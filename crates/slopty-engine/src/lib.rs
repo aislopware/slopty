@@ -40,7 +40,8 @@ pub enum EngineError {
     /// The VT library failed.
     #[error("libghostty-vt: {0}")]
     Vt(#[from] libghostty_vt::Error),
-    /// A size was rejected (zero columns/rows or zero cell metrics).
+    /// A size was rejected (zero columns/rows, past `MAX_COLS` × `MAX_ROWS`, or zero cell
+    /// metrics).
     #[error("invalid terminal size: {0}")]
     InvalidSize(&'static str),
     /// A search pattern did not compile.

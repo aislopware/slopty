@@ -384,6 +384,14 @@ mod golden {
                 source: slopty_proto::agent::AgentSource::Hook,
                 since_ms: WallMs::from_millis(1_790_000_060_000),
             }),
+            progress: Some(slopty_proto::terminal::Progress {
+                state: slopty_proto::terminal::ProgressState::Set,
+                percent: Some(42),
+            }),
+            restored: Some(slopty_proto::terminal::Restored {
+                saved_ms: WallMs::from_millis(1_789_999_000_000),
+                command: Vec::new(),
+            }),
         };
         snap(
             "worker_session_opened",
@@ -411,35 +419,42 @@ mod golden {
         );
     }
 
-    /// Project-wide text search: a start with every toggle and a glob each way, a stop, a
-    /// page of hits (a line cut round its match, two matches on one line), how it ended, and
-    /// why it could not start.
+    /// Project-wide text search: a start with every toggle, a glob each way and context lines,
+    /// a stop, a page of hits (a line cut round its match, two matches on one line, the context
+    /// round them and the file's stamp), how it ended, and why it could not start. Then a
+    /// replace of one match and a whole file, and its answer: a file rewritten, one changed on
+    /// disk since, one that could not be written.
     #[test]
     fn text_search() {
         use slopty_proto::search::{
-            FileHits, LineHit, SearchEvent, SearchQuery, SearchRequest, SearchSummary, Span,
+            ContextLine, FileHits, FileReplace, FileReplaced, FileStamp, LineHit, MatchAt, Replace,
+            SearchEvent, SearchQuery, SearchRequest, SearchSummary, SkipReason, Skipped, Span,
+        };
+        let query = SearchQuery {
+            pattern: r"fn (\w+)".to_owned(),
+            regex: true,
+            match_case: true,
+            whole_word: true,
+            globs: vec!["*.rs".to_owned(), "!target/**".to_owned()],
+            context: 2,
         };
         snap(
             "client_search_start",
             &ClientMsg::Search(SearchRequest::Start {
                 id: 7,
                 root: "~/w/slopty".to_owned(),
-                query: SearchQuery {
-                    pattern: r"fn \w+".to_owned(),
-                    regex: true,
-                    match_case: true,
-                    whole_word: true,
-                    globs: vec!["*.rs".to_owned(), "!target/**".to_owned()],
-                },
+                query: query.clone(),
             }),
         );
         snap("client_search_stop", &ClientMsg::Search(SearchRequest::Stop { id: 7 }));
+        let stamp = FileStamp { size: 4_812, modified_ns: 1_790_000_000_123_456_789 };
         snap(
             "worker_search_hits",
             &WorkerMsg::Search(SearchEvent::Hits {
                 id: 7,
                 files: vec![FileHits {
                     path: "src/main.rs".to_owned(),
+                    stamp,
                     lines: vec![
                         LineHit {
                             line: 12,
@@ -455,6 +470,15 @@ mod golden {
                             cut_before: true,
                             cut_after: true,
                         },
+                    ],
+                    context: vec![
+                        ContextLine {
+                            line: 11,
+                            text: "#[tokio::main]".to_owned(),
+                            cut_after: false,
+                        },
+                        ContextLine { line: 13, text: "}".to_owned(), cut_after: false },
+                        ContextLine { line: 4_097, text: "let y = 1;".to_owned(), cut_after: true },
                     ],
                 }],
             }),
@@ -477,6 +501,45 @@ mod golden {
             &WorkerMsg::Search(SearchEvent::Failed {
                 id: 8,
                 error: "regex parse error: unclosed group".to_owned(),
+            }),
+        );
+        snap(
+            "client_search_replace",
+            &ClientMsg::Search(SearchRequest::Replace(Replace {
+                id: 9,
+                root: "~/w/slopty".to_owned(),
+                query,
+                with: "fn ${1}_v2".to_owned(),
+                files: vec![
+                    FileReplace {
+                        path: "src/main.rs".to_owned(),
+                        stamp,
+                        matches: vec![MatchAt { line: 12, index: 1 }],
+                    },
+                    FileReplace {
+                        path: "src/lib.rs".to_owned(),
+                        stamp: FileStamp { size: 90, modified_ns: 1_790_000_000_000_000_001 },
+                        matches: vec![MatchAt { line: 1, index: 0 }, MatchAt { line: 7, index: 0 }],
+                    },
+                ],
+            })),
+        );
+        snap(
+            "worker_search_replaced",
+            &WorkerMsg::Search(SearchEvent::Replaced {
+                id: 9,
+                files: vec![FileReplaced {
+                    path: "src/main.rs".to_owned(),
+                    matches: 1,
+                    stamp: FileStamp { size: 4_815, modified_ns: 1_790_000_000_999_000_000 },
+                }],
+                skipped: vec![
+                    Skipped { path: "src/lib.rs".to_owned(), why: SkipReason::Changed },
+                    Skipped {
+                        path: "src/ro.rs".to_owned(),
+                        why: SkipReason::Failed("Permission denied".to_owned()),
+                    },
+                ],
             }),
         );
     }
@@ -1220,6 +1283,8 @@ mod golden {
             viewers: 0,
             command: Vec::new(),
             agent: None,
+            progress: None,
+            restored: None,
         };
         snap("server_session_changed", &ToServer::SessionChanged(summary.clone()));
         snap("server_terminals", &FromServer::Terminals(vec![(worker, summary)]));
@@ -1343,6 +1408,47 @@ mod orchestration {
             mode: 0o644,
         };
         snap("server_reply_stat", &reply(Outcome::Stat(Some(stat))));
+    }
+
+    /// Search in files for a script or an agent: the query with a glob and context, and the
+    /// files found in path order with how the search ended.
+    #[test]
+    fn search_in_files() {
+        use slopty_proto::search::{
+            ContextLine, FileHits, FileStamp, LineHit, SearchQuery, SearchSummary, Span,
+        };
+        let worker = term().worker;
+        let query = SearchQuery {
+            pattern: "todo".to_owned(),
+            regex: false,
+            match_case: false,
+            whole_word: true,
+            globs: vec!["*.rs".to_owned()],
+            context: 1,
+        };
+        snap(
+            "server_request_search",
+            &request(Verb::Search { worker, root: "~/w".to_owned(), query, max_lines: 200 }),
+        );
+        let file = FileHits {
+            path: "src/lib.rs".to_owned(),
+            stamp: FileStamp { size: 310, modified_ns: 1_790_000_000_000_000_000 },
+            lines: vec![LineHit {
+                line: 4,
+                text: "// TODO: this".to_owned(),
+                spans: vec![Span { start: 3, end: 7 }],
+                cut_before: false,
+                cut_after: false,
+            }],
+            context: vec![ContextLine {
+                line: 5,
+                text: "fn this() {}".to_owned(),
+                cut_after: false,
+            }],
+        };
+        let summary =
+            SearchSummary { files: 1, lines: 1, searched: 12, capped: false, elapsed_ms: 3 };
+        snap("server_reply_search", &reply(Outcome::Search { files: vec![file], summary }));
     }
 
     #[test]
@@ -1784,6 +1890,14 @@ mod conversation {
                 query: "src/ma".to_owned(),
                 limit: 50,
             }),
+        );
+        snap(
+            "client_approvals_on",
+            &ClientMsg::Conversation(ConversationRequest::Approvals { on: true }),
+        );
+        snap(
+            "client_release",
+            &ClientMsg::Conversation(ConversationRequest::Release { session, ask: 3 }),
         );
     }
 
@@ -2236,6 +2350,22 @@ mod ctl {
         insta::assert_snapshot!(name, line);
     }
 
+    /// `value` with every object's keys in order. Whether a `Value` keeps the order its keys were
+    /// written in is `serde_json`'s `preserve_order`, which a build gets or not from what else it
+    /// links (the workspace's tests do, `-p slopty-proto` alone does not): in key order, a line
+    /// reads the same either way.
+    fn sorted(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<_> = map.into_iter().collect();
+                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                entries.into_iter().map(|(key, value)| (key, sorted(value))).collect()
+            }
+            serde_json::Value::Array(items) => items.into_iter().map(sorted).collect(),
+            other => other,
+        }
+    }
+
     fn health() -> Health {
         Health {
             version: "0.1.0".to_owned(),
@@ -2316,6 +2446,8 @@ mod ctl {
                     viewers: 0,
                     command: vec!["/bin/zsh".to_owned()],
                     agent: None,
+                    progress: None,
+                    restored: None,
                 }],
             },
         );
@@ -2392,26 +2524,23 @@ mod ctl {
         snap(
             "ctl_reply_permission_answer",
             &reply(Decision::Allow {
-                updated_input: Some(serde_json::json!({
+                updated_input: Some(sorted(serde_json::json!({
                     "answers": { "Which layout?": "Split" },
                     "questions": [{
                         "header": "Layout", "multiSelect": false, "question": "Which layout?",
                         "options": [{ "label": "Split" }, { "label": "Stacked" }]
                     }]
-                })),
+                }))),
             }),
         );
         snap(
             "ctl_reply_permission_always",
             &reply(Decision::AllowAlways {
-                // Keys in sorted order: whether a `Value` keeps insertion order depends on
-                // serde_json's `preserve_order`, which feature unification turns on in some
-                // builds and not others.
-                updated_permissions: vec![serde_json::json!({
+                updated_permissions: vec![sorted(serde_json::json!({
                     "behavior": "allow", "destination": "localSettings",
                     "rules": [{ "ruleContent": "cargo test:*", "toolName": "Bash" }],
                     "type": "addRules"
-                })],
+                }))],
             }),
         );
         snap(
@@ -2441,5 +2570,22 @@ mod ctl {
             PasteboardAccess::Denied,
         ];
         snap("ctl_pasteboard_access", &every.to_vec());
+    }
+}
+
+/// The prefix that opens every control stream. Its layout never changes: two builds that no
+/// longer share a wire still read it to tell which one to update. The values are fixed ones,
+/// not this build's, so the golden does not feed the fingerprint it pins the layout of.
+#[cfg(test)]
+mod wire {
+    use slopty_proto::wire::Prefix;
+
+    #[test]
+    fn prefix() {
+        let prefix =
+            Prefix { fingerprint: 0x0123_4567_89ab_cdef, build: "0.1.0+wire.01234567".into() };
+        let hex: Vec<String> = prefix.encode().iter().map(|b| format!("{b:02x}")).collect();
+        let rows: Vec<String> = hex.chunks(16).map(|row| row.join(" ")).collect();
+        insta::assert_snapshot!("prefix", rows.join("\n"));
     }
 }

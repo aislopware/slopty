@@ -24,6 +24,8 @@ const TOOLS: &[(&str, &str)] = &[
     ("committed", "1.1.11"),
     // `cargo xtask linux`: cross-links the Linux worker with zig.
     ("cargo-zigbuild", "0.23.4"),
+    // `cargo xtask fuzz` and `deep fuzz`: libFuzzer builds of `fuzz/` (on nightly).
+    ("cargo-fuzz", "0.13.2"),
 ];
 
 pub fn run(sh: &Shell, no_tools: bool) -> Result<()> {

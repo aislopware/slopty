@@ -22,6 +22,11 @@ harness = [
     "dep:slopty-shape",
 ]
 
+# It runs a tokio client, which the `harness` feature brings.
+[[bin]]
+name = "slopty-glass"
+required-features = [ "harness" ]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -41,6 +46,12 @@ objc2-core-graphics.workspace = true
 objc2-foundation.workspace = true
 # The run's named pasteboards, released when it ends.
 slopty-platform.workspace = true
+# The glass measurement's client (`src/bin/slopty-glass.rs`): the app's receive path.
+slopty-capture.workspace = true
+slopty-client.workspace = true
+slopty-core.workspace = true
+slopty-net.workspace = true
+slopty-proto.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

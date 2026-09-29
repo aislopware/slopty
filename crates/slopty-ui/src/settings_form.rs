@@ -21,9 +21,12 @@
 //! to row, ← and → move a choice or a stepper, Space or Return turns a switch, and ↑ and ↓ in the
 //! sidebar move between sections. Tab goes along the ring as everywhere else.
 //!
-//! Two pages under the sections set nothing. Keyboard lists the bindings from the app's keymap,
-//! as the palette words them, and About says which build this is and where the project lives.
-//! A query finds bindings too.
+//! Two pages under the sections hold no table's rows. Keyboard lists every command of the app's
+//! keymap with the chords that run it, as the palette words them: a press on a command's chords
+//! records the next chord typed into `[keys]` (⌫ unbinds it, Esc keeps what it had), and a
+//! command the file sets has a way back to its default. About says which build this is and
+//! where the project lives. A query finds commands too, by their words, keys or name in the
+//! file.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -33,7 +36,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnimationExt as _, AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity,
     EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, ScrollHandle, SharedString, Stateful,
+    KeyDownEvent, Keystroke, ParentElement as _, Render, ScrollHandle, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown, MoveUp};
@@ -47,13 +50,28 @@ use crate::icons::{IconName, IconSize};
 #[path = "settings_form_schema.rs"]
 pub mod schema;
 
-use schema::{Row, Section, Shortcut, rows};
+use schema::{KeyRow, Row, Section, rows};
 
 /// What the search field says before anything is typed.
 pub const SEARCH_PLACEHOLDER: &str = "Search settings";
 
 /// What the page says when the query matches no row.
 pub const NO_MATCHES: &str = "No settings match";
+
+/// What a command's chords say while the next chord typed is recorded for it.
+pub const PRESS_KEYS: &str = "Press the new keys";
+
+/// What a command's chords say while recording, after a key alone that the command cannot take.
+pub const NEEDS_MODIFIER: &str = "Hold \u{2318} or \u{2303} with the key";
+
+/// What a command's chords say while recording, after a key that has no name in a chord.
+pub const CANT_BIND: &str = "This key can't be bound";
+
+/// What a command's chords say when nothing runs it.
+pub const NO_KEYS: &str = "None";
+
+/// The name of a command's button that puts its default chords back.
+pub const RESET_KEYS: &str = "Reset to default";
 
 /// What the font list says while it looks for the installed monospace families.
 pub const FINDING_FONTS: &str = "Finding monospace fonts";
@@ -130,8 +148,12 @@ pub struct SettingsForm {
     placed: Vec<(usize, usize)>,
     /// The sidebar is gone: every section in one column.
     narrow: bool,
-    /// The keymap's bindings as the Keyboard page lists them, read the first time they show.
-    shortcuts: Option<Vec<Shortcut>>,
+    /// The Keyboard page's lines for the text, read again when the text changes.
+    keys: Option<KeyPage>,
+    /// One per command of the keymap, for its chords' control.
+    key_handles: Vec<FocusHandle>,
+    /// The command whose next chord is being recorded.
+    recording: Option<Recording>,
     scroll: ScrollHandle,
     font_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
@@ -204,7 +226,9 @@ impl SettingsForm {
             turns: 0,
             placed: Vec::new(),
             narrow: false,
-            shortcuts: None,
+            keys: None,
+            key_handles: crate::keymap::current().commands().iter().map(|_| handle(cx)).collect(),
+            recording: None,
             scroll: ScrollHandle::new(),
             font_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
@@ -766,47 +790,238 @@ impl SettingsForm {
         .into_any_element()
     }
 
-    /// The keymap's bindings, read from the app's keymap the first time a page shows them.
-    fn shortcuts(&mut self, cx: &App) -> &[Shortcut] {
-        self.shortcuts.get_or_insert_with(|| {
-            let keymap = cx.key_bindings();
-            let keymap = keymap.borrow();
-            schema::shortcuts(keymap.bindings(), &crate::workspace::palette_items())
-        })
+    /// The Keyboard page's lines for the form's text: the keymap in effect with the text's
+    /// `[keys]` over it.
+    fn key_page(&mut self) -> &KeyPage {
+        if self.keys.as_ref().is_some_and(|page| page.text != self.text) {
+            self.keys = None;
+        }
+        self.keys.get_or_insert_with(|| KeyPage::read(&self.text))
     }
 
-    /// A binding: what it does, and its chords on key caps.
-    fn shortcut(&self, n: usize, shortcut: &Shortcut) -> AnyElement {
+    /// Record the next chord typed as command `ix`'s, or stop recording it when it is.
+    ///
+    /// The chord is taken before any binding sees it, so a chord the app binds (⌘T) is recorded
+    /// rather than run; a keystroke in another window (the quick terminal, a tile's own window)
+    /// is left alone. Leaving the control stops it.
+    fn record_keys(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording.take().is_some_and(|r| r.command == ix) {
+            cx.notify();
+            return;
+        }
+        let form = cx.entity().downgrade();
+        let home = window.window_handle();
+        let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != home {
+                return;
+            }
+            let _gone = form.update(cx, |form, cx| form.record(&event.keystroke, window, cx));
+            cx.stop_propagation();
+        });
+        let blur = self.key_handles.get(ix).map(|handle| {
+            window.focus(handle, cx);
+            cx.on_blur(handle, window, |this, _window, cx| {
+                this.recording = None;
+                cx.notify();
+            })
+        });
+        self.recording = Some(Recording { command: ix, said: None, _keys: keys, _blur: blur });
+        cx.notify();
+    }
+
+    /// A chord typed while recording: it becomes the command's, alone. Esc keeps what the
+    /// command had and ⌫ leaves it none; a modifier on its own is not a chord yet, and Tab
+    /// stops recording and goes along the ring as it does everywhere.
+    ///
+    /// A key the terminal or a field would type (a letter, Tab, an arrow) needs ⌘ or ⌃, or is
+    /// an F key, except for a folder's rows, which bare keys walk. A key that cannot be one
+    /// keeps the recording and says why.
+    fn record(&mut self, stroke: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.recording.as_ref().map(|r| r.command) else { return };
+        let m = stroke.modifiers;
+        let bare = !(m.control || m.alt || m.shift || m.platform);
+        let key = stroke.key.as_str();
+        if matches!(key, "shift" | "control" | "alt" | "platform" | "cmd" | "fn" | "function") {
+            return;
+        }
+        if key == "tab" && !(m.control || m.alt || m.platform) {
+            self.recording = None;
+            if m.shift {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+            cx.notify();
+            return;
+        }
+        let literal = match key {
+            "escape" if bare => None,
+            "backspace" if bare => Some(edit::quoted("")),
+            _ => {
+                let bare_ok = crate::keymap::current()
+                    .commands()
+                    .get(ix)
+                    .is_some_and(|c| c.scope().takes_bare_keys());
+                let said = match crate::keymap::canonical(&chord_text(stroke)) {
+                    Ok(chord) if m.platform || m.control || function_key(key) || bare_ok => {
+                        Ok(chord)
+                    }
+                    Ok(_) => Err(NEEDS_MODIFIER),
+                    Err(_) => Err(CANT_BIND),
+                };
+                match said {
+                    Ok(chord) => Some(edit::quoted(&chord)),
+                    Err(why) => {
+                        if let Some(recording) = &mut self.recording {
+                            recording.said = Some(why);
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+        };
+        self.recording = None;
+        match literal {
+            Some(literal) => {
+                self.write_keys(ix, Some(&literal));
+                self.apply(cx);
+            }
+            None => cx.notify(),
+        }
+    }
+
+    /// Put command `ix`'s default chords back: its line leaves the file.
+    fn reset_keys(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.recording = None;
+        self.write_keys(ix, None);
+        self.apply(cx);
+    }
+
+    /// Set command `ix`'s chords in `[keys.<scope>]` to `literal`, or take its line out.
+    fn write_keys(&mut self, ix: usize, literal: Option<&str>) {
+        let keymap = crate::keymap::current();
+        let Some(command) = keymap.commands().get(ix) else { return };
+        let table = format!("keys.{}", command.scope().name());
+        self.text = match literal {
+            Some(literal) => edit::write(&self.text, &table, command.name(), literal),
+            None => edit::remove(&self.text, &table, command.name()),
+        };
+    }
+
+    /// A command: what it does and its name in the file, then its chords on key caps, which a
+    /// press records anew, and a way back to its defaults when the file sets it.
+    fn key_line(&self, row: &KeyRow, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
+        let ix = row.command;
+        let recording = self.recording.as_ref().filter(|r| r.command == ix).map(|r| r.said);
+        let prompt = recording.map(|said| said.unwrap_or(PRESS_KEYS));
+        let meta = if row.set {
+            let was =
+                if row.defaults.is_empty() { NO_KEYS.to_owned() } else { row.defaults.join(", ") };
+            format!("{} \u{b7} default {was}", row.key)
+        } else {
+            row.key.clone()
+        };
+        let chords: AnyElement = if let Some(prompt) = prompt {
+            div().text_color(hsla(s.accent)).child(prompt).into_any_element()
+        } else if row.keys.is_empty() {
+            div().text_color(hsla(s.text_muted)).child(NO_KEYS).into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(spacing.xxs))
+                .children(row.keys.iter().map(|k| crate::kit::key_cap(theme, k.clone())))
+                .into_any_element()
+        };
+        let well = well(theme)
+            .id(("settings-chord", ix))
+            .debug_selector(move || format!("settings-chord-{ix}"))
+            .role(gpui::accesskit::Role::Button)
+            .aria_label(format!("Keys for {}", row.label))
+            .aria_value(prompt.map_or_else(|| row.keys.join(", "), str::to_owned))
+            .min_w(px(FIELD_WIDTH))
+            .justify_end()
+            .px(px(crate::kit::FIELD_INSET))
+            .text_size(px(theme.typography.small()))
+            .cursor_pointer()
+            .when(prompt.is_none(), |el| el.hover(move |el| el.bg(hsla(s.overlay))))
+            .on_click(cx.listener(move |this, _ev, window, cx| this.record_keys(ix, window, cx)))
+            .child(chords);
+        let well = match self.key_handles.get(ix) {
+            Some(handle) => well.track_focus(handle),
+            None => well,
+        };
+        let reset = row.set.then(|| {
+            crate::kit::icon_button(
+                theme,
+                format!("settings-key-reset-{ix}"),
+                IconName::Undo2,
+                RESET_KEYS,
+            )
+            .on_click(cx.listener(move |this, _ev, _window, cx| this.reset_keys(ix, cx)))
+        });
         div()
-            .id(("settings-shortcut", n))
+            .id(("settings-key", ix))
+            .debug_selector(move || format!("settings-key-{ix}"))
             .role(gpui::accesskit::Role::ListItem)
-            .aria_label(shortcut.label.clone())
-            .aria_value(shortcut.keys.join(", "))
-            .flex_none()
-            .h(px(theme.density.row))
+            .aria_label(row.label.clone())
+            .aria_value(row.keys.join(", "))
+            .aria_description(row.key.clone())
             .flex()
             .items_center()
-            .justify_between()
             .gap(px(spacing.md))
+            .min_h(px(theme.density.row_two_line))
+            .py(px(spacing.xs))
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(px(theme.typography.ui_size))
-                    .text_color(hsla(s.text))
-                    .child(shortcut.label.clone()),
+                    .flex()
+                    .flex_col()
+                    .gap(px(spacing.xxs))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(theme.typography.ui_size))
+                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                            .text_color(hsla(s.text))
+                            .child(row.label.clone()),
+                    )
+                    .child(crate::kit::meta(div(), theme).truncate().child(meta)),
             )
             .child(
                 div()
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(spacing.xxs))
-                    .children(shortcut.keys.iter().map(|k| crate::kit::key_cap(theme, k.clone()))),
+                    .gap(px(spacing.xs))
+                    .children(reset)
+                    .child(crate::a11y::tab_stop(well, s.accent)),
             )
             .into_any_element()
+    }
+
+    /// What the text's `[keys]` says that did not hold, over the Keyboard page's lines: the first
+    /// thing, and how many more.
+    fn keys_said(&self, said: &[String]) -> Option<AnyElement> {
+        let first = said.first()?;
+        let more = said.len().saturating_sub(1);
+        let text = if more == 0 { first.clone() } else { format!("{first} (+{more} more)") };
+        let theme = &self.theme;
+        Some(
+            crate::kit::meta(div(), theme)
+                .id("settings-keys-said")
+                .debug_selector(|| "settings-keys-said".to_owned())
+                .role(gpui::accesskit::Role::Alert)
+                .aria_label(text.clone())
+                .pt(px(theme.spacing.sm))
+                .text_color(hsla(theme.surfaces.error))
+                .child(text)
+                .into_any_element(),
+        )
     }
 
     /// The About page: the app, its version and build on one quiet line, then its links.
@@ -870,14 +1085,17 @@ impl SettingsForm {
         let theme = self.theme.clone();
         let searching = !self.query.trim().is_empty();
         let by_section = self.narrow || searching;
-        let keyboard: Vec<Shortcut> = if searching {
+        let whole_keyboard = !searching && (self.narrow || self.section == Section::Keyboard);
+        let (keyboard, said): (Vec<KeyRow>, Vec<String>) = if searching {
             let query = self.query.clone();
-            let all = self.shortcuts(cx);
-            all.iter().filter(|k| crate::picker::matches(&query, &k.haystack())).cloned().collect()
-        } else if self.narrow || self.section == Section::Keyboard {
-            self.shortcuts(cx).to_vec()
+            let page = self.key_page();
+            let found = page.rows.iter().filter(|r| crate::picker::matches(&query, &r.haystack()));
+            (found.cloned().collect(), Vec::new())
+        } else if whole_keyboard {
+            let page = self.key_page();
+            (page.rows.clone(), page.said.clone())
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let about = !searching && (self.narrow || self.section == Section::About);
         let mut children: Vec<AnyElement> = Vec::new();
@@ -896,13 +1114,16 @@ impl SettingsForm {
                 children.push(self.font_list(ix, row, cx));
             }
         }
-        for (n, shortcut) in keyboard.iter().enumerate() {
-            let heading = if by_section { Section::Keyboard.label() } else { shortcut.group };
+        if let Some(said) = self.keys_said(&said) {
+            children.push(said);
+        }
+        for row in &keyboard {
+            let heading = if by_section { Section::Keyboard.label() } else { row.group };
             if last != Some(heading) {
                 children.push(self.heading(heading, children.len(), last.is_none()));
                 last = Some(heading);
             }
-            children.push(self.shortcut(n, shortcut));
+            children.push(self.key_line(row, cx));
         }
         if about {
             if by_section {
@@ -1379,6 +1600,55 @@ fn quiet(theme: &Theme, id: &'static str, text: &'static str) -> Stateful<Div> {
         .text_size(px(theme.typography.small()))
         .text_color(hsla(theme.surfaces.text_muted))
         .child(text)
+}
+
+/// The Keyboard page's lines for one text of the file, and what its `[keys]` said that did not
+/// hold.
+struct KeyPage {
+    text: String,
+    rows: Vec<KeyRow>,
+    said: Vec<String>,
+}
+
+impl KeyPage {
+    fn read(text: &str) -> Self {
+        let keys = slopty_settings::Settings::parse(text).settings.keys;
+        let keymap = crate::keymap::current().with_keys(&keys);
+        let rows = schema::key_rows(&keymap, &crate::workspace::palette_items());
+        Self { text: text.to_owned(), rows, said: keymap.diagnostics().to_vec() }
+    }
+}
+
+/// The command whose next chord is recorded, and what listens for it.
+struct Recording {
+    command: usize,
+    /// Why the last key typed was not taken, until the next one.
+    said: Option<&'static str>,
+    /// Takes every keystroke before any binding does, while it lives.
+    _keys: Subscription,
+    /// Stops the recording when its control loses the keyboard.
+    _blur: Option<Subscription>,
+}
+
+/// A keystroke in the palette's key syntax, its modifiers first (`cmd-shift-t`); the Fn key is
+/// no part of a chord.
+fn chord_text(stroke: &Keystroke) -> String {
+    let m = stroke.modifiers;
+    let mut out = String::new();
+    for (on, word) in
+        [(m.control, "ctrl-"), (m.alt, "alt-"), (m.shift, "shift-"), (m.platform, "cmd-")]
+    {
+        if on {
+            out.push_str(word);
+        }
+    }
+    out.push_str(&stroke.key);
+    out
+}
+
+/// Whether `key` is one of the F keys, which a terminal or a field never types.
+fn function_key(key: &str) -> bool {
+    key.strip_prefix('f').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// What a text row's field shows for its value in `text`.

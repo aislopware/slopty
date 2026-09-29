@@ -451,6 +451,7 @@ mod tests {
     use gpui::{KeyUpEvent, Keystroke, TestAppContext, VisualTestContext};
 
     use super::*;
+    use crate::settings_form::PRESS_KEYS;
     use crate::settings_form::schema::{self, Section, rows};
 
     /// A window over `text` showing `mode`, the events it raised, and its context. gpui-kit is
@@ -753,16 +754,12 @@ mod tests {
         assert!(heights.iter().all(|h| (h - heights[0]).abs() < 0.5), "{heights:?}");
     }
 
-    /// The pages that set nothing. Keyboard lists what the app's keymap binds, in the palette's
-    /// words on key caps, and a query finds a binding among the rows; About names the version
-    /// and the build and links out. The form's title is "Settings" alone, and the file's face
-    /// names the file.
+    /// The pages beside the sections. Keyboard lists every command of the keymap, in the
+    /// palette's words on key caps, and a query finds one among the rows; About names the
+    /// version and the build and links out. The form's title is "Settings" alone, and the
+    /// file's face names the file.
     #[gpui::test]
     fn keyboard_and_about_read_what_is_bound_and_built(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            cx.bind_keys(crate::workspace::key_bindings());
-            cx.bind_keys(crate::terminal::key_bindings());
-        });
         let (view, _events, cx) = editor(cx, "", true, Mode::Form);
         assert!(cx.debug_bounds("settings-path").is_none(), "the form's title is Settings alone");
 
@@ -772,7 +769,8 @@ mod tests {
             tree.iter().find(|n| n.is("ListItem", Some(label))).and_then(|n| n.value.clone())
         };
         assert_eq!(keys("New terminal").as_deref(), Some("⌘T, ⌘N"), "{tree:#?}");
-        assert_eq!(keys("Focus column").as_deref(), Some("⌘1\u{2013}9"));
+        assert_eq!(keys("Focus column 3").as_deref(), Some("⌘3"));
+        assert_eq!(keys("Open URL…").as_deref(), Some(""), "a command with no chord, listed");
         assert_eq!(keys("Copy last output").as_deref(), Some("⇧⌘C"));
         assert!(tree.iter().any(|n| n.is("Heading", Some("Layout"))), "{tree:#?}");
         assert!(!tree.iter().any(|n| n.is("RadioGroup", Some("Theme"))), "no rows here");
@@ -796,6 +794,124 @@ mod tests {
         view.update_in(cx, SettingsEditor::show_toml);
         cx.run_until_parked();
         assert!(cx.debug_bounds("settings-path").is_some(), "the file's face names the file");
+    }
+
+    /// A press on a command's chords records the next chord typed into `[keys]`, before any
+    /// binding runs it, and applies it at once: the line shows it, and a chord taken from
+    /// another command is said over the page. Esc keeps what it had, ⌫ leaves it none, and the
+    /// way back to the default takes the line out of the file.
+    #[gpui::test]
+    fn a_chord_is_recorded_into_the_file(cx: &mut TestAppContext) {
+        use crate::keymap::Scope;
+        let ran = Rc::new(RefCell::new(false));
+        let counted = Rc::clone(&ran);
+        cx.update(|cx| {
+            cx.bind_keys([gpui::KeyBinding::new("cmd-t", crate::workspace::NewNote, None)]);
+            cx.on_action(move |_: &crate::workspace::NewNote, _cx| *counted.borrow_mut() = true);
+        });
+        let (_view, events, cx) = editor(cx, "", true, Mode::Form);
+        click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
+        let keymap = crate::keymap::current();
+        let note = keymap.find(Scope::Workspace, "new_note").expect("the command");
+        let chords = leak(format!("settings-chord-{note}"));
+        let applied = |events: &Rc<RefCell<Vec<SettingsEditorEvent>>>| match events.borrow().last()
+        {
+            Some(SettingsEditorEvent::Apply(text)) => text.clone(),
+            other => panic!("{other:?}"),
+        };
+
+        click(cx, chords);
+        assert_eq!(value_of(cx, "Button", "Keys for New note").as_deref(), Some(PRESS_KEYS));
+        cx.simulate_keystrokes("cmd-t");
+        assert!(!*ran.borrow(), "recorded, not run");
+        assert_eq!(applied(&events), "[keys.workspace]\nnew_note = \"cmd-t\"\n");
+        assert_eq!(value_of(cx, "ListItem", "New note").as_deref(), Some("⌘T"));
+        assert_eq!(value_of(cx, "ListItem", "New terminal").as_deref(), Some("⌘N"), "⌘T went");
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let said = tree.iter().find(|n| n.role == "Alert").and_then(|n| n.label.clone());
+        assert_eq!(
+            said.as_deref(),
+            Some("⌘T runs `workspace.new_note` now, no longer `workspace.new_terminal`"),
+            "{tree:#?}"
+        );
+
+        let count = events.borrow().len();
+        click(cx, chords);
+        cx.simulate_keystrokes("shift");
+        cx.simulate_keystrokes("escape");
+        assert_eq!(events.borrow().len(), count, "a modifier alone, then Esc: nothing written");
+        assert_eq!(value_of(cx, "ListItem", "New note").as_deref(), Some("⌘T"));
+
+        click(cx, chords);
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(applied(&events), "[keys.workspace]\nnew_note = \"\"\n");
+        assert_eq!(value_of(cx, "Button", "Keys for New note").as_deref(), Some(""));
+
+        click(cx, leak(format!("settings-key-reset-{note}")));
+        assert_eq!(applied(&events), "[keys.workspace]\n", "the line is gone");
+        assert_eq!(value_of(cx, "ListItem", "New note").as_deref(), Some("⇧⌘N"));
+        assert!(cx.debug_bounds(leak(format!("settings-key-reset-{note}"))).is_none());
+    }
+
+    /// Recording takes a chord a terminal or a field would not type. A key alone (a letter)
+    /// says it wants ⌘ or ⌃ and keeps recording, as does a key with no name in a chord; Tab
+    /// stops it and goes along the ring; a keystroke in another window is that window's. An F
+    /// key alone is a chord.
+    #[gpui::test]
+    fn recording_takes_only_a_chord_the_app_can_own(cx: &mut TestAppContext) {
+        use crate::keymap::Scope;
+        use crate::settings_form::{CANT_BIND, NEEDS_MODIFIER};
+        let (_view, events, cx) = editor(cx, "", true, Mode::Form);
+        click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
+        let keymap = crate::keymap::current();
+        let note = keymap.find(Scope::Workspace, "new_note").expect("the command");
+        let chords = leak(format!("settings-chord-{note}"));
+        let label = "Keys for New note";
+
+        click(cx, chords);
+        for (keys, said) in
+            [("a", NEEDS_MODIFIER), ("shift-down", NEEDS_MODIFIER), ("cmd-§", CANT_BIND)]
+        {
+            cx.simulate_keystrokes(keys);
+            assert_eq!(value_of(cx, "Button", label).as_deref(), Some(said), "{keys}");
+        }
+        let other = cx.update(|_window, cx| {
+            cx.open_window(gpui::WindowOptions::default(), |_window, cx| cx.new(|_cx| gpui::Empty))
+        });
+        let other: gpui::AnyWindowHandle = other.expect("a second window").into();
+        VisualTestContext::from_window(other, cx).simulate_keystrokes("cmd-y");
+        cx.run_until_parked();
+        assert!(events.borrow().is_empty(), "nothing written: {:?}", events.borrow());
+        assert_eq!(value_of(cx, "Button", label).as_deref(), Some(CANT_BIND), "still recording");
+
+        cx.simulate_keystrokes("tab");
+        assert!(events.borrow().is_empty(), "Tab is no chord: {:?}", events.borrow());
+        assert_eq!(value_of(cx, "Button", label).as_deref(), Some("⇧⌘N"), "recording stopped");
+        assert_ne!(focused(cx).1.as_deref(), Some(label), "the keyboard went along the ring");
+
+        click(cx, chords);
+        cx.simulate_keystrokes("f5");
+        assert!(
+            matches!(events.borrow().last(), Some(SettingsEditorEvent::Apply(t)) if t.contains("new_note = \"f5\"")),
+            "an F key alone is a chord: {:?}",
+            events.borrow()
+        );
+    }
+
+    /// A folder tile's rows are walked with bare keys, so its commands take a key alone.
+    #[gpui::test]
+    fn a_folders_command_takes_a_key_alone(cx: &mut TestAppContext) {
+        use crate::keymap::Scope;
+        let (_view, events, cx) = editor(cx, "", true, Mode::Form);
+        cx.simulate_input("folder.open");
+        cx.run_until_parked();
+        let open = crate::keymap::current().find(Scope::Folder, "open").expect("the command");
+        click(cx, leak(format!("settings-chord-{open}")));
+        cx.simulate_keystrokes("right");
+        assert_eq!(
+            events.borrow().last(),
+            Some(&SettingsEditorEvent::Apply("[keys.folder]\nopen = \"right\"\n".to_owned())),
+        );
     }
 
     /// Where the ligatures switch's knob sits from its track's left, on the first frame after

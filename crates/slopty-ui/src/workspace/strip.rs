@@ -882,7 +882,7 @@ impl WorkspaceView {
                 .child(title(NO_WORKERS))
                 .child(kit::inset_x(div(), theme).text_color(muted).child(NO_WORKERS_NEXT))
         } else {
-            let [terminal, agent, window] = &*BEGIN_KEYS;
+            let [terminal, agent, window] = &begin_keys();
             let begin = div()
                 .w_full()
                 .pt(px(spacing.sm))
@@ -1217,12 +1217,13 @@ const ADD_WINDOW: &str = "Add a window or display";
 /// The overview's place for a new workspace.
 pub(crate) const NEW_WORKSPACE: &str = "New workspace";
 
-/// The keys of the three ways to begin, read once from the workspace's bindings.
-pub(super) static BEGIN_KEYS: std::sync::LazyLock<[String; 3]> = std::sync::LazyLock::new(|| {
-    let bindings = super::actions::key_bindings();
+/// The keys of the three ways to begin, read from the keymap in effect so a rebinding shows at
+/// once. The keymap words its chords as it is installed, so a frame only looks them up.
+pub(super) fn begin_keys() -> [String; 3] {
+    let keymap = crate::keymap::current();
     [
-        crate::palette::keys_for(&super::actions::NewTerminal, &bindings),
-        crate::palette::keys_for(&super::actions::NewAgent, &bindings),
-        crate::palette::keys_for(&super::actions::AddWindow, &bindings),
+        keymap.label_of(&super::actions::NewTerminal).to_owned(),
+        keymap.label_of(&super::actions::NewAgent).to_owned(),
+        keymap.label_of(&super::actions::AddWindow).to_owned(),
     ]
-});
+}

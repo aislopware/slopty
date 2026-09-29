@@ -294,6 +294,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Everything else: chart appear motion, `text` anchor summaries, `gpui_web`, `gpui_wgpu`, and
     the editor, agent and git crates. None of it is on a path Slopty builds.
 
+**The zed fork moves to upstream `bd747337`, gpui-kit to `2ec5696c`.** ✅ 2026-09-29
+- Both rebased with no conflict. Zed's one new commit drops the language extension's special
+  case for old TOML and Zig extensions, which Slopty does not build. gpui-kit's three are the
+  plot appear scope, keyboard focus on `DataTable` with menu highlights kept on key presses
+  (#3307), and the gallery font subsets. Slopty uses none of `DataTable`, the kit menus or
+  `plot`, so nothing is adopted.
+
 **The app, the UI and the tools warn on an unreachable `pub` too.** ✅ 2026-09-29
 - `slopty-app`, `slopty-ui` and `slopty-tools` declare `#![warn(unreachable_pub)]` with the
   `redundant_pub_crate` allow beside it, as the other libraries do. `slopty-app` already forbids
@@ -320,3 +327,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `terminal/view.rs` were read, and 73 of `workspace.rs`. They now stop only at a
   `#[cfg(test)]` over a `mod`, which reads 59,433 lines of the UI and the app where they read
   46,594. The added lines all passed.
+
+**GPUI comes from the gpui-fast fork, which imports zed itself.** ✅ 2026-09-29
+- The user dropped the zed fork for `aislopware/gpui-fast`, a fork of longbridge/gpui-fast (GPUI
+  imported flat out of zed with no shared history, plus Retained Mode). longbridge takes a newer
+  zed only now and then (it sat on zed `7960b2a7` of 2026-09-12 while zed was 51 commits further
+  in the tracked directories), so the fork does it too, and is never behind zed.
+- `cargo xtask upstream sync` takes longbridge's branch first and zed second, so whatever
+  longbridge already imported is never imported again. The zed step follows gpui-fast's
+  `docs/upstream-sync.md`. It builds a vendor commit on the last one (`import_commit`) whose
+  tracked directories are zed's at the new head, byte for byte. The commit is made with a scratch
+  index and work tree, and the tool compares `git ls-tree` of both sides before it commits. It
+  merges that commit with `UPSTREAM` rewritten, then runs `script/check-upstream` and the build
+  checks before it pushes. Crates that join the tracked set are the path dependencies (normal,
+  dev and build, any target) of the tracked crates, followed through zed's
+  `[workspace.dependencies]`. On zed `bd747337` this finds the same change the hand import did:
+  `bench_metrics` in, `media` out.
+- It stops mid-merge, with `UPSTREAM` staged and a list, when an import needs a hand: conflicts,
+  a file zed changed that a `#[path = "fast/…"]` redirect replaces (the merge cannot carry that
+  change), or a crate the workspace manifest must add or drop. Committing the merge finishes it,
+  and the next `sync` carries on.
+- gpui-fast merges longbridge's branch rather than rebasing onto it. The vendor commits sit beside
+  the fork's branch and reach it through merges. A rebase would drop the merges and replay the
+  vendor commits onto longbridge's tree, leaving `import_commit` pointing at a commit the fork no
+  longer has. gpui-kit and libghostty-rs still rebase. The fork's pushes are now fast-forwards.
+- The gate watches gpui-fast's upstream at every gate and zed weekly, with `git ls-remote`.
+  `upstream.toml`'s `[zed]` base is the zed commit the fork is known current with.
+- Not done: taking only up to what longbridge imported. The fork follows zed's `main`, as the zed
+  fork did.
+
+- ✅ **A golden holding a `serde_json::Value` puts its keys in order** (2026-09-29).
+  `golden__ctl__ctl_reply_permission_answer` passed in the workspace and failed under
+  `cargo test -p slopty-proto`: whether a `Value` keeps the order its keys were written in is
+  `serde_json`'s `preserve_order`, which the workspace's tests get through feature unification
+  and the crate alone does not. Declaring the feature in `slopty-proto` would have fixed the
+  test by shipping it in the daemons and the CLI, which build without it, against the rule
+  above that the tests' features stay out of shipped builds. The ctl goldens instead sort every
+  object's keys before encoding (`sorted` in `tests/golden.rs`), so both runs write the same
+  line.

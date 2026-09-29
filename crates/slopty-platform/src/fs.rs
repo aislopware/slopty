@@ -75,8 +75,12 @@ fn unique() -> String {
 /// On Apple platforms a plain `fsync` leaves the data in the drive's cache, free to be written
 /// after the rename; `F_BARRIERFSYNC` adds the ordering, and Apple recommends it over
 /// `F_FULLFSYNC` where ordering is what is needed. Elsewhere `fdatasync` is that ordering.
+///
+/// # Errors
+///
+/// When the system cannot order the file's data.
 #[cfg(target_vendor = "apple")]
-fn order_before_later_writes(file: &File) -> io::Result<()> {
+pub fn order_before_later_writes(file: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd as _;
     // SAFETY: fcntl(2) with `F_BARRIERFSYNC` takes no third argument and only reads the
     // descriptor, which `file` keeps open for the call.
@@ -84,8 +88,13 @@ fn order_before_later_writes(file: &File) -> io::Result<()> {
     if done == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
+/// Put `file`'s data on the device ahead of every later write: `fdatasync` orders it here.
+///
+/// # Errors
+///
+/// When the system cannot sync the file's data.
 #[cfg(not(target_vendor = "apple"))]
-fn order_before_later_writes(file: &File) -> io::Result<()> {
+pub fn order_before_later_writes(file: &File) -> io::Result<()> {
     file.sync_data()
 }
 

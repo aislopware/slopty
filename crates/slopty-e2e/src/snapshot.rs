@@ -56,14 +56,41 @@ impl Diff {
     }
 }
 
+/// A rectangle of a frame in device pixels: left, top, width, height.
+pub type PixelRect = [u32; 4];
+
+/// Whether `rect` holds the pixel at `(x, y)`.
+const fn holds(rect: &PixelRect, x: u32, y: u32) -> bool {
+    let [left, top, width, height] = *rect;
+    x >= left && y >= top && x.saturating_sub(left) < width && y.saturating_sub(top) < height
+}
+
 /// Pixel-wise comparison; `diff` gets every differing pixel painted red on a faded copy of
 /// `actual`.
 #[must_use]
 pub fn compare(actual: &RgbaImage, golden: &RgbaImage) -> (Diff, RgbaImage) {
+    compare_masked(actual, golden, &[])
+}
+
+/// [`compare`] outside `masks`.
+///
+/// A masked pixel is neither counted nor compared, and the diff paints it blue. What a mask covers
+/// is a moving picture, whose pixels no two runs share ([`luma_distance`] compares those).
+#[must_use]
+pub fn compare_masked(
+    actual: &RgbaImage,
+    golden: &RgbaImage,
+    masks: &[PixelRect],
+) -> (Diff, RgbaImage) {
     let (w, h) = actual.dimensions();
     let mut diff = RgbaImage::new(w, h);
-    let mut differing = 0_u64;
+    let (mut differing, mut total) = (0_u64, 0_u64);
     for (x, y, pixel) in actual.enumerate_pixels() {
+        if masks.iter().any(|m| holds(m, x, y)) {
+            diff.put_pixel(x, y, Rgba([150, 180, 230, 255]));
+            continue;
+        }
+        total = total.saturating_add(1);
         let fade = |c: u8| (c / 3).saturating_add(170);
         let faded = Rgba([fade(pixel[0]), fade(pixel[1]), fade(pixel[2]), 255]);
         let same = golden.get_pixel_checked(x, y).is_some_and(|g| {
@@ -76,7 +103,48 @@ pub fn compare(actual: &RgbaImage, golden: &RgbaImage) -> (Diff, RgbaImage) {
             diff.put_pixel(x, y, Rgba([220, 30, 30, 255]));
         }
     }
-    (Diff { differing, total: u64::from(w).saturating_mul(u64::from(h)) }, diff)
+    (Diff { differing, total }, diff)
+}
+
+/// Luma buckets of [`luma_histogram`].
+pub const LUMA_BUCKETS: usize = 16;
+
+/// How many of `rect`'s pixels fall in each sixteenth of the luma range (BT.709 weights): what
+/// a picture is made of, wherever its moving parts happen to be.
+#[must_use]
+pub fn luma_histogram(img: &RgbaImage, rect: PixelRect) -> [u64; LUMA_BUCKETS] {
+    let mut buckets = [0_u64; LUMA_BUCKETS];
+    let [left, top, width, height] = rect;
+    for y in top..top.saturating_add(height).min(img.height()) {
+        for x in left..left.saturating_add(width).min(img.width()) {
+            let [r, g, b, _a] = img.get_pixel(x, y).0;
+            let weighted = [(2126_u32, r), (7152, g), (722, b)]
+                .iter()
+                .fold(0_u32, |sum, &(w, c)| sum.saturating_add(w.saturating_mul(u32::from(c))));
+            let luma = weighted / 10_000;
+            let bucket = usize::try_from(luma / 16).unwrap_or(0).min(LUMA_BUCKETS - 1);
+            if let Some(count) = buckets.get_mut(bucket) {
+                *count = count.saturating_add(1);
+            }
+        }
+    }
+    buckets
+}
+
+/// How far apart two pictures' luma histograms are.
+///
+/// It is the share of pixels that would have to change bucket to turn one into the other
+/// (total variation distance): 0 for the same mix, 1 for none in common. A page of text that
+/// scrolled is the same mix; a picture gone black, torn or scaled wrong is not.
+#[must_use]
+pub fn luma_distance(a: &[u64; LUMA_BUCKETS], b: &[u64; LUMA_BUCKETS]) -> f64 {
+    #[expect(clippy::cast_precision_loss, reason = "pixel counts fit f64 exactly")]
+    let share = |h: &[u64; LUMA_BUCKETS]| {
+        let total = h.iter().sum::<u64>().max(1) as f64;
+        h.map(|c| c as f64 / total)
+    };
+    let (a, b) = (share(a), share(b));
+    a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum::<f64>() / 2.0
 }
 
 /// Policy for accepting golden renders.
@@ -154,12 +222,28 @@ pub const fn golden_action(
 ///
 /// When the sizes differ, more than `tolerance` of the pixels differ, or a file cannot be
 /// written.
-#[expect(clippy::print_stderr, reason = "test helper; stderr is the test log")]
 pub fn assert_matches(
     name: &str,
     actual: &RgbaImage,
     tolerance: f64,
     artifacts: &Path,
+) -> Result<Diff> {
+    assert_matches_masked(name, actual, tolerance, artifacts, &[])
+}
+
+/// [`assert_matches`] outside `masks` ([`compare_masked`]): the chrome around a streamed
+/// picture, held to a golden while the picture moves.
+///
+/// # Errors
+///
+/// As [`assert_matches`].
+#[expect(clippy::print_stderr, reason = "test helper; stderr is the test log")]
+pub fn assert_matches_masked(
+    name: &str,
+    actual: &RgbaImage,
+    tolerance: f64,
+    artifacts: &Path,
+    masks: &[PixelRect],
 ) -> Result<Diff> {
     let golden_path = golden_dir().join(format!("{name}.png"));
     std::fs::create_dir_all(artifacts)?;
@@ -183,7 +267,7 @@ pub fn assert_matches(
     let golden = image::open(&golden_path)
         .with_context(|| format!("read {}", golden_path.display()))?
         .into_rgba8();
-    let (diff, image) = compare(actual, &golden);
+    let (diff, image) = compare_masked(actual, &golden, masks);
     let same_size = golden.dimensions() == actual.dimensions();
     let fraction = diff.fraction();
     let within_tolerance = same_size && fraction <= tolerance;
@@ -302,6 +386,37 @@ mod tests {
         let b = solid(1, 1, [1, 1, 1]);
         let (diff, _) = compare(&a, &b);
         assert_eq!(diff.differing, 3);
+    }
+
+    #[test]
+    fn a_masked_pixel_is_neither_compared_nor_counted() {
+        let a = solid(4, 4, [100, 100, 100]);
+        let mut b = a.clone();
+        b.put_pixel(1, 1, Rgba([0, 0, 0, 255]));
+        b.put_pixel(3, 3, Rgba([0, 0, 0, 255]));
+        let (diff, _) = compare_masked(&a, &b, &[[0, 0, 2, 2]]);
+        assert_eq!(diff, Diff { differing: 1, total: 12 });
+        let (diff, _) = compare_masked(&a, &b, &[[0, 0, 2, 2], [3, 3, 9, 9]]);
+        assert_eq!(diff, Diff { differing: 0, total: 11 });
+    }
+
+    #[test]
+    fn a_scrolled_mix_is_near_and_a_blank_picture_is_far() {
+        let mut page = solid(8, 8, [24, 24, 24]);
+        for x in 0..8 {
+            page.put_pixel(x, 2, Rgba([225, 225, 225, 255]));
+        }
+        let mut scrolled = solid(8, 8, [24, 24, 24]);
+        for x in 0..8 {
+            scrolled.put_pixel(x, 5, Rgba([225, 225, 225, 255]));
+        }
+        let whole = [0, 0, 8, 8];
+        let (a, b) = (luma_histogram(&page, whole), luma_histogram(&scrolled, whole));
+        assert!(luma_distance(&a, &b) < f64::EPSILON, "{a:?} {b:?}");
+        let black = luma_histogram(&solid(8, 8, [0, 0, 0]), whole);
+        assert!(luma_distance(&a, &black) > 0.99, "{a:?} {black:?}");
+        let half = luma_histogram(&page, [0, 0, 8, 4]);
+        assert_eq!(half.iter().sum::<u64>(), 32, "the rect bounds the count");
     }
 
     #[test]

@@ -12,6 +12,11 @@
 //! the system hands a delegate installed any later no tap that launched the app. Taps wait in a
 //! process-wide queue until the app listens ([`taps`]).
 //!
+//! A note may carry buttons ([`Category`]): the approval note's "Allow" and "Deny" answer a
+//! held permission prompt where the note is, without bringing the app forward, and "Show" opens
+//! the tile. The categories are registered with the centre when [`System`] is made, which does
+//! not prompt either. A pressed button comes back as a [`Tap`] with its [`Tap::action`].
+//!
 //! `BackgroundGrace` keeps an iOS app running for the short time the system grants after it
 //! leaves the screen, so the links stay up and what arrives just after the phone is pocketed
 //! still notifies.
@@ -31,15 +36,101 @@ pub struct Note {
     pub body: String,
     /// What a tap hands back ([`Tap::info`]), carried in the notification's `userInfo`.
     pub info: BTreeMap<String, String>,
+    /// Its buttons, when it has any.
+    pub category: Option<Category>,
+    /// No sound: it only says more about a note already up under its identifier, which
+    /// sounded when it came.
+    pub silent: bool,
 }
 
-/// A notification the human tapped.
+/// A notification the human tapped, or one of its buttons.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Tap {
     /// The note's identifier.
     pub id: String,
     /// The note's [`Note::info`]: every string key with a string value in its `userInfo`.
     pub info: BTreeMap<String, String>,
+    /// The button pressed ([`Action::id`]); `None` for the note itself.
+    pub action: Option<String>,
+}
+
+/// A button on a note.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Action {
+    /// What a press hands back as [`Tap::action`].
+    pub id: &'static str,
+    /// Its words, sentence case.
+    pub title: &'static str,
+    /// What the system does with a press beside handing it back.
+    pub kind: ActionKind,
+}
+
+/// How the system treats a press of an [`Action`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ActionKind {
+    /// Answered where the note is, the app left in the background; a locked iPhone asks to be
+    /// unlocked first, as it does for anything that acts on the person's behalf.
+    Unlocked,
+    /// Answered where the note is, drawn in the destructive style.
+    Destructive,
+    /// Brings the app forward.
+    Foreground,
+}
+
+/// A kind of note and the buttons it carries, registered with the centre once.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Category {
+    /// Its identifier, which a note names.
+    pub id: &'static str,
+    /// Its buttons, in the order they show.
+    pub actions: &'static [Action],
+}
+
+impl Category {
+    /// The button with identifier `id`.
+    #[must_use]
+    pub fn action(&self, id: &str) -> Option<&'static Action> {
+        self.actions.iter().find(|action| action.id == id)
+    }
+}
+
+/// [`APPROVAL`]'s button that allows the call.
+pub const ALLOW: &str = "allow";
+/// [`APPROVAL`]'s button that refuses it.
+pub const DENY: &str = "deny";
+/// [`APPROVAL`]'s button that opens the app at the agent.
+pub const SHOW: &str = "show";
+
+/// An agent asking for a permission that "Allow" or "Deny" answers whole.
+pub const APPROVAL: Category = Category {
+    id: "slopty.approval",
+    actions: &[
+        Action { id: ALLOW, title: "Allow", kind: ActionKind::Unlocked },
+        Action { id: DENY, title: "Deny", kind: ActionKind::Destructive },
+        Action { id: SHOW, title: "Show", kind: ActionKind::Foreground },
+    ],
+};
+
+/// Every category a note may name: what [`System`] registers.
+pub const CATEGORIES: [Category; 1] = [APPROVAL];
+
+/// The tap a response to note `id` makes, as the delegate hands it on.
+///
+/// `action` is the response's action identifier: `default` (the system's for the note itself)
+/// is a tap on the note, `dismiss` (the system's for a note swept away) is no tap at all, and
+/// anything else is a button.
+#[must_use]
+pub fn tap_of(
+    id: String,
+    info: BTreeMap<String, String>,
+    action: &str,
+    (default, dismiss): (&str, &str),
+) -> Option<Tap> {
+    if action == dismiss {
+        return None;
+    }
+    let action = (action != default).then(|| action.to_owned());
+    Some(Tap { id, info, action })
 }
 
 /// Where notifications go.
@@ -116,19 +207,21 @@ mod apple {
     use objc2::runtime::{Bool, ProtocolObject};
     use objc2::{AnyThread as _, define_class, msg_send};
     use objc2_foundation::{
-        NSArray, NSBundle, NSDictionary, NSError, NSObject, NSObjectProtocol, NSString,
+        NSArray, NSBundle, NSDictionary, NSError, NSObject, NSObjectProtocol, NSSet, NSString,
     };
     use objc2_user_notifications::{
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
-        UNNotification, UNNotificationPresentationOptions, UNNotificationRequest,
-        UNNotificationResponse, UNNotificationSettings, UNNotificationSound,
+        UNNotification, UNNotificationAction, UNNotificationActionOptions, UNNotificationCategory,
+        UNNotificationCategoryOptions, UNNotificationDefaultActionIdentifier,
+        UNNotificationDismissActionIdentifier, UNNotificationPresentationOptions,
+        UNNotificationRequest, UNNotificationResponse, UNNotificationSettings, UNNotificationSound,
         UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use parking_lot::Mutex;
     use tokio::sync::mpsc::error::SendError;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-    use super::{Note, Notifier, Tap};
+    use super::{ActionKind, CATEGORIES, Category, Note, Notifier, Tap};
 
     /// Where the person's answer stands. Completion handlers write it from the framework's
     /// queues, so it sits behind a lock.
@@ -259,6 +352,9 @@ mod apple {
             }
             install();
             let center = UNUserNotificationCenter::currentNotificationCenter();
+            let categories: Vec<Retained<UNNotificationCategory>> =
+                CATEGORIES.iter().map(category).collect();
+            center.setNotificationCategories(&NSSet::from_retained_slice(&categories));
             let state = Arc::new(Mutex::new(State { auth: Auth::Unasked, badge: None }));
             let read = Arc::clone(&state);
             let settings =
@@ -407,13 +503,44 @@ mod apple {
         }
     }
 
+    /// `category` as the centre registers it.
+    fn category(category: &Category) -> Retained<UNNotificationCategory> {
+        let actions: Vec<Retained<UNNotificationAction>> = category
+            .actions
+            .iter()
+            .map(|action| {
+                let options = match action.kind {
+                    ActionKind::Unlocked => UNNotificationActionOptions::AuthenticationRequired,
+                    ActionKind::Destructive => UNNotificationActionOptions::Destructive,
+                    ActionKind::Foreground => UNNotificationActionOptions::Foreground,
+                };
+                UNNotificationAction::actionWithIdentifier_title_options(
+                    &NSString::from_str(action.id),
+                    &NSString::from_str(action.title),
+                    options,
+                )
+            })
+            .collect();
+        UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+            &NSString::from_str(category.id),
+            &NSArray::from_retained_slice(&actions),
+            &NSArray::new(),
+            UNNotificationCategoryOptions::empty(),
+        )
+    }
+
     /// Hand `note` to the centre now: a nil trigger delivers at once, and the identifier
     /// replaces whatever is up under it.
     fn add(center: &UNUserNotificationCenter, note: &Note) {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&note.title));
         content.setBody(&NSString::from_str(&note.body));
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        if !note.silent {
+            content.setSound(Some(&UNNotificationSound::defaultSound()));
+        }
+        if let Some(category) = note.category {
+            content.setCategoryIdentifier(&NSString::from_str(category.id));
+        }
         let keys: Vec<Retained<NSString>> =
             note.info.keys().map(|k| NSString::from_str(k)).collect();
         let values: Vec<Retained<NSString>> =
@@ -469,8 +596,8 @@ mod apple {
         unsafe impl NSObjectProtocol for Delegate {}
 
         unsafe impl UNUserNotificationCenterDelegate for Delegate {
-            /// The person opened a note, possibly off the main thread: its identifier and
-            /// `userInfo` go to the app ([`deliver`]).
+            /// The person opened a note or pressed one of its buttons, possibly off the main
+            /// thread: its identifier, `userInfo` and the button go to the app ([`deliver`]).
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -479,12 +606,24 @@ mod apple {
                 done: &block2::DynBlock<dyn Fn()>,
             ) {
                 let request = response.notification().request();
-                let tap = Tap {
-                    id: request.identifier().to_string(),
-                    info: strings(&request.content().userInfo()),
+                // SAFETY: UserNotifications rule: the action identifiers are constant strings the
+                // framework exports, valid once it is loaded, which linking it guarantees.
+                let system = unsafe {
+                    (
+                        UNNotificationDefaultActionIdentifier.to_string(),
+                        UNNotificationDismissActionIdentifier.to_string(),
+                    )
                 };
-                tracing::debug!(id = tap.id, "note opened");
-                deliver(tap);
+                let tap = super::tap_of(
+                    request.identifier().to_string(),
+                    strings(&request.content().userInfo()),
+                    &response.actionIdentifier().to_string(),
+                    (&system.0, &system.1),
+                );
+                if let Some(tap) = tap {
+                    tracing::debug!(id = tap.id, action = ?tap.action, "note opened");
+                    deliver(tap);
+                }
                 done.call(());
             }
 
@@ -596,6 +735,41 @@ mod tests {
         memory.clear();
         assert!(memory.posted().is_empty() && memory.withdrawn().is_empty(), "cleared");
         assert_eq!(memory.badge(), Some(3), "clearing keeps the badge");
+    }
+
+    /// The approval note carries "Allow", "Deny" and "Show", registered with every other
+    /// category: the answers act where the note is (allowing only on an unlocked device), and
+    /// only "Show" brings the app forward.
+    #[test]
+    fn the_approval_note_answers_in_place_and_shows_on_demand() {
+        assert!(CATEGORIES.contains(&APPROVAL));
+        let kinds: Vec<(&str, &str, ActionKind)> =
+            APPROVAL.actions.iter().map(|a| (a.id, a.title, a.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (ALLOW, "Allow", ActionKind::Unlocked),
+                (DENY, "Deny", ActionKind::Destructive),
+                (SHOW, "Show", ActionKind::Foreground),
+            ]
+        );
+        assert_eq!(APPROVAL.action(DENY).map(|a| a.title), Some("Deny"));
+        assert_eq!(APPROVAL.action("maybe"), None);
+        let ids: std::collections::BTreeSet<&str> = CATEGORIES.iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), CATEGORIES.len(), "category identifiers are unique");
+    }
+
+    /// The delegate's routing: the system's default identifier is the note itself, its dismiss
+    /// identifier is nothing to hand on, and any other is the button pressed.
+    #[test]
+    fn a_response_becomes_a_tap_or_a_button_press() {
+        let system = ("com.apple.UNNotificationDefaultActionIdentifier", "dismissed");
+        let info = BTreeMap::from([("session".to_owned(), "s".to_owned())]);
+        let open = tap_of("n".to_owned(), info.clone(), system.0, system);
+        assert_eq!(open, Some(Tap { id: "n".to_owned(), info: info.clone(), action: None }));
+        let allow = tap_of("n".to_owned(), info.clone(), ALLOW, system);
+        assert_eq!(allow.and_then(|t| t.action), Some(ALLOW.to_owned()));
+        assert_eq!(tap_of("n".to_owned(), info, system.1, system), None, "swept away");
     }
 
     #[cfg(target_vendor = "apple")]

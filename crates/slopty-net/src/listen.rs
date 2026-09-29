@@ -1,7 +1,8 @@
 //! The accept side both listeners share: each incoming peer on a task of its own, so a peer
 //! that connects and says nothing, or a slow word from Tailscale, holds up nobody behind it.
 //! A peer [`Admission`] refuses gets its refusal at its first packet; the rest are greeted. A
-//! greeting is the QUIC handshake, the control stream the peer opens, and its first message,
+//! greeting is the QUIC handshake, the control stream the peer opens, the wire prefixes each
+//! way (a peer on another build is closed there, `crate::prefix`), and its first message,
 //! which must be its hello.
 
 use std::net::SocketAddr;
@@ -82,6 +83,11 @@ async fn admit<S, R, H>(
                     let _sent = greeted.send(peer).await;
                 }
                 Ok(None) => tracing::debug!(%peer, "{who} probe"),
+                Err(NetError::WrongBuild(wrong)) => {
+                    let peer_build = wrong.peer_build();
+                    let this = slopty_proto::wire::BUILD;
+                    tracing::warn!(%peer, peer_build, this, "{who} runs a different build; closed");
+                }
                 Err(e) => tracing::info!(%peer, error = %e, "{who} dropped"),
             }
         });
@@ -111,8 +117,10 @@ where
         Ok(Err(e)) => return Err(NetError::stream(&e)),
         Ok(Ok(streams)) => streams,
     };
-    let tx = FramedSend::<S>::new(send);
+    let mut tx = FramedSend::<S>::new(send);
     let mut rx = FramedRecv::<R>::new(recv);
+    crate::prefix::say(&mut tx).await?;
+    crate::prefix::check(&conn, &mut rx, HELLO_TIMEOUT).await?;
     let first = tokio::time::timeout(HELLO_TIMEOUT, rx.recv())
         .await
         .map_err(|_elapsed| NetError::Protocol("hello timeout"))??;

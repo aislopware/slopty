@@ -9,6 +9,14 @@
 //! note it posted, because the inbox now shows the same things. The icon badge is the inbox's
 //! unread count.
 //!
+//! An agent that waits on a yes or no held for this client (`inbox::approvals`) is posted with
+//! the approval buttons (`notify::APPROVAL`): "Allow" and "Deny" answer it where the note is,
+//! "Show" opens its tile as a tap does. The prompt is held a moment after the agent's status
+//! says it waits, so the note already up is replaced, silently, once the prompt comes, and
+//! again without the buttons once it is no longer held (the terminal asks by then). A prompt
+//! this client answered takes its note away instead: the agent still reads as waiting until its
+//! worker says the prompt settled, and the answer is not news.
+//!
 //! [`Attention`] decides and hands what it decided to a [`Notifier`]; the app owns one and
 //! feeds it a [`Look`] after every change of the workspace, and each finished command.
 
@@ -19,7 +27,8 @@ use std::time::Duration;
 use gpui::{App, Context, Entity};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
-use slopty_platform::notify::{Note, Notifier, Tap};
+use slopty_platform::notify::{self, APPROVAL, Note, Notifier, Tap};
+use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
 
 use super::agents::{agent_ask_line, agent_status_word};
@@ -32,6 +41,12 @@ const WORKER: &str = "worker";
 const ITEM: &str = "item";
 /// The `userInfo` key of the session.
 const SESSION: &str = "session";
+/// The `userInfo` key of the permission prompt an approval note answers.
+const ASK: &str = "ask";
+
+/// What a note's answer says when its prompt was no longer held: answered elsewhere, or the
+/// terminal asks by now.
+pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 
 /// Where a notification leads: the worker, its tile when it has one here, and the session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -77,6 +92,28 @@ pub struct Asking {
     pub title: String,
     /// What it asks (`agent_ask_line`), else its state in a word or two.
     pub body: String,
+    /// The yes-or-no prompt held for this client that the note's buttons answer.
+    pub approval: Option<u64>,
+    /// The prompt this client answered that its worker has not yet said is settled.
+    pub answered: Option<u64>,
+}
+
+impl Asking {
+    /// Its note: the approval buttons while a prompt is held, and a sound unless `silent`.
+    fn note(&self, silent: bool) -> Note {
+        let mut info = self.route.info();
+        if let Some(ask) = self.approval {
+            info.insert(ASK.to_owned(), ask.to_string());
+        }
+        Note {
+            id: self.route.session.to_string(),
+            title: self.title.clone(),
+            body: self.body.clone(),
+            info,
+            category: self.approval.map(|_| APPROVAL),
+            silent,
+        }
+    }
 }
 
 /// What notifications follow in the workspace, at one moment.
@@ -94,6 +131,7 @@ enum Why {
     Asks,
     Finished,
     Program,
+    Unanswered,
 }
 
 /// Decides which moments notify and hands them to a [`Notifier`].
@@ -105,6 +143,8 @@ pub struct Attention {
     asking: HashSet<SessionId>,
     /// The notes up, by session.
     posted: HashMap<SessionId, Why>,
+    /// The prompt each agent's note up answers, by session.
+    answers: HashMap<SessionId, Option<u64>>,
     /// The badge last set.
     badge: Option<usize>,
 }
@@ -124,7 +164,14 @@ impl Attention {
     /// Notes go to `notifier`. The app starts in front.
     #[must_use]
     pub fn new(notifier: Rc<dyn Notifier>) -> Self {
-        Self { notifier, active: true, asking: HashSet::new(), posted: HashMap::new(), badge: None }
+        Self {
+            notifier,
+            active: true,
+            asking: HashSet::new(),
+            posted: HashMap::new(),
+            answers: HashMap::new(),
+            badge: None,
+        }
     }
 
     /// Whether the app is in front now.
@@ -139,6 +186,7 @@ impl Attention {
             for (session, _) in self.posted.drain() {
                 self.notifier.withdraw(&session.to_string());
             }
+            self.answers.clear();
         }
         self.active = active;
     }
@@ -148,16 +196,24 @@ impl Attention {
     pub fn look(&mut self, look: &Look) {
         let now: HashSet<SessionId> = look.asking.iter().map(|a| a.route.session).collect();
         if !self.active {
-            let started: Vec<&Asking> =
-                look.asking.iter().filter(|a| !self.asking.contains(&a.route.session)).collect();
-            for asking in started {
-                let note = Note {
-                    id: asking.route.session.to_string(),
-                    title: asking.title.clone(),
-                    body: asking.body.clone(),
-                    info: asking.route.info(),
-                };
-                self.post(asking.route.session, Why::Asks, note);
+            for asking in &look.asking {
+                let session = asking.route.session;
+                let up = self.posted.get(&session) == Some(&Why::Asks);
+                let was = self.answers.get(&session).copied().flatten();
+                if !self.asking.contains(&session) {
+                    self.post(session, Why::Asks, asking.note(false));
+                } else if up && asking.approval.is_none() && was.is_some() && was == asking.answered
+                {
+                    self.posted.remove(&session);
+                    self.notifier.withdraw(&session.to_string());
+                    self.answers.insert(session, None);
+                    continue;
+                } else if up && self.answers.get(&session) != Some(&asking.approval) {
+                    self.post(session, Why::Asks, asking.note(true));
+                } else {
+                    continue;
+                }
+                self.answers.insert(session, asking.approval);
             }
         }
         let stopped: Vec<SessionId> = self.asking.difference(&now).copied().collect();
@@ -166,6 +222,7 @@ impl Attention {
                 self.posted.remove(&session);
                 self.notifier.withdraw(&session.to_string());
             }
+            self.answers.remove(&session);
         }
         self.asking = now;
         if self.badge != Some(look.unread) {
@@ -192,7 +249,13 @@ impl Attention {
         } else {
             format!("{command} \u{b7} {}", done.label())
         };
-        let note = Note { id: route.session.to_string(), title, body, info: route.info() };
+        let note = Note {
+            id: route.session.to_string(),
+            title,
+            body,
+            info: route.info(),
+            ..Note::default()
+        };
         self.post(route.session, Why::Finished, note);
     }
 
@@ -202,12 +265,37 @@ impl Attention {
         if self.active {
             return;
         }
-        let note = Note { id: route.session.to_string(), title, body, info: route.info() };
+        let note = Note {
+            id: route.session.to_string(),
+            title,
+            body,
+            info: route.info(),
+            ..Note::default()
+        };
         self.post(route.session, Why::Program, note);
+    }
+
+    /// A note's "Allow" or "Deny" for `route`'s agent found no prompt to answer (`why`): said
+    /// in a note of its own while the app is away. `title` is the tile's name.
+    pub fn unanswered(&mut self, route: Route, title: String, why: &str) {
+        if self.active {
+            return;
+        }
+        let note = Note {
+            id: route.session.to_string(),
+            title,
+            body: why.to_owned(),
+            info: route.info(),
+            ..Note::default()
+        };
+        self.post(route.session, Why::Unanswered, note);
     }
 
     fn post(&mut self, session: SessionId, why: Why, note: Note) {
         tracing::debug!(%session, ?why, "attention note");
+        if why != Why::Asks {
+            self.answers.remove(&session);
+        }
         self.posted.insert(session, why);
         self.notifier.post(note);
     }
@@ -226,7 +314,10 @@ impl WorkspaceView {
                 let body = agent_ask_line(agent).unwrap_or_else(|| agent_status_word(agent));
                 let route =
                     Route { worker: w.worker, item: w.tile.map(|t| t.item), session: w.session };
-                Some(Asking { route, title: self.route_title(route, cx), body })
+                let approval = self.approval(w.session).map(|prompt| prompt.ask);
+                let answered = self.answered_here(w.session);
+                let title = self.route_title(route, cx);
+                Some(Asking { route, title, body, approval, answered })
             })
             .collect();
         Look { asking, unread: self.inbox_count() }
@@ -255,10 +346,23 @@ impl WorkspaceView {
 
     /// The human tapped a note: focus the tile it names and give it the keyboard. A note without
     /// a route (one another part of the app posted, tagged by its session) reveals that session.
-    /// An agent with no tile here gets one.
+    /// An agent with no tile here gets one. An approval note's "Allow" or "Deny" answers its
+    /// prompt and leaves the workspace where it is; "Show" is a tap.
     pub fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
         let route = Route::of_tap(tap);
-        tracing::debug!(id = tap.id, ?route, "note opened");
+        tracing::debug!(id = tap.id, ?route, action = ?tap.action, "note opened");
+        let verdict = match tap.action.as_deref() {
+            Some(notify::ALLOW) => Some(Verdict::Allow),
+            Some(notify::DENY) => Some(Verdict::Deny { message: String::new(), interrupt: false }),
+            Some(_) | None => None,
+        };
+        if let Some(verdict) = verdict {
+            let ask = tap.info.get(ASK).and_then(|ask| ask.parse().ok());
+            if let (Some(route), Some(ask)) = (route, ask) {
+                self.verdict_tapped(route, ask, verdict, cx);
+            }
+            return;
+        }
         let Some(route) = route else {
             if let Ok(session) = tap.id.parse::<SessionId>() {
                 self.reveal_session(session, cx);
@@ -283,7 +387,8 @@ impl WorkspaceView {
     }
 
     /// What a note's title says: the tile's name, else the worker's.
-    fn route_title(&self, route: Route, cx: &App) -> String {
+    #[must_use]
+    pub fn route_title(&self, route: Route, cx: &App) -> String {
         route
             .item
             .map(|item| TileRef { worker: route.worker, item })

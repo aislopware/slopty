@@ -332,6 +332,8 @@ mod tests {
             viewers: 0,
             command: Vec::new(),
             agent: None,
+            progress: None,
+            restored: None,
         };
         (worker.parse().unwrap(), summary)
     }

@@ -1,20 +1,38 @@
-# Where each fork branch sits on its upstream. `cargo xtask upstream check` reads this;
-# `cargo xtask upstream sync` rebases the fork, pushes it, moves the workspace pins and rewrites
-# the `base` / `base_date` / `checked` lines here, so drift shows up in git history. `checked` is
-# the day a sync last confirmed the fork current: a quiet upstream keeps an old `base_date`.
-# Once the later of the two dates is `check_every_days` old (0: always), the gate asks the upstream
-# for its branch head and warns when it moved past `base`. `checkout` is relative to the main
-# checkout of this repository (shared by every worktree) and is cloned on first use.
+# Where each source Slopty builds on stands on its upstream. `cargo xtask upstream check` reads
+# this; `cargo xtask upstream sync` takes each upstream into its fork (a rebase, or a merge where
+# `strategy` says so), imports zed into the gpui-fast fork, pushes, moves the workspace pins and
+# rewrites the `base` / `base_date` / `checked` lines here, so drift shows up in git history.
+# `checked` is the day a sync last confirmed the source current: a quiet upstream keeps an old
+# `base_date`. Once the later of the two dates is `check_every_days` old (0: always), the gate
+# asks the upstream for its branch head and warns when it moved past `base`. `checkout` is
+# relative to the main checkout of this repository (shared by every worktree) and is cloned on
+# first use.
 
+# GPUI. The fork's zed imports are merges of vendor commits beside its branch, which a rebase
+# would replay or drop, so it merges longbridge's branch in. It lands changes most days, so every
+# gate asks.
+[gpui-fast]
+upstream = "https://github.com/longbridge/gpui-fast.git"
+upstream_branch = "main"
+fork = "https://github.com/aislopware/gpui-fast.git"
+branch = "main"
+checkout = ".research/gpui-fast"
+strategy = "merge"
+base = "6b3d5cad18e1611aa1d4832a1d74e5c5957920cd"
+base_date = "2026-09-29"
+checked = "2026-09-29"
+check_every_days = 0
+
+# zed is not forked: the gpui-fast fork imports it (its `UPSTREAM` file and
+# `docs/upstream-sync.md`). `base` is the zed commit the fork is known current with; the zed
+# clone lends its objects only.
 [zed]
 upstream = "https://github.com/zed-industries/zed.git"
 upstream_branch = "main"
-fork = "https://github.com/aislopware/zed.git"
-branch = "main"
 checkout = ".research/zed-main"
-base = "dd510f99e04e7a5b464f9a4e8771fa978ada138b"
-base_date = "2026-09-28"
-checked = "2026-09-28"
+base = "7960b2a7c9568e90fbe0727332149e5b2a5fd57a"
+base_date = "2026-09-12"
+checked = "2026-09-12"
 check_every_days = 7
 
 [gpui-kit]
@@ -23,9 +41,10 @@ upstream_branch = "main"
 fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
-base = "25d59c06f45cd81a02c5b9d5b81d32ee4985f87d"
-base_date = "2026-09-28"
-checked = "2026-09-28"
+strategy = "rebase"
+base = "2ec5696c2e975ddd2b8380d12ec00631bd159128"
+base_date = "2026-09-29"
+checked = "2026-09-29"
 # It lands several changes a day, so every gate asks.
 check_every_days = 0
 
@@ -35,7 +54,8 @@ upstream_branch = "master"
 fork = "https://github.com/aislopware/libghostty-rs.git"
 branch = "master"
 checkout = ".research/libghostty-rs"
+strategy = "rebase"
 base = "8953a740bc378cec3e07e1f6ca949f0595eab19b"
 base_date = "2026-09-28"
-checked = "2026-09-28"
+checked = "2026-09-29"
 check_every_days = 7

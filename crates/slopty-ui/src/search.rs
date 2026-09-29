@@ -1,15 +1,23 @@
 //! Search in files: a query typed once, every matching line under a directory on a worker,
-//! grouped by file as the worker finds them.
+//! grouped by file as the worker finds them, and replaced across files from the same surface.
 //!
 //! [`ProjectSearch`] floats over the workspace as the palette does, at the editor's width since
 //! its rows are lines of code. The field searches as it is typed (after [`DEBOUNCE`]), each
 //! change stopping the search before it on the worker ([`slopty_proto::search`]); the files
-//! field narrows it with ripgrep's globs, and three toggles (match case, whole word, regular
-//! expression) set how it matches. A file's row holds its name, where it is and how many lines
-//! matched, a click folding its lines away; a line's row holds its number and its text with
-//! each match tinted. ↑/↓ move, ↩ or a click opens the file tile at the line, Esc closes.
-//! Closing stops a search still going; the workspace keeps the surface, so it opens again as
-//! it was left and runs a stopped search again.
+//! field narrows it with ripgrep's globs, and toggles set how it matches (match case, whole
+//! word, regular expression) and whether the lines round each match show, dimmed.
+//!
+//! A file's row holds its name, where it is and how many lines matched, a click folding its
+//! lines away; a line's row holds its number and its text with each match tinted. Under the
+//! query, the replace field: while it holds text or the keyboard, each match is struck through
+//! with what replaces it beside it, a regular expression's groups expanded. ↩ there replaces
+//! the selected line's matches (or the selected file's) and moves on to the next, ⌘↩ replaces
+//! every match shown; the worker refuses a file changed since the search, and the foot says so.
+//!
+//! ↑/↓ move over the files and matching lines, ⇞/⇟ a page at a time, ⇥ goes from field to
+//! field, ↩ or a click opens the file tile at the line, Esc closes. Closing stops a search still
+//! going; the workspace keeps the surface, so it opens again as it was left and runs a stopped
+//! search again.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,12 +29,17 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, HighlightStyle, InteractiveElement as _, IntoElement, KeyContext, MouseButton,
     ParentElement as _, Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledText, Subscription, Task, UniformListScrollHandle, Window, div, px,
-    uniform_list,
+    StrikethroughStyle, Styled as _, StyledText, Subscription, Task, UniformListScrollHandle,
+    Window, div, px, uniform_list,
 };
-use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
-use slopty_client::search::{Row, SearchResults, SearchState};
-use slopty_proto::search::{FileHits, LineHit, MAX_LINES, SearchEvent, SearchQuery};
+use gpui_kit::component::input::{
+    Escape, IndentInline, Input, InputEvent, InputState, MoveDown, MovePageDown, MovePageUp,
+    MoveUp, OutdentInline,
+};
+use slopty_client::search::{Mark, Preview, Replaced, Row, Scope, SearchResults, SearchState};
+use slopty_proto::search::{
+    ContextLine, FileHits, LineHit, MAX_LINES, SearchEvent, SearchQuery, SkipReason, Skipped,
+};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_theme::{Theme, Typography, alpha};
 
@@ -56,20 +69,32 @@ pub const CTX: &str = "ProjectSearch";
 
 /// What the query field says before anything is typed.
 pub(crate) const QUERY_PLACEHOLDER: &str = "Search in files";
+/// What the replace field says before anything is typed.
+pub(crate) const REPLACE_PLACEHOLDER: &str = "Replace";
 /// What the files field says before anything is typed.
 pub(crate) const FILES_PLACEHOLDER: &str = "Files to include, as *.rs or !tests/**";
 /// The toggles' names, as a screen reader and the palette say them.
 pub(crate) const MATCH_CASE: &str = "Match case";
 pub(crate) const WHOLE_WORD: &str = "Match whole word";
 pub(crate) const REGEX: &str = "Use regular expression";
+pub(crate) const CONTEXT_LINES: &str = "Show lines round each match";
+/// The replace buttons' names: every match shown, a file's, a line's.
+pub(crate) const REPLACE_ALL: &str = "Replace all";
+pub(crate) const REPLACE_FILE: &str = "Replace in file";
+pub(crate) const REPLACE_LINE: &str = "Replace";
 /// What the list says while a search has found nothing yet.
 pub(crate) const SEARCHING: &str = "Searching\u{2026}";
 /// What the list says when a search went through everything and found nothing.
 pub(crate) const NO_RESULTS: &str = "No results";
+/// What the foot says while a replace is on its way.
+pub(crate) const REPLACING: &str = "Replacing\u{2026}";
 
 /// How long the field waits after a keystroke before it searches: a word typed is one search,
 /// not one per letter.
 pub const DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// The lines shown before and after each match while context is on.
+pub const CONTEXT: u32 = 2;
 
 /// The width of a line row's number column at zoom 1, room for five figures.
 const NUMBER_W: f32 = 40.0;
@@ -77,14 +102,17 @@ const NUMBER_W: f32 = 40.0;
 /// The most of the window's height the surface takes, under its ceiling.
 const SHARE: f32 = 0.7;
 
-/// Numbers searches for every surface in the app, so a page still in flight for a closed one
-/// is never taken for a new one's.
+/// How far ⇞ and ⇟ move the selection, in rows it can land on.
+const PAGE: usize = 10;
+
+/// Numbers searches and replaces for every surface in the app, so a page still in flight for
+/// a closed one is never taken for a new one's.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// What the surface asks of the workspace.
 #[derive(Clone, PartialEq, Debug)]
 pub enum ProjectSearchEvent {
-    /// Send this to the surface's worker: a search's start or stop.
+    /// Send this to the surface's worker: a search's start or stop, or a replace.
     Send(ClientMsg),
     /// Open the file at `path` on the worker, landing on `line` (from 1).
     Open {
@@ -105,10 +133,17 @@ type Selected = (String, Option<usize>);
 /// The surface.
 pub struct ProjectSearch {
     query: Entity<InputState>,
+    replace: Entity<InputState>,
     files: Entity<InputState>,
     match_case: bool,
     whole_word: bool,
     regex: bool,
+    /// The lines round each match show.
+    context: bool,
+    /// The replace field has the keyboard.
+    replace_focused: bool,
+    /// What a replace would make of the lines shown, while the replace field is in use.
+    preview: Option<Preview>,
     /// The directory searched, as the worker is asked it.
     root: String,
     /// Where that is, as the surface says it (`~/w/slopty on studio`).
@@ -120,12 +155,15 @@ pub struct ProjectSearch {
     /// The selection was moved by a key or the pointer; until then it follows the first
     /// match, wherever the pages put it.
     chosen: bool,
+    /// Where the selection stood when a replace went out: once its row is gone, the selection
+    /// lands on the next match from there.
+    anchor: Option<usize>,
     scroll: UniformListScrollHandle,
     plate: Plate,
     /// The search the last keystroke asked for, waiting out [`DEBOUNCE`].
     pending: Option<Task<()>>,
     theme: Theme,
-    _events: [Subscription; 2],
+    _events: [Subscription; 3],
 }
 
 impl std::fmt::Debug for ProjectSearch {
@@ -155,6 +193,7 @@ impl ProjectSearch {
         cx: &mut Context<Self>,
     ) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder(QUERY_PLACEHOLDER));
+        let replace = cx.new(|cx| InputState::new(window, cx).placeholder(REPLACE_PLACEHOLDER));
         let files = cx.new(|cx| InputState::new(window, cx).placeholder(FILES_PLACEHOLDER));
         let field = |this: &mut Self, event: &InputEvent, cx: &mut Context<Self>| match event {
             InputEvent::Change => this.changed(cx),
@@ -163,14 +202,19 @@ impl ProjectSearch {
         };
         let events = [
             cx.subscribe(&query, move |this, _input, event, cx| field(this, event, cx)),
+            cx.subscribe(&replace, |this, _input, event, cx| this.replace_event(event, cx)),
             cx.subscribe(&files, move |this, _input, event, cx| field(this, event, cx)),
         ];
         Self {
             query,
+            replace,
             files,
             match_case: false,
             whole_word: false,
             regex: false,
+            context: false,
+            replace_focused: false,
+            preview: None,
             root: root.to_owned(),
             place: place.to_owned(),
             results: None,
@@ -178,6 +222,7 @@ impl ProjectSearch {
             folded: HashSet::new(),
             selected: None,
             chosen: false,
+            anchor: None,
             scroll: UniformListScrollHandle::new(),
             plate: Plate::default(),
             pending: None,
@@ -213,7 +258,13 @@ impl ProjectSearch {
             match_case: self.match_case,
             whole_word: self.whole_word,
             globs: slopty_client::search::globs(&self.files.read(cx).value()),
+            context: if self.context { CONTEXT } else { 0 },
         }
+    }
+
+    /// What the replace field holds.
+    fn replacement(&self, cx: &App) -> String {
+        self.replace.read(cx).value().to_string()
     }
 
     /// The search shown, once one ran.
@@ -228,6 +279,13 @@ impl ProjectSearch {
         let (path, line) = self.selected.as_ref()?;
         let file = self.results.as_ref()?.files().iter().find(|f| &f.path == path)?;
         Some((file, line.and_then(|l| file.lines.get(l))))
+    }
+
+    /// A line's text as the list draws it now: each match struck through with its replacement
+    /// after it while a replace is previewed.
+    #[must_use]
+    pub fn drawn_line(&self, hit: &LineHit) -> String {
+        shown_line(hit, self.preview.as_ref()).0.to_string()
     }
 
     /// Give the query field the keyboard, its text selected.
@@ -258,6 +316,20 @@ impl ProjectSearch {
         }
     }
 
+    /// The replace field: its text and its focus decide the preview; ↩ replaces the selected
+    /// row's matches, ⌘↩ every match shown.
+    fn replace_event(&mut self, event: &InputEvent, cx: &mut Context<Self>) {
+        match event {
+            InputEvent::Change => {}
+            InputEvent::Focus => self.replace_focused = true,
+            InputEvent::Blur => self.replace_focused = false,
+            InputEvent::PressEnter { secondary: true, .. } => self.replace_all(cx),
+            InputEvent::PressEnter { .. } => self.replace_selected(cx),
+        }
+        self.update_preview(cx);
+        cx.notify();
+    }
+
     /// Whether what is shown is not what the fields ask for now.
     fn stale(&self, cx: &App) -> bool {
         self.results.as_ref().is_none_or(|r| *r.query() != self.query(cx))
@@ -272,6 +344,7 @@ impl ProjectSearch {
             self.stop(cx);
             self.results = None;
             self.refresh();
+            self.update_preview(cx);
             cx.notify();
             return;
         }
@@ -284,7 +357,9 @@ impl ProjectSearch {
         self.results = Some(results);
         self.selected = None;
         self.chosen = false;
+        self.anchor = None;
         self.refresh();
+        self.update_preview(cx);
         cx.emit(ProjectSearchEvent::Send(request));
         cx.notify();
     }
@@ -305,7 +380,8 @@ impl ProjectSearch {
         }
     }
 
-    /// A page or the end of a search from the worker; another search's is dropped.
+    /// A page or the end of a search from the worker, or a replace's answer; another search's
+    /// is dropped.
     pub fn apply(&mut self, event: SearchEvent, cx: &mut Context<Self>) {
         let Some(results) = self.results.as_mut() else { return };
         if results.apply(event) {
@@ -314,8 +390,59 @@ impl ProjectSearch {
         }
     }
 
+    /// The preview for the replace field as it stands: shown while it holds text or the
+    /// keyboard, so an empty replacement (a deletion) is seen before it is made.
+    fn update_preview(&mut self, cx: &App) {
+        let with = self.replacement(cx);
+        let previewing = self.replace_focused || !with.is_empty();
+        self.preview = self
+            .results
+            .as_ref()
+            .filter(|_| previewing)
+            .map(|results| Preview::new(results.query(), &with));
+    }
+
+    /// Replace the matches `scope` covers with what the replace field holds, one replace at a
+    /// time; the selection moves on to the next match once the answer takes its row away.
+    fn replace(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        let with = self.replacement(cx);
+        let Some(results) = self.results.as_mut() else { return };
+        let id: RequestId = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let Some(request) = results.replace(id, &with, scope) else { return };
+        tracing::info!(id, root = %self.root, ?scope, "search replaces");
+        self.anchor = self.selected_index();
+        cx.emit(ProjectSearchEvent::Send(request));
+        cx.notify();
+    }
+
+    /// ↩ in the replace field: the selected line's matches, or the selected file's.
+    fn replace_selected(&mut self, cx: &mut Context<Self>) {
+        let scope = match self.selected_index().and_then(|ix| self.rows.get(ix)) {
+            Some(Row::Line { file, line }) => Scope::Line { file: *file, line: *line },
+            Some(Row::File(file)) => Scope::File(*file),
+            Some(Row::Context { .. }) | None => return,
+        };
+        self.replace(scope, cx);
+    }
+
+    /// ⌘↩ in the replace field: every match shown, once the search has found them all.
+    fn replace_all(&mut self, cx: &mut Context<Self>) {
+        if self.can_replace_all() {
+            self.replace(Scope::All, cx);
+        }
+    }
+
+    /// Whether a replace of everything can go now: the search is through and found something,
+    /// and no other replace is on its way.
+    fn can_replace_all(&self) -> bool {
+        self.results.as_ref().is_some_and(|r| {
+            !r.running() && !r.files().is_empty() && r.replaced() != Some(&Replaced::Pending)
+        })
+    }
+
     /// Lay the rows out again. The selection stays on the row it was moved to; until it is
     /// moved it is the first match, which a later page can change, so ↩ opens the top one.
+    /// A row a replace took away hands the selection to the next match from where it stood.
     fn refresh(&mut self) {
         let Some(results) = &self.results else {
             self.rows.clear();
@@ -325,38 +452,72 @@ impl ProjectSearch {
         self.rows = results.rows(|path| self.folded.contains(path));
         let kept =
             self.chosen && self.selected.as_ref().is_some_and(|s| self.index_of(s).is_some());
-        if !kept {
-            self.selected =
-                self.rows.iter().find(|r| matches!(r, Row::Line { .. })).map(|r| self.key(*r));
-            if let Some(ix) = self.selected_index() {
-                self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
-            }
+        if kept {
+            return;
+        }
+        let from = self.anchor.take().filter(|_| self.chosen).unwrap_or(0);
+        let is_line = |r: &Row| matches!(r, Row::Line { .. });
+        let at = self
+            .rows
+            .iter()
+            .skip(from)
+            .position(is_line)
+            .map(|ix| ix.saturating_add(from))
+            .or_else(|| self.rows.iter().take(from).rposition(is_line));
+        self.selected = at.and_then(|ix| self.rows.get(ix)).map(|r| self.key(*r));
+        if let Some(ix) = at {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         }
     }
 
     fn key(&self, row: Row) -> Selected {
         let files = self.results.as_ref().map_or(&[][..], SearchResults::files);
+        let path = |file: usize| files.get(file).map(|f| f.path.clone()).unwrap_or_default();
         match row {
-            Row::File(file) => (files.get(file).map(|f| f.path.clone()).unwrap_or_default(), None),
-            Row::Line { file, line } => {
-                (files.get(file).map(|f| f.path.clone()).unwrap_or_default(), Some(line))
-            }
+            Row::File(file) | Row::Context { file, .. } => (path(file), None),
+            Row::Line { file, line } => (path(file), Some(line)),
         }
     }
 
     fn index_of(&self, selected: &Selected) -> Option<usize> {
-        self.rows.iter().position(|r| self.key(*r) == *selected)
+        self.rows
+            .iter()
+            .position(|r| !matches!(r, Row::Context { .. }) && self.key(*r) == *selected)
     }
 
     fn selected_index(&self) -> Option<usize> {
         self.index_of(self.selected.as_ref()?)
     }
 
-    /// Move the selection `delta` rows, stopping at the ends.
+    /// Whether the selection can land on row `ix`: a file or a match, not a line of context.
+    fn selectable(&self, ix: usize) -> bool {
+        self.rows.get(ix).is_some_and(|r| !matches!(r, Row::Context { .. }))
+    }
+
+    /// Move the selection `delta` rows it can land on, stopping at the ends.
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(last) = self.rows.len().checked_sub(1) else { return };
-        let at = self.selected_index().map_or(0, |ix| ix.saturating_add_signed(delta).min(last));
-        self.select(at, cx);
+        let target = match self.selected_index() {
+            None => (0..=last).find(|ix| self.selectable(*ix)),
+            Some(mut at) => {
+                let mut left = delta.unsigned_abs();
+                let mut landed = at;
+                while left > 0 {
+                    let next =
+                        if delta < 0 { at.checked_sub(1) } else { Some(at.saturating_add(1)) };
+                    let Some(next) = next.filter(|n| *n <= last) else { break };
+                    at = next;
+                    if self.selectable(at) {
+                        landed = at;
+                        left = left.saturating_sub(1);
+                    }
+                }
+                Some(landed)
+            }
+        };
+        if let Some(ix) = target {
+            self.select(ix, cx);
+        }
     }
 
     fn select(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -365,6 +526,25 @@ impl ProjectSearch {
         self.selected = Some(self.key(row));
         self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         cx.notify();
+    }
+
+    /// ⇥ and ⇧⇥: the keyboard goes to the next field, or the one before, round the three.
+    fn cycle(&self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let fields = [&self.query, &self.replace, &self.files];
+        let at = fields.iter().position(|f| f.read(cx).focus_handle(cx).is_focused(window));
+        let next = match (at, forward) {
+            (Some(ix), true) => ix.saturating_add(1).checked_rem(fields.len()).unwrap_or(0),
+            (Some(ix), false) => {
+                ix.checked_sub(1).unwrap_or_else(|| fields.len().saturating_sub(1))
+            }
+            (None, _) => 0,
+        };
+        if let Some(field) = fields.get(next) {
+            field.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
     }
 
     /// Open what is selected: a line at itself, a file at its first match.
@@ -393,7 +573,7 @@ impl ProjectSearch {
         cx.notify();
     }
 
-    /// Row `ix`: a file's heading or one of its lines.
+    /// Row `ix`: a file's heading, one of its matching lines, or a line round them.
     fn row(&self, ix: usize, cx: &Context<Self>) -> Option<AnyElement> {
         let row = *self.rows.get(ix)?;
         let results = self.results.as_ref()?;
@@ -404,14 +584,23 @@ impl ProjectSearch {
         let (content, label) = match row {
             Row::File(file) => {
                 let hits = results.files().get(file)?;
-                (self.file_row(hits), format!("{}, {}", hits.path, count_label(hits.lines.len())))
+                let label = format!("{}, {}", hits.path, count_label(hits.lines.len()));
+                (self.file_row(hits, file, chosen, cx), label)
             }
             Row::Line { file, line } => {
-                let hits = results.files().get(file)?;
-                let hit = hits.lines.get(line)?;
-                (self.line_row(hit), format!("Line {}: {}", hit.line, hit.text))
+                let hit = results.files().get(file)?.lines.get(line)?;
+                let label = format!("Line {}: {}", hit.line, hit.text);
+                (self.line_row(hit, Scope::Line { file, line }, chosen, cx), label)
+            }
+            Row::Context { file, line } => {
+                let around = results.files().get(file)?.context.get(line)?;
+                (
+                    self.context_row(around),
+                    format!("Line {}, context: {}", around.line, around.text),
+                )
             }
         };
+        let context = matches!(row, Row::Context { .. });
         let el = div()
             .id(ElementId::NamedInteger("search-row".into(), u64::try_from(ix).unwrap_or(0)))
             .debug_selector(move || format!("search-row-{ix}"))
@@ -426,22 +615,27 @@ impl ProjectSearch {
             .px(px(theme.spacing.inset() - pad))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .active(move |st| st.bg(hsla(s.overlay)))
-            .on_mouse_move(cx.listener(move |this, _ev, _window, cx| {
-                if this.selected_index() != Some(ix) {
-                    this.select(ix, cx);
-                }
-            }))
+            .when(!context, |el| {
+                el.active(move |st| st.bg(hsla(s.overlay))).on_mouse_move(cx.listener(
+                    move |this, _ev, _window, cx| {
+                        if this.selected_index() != Some(ix) {
+                            this.select(ix, cx);
+                        }
+                    },
+                ))
+            })
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _ev, _window, cx| {
-                this.select(ix, cx);
-                match row {
-                    Row::File(_) => {
-                        let path = this.key(row).0;
-                        this.fold(&path, cx);
-                    }
-                    Row::Line { .. } => this.open_selected(cx),
+            .on_click(cx.listener(move |this, _ev, _window, cx| match row {
+                Row::File(_) => {
+                    this.select(ix, cx);
+                    let path = this.key(row).0;
+                    this.fold(&path, cx);
                 }
+                Row::Line { .. } => {
+                    this.select(ix, cx);
+                    this.open_selected(cx);
+                }
+                Row::Context { file, line } => this.open_context(file, line, cx),
             }))
             .child(content);
         Some(if chosen {
@@ -451,9 +645,53 @@ impl ProjectSearch {
         })
     }
 
+    /// A click on a line of context opens its file there.
+    fn open_context(&self, file: usize, line: usize, cx: &mut Context<Self>) {
+        let Some(results) = &self.results else { return };
+        let Some(hits) = results.files().get(file) else { return };
+        let Some(around) = hits.context.get(line) else { return };
+        cx.emit(ProjectSearchEvent::Open { path: results.path_of(hits), line: around.line });
+    }
+
+    /// The button on the selected row that replaces its matches, while a replace is previewed.
+    fn row_replace(
+        &self,
+        scope: Scope,
+        chosen: bool,
+        cx: &Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        let theme = &self.theme;
+        let pending = self.results.as_ref().and_then(SearchResults::replaced);
+        if !chosen || self.preview.is_none() || pending == Some(&Replaced::Pending) {
+            return None;
+        }
+        let (id, icon, label) = match scope {
+            Scope::Line { .. } => ("search-replace-line", IconName::Replace, REPLACE_LINE),
+            Scope::File(_) | Scope::All => {
+                ("search-replace-file", IconName::ReplaceAll, REPLACE_FILE)
+            }
+        };
+        let side = crate::palette::line_height(theme) - theme.spacing.xs;
+        Some(
+            crate::kit::icon_button(theme, id, icon, label)
+                .size(px(side))
+                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    cx.stop_propagation();
+                    this.replace(scope, cx);
+                })),
+        )
+    }
+
     /// A file's heading: a chevron that says whether its lines show, its name, the folder it
     /// is in, and how many lines matched.
-    fn file_row(&self, hits: &FileHits) -> AnyElement {
+    fn file_row(
+        &self,
+        hits: &FileHits,
+        file: usize,
+        chosen: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let (dir, name) = hits.path.rsplit_once('/').unwrap_or(("", hits.path.as_str()));
@@ -489,40 +727,80 @@ impl ProjectSearch {
                     .whitespace_nowrap()
                     .child(SharedString::from(dir.to_owned())),
             )
+            .children(self.row_replace(Scope::File(file), chosen, cx))
             .child(
-                crate::kit::meta(crate::kit::tabular(div()), theme)
+                crate::kit::tabular(crate::kit::pill(theme, s.text_secondary, 1.0))
                     .flex_none()
                     .child(SharedString::from(hits.lines.len().to_string())),
             )
             .into_any_element()
     }
 
-    /// A matching line: its number in a column of its own, then its text with each match
-    /// tinted as a find bar tints its hits, an ellipsis where the line was cut.
-    fn line_row(&self, hit: &LineHit) -> AnyElement {
+    /// A line's number in a column of its own, under its file's name.
+    fn number(&self, line: u32, context: bool) -> gpui::Div {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (text, marks) = shown_line(hit);
-        let tint = HighlightStyle {
+        crate::kit::meta(crate::kit::tabular(div()), theme)
+            .flex_none()
+            .w(px(NUMBER_W))
+            .text_right()
+            .when(context, |el| el.text_color(hsla_alpha(s.text_muted, alpha::STRONG)))
+            .child(SharedString::from(line.to_string()))
+    }
+
+    /// A matching line: its number, then its text with each match tinted as a find bar tints
+    /// its hits, or struck through with its replacement after it while a replace is
+    /// previewed; an ellipsis where the line was cut.
+    fn line_row(
+        &self,
+        hit: &LineHit,
+        scope: Scope,
+        chosen: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let (text, marks) = shown_line(hit, self.preview.as_ref());
+        let found = HighlightStyle {
             color: Some(hsla(s.text)),
             background_color: Some(hsla_alpha(s.warn, alpha::FAINT)),
             font_weight: Some(gpui::FontWeight(Typography::MEDIUM_WEIGHT)),
             ..HighlightStyle::default()
         };
-        let highlights: Vec<_> = marks.into_iter().map(|range| (range, tint)).collect();
+        let removed = HighlightStyle {
+            color: Some(hsla(s.text_muted)),
+            background_color: Some(hsla_alpha(s.error, alpha::FAINT)),
+            strikethrough: Some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(hsla(s.error)),
+            }),
+            ..HighlightStyle::default()
+        };
+        let inserted = HighlightStyle {
+            color: Some(hsla(s.text)),
+            background_color: Some(hsla_alpha(s.success, alpha::FAINT)),
+            font_weight: Some(gpui::FontWeight(Typography::MEDIUM_WEIGHT)),
+            ..HighlightStyle::default()
+        };
+        let highlights: Vec<_> = marks
+            .into_iter()
+            .map(|(range, mark)| {
+                let style = match mark {
+                    Mark::Match => found,
+                    Mark::Removed => removed,
+                    Mark::Inserted => inserted,
+                };
+                (range, style)
+            })
+            .collect();
+        let ink = if chosen { s.text } else { s.text_secondary };
         div()
             .flex_1()
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .child(
-                crate::kit::meta(crate::kit::tabular(div()), theme)
-                    .flex_none()
-                    .w(px(NUMBER_W))
-                    .text_right()
-                    .child(SharedString::from(hit.line.to_string())),
-            )
+            .child(self.number(hit.line, false))
             .child(
                 div()
                     .flex_1()
@@ -530,13 +808,43 @@ impl ProjectSearch {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_color(hsla(s.text_secondary))
+                    .text_color(hsla(ink))
                     .child(StyledText::new(text).with_highlights(highlights)),
+            )
+            .children(self.row_replace(scope, chosen, cx))
+            .into_any_element()
+    }
+
+    /// A line round a match: set back, so the matches lead.
+    fn context_row(&self, around: &ContextLine) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let mut text = around.text.clone();
+        if around.cut_after {
+            text.push('\u{2026}');
+        }
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm))
+            .child(self.number(around.line, true))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(text)),
             )
             .into_any_element()
     }
 
-    /// The field and the toggles, then the files field and where the search looks.
+    /// The query and its toggles, the replace field, then the files field and where the search
+    /// looks.
     fn fields(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -570,13 +878,44 @@ impl ProjectSearch {
             .child(toggle("search-word", IconName::WholeWord, WHOLE_WORD, self.whole_word, |t| {
                 &mut t.whole_word
             }))
-            .child(toggle("search-regex", IconName::Regex, REGEX, self.regex, |t| &mut t.regex));
+            .child(toggle("search-regex", IconName::Regex, REGEX, self.regex, |t| &mut t.regex))
+            .child(toggle(
+                "search-context",
+                IconName::UnfoldVertical,
+                CONTEXT_LINES,
+                self.context,
+                |t| &mut t.context,
+            ));
+        let replace_row = crate::kit::inset_x(div(), theme)
+            .flex_none()
+            .h(px(theme.density.row))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .border_t_1()
+            .border_color(hsla(s.border_subtle))
+            .child(div().flex_1().min_w_0().child(
+                Input::new(&self.replace).appearance(false).px_0().aria_label(REPLACE_PLACEHOLDER),
+            ))
+            .when(self.can_replace_all(), |el| {
+                el.child(
+                    crate::kit::icon_button(
+                        theme,
+                        "search-replace-all",
+                        IconName::ReplaceAll,
+                        REPLACE_ALL,
+                    )
+                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _ev, _window, cx| this.replace_all(cx))),
+                )
+            });
         let files_row = crate::kit::inset_x(div(), theme)
             .flex_none()
             .h(px(theme.density.row))
             .flex()
             .items_center()
             .gap(px(theme.spacing.md))
+            .border_t_1()
             .border_b_1()
             .border_color(hsla(s.border_subtle))
             .text_size(px(theme.typography.small()))
@@ -602,13 +941,23 @@ impl ProjectSearch {
                     .whitespace_nowrap()
                     .child(SharedString::from(self.place.clone())),
             );
-        div().flex_none().flex().flex_col().child(query_row).child(files_row).into_any_element()
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .child(query_row)
+            .child(replace_row)
+            .child(files_row)
+            .into_any_element()
     }
 
-    /// What the foot says of the search: how many matches in how many files, that it stopped
-    /// at the cap, or why it could not run.
+    /// What the foot says: how the last replace went, else how many matches in how many files,
+    /// that the search stopped at the cap, or why it could not run.
     fn status(&self) -> Option<(String, bool)> {
         let results = self.results.as_ref()?;
+        if let Some(replaced) = results.replaced() {
+            return Some(replaced_status(replaced));
+        }
         let files = results.files().len();
         let found = format!("{} in {}", result_label(results.lines()), file_label(files));
         Some(match results.state() {
@@ -631,8 +980,11 @@ impl ProjectSearch {
         let theme = &self.theme;
         let s = theme.surfaces;
         let (said, warn) = self.status().unwrap_or_default();
-        let running = self.results.as_ref().is_some_and(SearchResults::running);
-        let key = |key: &'static str, what: &'static str| {
+        let busy = self
+            .results
+            .as_ref()
+            .is_some_and(|r| r.running() || r.replaced() == Some(&Replaced::Pending));
+        let key = |key: String, what: &'static str| {
             div()
                 .flex()
                 .items_center()
@@ -640,6 +992,15 @@ impl ProjectSearch {
                 .child(crate::kit::key_cap(theme, key))
                 .child(what)
         };
+        let keys = if self.preview.is_some() {
+            vec![(chord("enter"), REPLACE_LINE), (chord("cmd-enter"), REPLACE_ALL)]
+        } else {
+            vec![
+                (chord("up").chars().chain(chord("down").chars()).collect(), "Move"),
+                (chord("enter"), "Open"),
+            ]
+        };
+        let last = keys.len().saturating_sub(1);
         crate::kit::inset_x(div(), theme)
             .id("search-foot")
             .debug_selector(|| "search-foot".to_owned())
@@ -652,7 +1013,7 @@ impl ProjectSearch {
             .rounded_b(px(theme.radii.lg - 1.0))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .when(running, |el| {
+            .when(busy, |el| {
                 el.child(crate::icons::status_icon(
                     theme,
                     crate::icons::Status::Working,
@@ -674,8 +1035,9 @@ impl ProjectSearch {
                     .when(warn, |el| el.text_color(hsla(s.warn)))
                     .child(SharedString::from(said)),
             )
-            .child(key("↑↓", "Move"))
-            .child(key("↩", "Open").text_color(hsla(s.text_secondary)))
+            .children(keys.into_iter().enumerate().map(|(ix, (keys, what))| {
+                key(keys, what).when(ix == last, |el| el.text_color(hsla(s.text_secondary)))
+            }))
             .into_any_element()
     }
 
@@ -748,11 +1110,24 @@ impl Render for ProjectSearch {
             .child(self.list(cx))
             .when(self.results.is_some(), |el| el.child(self.foot()));
         let panel = crate::kit::slide_fade(panel, "search-open", theme.spacing.xs, Pace::Fade, cx);
+        let page = isize::try_from(PAGE).unwrap_or(1);
         let root = crate::kit::anchor(&theme, window)
             .id("search-backdrop")
             .child(panel)
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
             .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
+            .capture_action(cx.listener(move |this, _: &MovePageUp, _window, cx| {
+                this.step(page.saturating_neg(), cx);
+            }))
+            .capture_action(cx.listener(move |this, _: &MovePageDown, _window, cx| {
+                this.step(page, cx);
+            }))
+            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                this.cycle(true, window, cx);
+            }))
+            .capture_action(cx.listener(|this, _: &OutdentInline, window, cx| {
+                this.cycle(false, window, cx);
+            }))
             .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
                 cx.emit(ProjectSearchEvent::Dismiss);
             }))
@@ -776,31 +1151,64 @@ impl Render for ProjectSearch {
     }
 }
 
-/// A line's text as drawn, with an ellipsis where it was cut, and where its matches are in
-/// that text.
-fn shown_line(hit: &LineHit) -> (SharedString, Vec<std::ops::Range<usize>>) {
+/// A key as the palette spells it, from its keystroke (`cmd-enter` is ⌘↩).
+fn chord(keystroke: &str) -> String {
+    gpui::Keystroke::parse(keystroke).map(|k| crate::palette::keys_label(&k)).unwrap_or_default()
+}
+
+/// A line's text as drawn, with an ellipsis where it was cut, and where its marks fall in that
+/// text: its matches, or with a `preview` each match struck and its replacement after it.
+fn shown_line(
+    hit: &LineHit,
+    preview: Option<&Preview>,
+) -> (SharedString, Vec<(std::ops::Range<usize>, Mark)>) {
     const CUT: &str = "\u{2026}";
+    let (body, marks) = slopty_client::search::marked(hit, preview);
     let lead = if hit.cut_before { CUT.len() } else { 0 };
-    let mut text =
-        String::with_capacity(hit.text.len().saturating_add(CUT.len().saturating_mul(2)));
+    let mut text = String::with_capacity(body.len().saturating_add(CUT.len().saturating_mul(2)));
     if hit.cut_before {
         text.push_str(CUT);
     }
-    text.push_str(&hit.text);
+    text.push_str(&body);
     if hit.cut_after {
         text.push_str(CUT);
     }
-    let marks = hit
-        .spans
-        .iter()
-        .filter_map(|span| {
-            let start = usize::try_from(span.start).ok()?.saturating_add(lead);
-            let end = usize::try_from(span.end).ok()?.saturating_add(lead);
-            (start < end && text.is_char_boundary(start) && text.is_char_boundary(end))
-                .then_some(start..end)
+    let marks = marks
+        .into_iter()
+        .map(|(range, mark)| {
+            (range.start.saturating_add(lead)..range.end.saturating_add(lead), mark)
         })
         .collect();
     (text.into(), marks)
+}
+
+/// What the foot says of a replace: how far it got, and the files it left alone.
+fn replaced_status(replaced: &Replaced) -> (String, bool) {
+    match replaced {
+        Replaced::Pending => (REPLACING.to_owned(), false),
+        Replaced::Failed(error) => (error.clone(), true),
+        Replaced::Done { files, matches, skipped } => {
+            let files = usize::try_from(*files).unwrap_or(usize::MAX);
+            let matches = usize::try_from(*matches).unwrap_or(usize::MAX);
+            let done = format!("Replaced {} in {}", count_label(matches), file_label(files));
+            (skipped_note(done, skipped), !skipped.is_empty())
+        }
+    }
+}
+
+/// `done`, then what became of the files a replace left alone: how many changed on disk since
+/// the search, and the first that could not be written.
+fn skipped_note(done: String, skipped: &[Skipped]) -> String {
+    let changed = skipped.iter().filter(|s| s.why == SkipReason::Changed).count();
+    let failed = skipped.iter().find_map(|s| match &s.why {
+        SkipReason::Failed(error) => Some(format!("{}: {error}", s.path)),
+        SkipReason::Changed => None,
+    });
+    let changed = (changed > 0).then(|| {
+        let verb = if changed == 1 { "was" } else { "were" };
+        format!("{} changed since the search and {verb} skipped", file_label(changed))
+    });
+    std::iter::once(done).chain(changed).chain(failed).collect::<Vec<_>>().join(". ")
 }
 
 /// `n` with a thin space between each three figures: "2 000".
@@ -853,10 +1261,10 @@ mod tests {
             cut_before: true,
             cut_after: true,
         };
-        let (text, marks) = shown_line(&hit);
+        let (text, marks) = shown_line(&hit, None);
         assert_eq!(text.as_ref(), "\u{2026}let needle = 1;\u{2026}");
-        let mark = marks.first().cloned().unwrap();
-        assert_eq!(text.get(mark), Some("needle"));
+        let (mark, kind) = marks.first().cloned().unwrap();
+        assert_eq!((text.get(mark), kind), (Some("needle"), Mark::Match));
     }
 
     #[test]
@@ -866,5 +1274,24 @@ mod tests {
         assert_eq!(thousands(1_234_567), "1\u{2009}234\u{2009}567");
         assert_eq!(result_label(1), "1 result");
         assert_eq!(file_label(3), "3 files");
+    }
+
+    /// A replace says how far it got, and why it left a file alone.
+    #[test]
+    fn a_replace_says_what_it_did_and_what_it_skipped() {
+        let done = Replaced::Done { files: 2, matches: 5, skipped: Vec::new() };
+        assert_eq!(replaced_status(&done), ("Replaced 5 matches in 2 files".to_owned(), false));
+        let skipped = vec![
+            Skipped { path: "a.rs".into(), why: SkipReason::Changed },
+            Skipped { path: "b.rs".into(), why: SkipReason::Failed("Permission denied".into()) },
+        ];
+        let done = Replaced::Done { files: 1, matches: 1, skipped };
+        let (said, warn) = replaced_status(&done);
+        assert_eq!(
+            said,
+            "Replaced 1 match in 1 file. 1 file changed since the search and was skipped. \
+             b.rs: Permission denied"
+        );
+        assert!(warn);
     }
 }

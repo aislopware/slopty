@@ -8018,3 +8018,480 @@ end of the text; it was not rerun here (see the report).
 ```sh
 cargo test -p slopty-predict --test editing -- --nocapture
 ```
+
+## 2026-09-29 — A dual-stack port no IPv4 socket holds
+
+The fill's dial that got no answer ("A finding the fill brought out", above), found and fixed
+(decisions/transport.md, "A dual-stack port no IPv4 socket holds"). The rig is
+`fresh_endpoints_dial_a_loopback_server` in `crates/slopty-net/tests/dual_stack_port.rs`. A
+server links listener on `127.0.0.1:0` sends every link a directory every 2 ms. Eight tasks
+each bind a fresh client endpoint (`bind_client`, `[::]:0`), dial, say hello, read one push
+and close, 100 000 links in all. "Before" is `bind_udp` with the IPv4 bind taken out. Release
+build, this Mac:
+
+| bind | dials that got no answer | client port of each | run |
+| --- | --- | --- | --- |
+| before | 10 of 100 000 | 60 294, the server's own | 58.5 s |
+| before | 2 of 100 000 | 65 461, the server's own | 45.2 s |
+| after | **0 of 100 000** | | 43.1 s |
+| after | **0 of 100 000** | | 40.9 s |
+
+One server port in the 16 384 of the ephemeral range predicts 6 in 100 000. For the fill's
+11 870 CLI calls it predicts 0.7, and any other IPv4 socket on an ephemeral port adds as much;
+the fill saw 1 to 2. A client forced onto the
+server's port reproduced the server's log from the fill: one `unsent packet acked`, then
+`bad transport parameters: parameter had illegal value` at each Initial, and the dial timed out
+with the client having received nothing.
+
+What the kernel does, 20 000 binds against 2 000 sockets held (a one-off probe, run 2026-09-29):
+
+| bind | held by 2 000 sockets on | binds that took a held port |
+| --- | --- | --- |
+| `[::]:0` dual-stack | `127.0.0.1:0` | 2 360 |
+| `[::]:0` dual-stack | `0.0.0.0:0` | 3 074 |
+| `0.0.0.0:0` | `127.0.0.1:0` | 0 |
+| `0.0.0.0:0` or `127.0.0.1:0` | `[::]:0` dual-stack | 0 |
+
+An explicit `[::]:p` bound beside a socket on `0.0.0.0:p` and was refused beside `127.0.0.1:p`.
+
+The fix costs one IPv4 bind and close per endpoint: 16 to 21 µs over four runs of 10 000. A
+whole `bind_client` took 29 to 63 µs in the same runs, before and after alike, which is the
+machine's noise. No packet pays anything. The proving tests:
+`a_fresh_endpoint_takes_no_port_an_ipv4_socket_holds` (14 of 1 000 endpoints beside 200 IPv4
+sockets took one of their ports before, 0 after) and
+`an_endpoint_on_a_port_an_ipv4_socket_holds_is_refused`.
+
+```sh
+ROUNDS=100000 TASKS=8 cargo test -p slopty-net --release --test dual_stack_port -- --ignored --nocapture
+cargo test -p slopty-net --test dual_stack_port
+```
+
+## 2026-09-29 — Decoding a frame
+
+Mac Studio M1 Max, macOS 27.0, other sessions building in the same checkout (load average
+6–7). Every decode now runs under a cell budget. A thread-local is set per message and read
+and written per decoded line, and a line is checked against `MAX_COLS`
+(`docs/decisions/terminal.md`, "Decoded lines are bounded"). The wire bytes did not change.
+
+```sh
+cargo test -p slopty-proto --release --lib frame_decode_cost -- --ignored --nocapture
+```
+
+`codec::decode_body::<TermEvent>` on 200-column frames, µs, min / median:
+
+| frame | bytes | before | after (two runs) |
+| --- | --- | --- | --- |
+| an echo, 1 row (20 000 rounds) | 1 627 | 3.42 / 3.79 | 3.46 / 3.79–3.88 |
+| a screen of code, 60 rows (2 000) | 96 499 | 209.4 / 226.2 | 208.3–208.8 / 227.1–227.5 |
+| a blank screen, 60 rows (20 000) | 439 | 25.00 / 25.92 | 24.96–25.38 / 25.6–26.9 |
+
+That is the machine's noise. The allocation budgets (`slopty-grid` and `slopty-engine`
+`tests/allocs.rs`) count the same. The blank screen shows what putting the blanks back costs,
+0.4 µs a 200-column line, with or without the budget. The 703 bytes that decoded into 314 MB now fail at the first line's width, having allocated
+no cells (`decode_bounds.rs`).
+
+## 2026-09-29 — Quick terminal: chord to glass
+
+Mac Studio M1 Max, macOS 27.0, 60 Hz display, other sessions building in the same checkout.
+The real app under the self-test, one worker on loopback, the quick terminal shown nine times
+from the palette's "Toggle quick terminal" (the first show opens its shell and the panel; each
+later show follows a hide that has finished sliding). The app logs each show under
+`slopty::quick_terminal`: from the command to the panel in front (`asked_to_front_ms`) and to the
+first frame painted there (`asked_to_paint_ms`). The chord adds only its hop from the Carbon
+handler to the toggle on the same run loop; the self-test registers no chord, so that hop is not
+in these numbers.
+
+```sh
+cargo xtask e2e app -E 'test(the_quick_terminal_keeps_one_shell_across_shows)' 2>&1 | grep 'quick terminal'
+```
+
+| | to the panel in front | to the first frame painted in it |
+| --- | --- | --- |
+| first show (panel made and dressed) | 24.4 ms | 25.6 ms |
+| later shows, median of 8 (min–max) | 1.0 ms (0.4–1.2) | 16.5 ms (0.5–18.0) |
+
+The panel is in front within a millisecond, and its first frame is painted at the next display
+tick: one 60 Hz period (16.7 ms), once 0.5 ms when a tick was due. That first frame starts the
+slide, so the sheet is just above the window's top; it lands 240 ms later. No presentation
+report came back for the panel's frames (`presented_at` stayed empty on every frame of the run),
+so the glass is not in the table; by "submit to glass" above, it is a refresh or so after the
+paint.
+
+Since the review fixes of the same day, `asked_to_paint_ms` ends at the frame handed to the GPU
+(the window's presentation report) rather than in a paint callback, which the view no longer
+has. That point is a little later than the one measured above; the table was not measured again.
+
+## 2026-09-29 — Drawn frames to the glass
+
+Mac Studio M1 Max, macOS 27.0, debug build, other sessions building in the same checkout (load
+average 6–15). A worker under `SLOPTY_SYNTHETIC_SCREEN=1` serves its drawn display, 1512×982 pt
+at 2×, with a page of glyphs scrolling at 180 px/s (`docs/decisions/testing.md`, "A worker under
+test serves a drawn screen"). The `slopty-glass` client (`crates/slopty-e2e/src/bin/`) opens it
+over loopback QUIC, decodes with VideoToolbox and paints on a 60 Hz pacer that shares the
+worker's clock. Capture stamps are mach time, so the host clock is the same at both ends. Each
+run is 20 s after a 1 s warm-up. The harness runs every binary from a copy under `$TMPDIR`,
+because a VideoToolbox session from the noowners volume took 28–31 s to open.
+
+```sh
+cargo xtask e2e smooth --filter 'test(drawn_frames_reach_the_glass_on_loopback)'
+```
+
+"Painted" is the pacer's paint of the newest decoded frame: the client surface up to
+submission, not the panel's scan-out, which adds up to a refresh. Three runs, ms, p50 / p95 /
+p99 / max:
+
+| scale | stream | capture → arrival | capture → decoded | capture → painted |
+| --- | --- | --- | --- | --- |
+| 0.5 | 1512×982 HEVC | 6.9 / 10.4 / 14.2 / 17.4 | 7.9 / 11.9 / 15.9 / 28.2 | 17.0 / 19.7 / 21.4 / 35.2 |
+| 0.5 | | | | 16.2 / 19.5 / 20.2 / 20.6 |
+| 0.5 | | | | 15.8 / 19.7 / 20.6 / 31.7 |
+| 1 | 3024×1964 HEVC | 23.1 / 30.1 / 64.2 / 72.8 | 25.3 / 33.7 / 66.0 / 74.5 | 33.8 / 48.8 / 81.8 / 85.9 |
+| 1 | | | | 33.0 / 36.3 / 65.4 / 69.1 |
+| 1 | | | | 32.8 / 36.0 / 49.1 / 84.4 |
+
+At 0.5 about 1 200 frames were painted per run, with none lost, NACKed, repaired or refreshed.
+The worker encoded 587 of 588 captured by halfway, encode p50 6.4 / p95 7.7–8.1 ms, capture →
+packetized mean 7.1 ms. Decode adds about 1 ms, and the rest is waiting for the paint tick. At
+native scale the encoder cannot keep up. It encoded 327–329 of 600 captured (about 30 fps),
+encode p50 18 / p95 49–51 ms, capture → packetized mean 24–26 ms, so the pacer repainted each
+frame about twice. Again nothing was lost.
+
+The same test then opens the display in the real app for 20 s. The app's tile shows 1329
+frames at 756×492, and its UI draws at p50 0.4 ms per 16.7 ms frame. Encode p50 was 3.7 /
+p95 7.5 ms and capture → packetized mean 5.2 ms. No presentation report came back, because
+the window was covered while the user worked in Parsec. That leaves `presented` at 0, so the
+app's own arrival → present has no sample, and the glass numbers above come from
+`slopty-glass`. In the same run the app's stream NACKed once and asked for two refreshes with
+nothing lost.
+
+The app stream cases (`cargo xtask e2e app --filter 'test(/stream::/) - test(/frame_time/)'`)
+assert that a loopback stream loses nothing. Over repeated runs they failed about half the
+time. Window runs lost 1 frame and 116 datagrams, then 1 frame. Display runs had refresh
+storms of 2 to 266 with no loss, and recovery frames (219) outnumbered the frames shown (121).
+That points at the client's decoder after a quality or size change, not at the wire.
+
+## 2026-09-29 — encode time against frame size
+
+Mac Studio M1 Max, macOS 27.0, other sessions building in the same checkout (load average 6
+at the start, 24 at the end; printed per row in the log). `encode_time_by_size` in
+`crates/slopty-codec/tests/chroma444.rs` opens the worker's session (low-latency hardware HEVC
+Main 4:2:0 fed `420f`, with every property `Encoder::configure` sets, 32 Mbit/s) at each size,
+times 30 frames one at a time, then submits the scrolling code-editor picture on a real-time
+beat for 3 s without waiting for the last frame, as the capture callback does, and reads submit
+→ callback after the first second. Nothing is captured and no window opens.
+
+```sh
+cargo test -p slopty-codec --release --test chroma444 --no-run   # target/release/deps/chroma444-<hash>
+cp target/release/deps/chroma444-<hash> /tmp/slopty-probe/chroma444 && cd /tmp/slopty-probe
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 --exact tests::encode_time_by_size
+SLOPTY_PROBE_SIZES=3024x1964,3024x1968 nice -n 10 ./chroma444 --ignored --nocapture --exact tests::encode_time_by_size
+```
+
+| size | w % 16, h % 16 | one at a time p50 | on a 60 fps beat p50 / p95 | on a 120 fps beat p50 / p95 |
+| --- | --- | --- | --- | --- |
+| 1920 × 1080 | 0, 8 | 8.0 | 8.0 / 10.8 | 7.9 / 10.6 |
+| 2560 × 1440 | 0, 0 | 10.7 | 10.3 / 13.3 | 13.0 / 13.3 |
+| 3840 × 2160 | 0, 0 | 23.5 | 23.5 / 23.8 | 23.6 / 29.5 |
+| 3024 × 1964 | 0, 12 | 18.4 | **87.6 / 91.0** | **88.3 / 105.0** |
+| 3024 × 1962 | 0, 10 | 18.3 | **81.1 / 84.7** | **87.6 / 111.8** |
+| 3024 × 1960 | 0, 8 | 18.2 | **62.3 / 91.4** | **85.9 / 90.7** |
+| 3024 × 1968 | 0, 0 | 18.2 | 18.4 / 25.7 | 18.2 / 20.2 |
+| 3024 × 1952 | 0, 0 | 18.4 | 18.3 / 19.1 | 18.2 / 25.5 |
+| 3008 × 1964 | 0, 12 | 18.2 | 30.3 / 37.4 | **85.1 / 90.6** |
+| 3020 × 1968 | 12, 0 | 18.3 | **84.8 / 88.1** | **87.8 / 91.2** |
+| 3456 × 2234 | 0, 10 | 22.6 | **108.9 / 124.2** | **106.9 / 110.2** |
+| 3456 × 2240 | 0, 0 | 22.0 | 22.3 / 35.4 | 22.2 / 30.4 |
+| 2880 × 1800 | 0, 8 | 16.7 | 17.8 / 25.9 | **77.1 / 82.2** |
+| 1728 × 1118 | 0, 14 | 7.8 | 8.8 / 47.9 | 12.7 / 35.8 |
+| 1500 × 946 | 12, 2 | 6.6 | 6.5 / 12.1 | 6.4 / 17.9 |
+| 1282 × 802 | 2, 2 | 5.2 | 5.4 / 43.1 | 5.5 / 23.6 |
+| 2000 × 1234 | 0, 2 | 9.1 | 9.5 / 28.1 | **43.4 / 52.2** |
+
+No row dropped a frame. What it says:
+
+- **The time a frame takes follows its pixels, and alignment does not change it**: 18.2–18.4 ms
+  one at a time for every 3024-wide size, 22.0–22.6 ms for both 3456-wide ones.
+- **With both sides multiples of 16 the encoder overlaps frames; with either side off 16 it
+  does not.** 3840 × 2160 takes 23.5 ms a frame and still keeps a 120 fps beat at 23.6 ms, so
+  at least two frames are in the encoder at once. 3024 × 1968 and 3024 × 1952 keep both beats
+  at their 18 ms. Every size off 16 whose frame takes longer than the beat's period queues, to
+  a steady 77–109 ms: 3024 × 1964/1962/1960 at 60 (18 ms > 16.7) and at 120, 3020 × 1968 with
+  its width off, 3456 × 2234 against 22 ms at 3456 × 2240, 2880 × 1800 at 120 only (16.7 ms is
+  not over 60's period, is over 120's), 2000 × 1234 at 120 only (9.1 > 8.3). 3008 × 1964 at 60
+  sat on the edge (30 ms). Sizes off 16 that fit the period (1920 × 1080 at 120 with 8.0 ms,
+  1500 × 946, 1282 × 802) do not queue; their p95 tails are the load.
+- **Sixteen, not eight**: 3024 × 1960 and 2880 × 1800 are multiples of 8 and queue.
+- The queue stops growing at 77–109 ms rather than without bound, and nothing is dropped, so
+  VideoToolbox holds a fixed number of frames (about five at 60 fps) and the beat is held back
+  behind it.
+
+A second run the same afternoon (load 15–19), with an aligned twin for each size off 16 (p50
+ms, on a 60 / 120 fps beat):
+
+| size | one at a time | 60 fps beat | 120 fps beat |
+| --- | --- | --- | --- |
+| 3024 × 1964 | 18.4 | 86.1 | 85.8 |
+| 3024 × 1968 | 18.3 | 18.3 | 18.1 |
+| 3456 × 2234 | 22.6 | 110.9 | 107.2 |
+| 3456 × 2240 | 22.2 | 22.2 | 22.1 |
+| 2880 × 1800 | 16.6 | 16.4 | 77.4 |
+| 2880 × 1808 | 16.4 | 14.2 | 14.8 |
+| 2000 × 1234 | 9.3 | 9.4 | 41.5 |
+| 2000 × 1232 | 8.5 | 7.9 | 7.5 |
+
+Ruling: `docs/decisions/video.md`, "A stream's sides should be multiples of 16".
+
+## 2026-09-29 — compression presets and the low-latency encoder's keys
+
+Same machine and harness. `compression_presets` reads `SupportedPresetDictionaries` from a
+low-latency and a plain hardware session at 1080p, then times the worker's session with and
+without `VideoConferencing`'s settings applied on top, 180 frames on a 60 fps beat (the first
+second left out) and 120 one at a time, and scores the last ten decoded pictures.
+
+```sh
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 --exact tests::compression_presets
+```
+
+What the encoders offer:
+
+| encoder | preset | settings |
+| --- | --- | --- |
+| low-latency (`…hevc.rtvc`) | VideoConferencing | AverageBitRate 11 118 750, EnableLTR false, RealTime true |
+| hardware (`…ave.hevc`) | Balanced | AllowFrameReordering, LookAheadFrames 4, VariableBitRate 8.0 M, VBVMaxBitRate 12.0 M, VBVBufferDuration 2.5 |
+| hardware | HighSpeed | AllowFrameReordering, AverageBitRate 8.0 M, PrioritizeEncodingSpeedOverQuality |
+| hardware | HighQuality | AllowFrameReordering, LookAheadFrames 16, VBV as Balanced but 4 s |
+| hardware | ConsistentQuality | ConstantQualityFactor 0.5, LookAheadFrames 8, VBVMaxBitRate 16.0 M |
+
+The worker's session against the same with `VideoConferencing` (ms; spent Mbit/s; luma PSNR):
+
+| size | config | beat p50 / p95 / max | one at a time p50 / p95 | dropped | spent | PSNR |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1920 × 1080, 16 Mbit/s | worker | 7.43 / 7.87 / 8.68 | 7.36 / 9.48 | 0/180 | 6.91 | 53.18 |
+| | + VideoConferencing | 7.57 / 9.65 / 11.19 | 8.00 / 10.12 | 0/180 | 6.88 | 53.24 |
+| 3840 × 2160, 40 Mbit/s | worker | 23.38 / 23.72 / 24.07 | 23.39 / 23.71 | 0/180 | 18.42 | 53.54 |
+| | + VideoConferencing | 23.49 / 23.84 / 24.18 | 23.43 / 23.73 | 16/180 | 11.03 | 48.47 |
+| 5120 × 2880, 60 Mbit/s | worker | 38.10 / 38.33 / 38.72 | 38.12 / 38.41 | 0/180 | 23.53 | 53.24 |
+| | + VideoConferencing | 38.01 / 38.22 / 38.59 | 38.07 / 38.27 | 54/180 | 9.95 | 41.88 |
+
+The preset changes no time the encoder takes. Its fixed 11.1 Mbit/s rate drops frames and
+PSNR at 4K and 5K, and it turns LTR off. The low-latency encoder's supported-property list also
+names keys no SDK header exports, `RequestedMaxEncoderLatency`, `NumberOfSubFrameSections`,
+`NumberOfSlices`, `ReferenceBufferCount`, `NumberOfTemporalLayers` and `ThroughputMode` among
+them. Ruling: `docs/decisions/video.md`, "The `VideoConferencing` compression preset is not
+adopted".
+
+## 2026-09-29 — temporal layers on the low-latency encoder
+
+Same machine and harness. `temporal_layers` runs the worker's session at 1080p, 16 Mbit/s, on a
+60 fps beat for 120 frames, as it is and with `BaseLayerFrameRateFraction` 0.5, and reads every
+sample's NAL headers (`nal_unit_type`, `TemporalId`) and attachments.
+
+```sh
+nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 --exact tests::temporal_layers
+```
+
+| session | frames | NAL, TemporalId | IsDependedOnByOthers | mean size |
+| --- | --- | --- | --- | --- |
+| worker (fraction reads back -1) | keyframe | IDR_N_LP, 0 | true | 465 KiB |
+| | 119 P | TRAIL_R, 0 | true | 14.2 KiB |
+| fraction 0.5 (status 0, reads back 0.5) | keyframe | IDR_N_LP, 0 | true | 465 KiB |
+| | 59 P, base | TRAIL_R, 0 | true | 17.9 KiB |
+| | 60 P, layer 1 | TSA_R, 1 | false | 13.3 KiB |
+
+Encode time on the beat: 7.43 / 8.91 ms p50 / p95 as it is, 7.77 / 10.01 with the fraction. The
+keyframe also carries `FECGroupID` 0, `FECLastFrameInGroup` true and `FECLevelOfProtection` 3;
+every frame carries `EncodedFrameAvgQP`. Ruling: `docs/decisions/video.md`, "The encoder
+writes every frame as a reference; half of them need not be".
+
+## 2026-09-29 — two parity fragments on small frames, under clumped loss
+
+A simulation, so any machine gives the same numbers. `parity_under_burst_loss` in
+`crates/slopty-media/tests/burst_loss.rs` streams 60 fps for a minute over a link that loses
+datagrams in runs (a Gilbert channel: `loss` is the share lost, `burst` the mean run length),
+three seeds a case. The packetizer and `Redundancy` sit on one end and the reassembler on the
+other, with NACKs, refresh requests and 50 ms reports going back over a 10 ms one-way delay and
+retransmissions crossing the same lossy link. A still window's frames are 0.6–5.5 kB (one to
+five fragments), a scrolling 1080p screen's 8–20 kB (seven to seventeen). "Waited" is frames
+that needed a retransmission, "still" the time the picture stood past one frame interval.
+
+```sh
+cargo nextest run -p slopty-media --release --run-ignored only -E 'test(parity_under_burst_loss)' --no-capture
+```
+
+Before is a floor of one parity fragment; after is two once the ratio is above 50 ‰. Cells are
+before → after, over 10 800 frames:
+
+| scene | loss, run | waited a round trip | refreshes | still | wire Mbit/s |
+| --- | --- | --- | --- | --- | --- |
+| still | 0 % | 0 → 0 | 0 → 0 | 0 → 0 s | 1.98 → 1.98 |
+| still | 1 %, 1 | 3 → 0 | 0 → 0 | 0.07 → 0 s | 1.99 → 2.37 |
+| still | 1 %, 2 | 111 → 78 | 0 → 0 | 2.6 → 1.8 s | 1.99 → 2.26 |
+| still | 1 %, 4 | 111 → 102 | 1 → 0 | 2.7 → 2.3 s | 2.00 → 2.14 |
+| still | 3 %, 1 | 32 → 3 | 0 → 0 | 0.8 → 0.07 s | 2.00 → 2.46 |
+| still | 3 %, 2 | 325 → 166 | 0 → 0 | 7.6 → 4.3 s | 2.02 → 2.46 |
+| still | 3 %, 4 | 321 → 254 | 8 → 3 | 7.9 → 6.7 s | 2.02 → 2.39 |
+| still | 5 %, 1 | 93 → 5 | 0 → 0 | 2.3 → 0.1 s | 2.03 → 2.46 |
+| still | 5 %, 2 | 528 → 245 | 1 → 1 | 12.2 → 6.4 s | 2.04 → 2.48 |
+| still | 5 %, 4 | 554 → 439 | 12 → 7 | 13.7 → 11.2 s | 2.05 → 2.49 |
+| scroll | 0 % | 0 → 0 | 0 → 0 | 0 → 0 s | 7.40 → 7.40 |
+| scroll | 1 %, 1 | 19 → 6 | 0 → 0 | 0.47 → 0.15 s | 7.70 → 7.95 |
+| scroll | 1 %, 2 | 246 → 180 | 0 → 0 | 5.8 → 4.2 s | 7.66 → 7.92 |
+| scroll | 1 %, 4 | 288 → 255 | 0 → 0 | 5.9 → 5.5 s | 7.59 → 7.83 |
+| scroll | 3 %, 1 | 72 → 50 | 0 → 0 | 1.7 → 1.2 s | 8.03 → 8.08 |
+| scroll | 3 %, 2 | 593 → 519 | 0 → 1 | 13.1 → 11.6 s | 8.04 → 8.13 |
+| scroll | 3 %, 4 | 731 → 649 | 2 → 0 | 14.9 → 13.7 s | 7.93 → 8.12 |
+| scroll | 5 %, 1 | 110 → 103 | 0 → 0 | 2.7 → 2.5 s | 8.29 → 8.29 |
+| scroll | 5 %, 2 | 830 → 794 | 1 → 1 | 17.7 → 17.5 s | 8.34 → 8.36 |
+| scroll | 5 %, 4 | 1 154 → 1 073 | 3 → 4 | 23.1 → 21.8 s | 8.22 → 8.32 |
+
+A floor of two on every link was run too: the same repairs, but the scrolling screen at 0 %
+paid 7.40 → 7.95 Mbit/s and the still window 1.98 → 2.46 for nothing. Ruling:
+`docs/decisions/video.md`, "Small frames carry two parity fragments on a lossy link".
+
+## 2026-09-29 — audio: a smaller device buffer and 10 ms packets
+
+Mac Studio M1 Max, macOS 27.0, default output "Mac Studio Speakers", other sessions building in
+the same checkout (load average 5–20). Nothing audible played: the device runs carry silence.
+`docs/decisions/audio.md` (2026-09-29, "The Mac's device renders 128 frames and packets are
+10 ms") holds the ruling.
+
+```sh
+cargo test -p slopty-codec --release --lib --no-run      # target/release/deps/slopty_codec-<hash>
+cp target/release/deps/slopty_codec-<hash> /tmp/slopty-probe/codec_lib && cd /tmp/slopty-probe
+nice -n 10 ./codec_lib --ignored --nocapture --exact audio::tests::device_io_buffer
+cargo nextest run -p slopty-codec --release latency_tests --no-capture
+```
+
+**Apple's Opus converter takes 10 ms packets.** With `mFramesPerPacket` 480 the 100 ms tone of
+`encodes_and_decodes_a_tone` came out as 10 packets, 213 bytes for the first and 88–106 for the
+rest at the 96 kb/s target, and decoded to 9 360 of 9 600 samples (the 120-frame pre-skip, as at
+960).
+
+**The device takes 128 frames.** `device_io_buffer` opens the player's output unit, asks the
+device for a size through the unit (`kAudioDevicePropertyBufferFrameSize`, clamped to
+`kAudioDevicePropertyBufferFrameSizeRange`, 15–4 096 here), listens for
+`kAudioDeviceProcessorOverload` (a missed I/O deadline, the glitch) and feeds silent packets in
+real time from a thread that sleeps to each packet's time, for a minute a size. A run that
+starts more than once is a ring that ran dry and refilled; with sound each would be a gap.
+
+| ring floor | asked | in effect | largest render | overloads | ring ran dry |
+| --- | --- | --- | --- | --- | --- |
+| 15 ms | unasked | 512 | 512 | 0 | 1, 0 |
+| 15 ms | 128 | 128 | 128 | 0 | 1, 3 (and 1, 2, 2 in three 30 s runs) |
+| 20 ms | unasked | 512 | 512 | 0 | 0, 0 |
+| 20 ms | 128 | 128 | 128 | 0 | 0, 0 |
+
+Two rounds each, alternated, 10 ms packets. The feeding thread's own lateness (4–5 ms at p95 on
+this loaded machine) is what drains the ring; the device never missed a deadline at either
+size. A 15 ms floor was tried because 10 ms packets arrive twice as often, and was given up:
+it ran dry at 128 frames where 20 ms did not.
+
+**What the device adds, before the DAC.** The speakers' safety offset, device latency and stream
+latency are 317 frames (6.6 ms, 2026-09-28) at either size; the I/O buffer goes from 512 frames
+(10.7 ms) to 128 (2.7 ms). The device's share goes from 17.3 to 9.3 ms.
+
+**The ring's traces** (depth heard, ms; "before" is 20 ms packets and 512-frame renders, as of
+2026-09-28 and rerun today, "after" 10 ms packets and 128-frame renders with the ring's device
+term taken from the renders it sees). A 128-frame render takes a smaller bite, so the depth read
+after each one sits up to 4 ms higher than after a 512-frame one for the same ring; the column is
+the ring alone.
+
+| trace | before | after | underruns before → after |
+| --- | --- | --- | --- |
+| 250 ms stall, then its backlog in one burst | 21 mean over 1.5–3 s, 31 at most after | 24 mean, 59 at most after | 1 → 1 |
+| worker clock +100 ppm, 4 min | 30 → 28 | 25 → 22 | 0 → 0 |
+| worker clock −100 ppm, 4 min | 28 → 21 | 23 → 20 | 0 → 0 |
+| a 40 ms keyframe burst every 2 s | 49 mean | 39 mean | 3 → 3 |
+| muted 2–3 s, a 400 ms gate inside | 30 mean | 23 mean | 0 → 0 |
+| capture handed over 1 024 frames at a time (new) | 27 mean | 16 mean | 0 → 0 |
+| renders of 512 frames (a device that refuses 128) | — | 23 mean | — → 0 |
+| renders of 1 024 frames (iOS's default) | 18 mean, target 20 | 23 mean, target 22.3 | 0 → 0 |
+
+At the DAC that is ring + 17.3 ms before and ring + 9.3 ms after: 45 → 31 ms on the +100 ppm
+trace's last ten seconds, 66 → 48 ms under keyframe bursts. The stall's backlog now takes longer
+to cut (59 ms at most after the burst against 31), since a 10 ms packet gives at most 7.5 ms to a
+cut where a 20 ms one gave 17.5. On iOS the ring now counts the 21.3 ms render it really takes
+and holds 5 ms more than before; asking the audio session for a 10 ms I/O buffer
+(`setPreferredIOBufferDuration`, in `slopty-platform`) would take that and more off.
+
+Not measured here: what ScreenCaptureKit hands the worker per audio sample buffer. A packet now
+leaves once 10 ms of audio is in, not 20, which is 10 ms off the first sample of each packet
+when the capture's buffers are that short. The chunked trace is the case where they are 1 024
+frames; the ring covers the clumping it causes. Measuring it needs a Screen Recording-signed
+worker. On the wire a stream sends 100 packets a second instead of 50, about 90–106 bytes each
+instead of about 240, so the per-datagram headers cost roughly 25 kbit/s more (an estimate).
+
+## 2026-09-29 — refresh storms on loopback
+
+On the M1 Max (macOS 27.0), over loopback with no loss injected, the drawn display failed its
+e2e case in 6 of 10 runs and the drawn window in 0 of 10. The runs were logged at debug. A
+failing run showed decode errors, a storm of refreshes, and "1 lost" out of about 116
+datagrams. The worker-side reproducer streams the drawn display through the real pipeline and
+reassembler with the reports and feedback answered. It changes the quality six times, and every
+change builds a new encoder session. Before the fixes, 3 of 4 runs had decode errors (3, 15 and
+3) and refreshes (2, 10 and 2). After them, 0 errors in 14 runs.
+
+```sh
+cargo xtask e2e app --filter 'test(/stream::/) - test(/frame_time/)'
+TMPDIR=/tmp nice cargo test -p slopty-worker --lib quality_changes_decode_without_a_refresh -- --nocapture
+TMPDIR=/tmp nice cargo test -p slopty-worker --lib a_refresh_with_nothing_acknowledged_breaks -- --ignored --nocapture
+cargo test -p slopty-media --test pipeline given_up
+```
+
+There were four causes, each found in the logs and then pinned by a test that failed before
+its fix:
+
+- **A refresh with nothing acknowledged.** VideoToolbox, asked for `ForceLTRRefresh` before any
+  token is acknowledged, writes a sync frame. At 3024 × 1964, where the encoder drops frames
+  under real-time pressure, the frames after it fail to decode (-12909) until the next keyframe.
+  In each line, `K` is a sync frame, `r` a refresh, `t` a token and `!` a failed decode:
+  - The LTR refresh: `6 failed: 0:Kt0 2:P 4:Kr 6:Pt6! 8:P! 10:Pt10! 12:P! 14:P! 16:P!`
+  - A keyframe in its place: `0 failed`.
+
+  Dropping the stale acknowledged tokens from the request did not help, so the cause is the
+  missing acknowledgement, not an old one. Each failure brought a refresh, which caused the next
+  failure. With nothing acknowledged, the worker now sends a keyframe.
+- **An old session's frame after the new keyframe.** A retired encoder session finishes the
+  frame it holds after the new session's first keyframe is out. The decoder took that P-frame
+  from another session and failed. Packets now carry their session's generation, and a stale
+  one is dropped.
+- **A refresh asked for while the keyframe is encoded.** A session's first keyframe takes
+  60–130 ms at 3024 × 1964. The client repeats its refresh after 100 ms and two round trips, so
+  every stream that opened at that size made two keyframes of about 160 kB each. Now a keyframe
+  in flight answers requests for 400 ms, and the client waits 400 ms before asking for a new
+  stream's first keyframe again. A client that asks while part of the keyframe has arrived
+  also made a second keyframe: in one run the repeat went out 50 ms into a 136 kB keyframe that
+  QUIC was still draining (142 kB held). The reassembler now holds its repeat while a frame
+  that would restart delivery is still arriving and has not been given up on.
+- **The first keyframe given up on while it arrives.** The reassembler lost frame 0 at an age
+  of 15–20 ms with 130 of its 138 fragments missing and `flowing` true. It was not lost on the
+  wire: the connection's send window was still opening, and QUIC held about 120 kB of the
+  keyframe for 15–85 ms. Its later fragments re-created the frame, which was lost again. In one
+  run, frame 0 was lost four times in 60 ms. The deadline now runs from the frame's latest
+  fragment, and a frame given up on stays given up on until the keyframe it waits for arrives.
+  This was the "1 lost with 116 datagrams" on a lossless link.
+
+Still open: the congestion guard (`Shared::dropped`) asks for a refresh when it skips a capture
+that was never encoded. At start-up, with the first keyframe still held by QUIC, that refresh
+finds no acknowledged reference and goes out as a second keyframe of 165 kB, 75 ms behind the
+first. The client loses nothing, so it does not fail the case, but those bytes are wasted. The
+guard's rule is a transport ruling (`docs/decisions/transport.md`) and is left as it is here.
+
+After the fixes, pass counts, logged at debug, with other sessions building alongside (load
+average 9–19):
+
+| build | drawn window | drawn display |
+| --- | --- | --- |
+| before | 10 / 10 | 4 / 10 |
+| every fix but the hold while a keyframe arrives | 9 / 10 | 10 / 10 |
+| every fix | 10 / 11 | 11 / 11 |
+
+The one window failure left is a stall with nothing lost and no refresh. The first keyframe
+(136 kB) waited in the worker's datagram queue for 133 ms (142 kB held) and was released in one
+piece ("the link held datagrams the worker had already sent", `worker_gap` 0). With a 38 kB
+initial window and a 2 ms ACK delay, it should leave in a few round trips. Within the next
+second the same worker logged late heartbeats of 150–250 ms, so its runtime was starved around
+then. This is the transport under load, not the screen path, and is left to its owner.
+
+Ruling: `docs/decisions/video.md`, "A stream recovers with a keyframe until a reference is
+acknowledged".

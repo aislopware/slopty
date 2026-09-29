@@ -36,6 +36,7 @@ serde_json.workspace = true
 slopty-e2e.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true
+slopty-deploy.workspace = true
 slopty-net.workspace = true
 slopty-platform.workspace = true
 slopty-proto.workspace = true

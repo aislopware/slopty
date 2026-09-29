@@ -11,6 +11,11 @@
 //! The same sessions also price a frame rate: the shipped 4:2:0 encoder fed the text picture
 //! in real time at 60 and at 120 frames a second, the same scroll speed in both, at several
 //! target rates (`frame_rate_120_against_60`, MEASUREMENTS "120 fps against 60").
+//!
+//! The worker's own session is probed three more ways (MEASUREMENTS, 2026-09-29): encode time
+//! against frame size (`encode_time_by_size`), the compression presets and the keys the
+//! low-latency encoder lists (`compression_presets`), and which frames it marks as references
+//! (`temporal_layers`).
 
 #![cfg(target_os = "macos")]
 
@@ -38,15 +43,19 @@ mod tests {
     };
     use objc2_core_media::{
         CMFormatDescription, CMSampleBuffer, CMTime, CMTimeFlags,
-        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMTimeInvalid, kCMVideoCodecType_HEVC,
+        CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+        kCMHEVCTemporalLevelInfoKey_TemporalLevel, kCMSampleAttachmentKey_DependsOnOthers,
+        kCMSampleAttachmentKey_HEVCTemporalLevelInfo, kCMSampleAttachmentKey_IsDependedOnByOthers,
+        kCMSampleAttachmentKey_NotSync, kCMTimeInvalid, kCMVideoCodecType_HEVC,
     };
     use objc2_core_video::{
         CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
         CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
         CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetPixelFormatType,
         CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
-        kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferPixelFormatTypeKey,
-        kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVPixelBufferIOSurfacePropertiesKey,
+        kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA,
+        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
         kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
         kCVPixelFormatType_422YpCbCr8BiPlanarFullRange,
         kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
@@ -57,12 +66,19 @@ mod tests {
         VTCompressionSession, VTCopySupportedPropertyDictionaryForEncoder, VTCopyVideoEncoderList,
         VTDecodeFrameFlags, VTDecodeInfoFlags, VTDecompressionOutputCallbackRecord,
         VTDecompressionSession, VTEncodeInfoFlags, VTIsHardwareDecodeSupported, VTSession,
-        VTSessionCopyProperty, VTSessionSetProperty,
-        kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-        kVTCompressionPropertyKey_EnableLTR, kVTCompressionPropertyKey_ExpectedFrameRate,
-        kVTCompressionPropertyKey_MaxKeyFrameInterval, kVTCompressionPropertyKey_ProfileLevel,
-        kVTCompressionPropertyKey_RealTime,
+        VTSessionCopyProperty, VTSessionSetProperty, kVTCompressionPreset_VideoConferencing,
+        kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
+        kVTCompressionPropertyKey_AverageBitRate,
+        kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+        kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_EnableLTR,
+        kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxFrameDelayCount,
+        kVTCompressionPropertyKey_MaxKeyFrameInterval,
+        kVTCompressionPropertyKey_MaximumRealTimeFrameRate,
+        kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
+        kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+        kVTCompressionPropertyKey_SupportedPresetDictionaries,
         kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+        kVTCompressionPropertyKey_YCbCrMatrix,
         kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
         kVTProfileLevel_HEVC_Main_AutoLevel, kVTPropertySupportedValueListKey,
         kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
@@ -1314,6 +1330,474 @@ mod tests {
                         ms(spread.max),
                     );
                 }
+            }
+        }
+    }
+
+    // ---- The worker's session: frame size, presets, temporal layers --------------------------
+
+    impl Session {
+        /// A session set up as `slopty_codec::Encoder` sets up the worker's: low-latency
+        /// hardware HEVC Main 4:2:0 fed `420f`, with every property `Encoder::configure` sets
+        /// (the optional ones as best effort, as there) and `fps` expected.
+        fn worker(w: usize, h: usize, bitrate: i64, fps: i32) -> Result<Self, (&'static str, i32)> {
+            // SAFETY: framework-provided constant string.
+            let main = unsafe { kVTProfileLevel_HEVC_Main_AutoLevel };
+            let mut session = Self::new(
+                w,
+                h,
+                Spec::LowLatencyHardware,
+                Some(main),
+                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                bitrate,
+            )?;
+            session.set_fps(fps);
+            let limits = CFArray::from_retained_objects(&[
+                CFNumber::new_i64(bitrate * 5 / 32),
+                CFNumber::new_f64(1.0),
+            ]);
+            let s: &CFType = &session.vt;
+            // SAFETY: framework-provided constant strings.
+            unsafe {
+                set(s, kVTCompressionPropertyKey_AllowOpenGOP, CFBoolean::new(false));
+                set(s, kVTCompressionPropertyKey_MaxFrameDelayCount, &CFNumber::new_i64(0));
+                set(s, kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, yes());
+                set(s, kVTCompressionPropertyKey_MaximumRealTimeFrameRate, &CFNumber::new_i64(120));
+                set(
+                    s,
+                    kVTCompressionPropertyKey_YCbCrMatrix,
+                    kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                );
+                set(s, kVTCompressionPropertyKey_DataRateLimits, &limits);
+            }
+            Ok(session)
+        }
+    }
+
+    /// A property of a session, +1, or the status it failed with.
+    fn copy_property(session: &CFType, key: &CFString) -> Result<CFRetained<CFType>, i32> {
+        let mut out: *const CFType = ptr::null();
+        // SAFETY: VTSession.h: the value comes back +1 through a `CFTypeRef *` out pointer.
+        let status = unsafe {
+            VTSessionCopyProperty(as_session(session), key, None, (&raw mut out).cast::<c_void>())
+        };
+        let raw = NonNull::new(out.cast_mut()).filter(|_| status == 0).ok_or(status)?;
+        // SAFETY: +1 reference from the copy call (Copy rule).
+        Ok(unsafe { CFRetained::from_raw(raw) })
+    }
+
+    /// A value as a CFString-keyed dictionary, when it is one.
+    fn as_dict(value: &CFType) -> Option<&Dict> {
+        let d = value.downcast_ref::<CFDictionary>()?;
+        // SAFETY: every dictionary read here is keyed by CFString (VTCompressionProperties.h,
+        // CMSampleBuffer.h); values are only read.
+        Some(unsafe { d.cast_unchecked() })
+    }
+
+    /// `key = value` pairs of a dictionary, sorted by key.
+    fn pairs(d: &Dict) -> Vec<(String, String)> {
+        let (keys, values) = d.to_vecs();
+        let mut out: Vec<(String, String)> =
+            keys.iter().zip(&values).map(|(k, v)| (k.to_string(), describe(v))).collect();
+        out.sort();
+        out
+    }
+
+    /// A short rendering of a property value: numbers and booleans as they are, strings bare.
+    fn describe(value: &CFType) -> String {
+        if let Some(b) = value.downcast_ref::<CFBoolean>() {
+            return b.as_bool().to_string();
+        }
+        if let Some(n) = value.downcast_ref::<CFNumber>() {
+            return n.as_f64().map_or_else(|| format!("{n:?}"), |f| f.to_string());
+        }
+        if let Some(d) = as_dict(value) {
+            let inner: Vec<String> =
+                pairs(d).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+            return format!("{{{}}}", inner.join(", "));
+        }
+        text(value)
+    }
+
+    /// Twelve pictures of the text scrolled 8 rows apart: a beat at 120 takes them in turn, one
+    /// at 60 every other, so both scroll 960 rows a second.
+    fn scrolling(w: usize, h: usize) -> (Vec<Picture>, Vec<CFRetained<CVPixelBuffer>>) {
+        let pictures: Vec<Picture> = (0..12).map(|i| picture(w, h, i * 8)).collect();
+        let images = pictures
+            .iter()
+            .map(|p| fill(p, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+            .collect();
+        (pictures, images)
+    }
+
+    /// What frames submitted on a real-time beat gave back.
+    struct Beat {
+        /// Submit → callback per frame after the settling ones.
+        times: Vec<Duration>,
+        /// Frames the encoder dropped, of all submitted.
+        dropped: usize,
+        /// Bytes of the frames after the settling ones.
+        bytes: usize,
+        /// The samples it kept, each with the index of the picture it was made from.
+        samples: Vec<(usize, Sample)>,
+    }
+
+    /// Submit `frames` pictures at the session's rate, each on its beat whether or not the last
+    /// came back, as the capture callback does. The first `settle` frames are left out of the
+    /// times and the bytes (the keyframe and the rate controller's start).
+    fn on_beat(
+        session: &Session,
+        images: &[CFRetained<CVPixelBuffer>],
+        frames: usize,
+        settle: usize,
+    ) -> Beat {
+        let stride = (120 / session.fps.max(1)) as usize;
+        let period = Duration::from_secs(1) / session.fps as u32;
+        let mut submitted = Vec::with_capacity(frames);
+        let mut back: Vec<(Instant, Option<Sample>)> = Vec::with_capacity(frames);
+        let start = Instant::now();
+        for i in 0..frames {
+            let due = start + period * i as u32;
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a measurement's real-time beat, on its own thread"
+                )]
+                std::thread::sleep(wait);
+            }
+            submitted.push(Instant::now());
+            let status = session.submit(&images[(i * stride) % images.len()], i as i64);
+            assert_eq!(status, 0, "submit");
+            while let Ok(got) = session.rx.try_recv() {
+                back.push(got);
+            }
+        }
+        while back.len() < frames {
+            match session.rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(got) => back.push(got),
+                Err(_) => break,
+            }
+        }
+        let times = back
+            .iter()
+            .zip(&submitted)
+            .skip(settle)
+            .map(|((at, _), sent)| at.saturating_duration_since(*sent))
+            .collect();
+        let dropped = back.iter().filter(|(_, s)| s.is_none()).count();
+        let bytes = back
+            .iter()
+            .skip(settle)
+            .filter_map(|(_, s)| s.as_ref().map(|s| sample_bytes(&s.0)))
+            .sum();
+        let samples = back
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, (_, s))| s.map(|s| ((i * stride) % images.len(), s)))
+            .collect();
+        Beat { times, dropped, bytes, samples }
+    }
+
+    /// Submit → callback with one frame in flight, over `frames` pictures after `settle`.
+    fn one_at_a_time(
+        session: &Session,
+        images: &[CFRetained<CVPixelBuffer>],
+        frames: usize,
+        settle: usize,
+    ) -> Spread {
+        let times: Vec<Duration> = (0..frames + settle)
+            .filter_map(|i| {
+                let (took, sample) = session.encode(&images[i % images.len()], 10_000 + i as i64);
+                sample.map(|_| took)
+            })
+            .skip(settle)
+            .collect();
+        Spread::of_durations(&times).unwrap_or_default()
+    }
+
+    /// The sizes the size sweep times, `SLOPTY_PROBE_SIZES=3024x1964,3024x1968` to pick some.
+    fn probe_sizes(default: &[(usize, usize)]) -> Vec<(usize, usize)> {
+        let Ok(list) = std::env::var("SLOPTY_PROBE_SIZES") else { return default.to_vec() };
+        list.split(',')
+            .filter_map(|s| s.split_once('x'))
+            .filter_map(|(w, h)| Some((w.trim().parse().ok()?, h.trim().parse().ok()?)))
+            .collect()
+    }
+
+    /// Encode time against frame size, on the worker's session: one frame in flight, then on a
+    /// real-time beat at 60 and at 120. 3024 × 1964 (a `MacBook` Pro's native size) came back
+    /// 77–83 ms late where 3840 × 2160 took 22 (MEASUREMENTS "120 fps against 60"); the sweep
+    /// moves one side at a time around it to find what the encoder minds.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn encode_time_by_size() {
+        const SECONDS: usize = 3;
+        let sizes = probe_sizes(&[
+            (1920, 1080),
+            (2560, 1440),
+            (3840, 2160),
+            (3024, 1964),
+            (3024, 1962),
+            (3024, 1960),
+            (3024, 1968),
+            (3024, 1952),
+            (3008, 1964),
+            (3020, 1968),
+            (3456, 2234),
+            (3456, 2240),
+            (2880, 1800),
+            (1728, 1118),
+            (1500, 946),
+            (1282, 802),
+            (2000, 1234),
+        ]);
+        for (w, h) in sizes {
+            let (_, images) = scrolling(w, h);
+            for fps in [60_i32, 120] {
+                let Ok(session) = Session::worker(w, h, 32_000_000, fps) else {
+                    eprintln!("MEASURE size {w}x{h} fps={fps} refused");
+                    continue;
+                };
+                let serial = one_at_a_time(&session, &images, 30, 5);
+                let frames = fps as usize * SECONDS;
+                let beat = on_beat(&session, &images, frames, fps as usize);
+                let spread = Spread::of_durations(&beat.times).unwrap_or_default();
+                let spent = (beat.bytes * 8) as f64 / (SECONDS - 1) as f64 / 1e6;
+                eprintln!(
+                    "MEASURE size {w}x{h} w%16={} h%16={} fps={fps} load={} hardware={:?} \
+                     one_in_flight p50={:.2}ms p95={:.2}ms | on_beat p50={:.2}ms p95={:.2}ms \
+                     max={:.2}ms dropped={}/{frames} spent={spent:.2}Mbit/s",
+                    w % 16,
+                    h % 16,
+                    load_average(),
+                    session.hardware(),
+                    ms(serial.p50),
+                    ms(serial.p95),
+                    ms(spread.p50),
+                    ms(spread.p95),
+                    ms(spread.max),
+                    beat.dropped,
+                );
+            }
+        }
+    }
+
+    /// Mean luma PSNR of the last decoded pictures of `samples` against their sources.
+    fn tail_psnr(samples: Vec<(usize, Sample)>, pictures: &[Picture]) -> f64 {
+        let (sources, samples): (Vec<usize>, Vec<Sample>) = samples.into_iter().unzip();
+        match decode_tail(&samples, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, true, 10) {
+            Ok((_, tail)) if !tail.is_empty() => {
+                let first = sources.len() - tail.len();
+                let sum: f64 = tail
+                    .iter()
+                    .zip(&sources[first..])
+                    .map(|(p, &source)| psnr(&pictures[source], &p.0).0)
+                    .sum();
+                sum / tail.len() as f64
+            }
+            _ => f64::NAN,
+        }
+    }
+
+    /// macOS 26's compression presets: what each session offers (`SupportedPresetDictionaries`),
+    /// what `VideoConferencing` sets, and what it does to the worker's encode time, rate and
+    /// picture at 1080p, 4K and 5K. Also lists every key the low-latency encoder supports, to
+    /// see whether a latency key has appeared in the list or the headers.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn compression_presets() {
+        for (name, spec) in [("low-latency+hw", low_latency_spec()), ("hw", hardware_spec())] {
+            let (status, id, _, keys) = supported_for(1920, 1080, &spec);
+            eprintln!(
+                "MEASURE preset supported spec={name} status={status} encoder={id} keys={keys:?}"
+            );
+        }
+        // SAFETY: framework-provided constant strings.
+        let (presets_key, conferencing) = unsafe {
+            (
+                kVTCompressionPropertyKey_SupportedPresetDictionaries,
+                kVTCompressionPreset_VideoConferencing,
+            )
+        };
+        let mut conferencing_settings: Option<CFRetained<CFType>> = None;
+        for spec in [Spec::LowLatencyHardware, Spec::Hardware] {
+            let session = Session::new(
+                1920,
+                1080,
+                spec,
+                None,
+                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                16_000_000,
+            )
+            .expect("session");
+            match copy_property(&session.vt, presets_key) {
+                Err(status) => eprintln!("MEASURE preset spec={spec:?} none status={status}"),
+                Ok(presets) => {
+                    let presets = as_dict(&presets).expect("a dictionary of presets");
+                    for (name, settings) in pairs(presets) {
+                        eprintln!("MEASURE preset spec={spec:?} {name} = {settings}");
+                    }
+                    if matches!(spec, Spec::LowLatencyHardware) {
+                        conferencing_settings = presets.get(conferencing);
+                    }
+                }
+            }
+        }
+        let Some(settings) = conferencing_settings else {
+            eprintln!("MEASURE preset the low-latency encoder offers no VideoConferencing preset");
+            return;
+        };
+        let settings = as_dict(&settings).expect("preset settings are a dictionary");
+        let (keys, values) = settings.to_vecs();
+        for (w, h, bitrate) in [
+            (1920_usize, 1080_usize, 16_000_000_i64),
+            (3840, 2160, 40_000_000),
+            (5120, 2880, 60_000_000),
+        ] {
+            let (pictures, images) = scrolling(w, h);
+            for with_preset in [false, true] {
+                let session = Session::worker(w, h, bitrate, 60).expect("session");
+                if with_preset {
+                    let statuses: Vec<String> = keys
+                        .iter()
+                        .zip(&values)
+                        .map(|(k, v)| format!("{k}={}", set(&session.vt, k, v)))
+                        .collect();
+                    eprintln!("MEASURE preset applied {w}x{h} statuses {statuses:?}");
+                }
+                // The beat first: its samples start at the keyframe, which the decoder needs.
+                let beat = on_beat(&session, &images, 180, 60);
+                let serial = one_at_a_time(&session, &images, 120, 10);
+                let spread = Spread::of_durations(&beat.times).unwrap_or_default();
+                let spent = (beat.bytes * 8) as f64 / 2.0 / 1e6;
+                let dropped = beat.dropped;
+                let psnr_y = tail_psnr(beat.samples, &pictures);
+                eprintln!(
+                    "MEASURE preset {w}x{h} config={} load={} one_in_flight p50={:.2}ms \
+                     p95={:.2}ms max={:.2}ms | on_beat_60 p50={:.2}ms p95={:.2}ms max={:.2}ms \
+                     dropped={dropped}/180 spent={spent:.2}Mbit/s psnr_y={psnr_y:.2}dB",
+                    if with_preset { "worker+VideoConferencing" } else { "worker" },
+                    load_average(),
+                    ms(serial.p50),
+                    ms(serial.p95),
+                    ms(serial.max),
+                    ms(spread.p50),
+                    ms(spread.p95),
+                    ms(spread.max),
+                );
+            }
+        }
+    }
+
+    /// `(nal_unit_type, TemporalId)` of every NAL unit in a sample (four-byte lengths).
+    fn nal_headers(sample: &CMSampleBuffer) -> Vec<(u8, u8)> {
+        // SAFETY: a valid sample buffer.
+        let Some(block) = (unsafe { sample.data_buffer() }) else { return Vec::new() };
+        // SAFETY: a valid block buffer.
+        let len = unsafe { block.data_length() };
+        let mut bytes = vec![0_u8; len];
+        // SAFETY: CoreMedia rule: copies exactly `len` bytes into a buffer that holds them.
+        let status = unsafe {
+            block.copy_data_bytes(0, len, NonNull::new(bytes.as_mut_ptr()).unwrap().cast())
+        };
+        assert_eq!(status, 0, "CMBlockBufferCopyDataBytes");
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at + 6 <= bytes.len() {
+            let n = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            let (b0, b1) = (bytes[at + 4], bytes[at + 5]);
+            out.push(((b0 >> 1) & 0x3f, (b1 & 7).saturating_sub(1)));
+            at += 4 + n;
+        }
+        out
+    }
+
+    /// The sample's first attachment dictionary, rendered: `IsDependedOnByOthers`,
+    /// `DependsOnOthers`, `NotSync`, the HEVC temporal level, and every key it holds.
+    fn sample_marks(
+        sample: &CMSampleBuffer,
+    ) -> (Option<bool>, Option<bool>, bool, Option<i64>, Vec<String>) {
+        // SAFETY: valid sample buffer; `false` never allocates.
+        let Some(array) = (unsafe { sample.sample_attachments_array(false) }) else {
+            return (None, None, false, None, Vec::new());
+        };
+        // SAFETY: CMSampleBuffer.h: an array of CFDictionaries keyed by CFString.
+        let array: CFRetained<CFArray<Dict>> = unsafe { CFRetained::cast_unchecked(array) };
+        let Some(d) = array.get(0) else { return (None, None, false, None, Vec::new()) };
+        let flag = |key: &CFString| {
+            d.get(key).and_then(|v| v.downcast::<CFBoolean>().ok()).map(|b| b.as_bool())
+        };
+        // SAFETY: framework-provided constant strings.
+        let (depended, depends, not_sync, level_info, level_key) = unsafe {
+            (
+                kCMSampleAttachmentKey_IsDependedOnByOthers,
+                kCMSampleAttachmentKey_DependsOnOthers,
+                kCMSampleAttachmentKey_NotSync,
+                kCMSampleAttachmentKey_HEVCTemporalLevelInfo,
+                kCMHEVCTemporalLevelInfoKey_TemporalLevel,
+            )
+        };
+        let level = d.get(level_info).and_then(|v| {
+            as_dict(&v)
+                .and_then(|info| info.get(level_key))
+                .and_then(|n| n.downcast::<CFNumber>().ok())
+                .and_then(|n| n.as_i64())
+        });
+        let all = pairs(&d).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+        (flag(depended), flag(depends), flag(not_sync).unwrap_or(false), level, all)
+    }
+
+    /// Whether the worker's encoder writes frames nothing refers to: each sample's NAL types and
+    /// `TemporalId`s and the attachments that say so, on the worker's session as it is and with
+    /// `BaseLayerFrameRateFraction` 0.5 asked for. A frame nothing refers to is one whose loss
+    /// costs no refresh.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn temporal_layers() {
+        const FRAMES: usize = 120;
+        let (w, h) = (1920, 1080);
+        let (_, images) = scrolling(w, h);
+        // SAFETY: framework-provided constant string.
+        let fraction_key = unsafe { kVTCompressionPropertyKey_BaseLayerFrameRateFraction };
+        for fraction in [None, Some(0.5_f64)] {
+            let session = Session::worker(w, h, 16_000_000, 60).expect("session");
+            let status = fraction.map(|f| set(&session.vt, fraction_key, &CFNumber::new_f64(f)));
+            let read_back = copy_property(&session.vt, fraction_key).map(|v| describe(&v));
+            let beat = on_beat(&session, &images, FRAMES, 0);
+            let spread = Spread::of_durations(&beat.times[FRAMES / 2..]).unwrap_or_default();
+            let mut classes: std::collections::BTreeMap<String, (usize, usize)> =
+                std::collections::BTreeMap::new();
+            for (i, (_, sample)) in beat.samples.iter().enumerate() {
+                let nals = nal_headers(&sample.0);
+                let (depended, depends, not_sync, level, all) = sample_marks(&sample.0);
+                let bytes = sample_bytes(&sample.0);
+                let class = format!(
+                    "nal={:?} depended_on={depended:?} depends={depends:?} not_sync={not_sync} \
+                     temporal_level={level:?}",
+                    nals.iter().filter(|(t, _)| *t < 32).collect::<Vec<_>>()
+                );
+                if i < 8 {
+                    eprintln!(
+                        "MEASURE temporal fraction={fraction:?} frame={i} bytes={bytes} {class} \
+                         attachments={all:?}"
+                    );
+                }
+                let entry = classes.entry(class).or_default();
+                entry.0 += 1;
+                entry.1 += bytes;
+            }
+            eprintln!(
+                "MEASURE temporal fraction={fraction:?} set_status={status:?} read_back={read_back:?} \
+                 on_beat p50={:.2}ms p95={:.2}ms dropped={}/{FRAMES}",
+                ms(spread.p50),
+                ms(spread.p95),
+                beat.dropped
+            );
+            for (class, (count, bytes)) in classes {
+                eprintln!(
+                    "MEASURE temporal fraction={fraction:?} {count} frames, {} B mean: {class}",
+                    bytes / count.max(1)
+                );
             }
         }
     }

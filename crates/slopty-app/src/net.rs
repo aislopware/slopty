@@ -161,6 +161,8 @@ pub async fn add_worker(address: &str) -> Result<Added> {
 pub enum DialFailed {
     /// The worker turned this device away: the tailnet policy grants it no client role there.
     NotGranted,
+    /// The worker runs a different build: what to tell the person, and what updates it.
+    WrongBuild(slopty_client::update::UpdateNotice),
     /// Anything else, as a line for the status.
     Other(String),
 }
@@ -181,6 +183,10 @@ pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Conne
     let conn = connect(&endpoint, &address, hello(me.client())).await.map_err(|e| {
         if matches!(e, slopty_net::NetError::NotGranted) {
             DialFailed::NotGranted
+        } else if let Some(notice) =
+            slopty_client::update::UpdateNotice::for_worker_dial(address.host(), &e)
+        {
+            DialFailed::WrongBuild(notice)
         } else {
             other(&e)
         }

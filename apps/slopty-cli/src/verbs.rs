@@ -16,10 +16,11 @@ use slopty_proto::orchestration::{
     EventFilter, Happening, IdempotencyKey, Input, Outcome, Size, Verb, WaitUntil, Waited,
 };
 use slopty_proto::screen::CaptureTarget;
+use slopty_proto::search::SearchQuery;
 use slopty_proto::server::Role;
 use slopty_tools::ops::{
     self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES_PAGE, DEFAULT_MAX_LINES,
-    DEFAULT_WAIT_MS, Spec,
+    DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS, Spec,
 };
 use slopty_tools::resolve::Resolver;
 use slopty_tools::{Dispatch as _, ToolError, bulk, view};
@@ -182,6 +183,37 @@ pub enum VerbCmd {
         worker: Option<String>,
         /// Absolute path, or `~/…`.
         path: String,
+    },
+    /// Search the files under a directory on a worker, as ripgrep does: .gitignore honoured,
+    /// binary files skipped.
+    Search {
+        /// What to look for: the text as it is, unless `--regex`.
+        pattern: String,
+        /// The directory to search, absolute or `~/…`.
+        #[arg(default_value = "~")]
+        root: String,
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// Only files matching this glob (`*.rs`), or not matching one led by `!`
+        /// (`!tests/**`); repeat for more.
+        #[arg(long = "glob", short = 'g', value_name = "GLOB")]
+        globs: Vec<String>,
+        /// Read the pattern as a regular expression.
+        #[arg(long)]
+        regex: bool,
+        /// Tell upper and lower case apart.
+        #[arg(long, short = 's')]
+        case_sensitive: bool,
+        /// Match whole words only.
+        #[arg(long, short = 'w')]
+        word: bool,
+        /// Lines of context before and after each match (at most 5).
+        #[arg(long, short = 'C', default_value_t = 0)]
+        context: u32,
+        /// At most this many matching lines (at most 2000).
+        #[arg(long, default_value_t = DEFAULT_MAX_MATCHES)]
+        max: u32,
     },
     /// Replace a file on a worker with standard input.
     Put {
@@ -679,6 +711,33 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
                 print_json(&view::stat(&path, found.as_ref()))?;
             } else {
                 print!("{}", view::stat_text(&path, found.as_ref()));
+            }
+        }
+        VerbCmd::Search {
+            pattern,
+            root,
+            worker,
+            globs,
+            regex,
+            case_sensitive,
+            word,
+            context,
+            max,
+        } => {
+            let query = SearchQuery {
+                pattern,
+                regex,
+                match_case: case_sensitive,
+                whole_word: word,
+                globs,
+                context,
+            };
+            let (files, summary) =
+                ops::search(&mut res, worker.as_deref(), root.clone(), query, max).await?;
+            if json {
+                print_json(&view::search(&root, &files, &summary))?;
+            } else {
+                print!("{}", view::search_text(&files, &summary));
             }
         }
         VerbCmd::Put { worker, path } => {

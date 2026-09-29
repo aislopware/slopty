@@ -492,6 +492,14 @@ pub fn fmt(sh: &Shell, apply: bool) -> Result<()> {
     let toolchain: &[&str] = if nightly { &["+nightly"] } else { &[] };
     let check: &[&str] = if apply { &[] } else { &["--check"] };
     quiet_step("cargo fmt", cmd!(sh, "cargo {toolchain...} fmt --all -- {check...}"))?;
+    // The fuzz crate is a workspace of its own (`fuzz/`); without `--all`, which would reach
+    // into its path dependencies, this formats that one package.
+    if sh.path_exists("fuzz/Cargo.toml") {
+        quiet_step(
+            "cargo fmt (fuzz)",
+            cmd!(sh, "cargo {toolchain...} fmt --manifest-path fuzz/Cargo.toml -- {check...}"),
+        )?;
+    }
     if has(sh, "taplo") {
         taplo(sh, apply)?;
     }

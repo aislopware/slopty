@@ -19,6 +19,7 @@ use slopty_proto::orchestration::{
     TermRef, Waited,
 };
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
+use slopty_proto::search::{FileHits, SearchSummary};
 use slopty_proto::server::{Liveness, Os, WorkerInfo};
 use slopty_proto::terminal::{SessionState, SessionSummary};
 
@@ -227,6 +228,46 @@ pub struct EntryView<'a> {
     kind: &'static str,
     size: u64,
     modified_ms: WallMs,
+}
+
+/// A search in files, for JSON.
+#[derive(Debug, Serialize)]
+pub struct SearchView<'a> {
+    root: &'a str,
+    files: Vec<SearchFileView<'a>>,
+    /// Matching lines returned.
+    lines: u32,
+    /// Files the search read.
+    searched: u32,
+    /// There were more matching lines than returned.
+    capped: bool,
+    elapsed_ms: u32,
+}
+
+/// One file of a search, for JSON.
+#[derive(Debug, Serialize)]
+pub struct SearchFileView<'a> {
+    /// Relative to the search's root.
+    path: &'a str,
+    lines: Vec<SearchLineView<'a>>,
+}
+
+/// A matching line or a line of context round one, for JSON.
+#[derive(Debug, Serialize)]
+pub struct SearchLineView<'a> {
+    line: u32,
+    /// Without its indentation, cut round its first match when it is long.
+    text: &'a str,
+    /// Byte ranges of the matches in `text`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    matches: Vec<[u32; 2]>,
+    /// A line round a match, not one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    context: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    cut_before: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    cut_after: bool,
 }
 
 /// What is at a path, for JSON.
@@ -796,6 +837,76 @@ pub fn stat_text(path: &str, stat: Option<&FileStat>) -> String {
     )
 }
 
+/// A file's matching lines and the context round them, top down: each line once.
+fn search_lines(file: &FileHits) -> Vec<SearchLineView<'_>> {
+    let mut lines: Vec<SearchLineView<'_>> = file
+        .lines
+        .iter()
+        .map(|l| SearchLineView {
+            line: l.line,
+            text: &l.text,
+            matches: l.spans.iter().map(|s| [s.start, s.end]).collect(),
+            context: false,
+            cut_before: l.cut_before,
+            cut_after: l.cut_after,
+        })
+        .chain(file.context.iter().map(|c| SearchLineView {
+            line: c.line,
+            text: &c.text,
+            matches: Vec::new(),
+            context: true,
+            cut_before: false,
+            cut_after: c.cut_after,
+        }))
+        .collect();
+    lines.sort_by_key(|l| l.line);
+    lines
+}
+
+/// A search in files, for JSON.
+pub fn search<'a>(root: &'a str, files: &'a [FileHits], summary: &SearchSummary) -> SearchView<'a> {
+    SearchView {
+        root,
+        files: files
+            .iter()
+            .map(|f| SearchFileView { path: &f.path, lines: search_lines(f) })
+            .collect(),
+        lines: summary.lines,
+        searched: summary.searched,
+        capped: summary.capped,
+        elapsed_ms: summary.elapsed_ms,
+    }
+}
+
+/// A search in files, for a person: as ripgrep prints it with `--heading`, a match's number
+/// followed by `:` and a context line's by `-`, then what it came to.
+pub fn search_text(files: &[FileHits], summary: &SearchSummary) -> String {
+    let mut out = String::new();
+    for file in files {
+        let _infallible = writeln!(out, "{}", file.path);
+        for line in search_lines(file) {
+            let mark = if line.context { '-' } else { ':' };
+            let (before, after) =
+                (if line.cut_before { "…" } else { "" }, if line.cut_after { "…" } else { "" });
+            let _infallible = writeln!(out, "{}{mark}{before}{}{after}", line.line, line.text);
+        }
+        out.push('\n');
+    }
+    let noun = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let _infallible = writeln!(
+        out,
+        "{} in {}, {} searched in {} ms",
+        noun(summary.lines, "matching line", "matching lines"),
+        noun(u32::try_from(files.len()).unwrap_or(u32::MAX), "file", "files"),
+        noun(summary.searched, "file", "files"),
+        summary.elapsed_ms,
+    );
+    if summary.capped {
+        out.push_str("There are more: narrow the search with --glob or a sharper pattern.\n");
+    }
+    out
+}
+
 /// A page of the server's events, for JSON.
 pub fn events(page: &EventPage) -> EventsView<'_> {
     EventsView {
@@ -1215,6 +1326,8 @@ mod tests {
             viewers: 1,
             command: vec!["zsh".to_owned()],
             agent: None,
+            progress: None,
+            restored: None,
         }
     }
 

@@ -17,9 +17,13 @@
 //! its title, ended by its state in a word ("Needs approval", "Working", "Done", "Failed"),
 //! else the unseen dot, else its age past a minute (an agent at rest counts from its last turn);
 //! then, muted, its directory (its worker's name where it has none), what its agent says or its
-//! last command and its branch, or a note's progress. A row waiting on the human is not washed: the
-//! *Needs you* section above already leads with it, and its word says so in the warn tone. A row
-//! flies the camera to what it names. Workspaces are the title bar's tabs, not a section here.
+//! last command and its branch, or a note's progress; a shell reopened after its shell was lost
+//! says "Restored" there, and one whose program reports progress (`OSC 9;4`) ends that line in
+//! its figure and draws a hairline bar along the row's foot, as the Dock's does for them all,
+//! from the session's summary, so a tile never viewed shows it too. A row waiting on the human is
+//! not washed: the *Needs you* section above already leads with it, and its word says so in the
+//! warn tone. A row flies the camera to what it names. Workspaces are the title bar's tabs, not a
+//! section here.
 //!
 //! On a window wide enough it docks beside the rest of the frame, 248 pt by default, dragged
 //! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
@@ -55,8 +59,8 @@ use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
-use slopty_proto::terminal::RepoChanges;
-use slopty_theme::{Theme, Typography};
+use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
+use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::actions::ToggleNavigator;
 use super::agents::{Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human};
@@ -83,6 +87,9 @@ pub(super) const RAIL_W: f32 = 40.0;
 
 /// What an open worker with no tile says under its name.
 pub(super) const NO_TILES: &str = "No tiles";
+
+/// What a shell reopened after its shell was lost says on its row.
+pub(super) const RESTORED: &str = "Restored";
 
 /// How many rows *Working* lists before "Show N more".
 const WORKING_SHOWN: usize = 4;
@@ -301,21 +308,19 @@ pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'st
         WorkerStatus::Unreachable => Some((Status::Away, "unreachable")),
         WorkerStatus::Gone => Some((Status::Away, "gone")),
         WorkerStatus::NotGranted => Some((Status::Away, "not granted")),
+        WorkerStatus::NeedsUpdate(_) => Some((Status::Away, "different build")),
     }
 }
 
 /// What is wrong with a worker itself, as its header's warn line says it; nothing when all is
-/// well. A Mac that has not granted Screen Recording cannot share a window, one without
-/// Accessibility cannot take the keys, and a worker of another version may not speak this
-/// client's wire.
+/// well. A Mac that has not granted Screen Recording cannot share a window, and one without
+/// Accessibility cannot take the keys. A worker on another build never links at all: its
+/// status says so ([`WorkerStatus::NeedsUpdate`]), from the wire's own fingerprint.
 pub(super) fn worker_warning(caps: &WorkerCaps) -> Option<String> {
     let mac = caps.os == Os::MacOs;
-    let version = (!caps.version.is_empty() && caps.version != env!("CARGO_PKG_VERSION"))
-        .then(|| format!("Version {}", caps.version));
     let wrong: Vec<String> = [
         (mac && !caps.can_capture).then(|| "Screen Recording off".to_owned()),
         (mac && !caps.can_inject).then(|| "Accessibility off".to_owned()),
-        version,
     ]
     .into_iter()
     .flatten()
@@ -566,6 +571,51 @@ struct NavTile {
     /// The lines its repository's working tree has added and removed, at the end of the
     /// second line.
     changes: Option<(u32, u32)>,
+    /// Its program's progress report, while one stands.
+    progress: Option<Progress>,
+    /// It was reopened after its shell was lost.
+    restored: bool,
+}
+
+impl NavTile {
+    /// Whether it has a second line.
+    const fn two_lines(&self) -> bool {
+        let figure = match self.progress {
+            Some(progress) => has_figure(progress),
+            None => false,
+        };
+        !self.meta.is_empty() || self.changes.is_some() || self.restored || figure
+    }
+}
+
+/// Whether a progress report names how far along it is.
+const fn has_figure(progress: Progress) -> bool {
+    let measured =
+        matches!(progress.state, ProgressState::Set | ProgressState::Paused | ProgressState::Error);
+    measured && progress.percent.is_some()
+}
+
+/// A progress report's figure at the end of a row's second line: "42%" while it has one.
+pub(super) fn progress_figure(progress: Progress) -> Option<String> {
+    let percent = progress.percent.filter(|_| has_figure(progress))?;
+    Some(format!("{}%", percent.min(100)))
+}
+
+/// The hairline a progress report draws along a row's foot: its tone, how strongly, and the
+/// share of the row it covers. A report with no figure covers the row, set back, and stands
+/// still: the navigator never moves on its own. The tones are the tile header's bar's.
+pub(super) fn progress_line(theme: &Theme, progress: Progress) -> Option<(Rgb, f32, f32)> {
+    let s = &theme.surfaces;
+    let tone = match progress.state {
+        ProgressState::None => return None,
+        ProgressState::Set | ProgressState::Indeterminate => s.accent,
+        ProgressState::Paused => s.warn,
+        ProgressState::Error => s.error,
+    };
+    Some(match (progress.state, progress.percent) {
+        (ProgressState::Indeterminate, _) | (_, None) => (tone, alpha::STRONG, 1.0),
+        (_, Some(percent)) => (tone, 1.0, f32::from(percent.min(100)) / 100.0),
+    })
 }
 
 /// A worker's block as the navigator lists it.
@@ -645,7 +695,7 @@ impl NavRow {
     /// and for a worker's header whether it has a warning line and a step above it.
     const fn shape(&self) -> (Discriminant<Self>, bool, bool) {
         let (lines, gap) = match self {
-            Self::Tile(t) => (t.meta.is_empty() && t.changes.is_none(), false),
+            Self::Tile(t) => (!t.two_lines(), false),
             Self::Worker(h) => (h.warning.is_some(), h.gap),
             Self::Heading { .. }
             | Self::Agent(_)
@@ -927,12 +977,13 @@ impl WorkspaceView {
                     continue;
                 }
                 let kind = kind_icon(item, self.runs_agent(item));
-                let changes = match &item.kind {
-                    ItemKind::Terminal { session } => {
-                        self.summary(*session).and_then(|s| s.changes).and_then(line_changes)
-                    }
+                let summary = match &item.kind {
+                    ItemKind::Terminal { session } => self.summary(*session),
                     _ => None,
                 };
+                let changes = summary.and_then(|s| s.changes).and_then(line_changes);
+                let progress = summary.and_then(|s| s.progress);
+                let restored = summary.is_some_and(|s| s.restored.is_some());
                 let running = match (mark, &item.kind) {
                     (Some(Status::Running), ItemKind::Terminal { session }) => {
                         self.running_for(*session, cx).map(turn_label)
@@ -957,6 +1008,8 @@ impl WorkspaceView {
                     age_changes: age.map(until_age_changes),
                     running,
                     changes,
+                    progress,
+                    restored,
                 };
                 tiles.push((attention(mark, unseen), row));
             }
@@ -1905,7 +1958,25 @@ impl WorkspaceView {
             .changes
             .and_then(|(added, removed)| kit::changes(theme, added, removed))
             .map(|changes| changes.debug_selector(move || format!("nav-changes-{id}")));
-        let line2 = (!t.meta.is_empty() || changes.is_some()).then(|| {
+        let restored = t.restored.then(|| {
+            div().debug_selector(move || format!("nav-restored-{id}")).flex_none().child(RESTORED)
+        });
+        let figure = t.progress.and_then(progress_figure).map(|figure| {
+            readout(theme, figure).debug_selector(move || format!("nav-progress-{id}"))
+        });
+        let bar =
+            t.progress.and_then(|p| progress_line(theme, p)).map(|(tone, strength, share)| {
+                div()
+                .debug_selector(move || format!("nav-progress-bar-{id}"))
+                .absolute()
+                // Just under the second line, clear of its descenders.
+                .bottom(px(-theme.spacing.xxs))
+                .left_0()
+                .h(px(theme.spacing.xxs))
+                .w(gpui::relative(share))
+                .bg(crate::colors::hsla_alpha(tone, strength))
+            });
+        let line2 = t.two_lines().then(|| {
             meta(div(), theme)
                 .h(px(second))
                 .line_height(px(second))
@@ -1923,7 +1994,9 @@ impl WorkspaceView {
                         .text_ellipsis()
                         .child(crate::palette::dotted(theme, t.meta.clone())),
                 )
+                .children(restored)
                 .children(changes)
+                .children(figure)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
         let tile = t.tile;
@@ -1950,7 +2023,17 @@ impl WorkspaceView {
                 .items_start()
                 .gap(px(theme.spacing.xs))
                 .child(div().h(px(first)).flex().items_center().child(lead))
-                .child(div().flex_1().min_w_0().flex().flex_col().child(line1).children(line2)),
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(line1)
+                        .children(line2)
+                        .children(bar),
+                ),
         )
         .map(|row| if selected { self.nav.list.plate.mark(row, tile) } else { row })
         .when(self.nav.list.autoscroll == Some(tile), |row| {
@@ -2090,6 +2173,36 @@ mod tests {
         assert_eq!(meta("# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n"), "1 of 3 done");
         assert_eq!(meta("Groceries\n- milk\n"), "milk");
         assert_eq!(meta("Just a title\n"), "");
+    }
+
+    /// A report with a figure reads it against its sign; its line covers that share in its
+    /// state's tone, and one without a figure covers the row set back; no report draws nothing.
+    #[test]
+    fn a_progress_report_is_a_figure_and_a_share_of_the_row() {
+        let theme = Theme::default();
+        let s = theme.surfaces;
+        let report = |state, percent| Progress { state, percent };
+        assert_eq!(progress_figure(report(ProgressState::Set, Some(42))).as_deref(), Some("42%"));
+        assert_eq!(progress_figure(report(ProgressState::Set, Some(250))).as_deref(), Some("100%"));
+        assert_eq!(progress_figure(report(ProgressState::Indeterminate, None)), None);
+        assert_eq!(progress_line(&theme, Progress::default()), None);
+        assert_eq!(
+            progress_line(&theme, report(ProgressState::Set, Some(42))),
+            Some((s.accent, 1.0, 0.42))
+        );
+        assert_eq!(
+            progress_line(&theme, report(ProgressState::Indeterminate, None)),
+            Some((s.accent, alpha::STRONG, 1.0))
+        );
+        assert_eq!(
+            progress_line(&theme, report(ProgressState::Error, Some(80))).map(|l| l.0),
+            Some(s.error)
+        );
+        assert_eq!(
+            progress_line(&theme, report(ProgressState::Paused, None)).map(|l| l.0),
+            Some(s.warn)
+        );
+        assert!(RESTORED.chars().next().is_some_and(char::is_uppercase), "sentence case");
     }
 
     /// Only a state worth a word gets one: at rest or out of reach, the row says nothing.

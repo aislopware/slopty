@@ -2,11 +2,12 @@
 
 use std::marker::PhantomData;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf as _, Bytes, BytesMut};
 use noq::{RecvStream, SendStream};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use slopty_proto::codec;
+use slopty_proto::wire::{NotSlopty, Prefix};
 use tokio::io::AsyncReadExt as _;
 
 use crate::NetError;
@@ -90,6 +91,29 @@ impl<T: DeserializeOwned> FramedRecv<T> {
     #[must_use]
     pub fn into_raw(self) -> crate::streams::RawRecv {
         crate::streams::RawRecv::new(self.buf, self.stream)
+    }
+
+    /// Read the [`Prefix`] the peer opens the stream with; the messages follow it.
+    ///
+    /// # Errors
+    ///
+    /// [`NotSlopty`] inside `Ok` when the stream opens with anything else; a transport error
+    /// as it comes.
+    pub(crate) async fn prefix(&mut self) -> Result<Result<Prefix, NotSlopty>, NetError> {
+        loop {
+            match Prefix::decode(&self.buf) {
+                Ok(Some((prefix, len))) => {
+                    self.buf.advance(len);
+                    return Ok(Ok(prefix));
+                }
+                Ok(None) => {}
+                Err(not) => return Ok(Err(not)),
+            }
+            let n = self.stream.read_buf(&mut self.buf).await.map_err(|e| NetError::stream(&e))?;
+            if n == 0 {
+                return Err(NetError::Closed);
+            }
+        }
     }
 
     /// Read the next message; `Err(Closed)` at a clean end of stream.

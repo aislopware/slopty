@@ -847,6 +847,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WriteFile { worker, .. }
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
+        | Verb::Search { worker, .. }
         | Verb::ListPorts { worker }
         | Verb::ListItems { worker }
         | Verb::OpenItem { worker, .. }
@@ -952,6 +953,8 @@ pub(crate) mod tests {
             viewers: 0,
             command: Vec::new(),
             agent: None,
+            progress: None,
+            restored: None,
         }
     }
 

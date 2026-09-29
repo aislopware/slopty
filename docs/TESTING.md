@@ -24,6 +24,18 @@
    instead of waiting on the other sessions' builds in `target/`; an edit since then is not in it.
    The temp dir
    is named for its test, not at random, because a golden draws the paths under it. Nothing touches another app.
+   Remote windows and displays stream for real here too. With `SLOPTY_SYNTHETIC_SCREEN=1` the
+   worker serves its drawn screen (`slopty_worker::screen::synthetic::Synthetic`) in place of
+   the Mac's: one display and two windows, the same on every Mac, whose pictures are drawn
+   (`slopty_capture::synthetic::Canvas`: a still desktop, a strip of blocks, and a page of glyphs
+   scrolling in the middle half) and then encoded by VideoToolbox, sent and decoded as any other
+   worker's. Nothing is captured, so no grant is asked for. `tests/app/stream.rs` holds each
+   tile to its numbers (frames, arrival → present, loss, NACKs, the worker's own counters). Its
+   goldens mask the scrolling page and hold it to the golden's mix of luma instead
+   (`snapshot::luma_distance`), so the chrome, the overlay and the still parts of the picture are
+   compared pixel for pixel while the page moves. Its `frame_time` case, under
+   `cargo xtask e2e smooth`, times drawn frames from their capture stamp to the paint that
+   shows them.
    `cargo xtask e2e ios [--sim iphone|ipad]` is the same socket with
    the app in the simulator: the way to check anything on the phone or the tablet. There the
    socket also takes `ui_key_press` / `ui_touch` / `ui_pinch` / `ui_insert_text` /
@@ -92,6 +104,25 @@ ThreadSanitizer/AddressSanitizer builds of the daemons and the codec, `cargo hac
 and `cargo mutants` on one crate to find the lines no test would notice changing. A finding
 there becomes a test in the layer that can hold it. `docs/DEV.md` has the commands.
 
+**Fuzzing.** Every decoder a peer's bytes reach has a libFuzzer target in `fuzz/`, a crate
+outside the workspace (nightly, AddressSanitizer, debug assertions). The control stream both
+ways, the server's links and the unidirectional streams go through the real framing
+(`codec::try_take`, as `FramedRecv` reads it) in pieces of a size the fuzzer picks. The
+datagrams are covered too: the client's datagram, the terminal copy with its frame head, and the
+media header, the cursor and the pasteboard origin. The reassembler gets real packetized
+fragments and Reed–Solomon parity, reordered, lost, repeated or damaged, with NACKs answered from
+the packetizer. The worker is fuzzed on NACKs and receiver reports. The worker's control socket
+gets its JSON line. A target panics on a crash and on a broken invariant: a decoded message must
+encode back to the same bytes, a frame head must agree with its frame, and an undamaged run must
+deliver every frame byte for byte. The decoding targets also count the heap a decode takes
+(`slopty_testkit::alloc::Counting`) and fail past 64 bytes per input byte, 48 per budgeted
+cell and 2 MiB, so a small message that asks for a large allocation is a crash too
+(docs/decisions/terminal.md, "Decoded lines are bounded"). The fuzz targets and the replay run on `cargo xtask fuzz` and
+`deep fuzz`, never in the gate. A crash is minimised into `fuzz/regressions/<target>/`, and
+`fuzz/tests/regressions.rs` replays every such input on an ordinary build
+(`cargo xtask fuzz --replay`). The fix for a crash still gets its unit test in the crate it
+fixes.
+
 ## Budgets: allocations, instructions, footprint
 Wall time is not a pass or fail on a machine other sessions load, so the budgets are counts:
 - **Allocations**, in the gate. `tests/allocs.rs` in `slopty-media`, `slopty-engine` and
@@ -112,4 +143,5 @@ Wall time is not a pass or fail on a machine other sessions load, so the budgets
 
 `cargo xtask nightly` runs the soak, the bench's wall times, the property tests at
 `PROPTEST_CASES` cases, `slopty-ui`'s tests under `ITERATIONS` scheduler seeds and the deep
-checks, each with a JSON summary under `target/nightly/<date>/`. `docs/DEV.md` has the commands.
+checks (the fuzz smoke among them), each with a JSON summary under `target/nightly/<date>/`.
+`docs/DEV.md` has the commands.

@@ -65,12 +65,13 @@ const fn away(liveness: Liveness) -> Option<WorkerStatus> {
     }
 }
 
-/// How a failed dial shows. A worker that answered to turn this device away is reachable, so
-/// that is said whatever the server thinks of it; otherwise the server's word when it has one,
-/// else the reason.
+/// How a failed dial shows. A worker that answered to turn this device away, or to say it runs
+/// another build, is reachable, so that is said whatever the server thinks of it; otherwise the
+/// server's word when it has one, else the reason.
 fn failure_status(dial: &Dial, failed: DialFailed) -> WorkerStatus {
     let why = match failed {
         DialFailed::NotGranted => return WorkerStatus::NotGranted,
+        DialFailed::WrongBuild(notice) => return WorkerStatus::NeedsUpdate(notice),
         DialFailed::Other(why) => why,
     };
     match dial {
@@ -466,8 +467,18 @@ mod tests {
     fn a_refusal_by_the_tailnet_policy_is_named_over_other_words() {
         let other = || DialFailed::Other("no answer".to_owned());
         let at = Dial::At(HostAddr::new("studio", 45_550));
+        let notice = slopty_client::update::UpdateNotice {
+            of: slopty_client::update::Of::Worker,
+            host: "studio".to_owned(),
+            peer: String::new(),
+        };
         for dial in [at.clone(), Dial::Hold(Liveness::Unreachable), Dial::Unlisted] {
             assert_eq!(failure_status(&dial, DialFailed::NotGranted), WorkerStatus::NotGranted);
+            assert_eq!(
+                failure_status(&dial, DialFailed::WrongBuild(notice.clone())),
+                WorkerStatus::NeedsUpdate(notice.clone()),
+                "another build is said over the server's word"
+            );
         }
         assert_eq!(
             failure_status(&Dial::Hold(Liveness::Gone), other()),

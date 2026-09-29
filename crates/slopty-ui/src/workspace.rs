@@ -41,6 +41,7 @@ mod navigator;
 mod overlays;
 mod popout;
 mod project_search;
+mod quick;
 pub mod remote;
 mod rollup;
 mod statusbar;
@@ -60,6 +61,7 @@ use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window,
 };
+pub use quick::{QuickConfig, QuickToggle, TOGGLE_QUICK_TERMINAL};
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
 use slopty_client::relay::RelayWatch;
@@ -79,7 +81,9 @@ pub(crate) use tile::{
     ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, NOTE, OPENING, PAUSED,
     READING, RECONNECTING, SESSION_ENDED, SLEEPING, TAKE, TAKE_OVER,
 };
-pub use tile::{NOTE_TITLE_CHARS, UNTITLED_NOTE, file_title, note_progress, note_title};
+pub use tile::{
+    COPY_COMMAND, NOTE_TITLE_CHARS, UNTITLED_NOTE, file_title, note_progress, note_title,
+};
 
 /// Chrome words the modules keep to themselves, for the sentence-case check: a waiting
 /// badge's description and what "+" is called.
@@ -214,6 +218,14 @@ pub enum WorkspaceEvent {
     /// How many agents are waiting on the human right now, across every worker (the Dock
     /// badge).
     NeedsYou(usize),
+    /// A note's "Allow" or "Deny" found no prompt to answer while the app was away: the app
+    /// says `why` in a note of its own about `route`'s session.
+    Unanswered {
+        /// The note's agent.
+        route: attention::Route,
+        /// What to say.
+        why: &'static str,
+    },
 }
 
 /// Where the phone key bar sends its keys (see [`WorkspaceView::active_key_target`]).
@@ -243,6 +255,9 @@ pub enum WorkerStatus {
     /// The worker, or the server listing it, turned this device away: the tailnet policy grants
     /// it no role there. Still retried, as a policy change can grant it.
     NotGranted,
+    /// The worker runs a different build, whose wire this one cannot read: said with both
+    /// builds and what updates it, and dialled again only after a long wait or a nudge.
+    NeedsUpdate(slopty_client::update::UpdateNotice),
 }
 
 impl WorkerStatus {
@@ -259,6 +274,7 @@ impl WorkerStatus {
             Self::Unreachable => "unreachable".to_owned(),
             Self::Gone => "gone".to_owned(),
             Self::NotGranted => "closed to this device by the tailnet policy".to_owned(),
+            Self::NeedsUpdate(_) => "runs a different build".to_owned(),
         }
     }
 
@@ -695,6 +711,8 @@ pub struct WorkspaceView {
     app_active: bool,
     /// Remote tiles shown in windows of their own.
     popouts: popout::PopOuts,
+    /// The quick terminal's shell and panel.
+    quick: quick::Quick,
     /// Workers told this client wants their clipboard.
     watching: std::collections::HashSet<WorkerKey>,
     /// Uploads in flight.
@@ -865,6 +883,7 @@ impl WorkspaceView {
             clip: None,
             app_active: true,
             popouts: popout::PopOuts::default(),
+            quick: quick::Quick::default(),
             watching: std::collections::HashSet::new(),
             uploads: HashMap::new(),
             drop_landing: None,
@@ -1225,7 +1244,8 @@ impl WorkspaceView {
 
     /// The workspace changed (its own notify; never a frame of motion, see [`StripHost`]): the
     /// chrome may show it and a title may follow it, and who needs the human and which
-    /// worker's clipboard is wanted follow it at once. The faces follow in the next frame.
+    /// worker's clipboard is wanted follow it at once, and so do the approvals asked of the
+    /// workers. The faces follow in the next frame.
     fn changed(&mut self, cx: &mut Context<Self>) {
         #[cfg(test)]
         {
@@ -1235,6 +1255,7 @@ impl WorkspaceView {
         self.faces_dirty = true;
         self.drawn_waiting = self.needs_you();
         self.sync_clipboard_watch();
+        self.sync_approvals(cx);
         self.chrome.notify(cx);
         self.chrome_due = true;
     }

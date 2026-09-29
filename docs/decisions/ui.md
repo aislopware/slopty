@@ -3684,3 +3684,89 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     view in a new window with the keyboard, the tile's placeholder, the palette's two
     labels, nothing reopened, and back), and
     `popout::tests::a_window_opens_at_the_remote_size_fitted_to_the_screen`.
+
+- ✅ **A quick terminal slides down from the top of the screen** (2026-09-29).
+  - **A chord from any app, with no grant.** `[quick_terminal] hotkey` (⌃\` by default, in the
+    palette's key syntax; empty registers none) is registered with the Carbon Event Manager's
+    `RegisterEventHotKey` (`slopty_platform::hotkey::Hotkey`). The window server hands that
+    one chord to Slopty whichever app is in front, and the app in front never sees it. It
+    needs no Accessibility grant, unlike the session tap that takes system shortcuts for a
+    remote Mac, and sees nothing else typed. `NSEvent`'s global monitor was the other
+    candidate: it needs Accessibility for key events and cannot keep the chord from the app
+    in front. A chord without ⌘ or ⌃ is refused unless it is an F key, since it would take
+    typing from every app, and macOS refuses ⌥-only hot keys anyway. A chord another app holds
+    says so in a toast; the palette's "Toggle quick terminal" still works and shows the chord.
+    The self-test registers nothing, and its panel takes no keyboard: the machine's keyboard
+    is the person's.
+  - **One shell, a tile like any other.** The first show opens a shell on the worker of the
+    shell used last, in its directory, else where a new tile would go, and the workspace's
+    focus stays where it was. Its item is the quick terminal from then on. The panel draws
+    that tile's own `TerminalView`, the entity the workspace keeps, as a popped-out remote
+    tile's window draws its `ScreenView`. The tile says "In the quick terminal", and a click
+    there shows the panel. So the session, its rows, its agent status, the navigator row and a
+    relaunch's restore are the plumbing every shell has, and showing or hiding sends the worker
+    nothing. The alternative, a shell kept out of the layout, would have been a second kind
+    of item for every reader of the registry to skip. A shell that ends is put away with the
+    panel and its tile, and the next show opens a new one. Which item is the quick terminal is
+    not saved: after a relaunch the old one is an ordinary tile.
+  - **A panel over every app.** The window is GPUI's `WindowKind::PopUp`, an `NSPanel` with the
+    non-activating style at the pop-up level, on every Space and beside a full-screen app.
+    `slopty_platform::panel::Panel` takes its title bar off (borderless), makes it clear where
+    nothing is drawn, keeps it up when the app is not active, and leaves it out of ⌘\` and
+    Mission Control. A show places it along the top of the visible frame of the screen under
+    the pointer, the screen's width and `height` percent tall (40 by default, 20 to 100), then
+    orders it in front and makes it key without activating the app, as Spotlight does. A hide
+    orders it out, and the keyboard goes back to whoever had it. The window is kept, so the
+    next show draws what is already laid out.
+  - **Motion.** The sheet slides down from above the window on the sheet pace and the
+    drawer's curve (240 ms) and back up on the settle pace (160 ms), drawn by GPUI in the
+    clear window rather than by moving the window, so the terminal is laid out once at its
+    size and never resized mid-slide. Under Reduce Motion it is in place at once and gone at
+    once. Its bottom edge is rounded on the floating radius over a hairline, and the panel
+    wears the system's window shadow.
+  - **Hiding.** The chord again while it has the keyboard, the palette's command, losing the
+    keyboard (`autohide`, on by default), Esc while no shell holds the keyboard, or its shell
+    ending. The chord while it is up but another app has the keyboard brings it back to the
+    keyboard instead. Esc in a shell is the program's.
+  - **AppKit outside GPUI's updates.** Moving the panel makes AppKit tell GPUI of the new frame
+    and the keyboard from inside the call, and GPUI drops what arrives while the app is being
+    updated (a first run logged "RefCell already borrowed" and lost the resize). So the
+    placing, showing and ordering out run on the next turn of the main run loop, outside any
+    update, which costs under a millisecond.
+  - **Timing.** A show is timed from the chord's arrival on the main run loop (or the
+    palette's command) to the panel in front and to the first frame painted there, and logged
+    as `quick terminal shown` under `slopty::quick_terminal`; the frame on the glass is logged
+    too when the window reports its presentation, which the panel's did not in the first runs
+    (MEASUREMENTS, "Quick terminal: chord to glass": 1.0 ms to the front, 16.5 ms to the first
+    frame at 60 Hz).
+  - **Not done.** The worker's clipboard is not watched for the quick terminal while the
+    workspace window is in the background, as it is for a popped-out tile. The system
+    shortcut tap does not arm in the panel. There is no live test of the chord itself:
+    pressing it would mean posting a key event to the session, which the tests never do; the
+    live case goes through the palette's command, which reaches the same toggle.
+  - Tests: `workspace::tests::quick::the_quick_terminal_keeps_its_shell_across_shows` (the last
+    shell's directory, the focus kept, the workspace's own view drawn with the keyboard, the
+    tile's line, hide and show with no second shell and nothing closed),
+    `…::the_quick_terminal_hides_when_it_loses_the_keyboard`,
+    `…::esc_hides_the_quick_terminal_only_without_a_shell_in_it`,
+    `…::an_ended_quick_shell_goes_and_the_next_show_opens_another`,
+    `…::the_quick_terminal_slides_in_unless_motion_is_reduced`; `slopty_platform`
+    `hotkey::tests` (the syntax, the refused chords, main thread only) and
+    `panel::tests::the_band_hangs_from_the_top_of_the_visible_frame`; `slopty_settings`
+    `tests::quick_terminal_keys`; `slopty_app` `quick::tests::the_quick_terminal_follows_its_settings`
+    and `tests::the_palette_shows_the_quick_terminals_chord`; live, `cargo xtask e2e app`
+    `quick::the_quick_terminal_keeps_one_shell_across_shows` (one shell opened, its tile saying
+    where it went, the same session after sixteen more toggles).
+
+- ✅ **The palette's "Toggle quick terminal" hides a shown panel; drawing it changes nothing**
+  (2026-09-29). The palette runs in the workspace's window, which holds the keyboard then, so
+  the chord's rule (hide only while the panel has the keyboard, else bring it to the front)
+  showed it again, and with no chord and "Hide when unfocused" off nothing put it away. The
+  command now hides a shown panel (`QuickToggle::Command`); the chord keeps its rule. The
+  panel's shadow follows the slide from next-frame callbacks and a show is timed from the
+  window's presentation reports, where a paint callback wrote the view each frame; the
+  approvals the workspace asks of its workers follow its changes rather than its render. The
+  keyboard side is not run live, since it would take the keyboard from the person at the Mac.
+  Tests: `workspace::tests::quick::the_palettes_command_puts_a_shown_quick_terminal_away`;
+  `ssh::tests::reopening_the_panel_and_the_sheet_keeps_no_subscription` (the panel's, the SSH
+  sheet's and the settings dialog's subscriptions go with them).

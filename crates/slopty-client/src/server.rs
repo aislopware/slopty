@@ -1,6 +1,9 @@
 //! The one link a client keeps to the server, dialled at start and redialled forever after it
 //! drops.
 //!
+//! A server on a different build is said so ([`UpdateNotice`]) and asked again only after
+//! [`slopty_net::redial::WRONG_BUILD`].
+//!
 //! Every message it carries is handed on as a [`ServerEvent`], and verbs go up it through a
 //! [`ServerCaller`] ([`ServerCaller::wake`] wakes a sleeping worker).
 //!
@@ -11,12 +14,14 @@
 use std::collections::HashMap;
 
 use slopty_core::WorkerId;
-use slopty_net::HostAddr;
 use slopty_net::server::{DialError, ServerLink, connect};
+use slopty_net::{HostAddr, NetError};
 use slopty_proto::RequestId;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{FromServer, Refusal, Role, ToServer};
 use tokio::sync::{mpsc, oneshot};
+
+use crate::update::UpdateNotice;
 
 /// Server messages queued for the UI at most.
 const EVENT_DEPTH: usize = 256;
@@ -33,7 +38,8 @@ pub enum ServerEvent {
     },
     /// A message from it: the directory, a worker's change, an event.
     Message(Box<FromServer>),
-    /// A dial failed or the link dropped; the next attempt is on its way.
+    /// A dial failed or the link dropped; the next attempt is on its way. A server on a
+    /// different build is one of these, `why` being its [`UpdateNotice`].
     Unlinked {
         /// Why.
         why: String,
@@ -147,6 +153,7 @@ async fn run(
             Some(link) => Ok(link),
             None => connect(&endpoint, &addr, role.clone()).await,
         };
+        let mut another_build = false;
         let event = match dialled {
             Ok(link) => {
                 redial.linked(std::time::Instant::now());
@@ -154,6 +161,11 @@ async fn run(
                 ServerEvent::Unlinked { why }
             }
             Err(DialError::Refused(why)) => ServerEvent::Refused(why),
+            Err(DialError::Net(NetError::WrongBuild(wrong))) => {
+                another_build = true;
+                let notice = UpdateNotice::server(addr.host(), &wrong);
+                ServerEvent::Unlinked { why: notice.to_string() }
+            }
             Err(DialError::Net(e)) => ServerEvent::Unlinked { why: e.to_string() },
         };
         tracing::debug!(server = %addr, ?event, "server link down");
@@ -165,8 +177,14 @@ async fn run(
         if tx.send(event).await.is_err() {
             return;
         }
-        // Until the next dial there is no server to send a verb to.
-        let wait = tokio::time::sleep(redial.next(std::time::Instant::now()));
+        // Until the next dial there is no server to send a verb to. One on another build is
+        // asked again only after a while: it changes only when someone updates it.
+        let wait = if another_build {
+            slopty_net::redial::WRONG_BUILD
+        } else {
+            redial.next(std::time::Instant::now())
+        };
+        let wait = tokio::time::sleep(wait);
         tokio::pin!(wait);
         loop {
             tokio::select! {

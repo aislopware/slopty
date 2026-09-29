@@ -1594,3 +1594,95 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (10 s without a control stream or a hello, or a failed read). Past the greeting, it
     happens on the worker app's own error paths in `conn::run`. Those need the worker app on
     the simulated network to test, and that crate has another owner.
+- ✅ **A dual-stack port no IPv4 socket holds** (2026-09-29, the fill's "no answer"). About
+  one fresh dial in 10 000 to a server on a loopback port timed out. The cause was the port,
+  not the crypto. The client endpoint binds `[::]:0` dual-stack, and XNU's allocator for it
+  checks the IPv6 sockets but not the IPv4 ones: with 2 000 IPv4 sockets open, one such bind
+  in eight took a port one of them held. An explicit `[::]:p` also binds beside a socket on
+  `0.0.0.0:p`. IPv4 datagrams to that port go to the IPv4 socket. A client that drew the
+  server's own port (the server on `127.0.0.1:<ephemeral>`) sent its Initial from
+  `127.0.0.1:p` to `127.0.0.1:p`. The server answered to that address, which is its own
+  socket, and took its own Initial for a new client's. Its ACK acknowledged a packet the new
+  connection never sent ("unsent packet acked"), and its HELLO carried the server-only
+  parameters ("bad transport parameters: parameter had illegal value", once per
+  retransmission). The client heard nothing. Every failure in a run of 100 000 dials had the
+  client's port equal to the server's.
+  - **Rejected: the hypothesis of a stray packet from an earlier connection on a reused
+    port.** Stale traffic to a reused port is answered as designed: the new endpoint sends
+    the old connection a stateless reset (the reset key is the same in every process). In a
+    one-off harness, 5 000 dials from one port, each endpoint killed without a close while
+    the server pushed to it and the next bound on the same port, failed none. `ConnectionIndex::get` routes by the connection ID before any reset token, and
+    nothing here reached the reset-token lookup. A tag on the null crypto would not have
+    helped either: the server's own packets would carry valid tags, and the client would
+    still hear nothing.
+  - **The fix is in `slopty_net::endpoint::bind_udp`.** A socket that takes IPv4 (on `[::]`
+    or a v4-mapped address) gets its port from an IPv4 bind first. IPv4's checks cover both
+    families: in 20 000 binds, `0.0.0.0:0` never took a port an IPv4 or dual-stack socket
+    held. The probe is closed and the dual-stack socket binds that port explicitly. If
+    something took the port in between, the next port is tried, up to 16 times. An explicit
+    port an IPv4 socket holds is now `AddrInUse`, as it is on Linux. The cost is one IPv4
+    bind and close per endpoint (about 17 µs) and nothing per packet.
+  - **It also covers the worker's listener on `--port 0`**, which the e2e binds, and a
+    test's client beside other test processes' IPv4 sockets. The previously flaky dial in
+    `echo_is_not_held_behind_slow_requests` (a fresh client dialing a fresh worker on
+    loopback) fits the same cause, but no run caught that case.
+  - The MCP listener (`slopty_server::mcp::bind`, dual-stack TCP) half shares it. TCP draws a
+    free port clear of IPv4 sockets (0 of 1 000 beside 200 held), but a fixed `[::]:p` bound
+    beside a listener on `0.0.0.0:p`. A fixed port is now bound on `0.0.0.0` alone first, and
+    is `AddrInUse` when held there (`crates/slopty-server/tests/mcp_bind.rs`).
+  - Tests: `a_fresh_endpoint_takes_no_port_an_ipv4_socket_holds` (14 of 1 000 before, 0
+    after) and `an_endpoint_on_a_port_an_ipv4_socket_holds_is_refused` (bound beside
+    `0.0.0.0:p` before), in `crates/slopty-net/tests/dual_stack_port.rs`.
+    `fresh_endpoints_dial_a_loopback_server` (ignored) is the measurement
+    (docs/MEASUREMENTS.md, "A dual-stack port no IPv4 socket holds").
+- ✅ **Each end says its wire first** (2026-09-29). `Hello` and `HelloAck` carried nothing that
+  named a build, and `WorkerCaps.version` sat inside the `HelloAck`. When two builds' postcard
+  layouts differed, that message did not decode, so it could not be read. The decode error
+  dropped the link and the redial dialled it again forever. `slopty worker deploy` puts
+  workers on other machines, so they drift from the app. The product is pre-release and every
+  binary is rebuilt together, so there is no protocol version for a person to bump.
+  - **The fingerprint is derived from the goldens.** `crates/slopty-proto/build.rs` hashes
+    every `.snap` under `tests/snapshots` (FNV-1a 64, by file name and body) into
+    `slopty_proto::wire::FINGERPRINT`. The control socket's goldens (`golden__ctl__*`) are
+    left out because no link carries them. The insta header is left out because it names a
+    test's source line and not the wire. A changed golden is already a wire change, so the
+    fingerprint moves exactly when one is accepted. Nobody bumps it, and cargo reruns the
+    script when the directory changes. `BUILD` is the version plus the fingerprint's first
+    eight hex digits (`0.1.0+wire.f6acd634`), for a person to read. `git describe` was
+    rejected: tracking the git state would rebuild `slopty-proto`, and everything that
+    depends on it, after every commit.
+  - **A prefix that never changes opens the control stream both ways**, before any postcard:
+    `SLOPTY`, the fingerprint (`u64` little-endian), one length byte and the build text
+    (`wire::Prefix`, pinned by `golden__wire__prefix` with fixed values so that golden does
+    not feed the fingerprint). Each dialer writes its prefix, then its hello, then reads the
+    peer's prefix. Each listener writes its prefix, then reads the dialer's before the hello
+    (`slopty_net::prefix`). That covers client ↔ worker, client ↔ server and worker ↔ server,
+    because every control stream goes through `slopty_net::{client, server, listen}`.
+  - **On a mismatch the end that sees it closes with `close_code::WRONG_BUILD` (4)**, with
+    its own build as the reason. The other end reads the prefix or the close, whichever comes
+    first, as `NetError::WrongBuild { peer }`. A stream that opens with anything but the magic
+    is a build from before the prefix. It is closed the same way, with an empty `peer`
+    ("an older one"). A listener never hands such a peer on, and logs it at `warn` with both
+    builds. A new dialer against a pre-prefix listener only sees that listener's decode
+    error. That happens once, on the way over.
+  - **Nobody redials into it.** `slopty_net::redial::WRONG_BUILD` (60 s) replaces the fast
+    backoff for a peer that says it runs another build. A dial before then can only be
+    refused, and the peer changes only when someone updates it. The client's server link,
+    the worker's server link and the CLI's persistent link wait that long. The app's worker
+    loop is meant to wait for a wake instead: the Connect action, or the directory saying the
+    worker came back, which a redeployed worker does when it re-registers.
+  - **What a person reads** is `slopty_client::update::UpdateNotice`: "This worker runs a
+    different build", both builds, and the command that updates it. For a worker that is
+    `slopty worker deploy <host> --update`. For the server it is `slopty server install`, run
+    on its machine. The CLI prints the notice's `Display`, and the app shows the same words
+    on the worker. The deploy lives in the `slopty` binary (`apps/slopty-cli/src/deploy.rs`).
+    The app cannot run it until it moves into a library, so the notice gives the command to
+    copy.
+  - Tests: `the_fingerprint_is_the_goldens_and_stable` and
+    `the_fingerprint_moves_exactly_with_a_wire_golden` (proto) cover the derivation. Prefix
+    reading is in `a_prefix_reads_back_whole_and_waits_for_the_rest` and
+    `anything_else_is_not_slopty_at_once`. `crates/slopty-net/tests/wrong_build.rs` runs both
+    directions and a pre-prefix peer over loopback. `a_wrong_build_close_names_the_peers_build`
+    covers the error mapping. `crates/slopty-client/tests/wrong_build.rs` checks that a worker
+    dial becomes the notice, and that a server on another build is reported once with no
+    second dial within the fast backoff's first three steps.

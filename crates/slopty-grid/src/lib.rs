@@ -24,8 +24,8 @@ mod scrollback;
 mod style;
 
 pub use cell::{Cell, CellText, CellWidth};
-pub use line::{Hyperlink, Line, LineFlags, SemanticMark};
+pub use line::{Hyperlink, Line, LineFlags, MAX_COLS, SemanticMark, with_cell_budget};
 pub use modes::TermModes;
-pub use screen::{Cursor, CursorShape, RowUpdate, Screen, ScreenError};
+pub use screen::{Cursor, CursorShape, MAX_ROWS, RowUpdate, Screen, ScreenError};
 pub use scrollback::{LineIndex, Scrollback};
 pub use style::{Color, Style, StyleFlags, Underline};

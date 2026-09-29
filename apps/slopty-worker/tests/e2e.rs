@@ -308,7 +308,8 @@ mod tests {
         let session = loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
                 WorkerMsg::SessionOpened { summary, .. } => break summary.id,
-                WorkerMsg::Items(_sync) => {}
+                // Caps change whenever the worker learns more, such as an agent's version.
+                WorkerMsg::Items(_) | WorkerMsg::Caps(_) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
@@ -363,7 +364,7 @@ mod tests {
         loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
                 WorkerMsg::Pong { .. } => break,
-                WorkerMsg::Items(_sync) => {}
+                WorkerMsg::Items(_) | WorkerMsg::Caps(_) => {}
                 other => panic!("unexpected control message before Pong: {other:?}"),
             }
         }
@@ -782,7 +783,8 @@ mod tests {
         let session = loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
                 WorkerMsg::SessionOpened { summary, .. } => break summary.id,
-                WorkerMsg::Items(_sync) => {}
+                // Caps change whenever the worker learns more, such as an agent's version.
+                WorkerMsg::Items(_) | WorkerMsg::Caps(_) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
@@ -1221,6 +1223,138 @@ mod tests {
             "the program the lost shell ran is not started again"
         );
         worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
+    /// A Claude Code conversation running in a shell comes back resumed when ptyd ends: the
+    /// next worker types `claude --resume <id>` at the new shell's first prompt, with the model
+    /// it was started with and the permission mode its hooks last reported, in its directory.
+    /// Nothing else of its command line is kept. `claude` is the test's own script; the hook
+    /// goes to the worker's control socket as the relay would send it.
+    #[tokio::test]
+    async fn a_claude_code_conversation_comes_back_resumed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        use tokio::io::AsyncWriteExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let place = dir.path().join("project");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let ran = dir.path().join("claude-ran");
+        let claude = bin.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\nprintf '%s|' \"$PWD\" \"$@\" >> \"$CLAUDE_RAN\"\necho >> \"$CLAUDE_RAN\"\n\
+             echo fake-claude-up\nsleep 120\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let conversation = "4f1c7a52-9d0e-4b8a-a1a3-0c5f3e0b8d11";
+        let transcript = dir.path().join(format!("{conversation}.jsonl"));
+        std::fs::write(&transcript, b"{}\n").unwrap();
+
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint, mut worker) = dial(addr).await;
+        guard.1 = Some(endpoint);
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let open = OpenSession {
+            size: TermSize { cols: 200, rows: 20, ..TermSize::default() },
+            cwd: Some(place.to_string_lossy().into_owned()),
+            command: vec!["/bin/bash".to_owned()],
+            env: vec![
+                ("PATH".to_owned(), path),
+                ("HOME".to_owned(), dir.path().to_string_lossy().into_owned()),
+                ("CLAUDE_RAN".to_owned(), ran.to_string_lossy().into_owned()),
+                ("BASH_SILENCE_DEPRECATION_WARNING".to_owned(), "1".to_owned()),
+            ],
+            title: None,
+            attach: true,
+        };
+        worker.tx.send(&ClientMsg::OpenSession { request: 1, spec: open }).await.unwrap();
+        let session = next_msg(&mut worker, |m| match m {
+            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
+            _ => None,
+        })
+        .await;
+        let (_opened, mut events) = session_stream(&worker).await;
+        let started = "claude --model opus-x --append-system-prompt hush-hush 'fix it'\r";
+        worker
+            .tx
+            .send(&ClientMsg::Term { session, req: TermRequest::Raw(started.as_bytes().to_vec()) })
+            .await
+            .unwrap();
+        wait_for_text(&mut events, "fake-claude-up").await;
+
+        let hook = serde_json::json!({
+            "session_id": conversation,
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "cwd": place,
+            "transcript_path": transcript,
+            "permission_mode": "plan",
+        });
+        let request = slopty_proto::ctl::CtlRequest::Hook { session, payload: hook.to_string() };
+        let mut ctl =
+            tokio::net::UnixStream::connect(dir.path().join("worker.sock")).await.unwrap();
+        let mut line = serde_json::to_vec(&request).unwrap();
+        line.push(b'\n');
+        ctl.write_all(&line).await.unwrap();
+        let mut reply = String::new();
+        BufReader::new(ctl).read_line(&mut reply).await.unwrap();
+        let reply: slopty_proto::ctl::CtlReply = serde_json::from_str(&reply).unwrap();
+        assert!(matches!(reply, slopty_proto::ctl::CtlReply::Ok { .. }), "{reply:?}");
+
+        // The agent tick puts the conversation and the flags of the process it sees into the
+        // session's recipe.
+        let recipe = dir.path().join("data").join("sessions").join(format!("{session}.json"));
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !std::fs::read_to_string(&recipe)
+                .is_ok_and(|r| r.contains(conversation) && r.contains("opus-x"))
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the conversation is kept");
+        assert!(!std::fs::read_to_string(&recipe).unwrap().contains("hush-hush"));
+
+        guard.0[0].start_kill().unwrap();
+        guard.0[0].wait().await.unwrap();
+        tokio::time::timeout(STEP, guard.0[1].wait()).await.expect("the worker exits").unwrap();
+        drop(events);
+        drop(worker);
+        let ptyd = spawn_ptyd(dir.path()).await;
+        let (next, _addr) = spawn_worker(dir.path()).await;
+        guard.0 = vec![ptyd, next];
+
+        let runs = tokio::time::timeout(STEP, async {
+            loop {
+                let text = std::fs::read_to_string(&ran).unwrap_or_default();
+                if text.lines().count() >= 2 {
+                    return text;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the agent is resumed");
+        let resumed: Vec<&str> = runs
+            .lines()
+            .nth(1)
+            .unwrap()
+            .split('|')
+            .filter(|w| !w.is_empty() && !w.starts_with("--plugin-dir="))
+            .collect();
+        let (cwd, args) = resumed.split_first().unwrap();
+        assert_eq!(
+            std::path::Path::new(cwd).canonicalize().unwrap(),
+            place.canonicalize().unwrap()
+        );
+        assert_eq!(
+            args,
+            ["--resume", conversation, "--model", "opus-x", "--permission-mode", "plan"]
+        );
     }
 
     /// Streams the first display through the worker into the real client stack (`WorkerLink` +
@@ -1869,7 +2003,8 @@ mod tests {
         let session = loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {
                 WorkerMsg::SessionOpened { summary, .. } => break summary.id,
-                WorkerMsg::Items(_sync) => {}
+                // Caps change whenever the worker learns more, such as an agent's version.
+                WorkerMsg::Items(_) | WorkerMsg::Caps(_) => {}
                 other => panic!("unexpected control message before SessionOpened: {other:?}"),
             }
         };
@@ -4717,6 +4852,101 @@ mod tests {
 
         worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         drop(file);
+    }
+
+    /// A client that answers approvals, following nothing, is shown a yes or no and its answer
+    /// is what the relay prints; a question is not held for it. A hold for approvers ends where
+    /// the relay's wait would, undecided; a client can hand a held prompt to the TUI at once,
+    /// and the last approver stopping hands back what only it could answer. The relay is this
+    /// test's own child and the bounded hold is a control-socket request, as the relay's.
+    #[tokio::test]
+    async fn an_approver_answers_without_following_and_the_tui_asks_otherwise() {
+        use slopty_proto::conversation::{ConversationRequest, PermissionEvent, Settled, Verdict};
+        use slopty_proto::ctl::{CtlReply, CtlRequest, Decision, PermissionAnswer, PermissionAsk};
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let session = open_shell(&mut worker, dir.path()).await;
+        let approvals = |on| ClientMsg::Conversation(ConversationRequest::Approvals { on });
+        worker.tx.send(&approvals(true)).await.unwrap();
+        let hooks = std::fs::read_to_string(fixture("permission").join("hooks.jsonl")).unwrap();
+        let ask: serde_json::Value = hooks
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|l| l["input"].clone())
+            .find(|input| input["hook_event_name"] == "PermissionRequest")
+            .unwrap();
+        let asked = async |worker: &mut WorkerConn| {
+            next_msg(worker, |m| match m {
+                WorkerMsg::Permission(PermissionEvent::Asked(prompt)) => Some(*prompt),
+                _ => None,
+            })
+            .await
+        };
+        let settled = async |worker: &mut WorkerConn, id: u64| {
+            next_msg(worker, |m| match m {
+                WorkerMsg::Permission(PermissionEvent::Settled { ask, outcome, .. })
+                    if ask == id =>
+                {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await
+        };
+
+        // Allowed from a notification: the relay prints the allow.
+        let held = relay(dir.path(), session, &[], &ask);
+        let prompt = asked(&mut worker).await;
+        assert_eq!((prompt.session, prompt.tool.as_str()), (session, "Bash"));
+        let answer =
+            ConversationRequest::Answer { session, ask: prompt.ask, verdict: Verdict::Allow };
+        worker.tx.send(&ClientMsg::Conversation(answer)).await.unwrap();
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert!(matches!(
+            settled(&mut worker, prompt.ask).await,
+            Settled::Answered { verdict: Verdict::Allow, .. }
+        ));
+
+        // A question is the conversation's to answer: nobody follows, so the TUI asks at once.
+        let mut question = ask.clone();
+        question["tool_name"] = "AskUserQuestion".into();
+        let started = std::time::Instant::now();
+        assert_eq!(printed(relay(dir.path(), session, &[], &question)).await, "");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+        // The hold ends a second before the relay's wait would, undecided.
+        let bounded = CtlRequest::Permission(PermissionAsk {
+            session,
+            payload: ask.to_string(),
+            wait_ms: 2_500,
+        });
+        let started = std::time::Instant::now();
+        let reply = ctl(&dir.path().join("worker.sock"), &bounded).await;
+        assert_eq!(reply, CtlReply::Permission(PermissionAnswer { decision: Decision::Pass }));
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(1_400) && waited < STEP, "{waited:?}");
+        let prompt = asked(&mut worker).await;
+        assert_eq!(settled(&mut worker, prompt.ask).await, Settled::Released);
+
+        // Handed to the TUI by the client that has the terminal in front of the person.
+        let handed = relay(dir.path(), session, &[], &ask);
+        let prompt = asked(&mut worker).await;
+        let release = ConversationRequest::Release { session, ask: prompt.ask };
+        worker.tx.send(&ClientMsg::Conversation(release)).await.unwrap();
+        assert_eq!(printed(handed).await, "", "no decision: the TUI's dialog");
+        assert_eq!(settled(&mut worker, prompt.ask).await, Settled::Released);
+
+        // The last approver stops while a prompt is held: released, and no longer its news.
+        let orphaned = relay(dir.path(), session, &[], &ask);
+        asked(&mut worker).await;
+        worker.tx.send(&approvals(false)).await.unwrap();
+        assert_eq!(printed(orphaned).await, "");
+        let started = std::time::Instant::now();
+        assert_eq!(printed(relay(dir.path(), session, &[], &ask)).await, "", "nobody answers now");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+        worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 
     /// Where the agent runs Slopty's mod, a follower sees what the model writes before the

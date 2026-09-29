@@ -18,8 +18,9 @@
 //! refresh. The newest capture is kept, so a picture that went still still gets the frame the
 //! cadence or the guard held back, and a refresh asked for on it is answered (`repair_loop`).
 //!
-//! [`synthetic::Drawn`] is a platform whose pictures are drawn instead of captured, for timing
-//! this path end to end where ScreenCaptureKit cannot run.
+//! [`synthetic::Drawn`] and [`synthetic::Synthetic`] are platforms whose pictures are drawn
+//! instead of captured: the first times this path end to end where ScreenCaptureKit cannot run,
+//! the second is the whole screen a worker serves under test ([`synthetic_screen`]).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -227,6 +228,16 @@ const KEYFRAME_DRAIN_MS: u64 = 400;
 /// the wait against the 4 796 ms hold that motivated the rule, and a picture goes out meanwhile:
 /// deferral only happens when an LTR refresh is available to send instead.
 const KEYFRAME_VALVE_US: u64 = 1_000_000;
+
+/// How long a keyframe handed to the encoder answers the refreshes asked for before it comes out.
+///
+/// A request that arrives while a keyframe is being encoded was sent before the client could have
+/// had it, and that keyframe answers it; setting the request again had the encoder make a second
+/// one behind the first. The first keyframe of a session takes 60–130 ms at 3024 × 1964, longer
+/// than the client's first refresh repeat, so every stream that opened at that size encoded two
+/// (MEASUREMENTS.md, "a refresh asked for while the keyframe is encoded"). Past this the keyframe
+/// is taken as dropped by the encoder and a request is answered again.
+const KEYFRAME_IN_FLIGHT_US: u64 = 400_000;
 
 /// Whether a keyframe of `estimate` bytes should be encoded now.
 ///
@@ -723,17 +734,45 @@ pub async fn shareable() -> Result<Arc<Content<Native>>, ScreenError> {
     ScreenStream::shareable().await
 }
 
+/// Whether this worker serves the drawn screen of [`synthetic::Synthetic`] in place of its own.
+///
+/// [`synthetic::SWITCH`] turns it on, a test knob. Every stream the worker opens, its listing,
+/// its warm-up and its window resizes then go there.
+#[must_use]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(clippy::missing_const_for_fn, reason = "on macOS it reads the drawn screen's switch")
+)]
+pub fn synthetic_screen() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        synthetic::serving()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// Start and stop one small capture of the first display; returns how long that took.
 ///
 /// The first stream a client opens then does not pay ScreenCaptureKit's first start in this
 /// process: ~300 ms cold against ~115 ms warm (MEASUREMENTS.md, "start-up on a cold
 /// connection").
 pub async fn warm_up() -> Result<Duration, ScreenError> {
+    #[cfg(target_os = "macos")]
+    if synthetic::serving() {
+        return Pipeline::<synthetic::Synthetic>::warm_up().await;
+    }
     ScreenStream::warm_up().await
 }
 
 /// The `Listing` event for the current windows and displays.
 pub async fn listing() -> Result<ScreenEvent, ScreenError> {
+    #[cfg(target_os = "macos")]
+    if synthetic::serving() {
+        return Pipeline::<synthetic::Synthetic>::listing().await;
+    }
     ScreenStream::listing().await
 }
 
@@ -934,42 +973,65 @@ impl StatsHandle {
 /// The part of a stream the client's feedback reaches directly.
 ///
 /// Loss and reports are answered on the connection's own task, never behind a stream that is
-/// busy rebuilding its encoder or reading the window server.
-pub struct StreamControl<P: Platform = Native>(Arc<Shared<P>>);
+/// busy rebuilding its encoder or reading the window server. It names no platform, so one
+/// connection holds the controls of streams on either of the platforms a worker may serve
+/// ([`synthetic_screen`]).
+#[derive(Clone)]
+pub struct StreamControl(Arc<dyn Controlled>);
 
-impl<P: Platform> Clone for StreamControl<P> {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
+/// What the client's feedback does to a stream, whatever platform it runs on.
+trait Controlled: Counted {
+    fn take_report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision>;
+    fn take_refresh(&self, last_good_frame: u32, keyframe: bool);
+    fn take_nack(&self, frame: u32, fragments: &[u16]);
+    fn zoom_now(&self) -> f64;
+}
+
+impl<P: Platform> Controlled for Shared<P> {
+    fn take_report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
+        self.report(report, path)
+    }
+
+    fn take_refresh(&self, last_good_frame: u32, keyframe: bool) {
+        self.request_refresh(last_good_frame, keyframe);
+    }
+
+    fn take_nack(&self, frame: u32, fragments: &[u16]) {
+        self.nack(frame, fragments);
+    }
+
+    fn zoom_now(&self) -> f64 {
+        self.zoom()
     }
 }
 
-impl<P: Platform> std::fmt::Debug for StreamControl<P> {
+impl std::fmt::Debug for StreamControl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamControl").field("stream", &self.0.id).finish()
+        f.debug_struct("StreamControl").field("stream", &self.0.stream()).finish()
     }
 }
 
-impl<P: Platform> StreamControl<P> {
+impl StreamControl {
     /// See [`ScreenStream::report`].
     #[must_use]
     pub fn report(&self, report: &ReceiverReport, path: Option<PathSample>) -> Option<Decision> {
-        self.0.report(report, path)
+        self.0.take_report(report, path)
     }
 
     /// See [`ScreenStream::request_refresh`].
     pub fn request_refresh(&self, last_good_frame: u32, keyframe: bool) {
-        self.0.request_refresh(last_good_frame, keyframe);
+        self.0.take_refresh(last_good_frame, keyframe);
     }
 
     /// See [`ScreenStream::nack`].
     pub fn nack(&self, frame: u32, fragments: &[u16]) {
-        self.0.nack(frame, fragments);
+        self.0.take_nack(frame, fragments);
     }
 
     /// See [`ScreenStream::zoom`]; current across a rebuild, readable from the connection's task.
     #[must_use]
     pub fn zoom(&self) -> f64 {
-        self.0.zoom()
+        self.0.zoom_now()
     }
 }
 
@@ -1019,8 +1081,16 @@ struct Shared<P: Platform = Native> {
     /// `host_now_us()` when the current run of deferrals began, `0` when none is running: the
     /// valve's clock.
     keyframe_deferred_us: AtomicU64,
+    /// `host_now_us()` when a keyframe was handed to the encoder that has not come out yet, `0`
+    /// when none is in flight ([`KEYFRAME_IN_FLIGHT_US`]).
+    keyframe_submitted_us: AtomicU64,
     /// The long-term references this encoder session offered and the client acknowledged.
     ltr: Mutex<LtrBook>,
+    /// The encoder session whose packets are the stream's, as [`Self::install`] put it in; a
+    /// replaced session's late packets are dropped ([`Self::on_session_packet`]).
+    session: AtomicU64,
+    /// The last session number handed out ([`Self::next_session`]).
+    sessions: AtomicU64,
     /// The newest capture of the target, kept after it is encoded. ScreenCaptureKit sends
     /// nothing while the picture is still, so this is the only picture a skipped frame, a
     /// refresh or a keyframe asked for on a still screen can be answered with
@@ -1108,7 +1178,10 @@ impl<P: Platform> Shared<P> {
             pace_us: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
             keyframe_deferred_us: AtomicU64::new(0),
+            keyframe_submitted_us: AtomicU64::new(0),
             ltr: Mutex::new(LtrBook::default()),
+            session: AtomicU64::new(0),
+            sessions: AtomicU64::new(0),
             held: Mutex::new(None),
             owed: AtomicBool::new(false),
             repair: tokio::sync::Notify::new(),
@@ -1211,10 +1284,17 @@ impl<P: Platform> Shared<P> {
     ///
     /// Returns the old session for the caller to drop off the runtime: invalidating it waits for
     /// its callbacks to finish.
+    ///
+    /// `session` is the number the new session was built under ([`Self::next_session`]): from
+    /// here on only its packets are the stream's. The old session is invalidated off the
+    /// runtime, after the swap, and a frame it was still encoding comes out after the new
+    /// session's keyframe; sent, it would be decoded against the new session and fail
+    /// (MEASUREMENTS.md, "an old session's frame after the new keyframe").
     #[must_use = "the old session is dropped off the runtime"]
-    fn install(&self, encoder: P::Video) -> Option<P::Video> {
+    fn install(&self, encoder: P::Video, session: u64) -> Option<P::Video> {
         let mut slot = self.encoder.write();
         let old = slot.replace(encoder);
+        self.session.store(session, Ordering::Relaxed);
         self.rebuilt();
         drop(slot);
         // Outside the write lock: an encode takes the held capture's lock before the encoder's.
@@ -1238,6 +1318,7 @@ impl<P: Platform> Shared<P> {
         drop(ltr);
         self.keyframe_bytes.store(0, Ordering::Relaxed);
         self.keyframe_deferred_us.store(0, Ordering::Relaxed);
+        self.keyframe_submitted_us.store(0, Ordering::Relaxed);
     }
 
     /// Drop the held capture: it is not a picture of the target any more (hidden, suspected, or
@@ -1465,14 +1546,26 @@ impl<P: Platform> Shared<P> {
         if defer && !due {
             return Attempt::NotDue;
         }
-        let options = {
+        // Read before the requests: the book is locked ahead of them where both are taken.
+        let usable = self.ltr_usable();
+        let (options, standalone) = {
             let mut pending = self.pending.lock();
-            let force_keyframe = if defer { false } else { std::mem::take(&mut pending.keyframe) };
-            FrameOptions {
+            let refresh = std::mem::take(&mut pending.refresh) || defer;
+            // A refresh with no acknowledged reference to be predicted from goes out as a
+            // keyframe. VideoToolbox answers `ForceLTRRefresh` with nothing acknowledged with a
+            // sync frame that the frames after it cannot be decoded against (-12909, every one
+            // until the next keyframe, at 3024 × 1964): each failure asked for a refresh, and
+            // each refresh made the next one (MEASUREMENTS.md, "a refresh with nothing
+            // acknowledged").
+            let standalone = refresh && !usable;
+            let force_keyframe = !defer && (std::mem::take(&mut pending.keyframe) || standalone);
+            let options = FrameOptions {
                 force_keyframe,
-                force_ltr_refresh: std::mem::take(&mut pending.refresh) || defer,
+                force_ltr_refresh: refresh && !standalone,
                 acked_ltr: std::mem::take(&mut pending.acked),
-            }
+            };
+            drop(pending);
+            (options, standalone)
         };
         // The encoder wants presentation times that only go forward.
         let pts = at.max(last.saturating_add(1));
@@ -1502,6 +1595,12 @@ impl<P: Platform> Shared<P> {
             drop(pending);
             drop(encoder);
             return Attempt::Failed;
+        }
+        if options.force_keyframe {
+            self.keyframe_submitted_us.store(now.max(1), Ordering::Relaxed);
+        }
+        if standalone {
+            self.counters.refreshes_idr.fetch_add(1, Ordering::Relaxed);
         }
         drop(encoder);
         Attempt::Sent
@@ -1627,6 +1726,30 @@ impl<P: Platform> Shared<P> {
         }
     }
 
+    /// A number for an encoder session about to be built, to [`Self::install`] it under.
+    fn next_session(&self) -> u64 {
+        self.sessions.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+    }
+
+    /// Encoder session `session` produced an access unit: the stream's when that session is the
+    /// one in force, dropped when it was replaced.
+    ///
+    /// The session in force is set under the encoder's write lock, before the new session can be
+    /// given a frame, so every packet of the new session finds it set.
+    fn on_session_packet(&self, session: u64, packet: &EncodedPacket) {
+        if self.session.load(Ordering::Relaxed) != session {
+            tracing::debug!(
+                stream = %self.id,
+                session,
+                pts_us = packet.pts_us,
+                keyframe = packet.keyframe,
+                "a replaced encoder session's frame dropped"
+            );
+            return;
+        }
+        self.on_packet(packet);
+    }
+
     /// VideoToolbox produced an access unit.
     fn on_packet(&self, packet: &EncodedPacket) {
         let now = now::<P>();
@@ -1642,6 +1765,7 @@ impl<P: Platform> Shared<P> {
             self.geometry_wake.notify_one();
         }
         if packet.keyframe {
+            self.keyframe_submitted_us.store(0, Ordering::Relaxed);
             let bytes = u64::try_from(packet.data.len()).unwrap_or(u64::MAX);
             let estimate = keyframe_estimate(self.keyframe_bytes.load(Ordering::Relaxed), bytes);
             self.keyframe_bytes.store(estimate, Ordering::Relaxed);
@@ -1856,9 +1980,16 @@ impl<P: Platform> Shared<P> {
     /// so an LTR refresh would be predicted from a picture it does not have and fail to decode
     /// (-17694). Its acknowledged references are dropped and a keyframe is asked for, which then
     /// has no reference left to be deferred for ([`Self::keyframe_admitted`]).
+    ///
+    /// A keyframe being encoded answers it ([`KEYFRAME_IN_FLIGHT_US`]).
     fn request_refresh(&self, last_good_frame: u32, keyframe: bool) {
         tracing::debug!(stream = %self.id, last_good_frame, keyframe, "refresh requested");
         self.counters.refreshes.fetch_add(1, Ordering::Relaxed);
+        let submitted = self.keyframe_submitted_us.load(Ordering::Relaxed);
+        if submitted != 0 && now::<P>().saturating_sub(submitted) < KEYFRAME_IN_FLIGHT_US {
+            tracing::debug!(stream = %self.id, "the keyframe being encoded answers the refresh");
+            return;
+        }
         if keyframe {
             self.ltr.lock().client_lost();
             self.pending.lock().keyframe = true;
@@ -1896,23 +2027,26 @@ const fn send_ms_lo(now_us: u64) -> u8 {
 async fn build_encoder<P: Platform>(
     shared: &Weak<Shared<P>>,
     config: EncoderConfig,
+    session: u64,
 ) -> Result<P::Video, ScreenError> {
-    start_encoder(shared, config)
+    start_encoder(shared, config, session)
         .await
         .map_err(|_cancelled| ScreenError::Closed)?
         .map_err(Into::into)
 }
 
 /// [`build_encoder`] without waiting for it: the build runs on the blocking pool from here on.
+/// Its packets are the stream's once it is installed as `session` ([`Shared::install`]).
 fn start_encoder<P: Platform>(
     shared: &Weak<Shared<P>>,
     config: EncoderConfig,
+    session: u64,
 ) -> JoinHandle<Result<P::Video, CodecError>> {
     let weak = Weak::clone(shared);
     tokio::task::spawn_blocking(move || {
         P::Video::new(config, move |packet| {
             if let Some(shared) = weak.upgrade() {
-                shared.on_packet(&packet);
+                shared.on_session_packet(session, &packet);
             }
         })
     })
@@ -1928,6 +2062,8 @@ fn start_encoder<P: Platform>(
 /// stream goes on at its old size.
 pub struct Rebuild<P: Platform> {
     encoder: JoinHandle<Result<P::Video, CodecError>>,
+    /// The number the session is built under, to install it as.
+    session: u64,
     native: (u32, u32),
     desired: CaptureConfig,
     config: EncoderConfig,
@@ -2510,18 +2646,19 @@ impl<P: Platform> Pipeline<P> {
         let zoom = f64::from(capture_config.width) / f64::from(native.0);
         shared.set_zoom(zoom);
         let t_encoder = Instant::now();
-        let encoder = match build_encoder(&Arc::downgrade(&shared), encoder_config).await {
+        let session = shared.next_session();
+        let encoder = match build_encoder(&Arc::downgrade(&shared), encoder_config, session).await {
             Err(e) if chroma == Chroma::Full => {
                 tracing::warn!(stream = %id, error = %e, "no 4:4:4 session here: 4:2:0");
                 shared.chroma.lock().refuse();
                 (capture_config, encoder_config) =
                     carrying(Chroma::Subsampled, (capture_config, encoder_config));
-                build_encoder(&Arc::downgrade(&shared), encoder_config).await?
+                build_encoder(&Arc::downgrade(&shared), encoder_config, session).await?
             }
             built => built?,
         };
         let encoder_built = t_encoder.elapsed();
-        retire(shared.install(encoder));
+        retire(shared.install(encoder, session));
         let start = shared.rate.lock().target_bps();
         shared.apply_bitrate(start);
         shared.apply_cadence(start);
@@ -2643,8 +2780,8 @@ impl<P: Platform> Pipeline<P> {
 
     /// What the client's feedback reaches without going through this stream's owner.
     #[must_use]
-    pub fn control(&self) -> StreamControl<P> {
-        StreamControl(Arc::clone(&self.shared))
+    pub fn control(&self) -> StreamControl {
+        StreamControl(Arc::<Shared<P>>::clone(&self.shared))
     }
 
     /// A handle on the counters for the daemon's registry.
@@ -2835,8 +2972,9 @@ impl<P: Platform> Pipeline<P> {
             self.desired.format = desired.format;
             self.apply_desired();
         }
-        let encoder = start_encoder(&Arc::downgrade(&self.shared), config);
-        Rebuild { encoder, native, desired, config, resized: false }
+        let session = self.shared.next_session();
+        let encoder = start_encoder(&Arc::downgrade(&self.shared), config, session);
+        Rebuild { encoder, session, native, desired, config, resized: false }
     }
 
     /// The session `rebuild` was for could not be made: the stream goes on with the one it has.
@@ -3072,9 +3210,11 @@ impl<P: Platform> Pipeline<P> {
     }
 
     fn install_rebuild(&mut self, rebuild: Rebuild<P>, encoder: P::Video) {
-        let Rebuild { encoder: _answered, native, desired, config: encoder_config, .. } = rebuild;
+        let Rebuild {
+            encoder: _answered, session, native, desired, config: encoder_config, ..
+        } = rebuild;
         self.native = native;
-        retire(self.shared.install(encoder));
+        retire(self.shared.install(encoder, session));
         let target = {
             let mut rate = self.shared.rate.lock();
             rate.set_max(encoder_config.bitrate_bps);
@@ -3259,6 +3399,10 @@ pub fn resize_window(
     width: f64,
     height: f64,
 ) -> Result<(), ScreenError> {
+    #[cfg(target_os = "macos")]
+    if synthetic::serving() {
+        return Pipeline::<synthetic::Synthetic>::resize_window(window, width, height);
+    }
     ScreenStream::resize_window(window, width, height)
 }
 
@@ -4850,7 +4994,7 @@ mod tests {
         let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
         let log = Log::default();
-        let _none = shared.install(Recorder { session: 1, log: Arc::clone(&log) });
+        let _none = shared.install(Recorder { session: 1, log: Arc::clone(&log) }, 1);
         shared.pending.lock().keyframe = false;
         *shared.held.lock() = Some(a_frame());
         shared.owed.store(true, Ordering::Relaxed);
@@ -4859,7 +5003,7 @@ mod tests {
         let rebuild = std::thread::spawn({
             let shared = Arc::clone(&shared);
             let log = Arc::clone(&log);
-            move || drop(shared.install(Recorder { session: 2, log }))
+            move || drop(shared.install(Recorder { session: 2, log }, 2))
         });
         let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
         let swapping = || {
@@ -4937,6 +5081,113 @@ mod tests {
         }
     }
 
+    /// A frame the replaced session was still encoding comes out after the new session is in,
+    /// behind its keyframe: it is dropped, not sent to be decoded against the new session, and
+    /// its token is not filed in the new session's book. The session in force is sent.
+    #[test]
+    fn a_replaced_sessions_late_frame_is_not_sent() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let old = shared.next_session();
+        drop(shared.install(Recorder { session: old, log: Log::default() }, old));
+        shared.on_session_packet(old, &packet(900, true, Some(0), false));
+        assert!(!wire.drain().is_empty(), "the session in force is the stream's");
+
+        let new = shared.next_session();
+        assert_ne!(new, old);
+        drop(shared.install(Recorder { session: new, log: Log::default() }, new));
+        shared.on_session_packet(new, &packet(900, true, Some(0), false));
+        let keyframe = wire.drain();
+        assert!(!keyframe.is_empty());
+        shared.on_session_packet(old, &packet(900, false, Some(31), false));
+        assert!(wire.drain().is_empty(), "the old session's frame after the new keyframe");
+        assert_eq!(shared.stats().encoded, 2);
+        shared.report(&acking(&[31]), None);
+        assert!(shared.pending.lock().acked.is_empty(), "31 was never offered by this session");
+    }
+
+    /// A refresh with no acknowledged reference goes to the encoder as a keyframe, not as
+    /// `ForceLTRRefresh`, after which VideoToolbox's next frames do not decode; with one it goes
+    /// as the LTR refresh, a delta. Either way the request is taken.
+    #[test]
+    fn a_refresh_with_nothing_acknowledged_goes_out_as_a_keyframe() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let log = Log::default();
+        drop(shared.install(Recorder { session: 1, log: Arc::clone(&log) }, 1));
+        let at = std::cell::Cell::new(host_now_us());
+        // A second apart, so the cadence never holds one back.
+        let encode = |shared: &Shared<Recording>| {
+            *shared.held.lock() = Some(a_frame());
+            shared.owed.store(true, Ordering::Relaxed);
+            at.set(at.get() + 1_000_000);
+            let held = shared.held.lock();
+            let attempt = shared.try_encode(held.as_ref(), false, at.get());
+            drop(held);
+            assert_eq!(attempt, Attempt::Sent);
+            let (keyframe, refresh) = {
+                let pending = shared.pending.lock();
+                (pending.keyframe, pending.refresh)
+            };
+            assert!(!keyframe && !refresh, "the request was taken");
+        };
+        encode(&shared);
+        shared.on_packet(&packet(40_000, true, Some(0), false));
+
+        shared.pending.lock().refresh = true;
+        assert!(!shared.ltr_usable());
+        encode(&shared);
+        assert_eq!(log.lock().last(), Some(&(1, true)), "nothing acknowledged: a keyframe");
+        assert_eq!(shared.stats().ltr.refreshes_idr, 1);
+        shared.on_packet(&packet(40_000, true, None, false));
+
+        shared.on_packet(&packet(900, false, Some(3), false));
+        shared.report(&acking(&[3]), None);
+        shared.pending.lock().refresh = true;
+        encode(&shared);
+        assert_eq!(log.lock().last(), Some(&(1, false)), "a reference: the LTR refresh");
+    }
+
+    /// A refresh asked for while a keyframe is being encoded is answered by it: the encoder is
+    /// not asked for a second behind it. One asked for once it came out is answered again, and so
+    /// is one asked for when it is taken as dropped.
+    #[test]
+    fn a_keyframe_being_encoded_answers_a_refresh() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let log = Log::default();
+        drop(shared.install(Recorder { session: 1, log: Arc::clone(&log) }, 1));
+        *shared.held.lock() = Some(a_frame());
+        shared.owed.store(true, Ordering::Relaxed);
+        let now = host_now_us();
+        let held = shared.held.lock();
+        assert_eq!(shared.try_encode(held.as_ref(), true, now), Attempt::Sent);
+        drop(held);
+        assert_eq!(*log.lock(), vec![(1, true)], "the session's keyframe went in");
+
+        shared.request_refresh(0, true);
+        shared.request_refresh(0, false);
+        let asked = |shared: &Shared<Recording>| {
+            let pending = shared.pending.lock();
+            (pending.keyframe, pending.refresh)
+        };
+        assert_eq!(asked(&shared), (false, false), "the keyframe in flight answers both");
+        assert_eq!(shared.stats().refreshes, 2, "still counted");
+
+        shared.on_packet(&packet(40_000, true, None, false));
+        shared.request_refresh(0, true);
+        assert_eq!(asked(&shared), (true, false), "asked for after it came out: answered");
+
+        shared.pending.lock().keyframe = false;
+        let long_ago = host_now_us().saturating_sub(KEYFRAME_IN_FLIGHT_US);
+        shared.keyframe_submitted_us.store(long_ago, Ordering::Relaxed);
+        shared.request_refresh(0, false);
+        assert_eq!(asked(&shared), (false, true), "one that never came out answers nothing");
+    }
+
     /// A resize's encoder is built off the stream's task: starting it answers at once however
     /// long VideoToolbox takes, a wait for it that is given up leaves the build running, and the
     /// next wait gets the session. The stream's task relies on all three to keep taking input
@@ -4949,9 +5200,10 @@ mod tests {
         let shared = Arc::new(Shared::<Slow>::new(StreamId(1), sink, 8_000_000, 60, false));
         let (capture, config) = configs((1280, 800), &Quality::default(), None);
         let started = Instant::now();
-        let encoder = start_encoder(&Arc::downgrade(&shared), config);
+        let encoder = start_encoder(&Arc::downgrade(&shared), config, 1);
         let mut rebuild = Rebuild::<Slow> {
             encoder,
+            session: 1,
             native: (1280, 800),
             desired: capture,
             config,

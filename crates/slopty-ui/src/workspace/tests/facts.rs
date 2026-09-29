@@ -220,7 +220,8 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     let other = WorkerCaps { version: "0.0.1".into(), can_inject: false, ..healthy() };
     assert_eq!(
         navigator::worker_warning(&other).as_deref(),
-        Some("Accessibility off \u{b7} Version 0.0.1")
+        Some("Accessibility off"),
+        "a version is the wire fingerprint's to judge, not the header's"
     );
     let linux = WorkerCaps { os: Os::Linux, can_capture: false, can_inject: false, ..healthy() };
     assert_eq!(navigator::worker_warning(&linux), None, "not a Mac's grants");

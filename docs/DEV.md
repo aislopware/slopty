@@ -5,13 +5,15 @@ The repository, the commands and the loop. Rules of the game are in `CLAUDE.md`;
 
 ## Layout
 `crates/*` libraries, `apps/*` binaries, `xtask/` automation, `vendor/ghostty` pinned submodule
-(libghostty-vt source), `docs/` design + decisions. GPUI comes from `aislopware/zed`, gpui-kit
-from `aislopware/gpui-kit` and libghostty-vt from `aislopware/libghostty-rs`, as rev-pinned git
-dependencies. Each fork carries our commits on its default branch, rebased onto upstream.
+(libghostty-vt source), `docs/` design + decisions. GPUI comes from `aislopware/gpui-fast`,
+gpui-kit from `aislopware/gpui-kit` and libghostty-vt from `aislopware/libghostty-rs`, as
+rev-pinned git dependencies. Each fork carries our commits on its default branch: gpui-fast merges
+longbridge's branch in, the other two are rebased onto theirs. gpui-fast is GPUI imported flat out
+of zed, and the fork imports zed itself so it is never behind zed while longbridge lags.
 
 ## Dev loop
 - Before coding, bring the ground up to date: `cargo xtask upstream check` and `sync` whatever
-  is behind (the three forks and `vendor/ghostty`), `rustup update`, `cargo update -w`, and
+  is behind (the three forks, zed and `vendor/ghostty`), `rustup update`, `cargo update -w`, and
   `cargo binstall -y <tool>` for any gate tool `cargo info <tool>` shows behind.
 - `cargo xtask setup` installs tools (binstall) and initialises submodules.
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
@@ -43,13 +45,27 @@ dependencies. Each fork carries our commits on its default branch, rebased onto 
   identifiers, so one approval of Screen Recording and Accessibility survives every later build
   (`run worker` does it for you). Without it a rebuilt daemon is a new executable to TCC and
   loses both, which surfaces as ScreenCaptureKit `-3801` and no prompt (`docs/decisions/input.md`).
-- `cargo xtask upstream check` shows how far the GPUI, gpui-kit and libghostty forks are behind
-  upstream (bases in `xtask/upstream.toml`). Once a fork's `check_every_days` has run out (none
-  for gpui-kit, which lands several changes a day, so every gate asks; a week for the others),
-  the gate asks the upstream for its head (`git ls-remote`) and warns when it moved.
-  `cargo xtask upstream sync` rebases the forks in `.research/` under the main checkout, build-checks, pushes them
-  (`SSH_AUTH_SOCK` on the signing agent first) and moves the `Cargo.lock` pins, stopping on
-  any conflict that is not `Cargo.lock`. Then gate, e2e app + ios, and a DECISIONS entry.
+- `cargo xtask upstream check` shows how far the gpui-fast, gpui-kit and libghostty forks are
+  behind upstream, and how far zed is ahead of gpui-fast's import (bases in `xtask/upstream.toml`).
+  For zed it reads `zed_commit` from the fork's `UPSTREAM`, counts the zed commits since that touch
+  the tracked directories, and lists what an import would ask for by hand: crates joining or
+  leaving the tracked set, and redirected files zed changed. Once a source's `check_every_days`
+  has run out (none for gpui-fast and gpui-kit, which land changes most days, so every gate asks;
+  a week for zed and libghostty-rs), the gate asks the upstream for its head (`git ls-remote`)
+  and warns when it moved.
+- `cargo xtask upstream sync [--only <fork>]` works in the checkouts under `.research/` in the
+  main checkout. It rebases gpui-kit and libghostty-rs and merges longbridge's branch into
+  gpui-fast. Then it imports zed into gpui-fast by the procedure in gpui-fast's
+  `docs/upstream-sync.md`: a vendor commit `zed: import <short>` on the last one (`import_commit`)
+  holding zed's tracked directories byte for byte, built from the zed checkout (`.research/zed-main`,
+  fetched, its work tree untouched), merged into the fork with `UPSTREAM` rewritten. It then runs
+  `script/check-upstream` and the build checks, pushes (`SSH_AUTH_SOCK` on the signing agent
+  first) and moves the `Cargo.lock` pins. A conflict that is not `Cargo.lock` stops it. So does an
+  import that needs a hand: a conflict, a file zed changed that a `#[path = "fast/…"]` redirect
+  replaces (port it into our copy), or a crate the workspace manifest must add or drop. It stops
+  mid-merge with `UPSTREAM` already staged and prints the list; finish there, `git commit`, and
+  run `sync` again. `--only zed` is `--only gpui-fast`. Then gate, e2e app + ios, and a
+  DECISIONS entry.
 
 ## Gate
 `cargo gate` is fmt, clippy `-D warnings` on all targets and all three Apple triples, clippy for
@@ -90,6 +106,8 @@ index, and a skipped lane or test has already passed on the same inputs.
 The gate's nextest profile is `gate` (`.config/nextest.toml`). It retries the tests named
 there as timing-sensitive, which have failed under the gate's load and pass alone, up to twice.
 A pass on a retry shows as FLAKY in the log. Only a named test gets retries, never a pattern.
+The `ci` profile inherits `gate` (the same named retries and no others) and adds a runner's
+longer timeouts and a JUnit report.
 
 `cargo xtask check -p <crate>…` runs the same steps on named crates only, on the working tree:
 what an agent that owns those crates runs before it reports. Its builds name `workspace-hack`
@@ -113,7 +131,8 @@ the lock (`--idle-hours N`, `--dry-run`). How it knows a unit is in use:
 under `target/deep/`:
 - `miri` — the pure crates' tests under Miri (nightly; `PROPTEST_CASES=8`, isolation off for
   insta). `-p <crate>` narrows it.
-- `sanitize [address|thread]` — the daemons' and codec's tests built with `-Zsanitizer` and
+- `sanitize [address|thread]` — the tests of the daemons, the codec, `slopty-platform` and
+  `slopty-capture` (the crates with the most `unsafe`) built with `-Zsanitizer` and
   `-Zbuild-std` on nightly.
 - `features` — `cargo hack check --each-feature` over the workspace: every feature alone,
   none, and all.
@@ -121,6 +140,21 @@ under `target/deep/`:
   left out).
 - `mutants -p <crate> [--timeout s]` — `cargo mutants` on one crate; the surviving mutants are
   the lines no test would notice changing.
+- `fuzz [--time s]` — every fuzz target for 30 s (`cargo xtask fuzz` below).
+
+`cargo xtask fuzz [<target>] [--time s] [--jobs n]` builds `fuzz/` with cargo-fuzz (nightly,
+AddressSanitizer, debug assertions; `cargo binstall cargo-fuzz`) and runs each target, or the one
+named, for `--time` seconds (60 by default) under `nice`, in libFuzzer's fork mode so a crash is
+written and the run goes on. It replays the kept regression inputs first. The corpus of each
+target grows under `target/fuzz/corpus/<target>`. Beside it, seeds are rewritten every run from
+the wire goldens in `crates/slopty-proto/tests/snapshots`. Anything found lands under
+`target/fuzz/artifacts/<target>/`, with the log in `target/fuzz/logs/`, and fails the run.
+`--keep <artifact>` minimises one into `fuzz/regressions/<target>/`, which the fuzz crate's
+`tests/regressions.rs` replays on a plain build: `cargo xtask fuzz --replay`, no nightly needed.
+A new target is a function in `fuzz/src`, an entry in its `TARGETS`, a file in
+`fuzz/fuzz_targets` and a `[[bin]]`; that test fails when the three disagree. The crate has its
+own `Cargo.lock`, so `cargo update --manifest-path fuzz/Cargo.toml` moves its dependencies, and
+the gate checks its formatting.
 
 `cargo xtask profile -- <command…>` records a CPU profile of any command with samply into
 `target/profile/<epoch>.json.gz`; `samply load <file>` opens it in the Firefox Profiler.
@@ -152,9 +186,10 @@ under `target/deep/`:
 - `cargo xtask nightly [run] [--only <check>] [--skip <check>] [--soak-minutes 20]
   [--proptest-cases 4096] [--iterations 50]` runs the heavy lanes one after another under
   `nice`: `soak`, `bench` (with `--wall`), `proptest`, `gpui-iterations`, `miri`,
-  `sanitize-address`, `sanitize-thread`, `coverage` and `features`. Each writes `<check>.log`
-  and `<check>.json` under `target/nightly/<date>/`, beside a `summary.json`. A check whose tool
-  is missing is skipped and says why. `cargo xtask nightly install` writes and loads the
+  `sanitize-address`, `sanitize-thread`, `coverage`, `features` and `fuzz`. Each writes
+  `<check>.log` and `<check>.json` under `target/nightly/<date>/`, beside a `summary.json`. A
+  check whose tool is missing is skipped and says why. `cargo xtask nightly install` writes and
+  loads the
   LaunchAgent `dev.aislopware.slopty.nightly`, which runs it at 03:00 at background priority;
   `cargo xtask nightly uninstall` removes it. A failing seed of `gpui-iterations` replays with
   `SEED=<n> cargo nextest run -p slopty-ui <test>`.

@@ -25,6 +25,8 @@
 //!   relay long enough to say so, and what to say.
 //! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
 //!   numbers the overlay and the tests read.
+//! * [`update`] — [`update::UpdateNotice`]: what to say of a worker or server on a different build,
+//!   and the command that updates it.
 //! * [`search`] — [`search::SearchResults`]: a text search on a worker as its pages come in, in
 //!   path order, and the rows a results list draws.
 
@@ -49,6 +51,7 @@ pub mod search;
 pub mod server;
 pub mod term;
 pub mod tunnel;
+pub mod update;
 pub mod xfer;
 
 pub use items::{ItemChange, ItemDoc};

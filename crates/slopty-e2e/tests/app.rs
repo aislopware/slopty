@@ -14,8 +14,16 @@ mod conversation;
 mod gallery;
 
 #[cfg(test)]
+#[path = "app/quick.rs"]
+mod quick;
+
+#[cfg(test)]
 #[path = "app/settings.rs"]
 mod settings;
+
+#[cfg(test)]
+#[path = "app/stream.rs"]
+mod stream;
 
 #[cfg(test)]
 #[path = "app/tiles.rs"]

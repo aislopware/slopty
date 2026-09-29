@@ -78,6 +78,34 @@ pub fn is_claude(name: &str, argv: &[String]) -> bool {
     false
 }
 
+/// The arguments Claude Code itself was given, out of a command line [`is_claude`] accepts.
+///
+/// They are what follows `claude`, or the script a runtime runs. Empty when they cannot be
+/// told apart from the rest, as inside a shell's `-c` command.
+#[must_use]
+pub fn agent_args(argv: &[String]) -> &[String] {
+    let Some((argv0, rest)) = argv.split_first() else { return &[] };
+    let program = base(argv0);
+    if program == "claude" {
+        return rest;
+    }
+    if !RUNTIMES.contains(&program) {
+        return &[];
+    }
+    let shell = SHELLS.contains(&program);
+    let mut words = rest.iter();
+    while let Some(arg) = words.next() {
+        if let Some(flags) = arg.strip_prefix('-') {
+            if shell && flags.contains('c') {
+                return &[];
+            }
+            continue;
+        }
+        return if is_claude_script(arg) { words.as_slice() } else { &[] };
+    }
+    &[]
+}
+
 /// Whether the command a shell was handed (`sh -c '<command>'`) starts the agent: its first
 /// word, so `sh -c 'echo claude'` is an echo.
 fn is_claude_command(command: &str) -> bool {
@@ -158,6 +186,22 @@ mod tests {
         assert!(!is_claude("bun", &argv(&["bun", "run", "--", "claude"])), "`run` is the script");
         // Flags before the script are stepped over, so the script is still found.
         assert!(is_claude("node", &argv(&["node", "--enable-source-maps", "/usr/bin/claude"])));
+    }
+
+    /// The agent's own arguments follow `claude` or the script a runtime runs; inside a
+    /// shell's `-c` command they are not told apart.
+    #[test]
+    fn the_agents_own_arguments_follow_its_program_or_script() {
+        let words = |line: &str| argv(&line.split(' ').collect::<Vec<_>>());
+        assert_eq!(agent_args(&words("/opt/bin/claude --model x")), words("--model x"));
+        let cli = "/n/@anthropic-ai/claude-code/cli.js";
+        assert_eq!(agent_args(&words(&format!("node --x {cli} -c"))), words("-c"));
+        assert_eq!(
+            agent_args(&words("/bin/sh /Users/x/bin/claude --effort high")),
+            words("--effort high")
+        );
+        assert!(agent_args(&words("/bin/zsh -lic claude")).is_empty());
+        assert!(agent_args(&words("node server.js --model x")).is_empty());
     }
 
     #[test]

@@ -16,6 +16,15 @@ pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Bytes of the length prefix.
 pub const PREFIX_BYTES: usize = 4;
 
+/// Most terminal cells one message decodes into.
+///
+/// That is a [`crate::terminal::TermEvent::Lines`] of [`crate::terminal::MAX_FETCH_LINES`]
+/// lines at [`slopty_grid::MAX_COLS`], the largest an honest peer sends. A line's trailing
+/// blanks are not on the wire, so its bytes do not bound its cells; this does
+/// (`docs/decisions/terminal.md`, "Decoded lines are bounded").
+pub const MAX_DECODED_CELLS: usize =
+    crate::terminal::MAX_FETCH_LINES as usize * slopty_grid::MAX_COLS as usize;
+
 /// Framing errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
@@ -87,9 +96,11 @@ pub fn encode_body<T: Serialize>(msg: &T) -> Result<Vec<u8>, CodecError> {
     postcard::to_allocvec(msg).map_err(CodecError::Encode)
 }
 
-/// Decode a message body (no prefix).
+/// Decode a message body (no prefix), its terminal lines within [`MAX_DECODED_CELLS`].
 pub fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, CodecError> {
-    postcard::from_bytes(body).map_err(CodecError::Decode)
+    slopty_grid::with_cell_budget(MAX_DECODED_CELLS, || postcard::from_bytes(body))
+        .0
+        .map_err(CodecError::Decode)
 }
 
 /// Try to take one complete frame from the front of `buf`. Returns `Ok(None)` when more bytes
@@ -270,6 +281,68 @@ mod tests {
             "MEASURE 12 MiB image, encode + decode µs (min / median / max, 20 each): \
              sequence of u8 {before} · byte string {after}"
         );
+    }
+
+    /// A 200-column frame: `rows` rows of code, then `blank` rows with nothing on them.
+    fn code_frame(rows: u16, blank: u16) -> crate::terminal::TermEvent {
+        use slopty_grid::{Cursor, Line, RowUpdate, Style, TermModes};
+
+        use crate::terminal::{Frame, TermEvent};
+        let text = "fn main() { println!(\"hello, world\"); } // ".repeat(5);
+        TermEvent::Frame(Frame {
+            seq: 1,
+            full: false,
+            epoch: 0,
+            cols: 200,
+            rows: 60,
+            cursor: Cursor::default(),
+            modes: TermModes::empty(),
+            oldest_line: slopty_grid::LineIndex(0),
+            first_visible_line: slopty_grid::LineIndex(0),
+            total_lines: 60,
+            input_ack: 0,
+            updates: (0..rows.saturating_add(blank))
+                .map(|row| RowUpdate {
+                    row,
+                    line: if row < rows {
+                        Line::from_text(&text, 200, Style::DEFAULT)
+                    } else {
+                        Line::blank(200)
+                    }
+                    .into(),
+                })
+                .collect(),
+            images: Vec::new(),
+        })
+    }
+
+    /// Decoding a frame as a client does: an echo's one row, a 200 × 60 screen of code, and
+    /// one of blank rows (every cell put back by the decoder). Prints the numbers MEASUREMENTS
+    /// records: `cargo test -p slopty-proto --release --lib frame_decode_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn frame_decode_cost() {
+        use crate::terminal::TermEvent;
+        for (name, event, rounds) in [
+            ("echo, 1 row", code_frame(1, 0), 20_000),
+            ("screen, 60 rows", code_frame(60, 0), 2_000),
+            ("blank screen, 60 rows", code_frame(0, 60), 20_000),
+        ] {
+            let wire = encode(&event).unwrap();
+            let body = &wire[PREFIX_BYTES..];
+            let mut samples = Vec::with_capacity(rounds);
+            for _ in 0..rounds {
+                let t = std::time::Instant::now();
+                std::hint::black_box(decode_body::<TermEvent>(std::hint::black_box(body)).unwrap());
+                samples.push(t.elapsed());
+            }
+            println!(
+                "MEASURE decode {name}: {} B, µs (min / median / max, {rounds}): {}",
+                body.len(),
+                spread(&mut samples)
+            );
+        }
     }
 
     /// Frames encoded and handed to the stream as they were (a body, a copy behind the prefix,

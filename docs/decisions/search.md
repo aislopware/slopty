@@ -14,7 +14,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `.hg`, `.jj` and `.svn` are not.
   - A file with a NUL byte is binary and reports nothing. Its lines are gathered before any
     are sent, so a file found binary half way leaves no trace.
-  - The files field takes ripgrep's globs (`*.rs`, `!tests/**`).
+  - The files field takes ripgrep's globs (`*.rs`, `!tests/**`). They narrow what the ignore
+    files let through, as VS Code's "files to include" does, rather than outrank them as
+    `rg -g` does: given to the walk as overrides, `*.rs` brought a gitignored Rust file back
+    (caught by `search_in_files_through_the_cli_and_mcp`), so they filter the walk's entries
+    instead (`slopty_worker::search::walker`).
   - The toggles are `grep-regex`'s own: case (`case_insensitive`), whole word (`word`) and
     regular expression (`fixed_strings` when off).
 
@@ -73,5 +77,79 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   workspace keeps the surface, so ⌥⌘F brings the same query and results back, and runs a
   stopped search again.
 
-- ⏸ **Replace across files, context lines round a match, and an MCP verb for agents**
-  (`slopty-tools`) are deferred.
+- ✅ **Context lines come from the searcher, each line once** (2026-09-29). A toggle beside
+  the regex one asks for two lines each side of a match (`SearchQuery::context`, at most five,
+  `MAX_CONTEXT`). `grep-searcher` hands them to its sink's `context`. It already merges the
+  context of two matches close together and never reports a matching line as context, so
+  `FileHits::context` holds each line once and the client only interleaves by line number
+  (`SearchResults::rows`). A match the cap cuts off takes its context with it. The rows are
+  drawn in `text_muted` with a dimmer number; ↑/↓ skip them, and a click opens the file at that
+  line. No separator marks a gap between two runs of context: the line numbers already say it,
+  and a separator would cost a whole row in a list of fixed-height rows.
+
+- ✅ **Replace names what the search showed, and the worker refuses a file that moved**
+  (2026-09-29). VS Code and Zed replace what their result list shows, and so does Slopty:
+  - `SearchRequest::Replace` carries the search's query, the replacement and, per file, each
+    match as its line and its index on the line (`MatchAt`), with the file's `FileStamp` (size
+    and modification time in nanoseconds, taken before the file was read). A capped search
+    replaces only the matches it showed; searching again finds the rest.
+  - The worker compares the stamp before and after it reads the file whole. A file written in
+    between, or gone, is `SkipReason::Changed`: its lines may have moved, and a match found by
+    number could be another one. The modification time moves on every write on APFS, so no
+    hash of the content is needed.
+  - It finds the line's matches again with the same matcher and counts them as a hit does (not
+    empty, 64 at most). `$1`, `${name}` and `$$` expand through `grep-matcher`'s own
+    `interpolate` when the query is a regular expression; a literal query's `$1` is text. The
+    file is rewritten through `slopty_platform::fs::replace`: a temporary file beside it,
+    renamed over it, its permissions kept. CRLF endings and a missing final newline come
+    through as they were.
+  - `SearchEvent::Replaced` lists the files rewritten with their new stamps, and the files
+    skipped with why. The client takes the replaced lines out, keeps the new stamp for the next
+    replace in the same file, and moves the lines under a replacement that holds newlines.
+  - An open file tile needs nothing more: its watcher compares the same size and time by path
+    (`slopty_worker::file::stamp`), so the rename shows on its next look.
+
+  The replace field sits under the query. While it holds text or the keyboard, each match reads
+  struck through in the error tone, with its replacement after it in the success tone
+  (`slopty_client::search::Preview`; a regular expression's groups are expanded on the client
+  with the `regex` crate, which reads the same syntax). ↩ in the field replaces the selected
+  line's matches (on a file row, the file's) and the selection moves on to the next match. ⌘↩ or
+  the "Replace all" button replaces every match once the search is through, and the selected
+  row's own button replaces that row. One replace is in flight at a time. The foot says how
+  many matches in how many files, and how many files were skipped as changed since the search.
+  The surface replaces a line at a time: the wire names single matches, but a row holds a line,
+  and two matches of one query on one line are rare enough not to split the row.
+
+- ✅ **Scripts and agents search through one verb** (2026-09-29). `Verb::Search { worker, root,
+  query, max_lines }` answers `Outcome::Search { files, summary }`: the same search, gathered to
+  its end and sorted by path (`slopty_worker::search::collect`), in one reply. `max_lines` is 200
+  unless asked, what a model can read in one go, and never more than the surface's 2 000, which a
+  16 MiB frame holds with room to spare even with five lines of context. `capped` says there
+  were more; a narrower glob or pattern is the way on, as in the surface, so the verb needs no
+  paging. `slopty search <pattern> [root] [--worker] [-g glob] [--regex] [-s] [-w] [-C n]
+  [--max n]` prints ripgrep's heading format (a match's number followed by `:`, a context
+  line's by `-`), or the tool's JSON with `--json`; the MCP tool is `search_files`. Replace is
+  not a verb: an agent edits files with its own tools, and a replace across files belongs where
+  a person reviews it.
+
+- ✅ **A replace names the match it was shown, never follows a link, and an orchestration
+  search ends with its request** (2026-09-29). Three faults a review found in the batch above:
+  - A line longer than 240 bytes was cut to start at its indentation, so matches inside the
+    indentation (a search for a space or a tab) were left out of the spans. The client names a
+    match by its place among the spans, and the replace counts every match from the line's
+    start, so replacing the first match shown rewrote an indentation space. The cut now never
+    starts past the line's first match (`line_hit`). Test:
+    `a_replace_on_a_long_indented_line_rewrites_the_match_shown`.
+  - The replace looked at the file with `symlink_metadata`, then opened it and wrote through
+    `slopty_platform::fs::replace`, both of which follow links, so a link swapped in between (or
+    a directory below the root swapped for a link) sent the write out of the folder. Each
+    directory on the way is now opened from the last with `O_NOFOLLOW`, the file too, and the
+    new contents are written beside it and renamed over it inside the directory held open, after
+    checking the name still holds the file that was read. Test:
+    `a_link_swapped_in_after_the_search_is_not_written_through`.
+  - `Verb::Search` walked with a stop flag nothing set, so a sparse search of `~` or `/` ran to
+    the end of the tree after its caller had given up. The flag is now set when the verb's future
+    is dropped (`search::StopOnDrop`), and the walk stops after 30 s (`SEARCH_WITHIN`, under the
+    server's 60 s) with what it found, capped. Tests: `dropping_a_search_stops_its_walk` (the
+    dropped walk ended 0.2 ms after its drop, a whole one takes 150–215 ms),
+    `a_collected_search_stops_when_told_or_late`.

@@ -13,6 +13,7 @@ mod claude_mod;
 mod deep;
 mod e2e;
 mod fixtures;
+mod fuzz;
 mod gate;
 mod icon;
 mod ime;
@@ -92,11 +93,15 @@ enum Cmd {
         dry_run: bool,
     },
     /// The slow checks that run on a schedule, not per commit: Miri, sanitizers, the feature
-    /// powerset, coverage, mutation testing.
+    /// powerset, coverage, mutation testing, a fuzz smoke.
     Deep {
         #[command(subcommand)]
         cmd: deep::DeepCmd,
     },
+    /// libFuzzer over every decoder that faces a peer (`fuzz/`): each target for `--time`
+    /// seconds from the wire goldens and its kept corpus; `--keep` files a crash as a regression
+    /// input, `--replay` replays those on a plain build.
+    Fuzz(fuzz::FuzzOpts),
     /// Run the `*_cost` measurements in release and hold their retired instructions to
     /// `xtask/budgets.toml` (`--update-budgets` records a run; `--wall` keeps the wall-time
     /// trend, as the nightly run does).
@@ -185,7 +190,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<linux::LinuxCmd>,
     },
-    /// Keep the GPUI and gpui-kit forks current with upstream (`check` the drift, `sync` them).
+    /// Keep the gpui-fast, gpui-kit and libghostty-rs forks current with their upstreams and zed
+    /// (`check` the drift, `sync` them).
     Upstream {
         #[command(subcommand)]
         cmd: upstream::UpstreamCmd,
@@ -215,6 +221,7 @@ fn main() -> Result<()> {
             dry_run,
         }),
         Cmd::Deep { cmd } => deep::run(&sh, &cmd),
+        Cmd::Fuzz(opts) => fuzz::run(&sh, &opts),
         Cmd::Bench(opts) => bench::run(&sh, &opts),
         Cmd::Soak(opts) => soak::run(&sh, &opts),
         Cmd::Nightly { cmd } => nightly::run(&sh, cmd.as_ref()),

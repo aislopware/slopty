@@ -6,7 +6,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   macOS 26.5 (verified 2026-09-05: `encodes_and_decodes_a_tone` round-trips a 440 Hz tone;
   the first packet comes back 120 frames short, Opus pre-skip) and the decoder on both
   platforms. One fixed configuration, 48 kHz stereo float interleaved, 960-frame packets at
-  96 kb/s, so nothing about the format travels on the wire. Playback is an `AudioQueue` with
+  96 kb/s, so nothing about the format travels on the wire (packets are 480 frames since 2026-09-29,
+  see "The Mac's device renders 128 frames and packets are 10 ms"). Playback is an `AudioQueue` with
   three 20 ms buffers refilled from a mutex-guarded ring (≤200 ms; underrun pads silence and
   counts, overrun drops the oldest; buffers and ring superseded 2026-09-24, see "Playback holds
   about 40 ms"). The input-proc pattern: the proc hands its one slice and
@@ -53,7 +54,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Short audio gaps are concealed by replaying the last packet with a fade** (2026-09-12,
   `slopty_codec::audio::Conceal`). Apple's Opus decoder takes no empty packet for its own
   concealment, so the client keeps the last decoded packet and, on a sequence gap of up to
-  `MAX_CONCEALED` = 3 packets (60 ms), pushes it again faded linearly to silence across the
+  `MAX_CONCEALED` = 3 packets (60 ms; 6 of 10 ms since 2026-09-29), pushes it again faded linearly to silence across the
   gap before the packet that arrived: a lost packet is a dip, not a click, and the ring keeps
   the gap's 20 ms per packet so the next real packet is not played early. Longer gaps stay
   silence (replaying 60 ms of anything sounds worse than a pause, and the ring underruns to
@@ -520,3 +521,57 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     whole side while the callback plays the queue in order, runs dry, stops the run and ramps to
     silence), `a_mute_discards_the_queue_and_the_next_run_starts_after_it`, and the latency
     traces unchanged. Measurement: `render_cost`, ignored.
+
+- ✅ **The Mac's device renders 128 frames and packets are 10 ms** (2026-09-29, no protocol
+  version change; every binary is rebuilt together; `slopty_codec::audio`). What sits between a
+  sample on the worker and the listener shrank in three places (`docs/MEASUREMENTS.md`,
+  2026-09-29, "audio: a smaller device buffer and 10 ms packets").
+  - The player asks the macOS output device for 128-frame renders (`IO_FRAMES`,
+    `kAudioDevicePropertyBufferFrameSize` through the output unit, clamped to the device's
+    `BufferFrameSizeRange`). A device that refuses keeps its own size. On the Mac Studio's
+    speakers the I/O buffer went from 512 frames (10.7 ms) to 128 (2.7 ms), so the device's
+    share before the DAC went from 17.3 to 9.3 ms. Over a minute of real-time feeding at each
+    size the HAL reported no overload. The render callback is a copy that costs the same per
+    frame at any size. The setting is the process's and applies to the device the default
+    output had when the player opened; after the user switches devices, the new one runs at its
+    own size until the next player.
+  - Opus packets are 480 frames, 10 ms, where they were 960 (RFC 6716 allows 2.5 to 60 ms, and
+    10 ms is the shortest that keeps CELT's full quality). Apple's converter takes them: 88–106
+    bytes at 96 kb/s, the same 120-frame pre-skip. The worker sends a packet once 10 ms of audio
+    is in, so its first sample leaves 10 ms sooner when the capture hands audio over in buffers
+    that short. `MAX_CONCEALED` became 6 packets, still 60 ms. The wire carries 100 packets a
+    second instead of 50, about 25 kbit/s more in headers.
+  - The ring's device term is the device's real buffer. It was a constant 10 ms in the target
+    (95th percentile of lateness plus one device buffer), in the depth a cut keeps, and in the
+    deadband. It is now the largest render the device has asked for, and the deadband is half
+    of it plus half a slice. At 128 frames that takes 7 ms off the target on a jittery link. On
+    iOS, which renders 1 024 frames unless its audio session asks for fewer, the target now
+    counts the 21.3 ms it really takes: 5 ms more depth than before, and no underrun either way
+    on the traces.
+  - The floor stays 20 ms. 15 ms was tried because packets now come twice as often. Fed in real
+    time on this machine at 128-frame renders, it ran the ring dry one to three times a minute,
+    each of which would be a gap in sound. 20 ms never did. A glitch is worse than 5 ms.
+  - Together, on the synthetic traces, the listener hears 14 ms sooner on a steady link with a
+    drifting clock (45 → 31 ms at the DAC) and 18 ms sooner under keyframe bursts (66 → 48). A
+    stall's backlog takes longer to cut, 59 ms at most after the burst against 31, since a
+    10 ms packet gives at most 7.5 ms to a cut.
+  - Not measured: how much audio ScreenCaptureKit hands over at a time, which needs a
+    Screen Recording-signed worker. If it is 1 024 frames, packets leave in twos and threes;
+    the trace built that way (`capture_in_1024_frame_chunks_is_covered`) starves nothing and
+    holds 16 ms against 27 before.
+  - Tests: `device_io_buffer` (ignored, silence on the real output),
+    `a_device_rendering_1024_frames_is_not_starved` (now 512 and 1 024, with the target covering
+    the render), `capture_in_1024_frame_chunks_is_covered`, `a_packet_lasts_its_frames`, and the
+    latency traces at 128-frame renders.
+
+- ✅ **The device term is the largest render of the last few seconds, not of all time**
+  (2026-09-29). The ring kept the largest render the device had ever asked for, so one large
+  render (an iPhone's screen locking asks 4 096 frames, a Mac's output moving to another device
+  asks one large buffer) held 85 ms in the target for the player's life. `RenderSize` now keeps
+  the most of two windows of two seconds on the device's own clock, the one filling and the one
+  before, as one atomic word the device thread alone writes, so a large render is forgotten
+  after two to four seconds and a device that keeps asking that much keeps it. On the synthetic
+  trace with one 4 096-frame render among 128-frame ones
+  (`one_large_render_does_not_hold_the_depth_up_for_good`), the target goes 20 → 86 → 20 ms and the listener hears 21 ms after it against 94 ms with the
+  old mark; one underrun, the large render itself. The existing traces render one size
+  throughout, so their numbers are unchanged.

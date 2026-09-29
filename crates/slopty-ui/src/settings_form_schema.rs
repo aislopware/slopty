@@ -6,14 +6,16 @@
 //! table's page (`home`) under the table's own title, so a setting added to the file shows up
 //! before anyone places it.
 //!
-//! Two pages set nothing: Keyboard lists the keymap's bindings ([`shortcuts`]) and About says
-//! which build this is ([`about`]).
+//! Two pages hold no key of a table of their own: Keyboard lists the keymap's commands
+//! ([`key_rows`]), each set in `[keys]` when a chord is recorded for it, and About says which
+//! build this is ([`about`]).
 
 use std::sync::LazyLock;
 
-use gpui::{Action, KeyBinding};
+use gpui::Action;
 use slopty_settings::schema::{self, Field};
 
+use crate::keymap::{Command, Keymap, Scope};
 use crate::palette::{PaletteItem, PaletteRun};
 
 /// A page of the form, in the order the sidebar lists them.
@@ -29,7 +31,7 @@ pub enum Section {
     Streams,
     /// The server and the workers, and who may connect.
     Network,
-    /// The keymap, read-only.
+    /// The keymap: every command's chords, recorded into `[keys]`.
     Keyboard,
     /// The version, the build and where the project lives.
     About,
@@ -204,131 +206,114 @@ fn rows_of(fields: &'static [Field]) -> Vec<Row> {
     rows
 }
 
-/// One line of the Keyboard page: what a binding does and the keys that do it.
+/// One line of the Keyboard page: a command of the keymap, the chords that run it now, and
+/// whether the file set them.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Shortcut {
+pub struct KeyRow {
+    /// Its place among the keymap's commands.
+    pub command: usize,
     /// The group it is listed under.
     pub group: &'static str,
-    /// The palette's words for the action, else its name in words.
+    /// The palette's words for it, else its name in words.
     pub label: String,
-    /// Each chord that runs it, as the palette spells keys; a numbered family (⌘1 to ⌘9) is
-    /// one span, "⌘1–9".
+    /// Its scope and name as the file spells them (`workspace.new_terminal`).
+    pub key: String,
+    /// Each chord that runs it now, as the palette spells keys.
     pub keys: Vec<String>,
+    /// Its default chords, spelled the same way.
+    pub defaults: Vec<String>,
+    /// The file sets its chords.
+    pub set: bool,
 }
 
-impl Shortcut {
-    /// The text a search is held against: its words, its keys and its group.
+impl KeyRow {
+    /// The text a search is held against: its words, its name in the file, its keys and its
+    /// group.
     #[must_use]
     pub fn haystack(&self) -> String {
-        format!("{} {} {} Keyboard", self.label, self.keys.join(" "), self.group)
+        format!("{} {} {} {} Keyboard", self.label, self.key, self.keys.join(" "), self.group)
     }
 }
 
 /// The Keyboard page's groups, in order.
-pub const SHORTCUT_GROUPS: [&str; 5] = ["General", "Layout", "Terminal", "Conversation", "Files"];
+pub const KEY_GROUPS: [&str; 8] = [
+    "General",
+    "Layout",
+    "Terminal",
+    "Conversation",
+    "Files",
+    "Folders",
+    "Search in files",
+    "Pages",
+];
 
-/// The group an action of this name is listed under; `None` for an action that is not the
-/// app's own (a text field's editing keys).
-fn shortcut_group(name: &str) -> Option<&'static str> {
-    let (namespace, action) = name.split_once("::")?;
-    let layout = ["Column", "Workspace", "Width", "Tabbed", "Overview", "Fullscreen"]
-        .iter()
-        .any(|word| action.contains(word))
-        || matches!(action, "FocusUp" | "FocusDown" | "MoveUp" | "MoveDown");
-    Some(match namespace {
-        "workspace" if layout => "Layout",
-        "slopty" | "workers" | "workspace" => "General",
-        "terminal" => "Terminal",
-        "conversation" => "Conversation",
-        "file" => "Files",
-        _ => return None,
-    })
+/// The group a command is listed under: its scope's, the workspace's split into what arranges
+/// the strip and the rest.
+fn key_group(command: &Command) -> &'static str {
+    match command.scope() {
+        Scope::App => "General",
+        Scope::Workspace => {
+            let name = command.name();
+            let layout = ["column", "workspace", "width", "tabbed", "overview", "fullscreen"]
+                .iter()
+                .any(|word| name.contains(word))
+                || matches!(name, "focus_up" | "focus_down" | "move_up" | "move_down");
+            if layout { "Layout" } else { "General" }
+        }
+        Scope::Terminal => "Terminal",
+        Scope::Conversation => "Conversation",
+        Scope::File => "Files",
+        Scope::Folder => "Folders",
+        Scope::Search => "Search in files",
+        Scope::Page => "Pages",
+    }
 }
 
-/// An action's name in words: `workspace::ScrollPageUp` is "Scroll page up".
+/// A command's name in words: `scroll_page_up` is "Scroll page up".
 fn words(name: &str) -> String {
-    let action = name.rsplit_once("::").map_or(name, |(_, action)| action);
-    let mut out = String::with_capacity(action.len().saturating_add(4));
-    for (ix, c) in action.chars().enumerate() {
-        if ix == 0 {
-            out.push(c);
-        } else if c.is_uppercase() {
-            out.push(' ');
-            out.extend(c.to_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    let spaced = name.replace('_', " ");
+    let mut chars = spaced.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// A numbered family's keys as one span: `⌘1` to `⌘9` is "⌘1–9".
-fn span(first: &str, last: &str) -> String {
-    let shared = first.chars().zip(last.chars()).take_while(|(a, b)| a == b).count();
-    let tail: String = last.chars().skip(shared).collect();
-    format!("{first}\u{2013}{tail}")
-}
-
-/// The keymap's bindings as the Keyboard page lists them, group by group in
-/// [`SHORTCUT_GROUPS`]' order and in the keymap's own order within a group.
+/// `keymap`'s commands as the Keyboard page lists them, group by group in [`KEY_GROUPS`]' order
+/// and in the table's order within a group.
 ///
-/// One line an action: its chords from every context it is bound in, each once. An action bound
-/// with a number (a column, a workspace) is one line for the family. The words are the
-/// palette's (`palette`) when it lists the action, so a binding reads the same in both.
+/// A command is worded as the palette words it (`palette`) when the palette lists its action
+/// and no other scope runs the same action, so a line reads the same in both; an action run in
+/// several scopes (find, in a terminal, a file and a face) is worded by its name, under its
+/// scope's group.
 #[must_use]
-pub fn shortcuts<'a>(
-    bindings: impl IntoIterator<Item = &'a KeyBinding>,
-    palette: &[PaletteItem],
-) -> Vec<Shortcut> {
-    struct Line {
-        group: &'static str,
-        name: &'static str,
-        action: Box<dyn Action>,
-        numbered: bool,
-        keys: Vec<String>,
-    }
-    let mut lines: Vec<Line> = Vec::new();
-    for binding in bindings {
-        let action = binding.action();
-        let Some(group) = shortcut_group(action.name()) else { continue };
-        let keys: String =
-            binding.keystrokes().iter().map(|k| crate::palette::keys_label(k.inner())).collect();
-        let at = lines.iter().position(|l| l.name == action.name());
-        let line = if let Some(at) = at {
-            let Some(line) = lines.get_mut(at) else { continue };
-            line.numbered |= !line.action.partial_eq(action);
-            line
-        } else {
-            let name = action.name();
-            let action = action.boxed_clone();
-            lines.push(Line { group, name, action, numbered: false, keys: Vec::new() });
-            let Some(line) = lines.last_mut() else { continue };
-            line
-        };
-        if !line.keys.contains(&keys) {
-            line.keys.push(keys);
-        }
-    }
+pub fn key_rows(keymap: &Keymap, palette: &[PaletteItem]) -> Vec<KeyRow> {
+    let commands = keymap.commands();
     let said = |action: &dyn Action| {
+        let shared = commands.iter().filter(|c| c.action().partial_eq(action)).count() > 1;
+        if shared {
+            return None;
+        }
         palette.iter().find_map(|item| match &item.run {
             PaletteRun::Action(listed) if listed.partial_eq(action) => Some(item.label.clone()),
             _ => None,
         })
     };
-    SHORTCUT_GROUPS
+    let spelled = |chords: &[String]| -> Vec<String> {
+        chords.iter().map(|chord| crate::keymap::label(chord)).collect()
+    };
+    let mut rows: Vec<KeyRow> = commands
         .iter()
-        .flat_map(|group| lines.iter().filter(move |l| l.group == *group))
-        .map(|line| {
-            let (label, keys) = match (line.numbered, line.keys.first(), line.keys.last()) {
-                (true, Some(first), Some(last)) => (words(line.name), vec![span(first, last)]),
-                _ => (
-                    said(line.action.as_ref()).unwrap_or_else(|| words(line.name)),
-                    line.keys.clone(),
-                ),
-            };
-            Shortcut { group: line.group, label, keys }
+        .enumerate()
+        .map(|(ix, command)| KeyRow {
+            command: ix,
+            group: key_group(command),
+            label: said(command.action()).unwrap_or_else(|| words(command.name())),
+            key: command.key(),
+            keys: spelled(keymap.chords(ix)),
+            defaults: spelled(&keymap.default_chords(ix)),
+            set: keymap.is_set(ix),
         })
-        .collect()
+        .collect();
+    rows.sort_by_key(|row| KEY_GROUPS.iter().position(|g| *g == row.group));
+    rows
 }
 
 /// Which build this is, as the About page says it: the version, then the profile and the
@@ -466,41 +451,43 @@ mod tests {
         }
     }
 
-    /// The Keyboard page is the keymap: one line an action whatever contexts bind it, its
-    /// chords each once, the palette's words for it, a numbered family as one span, a text
-    /// field's own editing keys left out, and the groups in their order.
+    /// The Keyboard page is the keymap: a line a command, its chords in effect beside its
+    /// defaults, the palette's words for an action only one scope runs and its name's words for
+    /// one several do, its name in the file, and the groups in their order.
     #[test]
     fn the_keyboard_page_reads_the_keymap() {
-        use gpui_kit::component::input::MoveUp;
-
-        let mut bindings = crate::workspace::key_bindings();
-        bindings.extend(crate::terminal::key_bindings());
-        bindings.push(KeyBinding::new("up", MoveUp, Some("Input")));
-        let palette = crate::workspace::palette_items();
-        let listed = shortcuts(&bindings, &palette);
-        let line = |label: &str| {
-            listed.iter().find(|s| s.label == label).unwrap_or_else(|| panic!("{label}"))
-        };
-        let new = line("New terminal");
-        assert_eq!((new.group, new.keys.clone()), ("General", vec!["⌘T".into(), "⌘N".into()]));
-        let find = line("Find in terminal, file or conversation");
-        assert_eq!(find.keys, ["⌘F"], "bound in five contexts, said once");
-        assert_eq!(line("Focus column").keys, ["⌘1\u{2013}9"], "the family, not nine lines");
-        assert_eq!(line("Focus column").group, "Layout");
-        assert_eq!(line("Scroll page up").keys.len(), 1, "no palette words: the name's");
-        assert_eq!(line("Stop the agent").group, "Conversation");
-        assert_eq!(line("Save file").group, "Files");
-        assert!(!listed.iter().any(|s| s.keys.iter().any(|k| k == "↑")), "a field's own key");
+        let keys: slopty_settings::KeySettings =
+            slopty_settings::Settings::parse("[keys.workspace]\nnew_note = \"cmd-alt-n\"\n")
+                .settings
+                .keys;
+        let keymap = Keymap::new(&keys, Vec::new());
+        let listed = key_rows(&keymap, &crate::workspace::palette_items());
+        assert_eq!(listed.len(), keymap.commands().len(), "a line a command");
+        let line =
+            |key: &str| listed.iter().find(|r| r.key == key).unwrap_or_else(|| panic!("{key}"));
+        let new = line("workspace.new_terminal");
+        assert_eq!((new.group, new.label.as_str()), ("General", "New terminal"));
+        assert_eq!((new.keys.clone(), new.set), (vec!["⌘T".into(), "⌘N".into()], false));
+        let note = line("workspace.new_note");
+        assert_eq!(
+            (note.keys.clone(), note.defaults.clone()),
+            (vec!["⌥⌘N".into()], vec!["⇧⌘N".into()])
+        );
+        assert!(note.set, "the file's");
+        let find = line("terminal.find");
+        assert_eq!((find.label.as_str(), find.group), ("Find", "Terminal"), "several scopes");
+        assert_eq!(line("workspace.focus_column_3").label, "Focus column 3");
+        assert_eq!(line("workspace.focus_column_3").group, "Layout");
+        assert_eq!(line("terminal.scroll_page_up").label, "Scroll page up", "the name's words");
+        assert_eq!(line("conversation.interrupt").label, "Stop the agent");
+        assert_eq!(line("file.save").group, "Files");
+        assert!(line("workspace.open_url").keys.is_empty(), "none by default, still listed");
         let order: Vec<usize> = listed
             .iter()
-            .map(|s| SHORTCUT_GROUPS.iter().position(|g| *g == s.group).unwrap_or(usize::MAX))
+            .map(|r| KEY_GROUPS.iter().position(|g| *g == r.group).unwrap_or(usize::MAX))
             .collect();
         assert!(order.is_sorted(), "{listed:#?}");
-        let names: Vec<&str> = listed.iter().map(|s| s.label.as_str()).collect();
-        let mut unique = names.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(unique.len(), names.len(), "one line an action: {names:?}");
+        assert!(!order.contains(&usize::MAX), "every group is listed");
     }
 
     /// A row is the schema's field: its words, default and range are `slopty_settings`'s, and

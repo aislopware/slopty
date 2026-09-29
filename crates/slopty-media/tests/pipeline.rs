@@ -156,6 +156,112 @@ mod tests {
         assert!(h.tick().is_empty());
     }
 
+    /// A keyframe that crosses slower than the loss deadline is not given up on while its
+    /// fragments are still coming in: a connection whose window is still opening paces a
+    /// 60 kB first keyframe out over 100 ms, and it arrives whole, with no NACK and no refresh.
+    #[test]
+    fn a_keyframe_still_arriving_is_not_given_up_on() {
+        let mut h = Harness::new();
+        let key = frame_bytes(1, 60_000);
+        let s0 = h.send(&key, true, false);
+        let deadline = nack_delay() + (RTT + nack_delay()) * 2 + cfg().grace;
+        let pace = Duration::from_millis(2);
+        assert!(pace * u32::try_from(s0.datagrams.len()).unwrap() > deadline, "slower than it");
+        let mut actions = Vec::new();
+        for datagram in &s0.datagrams {
+            h.deliver(std::slice::from_ref(datagram));
+            h.advance(pace);
+            actions.extend(h.tick());
+        }
+        assert_eq!(actions, vec![], "nothing asked for");
+        let out = h.drain();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data, key);
+        assert_eq!(h.rx.stats().frames_lost, 0);
+    }
+
+    /// A frame given up on while the receiver waits for a keyframe stays given up on: a
+    /// straggler of it is stale, not the start of the same frame again, lost again and asked for
+    /// again. That was a refresh per straggler of a first keyframe that crossed slowly.
+    #[test]
+    fn a_frame_given_up_on_stays_given_up_on_while_a_keyframe_is_awaited() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 12_000), true, false);
+        h.deliver(&s0.datagrams[..2]);
+        let mut asked = Vec::new();
+        // Later frames keep the link flowing until the keyframe's deadline has passed.
+        let flow = |h: &mut Harness, frames: u32, asked: &mut Vec<Action>| {
+            for seed in 0..frames {
+                h.advance(Duration::from_millis(10));
+                let s = h.send(&frame_bytes(100 + seed, 900), false, false);
+                h.deliver(&s.datagrams);
+                asked.extend(h.tick());
+            }
+        };
+        flow(&mut h, 8, &mut asked);
+        let refreshes = |asked: &[Action]| {
+            asked.iter().filter(|a| matches!(a, Action::RequestRefresh { .. })).count()
+        };
+        assert_eq!(refreshes(&asked), 1, "the keyframe is given up on: {asked:?}");
+        assert_eq!(h.rx.stats().frames_lost, 1);
+        assert_eq!(h.rx.ingest(&s0.datagrams[2], h.now), Ingest::Ignored(Ignored::Stale));
+        flow(&mut h, 8, &mut asked);
+        assert_eq!(refreshes(&asked), 1, "the straggler asks for nothing: {asked:?}");
+        assert_eq!(h.rx.stats().frames_lost, 1);
+    }
+
+    /// A receiver told to give a new stream time for its first keyframe does not ask again
+    /// before it while nothing of the stream's video has come. Once part of the keyframe has come,
+    /// it is waited on until it is given up on.
+    #[test]
+    fn the_first_keyframe_is_given_its_time_before_it_is_asked_for_again() {
+        let first = Duration::from_millis(400);
+        let config = Config { first_repeat_after: first, ..cfg() };
+        let mut h = Harness::new();
+        h.rx = Reassembler::new(STREAM, config, h.now);
+        h.advance(cfg().refresh_repeat + RTT * 2);
+        assert!(h.tick().is_empty(), "the worker is still encoding it");
+        h.advance(first.saturating_sub(cfg().refresh_repeat + RTT * 2));
+        assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
+
+        let mut h = Harness::new();
+        h.rx = Reassembler::new(STREAM, config, h.now);
+        let s0 = h.send(&frame_bytes(1, 6_000), true, false);
+        h.deliver(&s0.datagrams[..1]);
+        h.advance(cfg().refresh_repeat + RTT * 2);
+        assert!(
+            !h.tick().iter().any(|a| matches!(a, Action::RequestRefresh { .. })),
+            "a keyframe coming in part is still on its way"
+        );
+        h.advance(cfg().max_hold);
+        assert!(
+            h.tick().iter().any(|a| matches!(a, Action::RequestRefresh { keyframe: true, .. })),
+            "a keyframe that came in part and stopped is asked for again once given up on"
+        );
+    }
+
+    /// A keyframe crossing slower than the refresh repeat, its fragments still coming in, is
+    /// not asked for again: the second keyframe it made queued behind the first. Its first
+    /// fragment came, so the first-keyframe wait no longer holds the repeat.
+    #[test]
+    fn a_keyframe_still_arriving_holds_the_refresh_repeat() {
+        let mut h = Harness::new();
+        let s0 = h.send(&frame_bytes(1, 60_000), true, false);
+        let pace = Duration::from_millis(5);
+        let crossing = pace * u32::try_from(s0.datagrams.len()).unwrap();
+        assert!(crossing > (cfg().refresh_repeat + RTT * 2) * 2, "slower than two repeats");
+        let mut actions = Vec::new();
+        for datagram in &s0.datagrams {
+            h.deliver(std::slice::from_ref(datagram));
+            h.advance(pace);
+            actions.extend(h.tick());
+        }
+        let refreshes: Vec<_> =
+            actions.iter().filter(|a| matches!(a, Action::RequestRefresh { .. })).collect();
+        assert_eq!(refreshes, Vec::<&Action>::new(), "no keyframe asked for");
+        assert_eq!(h.drain().len(), 1);
+    }
+
     #[test]
     fn first_frame_must_be_a_keyframe() {
         let mut h = Harness::new();
@@ -193,6 +299,29 @@ mod tests {
         assert!(h.tick().is_empty(), "nothing to NACK");
         let stats = h.rx.stats();
         assert_eq!((stats.frames_fec, stats.datagrams_lost), (1, 6));
+    }
+
+    /// On a link that has shown loss a small frame carries two parity fragments whatever the
+    /// ratio, so two losses in a row, the shape a clump takes, are repaired without a round trip.
+    #[test]
+    fn a_small_frame_survives_two_losses_in_a_row_without_a_nack() {
+        let mut h = Harness::new();
+        h.tx.set_parity_permille(100);
+        let key = frame_bytes(1, 2_000);
+        let s0 = h.send(&key, true, false);
+        h.deliver(&s0.datagrams);
+        h.drain();
+        let p = frame_bytes(2, 3_000);
+        let s1 = h.send(&p, false, false);
+        assert_eq!((s1.layout.data_count, s1.layout.parity_count), (3, 2));
+        h.deliver_except(&s1, &[1, 2]);
+        let out = h.drain();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data, p);
+        assert!(out[0].info.recovered);
+        h.advance(nack_delay());
+        assert!(h.tick().is_empty(), "nothing to NACK");
+        assert_eq!(h.rx.stats().nacks, 0);
     }
 
     #[test]
@@ -1044,12 +1173,12 @@ mod tests {
         h.drain();
         for i in 0..max {
             let s = h.send(&frame_bytes(2, 2_000), false, false);
-            h.deliver_except(&s, &[0, 1]);
+            h.deliver_except(&s, &[0, 1, 2]);
             assert_eq!(h.rx.queue_depth(), i + 1);
         }
         assert_eq!(h.rx.stats().frames_lost, 0, "full, nothing given up yet");
         let s = h.send(&frame_bytes(2, 2_000), false, false);
-        h.deliver_except(&s, &[0, 1]);
+        h.deliver_except(&s, &[0, 1, 2]);
         assert_eq!((h.rx.stats().frames_lost, h.rx.queue_depth()), (1, max), "the oldest went");
 
         let mut h = Harness::new();
@@ -1068,7 +1197,7 @@ mod tests {
         h.deliver(&s0.datagrams);
         h.drain();
         let s1 = h.send(&frame_bytes(2, 2_000), false, false);
-        h.deliver_except(&s1, &[0, 1]);
+        h.deliver_except(&s1, &[0, 1, 2]);
         for _ in 0..max {
             let _never_arrives = h.send(&frame_bytes(2, 2_000), false, false);
         }
@@ -1094,7 +1223,7 @@ mod tests {
         no_data[11] = 0;
         assert_eq!(h.rx.ingest(&Bytes::from(no_data), h.now), Ingest::Ignored(Ignored::Malformed));
         let mut past_the_end = s0.datagrams[2].to_vec();
-        past_the_end[9] = 3;
+        past_the_end[9] = 4;
         assert_eq!(
             h.rx.ingest(&Bytes::from(past_the_end), h.now),
             Ingest::Ignored(Ignored::Malformed)
@@ -1102,12 +1231,12 @@ mod tests {
         assert_eq!(h.rx.queue_depth(), 0, "nothing tracked");
 
         h.deliver(&s0.datagrams[..1]);
-        // Two data and no parity: three fragments as before, one count wrong.
+        // Three data and one parity: four fragments as before, the split wrong.
         let mut wrong_count = s0.datagrams[1].to_vec();
         wrong_count[11] = 3;
-        wrong_count[13] = 0;
+        wrong_count[13] = 1;
         let (header, _) = MediaHeader::parse(&wrong_count).unwrap();
-        assert_eq!((header.data_count.get(), header.parity_count), (3, 0));
+        assert_eq!((header.data_count.get(), header.parity_count), (3, 1));
         assert_eq!(
             h.rx.ingest(&Bytes::from(wrong_count), h.now),
             Ingest::Ignored(Ignored::Malformed)
@@ -1122,8 +1251,8 @@ mod tests {
     fn a_retransmission_alone_is_not_an_fec_recovery() {
         let mut h = Harness::new();
         let s0 = h.send(&frame_bytes(1, 2_000), true, false);
-        // 2 data + 1 parity; the first data fragment and the parity are lost.
-        h.deliver_except(&s0, &[0, 2]);
+        // 2 data + 2 parity; the first data fragment and both parity fragments are lost.
+        h.deliver_except(&s0, &[0, 2, 3]);
         h.advance(nack_delay());
         assert_eq!(h.tick(), vec![Action::Nack { frame: 0, fragments: vec![0] }]);
         let resent = h.tx.retransmit(0, &[0]);
@@ -1185,7 +1314,7 @@ mod tests {
         h.drain();
         let s1 = h.send(&frame_bytes(2, 2_000), false, false);
         let s2 = h.send(&frame_bytes(3, 2_000), false, false);
-        h.deliver_except(&s1, &[0, 1]);
+        h.deliver_except(&s1, &[0, 1, 2]);
         h.awake(Duration::from_millis(100));
         h.deliver(&s2.datagrams);
         assert_eq!(h.rx.stats().silences.while_idle, 0, "half a frame was pending");
@@ -1211,15 +1340,15 @@ mod tests {
         // Awaiting the first keyframe.
         let mut h = Harness::new();
         let plain = h.send(&frame_bytes(1, 2_000), false, false);
-        h.deliver_except(&plain, &[0, 1]);
+        h.deliver_except(&plain, &[0, 1, 2]);
         h.advance(nack_delay());
         assert!(h.tick().is_empty(), "a plain frame cannot start the stream");
         let refresh = h.send(&frame_bytes(2, 2_000), false, true);
-        h.deliver_except(&refresh, &[0, 1]);
+        h.deliver_except(&refresh, &[0, 1, 2]);
         h.advance(nack_delay());
         assert!(h.tick().is_empty(), "nor a refresh: nothing to refresh from");
         let key = h.send(&frame_bytes(3, 2_000), true, false);
-        h.deliver_except(&key, &[0, 1]);
+        h.deliver_except(&key, &[0, 1, 2]);
         h.advance(nack_delay());
         assert_eq!(h.tick(), vec![Action::Nack { frame: 2, fragments: vec![0, 1] }]);
 
@@ -1235,11 +1364,11 @@ mod tests {
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: false }]);
         assert!(h.rx.awaiting_refresh());
         let plain = h.send(&frame_bytes(4, 2_000), false, false);
-        h.deliver_except(&plain, &[0, 1]);
+        h.deliver_except(&plain, &[0, 1, 2]);
         h.advance(nack_delay());
         assert!(h.tick().is_empty(), "a plain frame cannot restart the stream");
         let refresh = h.send(&frame_bytes(5, 2_000), false, true);
-        h.deliver_except(&refresh, &[0, 1]);
+        h.deliver_except(&refresh, &[0, 1, 2]);
         h.advance(nack_delay());
         assert_eq!(h.tick(), vec![Action::Nack { frame: 4, fragments: vec![0, 1] }]);
     }

@@ -438,3 +438,89 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `a_closed_file_with_an_edit_leaves_nothing`, `a_closed_page_note_and_folder_leave_nothing`,
     `the_overlays_and_the_overview_leave_nothing`, `a_closed_agent_with_its_face_leaves_nothing`
     and `a_removed_worker_with_open_tiles_leaves_nothing` (`slopty-ui`).
+
+- ✅ **Every decoder a peer reaches is fuzzed, and only a named test is retried** (2026-09-29).
+  A peer's bytes reach postcard decoders, the zerocopy media parsers and the reassembler's
+  Reed–Solomon path. Nothing had fed them anything but well-formed messages. `fuzz/` holds
+  twelve libFuzzer targets: `client_msg`, `worker_msg`, `server_msg` and `uni_stream` through
+  the real framing in fuzzer-sized pieces, then `client_datagram`, `term_datagram`,
+  `media_header`, `cursor`, `origin`, `reassemble`, `feedback` (the worker's NACKs and reports)
+  and `ctl` (the worker's socket line). `reassemble` and `feedback` are structure-aware
+  (`arbitrary`). The first is a script of real packetized frames that the wire reorders, drops,
+  repeats and damages, and its NACKs are answered from the packetizer. A fuzzer guessing headers
+  would not get past the header check. Every target also asserts an invariant, not only the
+  absence of a crash. A decoded value re-encodes to the same bytes, and `frame_head` agrees with
+  the frame it heads. An undamaged run delivers each frame byte for byte and in order. A
+  retransmission is a data fragment of the frame asked for. The bitrate stays between the floor
+  and the ceiling, and the parity ratio within its bounds.
+  - The crate sits outside the workspace. Its instrumented build is nightly, so the gate never
+    builds it and gets no slower. The gate still checks its formatting, which takes 0.1 s. Each
+    target is a library function, so `fuzz/tests/regressions.rs` replays `fuzz/regressions/`
+    on a plain build. `cargo xtask fuzz` builds with ASan and runs each target in fork mode under
+    `nice`, seeded from the 190 wire goldens. `deep fuzz` (30 s each) runs in the nightly and in
+    the weekly Deep workflow, which uploads what it finds.
+  - First run, 60 s per target on this Mac (about 70 s each with fork start-up): no crash, leak,
+    timeout or broken invariant. Coverage reached `worker_msg` 6 319 edges, `server_msg` 5 962,
+    `client_msg` 4 047, `uni_stream` 3 774, `ctl` 3 329, `reassemble` 2 867 (3 252 exec/s),
+    `term_datagram` 2 454, `feedback` 2 068 and `client_datagram` 1 983. The fixed-layout
+    parsers have almost nothing to reach (`cursor` 43, `media_header` 49, `origin` 162).
+  - Found by reading what the targets decode, not by a crash: `Line`'s `Deserialize`
+    (`crates/slopty-grid/src/line.rs`, `cells.resize(cols, …)`) pads every line to the `cols`
+    the peer names. 100 lines of 65 535 blank columns are 703 bytes on the wire and 6.5 million
+    48-byte cells once decoded (314 MB), so one 16 MB frame of them asks for terabytes. It is
+    open, for the owner of `slopty-grid` and `slopty-proto`.
+  - The `ci` nextest profile retried every test twice, against the rule that only a named test
+    gets retries. It now inherits `gate` (`inherits = "gate"`), whose three session-actor tests
+    are the only ones retried, and keeps its longer timeouts and JUnit report. A throwaway crate
+    checked that nextest 0.9.146 carries a parent's per-test overrides into the child.
+  - `deep sanitize` also covers `slopty-platform` and `slopty-capture`, which hold most of the
+    `unsafe` (309 blocks between them, against 140 in the codec). First run: ASan and TSan
+    each pass all 79 tests (4 live ones skipped), in 1.1 s and 8.4 s.
+  - CI's release job gets the sccache the rustc wrapper needs; without it every tag build
+    would fail as the gate did before 7b0e09a0. The gate job runs `--in-place`, as the gate's
+    own help says CI should. `rust-cache` keeps only the registry and git checkouts, since
+    sccache already holds the compiled units.
+  - Tests: `every_target_has_its_entry_point`, `every_regression_input_replays_clean` and
+    `the_seeds_run_through_every_target` (`fuzz`), plus
+    `a_hex_golden_seeds_its_stream_and_a_line_the_control_socket`,
+    `every_golden_parses_and_every_seeded_target_exists` and
+    `the_smoke_runs_in_fork_mode_within_its_time` (`xtask`).
+
+- ✅ **A worker under test serves a drawn screen, and the app self-test streams it**
+  (2026-09-29). Remote desktop is the first priority, yet no app self-test streamed a picture:
+  a worker started from a shell has no Screen Recording grant, the Mac's real screen belongs to
+  whoever uses it, and the drawn `Canvas` was reachable only from in-process measurements. With
+  `SLOPTY_SYNTHETIC_SCREEN=1` (a test knob read once, in the style of `SLOPTY_WINDOW_CAPTURE`)
+  the worker serves every stream, its listing, its warm-up and its window resizes from
+  `slopty_worker::screen::synthetic::Synthetic`: `Studio`, a capture that lists one display
+  (id 1, 1512 × 982 points at 2×, 60 Hz) and two windows (7001 "Synthetic editor", 1280 × 800;
+  7002 "Synthetic terminal", 800 × 500) that take a resize, each drawn as a `Canvas` of its own
+  size; the real VideoToolbox encoder; and `Poke` for input.
+  - The daemon picks the platform per stream (`screens::run`), so the product path stays
+    `Pipeline<MacOs>` with every call direct, and the drawn one is a second monomorphisation.
+    `StreamControl` lost its platform parameter for it: it is `Arc<dyn Controlled>`, as
+    `StatsHandle` already was, a virtual call on the feedback path only. A display made for the
+    client is never made on a drawn worker; it streams the drawn display as the physical one.
+  - Goldens of a moving picture: `Canvas` scrolls its page in the middle half of the picture
+    and keeps the desktop and the strip still, so a golden masks the page and holds the rest
+    to its pixels (`snapshot::assert_matches_masked`), and holds the page to the golden's mix
+    of luma instead (`snapshot::luma_distance`, the share of pixels in another sixteenth of
+    the luma range: 0.006–0.015 between runs, a black or misplaced picture is near 1). The
+    tile header's health word follows the last second's pacing, which the machine's load
+    moves, so it is masked too and asserted through the accessibility tree.
+  - The harness runs the binaries from a copy in the temporary directory (`harness::bin_dir`).
+    The repository's volume is mounted without ownership, and every VideoToolbox session a
+    process opens there waits on an uncached signature check: the drawn-stream unit tests timed
+    out at 120 s from `target/`, and passed in 0.54 s copied to `/tmp`. The measurement
+    client is a binary (`slopty-glass`) for the same reason: a test binary is not copied.
+  - What the app cannot show here: presentation. Under a remote session to this Mac the app's
+    window is covered, the window server reports no frame presented, and arrival → present
+    has no sample; the tests say so and time the path with `slopty-glass` instead. Zoom (a
+    pinch) and trackpad mode are the touch UI's, and the Mac's test socket has no pinch and its
+    dump no toggled state, so neither is asserted here.
+  - Tests: `a_drawn_window_streams_into_its_tile`, `the_drawn_display_streams_into_its_tile`
+    and `frame_time::drawn_frames_reach_the_glass_on_loopback` (`tests/app/stream.rs`);
+    `only_a_one_switches_the_drawn_screen_on`,
+    `the_drawn_screen_lists_its_windows_and_takes_a_resize` and
+    `a_drawn_window_streams_at_its_own_size` (`slopty-worker`); `a_masked_pixel_is_neither_compared_nor_counted`
+    and `a_scrolled_mix_is_near_and_a_blank_picture_is_far` (`slopty-e2e`).

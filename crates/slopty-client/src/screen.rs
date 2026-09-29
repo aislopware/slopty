@@ -53,6 +53,17 @@ const TICK: Duration = Duration::from_millis(2);
 /// Half the stall gap, for the same reason the worker heartbeats at half it — a receiver that
 /// looks exactly as often as a stall is long cannot tell one it watched from one it missed.
 const IDLE_TICK: Duration = Duration::from_millis(25);
+
+/// How long a new stream waits for its first video datagram before it asks for a keyframe again.
+///
+/// The worker opens a stream once its encoder is built, and the session's first frame takes
+/// 60–130 ms more at 3024 × 1964, longer than the usual first repeat (100 ms and two round trips):
+/// asked again, it made a second full keyframe behind the first. The worker's own word on a target
+/// that draws nothing comes at this age (`ScreenEvent::Source`, the worker's `SOURCE_IDLE_AFTER`),
+/// which is where waiting on a first picture stops being the expected thing (MEASUREMENTS.md, "a
+/// refresh asked for while the keyframe is encoded").
+const FIRST_KEYFRAME_WAIT: Duration = Duration::from_millis(400);
+
 /// RTT assumed before the transport has measured one.
 const DEFAULT_RTT: Duration = Duration::from_millis(20);
 
@@ -618,7 +629,11 @@ pub fn spawn_screen(
         // from a runtime that did not run this task.
         reassembler: Reassembler::new(
             stream,
-            Config { tick_period: IDLE_TICK, ..Config::default() },
+            Config {
+                tick_period: IDLE_TICK,
+                first_repeat_after: FIRST_KEYFRAME_WAIT,
+                ..Config::default()
+            },
             Instant::now(),
         ),
         decoder,

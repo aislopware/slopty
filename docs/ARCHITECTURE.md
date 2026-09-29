@@ -286,6 +286,20 @@ answered. A bare
 program name the daemon cannot find on its own `PATH` runs through the user's login shell,
 interactive (`$SHELL -lic '…'`), so rc-file `PATH`s and aliases apply.
 
+**After a reboot.** ptyd's end takes the shells with it, so the worker keeps each session on
+disk itself (`slopty_worker::restore::Keeper`: a recipe and the newest checkpoint under
+`<data dir>/sessions/`). A worker that finds a recipe ptyd no longer holds reopens the session
+under its old id: a new shell in the old directory, under the old screen and a divider, and
+nothing it ran started again, except a Claude Code conversation the person left running. The
+daemon's agent tick hands the keeper what `AgentTable::resumable` says of each session: the
+conversation id (from the hooks, else the transcript's file name), the agent's directory and
+the flags of its command line that shape the session (`slopty_agent::resume`; never a prompt,
+settings or a system prompt), with the permission mode its hooks last reported. A tile opened on
+`claude` then runs `claude --resume <id> …` as its command. A shell the person typed `claude`
+into gets that line typed at its first prompt (`SessionHandle::type_at_first_prompt`: its OSC 7
+seen and its line editor holding the tty), unless a viewer types first. A conversation whose
+transcript or directory is gone comes back as the shell alone.
+
 **The shell's environment.** Every child gets `TERM`, `COLORTERM=truecolor`, `TERM_PROGRAM`,
 `TERM_PROGRAM_VERSION` and the shell integration's `ZDOTDIR`, on top of ptyd's own. `TERM` is
 `xterm-ghostty` once ghostty's terminfo is compiled, else `xterm-256color`. ptyd compiles it
@@ -795,6 +809,21 @@ folders first, cut at 2 000 with the whole count), rows walked by ↑/↓/↩/�
 the item (`ItemOp::SetFolder`), a file opens as a file tile beside it, rows drag out and drops go
 up into it; a path of unknown kind is asked as a folder first (`WorkspaceView::open_path_on`).
 
+**Search in files** (⌥⌘F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
+files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search(SearchEvent::Hits)`
+(`slopty_worker::search`, ripgrep's `ignore` and `grep-searcher`, capped at 2 000 lines), each
+file with its stamp (size and modification time) and, when the context toggle is on, the lines
+round each match merged once (`FileHits::context`). `slopty_client::search::SearchResults`
+keeps them in path order and lays out the rows: a file, then its matches and context in line
+order. The replace field previews each match struck through with its replacement
+(`search::Preview`, a regex's groups expanded client-side). ↩ there, a row's button or ⌘↩ sends
+`SearchRequest::Replace` naming each match by line and index with the file's stamp. The worker
+(`search::replace`) refuses a file whose stamp moved, finds the matches again with the same
+matcher, rewrites the file through `slopty_platform::fs::replace` (atomic, permissions kept) and
+answers `SearchEvent::Replaced` with the new stamps and the files it skipped. An open file tile
+sees the new stamp on its watcher's next look. Scripts and agents reach the same search through
+`Verb::Search` (`slopty search`, the `search_files` MCP tool), one capped reply in path order.
+
 A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
 usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`: an `NSView`
 on macOS, a `UIView` on iOS, each a subview of the GPUI window's view from its
@@ -871,9 +900,12 @@ worker then opens a conversation stream for it (`UniHead::Conversation`, at
 and sends the conversation as it stands, then each change, and the meters. Permission prompts go
 to the followers on the control stream (`WorkerMsg::Permission`): the relay's
 `CtlRequest::Permission` is held while someone follows the session
-(`slopty_worker::conversation::Holds`), the first answer is the decision the relay prints, and
-the last follower leaving, the wait running out or the relay going away hands it back
-undecided, so the TUI shows its own dialog. Where Claude Code runs Slopty's mod (a plugin
+(`slopty_worker::conversation::Holds`), or, for a plain yes-or-no tool call, while a client has
+asked for approvals (`ConversationRequest::Approvals`, at most `APPROVAL_HOLD`), which is what
+lets a notification's or the inbox's Allow and Deny answer it. The first answer is the decision
+the relay prints. The last follower or approver leaving, the wait running out, the relay going
+away or a client's `ConversationRequest::Release` (sent when the session's TUI is the tile in
+front) hands it back undecided, so the TUI shows its own dialog. Where Claude Code runs Slopty's mod (a plugin
 whose TypeScript function hooks the worker embeds and writes under its data dir,
 `slopty_agent::claude_mod`), the face also gets what the model is writing before the
 transcript has it. The mod posts its events over HTTP to the worker's mod socket
@@ -1194,7 +1226,9 @@ read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_
 a live stream re-asks its quality on change and takes a changed `muted`, see
 decisions/video.md and decisions/settings.md), `[colors] foreground |
 background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings laid over
-`TerminalPalette` in both appearances, see decisions/settings.md); every key has a
+`TerminalPalette` in both appearances, see decisions/settings.md), `[quick_terminal] hotkey |
+height | autohide` (below), `[keys.<context>] <action> = "chord" | ["chord", …] | ""` (the
+keymap, below); every key has a
 default, unknown keys warn, a
 file that does not parse is skipped with the error in the top bar for a few seconds. The app
 polls the file's stamp once a second and on a change rebuilds the `Theme` (variant from
@@ -1204,6 +1238,25 @@ terminal element re-measures its cell grid from the new size on the next frame a
 resizes the session. iOS reads the same path (in its sandbox); the in-app editor is its
 only way to change it.
 
+**Keymap.** `slopty_ui::keymap` holds the one table of every command a key runs: its scope
+(`app`, `workspace`, `terminal`, `file`, `conversation`, `folder`, `search`, `page`, the
+`[keys.<scope>]` it is set under), its name there (`new_terminal`), its default chords and the
+GPUI key contexts it binds in (the workspace's ⇧⌘F also in any text field, the face's keys also
+in its composer). The app adds its own rows (`[keys.app]`: settings, add a worker, the server).
+`Keymap::new` lays the file's `[keys]` over the table: a chord is read in the palette's syntax
+by the quick terminal's parser (`Chord::read`) and written as GPUI writes it, `""` or `"none"`
+unbinds, and one chord runs one command per context: the file's command takes it from a
+default, the first of two of the file's keeps it, and each clash is said naming both, with
+unknown contexts, actions and keys, in the settings notice. `keymap::install` swaps the bindings
+tagged as the keymap's for the new ones and keeps every other binding (gpui-kit's fields, the
+menu's) ahead of them, so a saved file rebinds at once; the map in effect is kept for the main
+thread, where `workspace::key_bindings`, `terminal::key_bindings` and the palette read the
+chord each line shows. Settings > Keyboard lists every command with its chords and its name in
+the file; a press on its chords takes the next keystroke through a GPUI keystroke interceptor
+(before any binding runs it) into `[keys.<scope>]`, and a set command has a reset that takes the
+line out. The terminal's key encoding is untouched: a chord bound in the terminal context runs
+its command, every other key still goes to the program.
+
 **Workers.** The app holds every added worker at once: one `WorkerLink` (on the process's one
 client endpoint, with its own reconnect loop and silence check) per worker
 (`slopty_app::workers`), all feeding the one `WorkspaceView` under the worker's `WorkerKey`
@@ -1211,7 +1264,10 @@ client endpoint, with its own reconnect loop and silence check) per worker
 next connection's snapshot reconciles them. A worker's capabilities come with its `HelloAck`,
 then as `WorkerMsg::Caps`, and from the server's directory while its own link is down; its
 navigator header adds a warn line only when something is wrong (Screen Recording or
-Accessibility off on a Mac, another version), and the hosts list reads its machine
+Accessibility off on a Mac); a worker on another build never links, and says so instead
+(`WorkerStatus::NeedsUpdate`: both builds, an "Update" on its tiles' pill that deploys the new
+build over SSH and dials it again at once, and the command to copy; otherwise the next dial
+comes only after `redial::WRONG_BUILD` or a nudge), and the hosts list reads its machine
 ("macOS 26.5 · load 2.1"). The titlebar names only the workers that are down;
 the "…" menu adds a worker and opens the workers list. The bell's inbox and the Dock badge count
 agents across every worker, and ⌘⇧A goes to the next one wherever it is. A banner names only
@@ -1230,6 +1286,34 @@ tailnet…"); every server that answers is a row to connect to, best first, and 
 it says "Nothing answered on your tailnet".
 `slopty_app::net::add_worker` connects, says `Hello`, and stores the worker under the id its
 `HelloAck` carries, the same as `slopty add` on the CLI.
+
+**Installing a worker over SSH.** On the Mac the panel's "Set up a worker" section has, beside
+"Use this Mac as a worker", "Install on a machine over SSH", and the palette offers it too. The
+form (host, optional user and port) gives way to five step lines while `slopty_deploy::deploy`
+runs on the networking runtime through the person's own `ssh`, unattended (`BatchMode`). This
+is the plan `slopty worker deploy` runs. A bar under the steps fills while the binaries go up.
+Cancel drops the run, which kills its `ssh`. A failure brings the form back, with the failure's
+title, what to do and the machine's last lines. When the deploy succeeds, the worker is added
+at its tailnet name (or its IP, or the host `ssh` reached) and the panel closes onto it. The
+same deploy with `--update` runs from a wrong-build tile's "Update"
+(`slopty_app::ssh`, `slopty_ui::add_worker`).
+
+**Quick terminal.** A chord from any app (`[quick_terminal] hotkey`, ⌃\` by default) slides a
+terminal down from the top of the screen under the pointer, over whichever app is in front; the
+same chord, or "Toggle quick terminal" in the palette, puts it away. The chord is a Carbon
+`RegisterEventHotKey` (`slopty_platform::hotkey`), which needs no Accessibility grant; a press
+arrives on the main run loop and goes, with its arrival time, down a channel to
+`WorkspaceView::toggle_quick_terminal`. The terminal is an ordinary shell item on the worker of
+the shell used last, in its directory, opened the first time and kept: its `TerminalView` (the
+workspace's own entity) is drawn in a GPUI `WindowKind::PopUp` window whose root is
+`slopty_ui::quick_terminal::QuickTerminalView`, and its tile says "In the quick terminal".
+`slopty_platform::panel` dresses that `NSPanel` (borderless, non-activating, every Space and
+beside full-screen apps, clear where nothing is drawn) and orders it in and out, so a hide
+keeps the session and a show draws the rows already there. The sheet slides on the theme's
+sheet pace and curve, and lands at once under Reduce Motion. It hides on losing the keyboard
+unless `autohide` is off, on Esc when no shell holds the keyboard, and when its shell ends;
+the next show then opens another (decisions/ui.md, "A quick terminal slides down from the top
+of the screen").
 
 ## 7. Crate map
 
@@ -1256,6 +1340,7 @@ it says "Nothing answered on your tailnet".
 | `slopty-theme` | design tokens, dark and light variants | client |
 | `slopty-ui` | GPUI elements and views; headless `#[gpui::test]` tests drive them through `VisualTestContext` | client |
 | `slopty-platform` | process-level platform helpers: keep the process out of App Nap and timer coalescing while a session is live, and raise the user's attention | all |
+| `slopty-deploy` | a worker put on another machine over the system `ssh`: the plan, its steps as events, a `Runner` seam, typed failures and how a window says them; the CLI's `worker deploy` and the app's SSH sheet and Update | all |
 | `slopty-app` | the app shell shared by macOS and iOS: workspace window, add-worker panel, one link loop per worker, settings | client |
 | `slopty-e2e` | app self-test: control-socket wire types, tokio driver, daemon+app harness (the app on the Mac or in the iOS simulator), numeric golden diff, frame-time scenarios (`cargo xtask e2e app\|ios\|smooth\|smooth-ios`), and `slopty-idle-window`, a window the harness owns so a capture target that never draws can be tested without touching anything else on the desktop | dev |
 | `slopty-shape` | a UDP relay the client and worker speak QUIC through, with a delay/jitter/loss/rate model below the congestion controller; the degraded link the congestion rulings are measured on | dev |

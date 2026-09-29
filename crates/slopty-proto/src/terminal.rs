@@ -1,17 +1,22 @@
 //! Terminal sessions: lifecycle, input, frames.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use slopty_core::{SessionId, WallMs};
-use slopty_grid::{Cursor, Line, LineIndex, RowUpdate, TermModes};
+use slopty_grid::{Cursor, Line, LineIndex, MAX_COLS, MAX_ROWS, RowUpdate, TermModes};
 
 use crate::input::{CellMetrics, KeyEvent, MouseEvent};
 
 /// Terminal size in cells.
+///
+/// A size decodes clamped to [`MAX_COLS`] × [`MAX_ROWS`]: a window wider than any terminal gets
+/// the widest one, and the PTY and the engine are given the same size.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct TermSize {
     /// Columns.
+    #[serde(deserialize_with = "clamped::<_, MAX_COLS>")]
     pub cols: u16,
     /// Rows.
+    #[serde(deserialize_with = "clamped::<_, MAX_ROWS>")]
     pub rows: u16,
     /// Client cell pixel metrics.
     pub metrics: CellMetrics,
@@ -35,6 +40,23 @@ impl TermSize {
     pub const fn height_px(self) -> u32 {
         (self.rows as u32).saturating_mul(self.metrics.cell_height as u32)
     }
+}
+
+/// A size a peer asked for, clamped to `MAX`.
+fn clamped<'de, D: Deserializer<'de>, const MAX: u16>(d: D) -> Result<u16, D::Error> {
+    u16::deserialize(d).map(|n| n.min(MAX))
+}
+
+/// A size a peer reports, at most `MAX`: a frame's screen, which the lines in it must fit.
+fn bounded<'de, D: Deserializer<'de>, const MAX: u16>(d: D) -> Result<u16, D::Error> {
+    let n = u16::deserialize(d)?;
+    if n > MAX {
+        return Err(serde::de::Error::invalid_value(
+            serde::de::Unexpected::Unsigned(u64::from(n)),
+            &"a size within `MAX_COLS` × `MAX_ROWS`",
+        ));
+    }
+    Ok(n)
 }
 
 /// Request to create a session.
@@ -113,6 +135,12 @@ pub struct SessionSummary {
     pub command: Vec<String>,
     /// The coding agent running in it and what it is doing, when one is.
     pub agent: Option<crate::agent::SessionAgent>,
+    /// The program's progress report (`OSC 9;4`) while one stands, as
+    /// [`TermEvent::Progress`] says it to the viewers: a client that does not view the session
+    /// still shows it. `None` once the report is removed or the program has exited.
+    pub progress: Option<Progress>,
+    /// The session was reopened after its shell was lost, as [`TermEvent::Restored`] says it.
+    pub restored: Option<Restored>,
 }
 
 /// A working tree's changes against `HEAD`: what `git diff --numstat HEAD` counts, plus the
@@ -329,9 +357,11 @@ pub struct Frame {
     /// reset, or the alternate screen, and the client puts its line cache aside. Returning
     /// from the alternate screen brings the primary's back, and with it the cache.
     pub epoch: u32,
-    /// Columns.
+    /// Columns, at most [`MAX_COLS`].
+    #[serde(deserialize_with = "bounded::<_, MAX_COLS>")]
     pub cols: u16,
-    /// Rows.
+    /// Rows, at most [`MAX_ROWS`].
+    #[serde(deserialize_with = "bounded::<_, MAX_ROWS>")]
     pub rows: u16,
     /// Cursor.
     pub cursor: Cursor,
@@ -481,9 +511,11 @@ pub enum TermEvent {
     },
     /// The PTY size changed (another client drives it).
     Resized {
-        /// Columns.
+        /// Columns, at most [`MAX_COLS`].
+        #[serde(deserialize_with = "bounded::<_, MAX_COLS>")]
         cols: u16,
-        /// Rows.
+        /// Rows, at most [`MAX_ROWS`].
+        #[serde(deserialize_with = "bounded::<_, MAX_ROWS>")]
         rows: u16,
     },
     /// Driver changed.

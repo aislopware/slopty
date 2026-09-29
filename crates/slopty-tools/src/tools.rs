@@ -20,10 +20,11 @@ use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{ErrorCode, EventFilter, IdempotencyKey, Input, Size, WaitUntil};
 use slopty_proto::screen::CaptureTarget;
+use slopty_proto::search::SearchQuery;
 
 use crate::ops::{
     self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES_PAGE, DEFAULT_MAX_LINES,
-    DEFAULT_WAIT_MS, Spec,
+    DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS, Spec,
 };
 use crate::resolve::Resolver;
 use crate::view::{self, Encoding};
@@ -268,6 +269,48 @@ struct PathArgs {
     worker: Option<String>,
     /// Absolute path, or `~/…`.
     path: String,
+}
+
+/// `search_files`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SearchFilesArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// The directory to search, absolute or `~/…`.
+    root: String,
+    /// What to look for: the text as it is, unless `regex`.
+    pattern: String,
+    /// The pattern is a regular expression (Rust regex syntax, as ripgrep takes it).
+    #[serde(default)]
+    regex: bool,
+    /// Upper and lower case differ; by default they match each other.
+    #[serde(default)]
+    match_case: bool,
+    /// A match must stand as a whole word.
+    #[serde(default)]
+    whole_word: bool,
+    /// Which files, as ripgrep's `--glob` takes them (`*.rs`, `!tests/**`).
+    #[serde(default)]
+    globs: Vec<String>,
+    /// Lines of context before and after each match (0-5, default 0).
+    #[serde(default)]
+    context: u32,
+    /// At most this many matching lines (default 200, at most 2000).
+    max_lines: Option<u32>,
+}
+
+impl SearchFilesArgs {
+    fn query(&self) -> SearchQuery {
+        SearchQuery {
+            pattern: self.pattern.clone(),
+            regex: self.regex,
+            match_case: self.match_case,
+            whole_word: self.whole_word,
+            globs: self.globs.clone(),
+            context: self.context,
+        }
+    }
 }
 
 /// `forget_worker`.
@@ -707,6 +750,15 @@ pub fn list() -> Vec<Tool> {
              `modified_ms` and `mode` (octal).",
             Kind::Read,
         ),
+        tool::<SearchFilesArgs>(
+            "search_files",
+            "Search the files under a directory on a worker, as ripgrep does: .gitignore \
+             honoured, binary files skipped. Returns `files` in path order, each with its \
+             `lines` (`line`, `text` without indentation, `matches` as byte ranges, `context` \
+             on a line round a match), then `lines`, `searched` and `capped` (there were more: \
+             narrow with `globs` or a sharper pattern).",
+            Kind::Read,
+        ),
         tool::<WorkerArgs>(
             "list_ports",
             "TCP ports listening in a worker's terminals' process trees, with the process and \
@@ -1010,6 +1062,13 @@ async fn run<D: Dispatch>(
             let found = ops::stat(&mut res, a.worker.as_deref(), a.path.clone()).await?;
             json(&view::stat(&a.path, found.as_ref()))
         }
+        "search_files" => {
+            let a: SearchFilesArgs = args(arguments)?;
+            let max = a.max_lines.unwrap_or(DEFAULT_MAX_MATCHES);
+            let (worker, root) = (a.worker.as_deref(), a.root.clone());
+            let (files, summary) = ops::search(&mut res, worker, root, a.query(), max).await?;
+            json(&view::search(&a.root, &files, &summary))
+        }
         "forget_worker" => {
             let a: ForgetWorkerArgs = args(arguments)?;
             ops::forget_worker(&mut res, &a.worker, checked_key(a.idempotency_key)?).await?;
@@ -1189,6 +1248,8 @@ mod tests {
                         viewers: 0,
                         command: Vec::new(),
                         agent: None,
+                        progress: None,
+                        restored: None,
                     },
                 )]),
                 Verb::WaitFor { .. } => {
@@ -1281,6 +1342,7 @@ mod tests {
                 "write_file",
                 "list_dir",
                 "stat",
+                "search_files",
                 "list_ports",
                 "list_items",
                 "open_item",

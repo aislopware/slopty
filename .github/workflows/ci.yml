@@ -34,11 +34,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
+      # sccache holds the compiled units; this keeps only the registry and git checkouts, so the
+      # two do not store every unit twice in the repository's cache quota.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - uses: cargo-bins/cargo-binstall@main
       - run: brew install zig
       - run: cargo xtask setup
-      - run: cargo xtask gate
+      # The runner's tree is the commit: check it in place rather than snapshotting the index.
+      - run: cargo xtask gate --in-place
 
   # Unsigned, un-notarized artifacts for now; Developer-ID signing + notarization land with
   # `cargo xtask dist`.
@@ -54,11 +59,17 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+      # `.cargo/config.toml` wraps rustc in sccache here too.
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
           targets: aarch64-apple-darwin
+      # sccache holds the compiled units; this keeps only the registry and git checkouts, so the
+      # two do not store every unit twice in the repository's cache quota.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall --no-confirm git-cliff@2.14.1
       - run: brew install zig

@@ -1,27 +1,33 @@
 //! Project-wide text search: the files under a directory that `.gitignore` lets through, their
 //! lines matching a query, streamed to the client in pages as they are found.
 //!
+//! Its `replace` module then rewrites the matches a search showed.
+//!
 //! ripgrep's own libraries do the work: `ignore` walks the tree on several threads with the
 //! ignore files honoured, `grep-regex` builds the matcher (a literal, a regex, either case,
 //! whole words) and `grep-searcher` reads each file line by line, stopping at the first NUL
 //! byte as ripgrep does, so a binary file reports nothing. A file's lines are gathered before
 //! they are sent, so a file found binary half way leaves no trace. [`search`] is the whole
-//! search on the caller's thread; [`Searches`] runs one per connection off the runtime, a new
-//! one stopping the last.
+//! search on the caller's thread, and [`collect`] the same gathered into one answer for an
+//! orchestration verb; [`Searches`] runs one per connection off the runtime, a new one stopping
+//! the last.
+
+mod replace;
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkMatch};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::{WalkBuilder, WalkState};
+pub use replace::replace;
 use slopty_proto::search::{
-    FileHits, LINE_BYTES, LineHit, MAX_LINES, PAGE_BYTES, SearchEvent, SearchQuery, SearchRequest,
-    SearchSummary, Span,
+    ContextLine, FileHits, FileStamp, LINE_BYTES, LineHit, MAX_CONTEXT, MAX_LINES, PAGE_BYTES,
+    SearchEvent, SearchQuery, SearchRequest, SearchSummary, Span,
 };
 use slopty_proto::{RequestId, WorkerMsg};
 
@@ -30,6 +36,7 @@ use slopty_proto::{RequestId, WorkerMsg};
 const FLUSH: Duration = Duration::from_millis(16);
 
 /// Matches a line reports at most; a line of `a` searched for `a` needs no more to be seen.
+/// A replace counts a line's matches the same way, so it replaces no more than were shown.
 const MAX_SPANS: usize = 64;
 
 /// How much of a long line is kept before its first match when it is cut.
@@ -47,8 +54,9 @@ const STORES: [&str; 4] = [".git", ".hg", ".jj", ".svn"];
 /// search where it is.
 ///
 /// Hidden files are searched (a `.github` workflow is part of a project), what the ignore
-/// files exclude is not, git repository or not, nor a version control store. A file past
-/// [`MAX_LINES`] matching lines in all stops the search, and the summary says it was capped.
+/// files exclude is not, git repository or not, nor a version control store. Past `limit`
+/// matching lines in all (never more than [`MAX_LINES`]) the search stops, and the summary
+/// says it was capped.
 ///
 /// # Errors
 ///
@@ -56,9 +64,23 @@ const STORES: [&str; 4] = [".git", ".hg", ".jj", ".svn"];
 pub fn search(
     root: &Path,
     query: &SearchQuery,
+    limit: u32,
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(Vec<FileHits>) -> bool,
 ) -> Result<SearchSummary, String> {
+    search_until(root, query, limit, Stop { cancel, until: None }, emit)
+}
+
+/// [`search`], also stopped at `stop.until`: the files not reached by then are not searched,
+/// and the summary says it was capped.
+fn search_until(
+    root: &Path,
+    query: &SearchQuery,
+    limit: u32,
+    stop: Stop<'_>,
+    emit: &mut dyn FnMut(Vec<FileHits>) -> bool,
+) -> Result<SearchSummary, String> {
+    let Stop { cancel, .. } = stop;
     let started = Instant::now();
     if !root.is_dir() {
         return Err(format!("No folder at {}", root.display()));
@@ -68,8 +90,9 @@ pub fn search(
     }
     let matcher = matcher(query)?;
     let walk = walker(root, &query.globs)?;
-    let found = Found::default();
-    let shared = Walk { root, matcher: &matcher, found: &found, cancel };
+    let found = Found { limit: limit.min(MAX_LINES), ..Found::default() };
+    let context = query.context.min(MAX_CONTEXT);
+    let shared = Walk { root, matcher: &matcher, found: &found, context, stop };
     let (tx, rx) = std::sync::mpsc::sync_channel::<FileHits>(QUEUE);
     let pages = std::thread::scope(|scope| {
         let walking =
@@ -77,7 +100,7 @@ pub fn search(
                 walk.run(|| {
                     let tx = tx.clone();
                     let shared = &shared;
-                    let mut searcher = searcher();
+                    let mut searcher = searcher(context);
                     Box::new(move |entry| visit(entry, shared, &mut searcher, &tx))
                 });
                 drop(tx);
@@ -96,6 +119,68 @@ pub fn search(
     })
 }
 
+/// [`search`] to its end, every file it found in path order: the answer to an orchestration
+/// verb, which has one reply and nothing to stream to.
+///
+/// Nobody sees a page before the end, so nothing but `cancel` and `within` stops a search
+/// that finds little in a large tree: `cancel` is for the caller to set when the request it
+/// answers is gone, and `within` bounds it when the request stays but its caller gave up.
+/// Stopped by either, what it found by then is the answer, and the summary says it was capped.
+///
+/// # Errors
+///
+/// As [`search`]'s.
+pub fn collect(
+    root: &Path,
+    query: &SearchQuery,
+    limit: u32,
+    cancel: &AtomicBool,
+    within: Duration,
+) -> Result<(Vec<FileHits>, SearchSummary), String> {
+    let stop = Stop { cancel, until: Instant::now().checked_add(within) };
+    let mut files = Vec::new();
+    let summary = search_until(root, query, limit, stop, &mut |page| {
+        files.extend(page);
+        true
+    })?;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((files, summary))
+}
+
+/// Sets its flag when dropped: a search's stop, held by the request it answers, so the walk
+/// ends with the request however that ends.
+#[derive(Debug, Default)]
+pub struct StopOnDrop(Arc<AtomicBool>);
+
+impl StopOnDrop {
+    /// The flag to hand the search.
+    #[must_use]
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// What stops a search besides its cap: `cancel` set from elsewhere, or the clock passing
+/// `until`.
+#[derive(Clone, Copy, Debug)]
+struct Stop<'a> {
+    cancel: &'a AtomicBool,
+    until: Option<Instant>,
+}
+
+impl Stop<'_> {
+    /// The deadline has passed.
+    fn late(&self) -> bool {
+        self.until.is_some_and(|until| Instant::now() >= until)
+    }
+}
+
 /// The matcher for `query`: a line never matches across its end, and no pattern can ask for
 /// the NUL byte the binary check stops at.
 fn matcher(query: &SearchQuery) -> Result<RegexMatcher, String> {
@@ -111,6 +196,10 @@ fn matcher(query: &SearchQuery) -> Result<RegexMatcher, String> {
 
 /// The walk under `root`, narrowed by ripgrep-style `globs`, on a few of the machine's cores:
 /// the worker also runs shells and streams while it searches.
+///
+/// The globs narrow what the ignore files let through, as VS Code's "files to include" does.
+/// Given to the walk as overrides they would outrank `.gitignore`, as `rg -g` does, and `*.rs`
+/// would bring back every ignored Rust file.
 fn walker(root: &Path, globs: &[String]) -> Result<ignore::WalkParallel, String> {
     let mut overrides = ignore::overrides::OverrideBuilder::new(root);
     for glob in globs.iter().map(|g| g.trim()).filter(|g| !g.is_empty()) {
@@ -121,20 +210,40 @@ fn walker(root: &Path, globs: &[String]) -> Result<ignore::WalkParallel, String>
     Ok(WalkBuilder::new(root)
         .hidden(false)
         .require_git(false)
-        .overrides(overrides)
         .threads(threads)
-        .filter_entry(|entry| !STORES.iter().any(|store| entry.file_name() == *store))
+        .filter_entry(move |entry| {
+            let dir = entry.file_type().is_some_and(|t| t.is_dir());
+            !STORES.iter().any(|store| entry.file_name() == *store)
+                && !overrides.matched(entry.path(), dir).is_ignore()
+        })
         .build_parallel())
 }
 
-fn searcher() -> Searcher {
-    SearcherBuilder::new().line_number(true).binary_detection(BinaryDetection::quit(0)).build()
+/// A searcher that numbers lines and gives `context` lines each side of a match.
+fn searcher(context: u32) -> Searcher {
+    let context = usize::try_from(context).unwrap_or(0);
+    SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(0))
+        .before_context(context)
+        .after_context(context)
+        .build()
 }
 
-/// What the walk's threads share: the files searched, the lines taken against the cap, and
-/// whether the cap cut the search short.
+/// What `meta` says of a file as a replace compares it: its size and modification time.
+pub(crate) fn stamp_of(meta: &std::fs::Metadata) -> FileStamp {
+    let modified = meta.modified().ok().and_then(|at| at.duration_since(UNIX_EPOCH).ok());
+    FileStamp {
+        size: meta.len(),
+        modified_ns: modified.map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)),
+    }
+}
+
+/// What the walk's threads share: the lines the search may report, the files searched, the
+/// lines taken against the cap, and whether the cap cut the search short.
 #[derive(Debug, Default)]
 struct Found {
+    limit: u32,
     searched: AtomicU32,
     lines: AtomicU32,
     capped: AtomicBool,
@@ -143,20 +252,21 @@ struct Found {
 impl Found {
     /// Lines still to be had under the cap.
     fn left(&self) -> u32 {
-        MAX_LINES.saturating_sub(self.lines.load(Ordering::Relaxed))
+        self.limit.saturating_sub(self.lines.load(Ordering::Relaxed))
     }
 
     /// Take up to `wanted` lines against the cap: how many were granted. Fewer than wanted
     /// means the cap was reached with lines left over.
     fn claim(&self, wanted: usize) -> usize {
         let wanted = u32::try_from(wanted).unwrap_or(u32::MAX);
+        let limit = self.limit;
         let before = self
             .lines
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                Some(used.saturating_add(wanted).min(MAX_LINES))
+                Some(used.saturating_add(wanted).min(limit))
             })
-            .unwrap_or(MAX_LINES);
-        let granted = MAX_LINES.saturating_sub(before).min(wanted);
+            .unwrap_or(limit);
+        let granted = limit.saturating_sub(before).min(wanted);
         if granted < wanted {
             self.capped.store(true, Ordering::Relaxed);
         }
@@ -168,14 +278,15 @@ impl Found {
     }
 }
 
-/// What every thread of the walk reads: where it started, what it matches, the shared counts
-/// and the stop.
+/// What every thread of the walk reads: where it started, what it matches, the context it
+/// gives, the shared counts and the stop.
 #[derive(Clone, Copy, Debug)]
 struct Walk<'a> {
     root: &'a Path,
     matcher: &'a RegexMatcher,
     found: &'a Found,
-    cancel: &'a AtomicBool,
+    context: u32,
+    stop: Stop<'a>,
 }
 
 /// One entry of the walk: a regular file is searched, and its lines, when it has any, go to
@@ -186,8 +297,13 @@ fn visit(
     searcher: &mut Searcher,
     tx: &SyncSender<FileHits>,
 ) -> WalkState {
-    let Walk { root, matcher, found, cancel } = *walk;
+    let Walk { root, matcher, found, context, stop } = *walk;
+    let cancel = stop.cancel;
     if cancel.load(Ordering::Relaxed) || found.full() {
+        return WalkState::Quit;
+    }
+    if stop.late() {
+        found.capped.store(true, Ordering::Relaxed);
         return WalkState::Quit;
     }
     let Ok(entry) = entry else { return WalkState::Continue };
@@ -197,7 +313,18 @@ fn visit(
         return WalkState::Continue;
     }
     found.searched.fetch_add(1, Ordering::Relaxed);
-    let mut sink = Gathered { matcher, cancel, left: found.left(), lines: Vec::new(), more: false };
+    // Taken before the file is read: a write while it is read then moves the stamp past the
+    // one sent, and a replace refuses the file rather than trusting lines read half way.
+    let Ok(meta) = entry.metadata() else { return WalkState::Continue };
+    let stamp = stamp_of(&meta);
+    let mut sink = Gathered {
+        matcher,
+        cancel,
+        left: found.left(),
+        lines: Vec::new(),
+        context: Vec::new(),
+        more: false,
+    };
     let read = searcher.search_path(matcher, entry.path(), &mut sink);
     if read.is_err() || sink.lines.is_empty() {
         return WalkState::Continue;
@@ -207,19 +334,21 @@ fn visit(
     }
     let granted = found.claim(sink.lines.len());
     sink.lines.truncate(granted);
-    if sink.lines.is_empty() {
-        return WalkState::Quit;
-    }
+    let Some(last) = sink.lines.last().map(|l| l.line) else { return WalkState::Quit };
+    // The lines round a match the cap cut off go with it.
+    let reach = last.saturating_add(context);
+    sink.context.retain(|c| c.line <= reach);
     let path = entry.path().strip_prefix(root).unwrap_or_else(|_| entry.path());
     let path = path.to_string_lossy().into_owned();
-    if tx.send(FileHits { path, lines: sink.lines }).is_err() || found.full() {
+    let file = FileHits { path, stamp, lines: sink.lines, context: sink.context };
+    if tx.send(file).is_err() || found.full() {
         return WalkState::Quit;
     }
     WalkState::Continue
 }
 
-/// One file's matching lines, gathered until it ends, the cap's share is used up, or the
-/// search is stopped. A file found binary keeps none.
+/// One file's matching lines and the lines round them, gathered until it ends, the cap's share
+/// is used up, or the search is stopped. A file found binary keeps none.
 #[derive(Debug)]
 struct Gathered<'a> {
     matcher: &'a RegexMatcher,
@@ -227,6 +356,7 @@ struct Gathered<'a> {
     /// Lines this file may add under the cap, as it stood when the file was started.
     left: u32,
     lines: Vec<LineHit>,
+    context: Vec<ContextLine>,
     /// It had more matching lines than it was let take.
     more: bool,
 }
@@ -248,22 +378,37 @@ impl Sink for Gathered<'_> {
         Ok(true)
     }
 
+    fn context(
+        &mut self,
+        _searcher: &Searcher,
+        context: &SinkContext<'_>,
+    ) -> Result<bool, Self::Error> {
+        let number = context.line_number().unwrap_or(0);
+        self.context.push(context_line(number, context.bytes()));
+        Ok(true)
+    }
+
     fn binary_data(
         &mut self,
         _searcher: &Searcher,
         _binary_byte_offset: u64,
     ) -> Result<bool, Self::Error> {
         self.lines.clear();
+        self.context.clear();
         self.more = false;
         Ok(false)
     }
 }
 
-/// A matching line as the client shows it: its end and its indentation off, cut to
-/// [`LINE_BYTES`] round its first match, the matches marked in what is left.
-fn line_hit(number: u64, raw: &[u8], matcher: &RegexMatcher) -> LineHit {
+/// A line's text without its end: the `\n`, and a `\r` before it.
+fn content(raw: &[u8]) -> &[u8] {
     let line = raw.strip_suffix(b"\n").unwrap_or(raw);
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+/// Where `matcher` matches in `line`, as a hit shows them and a replace counts them: the
+/// matches that are not empty, in order, [`MAX_SPANS`] at most.
+fn spans_in(line: &[u8], matcher: &RegexMatcher) -> Vec<(usize, usize)> {
     let mut found: Vec<(usize, usize)> = Vec::new();
     let _searched = matcher.find_iter(line, |m| {
         if m.start() < m.end() {
@@ -271,14 +416,31 @@ fn line_hit(number: u64, raw: &[u8], matcher: &RegexMatcher) -> LineHit {
         }
         found.len() < MAX_SPANS
     });
-    let indent = line.iter().take_while(|b| matches!(b, b' ' | b'\t')).count();
+    found
+}
+
+/// How many spaces and tabs `line` starts with.
+fn indent(line: &[u8]) -> usize {
+    line.iter().take_while(|b| matches!(b, b' ' | b'\t')).count()
+}
+
+/// A matching line as the client shows it: its end and its indentation off, cut to
+/// [`LINE_BYTES`] round its first match, the matches marked in what is left.
+///
+/// The cut never starts past the first match, since a replace names a match by its place among
+/// the line's spans: one left out before the cut would make every later one another match.
+/// Only matches past the end may go, and those come last.
+fn line_hit(number: u64, raw: &[u8], matcher: &RegexMatcher) -> LineHit {
+    let line = content(raw);
+    let found = spans_in(line, matcher);
+    let indent = indent(line);
     let first = found.first().map_or(indent, |(start, _)| *start);
-    let (mut start, mut end) = (indent.min(first), line.len());
+    let mut start = boundary_before(line, indent.min(first));
+    let mut end = line.len();
     if end.saturating_sub(start) > LINE_BYTES {
-        start = first.saturating_sub(LEAD).max(indent);
+        start = boundary_before(line, first.saturating_sub(LEAD).max(indent).min(first));
         end = start.saturating_add(LINE_BYTES).min(line.len());
     }
-    let start = boundary_after(line, start);
     let end = boundary_before(line, end).max(start);
     let mut text = String::with_capacity(end.saturating_sub(start));
     let mut spans = Vec::with_capacity(found.len());
@@ -304,6 +466,21 @@ fn line_hit(number: u64, raw: &[u8], matcher: &RegexMatcher) -> LineHit {
     }
 }
 
+/// A line round a match as the client shows it: as a hit is, its end and indentation off, cut
+/// to [`LINE_BYTES`] from its start.
+fn context_line(number: u64, raw: &[u8]) -> ContextLine {
+    let line = content(raw);
+    let start = indent(line);
+    let end = boundary_before(line, start.saturating_add(LINE_BYTES).min(line.len())).max(start);
+    let mut text = String::with_capacity(end.saturating_sub(start));
+    push_shown(&mut text, line.get(start..end).unwrap_or_default());
+    ContextLine {
+        line: u32::try_from(number).unwrap_or(u32::MAX),
+        text,
+        cut_after: end < line.len(),
+    }
+}
+
 /// `bytes` onto `text` as the client can draw it: bytes that are not UTF-8 replaced, and a tab
 /// or another control character a space, byte for byte, so the spans still line up.
 fn push_shown(text: &mut String, bytes: &[u8]) {
@@ -320,15 +497,7 @@ const fn continues(byte: u8) -> bool {
     byte & 0b1100_0000 == 0b1000_0000
 }
 
-/// `at`, moved forward onto the start of a character.
-fn boundary_after(line: &[u8], mut at: usize) -> usize {
-    while line.get(at).is_some_and(|b| continues(*b)) {
-        at = at.saturating_add(1);
-    }
-    at
-}
-
-/// `at`, moved back onto the start of a character, so the text ends on a whole one.
+/// `at`, moved back onto the start of a character, so the text starts and ends on whole ones.
 fn boundary_before(line: &[u8], mut at: usize) -> usize {
     while at > 0 && line.get(at).is_some_and(|b| continues(*b)) {
         at = at.saturating_sub(1);
@@ -341,6 +510,12 @@ fn boundary_before(line: &[u8], mut at: usize) -> usize {
 struct Paged {
     files: u32,
     lines: u32,
+}
+
+/// The text a file adds to a page: its matching lines and the lines round them.
+fn text_bytes(file: &FileHits) -> usize {
+    let lines = file.lines.iter().map(|l| l.text.len()).sum::<usize>();
+    lines.saturating_add(file.context.iter().map(|c| c.text.len()).sum::<usize>())
 }
 
 /// Gather the files the walk finds into pages and hand each to `emit` once it holds
@@ -376,7 +551,7 @@ fn page_out(
         };
         match next {
             Ok(file) => {
-                bytes = bytes.saturating_add(file.lines.iter().map(|l| l.text.len()).sum());
+                bytes = bytes.saturating_add(text_bytes(&file));
                 page.push(file);
                 since.get_or_insert_with(Instant::now);
                 if bytes >= PAGE_BYTES {
@@ -403,9 +578,9 @@ pub struct Searches {
 }
 
 impl Searches {
-    /// Start or stop a search for the connection whose messages go out on `out`. A search
-    /// runs on the blocking pool; its pages go out as they fill, then `Done` or `Failed`,
-    /// unless it was stopped first.
+    /// Start or stop a search, or run a replace, for the connection whose messages go out on
+    /// `out`. A search runs on the blocking pool; its pages go out as they fill, then `Done` or
+    /// `Failed`, unless it was stopped first. A replace runs beside it and answers once.
     pub fn handle(&mut self, request: SearchRequest, out: &tokio::sync::mpsc::Sender<WorkerMsg>) {
         match request {
             SearchRequest::Start { id, root, query } => {
@@ -421,6 +596,18 @@ impl Searches {
                 if self.current.as_ref().is_some_and(|(current, _)| *current == id) {
                     self.stop();
                 }
+            }
+            SearchRequest::Replace(request) => {
+                let out = out.clone();
+                let _running = tokio::task::spawn_blocking(move || {
+                    let id = request.id;
+                    let root = crate::file::expand_home(Path::new(&request.root));
+                    let event = match replace(&root, &request) {
+                        Ok((files, skipped)) => SearchEvent::Replaced { id, files, skipped },
+                        Err(error) => SearchEvent::Failed { id, error },
+                    };
+                    let _sent = out.blocking_send(WorkerMsg::Search(event));
+                });
             }
         }
     }
@@ -457,7 +644,7 @@ fn run(
         !cancel.load(Ordering::Relaxed)
             && out.blocking_send(WorkerMsg::Search(SearchEvent::Hits { id, files })).is_ok()
     };
-    let result = search(&dir, query, cancel, &mut emit);
+    let result = search(&dir, query, MAX_LINES, cancel, &mut emit);
     if cancel.load(Ordering::Relaxed) {
         tracing::debug!(id, root, "search stopped");
         return;
@@ -495,7 +682,7 @@ mod tests {
     fn found(root: &Path, query: &SearchQuery) -> (Vec<FileHits>, SearchSummary) {
         let mut files = Vec::new();
         let cancel = AtomicBool::new(false);
-        let summary = search(root, query, &cancel, &mut |page| {
+        let summary = search(root, query, MAX_LINES, &cancel, &mut |page| {
             files.extend(page);
             true
         })
@@ -569,9 +756,9 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let bad = SearchQuery { regex: true, ..query("(unclosed") };
-        let error = search(root, &bad, &cancel, &mut |_| true).unwrap_err();
+        let error = search(root, &bad, MAX_LINES, &cancel, &mut |_| true).unwrap_err();
         assert!(error.contains("unclosed"), "{error}");
-        let error = search(&root.join("nowhere"), &query("x"), &cancel, &mut |_| true);
+        let error = search(&root.join("nowhere"), &query("x"), MAX_LINES, &cancel, &mut |_| true);
         assert!(error.unwrap_err().starts_with("No folder at"));
     }
 
@@ -587,7 +774,7 @@ mod tests {
         }
         let cancel = AtomicBool::new(false);
         let mut pages = Vec::new();
-        let summary = search(dir.path(), &query("hit"), &cancel, &mut |page| {
+        let summary = search(dir.path(), &query("hit"), MAX_LINES, &cancel, &mut |page| {
             pages.push(page);
             true
         })
@@ -614,7 +801,7 @@ mod tests {
         }
         let cancel = AtomicBool::new(false);
         let mut pages = 0_u32;
-        let summary = search(dir.path(), &query("hit"), &cancel, &mut |_| {
+        let summary = search(dir.path(), &query("hit"), MAX_LINES, &cancel, &mut |_| {
             pages = pages.saturating_add(1);
             false
         })
@@ -625,7 +812,7 @@ mod tests {
 
         let stopped = AtomicBool::new(true);
         let mut sent = false;
-        let summary = search(dir.path(), &query("hit"), &stopped, &mut |_| {
+        let summary = search(dir.path(), &query("hit"), MAX_LINES, &stopped, &mut |_| {
             sent = true;
             true
         })

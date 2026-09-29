@@ -2,6 +2,7 @@
 //!
 //! The server link and every worker link follow the one rule: a quarter second after a drop,
 //! doubling per failure to [`MAX`], and back to the start once a link has held for [`STEADY`].
+//! A peer on a different build is the exception: it is asked again after [`WRONG_BUILD`].
 
 use std::time::{Duration, Instant};
 
@@ -11,6 +12,11 @@ pub const FIRST: Duration = Duration::from_millis(250);
 pub const MAX: Duration = Duration::from_secs(2);
 /// A link that held this long was healthy: its drop starts the backoff again from [`FIRST`].
 pub const STEADY: Duration = Duration::from_secs(10);
+/// A peer on a different build ([`crate::WrongBuild`]) is dialled again only this long after.
+///
+/// Unless something says it changed: it changes only when someone updates it, and a dial
+/// before then costs both ends a handshake that can only be refused.
+pub const WRONG_BUILD: Duration = Duration::from_secs(60);
 
 /// The wait before redial number `failures` (0 for the first after a drop): 250 ms doubling to
 /// [`MAX`].

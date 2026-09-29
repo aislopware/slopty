@@ -12,13 +12,21 @@ use slopty_proto::media::{
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes as _, IntoBytes as _};
 
-use crate::MediaError;
+use crate::{MediaError, Redundancy};
 
 /// Most data fragments in one frame. With at most [`MAX_PARITY_FRAGMENTS`] parity fragments every
 /// combination stays inside what the GF(2^16) engine supports (checked by a test).
 pub const MAX_DATA_FRAGMENTS: usize = 32_768;
 /// Most parity fragments in one frame (the header field is a byte).
 pub const MAX_PARITY_FRAGMENTS: usize = 255;
+/// Least parity on a frame once the link has shown loss: two fragments.
+///
+/// Above [`Redundancy::MIN`] a clump of two losses in a small frame is then repaired without a
+/// round trip. Moonlight asks Sunshine for the same floor (`minRequiredFecPackets` 2, "Require at
+/// least 2 FEC packets for small frames", `SdpGenerator.c`). On a clean link the floor stays one
+/// fragment, which covers the lone loss such a link has and costs a busy screen nothing more.
+/// `docs/decisions/video.md`, "Small frames carry two parity fragments on a lossy link".
+pub const MIN_PARITY_FRAGMENTS: usize = 2;
 /// Parity ratio when nothing is known about the link, in thousandths (Sunshine's 20 %).
 pub(crate) const DEFAULT_PARITY_PERMILLE: u16 = 200;
 /// Frames kept for retransmission. At 60 fps this is about half a second, more than any playout
@@ -58,7 +66,9 @@ pub(crate) const MIN_PAYLOAD: usize = 256;
 ///
 /// `max_payload` caps the payload per datagram (clamped to `MIN_PAYLOAD..=MAX_PAYLOAD` and
 /// rounded down to even). Fragments are balanced (all the same size, as small as the count allows)
-/// so the padding in the last one never exceeds two bytes per fragment.
+/// so the padding in the last one never exceeds two bytes per fragment. Any non-zero ratio gets at
+/// least one parity fragment, and at least [`MIN_PARITY_FRAGMENTS`] once it is above the clean-link
+/// [`Redundancy::MIN`].
 pub fn layout(len: usize, parity_permille: u16, max_payload: usize) -> Result<Layout, MediaError> {
     if len == 0 {
         return Err(MediaError::Empty);
@@ -70,13 +80,14 @@ pub fn layout(len: usize, parity_permille: u16, max_payload: usize) -> Result<La
         return Err(MediaError::FrameTooLarge { len });
     }
     let shard_bytes = total.div_ceil(data_count).next_multiple_of(2).min(max_payload);
+    let floor = if parity_permille > Redundancy::MIN { MIN_PARITY_FRAGMENTS } else { 1 };
     let parity_count = if parity_permille == 0 {
         0
     } else {
         data_count
             .saturating_mul(usize::from(parity_permille))
             .div_ceil(1000)
-            .clamp(1, MAX_PARITY_FRAGMENTS)
+            .clamp(floor, MAX_PARITY_FRAGMENTS)
     };
     Ok(Layout {
         data_count: u16::try_from(data_count).unwrap_or(u16::MAX),
@@ -370,7 +381,7 @@ mod tests {
             assert!(usize::from(l.data_count) * l.shard_bytes >= total, "{len}: {l:?}");
             // Balanced: one fragment fewer would not fit.
             assert!((usize::from(l.data_count) - 1) * MAX_PAYLOAD < total, "{len}: {l:?}");
-            assert!(l.parity_count >= 1);
+            assert!(usize::from(l.parity_count) >= MIN_PARITY_FRAGMENTS);
             assert!(ReedSolomonEncoder::supports(
                 usize::from(l.data_count),
                 usize::from(l.parity_count)
@@ -378,7 +389,7 @@ mod tests {
         }
         assert_eq!(
             layout(1166, 200, MAX_PAYLOAD).unwrap(),
-            Layout { data_count: 1, shard_bytes: 1182, parity_count: 1 }
+            Layout { data_count: 1, shard_bytes: 1182, parity_count: 2 }
         );
         assert_eq!(layout(1167, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
         assert_eq!(layout(1167, 200, MAX_PAYLOAD).unwrap().data_count, 2);
@@ -387,6 +398,21 @@ mod tests {
             layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200, MAX_PAYLOAD),
             Err(MediaError::FrameTooLarge { .. })
         ));
+    }
+
+    /// Two parity fragments on any frame once the ratio says the link loses, one on a clean link,
+    /// none when parity is off; a big frame gets its ratio's share either way.
+    #[test]
+    fn the_parity_floor_is_two_on_a_lossy_link_and_one_on_a_clean_one() {
+        let parity =
+            |len: usize, permille: u16| layout(len, permille, MAX_PAYLOAD).unwrap().parity_count;
+        assert_eq!(parity(100, Redundancy::MIN), 1);
+        assert_eq!(parity(5_000, Redundancy::MIN), 1);
+        assert_eq!(parity(100, Redundancy::MIN + 1), 2);
+        assert_eq!(parity(5_000, 200), 2);
+        assert_eq!(parity(100, 0), 0);
+        assert_eq!(parity(60_000, 200), 11);
+        assert_eq!(parity(60_000, Redundancy::MIN), 3);
     }
 
     #[test]
@@ -443,8 +469,8 @@ mod tests {
         let sent = p.packetize(&frame, 7, |_| {}).unwrap().clone();
         assert_eq!(sent.frame, 0);
         assert_eq!(sent.layout.data_count, 5);
-        assert_eq!(sent.layout.parity_count, 1);
-        assert_eq!(sent.datagrams.len(), 6);
+        assert_eq!(sent.layout.parity_count, 2);
+        assert_eq!(sent.datagrams.len(), 7);
         for (i, dg) in sent.datagrams.iter().enumerate() {
             assert!(dg.len() <= MAX_DATAGRAM);
             let (h, payload) = MediaHeader::parse(dg).unwrap();
@@ -453,7 +479,7 @@ mod tests {
             assert_eq!(usize::from(h.index.get()), i);
             assert_eq!(h.flags, flags::KEYFRAME | flags::LTR);
             assert_eq!(h.send_ms_lo, 7);
-            assert_eq!(h.is_parity(), i == 5);
+            assert_eq!(h.is_parity(), i >= 5);
         }
         let (_h, first) = MediaHeader::parse(&sent.datagrams[0]).unwrap();
         let (prefix, rest) = FramePrefix::parse(first).unwrap();
@@ -461,7 +487,7 @@ mod tests {
         assert_eq!(prefix.ltr_token.get(), 42);
         assert_eq!(&rest[..8], &data[..8]);
         assert_eq!(p.next_frame(), 1);
-        assert_eq!(p.datagrams_sent(), 6);
+        assert_eq!(p.datagrams_sent(), 7);
     }
 
     #[test]

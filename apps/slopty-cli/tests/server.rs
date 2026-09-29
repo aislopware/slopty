@@ -79,6 +79,8 @@ mod tests {
             viewers: 0,
             command: Vec::new(),
             agent: None,
+            progress: None,
+            restored: None,
         }
     }
 
@@ -370,7 +372,7 @@ mod tests {
         mcp.request(1, "tools/list", json!({})).await;
         let list = mcp.reply(1).await;
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 31, "{list}");
+        assert_eq!(tools.len(), 32, "{list}");
         assert_eq!(tools[0]["name"], "list_workers");
         let read_output = tools.iter().find(|t| t["name"] == "read_output").unwrap();
         assert!(read_output["description"].as_str().unwrap().contains("`next`"), "{read_output}");

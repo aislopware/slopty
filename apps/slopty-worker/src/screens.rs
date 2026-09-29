@@ -1,7 +1,7 @@
 //! One screen stream on a client's connection: the QUIC datagrams it sends into, and the task
 //! that owns it.
 //!
-//! The task is the only thing that touches the [`ScreenStream`], so everything the stream does
+//! The task is the only thing that touches the [`Pipeline`], so everything the stream does
 //! slowly — the 115–300 ms open, an encoder rebuild, a close waiting on ScreenCaptureKit, the
 //! geometry probe's window-server reads — waits only for that stream. The connection's own loop
 //! hands commands over and goes straight back to the terminals.
@@ -13,8 +13,10 @@ use slopty_core::{ClientId, StreamId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
 use slopty_worker::platform::{Native, Platform};
+#[cfg(target_os = "macos")]
+use slopty_worker::screen::synthetic::Synthetic;
 use slopty_worker::screen::{
-    Pipeline, Rebuild, Refused, ScreenError, ScreenStream, StreamControl, StreamEvent, sized,
+    Pipeline, Rebuild, Refused, ScreenError, StreamControl, StreamEvent, sized,
 };
 use tokio::sync::mpsc;
 
@@ -95,8 +97,23 @@ pub struct Link {
 }
 
 /// Open the stream, then serve its commands and its geometry until it is closed or the
-/// connection lets go of it.
+/// connection lets go of it. A worker serving the drawn screen opens it there
+/// ([`slopty_worker::screen::synthetic_screen`]).
 pub async fn run(
+    link: Link,
+    id: StreamId,
+    target: CaptureTarget,
+    quality: Quality,
+    commands: mpsc::UnboundedReceiver<Command>,
+) {
+    #[cfg(target_os = "macos")]
+    if slopty_worker::screen::synthetic_screen() {
+        return run_on::<Synthetic>(link, id, target, quality, commands).await;
+    }
+    run_on::<Native>(link, id, target, quality, commands).await;
+}
+
+async fn run_on<P: Platform>(
     link: Link,
     id: StreamId,
     target: CaptureTarget,
@@ -105,13 +122,14 @@ pub async fn run(
 ) {
     let on_event = on_event(id, link.out.clone());
     let sink = Arc::new(QuicSink(link.conn.clone()));
-    let opened = ScreenStream::open(id, target, quality, sink, on_event).await;
+    let opened = Pipeline::<P>::open(id, target, quality, sink, on_event).await;
     let opened = opened.map(|(stream, opened)| (stream, vec![opened], None));
     serve_opened(link, id, opened, commands).await;
 }
 
 /// Open a stream of a display made for the client (or, when none can be had, of a physical
-/// display), then serve it as [`run`] does; the display goes when the stream does.
+/// display), then serve it as [`run`] does; the display goes when the stream does. A worker
+/// serving the drawn screen makes no display and streams its drawn one.
 pub async fn run_display(
     link: Link,
     id: StreamId,
@@ -120,6 +138,12 @@ pub async fn run_display(
 ) {
     let on_event = on_event(id, link.out.clone());
     let sink = Arc::new(QuicSink(link.conn.clone()));
+    #[cfg(target_os = "macos")]
+    if slopty_worker::screen::synthetic_screen() {
+        let opened = sized::open::<Synthetic, sized::Cg>(None, id, asked, sink, on_event).await;
+        let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
+        return serve_opened(link, id, opened, commands).await;
+    }
     let displays = link.daemon.displays.as_ref();
     let opened = sized::open::<Native, sized::Cg>(displays, id, asked, sink, on_event).await;
     let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
@@ -139,15 +163,15 @@ fn on_event(id: StreamId, events: mpsc::Sender<WorkerMsg>) -> impl Fn(StreamEven
 
 /// A stream as it opened: the stream, what to tell the client first, and for a display made
 /// for the client what serves its resizes.
-type Opened = Result<(ScreenStream, Vec<ScreenEvent>, Option<sized::Sized>), ScreenError>;
+type Opened<P> = Result<(Pipeline<P>, Vec<ScreenEvent>, Option<sized::Sized>), ScreenError>;
 
 /// Tell the client how the stream opened, serve it until it is closed or the connection lets
 /// go of it, and tear it down: input released, capture stopped, then any display made for it
 /// released on the main thread.
-async fn serve_opened(
+async fn serve_opened<P: Platform>(
     link: Link,
     id: StreamId,
-    opened: Opened,
+    opened: Opened<P>,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
     let Link { daemon, client, conn, out, told } = link;

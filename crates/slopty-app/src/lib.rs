@@ -22,8 +22,10 @@
 )]
 mod e2e;
 pub mod net;
+mod quick;
 mod server;
 pub mod settings;
+pub mod ssh;
 pub mod this_mac;
 pub mod workers;
 
@@ -56,9 +58,10 @@ use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::{TerminalView, TerminalViewEvent};
 use slopty_ui::workspace::attention::Attention;
 use slopty_ui::workspace::{
-    Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
-    WorkspaceEvent, WorkspaceView,
+    Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, ToggleQuickTerminal,
+    WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView,
 };
+pub use ssh::actions::InstallOverSsh;
 pub use this_mac::actions::UseThisMac;
 pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
 use workers::{Hearing, Tick, WorkerSlot};
@@ -255,6 +258,10 @@ struct Adding {
     search: Option<Search>,
     /// "Use this Mac as a worker" under way: its checklist stands in for the address.
     this_mac: Option<this_mac::Flow>,
+    /// "Install on a machine over SSH": its form, then its steps, stand in for the address.
+    ssh: Option<ssh::Sheet>,
+    /// Return in the address field adds what it holds; it goes with the panel.
+    _enter: gpui::Subscription,
 }
 
 /// What the tailnet offers the panel: a server to connect to, or a worker to add.
@@ -378,6 +385,8 @@ pub struct Workspace {
     settings_seen: settings::Seen,
     /// The in-app settings editor while it is open.
     settings_editor: Option<Entity<SettingsEditor>>,
+    /// What the editor asks for, heard while it is open.
+    settings_editor_events: Option<gpui::Subscription>,
     /// Focus the editor's field on the next frame (it needs a frame to exist).
     pending_focus_editor: bool,
     /// The self-test's stand-in for iPad Split View and Stage Manager: the app laid out in
@@ -392,6 +401,12 @@ pub struct Workspace {
     this_mac: Option<Rc<dyn this_mac::Host>>,
     /// Runs of it so far, so an answer for one left behind is dropped.
     this_mac_runs: u64,
+    /// What installs and updates a worker over SSH; `None` where it is not offered.
+    deployer: Option<Rc<dyn ssh::Deployer>>,
+    /// Runs of the SSH sheet so far, so an answer for one left behind is dropped.
+    ssh_runs: u64,
+    /// Updates from the tiles of a worker on a different build, by host.
+    updates: ssh::Updating,
     /// What reaches the system's notifications while the app is not in front.
     attention: Attention,
     /// The terminals whose finished commands [`Self::attention`] hears and whose progress the
@@ -399,6 +414,10 @@ pub struct Workspace {
     heard_terminals: std::collections::HashMap<SessionId, Heard>,
     /// What the Dock tile's bar shows, so a terminal's redraw sets it only when it changes.
     dock_progress: Option<slopty_platform::dock::DockProgress>,
+    /// The quick terminal's chord, registered with macOS from the settings.
+    quick_hotkey: quick::Hotkey,
+    /// How the worker loops dial: over the network, or a test's stand-in.
+    dial: Dialer,
     /// The time iOS grants after the app leaves the screen, held until it returns, so the links
     /// stay up for what arrives just after the phone is pocketed.
     #[cfg(target_os = "ios")]
@@ -450,6 +469,10 @@ impl Workspace {
                     slopty_platform::bounce();
                 }
             }
+            WorkspaceEvent::Unanswered { route, why } => {
+                let title = ws.view.read(cx).route_title(*route, cx);
+                ws.attention.unanswered(*route, title, why);
+            }
         });
         // The key bar follows the focused tile: a workspace change re-renders the shell,
         // which is a key bar and the overlays.
@@ -458,7 +481,10 @@ impl Workspace {
             cx.notify();
         });
         let this_mac = this_mac::native(&runtime);
-        Self {
+        let quick_hotkey = quick::Hotkey::new(quick::listen(view.clone(), cx));
+        let dial = network_dialer(runtime.clone());
+        let deployer = ssh::native(&runtime);
+        let this = Self {
             workers: Vec::new(),
             directory: slopty_client::directory::Directory::default(),
             server: None,
@@ -476,20 +502,28 @@ impl Workspace {
             settings_path,
             settings_seen,
             settings_editor: None,
+            settings_editor_events: None,
             pending_focus_editor: false,
             split_view: None,
             key_bar_scroll: ScrollHandle::new(),
             key_bar_fades: (false, false),
             this_mac,
             this_mac_runs: 0,
+            deployer,
+            ssh_runs: 0,
+            updates: ssh::Updating::new(),
             attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
             heard_terminals: std::collections::HashMap::new(),
             dock_progress: None,
+            quick_hotkey,
+            dial,
             #[cfg(target_os = "ios")]
             grace: None,
             #[cfg(target_os = "ios")]
             paste_key: None,
-        }
+        };
+        this.publish_updates(cx);
+        this
     }
 
     /// Post notes through `notifier` from now on (the system's in the app).
@@ -595,10 +629,8 @@ impl Workspace {
         let editor = cx.new(|cx| {
             SettingsEditor::new(&text, &path, cfg!(target_os = "macos"), theme, window, cx)
         });
-        self.subscriptions.push(cx.subscribe_in(
-            &editor,
-            window,
-            |this, editor, event, window, cx| match event {
+        self.settings_editor_events =
+            Some(cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 SettingsEditorEvent::Apply(text) => {
                     this.write_settings(text, editor, cx);
                 }
@@ -612,8 +644,7 @@ impl Workspace {
                     this.close_settings(window, cx);
                 }
                 SettingsEditorEvent::Dismiss => this.close_settings(window, cx),
-            },
-        ));
+            }));
         self.settings_editor = Some(editor);
         cx.notify();
     }
@@ -642,6 +673,7 @@ impl Workspace {
 
     /// Drop the editor and hand the keyboard back to the focused tile.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_editor_events = None;
         if self.settings_editor.take().is_none() {
             return;
         }
@@ -660,15 +692,23 @@ impl Workspace {
     }
 
     /// Take a (re)loaded settings file: log what was odd about it, show it as a toast for a
-    /// few seconds, and rebuild the theme.
-    fn apply_loaded(&mut self, loaded: Loaded, cx: &mut Context<Self>) {
-        for warning in &loaded.warnings {
-            tracing::warn!(%warning, "settings");
-        }
+    /// few seconds, and rebuild the theme and the keys.
+    ///
+    /// A file that does not parse changes nothing: the settings last applied stay (the
+    /// defaults, on a launch), and no chord is taken from other apps on its account.
+    fn apply_loaded(&mut self, mut loaded: Loaded, cx: &mut Context<Self>) {
         if let Some(error) = &loaded.error {
             tracing::error!(%error, "settings ignored");
             self.show_notice(format!("Settings: {error}"), cx);
-        } else if let Some(first) = loaded.warnings.first() {
+            self.rebuild_theme(cx);
+            return;
+        }
+        let keymap = keymap_for(&loaded.settings.keys);
+        loaded.warnings.extend(keymap.diagnostics().iter().cloned());
+        for warning in &loaded.warnings {
+            tracing::warn!(%warning, "settings");
+        }
+        if let Some(first) = loaded.warnings.first() {
             let more = loaded.warnings.len().saturating_sub(1);
             let text = if more == 0 {
                 format!("Settings: {first}")
@@ -677,14 +717,40 @@ impl Workspace {
             };
             self.show_notice(text, cx);
         }
-        // A file that did not parse keeps the server in use rather than dropping it.
-        let server = loaded.error.is_none().then(|| loaded.settings.client.server.clone());
+        let server = loaded.settings.client.server.clone();
         self.settings = loaded.settings;
         self.rebuild_theme(cx);
-        if let Some(server) = server {
-            self.set_server(server, None, cx);
-            self.refresh_menu(cx);
+        self.apply_keymap(keymap, cx);
+        self.apply_quick_terminal(cx);
+        self.set_server(server, None, cx);
+        self.refresh_menu(cx);
+    }
+
+    /// Bind `keymap` in place of the keys bound now, unless it binds the same, and show the
+    /// menus' chords from it: the "…" menu's, and the menu bar's, whose key equivalents AppKit
+    /// runs itself. The palette reads it when it opens.
+    fn apply_keymap(&self, keymap: slopty_ui::keymap::Keymap, cx: &mut Context<Self>) {
+        if keymap.binds_as(&slopty_ui::keymap::current()) {
+            return;
         }
+        tracing::info!(said = keymap.diagnostics().len(), "keys rebound");
+        slopty_ui::keymap::install(keymap, cx);
+        rebuild_app_menus(cx);
+        self.refresh_menu(cx);
+    }
+
+    /// The quick terminal as the settings have it: where it sits, its chord registered, and
+    /// the palette's line showing that chord. What is wrong with the chord is said when the
+    /// chord changes, not again with every save.
+    fn apply_quick_terminal(&mut self, cx: &mut Context<Self>) {
+        let settings = &self.settings.quick_terminal;
+        let config = quick::config(settings);
+        self.view.update(cx, |v, cx| v.set_quick_terminal(config, cx));
+        let (chord, said) = self.quick_hotkey.apply(settings);
+        if let Some(why) = said {
+            self.show_notice(why, cx);
+        }
+        self.view.update(cx, |v, _| v.extend_palette(app_palette_items(chord)));
     }
 
     /// The window turned dark or light.
@@ -893,9 +959,10 @@ impl Workspace {
     /// silence) is redialled on the shared backoff ([`slopty_net::redial`]); the loop ends
     /// when the worker is dropped.
     /// While the server says the worker is away the loop waits for it to come back online
-    /// (or for [`server::HOLD_RETRY`], in case the server is the one that cannot see it).
+    /// (or for [`server::HOLD_RETRY`], in case the server is the one that cannot see it). A
+    /// worker on another build changes only when someone updates it, so it is asked again after
+    /// [`slopty_net::redial::WRONG_BUILD`], or at once when something wakes the loop.
     fn spawn_worker_loop(&self, id: WorkerId, cx: &Context<Self>) {
-        let handle = self.runtime.clone();
         let view = self.view.clone();
         cx.spawn(async move |this, cx| {
             let mut redial = slopty_net::redial::Redial::default();
@@ -914,26 +981,32 @@ impl Workspace {
                     continue;
                 }
                 held = false;
-                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-                handle.spawn(async move {
-                    let _sent = ready_tx.send(net::connect_to(id, address).await);
-                });
-                let outcome = ready_rx.await;
-                let Ok(Ok(connected)) = outcome else {
-                    let failed = match outcome {
-                        Ok(Err(failed)) => failed,
-                        Ok(Ok(_)) | Err(_) => {
-                            net::DialFailed::Other("connection task died".to_owned())
-                        }
-                    };
-                    let Ok(status) = this.update(cx, |ws, _cx| ws.failure_status(id, failed))
-                    else {
-                        break;
-                    };
-                    let delay = redial.next(std::time::Instant::now());
-                    view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
-                    wait_or_wake(cx, &wake, delay).await;
-                    continue;
+                let Ok(dialing) =
+                    this.update(cx, move |ws, cx| (ws.dial.clone().0)(id, address, cx))
+                else {
+                    break;
+                };
+                let connected = match dialing.await {
+                    Ok(connected) => connected,
+                    Err(failed) => {
+                        let wrong_build = matches!(failed, net::DialFailed::WrongBuild(_));
+                        let Ok(status) = this.update(cx, |ws, cx| {
+                            if wrong_build {
+                                ws.update_still_wrong(id, cx);
+                            }
+                            ws.failure_status(id, failed)
+                        }) else {
+                            break;
+                        };
+                        let delay = if wrong_build {
+                            slopty_net::redial::WRONG_BUILD
+                        } else {
+                            redial.next(std::time::Instant::now())
+                        };
+                        view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
+                        wait_or_wake(cx, &wake, delay).await;
+                        continue;
+                    }
                 };
                 redial.linked(std::time::Instant::now());
                 let net::Connected { me, ack, sender, mut events, link } = connected;
@@ -955,6 +1028,7 @@ impl Workspace {
                     };
                     ws.view.update(cx, |v, cx| v.connect_worker(key, worker_link, ack, cx));
                     ws.refresh_menu(cx);
+                    ws.update_linked(id, cx);
                     true
                 });
                 if !matches!(alive, Ok(true)) {
@@ -1048,7 +1122,7 @@ impl Workspace {
     /// `mode` and keeps what was typed, leaving this Mac's checklist if it was up.
     fn show_add_worker(&mut self, mode: Panel, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(adding) = &mut self.adding {
-            let left = adding.this_mac.take().is_some();
+            let left = adding.this_mac.take().is_some() | adding.ssh.take().is_some();
             if adding.mode != mode {
                 adding.mode = mode;
                 adding.error = None;
@@ -1062,19 +1136,27 @@ impl Workspace {
             return;
         }
         let address = cx.new(|cx| InputState::new(window, cx).placeholder(mode.example()));
-        self.subscriptions.push(cx.subscribe(&address, |this, _input, event, cx| {
+        let enter = cx.subscribe(&address, |this, _input, event, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 this.add_from_panel(cx);
             }
-        }));
+        });
         address.update(cx, |input, cx| input.focus(window, cx));
         // A server's panel looks while no server is set; a worker's always, for the workers
         // not yet added.
         let search = (LISTS_TAILNET && (mode == Panel::Worker || self.server.is_none()))
             .then_some(Search::Looking);
         let looking = search.is_some();
-        self.adding =
-            Some(Adding { mode, address, busy: false, error: None, search, this_mac: None });
+        self.adding = Some(Adding {
+            mode,
+            address,
+            busy: false,
+            error: None,
+            search,
+            this_mac: None,
+            ssh: None,
+            _enter: enter,
+        });
         if looking {
             self.look_on_tailnet(window, cx);
         }
@@ -1273,6 +1355,7 @@ impl Workspace {
         }
         self.this_mac_runs = self.this_mac_runs.wrapping_add(1);
         let run = self.this_mac_runs;
+        adding.ssh = None;
         adding.this_mac = Some(this_mac::Flow::installing(run));
         let install = host.install();
         cx.spawn_in(window, async move |this, cx| {
@@ -1511,16 +1594,17 @@ impl Workspace {
             ),
         };
         let flow = adding.this_mac.as_ref();
-        // The checklist has a heading of its own, and its link goes back to the panel it came
-        // from, named as that panel's own link names it.
-        let (title, blurb, other) = match (flow, adding.mode) {
-            (None, _) => (title, blurb, other),
-            (Some(_), Panel::Server) => {
-                (this_mac::TITLE, this_mac::BLURB, "Connect to a server instead")
-            }
-            (Some(_), Panel::Worker) => {
-                (this_mac::TITLE, this_mac::BLURB, "Add a worker by address instead")
-            }
+        let sheet = adding.ssh.as_ref();
+        // The checklist and the SSH sheet have headings of their own, and their link goes back
+        // to the panel they came from, named as that panel's own link names it.
+        let back = match adding.mode {
+            Panel::Server => "Connect to a server instead",
+            Panel::Worker => "Add a worker by address instead",
+        };
+        let (title, blurb, other) = match (flow, sheet) {
+            (Some(_), _) => (this_mac::TITLE, this_mac::BLURB, back),
+            (None, Some(_)) => (ssh::HEADING, ssh::BLURB, back),
+            (None, None) => (title, blurb, other),
         };
         let welcome = self.welcome();
         // The page leads with the app's mark over its heading, as Raycast's and Linear's first
@@ -1609,22 +1693,27 @@ impl Workspace {
                 )
             });
         // At the body's size, as Cancel beside it is: one size for what can be pressed.
-        let in_flow = flow.is_some();
+        let in_flow = flow.is_some() || sheet.is_some();
         let switch = button("panel-switch", other, ButtonKind::Link).on_click(cx.listener(
             move |this, _ev, window, cx| {
                 if in_flow {
                     this.leave_this_mac(cx);
+                    this.leave_ssh(cx);
                 } else {
                     this.show_add_worker(other_mode, window, cx);
                 }
             },
         ));
-        // This Mac is one more place to add, so it is a row to press as the tailnet's are, not
-        // a second link under the switch, where the likeliest first step for a single Mac sat
-        // at the page's foot dressed as a way aside.
-        let use_this_mac = (self.this_mac.is_some() && !in_flow).then(|| {
-            let row = this_mac_row(theme)
-                .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)));
+        // This Mac and a machine over SSH are more places to add, so they are rows to press as
+        // the tailnet's are, in one frame, not links under the switch, where the likeliest first
+        // step for a single Mac sat at the page's foot dressed as a way aside.
+        let this_mac_entry = (self.this_mac.is_some() && !in_flow).then(|| {
+            this_mac_row(theme)
+                .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)))
+        });
+        let ssh_entry = (!in_flow).then(|| self.ssh_row(cx)).flatten();
+        let label = if ssh_entry.is_some() { SET_UP_LABEL } else { THIS_MAC_LABEL };
+        let use_this_mac = (this_mac_entry.is_some() || ssh_entry.is_some()).then(|| {
             let frame = div()
                 .flex()
                 .flex_col()
@@ -1632,13 +1721,14 @@ impl Workspace {
                 .rounded(px(radii.md))
                 .border_1()
                 .border_color(hsla(s.border))
-                .child(row);
+                .children(this_mac_entry)
+                .children(ssh_entry);
             div()
                 .id("add-worker-this-mac")
                 .flex()
                 .flex_col()
                 .gap(px(spacing.sm))
-                .child(panel_label(theme, "add-worker-this-mac-label", THIS_MAC_LABEL))
+                .child(panel_label(theme, "add-worker-this-mac-label", label))
                 .child(frame)
         });
         let cancel = (!welcome).then(|| {
@@ -1648,6 +1738,7 @@ impl Workspace {
         let ways = div().flex().flex_col().items_start().gap(px(spacing.xs)).child(switch);
         let aside = div().flex().items_start().child(ways).child(div().flex_1()).children(cancel);
         let checklist = flow.map(|flow| self.this_mac_checklist(flow, cx));
+        let ssh_sheet = sheet.map(|sheet| self.ssh_sheet(sheet, cx));
         let panel = div()
             .id("add-worker")
             .debug_selector(|| "add-worker".to_owned())
@@ -1682,8 +1773,12 @@ impl Workspace {
             // Where the tailnet cannot be listed, the line saying so stands in the list's place;
             // this Mac's checklist stands in for both and the address.
             .when_some(checklist, gpui::ParentElement::child)
+            .when_some(ssh_sheet, gpui::ParentElement::child)
             .when(!in_flow, |el| {
-                el.children(tailnet).children(unlisted).children(use_this_mac).child(entry)
+                el.children(tailnet)
+                    .children(unlisted)
+                    .children(use_this_mac)
+                    .child(entry)
             })
             .child(aside);
         if !welcome {
@@ -2243,6 +2338,37 @@ impl Workspace {
     }
 }
 
+/// How a worker loop dials worker `id`, at an address when the directory has one.
+#[derive(Clone)]
+struct Dialer(Rc<DialFn>);
+
+type DialFn = dyn Fn(
+    WorkerId,
+    Option<slopty_net::HostAddr>,
+    &mut App,
+) -> gpui::Task<Result<net::Connected, net::DialFailed>>;
+
+impl std::fmt::Debug for Dialer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Dialer")
+    }
+}
+
+/// Dial over the network, on `runtime`, where the transport lives ([`net::connect_to`]).
+fn network_dialer(runtime: tokio::runtime::Handle) -> Dialer {
+    Dialer(Rc::new(move |id, address, cx| {
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        runtime.spawn(async move {
+            let _sent = ready_tx.send(net::connect_to(id, address).await);
+        });
+        cx.foreground_executor().spawn(async move {
+            ready_rx
+                .await
+                .unwrap_or_else(|_| Err(net::DialFailed::Other("connection task died".to_owned())))
+        })
+    }))
+}
+
 /// Wait `delay`, or less if `wake` is notified first; whether it was.
 async fn wait_or_wake(
     cx: &gpui::AsyncApp,
@@ -2331,9 +2457,18 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &UseThisMac, window, cx| {
                 this.use_this_mac(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &InstallOverSsh, window, cx| {
+                this.open_ssh(window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleQuickTerminal, _window, cx| {
+                let asked = std::time::Instant::now();
+                this.view.update(cx, |v, cx| {
+                    v.toggle_quick_terminal(asked, slopty_ui::workspace::QuickToggle::Command, cx);
+                });
+            }))
             .when(!welcome, |el| {
                 el.child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
                     .when_some(key_bar, |el, bar| {
@@ -2525,25 +2660,39 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
 
 /// The label over this Mac's row on the add panels.
 const THIS_MAC_LABEL: &str = "On this Mac";
+/// The label over this Mac's row and the SSH row together.
+const SET_UP_LABEL: &str = "Set up a worker";
 
 /// This Mac as a row to press, drawn as a found worker's is: the Mac's glyph, what pressing
 /// does over what follows, and the chevron that says the press goes on to a checklist.
 fn this_mac_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    use slopty_ui::icons::IconName;
+    entry_row(theme, "use-this-mac", IconName::Monitor, this_mac::TITLE, this_mac::ROW_META)
+}
+
+/// A way to add a worker that goes on to a sheet of its own, as a row to press drawn as a found
+/// worker's is: its glyph, what pressing does over what follows, and the chevron that says the
+/// press goes on.
+fn entry_row(
+    theme: &Theme,
+    id: &'static str,
+    glyph: slopty_ui::icons::IconName,
+    title: &'static str,
+    meta: &'static str,
+) -> gpui::Stateful<gpui::Div> {
     use slopty_ui::icons::{IconName, IconSize, icon};
     let s = theme.surfaces;
     let glyph_size = px(theme.typography.icon());
     let row = kit::row(theme, kit::Row::Two)
-        .id("use-this-mac")
-        .debug_selector(|| "use-this-mac".to_owned())
+        .id(id)
+        .debug_selector(move || id.to_owned())
         .role(Role::Button)
-        .aria_label(this_mac::TITLE)
+        .aria_label(title)
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
         .hover(move |el| el.bg(hsla(s.raised)))
         .active(move |el| el.bg(hsla(s.overlay)))
-        .child(
-            icon(theme, IconName::Monitor, IconSize::Inline, hsla(s.text_muted)).size(glyph_size),
-        )
+        .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
         .child(
             div()
                 .flex_1()
@@ -2555,9 +2704,9 @@ fn this_mac_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
                         .text_size(px(theme.typography.ui_size))
                         .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text))
-                        .child(this_mac::TITLE),
+                        .child(title),
                 )
-                .child(kit::meta(div(), theme).child(this_mac::ROW_META)),
+                .child(kit::meta(div(), theme).child(meta)),
         )
         .child(
             icon(theme, IconName::ChevronRight, IconSize::Inline, hsla(s.text_muted))
@@ -2566,16 +2715,40 @@ fn this_mac_row(theme: &Theme) -> gpui::Stateful<gpui::Div> {
     tab_stop(row, s.accent)
 }
 
-/// The app's own bindings, outside any view's context.
-fn app_key_bindings() -> Vec<gpui::KeyBinding> {
-    vec![
-        gpui::KeyBinding::new("cmd-,", OpenSettings, None),
-        gpui::KeyBinding::new("cmd-shift-h", AddWorker, None),
-    ]
+/// The app's own commands, bound outside any view's context: its rows of the keymap's table
+/// (`[keys.app]`), which lives in `slopty_ui::keymap` beside the rest.
+fn app_commands() -> Vec<slopty_ui::keymap::Command> {
+    use slopty_ui::keymap::app_command;
+    let mut commands = vec![
+        app_command("open_settings", OpenSettings, &["cmd-,"]),
+        app_command("add_worker", AddWorker, &["cmd-shift-h"]),
+        app_command("connect_server", ConnectServer, &[]),
+        app_command("disconnect_server", DisconnectServer, &[]),
+    ];
+    if this_mac::OFFERED {
+        commands.push(app_command("use_this_mac", UseThisMac, &[]));
+    }
+    if ssh::OFFERED {
+        commands.push(app_command("install_over_ssh", InstallOverSsh, &[]));
+    }
+    commands
 }
 
-/// The app's lines for the command palette, after the workspace's.
-fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
+/// The app's commands and the rest of the table, with `keys` over them.
+fn keymap_for(keys: &slopty_settings::KeySettings) -> slopty_ui::keymap::Keymap {
+    slopty_ui::keymap::Keymap::new(keys, app_commands())
+}
+
+/// The app's own bindings in effect.
+fn app_key_bindings() -> Vec<gpui::KeyBinding> {
+    slopty_ui::keymap::current().bindings(|scope| scope == slopty_ui::keymap::Scope::App)
+}
+
+/// The app's lines for the command palette, after the workspace's; the quick terminal's shows
+/// `quick_chord`, its chord from any app.
+fn app_palette_items(
+    quick_chord: Option<slopty_platform::hotkey::Chord>,
+) -> Vec<slopty_ui::palette::PaletteItem> {
     use slopty_ui::icons::IconName;
 
     let bindings = app_key_bindings();
@@ -2591,12 +2764,37 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     if this_mac::OFFERED {
         items.push(item(this_mac::TITLE, IconName::Monitor, Box::new(UseThisMac)));
     }
+    if ssh::OFFERED {
+        items.push(item(ssh::TITLE, IconName::Terminal, Box::new(InstallOverSsh)));
+    }
+    items.extend(quick::palette_line(quick_chord));
     items
 }
 
 /// Where this device keeps its layout: beside the settings, in the client's data directory.
 fn layout_path() -> std::path::PathBuf {
     slopty_platform::dirs::data_dir().join("layout.json")
+}
+
+/// What builds the app's menu bar, kept so a rebinding rebuilds it.
+struct AppMenus(Rc<dyn Fn() -> Vec<gpui::Menu>>);
+
+impl gpui::Global for AppMenus {}
+
+/// Show the menus `build` makes in the menu bar, and again whenever the keys are rebound.
+///
+/// A menu's key equivalents are the chords bound when it is set, and AppKit runs them before
+/// any binding sees the key, so a menu built once would keep a chord the file took away.
+pub fn set_app_menus(cx: &mut App, build: impl Fn() -> Vec<gpui::Menu> + 'static) {
+    cx.set_global(AppMenus(Rc::new(build)));
+    rebuild_app_menus(cx);
+}
+
+/// The menu bar again, from the keys bound now.
+fn rebuild_app_menus(cx: &App) {
+    if let Some(build) = cx.try_global::<AppMenus>().map(|menus| Rc::clone(&menus.0)) {
+        cx.set_menus(build());
+    }
 }
 
 /// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
@@ -2630,9 +2828,8 @@ pub fn open_workspace(
     if let Err(e) = slopty_ui::fonts::install(cx) {
         tracing::error!(error = %e, "bundled fonts");
     }
-    cx.bind_keys(slopty_ui::workspace::key_bindings());
-    cx.bind_keys(slopty_ui::terminal::key_bindings());
-    cx.bind_keys(app_key_bindings());
+    // The table's defaults until the settings are read, below, lay their `[keys]` over it.
+    slopty_ui::keymap::install(keymap_for(&slopty_settings::KeySettings::default()), cx);
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the
     // window's appearance is known, below.
     kit::sync(&Theme::default(), cx);
@@ -2650,7 +2847,7 @@ pub fn open_workspace(
     };
     let view = cx.new(|cx| {
         let mut view = WorkspaceView::new(Theme::default(), saved, cx);
-        view.extend_palette(app_palette_items());
+        view.extend_palette(app_palette_items(None));
         view.set_layout_path(layout_path());
         view.set_pasteboard(pasteboard());
         view.set_hardware_keyboard(hardware_keyboard_attached());
@@ -2710,10 +2907,19 @@ pub fn open_workspace(
     let for_notifications = workspace.clone();
     cx.spawn(async move |cx| {
         while let Some(tap) = tapped.recv().await {
+            // "Allow" and "Deny" answer where the note is, leaving the app where it was.
+            let verdict = matches!(
+                tap.action.as_deref(),
+                Some(slopty_platform::notify::ALLOW | slopty_platform::notify::DENY)
+            );
             cx.update(|cx| {
-                cx.activate(true);
+                if !verdict {
+                    cx.activate(true);
+                }
                 let _handled = window.update(cx, |_root, window, cx| {
-                    window.activate_window();
+                    if !verdict {
+                        window.activate_window();
+                    }
                     for_notifications.update(cx, |ws, cx| ws.open_notification(&tap, cx));
                 });
             });
@@ -2952,7 +3158,7 @@ mod tests {
     /// The shell in a headless window with the add-worker panel up, `worker` ones known so
     /// it is a dialog over the workspace, else the first run. The runtime and the directory
     /// hold what the shell's tasks and settings file need for the test's length.
-    fn shell<'a>(
+    pub(crate) fn shell<'a>(
         cx: &'a mut TestAppContext,
         runtime: &tokio::runtime::Runtime,
         dir: &tempfile::TempDir,
@@ -2974,14 +3180,14 @@ mod tests {
     }
 
     /// The shell with no window, no worker and no panel.
-    fn workspace(
+    pub(crate) fn workspace(
         cx: &mut TestAppContext,
         runtime: &tokio::runtime::Runtime,
         dir: &tempfile::TempDir,
     ) -> Entity<Workspace> {
         cx.update(|cx| {
             gpui_kit::init(cx);
-            cx.bind_keys(app_key_bindings());
+            slopty_ui::keymap::install(keymap_for(&slopty_settings::KeySettings::default()), cx);
         });
         let path = dir.path().join("settings.toml");
         let (cache, _writes) = tokio::sync::watch::channel(server::Cache::Remove);
@@ -3480,8 +3686,192 @@ mod tests {
     /// The palette offers it on a Mac.
     #[test]
     fn the_palette_offers_this_mac_on_a_mac() {
-        let offered = app_palette_items().iter().any(|item| item.label == this_mac::TITLE);
+        let offered = app_palette_items(None).iter().any(|item| item.label == this_mac::TITLE);
         assert_eq!(offered, this_mac::OFFERED);
+    }
+
+    /// The quick terminal's line carries the chord registered from the settings, and none
+    /// when there is no chord; only the Mac offers it.
+    #[test]
+    fn the_palette_shows_the_quick_terminals_chord() {
+        let quick = |chord| {
+            app_palette_items(chord)
+                .into_iter()
+                .find(|item| item.label == slopty_ui::workspace::TOGGLE_QUICK_TERMINAL)
+                .map(|item| item.keys)
+        };
+        let chord = slopty_platform::hotkey::Chord::parse("ctrl-`").ok();
+        if WorkspaceView::quick_terminal_offered() {
+            assert_eq!(quick(chord).as_deref(), Some("\u{2303}`"));
+            assert_eq!(quick(None).as_deref(), Some(""), "no chord, the command still");
+        } else {
+            assert_eq!(quick(chord), None);
+        }
+    }
+
+    /// A dial a worker answers from another build shows as its status, with both builds and the
+    /// command that updates it, and the loop does not dial it again on the backoff: only after
+    /// the long wait, or when something wakes it.
+    #[gpui::test]
+    fn a_worker_on_another_build_is_asked_again_only_after_the_long_wait(cx: &mut TestAppContext) {
+        use slopty_client::update::{Of, UpdateNotice};
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(cx, &runtime, &dir);
+        let notice = UpdateNotice {
+            of: Of::Worker,
+            host: "mini".to_owned(),
+            peer: "0.0.9+wire.0badf00d".to_owned(),
+        };
+        let dials = Rc::new(std::cell::Cell::new(0_u32));
+        let (counted, said) = (Rc::clone(&dials), notice.clone());
+        ws.update(cx, |ws, _cx| {
+            ws.dial = Dialer(Rc::new(move |_id, _address, _cx| {
+                counted.set(counted.get().saturating_add(1));
+                gpui::Task::ready(Err(net::DialFailed::WrongBuild(said.clone())))
+            }));
+        });
+        let id = WorkerId::new();
+        ws.update(cx, |ws, cx| ws.add_worker(id, "mini".to_owned(), true, cx));
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 1);
+        let status = ws.read_with(cx, |ws, cx| {
+            ws.view.read(cx).workers().map(|(_, _, status)| status.clone()).next()
+        });
+        assert_eq!(status, Some(WorkerStatus::NeedsUpdate(notice)));
+
+        cx.executor().advance_clock(slopty_net::redial::MAX.saturating_mul(10));
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 1, "not dialled again on the backoff");
+        cx.executor().advance_clock(slopty_net::redial::WRONG_BUILD);
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 2, "asked again after the long wait");
+        ws.update(cx, |ws, _cx| ws.connect_now(id));
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 3, "or at once when woken");
+        ws.update(cx, |ws, cx| ws.drop_slot(id, cx));
+        cx.run_until_parked();
+    }
+
+    /// A settings file read again rebinds the keys at once: the app's own command runs on the
+    /// file's chord and no longer on its default, and on its default again once the file drops
+    /// the line. A chord taken from another command is said in one notice naming both.
+    #[gpui::test]
+    fn saved_keys_rebind_at_once(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        let load = |cx: &mut VisualTestContext, text: &str| {
+            ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(text), cx));
+            cx.run_until_parked();
+        };
+        let press = |cx: &mut VisualTestContext, keys: &str| {
+            cx.update(|window, cx| ws.update(cx, |ws, cx| ws.close_settings(window, cx)));
+            cx.run_until_parked();
+            let field = cx.debug_bounds("add-worker-field").expect("the panel's field");
+            cx.simulate_click(field.center(), gpui::Modifiers::none());
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            ws.read_with(cx, |ws, _| ws.settings_editor.is_some())
+        };
+        assert!(press(cx, "cmd-,"), "the default");
+
+        load(cx, "[keys.app]\nopen_settings = \"cmd-;\"\n");
+        assert!(!press(cx, "cmd-,"), "the default no longer");
+        assert!(press(cx, "cmd-;"), "the file's chord");
+
+        load(cx, "[keys.app]\nopen_settings = \"cmd-shift-h\"\n");
+        let said = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text(cx));
+        assert_eq!(
+            said.as_deref(),
+            Some("Settings: ⇧⌘H runs `app.open_settings` now, no longer `app.add_worker`")
+        );
+        assert!(press(cx, "cmd-shift-h"), "the file's command wins the chord");
+
+        load(cx, "");
+        assert!(press(cx, "cmd-,"), "the default again");
+        assert!(!press(cx, "cmd-;"));
+    }
+
+    /// The menu bar is built again whenever the keys are rebound, from the keys bound then:
+    /// AppKit runs a menu item's key equivalent itself, so a menu built once would keep running
+    /// New Shell on ⌘T after the file moved it to ⌘Y.
+    #[gpui::test]
+    fn the_menu_bar_follows_a_rebinding(cx: &mut TestAppContext) {
+        use slopty_ui::workspace::NewTerminal;
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(cx, &runtime, &dir);
+        let built = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = Rc::clone(&built);
+        cx.update(|cx| {
+            set_app_menus(cx, move || {
+                let keys = slopty_ui::keymap::current().label_of(&NewTerminal).to_owned();
+                seen.borrow_mut().push(keys);
+                vec![
+                    gpui::Menu::new("File")
+                        .items([gpui::MenuItem::action("New Shell", NewTerminal)]),
+                ]
+            });
+        });
+        let file = "[keys.workspace]\nnew_terminal = \"cmd-y\"\n";
+        ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(file), cx));
+        ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(file), cx));
+        assert_eq!(*built.borrow(), ["⌘T", "⌘Y"], "built at first, then once for the change");
+        let menus = cx.update(|cx| cx.get_menus()).unwrap_or_default();
+        assert_eq!(menus.iter().map(|m| m.name.to_string()).collect::<Vec<_>>(), ["File"]);
+        // The item's key equivalent as AppKit's menu takes it: the action's first binding
+        // that holds in the workspace (`gpui_macos`'s `create_menu_item`).
+        let equivalent = cx.update(|cx| {
+            let mut context = gpui::KeyContext::new_with_defaults();
+            context.add("Workspace");
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            keymap
+                .bindings_for_action(&NewTerminal)
+                .find(|b| b.predicate().is_none_or(|p| p.eval(std::slice::from_ref(&context))))
+                .map(|b| b.keystrokes().iter().map(|k| k.inner().unparse()).collect::<String>())
+        });
+        assert_eq!(equivalent.as_deref(), Some("cmd-y"), "no ⌘T left for the menu to take");
+    }
+
+    /// A settings file that does not parse changes no key and takes no chord from other apps:
+    /// the keymap and the quick terminal's chord stay as last applied, not the defaults'. A
+    /// chord that does not read is said once, not again with every unrelated save.
+    #[gpui::test]
+    fn a_broken_file_keeps_the_keys_and_says_a_bad_chord_once(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        let load = |cx: &mut VisualTestContext, text: &str| {
+            ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(text), cx));
+            cx.run_until_parked();
+        };
+        let said =
+            |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text(cx));
+        let quiet = |cx: &mut VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_secs(10));
+            cx.run_until_parked();
+        };
+        let note_keys = || {
+            let keymap = slopty_ui::keymap::current();
+            let ix = keymap.find(slopty_ui::keymap::Scope::Workspace, "new_note");
+            keymap.chords(ix.unwrap_or_default()).to_vec()
+        };
+
+        load(cx, "[quick_terminal]\nhotkey = \"\"\n[keys.workspace]\nnew_note = \"cmd-alt-n\"\n");
+        assert_eq!(ws.read_with(cx, |ws, _| ws.quick_hotkey.asked()), None);
+        load(cx, "[quick_terminal\nhotkey = ");
+        assert!(said(cx).is_some_and(|t| t.starts_with("Settings: ")), "{:?}", said(cx));
+        assert_eq!(ws.read_with(cx, |ws, _| ws.quick_hotkey.asked()), None, "no ⌃` taken");
+        assert_eq!(note_keys(), ["alt-cmd-n"], "the keys last applied");
+
+        quiet(cx);
+        load(cx, "[quick_terminal]\nhotkey = \"alt-q\"\n");
+        assert!(said(cx).is_some_and(|t| t.contains("Quick terminal chord")), "{:?}", said(cx));
+        quiet(cx);
+        load(cx, "[quick_terminal]\nhotkey = \"alt-q\"\n[font]\nligatures = false\n");
+        assert_eq!(said(cx), None, "said once");
     }
 
     /// A change from the settings form writes the file and applies it with the dialog still

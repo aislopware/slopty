@@ -37,7 +37,7 @@ use gpui::{
     RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
     TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
-    px, relative, size, surface,
+    px, size, surface,
 };
 use slopty_client::pacing::{Pace, Pacer, PacingStats};
 use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
@@ -1283,11 +1283,13 @@ impl ScreenView {
     /// The workspace reports how wide the view is painted (device pixels) so the stream can be
     /// downscaled at the worker when it is drawn small. Quantised to quarter steps and rate
     /// limited: a change inside the cooldown is taken when it ends, the latest width asked for
-    /// winning. A picture zoomed inside the tile is drawn wider than the tile, and asks for
-    /// that width.
+    /// winning. A picture narrower than its tile's aspect is drawn narrower than the tile, and a
+    /// picture zoomed inside the tile wider; each asks for the width it is drawn at.
     pub fn set_painted_width(&mut self, device_px: f32, cx: &Context<Self>) {
         self.painted = device_px;
-        let drawn = device_px * self.zoom.scale();
+        let body = f32::from(self.bounds.size.width);
+        let share = if body > 0.0 { self.frame().size.0 / body } else { 1.0 };
+        let drawn = device_px * share * self.zoom.scale();
         let wanted = (drawn / self.native.0).clamp(MIN_SCALE, 1.0);
         let bucket = (wanted * 4.0).ceil() / 4.0;
         if (bucket - self.quality.scale).abs() < f32::EPSILON {
@@ -1431,25 +1433,44 @@ impl ScreenView {
     /// Window position → stream pixels, at the size the worker maps them with, through the
     /// zoom: the pixel of the picture drawn under `position`.
     fn to_stream(&self, position: Point<Pixels>) -> (f32, f32) {
-        let (fx, fy) = self.zoom.to_picture(self.body_fraction(position));
+        let (fx, fy) = self.zoom.to_picture(self.frame_fraction(position));
         let (stream_w, stream_h) = self.mapped_f32();
         let (x, y) = (fx * stream_w, fy * stream_h);
         tracing::trace!(?position, bounds = ?self.bounds, mapped = ?self.mapped, x, y, "to_stream");
         (x, y)
     }
 
-    /// Window position → a point of the body, in fractions of its size.
-    fn body_fraction(&self, position: Point<Pixels>) -> (f32, f32) {
-        let (w, h) = self.body_size();
+    /// [`Self::to_stream`] held to the picture: the nearest pixel of its edge for a position off
+    /// it.
+    fn to_stream_edge(&self, position: Point<Pixels>) -> (f32, f32) {
+        let (x, y) = self.to_stream(position);
+        let (w, h) = self.mapped_f32();
+        (x.clamp(0.0, w), y.clamp(0.0, h))
+    }
+
+    /// Window position → a point of the frame, in fractions of its size.
+    fn frame_fraction(&self, position: Point<Pixels>) -> (f32, f32) {
+        let frame = self.frame();
         (
-            (f32::from(position.x) - f32::from(self.bounds.origin.x)) / w,
-            (f32::from(position.y) - f32::from(self.bounds.origin.y)) / h,
+            (f32::from(position.x) - f32::from(self.bounds.origin.x) - frame.origin.0)
+                / frame.size.0,
+            (f32::from(position.y) - f32::from(self.bounds.origin.y) - frame.origin.1)
+                / frame.size.1,
         )
     }
 
-    /// The body's size in points, never zero.
-    fn body_size(&self) -> (f32, f32) {
-        (f32::from(self.bounds.size.width).max(1.0), f32::from(self.bounds.size.height).max(1.0))
+    /// Where the picture is drawn at fit, in points from the body's top-left: the stream's aspect
+    /// kept, centred, never of zero size ([`zoom::fit`]). The zoom and every pointer mapping
+    /// are fractions of this rectangle, not of the body.
+    fn frame(&self) -> zoom::Frame {
+        let body = (f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
+        let frame = zoom::fit(body, self.size);
+        zoom::Frame { size: (frame.size.0.max(1.0), frame.size.1.max(1.0)), ..frame }
+    }
+
+    /// The frame's size in points, never zero.
+    fn frame_size(&self) -> (f32, f32) {
+        self.frame().size
     }
 
     /// How the picture is drawn over the body.
@@ -1460,7 +1481,7 @@ impl ScreenView {
 
     /// The scale at which a pixel of the target is a pixel of this device.
     fn one_to_one(&self) -> f32 {
-        zoom::one_to_one(self.native.0, self.body_size().0, self.scale_factor)
+        zoom::one_to_one(self.native.0, self.frame_size().0, self.scale_factor)
     }
 
     /// Draw the picture as `zoom` (held to its limits), say so, and ask the worker for the
@@ -1519,8 +1540,8 @@ impl ScreenView {
         }
         cx.stop_propagation();
         let now = cx.background_executor().now();
-        let at = self.body_fraction(ev.position);
-        let (w, h) = self.body_size();
+        let at = self.frame_fraction(ev.position);
+        let (w, h) = self.frame_size();
         let points = (at.0 * w, at.1 * h);
         match ev.phase {
             TouchPhase::Started => {
@@ -1552,7 +1573,7 @@ impl ScreenView {
         let Some(two) = self.two.as_mut() else { return };
         let step = two.step((1.0 + delta).max(0.01), points);
         let max = zoom::max_scale(self.one_to_one());
-        let (w, h) = self.body_size();
+        let (w, h) = self.frame_size();
         if self.trackpad.is_some() {
             match step.kind {
                 touch::TwoKind::Pinch => self.set_zoom(self.zoom.about(at, step.factor, max), cx),
@@ -1693,8 +1714,8 @@ impl ScreenView {
     ) -> bool {
         let Some(mut pad) = self.trackpad else { return false };
         let now = cx.background_executor().now();
-        let (w, h) = self.body_size();
-        let at = self.body_fraction(ev.position);
+        let (w, h) = self.frame_size();
+        let at = self.frame_fraction(ev.position);
         let points = (at.0 * w, at.1 * h);
         let acts = match ev.phase {
             TouchPhase::Started => {
@@ -1734,16 +1755,24 @@ impl ScreenView {
         cx.emit(ScreenViewEvent::Pressed);
     }
 
+    /// Whether `p` is over the picture as it is drawn: inside the body, and not on the bare
+    /// body beside a picture of another aspect.
     fn inside(&self, p: Point<Pixels>) -> bool {
-        self.bounds.contains(&p)
+        let on_picture = |f: f32| (0.0..=1.0).contains(&f);
+        let (fx, fy) = self.zoom.to_picture(self.frame_fraction(p));
+        self.bounds.contains(&p) && on_picture(fx) && on_picture(fy)
     }
 
     /// The pointer from the body's top-left, in view pixels, through the zoom
     /// ([`Self::pointer_spot`]).
     fn cursor_offset(&self, now: Instant) -> (Pixels, Pixels) {
-        let (w, h) = self.body_size();
-        let (u, v) = self.zoom.to_body(self.pointer_spot(now).0);
-        (px(u * w), px(v * h))
+        self.frame_to_body(self.zoom.to_frame(self.pointer_spot(now).0))
+    }
+
+    /// A point of the frame (fractions of it) in points from the body's top-left.
+    fn frame_to_body(&self, (u, v): (f32, f32)) -> (Pixels, Pixels) {
+        let frame = self.frame();
+        (px(u.mul_add(frame.size.0, frame.origin.0)), px(v.mul_add(frame.size.1, frame.origin.1)))
     }
 
     /// The pointer moved over the picture: sent to the worker, and drawn there in the same
@@ -1769,7 +1798,13 @@ impl ScreenView {
         if self.touch && self.trackpad.is_none() && ev.click_count == 2 {
             let target = zoom::double_tap_target(self.one_to_one());
             let max = zoom::max_scale(self.one_to_one());
-            self.set_zoom(self.zoom.toggled(self.body_fraction(ev.position), target, max), cx);
+            self.set_zoom(self.zoom.toggled(self.frame_fraction(ev.position), target, max), cx);
+            cx.stop_propagation();
+            return;
+        }
+        // A press on the bare body beside a picture of another aspect only takes the keys:
+        // nothing of the remote screen is under it.
+        if !self.inside(ev.position) {
             cx.stop_propagation();
             return;
         }
@@ -1798,9 +1833,7 @@ impl ScreenView {
         let button = proto_button(ev.button);
         let Some(at) = self.buttons.iter().position(|&b| b == button) else { return };
         self.buttons.swap_remove(at);
-        let (x, y) = self.to_stream(ev.position);
-        let (w, h) = self.mapped_f32();
-        let (x, y) = (x.clamp(0.0, w), y.clamp(0.0, h));
+        let (x, y) = self.to_stream_edge(ev.position);
         let now = cx.background_executor().now();
         self.place((x, y), now);
         self.redraw_pointer(now, cx);
@@ -1826,7 +1859,9 @@ impl ScreenView {
             ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y), true),
             ScrollDelta::Lines(l) => (l.x, l.y, false),
         };
-        let (x, y) = self.to_stream(ev.position);
+        // Over the bare body beside the picture a scroll goes on at the picture's edge, so a
+        // gesture that drifts off it still ends where it began.
+        let (x, y) = self.to_stream_edge(ev.position);
         let mods = keys::mods(ev.modifiers);
         // A finger landing on a fling stops it, and macOS closes the old momentum before it
         // opens the new gesture.
@@ -2191,9 +2226,8 @@ impl ScreenView {
     /// has sent one, else a drawn arrow. An element of the pointer's own extent, which tests
     /// find where it is drawn (`screen-pointer`).
     fn cursor_overlay(&self, spot: Option<(f32, f32)>) -> Option<impl IntoElement + use<>> {
-        let (w, h) = self.body_size();
-        let (u, v) = self.zoom.to_body(spot?);
-        let at = point(px(u * w), px(v * h));
+        let (x, y) = self.frame_to_body(self.zoom.to_frame(spot?));
+        let at = point(x, y);
         let (bounds, paint) = match &self.pointer {
             Pointer::Image { image, size, hot } => {
                 (pointer_bounds(at, *size, *hot), PointerPaint::Image(Arc::clone(image)))
@@ -2467,19 +2501,26 @@ impl Render for ScreenView {
                     .into_any_element()
             },
             |buffer| {
-                let picture = surface(buffer.clone()).object_fit(ObjectFit::Fill);
+                // At fit the surface keeps the picture's aspect in whatever the body is laid
+                // out to, which is the frame the pointer maps through (`frame`).
                 if self.zoom.is_fit() {
-                    return picture.size_full().into_any_element();
+                    return surface(buffer.clone())
+                        .object_fit(ObjectFit::Contain)
+                        .size_full()
+                        .into_any_element();
                 }
-                // Placed in fractions of the body, so a body that changes size between the
-                // zoom and this draw keeps the same part of the picture in view.
-                let (s, (ox, oy)) = (self.zoom.scale(), self.zoom.origin());
-                picture
+                // Zoomed, it is placed from the frame the last paint laid out: `scale` times it,
+                // at `origin` in its fractions.
+                let (left, top) = self.frame_to_body(self.zoom.origin());
+                let (w, h) = self.frame_size();
+                let s = self.zoom.scale();
+                surface(buffer.clone())
+                    .object_fit(ObjectFit::Fill)
                     .absolute()
-                    .left(relative(ox))
-                    .top(relative(oy))
-                    .w(relative(s))
-                    .h(relative(s))
+                    .left(left)
+                    .top(top)
+                    .w(px(w * s))
+                    .h(px(h * s))
                     .into_any_element()
             },
         );
@@ -3320,11 +3361,20 @@ mod tests {
         cx: &mut gpui::TestAppContext,
         target: CaptureTarget,
     ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>, &mut gpui::VisualTestContext) {
+        windowed_sized(cx, target, (800, 600))
+    }
+
+    /// [`windowed_on`], with a stream of `pixels` in the 400 × 300 body.
+    fn windowed_sized(
+        cx: &mut gpui::TestAppContext,
+        target: CaptureTarget,
+        pixels: (u32, u32),
+    ) -> (gpui::Entity<ScreenView>, mpsc::Receiver<ClientMsg>, &mut gpui::VisualTestContext) {
         let (out, rx) = mpsc::channel(64);
         let opened = Opened {
             stream: StreamId(4),
             target,
-            size: (800, 600),
+            size: pixels,
             quality: Quality { scale: 1.0, ..Quality::default() },
         };
         let (view, cx) = cx.add_window_view(|window, cx| {
@@ -3871,6 +3921,76 @@ mod tests {
         near_px(offset(&view, cx), (200.0, 150.0));
     }
 
+    /// A picture of another aspect than its body keeps its own, centred with the body bare above
+    /// and below, and the pointer maps through the picture as drawn: a point of the picture is
+    /// its stream pixel, a move or a press on the bare body sends nothing, a release there lands
+    /// on the picture's edge, the worker's pointer is drawn on the picture, and zoomed the
+    /// picture is drawn from the same frame.
+    #[gpui::test]
+    fn a_picture_of_another_aspect_is_letterboxed_and_the_pointer_follows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // 2:1 in a 4:3 body: 400 × 200 points at (0, 50).
+        let (view, mut rx, cx) =
+            windowed_sized(cx, CaptureTarget::Display(DisplayId(2)), (800, 400));
+        drop(sent(&mut rx));
+        let b = view.read_with(cx, |v, _| v.bounds);
+        assert_eq!(b.size, size(px(400.0), px(300.0)));
+        let frame = view.read_with(cx, |v, _| v.frame());
+        assert_eq!(frame, zoom::Frame { origin: (0.0, 50.0), size: (400.0, 200.0) });
+        let at = |x: f32, y: f32| point(b.origin.x + px(x), b.origin.y + px(y));
+
+        cx.simulate_mouse_move(at(100.0, 150.0), None, Modifiers::default());
+        cx.run_until_parked();
+        match inputs(&mut rx).as_slice() {
+            [ScreenInput::Move { x, y }] => near_px((*x, *y), (200.0, 200.0)),
+            other => panic!("expected one move, got {other:?}"),
+        }
+        // The bars: nothing of the remote screen is there.
+        cx.simulate_mouse_move(at(200.0, 20.0), None, Modifiers::default());
+        cx.simulate_mouse_down(at(200.0, 290.0), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at(200.0, 290.0), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        assert!(inputs(&mut rx).is_empty(), "the bare body sends nothing");
+
+        // Pressed on the picture, let go on the bar below it: at the picture's bottom edge.
+        cx.simulate_mouse_down(at(300.0, 225.0), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(at(300.0, 290.0), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let got = presses(&inputs(&mut rx));
+        assert_eq!(got.len(), 2, "{got:?}");
+        near_px((got[0].2, got[0].3), (600.0, 350.0));
+        near_px((got[1].2, got[1].3), (600.0, 400.0));
+
+        // The worker's pointer at its pixel is drawn over that pixel of the picture.
+        cx.executor().advance_clock(LOCAL_HOLD);
+        view.update(cx, |v, _| v.cursor = CursorState { x: 200, y: 100, visible: true });
+        near_px(offset(&view, cx), (100.0, 100.0));
+
+        // Zoomed twice about the picture's middle: the middle stays, the rest of the frame
+        // shows the picture's middle half, and the bars show more of it.
+        view.update(cx, |v, cx| {
+            v.zoom = Zoom::FIT.about((0.5, 0.5), 2.0, 8.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_mouse_move(at(200.0, 150.0), None, Modifiers::default());
+        cx.simulate_mouse_move(at(0.5, 50.0), None, Modifiers::default());
+        cx.simulate_mouse_move(at(200.0, 20.0), None, Modifiers::default());
+        cx.run_until_parked();
+        let moves: Vec<(f32, f32)> = inputs(&mut rx)
+            .iter()
+            .filter_map(|i| match i {
+                ScreenInput::Move { x, y } => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moves.len(), 3, "{moves:?}");
+        near_px(moves[0], (400.0, 200.0));
+        near_px(moves[1], (200.5, 100.0));
+        near_px(moves[2], (400.0, 70.0));
+    }
+
     /// On glass a double tap goes to one to one about the tapped point and back to fit, and its
     /// second tap is not sent (the first has clicked); with a pointer, a double click is a
     /// double click.
@@ -4058,7 +4178,7 @@ mod tests {
         drag(cx, a, &[point(a.x + px(100.0), a.y)], Duration::from_millis(1000));
         let (zoom, at) = view.read_with(cx, |v, _| (v.zoom, v.trackpad.map(|p| p.at())));
         let at = at.unwrap_or_default();
-        let (u, _) = zoom.to_body(at);
+        let (u, _) = zoom.to_frame(at);
         let margin = view.read_with(cx, |v, _| v.theme.spacing.xl / 400.0);
         assert!((u - (1.0 - margin)).abs() < 1e-4, "kept at the margin: {u} with {zoom:?}");
         assert!(zoom.origin().0 < 0.0, "panned: {zoom:?}");

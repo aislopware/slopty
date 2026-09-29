@@ -4,19 +4,18 @@
 //! playback that pulls from a jitter ring on the device's I/O thread. No third-party codec:
 //! Apple ships Opus in the OS and the same calls work on macOS and iOS.
 //!
-//! Everything is 48 kHz stereo float, interleaved, 20 ms packets (960 frames): the one Opus
-//! configuration every decoder accepts, and one packet fits a datagram at any sane bitrate.
+//! Everything is 48 kHz stereo float, interleaved, 10 ms packets (480 frames): the shortest Opus
+//! frame that keeps full CELT quality (RFC 6716 allows 2.5 to 60 ms), and one packet fits a
+//! datagram at any sane bitrate.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "macos")]
-use objc2_audio_toolbox::kAudioUnitSubType_DefaultOutput;
 use objc2_audio_toolbox::{
     AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext,
     AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioConverterDispose,
@@ -29,6 +28,14 @@ use objc2_audio_toolbox::{
     kAudioUnitProperty_StreamFormat, kAudioUnitScope_Global, kAudioUnitScope_Input,
     kAudioUnitType_Output,
 };
+#[cfg(target_os = "macos")]
+use objc2_audio_toolbox::{AudioUnitGetProperty, kAudioUnitSubType_DefaultOutput};
+#[cfg(target_os = "macos")]
+use objc2_core_audio::{
+    kAudioDevicePropertyBufferFrameSize, kAudioDevicePropertyBufferFrameSizeRange,
+};
+#[cfg(target_os = "macos")]
+use objc2_core_audio_types::AudioValueRange;
 use objc2_core_audio_types::{
     AudioBuffer, AudioBufferList, AudioStreamBasicDescription, AudioStreamPacketDescription,
     AudioTimeStamp, kAudioFormatFlagsNativeFloatPacked, kAudioFormatLinearPCM, kAudioFormatOpus,
@@ -42,8 +49,8 @@ use crate::video::AudioEncoder;
 pub const SAMPLE_RATE: u32 = 48_000;
 /// Channels.
 pub const CHANNELS: u32 = 2;
-/// Frames per Opus packet (20 ms).
-pub const FRAME_SAMPLES: u32 = 960;
+/// Frames per Opus packet (10 ms).
+pub const FRAME_SAMPLES: u32 = 480;
 /// Encoder target, bits per second.
 pub const BITRATE: u32 = 96_000;
 /// Samples per frame, one a channel.
@@ -55,13 +62,13 @@ const SAMPLE_BYTES: usize = size_of::<f32>();
 
 /// Longest gap concealed, in packets (60 ms). A longer one is a pause: replaying anything for
 /// longer sounds worse than silence, and the ring underruns to silence on its own.
-pub const MAX_CONCEALED: u32 = 3;
+pub const MAX_CONCEALED: u32 = 6;
 
 /// Packet-loss concealment without the decoder's help.
 ///
 /// Apple's Opus decoder takes no empty packet for it, so the last decoded packet stands in for
 /// a short gap, replayed with a linear fade to silence across the gap: a lost packet is a dip
-/// instead of a click. The stand-in keeps the ring's timing too: the gap took 20 ms per packet
+/// instead of a click. The stand-in keeps the ring's timing too: the gap took 10 ms per packet
 /// on the worker, and playing that long keeps the next real packet from arriving early.
 #[derive(Debug, Default)]
 pub struct Conceal {
@@ -288,7 +295,7 @@ impl OpusEncoder {
         Ok(Self { converter, pending: VecDeque::new(), packet: vec![0; max] })
     }
 
-    /// Queue interleaved stereo samples and encode every whole 20 ms packet they complete.
+    /// Queue interleaved stereo samples and encode every whole 10 ms packet they complete.
     pub fn push(&mut self, samples: &[f32], mut out: impl FnMut(&[u8])) -> Result<(), CodecError> {
         self.pending.extend(samples);
         while self.pending.len() >= PACKET_SAMPLES {
@@ -304,7 +311,7 @@ impl OpusEncoder {
     }
 }
 
-/// Encode one 20 ms packet of `frame` into `packet`; the packet's length, 0 when the converter held
+/// Encode one 10 ms packet of `frame` into `packet`; the packet's length, 0 when the converter held
 /// it back.
 fn encode_one(
     converter: &mut Converter,
@@ -423,7 +430,7 @@ const fn bytemuck_cast(frame: &[f32]) -> &[u8] {
 /// When a packet reached the client: what the jitter estimate is made of.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Arrival {
-    /// The packet's sequence number, which is the worker's 20 ms clock.
+    /// The packet's sequence number, which is the worker's 10 ms clock.
     pub seq: u32,
     /// When its datagram came off the connection.
     pub at: Instant,
@@ -450,7 +457,7 @@ pub struct PlayoutStats {
 struct Timed {
     /// Arrival, microseconds since the first packet.
     at_us: i64,
-    /// Arrival minus the packet's place on the worker's clock (`seq × 20 ms`), which is the
+    /// Arrival minus the packet's place on the worker's clock (`seq × 10 ms`), which is the
     /// one-way delay plus an unknown constant.
     delay_us: i64,
     /// The ring ran dry waiting for this packet.
@@ -463,10 +470,10 @@ struct Timed {
 
 /// The jitter buffer policy: how deep the ring should be, from how late packets run.
 ///
-/// Each packet's delay is its arrival minus its place on the worker's 20 ms clock; how late it
+/// Each packet's delay is its arrival minus its place on the worker's 10 ms clock; how late it
 /// ran is that delay minus the smallest one over the last [`JITTER_WINDOW_US`]. The depth an
-/// on-time packet should find is the 95th percentile of that lateness plus one device buffer,
-/// held between [`TARGET_MIN_US`] and [`TARGET_MAX_US`].
+/// on-time packet should find is the 95th percentile of that lateness plus the device's buffer
+/// (the most it has rendered at once), held between [`TARGET_MIN_US`] and [`TARGET_MAX_US`].
 ///
 /// Part of the decoder's [`Feed`], never touched by the device's callback.
 #[derive(Debug)]
@@ -505,6 +512,8 @@ struct Timing {
     target_us: i64,
     /// The estimate started over with this packet.
     rebased: bool,
+    /// The device's buffer, which the depth has to cover on top of the lateness.
+    device_us: i64,
 }
 
 /// Samples waiting to be played, between the thread that decodes packets and the device's
@@ -544,6 +553,55 @@ struct Ring {
     seen: AtomicU32,
     tail: [AtomicU32; 2],
     ramp: AtomicUsize,
+    /// The most frames the device has asked for in one render lately: its I/O buffer.
+    render: RenderSize,
+}
+
+/// Frames of one window of the device's render sizes: two seconds of its own clock.
+const RENDER_WINDOW_FRAMES: usize = SAMPLE_RATE as usize * 2;
+
+/// The largest render the device has asked for lately: the most over the window of
+/// [`RENDER_WINDOW_FRAMES`] now filling and the one before it, so a size seen once goes after two
+/// to four seconds. One large render (an iPhone's screen locking asks 4 096 frames at a time, a
+/// Mac's output moving to another device asks one large buffer) would otherwise hold the depth
+/// it adds, 85 ms, for the rest of the player's life. A device that keeps asking that much keeps
+/// it.
+///
+/// The device's thread alone writes it, wait-free: a load and a store of each word. The decoder
+/// reads the two maxima as one word, so it never sees half a window's turn.
+#[derive(Debug, Default)]
+struct RenderSize {
+    /// The largest render in the window now filling, low 32 bits, and in the one before, high.
+    largest: AtomicU64,
+    /// Frames rendered in the window now filling.
+    rendered: AtomicUsize,
+}
+
+impl RenderSize {
+    /// The device asked for `frames`; the device's side.
+    fn note(&self, frames: usize) {
+        let (mut now, mut before) = split(self.largest.load(Ordering::Relaxed));
+        let mut rendered = self.rendered.load(Ordering::Relaxed);
+        if rendered >= RENDER_WINDOW_FRAMES {
+            (now, before, rendered) = (0, now, 0);
+        }
+        now = now.max(u32::try_from(frames).unwrap_or(u32::MAX));
+        self.largest
+            .store((u64::from(before) << 32) | u64::from(now) | u64::from(now), Ordering::Relaxed);
+        self.rendered.store(rendered.saturating_add(frames), Ordering::Relaxed);
+    }
+
+    /// The largest render lately, 0 before the first.
+    fn frames(&self) -> usize {
+        let (now, before) = split(self.largest.load(Ordering::Relaxed));
+        usize::try_from(now.max(before)).unwrap_or(usize::MAX)
+    }
+}
+
+/// The two halves of a [`RenderSize::largest`] word: the window now filling's, then the last's.
+const fn split(word: u64) -> (u32, u32) {
+    #[expect(clippy::cast_possible_truncation, reason = "each half is a u32 by construction")]
+    (word as u32, (word >> 32) as u32)
 }
 
 /// The decoder's side of the ring: when to start, and the depth, steered from the level the
@@ -593,17 +651,20 @@ struct Feed {
     steer: Steer,
 }
 
-/// Microseconds of audio in one 20 ms packet.
-const PACKET_US: i64 = 20_000;
-/// Microseconds of audio in one device buffer.
+/// Microseconds of audio in one packet, [`FRAME_SAMPLES`] at [`SAMPLE_RATE`].
+const PACKET_US: i64 = 10_000;
+/// Microseconds of one device buffer until the device has rendered (a Mac's 512 frames, give or
+/// take), and how soon after a stall's release an arrival still belongs to it.
 const DEVICE_US: i64 = 10_000;
 /// How far back the jitter estimate looks.
 const JITTER_WINDOW_US: i64 = 5_000_000;
 /// Arrivals the estimate needs before it is trusted over [`TARGET_DEFAULT_US`].
 const ESTIMATE_AFTER_US: i64 = 1_000_000;
-/// Depth before the estimate is trusted: two packets, what the ring held before it had one.
+/// Depth before the estimate is trusted: what the ring held before it had one.
 const TARGET_DEFAULT_US: i64 = 40_000;
-/// Least depth: the device takes 10 ms at a time, and a packet arrives every 20.
+/// Least depth. Fed in real time on this Mac with 128-frame renders, 15 ms ran the ring dry one
+/// to three times a minute on the feeding thread's scheduling alone and 20 ms never did
+/// (`docs/MEASUREMENTS.md`, 2026-09-29, "audio: a smaller device buffer and 10 ms packets").
 const TARGET_MIN_US: i64 = 20_000;
 /// Most depth. Lateness a buffer this deep cannot cover is a stall, and is left out of the
 /// estimate: waiting for it would only hold the whole window's audio that much later.
@@ -615,21 +676,22 @@ const COVERED_US: i64 = TARGET_MAX_US - DEVICE_US;
 const REBASE_US: i64 = 1_000_000;
 /// Depth past the target by more than this is a stall's backlog, cut in one go.
 const BURST_US: i64 = 40_000;
-/// How far the recent depth may sit off the target before a slice corrects it. Past half a
-/// device buffer plus half a slice, so the device's 10 ms phase against the packets' arrival
-/// and one slice's correction cannot alternate a drop and a stretch.
-const DEADBAND_US: i64 = 7_500;
 /// Depths averaged for a slice's decision (half a second of packets), and how many it waits for.
-const RECENT: usize = 25;
-const RECENT_MIN: usize = 10;
-/// Frames dropped or played twice per correction: 5 ms, a quarter of a packet.
+const RECENT: usize = 50;
+const RECENT_MIN: usize = 20;
+/// Frames dropped or played twice per correction: 5 ms, half a packet.
 const SLICE_FRAMES: usize = 240;
 /// Frames each join is crossfaded over: 2.5 ms, long enough that no step is a click.
 const FADE_FRAMES: usize = 120;
-/// Least the ring keeps after a cut, so the device's next pull still finds a buffer.
-const KEEP_US: i64 = DEVICE_US;
 /// A sample above this is sound: the host's gate floor, -80 dBFS.
 const LOUD: f32 = 1e-4;
+
+/// How far the recent depth may sit off the target before a slice corrects it: past half a
+/// device buffer plus half a slice, so the device's phase against the packets' arrival and one
+/// slice's correction cannot alternate a drop and a stretch.
+fn deadband_us(device_us: i64) -> i64 {
+    (device_us / 2).saturating_add(frames_us(SLICE_FRAMES) / 2)
+}
 
 /// Microseconds of audio in `frames` frames.
 fn frames_us(frames: usize) -> i64 {
@@ -676,7 +738,7 @@ impl Jitter {
     }
 
     /// Put an arrival into the estimate.
-    fn time(&mut self, arrival: Arrival, since: Since) -> Timing {
+    fn time(&mut self, arrival: Arrival, since: Since, device_us: i64) -> Timing {
         let epoch = *self.epoch.get_or_insert(arrival.at);
         let at_us = i64::try_from(arrival.at.saturating_duration_since(epoch).as_micros())
             .unwrap_or(i64::MAX);
@@ -702,13 +764,14 @@ impl Jitter {
         }
         let stall = self.released_at.is_some_and(|t| at_us.saturating_sub(t) <= DEVICE_US);
         self.window.push_back(Timed { at_us, delay_us, starved: since.starved, stall });
-        self.retarget(at_us, min);
-        Timing { lateness, target_us: self.target_us, rebased }
+        self.retarget(at_us, min, device_us);
+        Timing { lateness, target_us: self.target_us, rebased, device_us }
     }
 
     /// The target from the window: the 95th percentile of lateness, and never less than a
-    /// lateness that starved the ring in it, since that one is known not to be noise.
-    fn retarget(&mut self, now_us: i64, min: i64) {
+    /// lateness that starved the ring in it, since that one is known not to be noise, plus the
+    /// device's buffer.
+    fn retarget(&mut self, now_us: i64, min: i64, device_us: i64) {
         self.late.clear();
         self.late.extend(
             self.window.iter().filter(|t| !t.stall).map(|t| t.delay_us.saturating_sub(min)),
@@ -723,7 +786,7 @@ impl Jitter {
             .map(|t| t.delay_us.saturating_sub(min))
             .max();
         self.lateness_us = p95.unwrap_or(0).max(held.unwrap_or(0));
-        let target = self.lateness_us.saturating_add(DEVICE_US).clamp(TARGET_MIN_US, TARGET_MAX_US);
+        let target = self.lateness_us.saturating_add(device_us).clamp(TARGET_MIN_US, TARGET_MAX_US);
         let span = self.window.front().map_or(0, |t| now_us.saturating_sub(t.at_us));
         self.target_us =
             if span < ESTIMATE_AFTER_US { target.max(TARGET_DEFAULT_US) } else { target };
@@ -734,14 +797,14 @@ impl Feed {
     /// Time one decoded packet against what the ring saw since the last one, then queue it.
     fn push(&mut self, ring: &Ring, pcm: &[f32], arrival: Arrival) {
         let since = self.steer.since(ring);
-        let timing = self.jitter.time(arrival, since);
+        let timing = self.jitter.time(arrival, since, ring.device_us());
         self.steer.push(ring, pcm, timing);
     }
 
     /// A packet that is timed but not played (the stream is muted).
     fn hold(&mut self, ring: &Ring, arrival: Arrival) {
         let since = self.steer.since(ring);
-        let _timing = self.jitter.time(arrival, since);
+        let _timing = self.jitter.time(arrival, since, ring.device_us());
         self.steer.hold(ring);
     }
 
@@ -798,6 +861,7 @@ impl Ring {
             seen: AtomicU32::new(0),
             tail: [AtomicU32::new(0), AtomicU32::new(0)],
             ramp: AtomicUsize::new(0),
+            render: RenderSize::default(),
         }
     }
 
@@ -817,6 +881,15 @@ impl Ring {
         self.write.load(Ordering::Acquire).saturating_sub(read.max(from))
     }
 
+    /// Microseconds of the device's buffer: the most it has asked for in one render lately
+    /// ([`RenderSize`]), or [`DEVICE_US`] until it has rendered.
+    fn device_us(&self) -> i64 {
+        match self.render.frames() {
+            0 => DEVICE_US,
+            frames => frames_us(frames),
+        }
+    }
+
     /// A run is playing.
     fn playing(&self) -> bool {
         playing(self.run.load(Ordering::Acquire))
@@ -828,6 +901,7 @@ impl Ring {
     /// sample it played down to silence, and the ring plays again once the decoder has filled
     /// it to the target and started a new run.
     fn pull(&self, out: &mut [f32]) {
+        self.render.note(out.len() / SAMPLES_PER_FRAME);
         let run = self.run.load(Ordering::Acquire);
         let seen = self.seen.load(Ordering::Relaxed);
         let mut ramp = self.ramp.load(Ordering::Relaxed);
@@ -975,6 +1049,7 @@ impl Steer {
                 before.saturating_add(timing.lateness),
                 timing.target_us,
                 level,
+                timing.device_us,
             );
             self.publish(ring, &packet);
             self.packet = packet;
@@ -1055,13 +1130,21 @@ impl Steer {
 
     /// Move the depth towards the target, in the arriving `packet`: a stall's backlog at once,
     /// a drift one slice at a time. `level` is the ring's with the whole packet in it.
-    fn converge(&mut self, packet: &mut Vec<f32>, depth: i64, target_us: i64, level: i64) {
+    fn converge(
+        &mut self,
+        packet: &mut Vec<f32>,
+        depth: i64,
+        target_us: i64,
+        level: i64,
+        device_us: i64,
+    ) {
+        let deadband = deadband_us(device_us);
         let excess = depth.saturating_sub(target_us);
         // A backlog arrives packet by packet, so the cut goes on with each packet until the
         // depth is back at the target. A packet gives all but the fade it joins over.
-        self.cutting = excess > BURST_US || (self.cutting && excess > DEADBAND_US);
+        self.cutting = excess > BURST_US || (self.cutting && excess > deadband);
         if self.cutting {
-            let room = level.saturating_sub(KEEP_US).saturating_sub(frames_us(FADE_FRAMES));
+            let room = level.saturating_sub(device_us).saturating_sub(frames_us(FADE_FRAMES));
             let most = (packet.len() / SAMPLES_PER_FRAME).saturating_sub(FADE_FRAMES);
             let cut = us_frames(excess.min(room)).min(most);
             if cut >= SLICE_FRAMES && drop_frames(packet, cut) {
@@ -1080,15 +1163,14 @@ impl Steer {
         let sum = self.recent.iter().fold(0_i64, |sum, &d| sum.saturating_add(d));
         let mean = sum.checked_div(i64::try_from(self.recent.len()).unwrap_or(1)).unwrap_or(0);
         let slice = frames_us(SLICE_FRAMES);
-        let spare = level.saturating_sub(KEEP_US) >= slice.saturating_add(frames_us(FADE_FRAMES));
-        let shift = if mean.saturating_sub(target_us) > DEADBAND_US
+        let spare = level.saturating_sub(device_us) >= slice.saturating_add(frames_us(FADE_FRAMES));
+        let shift = if mean.saturating_sub(target_us) > deadband
             && spare
             && drop_frames(packet, SLICE_FRAMES)
         {
             self.trimmed_frames = self.trimmed_frames.saturating_add(SLICE_FRAMES as u64);
             slice.saturating_neg()
-        } else if target_us.saturating_sub(mean) > DEADBAND_US
-            && stretch_frames(packet, SLICE_FRAMES)
+        } else if target_us.saturating_sub(mean) > deadband && stretch_frames(packet, SLICE_FRAMES)
         {
             self.stretched_frames = self.stretched_frames.saturating_add(SLICE_FRAMES as u64);
             slice
@@ -1152,6 +1234,12 @@ const OUTPUT_SUBTYPE: u32 = kAudioUnitSubType_DefaultOutput;
 /// bindings, generated from the macOS SDK, do not carry.
 #[cfg(not(target_os = "macos"))]
 const OUTPUT_SUBTYPE: u32 = 0x7269_6f63;
+/// Frames the macOS output device is asked to render at a time: 2.7 ms at 48 kHz, where the Mac
+/// Studio's speakers run 512 (10.7 ms) unasked. A sample waits that buffer out before the DAC,
+/// and the render callback is a copy that costs the same per frame at any size
+/// (`docs/MEASUREMENTS.md`, 2026-09-29, "audio: a smaller device buffer and 10 ms packets").
+#[cfg(target_os = "macos")]
+const IO_FRAMES: u32 = 128;
 /// Most frames a render may ask for: iOS asks up to 4 096 at a time with the screen locked, and a
 /// unit asked for more than its maximum fails the render.
 const MAX_FRAMES_PER_SLICE: u32 = 4096;
@@ -1160,7 +1248,7 @@ const MAX_FRAMES_PER_SLICE: u32 = 4096;
 /// concealment). A power of two, so a position finds its cell with a mask.
 const RING_SAMPLES: usize = 1 << 15;
 const RING_MASK: usize = RING_SAMPLES - 1;
-const _: () = assert!(RING_SAMPLES >= PACKET_SAMPLES * 13, "260 ms at least");
+const _: () = assert!(RING_SAMPLES >= PACKET_SAMPLES * 26, "260 ms at least");
 /// Room for the largest packet a decoder returns, played with a slice twice.
 const PACKET_ROOM: usize = PACKET_SAMPLES * 3 + SLICE_FRAMES * SAMPLES_PER_FRAME;
 
@@ -1219,12 +1307,61 @@ unsafe extern "C-unwind" fn render(
 }
 
 impl Player {
-    /// Open the output unit and start it (it plays silence until samples arrive).
+    /// Open the output unit and start it (it plays silence until samples arrive). On macOS the
+    /// device is asked for `IO_FRAMES` a render first.
     pub fn new() -> Result<Self, CodecError> {
         let player = Self::open()?;
-        // SAFETY: AudioToolbox rule: start an initialised output unit.
-        check("AudioOutputUnitStart", unsafe { AudioOutputUnitStart(player.unit) })?;
+        #[cfg(target_os = "macos")]
+        player.ask_io_frames(IO_FRAMES);
+        player.start()?;
         Ok(player)
+    }
+
+    fn start(&self) -> Result<(), CodecError> {
+        // SAFETY: AudioToolbox rule: start an initialised output unit.
+        check("AudioOutputUnitStart", unsafe { AudioOutputUnitStart(self.unit) })
+    }
+
+    /// Ask the device the unit plays through for `frames` a render, within the range it takes. A
+    /// device that refuses keeps its own size, which the player works at too, only later.
+    #[cfg(target_os = "macos")]
+    fn ask_io_frames(&self, frames: u32) {
+        let zero = AudioValueRange { mMinimum: 0.0, mMaximum: 0.0 };
+        let range =
+            self.get(kAudioDevicePropertyBufferFrameSizeRange, kAudioUnitScope_Global, zero);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a device's frame counts, between 1 and a few thousand"
+        )]
+        let frames = range
+            .filter(|r| r.mMinimum > 0.0 && r.mMinimum <= r.mMaximum)
+            .map_or(frames, |r| f64::from(frames).max(r.mMinimum).min(r.mMaximum) as u32);
+        if let Err(error) =
+            self.set(kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, &frames)
+        {
+            tracing::debug!(%error, frames, "the output device keeps its own I/O buffer size");
+        }
+    }
+
+    /// One property of the unit's output element (element 0), `None` when the unit has none.
+    #[cfg(target_os = "macos")]
+    fn get<T: Copy>(&self, property: u32, scope: u32, zero: T) -> Option<T> {
+        let mut value = zero;
+        let mut size = u32_of(size_of::<T>());
+        // SAFETY: AudioToolbox rule: a live unit, and an out buffer of the stated size for a
+        // property whose documented type is `T`.
+        let status = unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                property,
+                scope,
+                0,
+                NonNull::from(&mut value).cast::<c_void>(),
+                NonNull::from(&mut size),
+            )
+        };
+        (status == 0).then_some(value)
     }
 
     /// The output unit found, given the ring's format and callback, and initialised, but not
@@ -1370,13 +1507,105 @@ mod tests {
     fn player_starts_and_drains() {
         let player = Player::new().unwrap();
         let at = Instant::now();
-        for seq in 1..=3 {
-            let at = at + Duration::from_millis(u64::from(seq) * 20);
+        // Six packets, 60 ms: past the 40 ms the ring fills to before it starts.
+        for seq in 1..=6 {
+            let at = at + Duration::from_millis(u64::from(seq) * 10);
             player.push(&vec![0.0; PACKET_SAMPLES], Arrival { seq, at });
         }
-        assert!(player.queued() <= PACKET_SAMPLES * 3);
+        assert!(player.queued() <= PACKET_SAMPLES * 6);
         std::thread::sleep(Duration::from_millis(150));
         assert_eq!(player.queued(), 0);
+    }
+
+    /// What the default output does at the I/O buffer it runs unasked and at [`IO_FRAMES`]: the
+    /// size in effect, the largest render the callback saw, HAL overloads (a missed I/O
+    /// deadline, which is the audible glitch) and how many runs the ring started, over a minute
+    /// of silent packets fed in real time at each size. Silence only: this is the machine's real
+    /// output. `docs/MEASUREMENTS.md`, 2026-09-29, "audio: a smaller device buffer and 10 ms
+    /// packets".
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "a measurement: renders silence on this Mac's default output for two minutes"]
+    #[expect(clippy::disallowed_methods, reason = "a real-time feed on the test's own thread")]
+    fn device_io_buffer() {
+        use std::sync::atomic::AtomicU64;
+
+        use objc2_audio_toolbox::kAudioOutputUnitProperty_CurrentDevice;
+        use objc2_core_audio::{
+            AudioObjectAddPropertyListener, AudioObjectID, AudioObjectPropertyAddress,
+            AudioObjectRemovePropertyListener, kAudioDeviceProcessorOverload,
+            kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal,
+        };
+
+        static OVERLOADS: AtomicU64 = AtomicU64::new(0);
+        unsafe extern "C-unwind" fn overload(
+            _device: AudioObjectID,
+            _count: u32,
+            _addresses: NonNull<AudioObjectPropertyAddress>,
+            _user: *mut c_void,
+        ) -> i32 {
+            OVERLOADS.fetch_add(1, Ordering::Relaxed);
+            0
+        }
+
+        const SECONDS: u64 = 60;
+        let packet_us = u64::try_from(PACKET_US).unwrap();
+        for asked in [None, Some(IO_FRAMES)] {
+            let player = Player::open().unwrap();
+            if let Some(frames) = asked {
+                player.ask_io_frames(frames);
+            }
+            let in_effect =
+                player.get(kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0_u32);
+            let device = player
+                .get(kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0_u32)
+                .unwrap();
+            let mut address = AudioObjectPropertyAddress {
+                mSelector: kAudioDeviceProcessorOverload,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain,
+            };
+            // SAFETY: CoreAudio HAL rule: a device the HAL named, an address valid for the call,
+            // and a listener that lives for the whole process (a plain `fn`), removed below.
+            let status = unsafe {
+                AudioObjectAddPropertyListener(
+                    device,
+                    NonNull::from(&mut address),
+                    Some(overload),
+                    ptr::null_mut(),
+                )
+            };
+            assert_eq!(status, 0, "AudioObjectAddPropertyListener");
+            let before = OVERLOADS.load(Ordering::Relaxed);
+            player.start().unwrap();
+            let silent = vec![0.0_f32; PACKET_SAMPLES];
+            let start = Instant::now();
+            let packets = u32::try_from(SECONDS * 1_000_000 / packet_us).unwrap();
+            for seq in 1..=packets {
+                let due = start + Duration::from_micros(u64::from(seq) * packet_us);
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                player.push(&silent, Arrival { seq, at: Instant::now() });
+            }
+            let overloads = OVERLOADS.load(Ordering::Relaxed) - before;
+            // SAFETY: as above, the same listener and address.
+            let _removed = unsafe {
+                AudioObjectRemovePropertyListener(
+                    device,
+                    NonNull::from(&mut address),
+                    Some(overload),
+                    ptr::null_mut(),
+                )
+            };
+            let runs = player.feed.lock().steer.epoch;
+            eprintln!(
+                "MEASURE device asked={asked:?} in_effect={in_effect:?} largest_render={} \
+                 overloads={overloads} runs_started={runs} packet_us={PACKET_US} {:?}",
+                player.ring.render.frames(),
+                player.stats()
+            );
+        }
     }
 
     /// The output unit takes the ring's format and callback and initialises, and is not
@@ -1500,6 +1729,8 @@ mod latency_tests {
         /// adds; the device's own terms come on top (17.3 ms on the Mac Studio's speakers,
         /// `tests/audio_latency.rs`).
         heard: Vec<(i64, i64)>,
+        /// The depth the estimate aimed at after each device pull, µs.
+        targets: Vec<(i64, i64)>,
         stats: PlayoutStats,
     }
 
@@ -1524,28 +1755,32 @@ mod latency_tests {
         }
     }
 
-    /// Frames a render asks for: the I/O buffer of the Mac Studio's speakers and most Mac
-    /// output devices (`tests/audio_latency.rs`).
-    const DEVICE_FRAMES: usize = 512;
+    /// Frames a render asks for: what the player asks a Mac's output device for (`IO_FRAMES`).
+    const DEVICE_FRAMES: usize = 128;
 
     /// Play `arrivals` (arrival µs, sequence), in arrival order, against a device that renders
     /// [`DEVICE_FRAMES`] at a time on its own 48 kHz clock, until `end_us`. Driven through the
     /// same `push` and `pull` the player runs; the clocks are the trace's, so nothing sleeps.
     fn play(arrivals: &[(i64, u32)], end_us: i64) -> Run {
-        play_with(arrivals, end_us, (0, 0), DEVICE_FRAMES)
+        play_with(arrivals, end_us, (0, 0), &|_| DEVICE_FRAMES)
     }
 
     /// [`play`], with the packets arriving in `muted` (from, to) held rather than played.
     fn play_muted(arrivals: &[(i64, u32)], end_us: i64, muted: (i64, i64)) -> Run {
-        play_with(arrivals, end_us, muted, DEVICE_FRAMES)
+        play_with(arrivals, end_us, muted, &|_| DEVICE_FRAMES)
     }
 
-    /// [`play_muted`] against a device that renders `frames` at a time.
-    fn play_with(arrivals: &[(i64, u32)], end_us: i64, muted: (i64, i64), frames: usize) -> Run {
+    /// [`play_muted`] against a device whose render at each time (µs) asks `frames(time)`.
+    fn play_with(
+        arrivals: &[(i64, u32)],
+        end_us: i64,
+        muted: (i64, i64),
+        frames: &dyn Fn(i64) -> usize,
+    ) -> Run {
         let epoch = Instant::now();
         let mut playout = Playout::default();
         let mut run = Run::default();
-        let mut out = vec![0.0_f32; frames * CHANNELS as usize];
+        let mut buffer = vec![0.0_f32; MAX_FRAMES_PER_SLICE as usize * CHANNELS as usize];
         let mut last = 0.0_f32;
         let mut next = arrivals.iter().peekable();
         // The device's clock in frames, so a render period that is not a whole number of
@@ -1562,14 +1797,17 @@ mod latency_tests {
                 }
                 next.next();
             }
-            playout.pull(&mut out);
+            let asked = frames(pull_at);
+            let out = &mut buffer[..asked * CHANNELS as usize];
+            playout.pull(out);
             for frame in out.chunks(2) {
                 run.max_step = run.max_step.max((frame[0] - last).abs());
                 last = frame[0];
             }
             let queued = playout.ring.queued() / CHANNELS as usize;
             run.heard.push((pull_at, frames_us(queued) / 1000));
-            rendered += frames;
+            run.targets.push((pull_at, playout.feed.jitter.target_us));
+            rendered += asked;
             pull_at = 5_000 + frames_us(rendered);
         }
         run.stats = playout.stats();
@@ -1584,11 +1822,12 @@ mod latency_tests {
         i64::try_from((x >> 33) % u64::try_from(spread_us.max(1)).unwrap()).unwrap()
     }
 
-    /// Packets every 20 ms on a worker clock `ppm` parts per million fast, 3 ms of link delay
+    /// Packets every 10 ms on a worker clock `ppm` parts per million fast, 3 ms of link delay
     /// and `spread_us` of scatter on top; a window `(from, to)` of the worker's clock in which
     /// the link held everything and let it go at `to`.
     fn trace(seconds: u32, ppm: i64, spread_us: i64, held: &[(i64, i64)]) -> Vec<(i64, u32)> {
-        let mut out: Vec<(i64, u32)> = (1..=seconds * 50)
+        let per_second = u32::try_from(1_000_000 / PACKET_US).unwrap();
+        let mut out: Vec<(i64, u32)> = (1..=seconds * per_second)
             .map(|seq| {
                 let sent = i64::from(seq) * PACKET_US * (1_000_000 - ppm) / 1_000_000;
                 let arrives = sent + 3_000 + scatter(seq, spread_us);
@@ -1687,7 +1926,7 @@ mod latency_tests {
         let gap_us = 400_000;
         let arrivals: Vec<(i64, u32)> = trace(6, 0, 1_000, &[])
             .into_iter()
-            .map(|(at, seq)| if seq > 125 { (at + gap_us, seq) } else { (at, seq) })
+            .map(|(at, seq)| if seq > 250 { (at + gap_us, seq) } else { (at, seq) })
             .collect();
         let end_us = 6_000_000 + gap_us;
         let run = play_muted(&arrivals, end_us, (2_000_000, 3_000_000));
@@ -2009,13 +2248,75 @@ mod latency_tests {
         eprintln!("decoder thread beside: p99.9 {} ns", beside.wall.p999);
     }
 
+    /// One render far larger than the rest, as a Mac asks once when its output moves to another
+    /// device, holds the depth up only for the render-size window: afterwards the target and the
+    /// depth heard come back to what 128-frame renders need, and nothing more runs dry.
+    #[test]
+    fn one_large_render_does_not_hold_the_depth_up_for_good() {
+        let big_at = 3_000_000;
+        let frames = |at: i64| if (big_at..big_at + 3_000).contains(&at) { 4096 } else { 128 };
+        let run = play_with(&trace(12, 0, 1_000, &[]), 12_000_000, (0, 0), &frames);
+        let target_at = |at: i64| run.targets.iter().rev().find(|&&(t, _)| t <= at).unwrap().1;
+        let (before, during, after) =
+            (target_at(big_at), target_at(big_at + 500_000), target_at(12_000_000));
+        let (heard_before, heard_after) =
+            (run.mean_heard(2_000_000, big_at), run.mean_heard(10_000_000, 12_000_000));
+        eprintln!(
+            "one 4096-frame render: target {before} µs before, {during} µs during, {after} µs \
+             after; {heard_before} ms heard before, {heard_after} ms after; {:?}",
+            run.stats
+        );
+        assert!(during >= frames_us(4096), "the large render is covered while it is recent");
+        assert!(after <= before + 2_000, "{after} µs against {before} µs");
+        assert!(heard_after <= heard_before + 3, "{heard_after} ms against {heard_before} ms");
+        assert!(run.stats.underruns <= 1, "the large render alone: {:?}", run.stats);
+        assert!(run.max_step < 2.0 * tone_step(), "no click: {}", run.max_step);
+    }
+
     /// iOS renders 1 024 frames at a time unless the session asks for fewer, twice what a Mac
-    /// device takes. The ring's depth still covers a render while packets arrive every 20 ms.
+    /// device takes. The ring's depth still covers a render while packets arrive every 10 ms.
     #[test]
     fn a_device_rendering_1024_frames_is_not_starved() {
-        let run = play_with(&trace(20, 0, 1_000, &[]), 20_000_000, (0, 0), 1024);
+        for frames in [512, 1024] {
+            let run = play_with(&trace(20, 0, 1_000, &[]), 20_000_000, (0, 0), &|_| frames);
+            eprintln!(
+                "{frames}-frame renders: {} ms mean after 3 s; {:?}",
+                run.mean_heard(3_000_000, 20_000_000),
+                run.stats
+            );
+            assert_eq!(run.stats.underruns, 0, "{frames}: {:?}", run.stats);
+            assert!(
+                run.stats.target >= duration_us(frames_us(frames)),
+                "the depth covers the render it takes: {:?}",
+                run.stats
+            );
+            assert!(run.max_step < 2.0 * tone_step(), "no click: {}", run.max_step);
+        }
+    }
+
+    /// A packet is [`FRAME_SAMPLES`] of audio: the sequence clock the estimate reads.
+    #[test]
+    fn a_packet_lasts_its_frames() {
+        assert_eq!(frames_us(FRAME_SAMPLES as usize), PACKET_US);
+    }
+
+    /// A capture that hands the worker its audio 1 024 frames (21.3 ms) at a time sends the
+    /// packets each chunk completes together: two most of the time, sometimes three. The
+    /// estimate reads that clumping as lateness and holds the depth for it, so nothing starves.
+    #[test]
+    fn capture_in_1024_frame_chunks_is_covered() {
+        let chunk_us = frames_us(1024);
+        let arrivals: Vec<(i64, u32)> = trace(20, 0, 1_000, &[])
+            .into_iter()
+            .map(|(at, seq)| {
+                let sent = i64::from(seq) * PACKET_US;
+                let delivered = (sent + chunk_us - 1) / chunk_us * chunk_us;
+                (at + delivered - sent, seq)
+            })
+            .collect();
+        let run = play(&arrivals, 20_000_000);
         eprintln!(
-            "1024-frame renders: {} ms mean after 3 s; {:?}",
+            "1024-frame capture chunks: {} ms mean after 3 s; {:?}",
             run.mean_heard(3_000_000, 20_000_000),
             run.stats
         );

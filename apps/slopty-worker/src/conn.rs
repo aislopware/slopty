@@ -14,7 +14,7 @@ use std::sync::Arc;
 use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_net::worker::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
-use slopty_proto::conversation::{ConversationRequest, PermissionEvent, PermissionPrompt};
+use slopty_proto::conversation::{ConversationRequest, PermissionEvent};
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::folder::Listing;
 use slopty_proto::handshake::HelloAck;
@@ -598,9 +598,9 @@ async fn relay_events(
         match events.recv().await {
             // The worker's clipboard goes only to the clients that want it now.
             Ok(WorkerMsg::Clip(ClipMsg::Offer(_))) if !daemon.clip.is_watching(link) => {}
-            // A permission prompt goes only to the followers of its session.
+            // A permission prompt goes only to the clients that may answer it.
             Ok(WorkerMsg::Permission(event))
-                if !daemon.follows.lock().holds.follows(link, event.session()) => {}
+                if !daemon.follows.lock().holds.tells(link, event.session(), event.ask()) => {}
             Ok(msg) => {
                 if let WorkerMsg::SessionClosed { session, .. } = &msg {
                     let _sent = done.send(Done::SessionClosed(*session));
@@ -1054,6 +1054,13 @@ impl Peer<'_> {
                     let _gone = task.send(crate::follow::Command::Search { query, limit });
                 }
             }
+            ConversationRequest::Approvals { on } => {
+                tracing::info!(client = %self.client, on, "approvals");
+                crate::follow::approvals(self.daemon, self.link, on, |msg| self.post(msg));
+            }
+            ConversationRequest::Release { session, ask } => {
+                crate::follow::hand_back(self.daemon, self.link, self.client, session, ask);
+            }
         }
     }
 
@@ -1070,16 +1077,11 @@ impl Peer<'_> {
         let (held, seen) = {
             let mut follows = self.daemon.follows.lock();
             let ids = follows.holds.follow(session, self.link);
-            let held: Vec<PermissionPrompt> = ids
-                .into_iter()
-                .filter_map(|ask| follows.holds.get(ask).map(|held| held.reply.prompt.clone()))
-                .collect();
+            let held = ids.len();
+            crate::follow::show_held(&follows, ids, |msg| self.post(msg));
             (held, follows.board.watch(session))
         };
-        tracing::info!(client = %self.client, %session, held = held.len(), "follow");
-        for prompt in held {
-            self.post(WorkerMsg::Permission(PermissionEvent::Asked(Box::new(prompt))));
-        }
+        tracing::info!(client = %self.client, %session, held, "follow");
         let (commands, taken) = mpsc::unbounded_channel();
         let (daemon, conn) = (self.daemon.clone(), self.conn.clone());
         self.tasks.spawn(crate::follow::stream(daemon, conn, session, seen, taken));
@@ -1487,6 +1489,8 @@ mod tests {
             viewers: 0,
             command: Vec::new(),
             agent: None,
+            progress: None,
+            restored: None,
         }
     }
 

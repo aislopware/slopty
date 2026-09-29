@@ -387,6 +387,9 @@ impl WorkspaceView {
                 let tile = TileRef { worker: key, item: id };
                 let placement = if by_me { Placement::Local } else { Placement::Remote };
                 self.layout.open(tile, placement);
+                if by_me {
+                    self.quick_arrived(key, id);
+                }
                 self.note_recent(id);
                 // A worker's given shell opens beside the rest and leaves the focus where it
                 // was: a worker coming up must not take the keys someone is typing elsewhere.

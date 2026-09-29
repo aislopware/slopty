@@ -13,6 +13,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
+use slopty_client::update::UpdateNotice;
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::redial::Redial;
 use slopty_net::server::{DialError, ServerLink, connect};
@@ -163,7 +164,8 @@ impl Link {
     }
 
     /// A link held for the process lifetime: it dials in the background and redials whenever
-    /// the connection drops, on the backoff every link follows ([`slopty_net::redial`]). A
+    /// the connection drops, on the backoff every link follows ([`slopty_net::redial`]), or
+    /// after [`slopty_net::redial::WRONG_BUILD`] for a server on a different build. A
     /// call made while the server is down tries a dial at once and fails with the reason when
     /// that does not get through.
     ///
@@ -179,7 +181,7 @@ impl Link {
             let mut redial = Redial::default();
             let mut held: Option<Call> = None;
             loop {
-                match dial(&endpoint, &server, role.clone()).await {
+                let wait = match dial(&endpoint, &server, role.clone()).await {
                     Ok(link) => {
                         tracing::info!(%server, "connected to the server");
                         redial.linked(Instant::now());
@@ -187,16 +189,18 @@ impl Link {
                             Ended::Released => return,
                             Ended::Lost(e) => tracing::warn!(%server, error = %e, "server lost"),
                         }
+                        redial.next(Instant::now())
                     }
                     Err(e) => {
                         tracing::debug!(%server, error = %e, "server unreachable");
                         if let Some(call) = held.take() {
                             call.answer(unreachable(&e));
                         }
+                        redial_after(&e, &mut redial)
                     }
-                }
+                };
                 tokio::select! {
-                    () = tokio::time::sleep(redial.next(Instant::now())) => {}
+                    () = tokio::time::sleep(wait) => {}
                     call = rx.recv() => match call {
                         Some(call) => held = Some(call),
                         None => return,
@@ -292,8 +296,21 @@ fn sent_verb(request: ToServer) -> Option<Verb> {
 async fn dial(endpoint: &Endpoint, server: &HostAddr, role: Role) -> Result<ServerLink> {
     connect(endpoint, server, role).await.map_err(|e| match e {
         DialError::Refused(why) => anyhow!("the server at {server} refused: {}", why.text()),
+        DialError::Net(NetError::WrongBuild(wrong)) => {
+            UpdateNotice::server(server.host(), &wrong).into()
+        }
         DialError::Net(e) => anyhow!("cannot reach the server at {server}: {e}"),
     })
+}
+
+/// How long to wait before dialling again after `e`: the backoff, or for a server on a
+/// different build, which changes only when someone updates it, a good while.
+fn redial_after(e: &anyhow::Error, redial: &mut Redial) -> Duration {
+    if e.downcast_ref::<UpdateNotice>().is_some() {
+        slopty_net::redial::WRONG_BUILD
+    } else {
+        redial.next(Instant::now())
+    }
 }
 
 /// Run one connection: send calls, route replies to their callers, fan the rest out.

@@ -79,6 +79,16 @@ pub fn hook_output(decision: &Decision) -> Option<Value> {
 /// dialog when the allow comes without one.
 const ASKS_THE_PERSON: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 
+/// Whether the `PermissionRequest` `hook` is a yes or no that "Allow" or "Deny" answers whole.
+///
+/// Such a prompt may be answered from a notification or the inbox, without the conversation in
+/// view. A question wants its answers and a plan wants reading, so those wait for the
+/// conversation face or the TUI.
+#[must_use]
+pub fn approvable(hook: &Hook) -> bool {
+    hook.tool_name.as_deref().is_some_and(|tool| !ASKS_THE_PERSON.contains(&tool))
+}
+
 /// The decision a person's verdict on the `PermissionRequest` `hook` makes.
 ///
 /// "Allow always" hands back every one of the hook's `permission_suggestions`, as Claude
@@ -216,6 +226,19 @@ mod tests {
             hook_output(&stop).map(|o| o["hookSpecificOutput"]["decision"].clone()),
             Some(json!({ "behavior": "deny", "message": "stop", "interrupt": true }))
         );
+    }
+
+    /// A tool call is a yes or no an approver answers; a question, a plan and a request that
+    /// names no tool are not.
+    #[test]
+    fn only_a_tool_call_is_approvable_from_outside_the_conversation() {
+        let asking =
+            |tool: Option<&str>| Hook { tool_name: tool.map(str::to_owned), ..Hook::default() };
+        assert!(approvable(&asking(Some("Bash"))));
+        assert!(approvable(&asking(Some("mcp__github__create_issue"))));
+        assert!(!approvable(&asking(Some("AskUserQuestion"))));
+        assert!(!approvable(&asking(Some("ExitPlanMode"))));
+        assert!(!approvable(&asking(None)));
     }
 
     /// The suggestions of the `permission` capture, and the kinds the SDK documents besides,

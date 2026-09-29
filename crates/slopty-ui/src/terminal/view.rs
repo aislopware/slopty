@@ -117,36 +117,15 @@ mod actions {
 }
 pub use actions::{
     ClearScreen, CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt,
-    NoteLastBlock, Paste, PrevPrompt, RerunLast,
+    NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp, ScrollToBottom,
+    ScrollToTop, SelectAll,
 };
-use actions::{ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll};
 
-/// Key bindings for the terminal context.
+/// The terminal's key bindings in effect: the keymap's terminal scope ([`crate::keymap`], where
+/// the table is). A chord bound here runs its command; every other key goes to the program.
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
-    const CTX: Option<&str> = Some("Terminal");
-    vec![
-        KeyBinding::new("cmd-c", Copy, CTX),
-        KeyBinding::new("cmd-v", Paste, CTX),
-        KeyBinding::new("cmd-f", Find, CTX),
-        KeyBinding::new("cmd-g", FindNext, CTX),
-        KeyBinding::new("cmd-shift-g", FindPrev, CTX),
-        KeyBinding::new("cmd-up", PrevPrompt, CTX),
-        KeyBinding::new("cmd-down", NextPrompt, CTX),
-        // ghostty's scroll keys; the ⌘ pair is what Terminal.app taught the Mac.
-        KeyBinding::new("shift-pageup", ScrollPageUp, CTX),
-        KeyBinding::new("shift-pagedown", ScrollPageDown, CTX),
-        KeyBinding::new("shift-home", ScrollToTop, CTX),
-        KeyBinding::new("shift-end", ScrollToBottom, CTX),
-        KeyBinding::new("cmd-home", ScrollToTop, CTX),
-        KeyBinding::new("cmd-end", ScrollToBottom, CTX),
-        KeyBinding::new("cmd-a", SelectAll, CTX),
-        KeyBinding::new("cmd-shift-c", CopyLastOutput, CTX),
-        // ⌘⇧↩ is the workspace's maximize-column; "Rerun last command" is in the palette.
-        KeyBinding::new("cmd-k", ClearScreen, CTX),
-        // Only while the search field itself is focused: Esc in the grid goes to the program.
-        KeyBinding::new("escape", CloseFind, Some("TerminalSearch")),
-    ]
+    crate::keymap::current().bindings(|scope| scope == crate::keymap::Scope::Terminal)
 }
 
 /// The open search bar.

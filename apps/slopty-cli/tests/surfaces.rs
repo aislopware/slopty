@@ -64,6 +64,8 @@ mod tests {
                 viewers: 0,
                 command: Vec::new(),
                 agent: Some(blocked()),
+                progress: None,
+                restored: None,
             }],
         }
     }

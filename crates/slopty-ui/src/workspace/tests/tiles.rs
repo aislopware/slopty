@@ -7,7 +7,7 @@ use slopty_grid::SemanticMark;
 use slopty_theme::alpha;
 
 use super::*;
-use crate::workspace::tile::{CLOSE_TILE, RECONNECTING, cwd_tail};
+use crate::workspace::tile::{CLOSE_TILE, COPY_COMMAND, RECONNECTING, cwd_tail};
 use crate::workspace::toast::{SAY_FOR, SHOWN};
 
 /// The status marks drawn, by label.
@@ -472,6 +472,30 @@ fn a_tile_whose_worker_dropped_says_reconnecting_at_its_foot(cx: &mut TestAppCon
     let body = cx.debug_bounds(selector("item", tile.item)).expect("the tile is drawn");
     assert!((pill.center().x - body.center().x).abs() < px(1.0), "centred");
     assert!(pill.center().y > body.center().y && pill.bottom() < body.bottom(), "at the foot");
+}
+
+/// A tile whose worker runs another build says so calmly at its foot: the title, both builds,
+/// and the command that updates it, which one press copies. The worker's line says it too.
+#[gpui::test]
+fn a_worker_on_another_build_offers_the_command_that_updates_it(cx: &mut TestAppContext) {
+    use slopty_client::update::{Of, UpdateNotice};
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let peer = "0.0.9+wire.0badf00d".to_owned();
+    let notice = UpdateNotice { of: Of::Worker, host: "studio".to_owned(), peer };
+    let key = fake.key;
+    let status = WorkerStatus::NeedsUpdate(notice.clone());
+    assert_eq!(status.text(), "runs a different build");
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, status, cx));
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Status", Some(notice.title()))), "{nodes:#?}");
+    let drawn = cx.debug_bounds(selector("state", tile.item)).expect("the pill");
+    assert!(drawn.size.width > px(200.0), "the builds are said beside the title: {drawn:?}");
+    assert!(nodes.iter().any(|n| n.is("Button", Some(COPY_COMMAND))), "{nodes:#?}");
+    click(cx, selector("copy-command", tile.item));
+    let copied = cx.update(|_w, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("slopty worker deploy studio --update"));
 }
 
 /// A shell whose program exited says how, and offers to start it again where it was or to

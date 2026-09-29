@@ -211,6 +211,27 @@ pub fn write(text: &str, table: &str, key: &str, literal: &str) -> String {
     out
 }
 
+/// `text` without `table.key`, so its default applies again: the key's lines go, every other
+/// line (its table's header and the comments over it included) stays. Unchanged when the key
+/// is not set.
+#[must_use]
+pub fn remove(text: &str, table: &str, key: &str) -> String {
+    let (entries, _) = scan(text);
+    let Some(entry) = find(&entries, table, key) else { return text.to_owned() };
+    let (first, last) = entry.lines;
+    let mut out: String = text
+        .lines()
+        .enumerate()
+        .filter(|(ix, _)| !(first..=last).contains(ix))
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 /// A TOML value's text, read.
 fn parse(value: &str) -> Value {
     let value = value.trim();
@@ -390,6 +411,20 @@ allow = [
         );
         let dotted = write("font.mono_size = 9\n", "font", "mono_size", "10.0");
         assert_eq!(dotted, "font.mono_size = 10.0\n", "a dotted key is set where it is");
+    }
+
+    /// A removal takes the key's lines alone, a value over several lines whole; a key that is
+    /// not set leaves the text as it was.
+    #[test]
+    fn a_removal_takes_the_key_alone() {
+        let gone = remove(FILE, "font", "mono_size");
+        assert_eq!(gone, FILE.replace("mono_size = 13.0 # mine\n", ""));
+        let array = remove(FILE, "terminal", "allow");
+        assert!(array.ends_with("[terminal]\ncursor_style = \"program\"\n"), "{array}");
+        assert_eq!(remove(FILE, "remote", "fps"), FILE, "nothing to remove");
+        let keys = write("", "keys.workspace", "new_note", "\"cmd-alt-n\"");
+        assert_eq!(keys, "[keys.workspace]\nnew_note = \"cmd-alt-n\"\n");
+        assert_eq!(remove(&keys, "keys.workspace", "new_note"), "[keys.workspace]\n");
     }
 
     /// What a control writes reads back as the same value.

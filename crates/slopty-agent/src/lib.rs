@@ -46,6 +46,7 @@ pub mod discover;
 pub mod hooks;
 pub mod live;
 pub mod permission;
+pub mod resume;
 pub mod statusline;
 pub mod title;
 pub mod transcript;
@@ -240,6 +241,9 @@ pub struct Hook {
     /// `SessionStart`: `startup|resume|clear|compact|fork`.
     #[serde(default)]
     pub source: Option<String>,
+    /// `SessionEnd`: `clear|resume|logout|prompt_input_exit|other`.
+    #[serde(default)]
+    pub reason: Option<String>,
     /// The conversation transcript (JSONL); on every event in practice.
     #[serde(default)]
     pub transcript_path: Option<String>,
@@ -516,6 +520,10 @@ pub struct Tracker {
     blocks: BTreeSet<String>,
     /// When the status entered its [`phase`], what [`AgentEvent::since_ms`] says.
     since_ms: WallMs,
+    /// The command line of the agent process this tracker follows, when the platform said.
+    argv: Vec<String>,
+    /// The permission mode the hooks last reported.
+    permission_mode: Option<String>,
 }
 
 /// The part of a status an elapsed time runs across: a tool call inside a turn is still the
@@ -545,6 +553,8 @@ impl Default for Tracker {
             process: None,
             blocks: BTreeSet::new(),
             since_ms: WallMs::ZERO,
+            argv: Vec::new(),
+            permission_mode: None,
         }
     }
 }
@@ -602,6 +612,12 @@ impl Tracker {
         }
         if hook.transcript_path.is_some() {
             self.transcript_path.clone_from(&hook.transcript_path);
+        }
+        if hook.permission_mode.is_some() {
+            self.permission_mode.clone_from(&hook.permission_mode);
+        }
+        if self.cwd.is_none() {
+            self.cwd = hook.cwd.as_ref().map(PathBuf::from);
         }
         self.ledger(hook);
         let (status, detail) = self.next(hook)?;
@@ -665,6 +681,9 @@ impl Tracker {
                 *self = Self::default();
             }
             self.process = Some(process);
+        }
+        if !program.argv.is_empty() {
+            self.argv.clone_from(&program.argv);
         }
         self.absent = 0;
         if self.first_seen.is_none() {
@@ -745,6 +764,34 @@ impl Tracker {
             cwd: self.cwd.clone()?,
             since: self.first_seen?,
             current: self.transcript_path.clone(),
+        })
+    }
+
+    /// The conversation to bring back after a reboot ([`resume`]): the one a hook named, else
+    /// the one whose transcript was found, in the directory the agent runs in, with the flags
+    /// its command line keeps and the permission mode it was last in.
+    #[must_use]
+    pub fn resumable(&self) -> resume::Resumable {
+        let invocation = resume::invocation(detect::agent_args(&self.argv));
+        if self.status == AgentStatus::None || invocation.print {
+            return resume::Resumable::No;
+        }
+        let session = self.agent_session.clone().or_else(|| {
+            let path = Path::new(self.transcript_path.as_deref()?);
+            Some(path.file_stem()?.to_str()?.to_owned())
+        });
+        let (Some(session), Some(cwd)) = (session, self.cwd.as_ref()) else {
+            return resume::Resumable::Unknown;
+        };
+        if !resume::is_session_id(&session) {
+            return resume::Resumable::Unknown;
+        }
+        resume::Resumable::Yes(resume::Resume {
+            session,
+            cwd: cwd.to_string_lossy().into_owned(),
+            transcript: self.transcript_path.clone(),
+            args: resume::with_mode(invocation.args, self.permission_mode.as_deref()),
+            relay: invocation.relay,
         })
     }
 
@@ -893,21 +940,63 @@ impl Tracker {
 #[derive(Debug, Default)]
 pub struct AgentTable {
     sessions: HashMap<SessionId, Tracker>,
+    /// Conversations whose `SessionEnd` did not come from the person ([`Self::resumable`]),
+    /// with the probes since that saw something else in the foreground.
+    parked: HashMap<SessionId, (resume::Resume, u8)>,
 }
 
 impl AgentTable {
     /// Feed a hook for a session.
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
         let tracker = self.sessions.entry(session).or_default();
+        let before = tracker.resumable();
         let event = tracker.apply(session, hook);
         if tracker.status() == &AgentStatus::None {
             self.sessions.remove(&session);
+            if hook.event == HookEvent::SessionEnd
+                && !resume::ended_by_the_person(hook.reason.as_deref())
+                && let resume::Resumable::Yes(conversation) = before
+            {
+                self.parked.insert(session, (conversation, 0));
+            }
+        } else if matches!(tracker.resumable(), resume::Resumable::Yes(_)) {
+            self.parked.remove(&session);
         }
         event
     }
 
+    /// The conversation to bring back in `session` after a reboot.
+    ///
+    /// A conversation ended by a signal (`SessionEnd` with `other`, what a reboot gives) or
+    /// followed by another (`clear`, `resume`) is kept until the next one is known, or until
+    /// `ABSENT_BEFORE_GONE` probes in a row find no agent in the foreground: the person is
+    /// back at the shell. One the person ended, or whose process went away, is not.
+    #[must_use]
+    pub fn resumable(&self, session: SessionId) -> resume::Resumable {
+        let tracked = self.sessions.get(&session).map(Tracker::resumable);
+        match (tracked, self.parked.get(&session)) {
+            (Some(resume::Resumable::Unknown) | None, Some((conversation, _probes))) => {
+                resume::Resumable::Yes(conversation.clone())
+            }
+            (Some(tracked), _) => tracked,
+            (None, None) => resume::Resumable::No,
+        }
+    }
+
     /// Feed one round of what the worker can see of a session ([`Tracker::observe`]).
     pub fn observe(&mut self, session: SessionId, obs: &Observation) -> Option<AgentEvent> {
+        if let (Some(program), Some((_conversation, probes))) =
+            (obs.program.as_ref(), self.parked.get_mut(&session))
+        {
+            if program.is_claude() {
+                *probes = 0;
+            } else {
+                *probes = probes.saturating_add(1);
+                if *probes >= ABSENT_BEFORE_GONE {
+                    self.parked.remove(&session);
+                }
+            }
+        }
         // A session with nothing agent-like in it must not grow an entry on every tick.
         if !self.sessions.contains_key(&session)
             && !obs.program.as_ref().is_some_and(Program::is_claude)
@@ -943,6 +1032,7 @@ impl AgentTable {
     /// went away takes its agent with it whatever its last signal said.
     pub fn retain(&mut self, live: &[SessionId]) -> Vec<AgentEvent> {
         let mut gone = Vec::new();
+        self.parked.retain(|session, _conversation| live.contains(session));
         self.sessions.retain(|session, _tracker| {
             if live.contains(session) {
                 return true;
@@ -993,6 +1083,7 @@ impl AgentTable {
     /// The session's terminal went away.
     pub fn forget(&mut self, session: SessionId) {
         self.sessions.remove(&session);
+        self.parked.remove(&session);
     }
 
     /// Where the session's conversation is written, once a hook has said.
@@ -1856,5 +1947,106 @@ mod tests {
             Some("Bash")
         );
         assert_eq!(short_path("/Users/x/proj/src/lib.rs"), "src/lib.rs");
+    }
+
+    /// `claude <line>` running in `/tmp/project`, as the process table names it.
+    fn claude(line: &str) -> Observation {
+        let argv = std::iter::once("claude").chain(line.split_whitespace()).map(str::to_owned);
+        Observation {
+            program: Some(Program { name: "claude".into(), argv: argv.collect() }),
+            ..seen("claude", None)
+        }
+    }
+
+    fn resumed(table: &AgentTable, sid: SessionId) -> (String, Vec<String>) {
+        match table.resumable(sid) {
+            resume::Resumable::Yes(r) => (r.session, r.args),
+            other => panic!("nothing to resume: {other:?}"),
+        }
+    }
+
+    /// The conversation a hooked agent holds comes back with the flags of its command line and
+    /// the mode it was last in; `/clear` moves it to the new conversation, and between the
+    /// two hooks the old one still stands.
+    #[test]
+    fn the_newest_conversation_is_the_one_to_resume() {
+        let sid = SessionId::new();
+        let mut table = AgentTable::default();
+        assert_eq!(table.resumable(sid), resume::Resumable::No);
+        table.observe(sid, &claude("--model opus --append-system-prompt hush-hush fix-it"));
+        assert_eq!(table.resumable(sid), resume::Resumable::Unknown, "which one is not known");
+        table.apply(
+            sid,
+            &hook(
+                r#"{"session_id":"a1","hook_event_name":"SessionStart","source":"startup",
+                "permission_mode":"plan","transcript_path":"/t/a1.jsonl"}"#,
+            ),
+        );
+        assert_eq!(
+            resumed(&table, sid),
+            (
+                "a1".into(),
+                vec!["--model".into(), "opus".into(), "--permission-mode".into(), "plan".into()]
+            )
+        );
+        let resume::Resumable::Yes(r) = table.resumable(sid) else { panic!("nothing to resume") };
+        assert_eq!(
+            (r.cwd.as_str(), r.transcript.as_deref()),
+            ("/tmp/project", Some("/t/a1.jsonl"))
+        );
+
+        table.apply(
+            sid,
+            &hook(r#"{"session_id":"a1","hook_event_name":"SessionEnd","reason":"clear"}"#),
+        );
+        assert_eq!(resumed(&table, sid).0, "a1", "until the next one starts");
+        table.apply(
+            sid,
+            &hook(r#"{"session_id":"b2","hook_event_name":"SessionStart","source":"clear","permission_mode":"default"}"#),
+        );
+        table.observe(sid, &claude("--model opus --append-system-prompt hush-hush fix-it"));
+        assert_eq!(resumed(&table, sid), ("b2".into(), vec!["--model".into(), "opus".into()]));
+    }
+
+    /// An agent the person ended does not come back; one ended by a signal does, until the
+    /// shell is seen back in the foreground for a while. A `--print` run never does.
+    #[test]
+    fn only_a_conversation_the_person_left_running_comes_back() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        let start = hook(r#"{"session_id":"a1","hook_event_name":"SessionStart","cwd":"/w"}"#);
+        table.apply(sid, &start);
+        table.apply(sid, &hook(r#"{"session_id":"a1","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#));
+        assert_eq!(table.resumable(sid), resume::Resumable::No);
+
+        table.apply(sid, &start);
+        table.apply(
+            sid,
+            &hook(r#"{"session_id":"a1","hook_event_name":"SessionEnd","reason":"other"}"#),
+        );
+        assert_eq!(resumed(&table, sid).0, "a1", "a reboot's signal");
+        for _probe in 1..ABSENT_BEFORE_GONE {
+            table.observe(sid, &seen("zsh", None));
+        }
+        assert_eq!(resumed(&table, sid).0, "a1", "the relay passes through the foreground");
+        table.observe(sid, &seen("zsh", None));
+        assert_eq!(table.resumable(sid), resume::Resumable::No, "the person is at the shell");
+
+        let other = SessionId::new();
+        table.observe(other, &claude("-p hello"));
+        table.apply(other, &start);
+        assert_eq!(table.resumable(other), resume::Resumable::No);
+    }
+
+    /// An agent no hook speaks for is resumed from the transcript found for it, whose name is
+    /// the conversation's id; several agents each keep their own.
+    #[test]
+    fn an_unhooked_agent_is_resumed_from_its_transcript() {
+        let (a, b, mut table) = (SessionId::new(), SessionId::new(), AgentTable::default());
+        table.observe(a, &claude("--effort high"));
+        table.observe(b, &claude(""));
+        assert!(table.set_transcript_path(a, Path::new("/h/.claude/projects/p/aa-11.jsonl")));
+        assert!(table.set_transcript_path(b, Path::new("/h/.claude/projects/p/bb-22.jsonl")));
+        assert_eq!(resumed(&table, a), ("aa-11".into(), vec!["--effort".into(), "high".into()]));
+        assert_eq!(resumed(&table, b), ("bb-22".into(), Vec::new()));
     }
 }

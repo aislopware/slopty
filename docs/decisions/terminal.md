@@ -2076,6 +2076,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     program is never started again. `TermEvent::Restored { saved_ms, command }` tells each
     viewer on attach that the session was restored and what it ran before (empty when that
     was the shell), so the UI can offer the command again. The chain survives a second loss.
+    A Claude Code conversation left running is the other exception: it comes back resumed
+    (claude-code.md, "An agent comes back after a reboot").
   - **Exited sessions come back as shells too.** An exited session stays until closed, and
     its record with it, so after a reboot it reopens as a live shell in its directory. The
     gap note's alternative, a read-only ended item with "Start a shell here", needs a session
@@ -2189,3 +2191,57 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `an_indeterminate_report_sweeps_unless_motion_is_reduced`,
     `a_restored_session_runs_its_command_again_only_on_a_click` and
     `a_restored_login_shell_has_nothing_to_run_and_is_dismissed`.
+- ✅ **Decoded lines are bounded** (2026-09-29).
+  - **The bug.** A line leaves its trailing blanks off the wire and gets them back on decode,
+    padded to the width the peer claims. A blank line was 7 bytes at any width. 100 of them
+    claiming 65 535 columns (703 bytes of `TermEvent::Lines`) decoded into 314 MB. One 16 MB
+    frame of them asked for terabytes. Seven bytes of `Resized` or a frame's `cols` × `rows`
+    made the client build a 65 535 × 65 535 screen. `orchestration::Line` is text, bounded by
+    its bytes, and was never affected.
+  - **A size ceiling.** `slopty_grid::MAX_COLS` (2048) and `MAX_ROWS` (1024). A full-screen
+    window at the smallest font is about 630 × 350 on a 6K display, so this leaves room for a
+    window across several. A line wider than `MAX_COLS` does not decode, and neither do a
+    `Frame` or a `Resized` past the ceiling. A `TermSize` decodes clamped to it, so a window
+    wider than any terminal gets the widest, and the PTY and the engine get the same size.
+    The engine refuses a size past it (`check_size`). A client's `Screen` clamps as a
+    backstop.
+  - **A cell budget per message.** The ceiling alone left 2.8 M blank lines per 16 MB frame,
+    each 2048 cells. `codec::decode_body` now runs every decode under
+    `slopty_grid::with_cell_budget(MAX_DECODED_CELLS)`. Serde gives a `Deserialize` no
+    context, so a thread-local carries the budget down. Each decoded line takes its width
+    from it, and the line that would overdraw it fails, which fails the message.
+    `MAX_DECODED_CELLS` is `MAX_FETCH_LINES` × `MAX_COLS` (8 Mi cells, 384 MiB). That is a
+    full answer to `FetchLines` at the widest, the largest message an honest worker sends, so
+    no honest message meets it. Outside a decode nothing is counted, so the worker's own
+    files and the tests are not limited.
+  - **Why not a budget per byte.** An honest blank line is already the worst ratio: its bytes
+    say nothing about its width. Any per-byte factor that lets an honest 2048-column scrollback
+    through lets an attacker's copy of it through too. Only a ceiling on the message's cells
+    bounds it.
+  - **Rejected: not putting the blanks back at decode.** Padding at placement would bound
+    decoded memory by the bytes. But a `Line` is its `cells`, and every reader (renderer,
+    selection, search, the scrollback cache) counts on `cols` of them, so it would change the
+    type across the client and the UI. The wire and the goldens are unchanged here.
+  - **Cost.** One thread-local read and write per decoded line, and two per message.
+    MEASUREMENTS, "Decoding a frame".
+  - **The fuzz targets now bound the heap too.** A decoding target (the four streams and
+    `term_datagram`) runs under `slopty_testkit::alloc::Counting`. It fails when a decode
+    takes more than 64 bytes of heap per body byte, plus 48 per cell its lines took, plus
+    2 MiB (serde preallocates a sequence up to 1 MiB before reading it). With the fix undone,
+    the 703-byte input kept under `fuzz/regressions/{uni_stream,term_datagram}/` fails
+    with 314 573 600 heap bytes.
+  - Tests: `decode_bounds.rs` in slopty-proto covers the 703-byte input, a 16 MB frame of
+    blank 2048-column lines (it stops at exactly `MAX_DECODED_CELLS`), frames and `Resized`
+    past the ceiling, and `TermSize` clamped. In slopty-grid:
+    `decoded_lines_stay_within_the_cell_budget`,
+    `a_line_wider_than_the_ceiling_does_not_decode` and `a_screen_is_never_past_the_ceiling`.
+    In the engine: `the_size_ceiling_is_the_largest_terminal`.
+
+- ✅ **A progress percent moves the summary at most four times a second** (2026-09-29). Every
+  `OSC 9;4` change said the session's summary moved, and each move is a summary read on the
+  session's actor and a `SessionChanged` to every client and the server, so a build reporting
+  each file flooded them. A report that starts, ends or changes kind (an error, a pause) still
+  says so at once; a percent says so at most every 250 ms (`session::PROGRESS_EVERY`), the
+  latest held back until its time, so the last value always goes out. The daemon also takes the
+  moves queued while it works in one batch, each session once. Ten thousand reports over 1.5 s
+  moved the summary 7 times (`a_flood_of_progress_moves_the_summary_a_bounded_number_of_times`).

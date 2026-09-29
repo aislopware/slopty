@@ -4,7 +4,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Line, TermModes};
+use crate::{Line, MAX_COLS, TermModes};
+
+/// The tallest screen there is: the engine makes no terminal taller, and a frame claiming more
+/// rows does not decode. A full-screen window at the smallest font on a portrait 6K display
+/// is about 350 rows.
+pub const MAX_ROWS: u16 = 1024;
 
 /// Cursor shape as requested by DECSCUSR or the engine default.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Default)]
@@ -68,7 +73,8 @@ pub enum ScreenError {
     },
 }
 
-/// The visible grid: exactly `rows` lines of `cols` cells, a cursor, and mode bits.
+/// The visible grid: exactly `rows` lines of `cols` cells, a cursor, and mode bits. A size
+/// past [`MAX_COLS`] × [`MAX_ROWS`] is clamped to it, whoever asked.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Screen {
     cols: u16,
@@ -84,6 +90,7 @@ impl Screen {
     /// A blank screen.
     #[must_use]
     pub fn new(cols: u16, rows: u16) -> Self {
+        let (cols, rows) = (cols.min(MAX_COLS), rows.min(MAX_ROWS));
         Self {
             cols,
             rows,
@@ -144,6 +151,7 @@ impl Screen {
     /// Resize, keeping the top-left content. Real reflow is the engine's job; this keeps the client
     /// consistent until the next full frame arrives.
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = (cols.min(MAX_COLS), rows.min(MAX_ROWS));
         self.cols = cols;
         self.rows = rows;
         self.lines.resize_with(usize::from(rows), || Arc::new(Line::blank(cols)));
@@ -248,5 +256,19 @@ mod tests {
         assert_eq!((s.cursor().row, s.cursor().col), (9, 39));
         assert_eq!(s.lines().len(), 10);
         assert!(s.lines().iter().all(|l| l.cols() == 40));
+    }
+
+    /// A size claimed past the ceiling is the ceiling: seven bytes of `Resized` once asked a
+    /// client for 4 G cells.
+    #[test]
+    fn a_screen_is_never_past_the_ceiling() {
+        let mut s = Screen::new(u16::MAX, 1);
+        assert_eq!((s.cols(), s.rows()), (MAX_COLS, 1));
+        assert_eq!(s.lines()[0].cols(), MAX_COLS);
+        s.resize(2, u16::MAX);
+        assert_eq!((s.cols(), s.rows()), (2, MAX_ROWS));
+        assert_eq!(s.lines().len(), usize::from(MAX_ROWS));
+        s.resize(MAX_COLS + 1, 1);
+        assert_eq!((s.cols(), s.rows()), (MAX_COLS, 1));
     }
 }

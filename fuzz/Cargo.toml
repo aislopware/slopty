@@ -1,0 +1,147 @@
+# The fuzz targets (`cargo xtask fuzz`, docs/TESTING.md "Beyond the layers"). Its own workspace,
+# outside the main one: libFuzzer's instrumented build is nightly-only and never belongs in the
+# gate. What each target does lives in the library, so `tests/regressions.rs` replays every
+# input under `regressions/` on a plain build.
+[package]
+name = "slopty-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "libFuzzer targets for every decoder that faces a peer"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = [ "." ]
+
+[dependencies]
+arbitrary = { version = "1.4.2", features = [ "derive" ] }
+bytes = "1.12.1"
+libfuzzer-sys = "0.4.13"
+serde = "1.0.229"
+serde_json = "1.0.151"
+slopty-core = { path = "../crates/slopty-core" }
+slopty-grid = { path = "../crates/slopty-grid" }
+slopty-media = { path = "../crates/slopty-media" }
+slopty-proto = { path = "../crates/slopty-proto" }
+slopty-testkit = { path = "../crates/slopty-testkit" }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+rust_2024_compatibility = { level = "warn", priority = -1 }
+unexpected_cfgs = { level = "warn", check-cfg = [ "cfg(fuzzing)" ] }
+
+# The main workspace's groups and restriction lints, less the two a harness exists to break: it
+# reports a finding by panicking (`panic`, `expect_used`), as the tests do under `clippy.toml`.
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+allow_attributes_without_reason = "warn"
+str_to_string = "warn"
+missing_assert_message = "warn"
+module_name_repetitions = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+debug = "line-tables-only"
+overflow-checks = true
+
+[[bin]]
+name = "client_msg"
+path = "fuzz_targets/client_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "worker_msg"
+path = "fuzz_targets/worker_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_msg"
+path = "fuzz_targets/server_msg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "uni_stream"
+path = "fuzz_targets/uni_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_datagram"
+path = "fuzz_targets/client_datagram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "term_datagram"
+path = "fuzz_targets/term_datagram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "media_header"
+path = "fuzz_targets/media_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cursor"
+path = "fuzz_targets/cursor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "origin"
+path = "fuzz_targets/origin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reassemble"
+path = "fuzz_targets/reassemble.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "feedback"
+path = "fuzz_targets/feedback.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ctl"
+path = "fuzz_targets/ctl.rs"
+test = false
+doc = false
+bench = false

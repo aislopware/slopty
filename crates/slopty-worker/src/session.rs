@@ -163,6 +163,7 @@ enum Cmd {
     Probe { reply: oneshot::Sender<Probe> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
+    Launch { line: String },
     Close,
 }
 
@@ -183,6 +184,10 @@ pub struct Snapshot {
     pub viewers: u16,
     /// Exit status if the child is gone.
     pub exited: Option<i32>,
+    /// The program's progress report (`OSC 9;4`), while one stands.
+    pub progress: Option<Progress>,
+    /// Whether the session was reopened after its shell was lost.
+    pub restored: Option<Restored>,
 }
 
 /// What the worker can see of a session without asking anything running in it: the program in
@@ -299,6 +304,7 @@ impl std::fmt::Debug for Cmd {
             Self::Probe { .. } => "Probe",
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
+            Self::Launch { .. } => "Launch",
             Self::Close => "Close",
         };
         f.write_str(name)
@@ -427,6 +433,15 @@ impl SessionHandle {
         let _ignored = self.tx.send(Cmd::Exited { status });
     }
 
+    /// Type `line` and Enter into the shell once it is at its first prompt: it has reported
+    /// its directory since this actor started (OSC 7, which the shell integration sends before
+    /// every prompt) and its line editor holds the terminal. The line is dropped when a viewer
+    /// types first, since the terminal is theirs then, or when no prompt came within
+    /// [`FIRST_PROMPT_WAIT`]. Restore uses this to resume the agent a lost shell was running.
+    pub fn type_at_first_prompt(&self, line: String) -> Result<(), WorkerError> {
+        self.send(Cmd::Launch { line })
+    }
+
     /// Stop the actor (the PTY master closes; ptyd decides the child's fate).
     pub fn close(&self) {
         let _ignored = self.tx.send(Cmd::Close);
@@ -498,6 +513,10 @@ pub struct SessionStart {
 
 /// The divider between a lost shell's screen and the new shell's.
 pub const RESTORED_DIVIDER: &str = "Restored after restart";
+
+/// How long [`SessionHandle::type_at_first_prompt`] waits for the prompt. Longer than any rc
+/// file a person waits through; a prompt later than this is one they may be using already.
+pub const FIRST_PROMPT_WAIT: Duration = Duration::from_secs(30);
 
 /// Spawn the actor thread.
 pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
@@ -631,8 +650,12 @@ impl Viewer {
 /// key sequence number it carried, if any), or the engine answered a query.
 #[derive(Clone, Copy, Debug)]
 enum Origin {
-    Viewer { key: Option<u64> },
+    Viewer {
+        key: Option<u64>,
+    },
     Engine,
+    /// The line [`SessionHandle::type_at_first_prompt`] was given.
+    Worker,
 }
 
 /// The frames a viewer's input buys ahead of the pace ([`ECHO_FRAMES`]).
@@ -787,11 +810,28 @@ struct Actor {
     touched: Option<mpsc::UnboundedSender<(SessionId, String)>>,
     /// No port hint is sent before this, so a flood of addresses is one hint a second.
     next_hint: Option<tokio::time::Instant>,
+    /// When a progress change last said the summary moved, and when a percent held back since
+    /// is to say it ([`Self::progress_moved`]).
+    progress_told: Option<tokio::time::Instant>,
+    progress_due: Option<tokio::time::Instant>,
+    /// The shell reported its directory in output of its own, the replayed screen aside.
+    prompted: bool,
+    /// The tty was out of canonical mode at the last read: a line editor holds it.
+    line_editor: bool,
+    /// The line [`SessionHandle::type_at_first_prompt`] waits to type, and until when.
+    launch: Option<(String, tokio::time::Instant)>,
 }
 
 /// A session's output is looked at for a local server's address at most this often once it
 /// named one.
 const HINT_EVERY: Duration = Duration::from_secs(1);
+
+/// A progress report's percent moves the summary at most this often.
+///
+/// A build tool may report every file it compiles, thousands a second, and each move is a
+/// summary read and sent to every client and the server; a bar that moves four times a second
+/// reads as moving.
+pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 /// A checkpoint follows this much quiet after output. Shorter means a crashed worker loses less
 /// of what a fresh one cannot replay from the ring; longer means fewer formatter runs.
@@ -843,16 +883,21 @@ impl Actor {
         if start.divide {
             engine.mark_restored(RESTORED_DIVIDER)?;
         }
+        let mut events = engine.drain_events();
+        let replayed = events.len();
         if !start.backlog.is_empty() {
             engine.write(&start.backlog);
+            events.extend(engine.drain_events());
         }
         // What the replay said is state, not news: the last worker delivered the bells, the
         // notifications, the clipboard writes and the query answers already (an answer written
         // now would land in a shell that is not asking). The title, the directory and the
-        // program's colours are what the first attach is told.
+        // program's colours are what the first attach is told. A directory in the backlog is
+        // the shell's own, at a prompt since.
         let (mut title, mut cwd, mut program_colors) = (None, None, ColorOverrides::default());
         let (mut progress, mut pointer) = (Progress::default(), PointerShape::default());
-        for ev in engine.drain_events() {
+        let prompted = events.iter().skip(replayed).any(|ev| matches!(ev, EngineEvent::Cwd(_)));
+        for ev in events {
             match ev {
                 EngineEvent::Title(t) => title = Some(t),
                 EngineEvent::Cwd(c) => cwd = Some(c),
@@ -919,6 +964,11 @@ impl Actor {
             moves: start.moves,
             touched: start.touched,
             next_hint: None,
+            progress_told: None,
+            progress_due: None,
+            prompted,
+            line_editor: false,
+            launch: None,
         })
     }
 
@@ -976,6 +1026,9 @@ impl Actor {
                     self.checkpoint_due = None;
                     self.checkpoint(false);
                 }
+                () = sleep_until_due(self.progress_due) => {
+                    self.progress_told_now(tokio::time::Instant::now());
+                }
             }
         }
         tracing::debug!(session = %self.id, "actor stopped");
@@ -1005,6 +1058,7 @@ impl Actor {
         self.hint_ports(bytes);
         self.tap_output(bytes);
         self.after_output();
+        self.launch_when_prompted();
         self.arm_hold();
         let ended = self.engine.commands_ended();
         self.place_due |= ended != self.activity.borrow().commands_ended;
@@ -1061,6 +1115,28 @@ impl Actor {
         }
     }
 
+    /// The progress report changed, and with it the summary. A report that starts, ends or
+    /// changes kind (an error, a pause) says so at once; a percent that moves says so at most
+    /// every [`PROGRESS_EVERY`], the latest one held back until then, so the last value is always
+    /// told.
+    fn progress_moved(&mut self, kind: bool) {
+        let now = tokio::time::Instant::now();
+        let next = self.progress_told.and_then(|at| at.checked_add(PROGRESS_EVERY));
+        match next {
+            Some(next) if !kind && now < next => {
+                self.progress_due.get_or_insert(next);
+            }
+            _ => self.progress_told_now(now),
+        }
+    }
+
+    /// Say the summary moved for the progress report, as it stands `now`.
+    fn progress_told_now(&mut self, now: tokio::time::Instant) {
+        self.progress_told = Some(now);
+        self.progress_due = None;
+        self.moved();
+    }
+
     /// Tell the daemon the summary is out of date.
     fn moved(&self) {
         if let Some(moves) = &self.moves {
@@ -1075,7 +1151,10 @@ impl Actor {
     /// discipline per read").
     fn read_line_discipline(&mut self) {
         match self.master.line_discipline() {
-            Ok(discipline) => self.engine.set_line_discipline(discipline),
+            Ok(discipline) => {
+                self.line_editor = !discipline.canonical;
+                self.engine.set_line_discipline(discipline);
+            }
             Err(e) => tracing::debug!(session = %self.id, error = %e, "line discipline unread"),
         }
     }
@@ -1275,6 +1354,10 @@ impl Actor {
                     self.broadcast(&TermEvent::Notification { title, body });
                 }
                 EngineEvent::Progress(progress) => {
+                    // The summary carries it to the clients that do not view the session.
+                    if progress != self.progress {
+                        self.progress_moved(progress.state != self.progress.state);
+                    }
                     self.progress = progress;
                     self.broadcast(&TermEvent::Progress(progress));
                 }
@@ -1295,6 +1378,7 @@ impl Actor {
                     // else.
                     self.cwd = Some(c);
                     self.place_due = true;
+                    self.prompted = true;
                 }
                 EngineEvent::ClipboardWrite { text } => {
                     // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
@@ -1317,6 +1401,9 @@ impl Actor {
     fn queue_input(&mut self, bytes: &[u8], origin: Origin) -> Result<(), TermError> {
         if bytes.is_empty() || self.pty_closed {
             return Ok(());
+        }
+        if matches!(origin, Origin::Viewer { .. }) && self.launch.take().is_some() {
+            tracing::info!(session = %self.id, "a viewer typed before the first prompt; the agent is not resumed");
         }
         if self.input.pending.len().saturating_add(bytes.len()) > INPUT_MAX_BYTES {
             tracing::warn!(
@@ -1811,6 +1898,8 @@ impl Actor {
                     size: self.engine.size(),
                     viewers: u16::try_from(self.viewers.len()).unwrap_or(u16::MAX),
                     exited: self.exited,
+                    progress: (self.progress.state != ProgressState::None).then_some(self.progress),
+                    restored: self.restored.clone(),
                 });
             }
             Cmd::ResizeUnviewed { size, reply } => {
@@ -1843,9 +1932,33 @@ impl Actor {
             Cmd::Read { read, reply } => {
                 let _ignored = reply.send(self.read(read));
             }
+            Cmd::Launch { line } => {
+                let until = tokio::time::Instant::now().checked_add(FIRST_PROMPT_WAIT);
+                self.launch = until.map(|until| (line, until));
+                self.launch_when_prompted();
+            }
             Cmd::Close => return false,
         }
         true
+    }
+
+    /// Type the line waiting for the first prompt ([`SessionHandle::type_at_first_prompt`])
+    /// once the shell is there, or drop it once it is too late.
+    fn launch_when_prompted(&mut self) {
+        if !self.prompted || !self.line_editor {
+            return;
+        }
+        let Some((line, until)) = self.launch.take() else { return };
+        if tokio::time::Instant::now() > until {
+            tracing::info!(session = %self.id, "no prompt in time; the agent is not resumed");
+            return;
+        }
+        tracing::info!(session = %self.id, "resuming the agent at the first prompt");
+        let mut bytes = line.into_bytes();
+        bytes.push(b'\r');
+        if let Err(e) = self.queue_input(&bytes, Origin::Worker) {
+            tracing::warn!(session = %self.id, error = ?e, "the line that resumes the agent was not typed");
+        }
     }
 
     fn read(&self, read: Read) -> Result<Text, WorkerError> {

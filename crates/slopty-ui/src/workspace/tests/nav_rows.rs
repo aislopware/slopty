@@ -71,6 +71,44 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), Some(site), "↩ goes to the first tile listed");
 }
 
+/// A shell no client views still shows its program's progress from its summary: the figure at
+/// the end of its second line and the hairline under it, along the share it names; a reopened
+/// shell says "Restored" there; and both go when the summary drops them.
+#[gpui::test]
+fn a_row_shows_its_sessions_progress_and_that_it_was_restored(cx: &mut TestAppContext) {
+    use slopty_proto::terminal::{Progress, ProgressState, Restored};
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/w/oss/slopty"));
+    let id = tile.item.as_uuid();
+    let key = studio.key;
+    let reported = SessionSummary {
+        progress: Some(Progress { state: ProgressState::Set, percent: Some(40) }),
+        restored: Some(Restored { saved_ms: WallMs::ZERO, command: Vec::new() }),
+        ..summary(session, Some("/w/oss/slopty"))
+    };
+    view.update_in(cx, |v, _w, cx| v.session_opened(key, reported, cx));
+    cx.run_until_parked();
+    let row = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row");
+    let figure = cx.debug_bounds(leak(format!("nav-progress-{id}"))).expect("the figure");
+    let bar = cx.debug_bounds(leak(format!("nav-progress-bar-{id}"))).expect("the hairline");
+    let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
+    assert!(shown(cx, leak(format!("nav-restored-{id}"))), "the restored mark");
+    assert!(figure.top() >= meta.top() - px(0.5), "on the second line: {figure:?} {meta:?}");
+    assert!(bar.top() >= meta.bottom() - px(0.5) && bar.bottom() <= row.bottom(), "{bar:?}");
+    let lines = cx.debug_bounds(leak(format!("nav-lines-{id}"))).expect("the lines");
+    let share = f32::from(bar.size.width) / f32::from(lines.right() - bar.left());
+    assert!(share > 0.3 && share < 0.5, "about 40% of the lines: {share}");
+
+    let quiet = summary(session, Some("/w/oss/slopty"));
+    view.update_in(cx, |v, _w, cx| v.session_opened(key, quiet, cx));
+    cx.run_until_parked();
+    assert!(!shown(cx, leak(format!("nav-progress-{id}"))), "the report ended");
+    assert!(!shown(cx, leak(format!("nav-progress-bar-{id}"))));
+    assert!(!shown(cx, leak(format!("nav-restored-{id}"))));
+}
+
 /// A shell's row reads two lines: its title, ended by its age from the session's start, then
 /// what its agent says, its directory and its branch, in the order every second line keeps. Once
 /// the agent waits on the human, the state takes the age's place in a word and the second line

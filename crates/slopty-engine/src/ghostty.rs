@@ -1530,6 +1530,10 @@ const fn check_size(size: TermSize) -> Result<(), EngineError> {
     if size.cols == 0 || size.rows == 0 {
         return Err(EngineError::InvalidSize("zero columns or rows"));
     }
+    // The wire refuses a line or a frame past these, so a terminal past them could not be shown.
+    if size.cols > slopty_grid::MAX_COLS || size.rows > slopty_grid::MAX_ROWS {
+        return Err(EngineError::InvalidSize("past MAX_COLS × MAX_ROWS"));
+    }
     if size.metrics.cell_width == 0 || size.metrics.cell_height == 0 {
         return Err(EngineError::InvalidSize("zero cell metrics"));
     }
@@ -2255,6 +2259,23 @@ mod tests {
         e.write(b"\x1b[?1049l");
         let reflowed = e.full_frame(0).unwrap();
         assert!(![before.epoch, alt.epoch, again.epoch].contains(&reflowed.epoch));
+    }
+
+    /// The widest, tallest terminal there is makes a frame of that size, and one past it is
+    /// refused, as the wire would refuse its frames.
+    #[test]
+    fn the_size_ceiling_is_the_largest_terminal() {
+        let mut e = engine(slopty_grid::MAX_COLS, slopty_grid::MAX_ROWS);
+        e.write(b"wide");
+        let frame = e.full_frame(0).unwrap();
+        assert_eq!((frame.cols, frame.rows), (slopty_grid::MAX_COLS, slopty_grid::MAX_ROWS));
+        assert_eq!(frame.updates[0].line.text(), "wide");
+        let metrics = CellMetrics { cell_width: 8, cell_height: 16 };
+        for (cols, rows) in [(slopty_grid::MAX_COLS + 1, 1), (1, slopty_grid::MAX_ROWS + 1)] {
+            let err = e.resize(TermSize { cols, rows, metrics }).unwrap_err();
+            assert!(matches!(err, EngineError::InvalidSize(_)), "{cols} × {rows}: {err}");
+        }
+        assert_eq!(e.size().cols, slopty_grid::MAX_COLS, "a refused size changes nothing");
     }
 
     #[test]

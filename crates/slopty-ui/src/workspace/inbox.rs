@@ -9,6 +9,11 @@
 //! command's exit), how long it took, its tile, worker and directory. Reading is the header's badge
 //! going: a row marked read, "Mark all read", or its tile looked at. The history holds the
 //! last [`LOG_MAX`] commands.
+//!
+//! An agent that waits on a yes or no held for this client ([`approvals`]) gets "Deny" and
+//! "Allow" at the end of its row's second line, which answer it where it is.
+
+pub(super) mod approvals;
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -21,6 +26,7 @@ use gpui::{
 };
 use slopty_client::layout::WorkerKey;
 use slopty_core::SessionId;
+use slopty_proto::conversation::Verdict;
 use slopty_theme::{Theme, alpha};
 
 use super::agents::{agent_ask_line, agent_status_word};
@@ -50,6 +56,12 @@ pub(super) const INBOX_HOLDS: &str =
 /// The button that reads every unread row.
 pub(super) const MARK_ALL_READ: &str = "Mark all read";
 
+/// The button that allows a waiting agent's call.
+pub(super) const ALLOW: &str = "Allow";
+
+/// The button that refuses it.
+pub(super) const DENY: &str = "Deny";
+
 /// One finished command as the history keeps it: what ran, where, and when it ended.
 #[derive(Debug)]
 struct Logged {
@@ -71,6 +83,8 @@ pub(super) struct Inbox {
     all: bool,
     /// The fill under the view that is up, which slides between *Unread* and *All*.
     plate: Plate,
+    /// The permission prompts this client may answer from here.
+    approvals: approvals::Approvals,
 }
 
 /// One of the inbox's rows, before it is drawn.
@@ -90,6 +104,8 @@ struct Row {
     /// Still unread: bright, and the mark-read button swaps in under the pointer.
     unread: bool,
     go: Go,
+    /// The prompt "Deny" and "Allow" answer: its session and ask.
+    approval: Option<(SessionId, u64)>,
 }
 
 /// Where a row goes when clicked.
@@ -196,6 +212,7 @@ impl WorkspaceView {
             age: Some(now.saturating_duration_since(logged.at)),
             unread,
             go: Go::Session(logged.session),
+            approval: None,
         }
     }
 
@@ -232,6 +249,7 @@ impl WorkspaceView {
             age,
             unread: true,
             go: Go::Waiting(waiting),
+            approval: self.approval(session).map(|prompt| (session, prompt.ask)),
         }
     }
 
@@ -458,6 +476,7 @@ impl WorkspaceView {
                 .text_color(hsla(tone))
                 .child(SharedString::from(word))
         });
+        let answers = row.approval.map(|(session, ask)| self.approval_buttons(session, ask, cx));
         let place = join(&[&row.meta, row.cwd.as_deref().unwrap_or_default()]);
         let separated = word.is_some() && !place.is_empty();
         let second = meta(div(), theme)
@@ -478,7 +497,8 @@ impl WorkspaceView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .child(SharedString::from(place)),
-            );
+            )
+            .children(answers);
         let el = kit::row(theme, kit::Row::Two)
             .id(ElementId::Name(row.id.clone().into()))
             .debug_selector(move || row.id)
@@ -512,6 +532,49 @@ impl WorkspaceView {
                 }
             }))
             .into_any_element()
+    }
+}
+
+impl WorkspaceView {
+    /// "Deny" and "Allow" for `session`'s prompt `ask`, as quiet text buttons the height of a
+    /// row's second line: the answer goes where the row is, without going to the agent.
+    fn approval_buttons(&self, session: SessionId, ask: u64, cx: &Context<Self>) -> Div {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (_, second_h) = super::navigator::line_heights(theme);
+        let button = |id: String, label: &'static str, ink| {
+            let selector = id.clone();
+            let el = div()
+                .id(ElementId::Name(id.into()))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .h(px(second_h))
+                .px(px(theme.spacing.xs))
+                .flex()
+                .items_center()
+                .rounded(px(theme.radii.xs))
+                .cursor_pointer()
+                .text_color(hsla(ink))
+                .hover(move |el| el.bg(hsla(s.overlay)))
+                .child(label);
+            tab_stop(el, s.accent)
+        };
+        let deny = button(format!("inbox-deny-{session}"), DENY, s.text_secondary).on_click(
+            cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                let verdict = Verdict::Deny { message: String::new(), interrupt: false };
+                this.answer_approval(session, ask, verdict, cx);
+            }),
+        );
+        let allow = button(format!("inbox-allow-{session}"), ALLOW, s.accent).on_click(
+            cx.listener(move |this, _ev, _w, cx| {
+                cx.stop_propagation();
+                this.answer_approval(session, ask, Verdict::Allow, cx);
+            }),
+        );
+        div().flex_none().flex().items_center().gap(px(theme.spacing.xxs)).child(deny).child(allow)
     }
 }
 
@@ -578,7 +641,7 @@ mod tests {
             Status::Failed,
             Status::Away,
         ];
-        let words = [ALL_CAUGHT_UP, INBOX_HOLDS, MARK_ALL_READ]
+        let words = [ALL_CAUGHT_UP, INBOX_HOLDS, MARK_ALL_READ, ALLOW, DENY]
             .into_iter()
             .chain(statuses.map(Status::label));
         for text in words {

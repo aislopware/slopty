@@ -24,6 +24,7 @@ serde_json.workspace = true
 slopty-agent.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true
+slopty-deploy.workspace = true
 slopty-grid.workspace = true
 slopty-net.workspace = true
 slopty-platform.workspace = true

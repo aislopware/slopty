@@ -29,10 +29,13 @@ pub mod drag;
 #[cfg(target_vendor = "apple")]
 pub mod file_drop;
 pub mod fs;
+pub mod hotkey;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_vendor = "apple")]
 pub mod notify;
+#[cfg(target_os = "macos")]
+pub mod panel;
 #[cfg(target_os = "ios")]
 pub mod paste_control;
 #[cfg(target_vendor = "apple")]

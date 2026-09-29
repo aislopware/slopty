@@ -19,6 +19,10 @@
 //! transcript path a hook would have named, so ⌘⇧L works either way) and never touches the
 //! status. Nothing here reads a transcript outside the project directory the session's own
 //! working directory points at.
+//!
+//! Each tick also hands the worker the conversation each session holds
+//! (`AgentTable::resumable`), which it keeps so a reboot can resume it
+//! (`slopty_worker::restore`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -78,6 +82,14 @@ pub async fn watch(daemon: Daemon) -> ! {
                 // A conversation the human cleared or resumed: read the new file from its top.
                 tails.remove(&session);
             }
+        }
+        // The conversation each session holds, kept for a reboot to resume.
+        let resumable: Vec<_> = {
+            let agents = daemon.agents.lock();
+            ids.iter().map(|session| (*session, agents.resumable(*session))).collect()
+        };
+        for (session, agent) in resumable {
+            daemon.worker.keep_agent(session, agent);
         }
         follow(&daemon, &mut tails).await;
     }

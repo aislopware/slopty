@@ -2,4 +2,4 @@
 source: crates/slopty-proto/tests/golden.rs
 expression: line
 ---
-{"reply":"status","id":"00000000-0000-0000-0000-000000000077","name":"mac-studio","sessions":[{"id":"01020304-0506-0708-090a-0b0c0d0e0f10","title":"zsh","cwd":"/w/slopty","repo":null,"branch":null,"changes":null,"started_ms":1790000000000,"cols":80,"rows":24,"state":{"Exited":{"status":1}},"viewers":0,"command":["/bin/zsh"],"agent":null}]}
+{"reply":"status","id":"00000000-0000-0000-0000-000000000077","name":"mac-studio","sessions":[{"id":"01020304-0506-0708-090a-0b0c0d0e0f10","title":"zsh","cwd":"/w/slopty","repo":null,"branch":null,"changes":null,"started_ms":1790000000000,"cols":80,"rows":24,"state":{"Exited":{"status":1}},"viewers":0,"command":["/bin/zsh"],"agent":null,"progress":null,"restored":null}]}

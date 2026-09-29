@@ -1,0 +1,6 @@
+# What `cargo fuzz` writes when run by hand here; `cargo xtask fuzz` keeps all of it under the
+# root `target/fuzz/`.
+/target
+/corpus
+/artifacts
+/coverage

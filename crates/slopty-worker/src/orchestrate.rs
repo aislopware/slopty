@@ -69,6 +69,13 @@ const _: () = assert!(
     "a whole read and its envelope fit in one frame"
 );
 
+/// The longest a `Search` walks.
+///
+/// Well under the minute the server waits for any verb's answer (`slopty_server::hub`), so a
+/// search of a whole disk answers with what it found by then rather than walking on for a
+/// caller that gave up.
+pub const SEARCH_WITHIN: Duration = Duration::from_secs(30);
+
 /// Most entries one `ListDir` returns: names of up to 255 bytes each keep the reply a few
 /// megabytes, well inside a frame.
 pub const MAX_DIR_ENTRIES: u32 = 10_000;
@@ -289,6 +296,12 @@ impl Orchestrator {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
                 blocking(move || stat(&path)).await.map(Outcome::Stat)
+            }
+            Verb::Search { worker, root, query, max_lines } => {
+                self.mine(worker)?;
+                let root = crate::file::expand_home(Path::new(&root));
+                let (files, summary) = search(root, query, max_lines, SEARCH_WITHIN).await?;
+                Ok(Outcome::Search { files, summary })
             }
             Verb::ListItems { worker } => {
                 self.mine(worker)?;
@@ -749,6 +762,29 @@ fn item_failure(e: WorkerError) -> Failure {
 
 fn unexpected() -> Failure {
     Failure::new(ErrorCode::Failed, "the session answered a different read")
+}
+
+/// Search the files under `root` on the blocking pool, for `within` at most. Dropping the
+/// future (the server's link went, or its task was aborted) stops the walk at its next file.
+///
+/// # Errors
+///
+/// `Invalid` when the root is not a folder or the query does not parse.
+pub async fn search(
+    root: PathBuf,
+    query: slopty_proto::search::SearchQuery,
+    max_lines: u32,
+    within: Duration,
+) -> Result<(Vec<slopty_proto::search::FileHits>, slopty_proto::search::SearchSummary), Failure> {
+    let stop = crate::search::StopOnDrop::default();
+    let cancel = stop.flag();
+    let found = blocking(move || {
+        crate::search::collect(&root, &query, max_lines, &cancel, within)
+            .map_err(|e| Failure::new(ErrorCode::Invalid, e))
+    })
+    .await;
+    drop(stop);
+    found
 }
 
 /// Run file work on the blocking pool.

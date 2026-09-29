@@ -29,9 +29,11 @@
 //! **Held prompts.** The relay's `CtlRequest::Permission`, once the control socket has taken
 //! its hook in, comes to [`ask`]. The daemon's
 //! [`Follows::holds`] (`slopty_worker::conversation::Holds`) decides: undecided at once when
-//! nobody follows, else held and shown to the followers (`WorkerMsg::Permission`, on the control
-//! stream: small and urgent), until a follower answers ([`answer`]), the last one leaves, the
-//! wait runs out or the relay goes away ([`release`]).
+//! nobody can answer, else held and shown to the followers (`WorkerMsg::Permission`, on the
+//! control stream: small and urgent), until a follower answers ([`answer`]), the last one leaves,
+//! the wait runs out or the relay goes away ([`release`]). A yes or no nobody follows is held
+//! for the clients that answer approvals ([`approvals`]: a notification's "Allow", the inbox's)
+//! for [`APPROVAL_HOLD`] at most, and one of them may also hand it to the TUI at once.
 //!
 //! **Orchestration** follows too, as `ORCHESTRATION` ([`Orchestrated`]): the sessions whose
 //! conversation a verb read or whose agent a verb started, until they end.
@@ -40,6 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use parking_lot::Mutex;
 use slopty_agent::live::Overlay;
 use slopty_agent::{Hook, permission};
 use slopty_core::{ClientId, SessionId, WallMs};
@@ -53,7 +56,7 @@ use slopty_proto::conversation::{
 use slopty_proto::ctl::Decision;
 use slopty_worker::clip::Link;
 use slopty_worker::conversation::{
-    Board, Held, Holds, ORCHESTRATION, Read, Reader, Seen, SharedReader,
+    Board, Held, Holds, ORCHESTRATION, Reach, Read, Reader, Seen, SharedReader,
 };
 use slopty_worker::file::mention::Index;
 use slopty_worker::orchestrate::{Conversations, Sources};
@@ -71,6 +74,13 @@ const FRAME_CHANGES: usize = 64;
 
 /// How much sooner than the relay gives up the worker answers, so the answer reaches it.
 const HOLD_MARGIN: Duration = Duration::from_secs(1);
+
+/// The longest a prompt nobody follows is held for the approvers before the TUI asks.
+///
+/// Time to reach a phone and answer its notification, while a person at the terminal who never
+/// looks at one is not kept from Claude Code's own dialog for long. A client showing the TUI in
+/// front of the person hands it back sooner.
+pub const APPROVAL_HOLD: Duration = Duration::from_secs(120);
 
 /// How often a follower looks at the agent's custom commands again: a command file the person
 /// writes shows in the menu within this.
@@ -145,9 +155,11 @@ impl Mentions {
 /// The decision the relay waiting on `session`'s permission prompt `hook`, for at most
 /// `relay_wait`, gets.
 ///
-/// Undecided at once when nobody follows the session. Held, it is decided by a follower's
-/// answer, or released undecided when the last follower leaves or the wait is up;
-/// `relay_gone` finishing means Claude Code gave up on the hook, and the prompt is withdrawn.
+/// Undecided at once when nobody can answer it. Held, it is decided by an answer, or released
+/// undecided when the last follower leaves, nobody who could answer is left, a client hands it
+/// to the TUI or the wait is up (the relay's, or [`APPROVAL_HOLD`] when it is held for the
+/// approvers only); `relay_gone` finishing means Claude Code gave up on the hook, and the prompt
+/// is withdrawn.
 pub async fn ask(
     daemon: &Daemon,
     session: SessionId,
@@ -155,16 +167,12 @@ pub async fn ask(
     relay_wait: Duration,
     relay_gone: impl Future<Output = ()>,
 ) -> Decision {
-    let wait = relay_wait.saturating_sub(HOLD_MARGIN);
-    let asked_ms = WallMs::now();
-    let until_ms = asked_ms.saturating_add(wait);
     let (reply, decided) = oneshot::channel();
-    let Some(prompt) = hold(daemon, session, hook, reply, (asked_ms, until_ms)) else {
+    let Some((prompt, reach, wait)) = hold(daemon, session, hook, reply, relay_wait) else {
         return Decision::Pass;
     };
     let id = prompt.ask;
-    tracing::info!(%session, ask = id, tool = %prompt.tool, "permission held for the followers");
-    let _sent = daemon.events.send(WorkerMsg::Permission(PermissionEvent::Asked(Box::new(prompt))));
+    tracing::info!(%session, ask = id, tool = %prompt.tool, ?reach, "permission held");
     tokio::pin!(decided);
     let outcome = tokio::select! {
         decision = &mut decided => return decision.unwrap_or(Decision::Pass),
@@ -183,22 +191,89 @@ pub async fn ask(
     }
 }
 
-/// Hold a prompt for `session`'s followers, and the prompt as they are to be shown it; `None`
-/// when nobody follows.
+/// Hold a prompt for whoever can answer it in `session`, and show it to them: the prompt, who
+/// that is, and how long it is held; `None` when nobody can answer.
+///
+/// It goes on the broadcast before the lock is let go, so it is ahead of its `Settled`: a prompt
+/// is settled only once it is out of the holds, under the same lock.
 fn hold(
     daemon: &Daemon,
     session: SessionId,
     hook: &Hook,
     reply: oneshot::Sender<Decision>,
-    (asked_ms, until_ms): (WallMs, WallMs),
-) -> Option<PermissionPrompt> {
-    let mut follows = daemon.follows.lock();
-    let id = follows.holds.ask(session, |id| Pending {
+    relay_wait: Duration,
+) -> Option<(PermissionPrompt, Reach, Duration)> {
+    let approvable = permission::approvable(hook);
+    let holds = &mut daemon.follows.lock().holds;
+    let reach = holds.reach(session, approvable)?;
+    let wait = hold_for(reach, relay_wait);
+    let asked_ms = WallMs::now();
+    let until_ms = asked_ms.saturating_add(wait);
+    let id = holds.ask(session, approvable, |id| Pending {
         prompt: permission::prompt(session, id, hook, asked_ms, until_ms),
         hook: hook.clone(),
         reply,
     })?;
-    follows.holds.get(id).map(|held| held.reply.prompt.clone())
+    let prompt = holds.get(id).map(|held| held.reply.prompt.clone())?;
+    let asked = PermissionEvent::Asked(Box::new(prompt.clone()));
+    let _sent = daemon.events.send(WorkerMsg::Permission(asked));
+    Some((prompt, reach, wait))
+}
+
+/// How long a prompt held for `reach` waits when the relay waits `relay_wait`.
+fn hold_for(reach: Reach, relay_wait: Duration) -> Duration {
+    let wait = relay_wait.saturating_sub(HOLD_MARGIN);
+    match reach {
+        Reach::Followers => wait,
+        Reach::Approvers => wait.min(APPROVAL_HOLD),
+    }
+}
+
+/// `link` starts or stops answering approvals.
+///
+/// Starting, it is shown through `show` the yes-or-no prompts already held that it does not see
+/// as a follower ([`start_approving`]); stopping hands back to the TUI what nobody else can
+/// answer.
+pub fn approvals(daemon: &Daemon, link: Link, on: bool, show: impl FnMut(WorkerMsg)) {
+    if on {
+        start_approving(&daemon.follows, link, show);
+    } else {
+        let released = daemon.follows.lock().holds.stop_approving(link);
+        release(daemon, released);
+    }
+}
+
+/// `link` answers approvals from now on, and is shown through `show` the prompts held that it
+/// is to answer now ([`show_held`]).
+fn start_approving(follows: &Mutex<Follows>, link: Link, show: impl FnMut(WorkerMsg)) {
+    let follows = &mut *follows.lock();
+    let ids = follows.holds.approve(link);
+    show_held(follows, ids, show);
+}
+
+/// Show held prompts `ids` through `show`, each an `Asked`.
+///
+/// Taking the follows means their lock is held, and a prompt is settled only under it, once out
+/// of the holds: an `Asked` shown here is queued ahead of its prompt's `Settled`, so a client is
+/// never left showing a prompt settled while it was being shown.
+pub fn show_held(follows: &Follows, ids: Vec<u64>, mut show: impl FnMut(WorkerMsg)) {
+    for held in ids.into_iter().filter_map(|ask| follows.holds.get(ask)) {
+        let asked = PermissionEvent::Asked(Box::new(held.reply.prompt.clone()));
+        show(WorkerMsg::Permission(asked));
+    }
+}
+
+/// A client hands prompt `ask` of `session` back to the TUI: the person answers there. Taken
+/// as an answer is, so only from a client it was shown to; `false` when it was not taken.
+pub fn hand_back(daemon: &Daemon, link: Link, by: ClientId, session: SessionId, ask: u64) -> bool {
+    let taken = daemon.follows.lock().holds.answer(link, session, ask);
+    let Some(held) = taken else {
+        tracing::debug!(%session, ask, %by, "a hand-back of a prompt no longer held");
+        return false;
+    };
+    tracing::info!(%session, ask, %by, "permission handed back to the TUI");
+    release(daemon, vec![(ask, held)]);
+    true
 }
 
 /// A follower answers: the first answer to a prompt still held goes to its relay, and the
@@ -270,8 +345,8 @@ impl Conversations for Orchestrated {
     }
 }
 
-/// Hand back prompts the last follower left undecided: each relay answers nothing, and Claude
-/// Code shows its own dialog.
+/// Hand back prompts nobody answered: each relay answers nothing, and Claude Code shows its own
+/// dialog.
 pub fn release(daemon: &Daemon, released: Vec<(u64, Held<Pending>)>) {
     for (id, held) in released {
         tracing::info!(session = %held.session, ask = id, "permission released to the TUI");
@@ -604,4 +679,68 @@ async fn send_changes(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A follower's hold lasts until a second before the relay gives up; an approver's is
+    /// bounded by [`APPROVAL_HOLD`] too, and by the relay's wait when that is shorter.
+    #[test]
+    fn an_approvers_hold_is_bounded() {
+        let relay = permission::WAIT;
+        assert_eq!(hold_for(Reach::Followers, relay), relay.saturating_sub(HOLD_MARGIN));
+        assert_eq!(hold_for(Reach::Approvers, relay), APPROVAL_HOLD);
+        let short = Duration::from_secs(10);
+        assert_eq!(hold_for(Reach::Approvers, short), Duration::from_secs(9));
+        assert!(APPROVAL_HOLD < relay, "the TUI asks well before Claude Code gives up");
+    }
+    /// A client that starts answering approvals is shown the prompts held before anything
+    /// settles them: another client's answer that comes while a prompt is being shown waits, and
+    /// its `Settled` goes out after the `Asked`, so no client is left showing a settled prompt.
+    #[test]
+    fn a_prompt_shown_to_a_new_approver_goes_out_ahead_of_its_settling() {
+        use std::sync::mpsc as std_mpsc;
+
+        let follows = Arc::new(Mutex::new(Follows::default()));
+        let session = SessionId::new();
+        let (first, second): (Link, Link) = (1, 2);
+        let hook = Hook::parse(
+            r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        )
+        .unwrap();
+        let (reply, _decided) = oneshot::channel();
+        let ask = {
+            let holds = &mut follows.lock().holds;
+            holds.approve(first);
+            let prompt = |id| permission::prompt(session, id, &hook, WallMs::ZERO, WallMs::ZERO);
+            holds
+                .ask(session, true, |id| Pending { prompt: prompt(id), hook: hook.clone(), reply })
+                .unwrap()
+        };
+        let out = Arc::new(Mutex::new(Vec::new()));
+        let (go, went) = std_mpsc::channel();
+        let (done, answered) = std_mpsc::channel();
+        let answerer = std::thread::spawn({
+            let (follows, out) = (Arc::clone(&follows), Arc::clone(&out));
+            move || {
+                went.recv().unwrap();
+                // As `answer` does: take it under the lock, then say it was settled.
+                let taken = follows.lock().holds.answer(first, session, ask);
+                assert!(taken.is_some());
+                out.lock().push("settled");
+                done.send(()).unwrap();
+            }
+        });
+        start_approving(&follows, second, |msg| {
+            assert!(matches!(msg, WorkerMsg::Permission(PermissionEvent::Asked(_))), "{msg:?}");
+            go.send(()).unwrap();
+            // Time for the answer to overtake the prompt, if anything lets it.
+            let _overtaken = answered.recv_timeout(Duration::from_millis(200));
+            out.lock().push("asked");
+        });
+        answerer.join().unwrap();
+        assert_eq!(*out.lock(), ["asked", "settled"]);
+    }
 }

@@ -31,13 +31,16 @@ objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The output device's I/O buffer size, which the player asks for; also the latency terms the
+# ignored measurement in `tests/audio_latency.rs` reads.
+objc2-core-audio.workspace = true
+
 [dev-dependencies]
 pretty_assertions.workspace = true
 slopty-testkit.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-# The output device's latency terms, read by the ignored measurement in `tests/audio_latency.rs`.
-objc2-core-audio.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true
 # `VTCopyVideoEncoderList` and the per-encoder property dictionaries, read by the ignored 4:4:4

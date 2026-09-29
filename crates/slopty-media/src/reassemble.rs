@@ -6,13 +6,14 @@
 //! * **Need keyframe** (start): only an IDR starts delivery.
 //! * **Need frame *n***: frames leave in order. A frame with missing fragments gets a NACK after a
 //!   short silence, retried at most [`Config::nack_retries`] times, and declared lost after the
-//!   deadline those retries imply — but only while the link is *flowing*: a retry needs something
-//!   to have arrived since the last NACK, and the deadline only counts when newer datagrams are
-//!   still coming in. A path that stalls outright (Wi-Fi delay bursts of 100–300 ms hold every
-//!   packet and then release them all) is waited out up to [`Config::max_hold`], because a refresh
-//!   could not get through it either and everything usually arrives once it clears. When it clears,
-//!   every pending frame's NACK clock restarts: the NACK sent into the stall only left with the
-//!   release, so its answer is a round trip away from *now*, not from when it was written.
+//!   deadline those retries imply, counted from its latest fragment — but only while the link is
+//!   *flowing*: a retry needs something to have arrived since the last NACK, and the deadline only
+//!   counts when newer datagrams are still coming in. A path that stalls outright (Wi-Fi delay
+//!   bursts of 100–300 ms hold every packet and then release them all) is waited out up to
+//!   [`Config::max_hold`], because a refresh could not get through it either and everything usually
+//!   arrives once it clears. When it clears, every pending frame's NACK clock restarts: the NACK
+//!   sent into the stall only left with the release, so its answer is a round trip away from *now*,
+//!   not from when it was written.
 //! * **Need refresh** (after a loss): the worker is asked for a refresh from the last good frame;
 //!   the next IDR or LTR-refresh frame restarts delivery and everything older is dropped.
 //!
@@ -116,6 +117,10 @@ pub struct Config {
     pub refresh_repeat: Duration,
     /// Longest wait between refresh repeats.
     pub refresh_repeat_max: Duration,
+    /// Before the stream's first video datagram, the shortest wait for a refresh repeat: until
+    /// then the worker is still encoding the keyframe that starts the stream, and a repeat only
+    /// has it encode a second one. Zero repeats on the usual backoff from the start.
+    pub first_repeat_after: Duration,
     /// Unanswered refresh repeats before the receiver stops asking altogether, until something
     /// arrives on the stream again. The worker's
     /// [`SourceState`](slopty_proto::screen::SourceState) hint is the real answer to a target
@@ -150,6 +155,7 @@ impl Default for Config {
             max_pending: 64,
             refresh_repeat: Duration::from_millis(100),
             refresh_repeat_max: Duration::from_secs(2),
+            first_repeat_after: Duration::ZERO,
             refresh_max_repeats: 12,
             max_hold: Duration::from_millis(500),
             stall_gap: STALL_GAP,
@@ -440,6 +446,11 @@ pub struct Reassembler {
     frames: BTreeMap<u32, Slot>,
     need: Need,
     last_good: Option<u32>,
+    /// The frames given up on lately, at most [`Config::max_pending`]. Their fragments still in
+    /// flight are stale whatever the receiver waits for: while it waits for a keyframe or a
+    /// refresh nothing else marks them so, and each one opened its frame again, to be lost again
+    /// and asked for again.
+    given_up: VecDeque<u32>,
     ready: VecDeque<FrameOut>,
     decoder: Option<ReedSolomonDecoder>,
     actions: Vec<Action>,
@@ -516,6 +527,7 @@ impl Reassembler {
             frames: BTreeMap::new(),
             need: Need::Keyframe,
             last_good: None,
+            given_up: VecDeque::new(),
             ready: VecDeque::new(),
             decoder: None,
             actions: Vec::new(),
@@ -740,6 +752,9 @@ impl Reassembler {
         if !valid {
             return Ingest::Ignored(Ignored::Malformed);
         }
+        if self.given_up.contains(&frame) {
+            return Ingest::Ignored(Ignored::Stale);
+        }
         if let Need::Frame(next) = self.need {
             if frame < next {
                 return Ingest::Ignored(Ignored::Stale);
@@ -844,6 +859,7 @@ impl Reassembler {
     /// Give up on `frame`.
     fn lose(&mut self, frame: u32, missing: u64, now: Instant) {
         self.frames.remove(&frame);
+        self.give_up(frame);
         self.stats.frames_lost = self.stats.frames_lost.saturating_add(1);
         self.window.frames_lost = self.window.frames_lost.saturating_add(1);
         self.count_lost_datagrams(missing);
@@ -851,6 +867,14 @@ impl Reassembler {
             Need::Frame(_) => self.enter_refresh(now),
             Need::Keyframe | Need::Refresh => self.request_refresh(now),
         }
+    }
+
+    /// Nothing more of `frame` is wanted.
+    fn give_up(&mut self, frame: u32) {
+        if self.given_up.len() >= self.cfg.max_pending.max(1) {
+            self.given_up.pop_front();
+        }
+        self.given_up.push_back(frame);
     }
 
     fn enter_refresh(&mut self, now: Instant) {
@@ -1126,6 +1150,7 @@ impl Reassembler {
                 }
                 Slot::Partial(p) => {
                     p.first_seen = fresh;
+                    p.last_seen = fresh;
                     p.nacked_at = (p.nacks > 0).then_some(now);
                 }
             }
@@ -1192,11 +1217,18 @@ impl Reassembler {
                     }
                 }
                 Slot::Partial(p) => {
+                    // Counted from the frame's latest fragment, not its first: fragments still
+                    // coming in are in flight, however long the frame takes to cross. A 160 kB
+                    // keyframe leaving a connection whose window is still opening takes longer
+                    // than the deadline, and was given up on half-way across (MEASUREMENTS.md,
+                    // "the first keyframe given up on while it arrives").
                     let age = now.saturating_duration_since(p.first_seen);
-                    if age >= max_hold || (age >= deadline && flowing) {
+                    let quiet = now.saturating_duration_since(p.last_seen);
+                    if quiet >= max_hold || (quiet >= deadline && flowing) {
                         tracing::debug!(
                             frame,
                             ?age,
+                            ?quiet,
                             tries = p.nacks,
                             missing = p.missing_data_count(),
                             of = p.data_count,
@@ -1209,7 +1241,7 @@ impl Reassembler {
                         lost.push((frame, p.missing_data_count()));
                     } else if (in_order || p.restartable(accept_refresh))
                         && p.nacks < retries
-                        && now.saturating_duration_since(p.last_seen) >= nack_delay
+                        && quiet >= nack_delay
                         && retry_due(p.nacked_at)
                     {
                         let fragments = p.missing_data();
@@ -1233,13 +1265,28 @@ impl Reassembler {
         for (frame, missing) in lost {
             self.lose(frame, missing, now);
         }
-        if !in_order && self.source_live && self.refresh_repeats < self.cfg.refresh_max_repeats {
+        // A frame that would restart delivery, still coming in and not given up on, is the
+        // answer on its way: asked again, the worker made a second keyframe behind the first
+        // while QUIC was still draining it (MEASUREMENTS.md, "a refresh asked for while the
+        // keyframe is encoded").
+        let answer_arriving = self
+            .frames
+            .values()
+            .any(|slot| matches!(slot, Slot::Partial(p) if p.restartable(accept_refresh)));
+        if !in_order
+            && !answer_arriving
+            && self.source_live
+            && self.refresh_repeats < self.cfg.refresh_max_repeats
+        {
             let backoff = self
                 .cfg
                 .refresh_repeat
                 .saturating_mul(1_u32 << self.refresh_repeats.min(16))
                 .min(self.cfg.refresh_repeat_max);
-            let repeat = backoff.saturating_add(rtt.saturating_mul(2));
+            let mut repeat = backoff.saturating_add(rtt.saturating_mul(2));
+            if !self.any_arrived {
+                repeat = repeat.max(self.cfg.first_repeat_after);
+            }
             if self.refresh_requested_at.is_none_or(|t| now.saturating_duration_since(t) >= repeat)
             {
                 self.refresh_repeats = self.refresh_repeats.saturating_add(1);

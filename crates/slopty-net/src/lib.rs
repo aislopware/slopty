@@ -14,6 +14,8 @@
 //! * [`server`] — links to the server: its accept loop, and the dial to it.
 //! * [`known`] — the client's id and the workers it has added.
 //! * [`redial`] — when a dropped link is dialled again.
+//! * `prefix` — the wire prefix each end opens the control stream with, and the check of the peer's
+//!   ([`slopty_proto::wire`]).
 //!
 //! The endpoint and the crypto provider know nothing of the roles: the same plaintext QUIC
 //! serves client ↔ worker and worker, client or agent ↔ server links.
@@ -40,6 +42,7 @@ pub mod endpoint;
 pub mod framed;
 pub mod known;
 mod listen;
+mod prefix;
 pub mod redial;
 pub mod server;
 pub mod streams;
@@ -101,7 +104,38 @@ pub enum NetError {
     /// ([`worker::close_code::NOT_GRANTED`]).
     #[error("not granted by the tailnet policy")]
     NotGranted,
+    /// The peer speaks another wire: it runs a different build
+    /// ([`worker::close_code::WRONG_BUILD`]).
+    #[error(transparent)]
+    WrongBuild(#[from] WrongBuild),
 }
+
+/// A peer that runs a different build, whose messages this one cannot read. Found in the
+/// wire prefix before any message (`slopty_proto::wire`), so the link is never redialled
+/// into a decode error.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WrongBuild {
+    /// The peer's build as it said it; empty for a build older than the prefix, which says
+    /// none.
+    pub peer: String,
+}
+
+impl WrongBuild {
+    /// The peer's build as a person reads it.
+    #[must_use]
+    pub fn peer_build(&self) -> &str {
+        if self.peer.is_empty() { "an older one" } else { &self.peer }
+    }
+}
+
+impl std::fmt::Display for WrongBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (peer, this) = (self.peer_build(), slopty_proto::wire::BUILD);
+        write!(f, "the peer runs a different build ({peer}); this is {this}")
+    }
+}
+
+impl std::error::Error for WrongBuild {}
 
 impl NetError {
     /// An I/O error on `context` (a path, or what was being done).
@@ -114,11 +148,19 @@ impl NetError {
     /// just "connection lost", and the reason (timed out, reset, closed by peer) is the part
     /// worth logging.
     /// A close by the peer with [`worker::close_code::NOT_GRANTED`] anywhere in the chain is
-    /// [`NetError::NotGranted`].
+    /// [`NetError::NotGranted`], and one with [`worker::close_code::WRONG_BUILD`] is
+    /// [`NetError::WrongBuild`], with the build its reason names.
     #[must_use]
     pub fn stream(e: &(dyn std::error::Error + 'static)) -> Self {
-        if closed_with(e) == Some(u64::from(worker::close_code::NOT_GRANTED)) {
-            return Self::NotGranted;
+        if let Some(close) = closed_with(e) {
+            let code = close.error_code.into_inner();
+            if code == u64::from(worker::close_code::NOT_GRANTED) {
+                return Self::NotGranted;
+            }
+            if code == u64::from(worker::close_code::WRONG_BUILD) {
+                let peer = String::from_utf8_lossy(&close.reason).into_owned();
+                return Self::WrongBuild(WrongBuild { peer });
+            }
         }
         let mut text = e.to_string();
         let mut source = e.source();
@@ -134,13 +176,12 @@ impl NetError {
     }
 }
 
-/// The application close code the peer closed the connection with, found anywhere in `e`'s
-/// source chain.
-fn closed_with(e: &(dyn std::error::Error + 'static)) -> Option<u64> {
+/// How the peer closed the connection, found anywhere in `e`'s source chain.
+fn closed_with<'e>(e: &'e (dyn std::error::Error + 'static)) -> Option<&'e noq::ApplicationClose> {
     let mut at = Some(e);
     while let Some(err) = at {
         if let Some(noq::ConnectionError::ApplicationClosed(close)) = err.downcast_ref() {
-            return Some(close.error_code.into_inner());
+            return Some(close);
         }
         at = err.source();
     }
@@ -164,11 +205,26 @@ mod tests {
     struct LostTo(#[source] noq::ConnectionError);
 
     fn closed(code: u32) -> LostTo {
+        closed_for(code, b"no role")
+    }
+
+    fn closed_for(code: u32, reason: &'static [u8]) -> LostTo {
         let close = noq::ApplicationClose {
             error_code: noq::VarInt::from_u32(code),
-            reason: bytes::Bytes::from_static(b"no role"),
+            reason: bytes::Bytes::from_static(reason),
         };
         LostTo(noq::ConnectionError::ApplicationClosed(close))
+    }
+
+    /// A `WRONG_BUILD` close is its own error, naming the build its reason carries.
+    #[test]
+    fn a_wrong_build_close_names_the_peers_build() {
+        let e = NetError::stream(&closed_for(4, b"0.1.0+wire.0badf00d"));
+        let NetError::WrongBuild(wrong) = &e else { panic!("{e:?}") };
+        assert_eq!(wrong.peer, "0.1.0+wire.0badf00d");
+        assert!(e.to_string().contains("different build (0.1.0+wire.0badf00d)"), "{e}");
+        let older = super::WrongBuild { peer: String::new() };
+        assert!(older.to_string().contains("different build (an older one)"), "{older}");
     }
 
     /// A worker's `NOT_GRANTED` close reads as its own error wherever it sits in the chain;

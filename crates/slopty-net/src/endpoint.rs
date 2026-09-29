@@ -310,19 +310,60 @@ fn bind_with(
     transport: TransportConfig,
 ) -> Result<Endpoint, NetError> {
     let bind_err = |source| NetError::Bind { addr: local.to_string(), source };
+    let socket = bind_udp(local).map_err(bind_err)?;
+    let socket =
+        noq::Runtime::wrap_udp_socket(&noq::TokioRuntime, socket.into()).map_err(bind_err)?;
+    endpoint_with(socket, server, transport, crate::crypto::endpoint_config()).map_err(bind_err)
+}
+
+/// Ports [`bind_udp`] tries for a socket on port 0 before it gives up.
+const PORT_ATTEMPTS: usize = 16;
+
+/// A UDP socket on `local`. An IPv6 address is bound dual-stack, and a dual-stack socket that
+/// takes IPv4 (on `[::]` or a v4-mapped address) gets a port no IPv4 socket holds.
+///
+/// XNU checks a dual-stack socket's port against the IPv6 sockets and not all of the IPv4 ones:
+/// `[::]:0` is handed a port a socket on `127.0.0.1` or `0.0.0.0` holds (about one bind in
+/// eight with 2 000 such sockets open), and `[::]:p` binds beside a socket on `0.0.0.0:p`.
+/// IPv4 datagrams to that port then reach the IPv4 socket, never this one. A client that
+/// landed on a loopback server's own port sent its Initial to itself, which the server
+/// answered to itself, and the dial got no answer (docs/decisions/transport.md, "A dual-stack
+/// port no IPv4 socket holds"). IPv4's own checks see both families, so the port is first
+/// bound on the IPv4 side, then let go and bound dual-stack. An explicit port an IPv4 socket
+/// holds is then in use, as it is on Linux.
+fn bind_udp(local: SocketAddr) -> std::io::Result<socket2::Socket> {
+    let v4_side = match local.ip() {
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => Some(std::net::Ipv4Addr::UNSPECIFIED),
+        std::net::IpAddr::V6(ip) => ip.to_ipv4_mapped(),
+        std::net::IpAddr::V4(_) => None,
+    };
+    let Some(v4_side) = v4_side else { return bind_socket(local) };
+    let mut in_use = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+    for _ in 0..PORT_ATTEMPTS {
+        let probe = std::net::UdpSocket::bind((v4_side, local.port()))?;
+        let port = probe.local_addr()?.port();
+        drop(probe);
+        match bind_socket(SocketAddr::new(local.ip(), port)) {
+            // Taken between the two binds, or held by an IPv6 socket: another port.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && local.port() == 0 => in_use = e,
+            bound => return bound,
+        }
+    }
+    Err(in_use)
+}
+
+/// A UDP socket bound on `local`, dual-stack when it is IPv6.
+fn bind_socket(local: SocketAddr) -> std::io::Result<socket2::Socket> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(local),
         socket2::Type::DGRAM,
         Some(socket2::Protocol::UDP),
-    )
-    .map_err(bind_err)?;
+    )?;
     if local.is_ipv6() {
-        socket.set_only_v6(false).map_err(bind_err)?;
+        socket.set_only_v6(false)?;
     }
-    socket.bind(&local.into()).map_err(bind_err)?;
-    let socket =
-        noq::Runtime::wrap_udp_socket(&noq::TokioRuntime, socket.into()).map_err(bind_err)?;
-    endpoint_with(socket, server, transport, crate::crypto::endpoint_config()).map_err(bind_err)
+    socket.bind(&local.into())?;
+    Ok(socket)
 }
 
 /// [`bind`] on a socket that is not the OS's: `slopty_shape::sim`'s in-memory network, where a

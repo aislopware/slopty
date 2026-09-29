@@ -103,12 +103,15 @@ pub(crate) async fn dial(
         .map_err(|e| NetError::Connect(format!("{addr}: {e}")))
 }
 
-/// `Hello` on a fresh control stream, and the worker's answer.
+/// `Hello` on a fresh control stream after this build's wire prefix, and the worker's prefix
+/// and answer. A worker on another build is [`NetError::WrongBuild`].
 async fn greet(conn: Connection, remote: SocketAddr, hello: Hello) -> Result<WorkerConn, NetError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut tx = FramedSend::<ClientMsg>::new(send);
     let mut rx = FramedRecv::<WorkerMsg>::new(recv);
+    crate::prefix::say(&mut tx).await?;
     tx.send(&ClientMsg::Hello(hello)).await?;
+    crate::prefix::check(&conn, &mut rx, ACK_TIMEOUT).await?;
     let reply = tokio::time::timeout(ACK_TIMEOUT, rx.recv())
         .await
         .map_err(|_elapsed| NetError::Protocol("hello ack timeout"))??;

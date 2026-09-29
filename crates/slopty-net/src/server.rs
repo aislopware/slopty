@@ -1,9 +1,9 @@
 //! Links to the server, both ends: the server's accept loop, and the dial a worker, client or
 //! agent makes (`slopty_proto::server`, `docs/decisions/topology.md`).
 //!
-//! Every link is one bidirectional stream opened by the dialer, whose first message is
-//! [`ToServer::Hello`]. The answer ([`FromServer::Welcome`], or a refusal such as a duplicate
-//! worker) is the caller's.
+//! Every link is one bidirectional stream opened by the dialer, whose first message, after the
+//! wire prefixes both ways (`crate::prefix`), is [`ToServer::Hello`]. The answer
+//! ([`FromServer::Welcome`], or a refusal such as a duplicate worker) is the caller's.
 //! Server links run on [`crate::endpoint::lease_transport_config`]: a link that goes quiet for
 //! [`crate::endpoint::LEASE_IDLE_TIMEOUT`] is dead, which for a worker ends its lease.
 
@@ -164,12 +164,15 @@ pub async fn connect(
     hello(conn, remote, role).await
 }
 
-/// `Hello` on a fresh stream and the server's answer.
+/// `Hello` on a fresh stream after this build's wire prefix, and the server's prefix and
+/// answer. A server on another build is [`NetError::WrongBuild`].
 async fn hello(conn: Connection, remote: SocketAddr, role: Role) -> Result<ServerLink, DialError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     let mut tx = FramedSend::<ToServer>::new(send);
     let mut rx = FramedRecv::<FromServer>::new(recv);
+    crate::prefix::say(&mut tx).await?;
     tx.send(&ToServer::Hello { role }).await?;
+    crate::prefix::check(&conn, &mut rx, WELCOME_TIMEOUT).await?;
     let reply = tokio::time::timeout(WELCOME_TIMEOUT, rx.recv())
         .await
         .map_err(|_elapsed| NetError::Protocol("welcome timeout"))??;

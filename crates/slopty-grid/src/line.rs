@@ -5,6 +5,65 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Cell, CellWidth, Style};
 
+/// The widest line there is.
+///
+/// The engine makes no terminal wider, and a line claiming more columns does not decode. A
+/// full-screen window at the smallest font on a 6K display is
+/// about 630 columns, so this leaves room for a window across several.
+pub const MAX_COLS: u16 = 2048;
+
+thread_local! {
+    /// Cells the lines decoded on this thread may still take; `None` outside
+    /// [`with_cell_budget`].
+    static CELL_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run `decode` with at most `cells` cells for the lines it decodes, and say how many they took.
+///
+/// A line past the budget fails to decode. Nested, the inner decode takes from what the outer
+/// one has left, and only lines decoded on this thread count.
+///
+/// The wire leaves a line's trailing blanks off, so a blank line of any width is a few bytes
+/// and its bytes do not bound its cells: 100 of them claiming 65 535 columns were 314 MB. Serde
+/// passes no context to a `Deserialize`, so the frame decoder hands the budget down through
+/// this thread-local.
+pub fn with_cell_budget<T>(cells: usize, decode: impl FnOnce() -> T) -> (T, usize) {
+    struct Restore {
+        outer: Option<usize>,
+        start: usize,
+    }
+    impl Restore {
+        fn spent(&self) -> usize {
+            self.start.saturating_sub(CELL_BUDGET.get().unwrap_or(0))
+        }
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let spent = self.spent();
+            CELL_BUDGET.set(self.outer.map(|outer| outer.saturating_sub(spent)));
+        }
+    }
+    let outer = CELL_BUDGET.get();
+    let start = outer.map_or(cells, |outer| outer.min(cells));
+    CELL_BUDGET.set(Some(start));
+    let restore = Restore { outer, start };
+    let out = decode();
+    let spent = restore.spent();
+    drop(restore);
+    (out, spent)
+}
+
+/// Take `cells` from the thread's decode budget; false when it has not that many left.
+fn spend(cells: usize) -> bool {
+    match CELL_BUDGET.get() {
+        None => true,
+        Some(left) => left.checked_sub(cells).is_some_and(|rest| {
+            CELL_BUDGET.set(Some(rest));
+            true
+        }),
+    }
+}
+
 /// OSC 133 semantic prompt marks, so the client can navigate prompts and select command output.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, Default)]
 pub enum SemanticMark {
@@ -108,7 +167,8 @@ impl Hyperlink {
 ///
 /// On the wire a line is its width and its cells up to the last one that is not blank; the
 /// rest are blank again on decode. A blank cell cost seven bytes, so a 200-column echo row
-/// took two packets (MEASUREMENTS 2026-09-25, "a scroll ships the rows it moved").
+/// took two packets (MEASUREMENTS 2026-09-25, "a scroll ships the rows it moved"). A decoded
+/// line is at most [`MAX_COLS`] wide and within the decode's [`with_cell_budget`].
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Line {
     /// The cells, left to right.
@@ -158,9 +218,18 @@ impl Serialize for Line {
 impl<'de> Deserialize<'de> for Line {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let Wire { cols, mut cells, flags, mark, links } = Wire::deserialize(deserializer)?;
+        if cols > MAX_COLS {
+            return Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Unsigned(u64::from(cols)),
+                &"at most `MAX_COLS` columns",
+            ));
+        }
         let cols = usize::from(cols);
         if cells.len() > cols {
             return Err(serde::de::Error::invalid_length(cells.len(), &"at most `cols` cells"));
+        }
+        if !spend(cols) {
+            return Err(serde::de::Error::custom("the lines exceed the decode's cell budget"));
         }
         cells.resize(cols, Cell::BLANK);
         Ok(Self { cells, flags, mark, links })
@@ -372,6 +441,42 @@ mod tests {
         });
         let err = serde_json::from_value::<Line>(bad).unwrap_err().to_string();
         assert!(err.contains("at most `cols` cells"), "{err}");
+    }
+
+    fn blank_json(cols: u16) -> serde_json::Value {
+        serde_json::json!({ "cols": cols, "cells": [], "flags": "", "mark": "Unknown", "links": [] })
+    }
+
+    #[test]
+    fn a_line_wider_than_the_ceiling_does_not_decode() {
+        assert_eq!(serde_json::from_value::<Line>(blank_json(MAX_COLS)).unwrap().cols(), MAX_COLS);
+        let err = serde_json::from_value::<Line>(blank_json(MAX_COLS + 1)).unwrap_err();
+        assert!(err.to_string().contains("at most `MAX_COLS` columns"), "{err}");
+    }
+
+    /// The budget counts every cell a decoded line holds, trailing blanks put back included;
+    /// a nested decode spends the outer one's, and outside any decode nothing is counted.
+    #[test]
+    fn decoded_lines_stay_within_the_cell_budget() {
+        let decode = |cols| serde_json::from_value::<Line>(blank_json(cols));
+        let ((), spent) = with_cell_budget(100, || {
+            decode(60).unwrap();
+            let ((), inner) = with_cell_budget(1_000, || {
+                decode(30).unwrap();
+                let err = decode(11).unwrap_err().to_string();
+                assert!(err.contains("cell budget"), "only the outer's 40 were left: {err}");
+            });
+            assert_eq!(inner, 30, "a line that failed took nothing");
+            decode(11).expect_err("the inner decode spent the outer's cells");
+            decode(10).unwrap();
+            decode(0).unwrap();
+            decode(1).unwrap_err();
+        });
+        assert_eq!(spent, 100);
+        decode(MAX_COLS).expect("no budget outside a decode");
+        let (line, spent) = with_cell_budget(5, || decode(5));
+        assert_eq!((line.unwrap().cols(), spent), (5, 5), "a fresh budget");
+        assert_eq!(spent, 5);
     }
 
     #[test]

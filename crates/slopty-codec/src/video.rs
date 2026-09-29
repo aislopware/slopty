@@ -100,7 +100,7 @@ pub trait VideoEncoder: Send + Sync + Sized + 'static {
     fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError>;
 }
 
-/// An Opus encoder for the captured audio: 48 kHz interleaved stereo float in, 20 ms packets
+/// An Opus encoder for the captured audio: 48 kHz interleaved stereo float in, 10 ms packets
 /// out.
 pub trait AudioEncoder: Send + Sized + 'static {
     /// A fresh encoder.

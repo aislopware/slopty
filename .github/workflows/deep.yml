@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [ features, miri, sanitize thread, sanitize address, coverage ]
+        check: [ features, miri, sanitize thread, sanitize address, coverage, fuzz ]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -35,8 +35,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri, rust-src, rustfmt
+      # sccache holds the compiled units; this keeps only the registry and git checkouts, so the
+      # two do not store every unit twice in the repository's cache quota.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
       - uses: cargo-bins/cargo-binstall@main
       - run: brew install zig
       - run: cargo xtask setup
       - run: cargo xtask deep ${{ matrix.check }}
+      # A fuzz finding is its input: keep the crashes for `cargo xtask fuzz --keep`.
+      - uses: actions/upload-artifact@v4
+        if: failure() && matrix.check == 'fuzz'
+        with:
+          name: fuzz-artifacts
+          path: target/fuzz/artifacts
+          if-no-files-found: ignore

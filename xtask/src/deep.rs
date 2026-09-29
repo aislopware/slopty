@@ -1,6 +1,6 @@
 //! `cargo xtask deep` — the checks that are too slow for every commit and run on a schedule
 //! (or before a release): Miri on the pure crates, a sanitizer build of the daemons, the
-//! feature powerset, coverage and mutation testing.
+//! feature powerset, coverage, mutation testing, and a short fuzz of every peer-facing decoder.
 //!
 //! `cargo gate` is the bar every commit meets; these find what the gate cannot — undefined
 //! behaviour a test only trips under Miri, a data race a sanitizer sees, a feature set that
@@ -23,9 +23,17 @@ const PURE: &[&str] = &[
     "slopty-settings",
 ];
 
-/// Crates whose `unsafe` and threads are worth a sanitizer: the daemons and the codec, which
-/// build on a nightly toolchain without GPUI.
-const SANITIZED: &[&str] = &["slopty-pty", "slopty-net", "slopty-worker", "slopty-codec"];
+/// Crates whose `unsafe` and threads are worth a sanitizer: the daemons, the codec, and the two
+/// crates that hold most of the workspace's `unsafe` (the Apple framework calls of
+/// `slopty-platform` and `slopty-capture`). All of them build on a nightly toolchain without GPUI.
+const SANITIZED: &[&str] = &[
+    "slopty-pty",
+    "slopty-net",
+    "slopty-worker",
+    "slopty-codec",
+    "slopty-platform",
+    "slopty-capture",
+];
 
 /// Which sanitizer to build with.
 #[derive(Clone, Copy, ValueEnum, Debug)]
@@ -70,6 +78,13 @@ pub enum DeepCmd {
         #[arg(long)]
         html: bool,
     },
+    /// A short run of every fuzz target (`cargo xtask fuzz` with `--time`), after replaying the
+    /// kept regression inputs.
+    Fuzz {
+        /// Seconds each target runs.
+        #[arg(long, default_value_t = 30)]
+        time: u64,
+    },
     /// Mutation testing of one crate (`cargo mutants`): which changed lines no test catches.
     Mutants {
         /// The crate to mutate.
@@ -88,6 +103,16 @@ pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
         DeepCmd::Features => features(sh),
         DeepCmd::Coverage { html } => coverage(sh, *html),
         DeepCmd::Mutants { package, timeout } => mutants(sh, package, *timeout),
+        DeepCmd::Fuzz { time } => crate::fuzz::run(
+            sh,
+            &crate::fuzz::FuzzOpts {
+                target: None,
+                time: *time,
+                jobs: 1,
+                replay: false,
+                keep: None,
+            },
+        ),
     }
 }
 

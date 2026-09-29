@@ -105,6 +105,8 @@ mod tests {
             viewers: 0,
             command: ["/bin/bash", "--noprofile", "--norc", "-i"].map(str::to_owned).to_vec(),
             agent: None,
+            progress: None,
+            restored: None,
         }
     }
 

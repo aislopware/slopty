@@ -41,6 +41,9 @@ use tokio::sync::broadcast;
 /// again; both cost more than the few hundred kilobytes a deeper queue does.
 const EVENT_BUFFER: usize = 1024;
 
+/// Moved sessions taken from the queue at once, each told once however often it moved.
+const MOVES_AT_ONCE: usize = 256;
+
 /// How long a daemon going down waits for its streams' input threads to let go of what their
 /// clients hold down on this desktop.
 #[cfg(target_os = "macos")]
@@ -492,16 +495,24 @@ async fn run(displays: Displays) -> Result<()> {
         }
     });
     tokio::spawn(close_stale_exits(daemon.clone()));
-    // A session that moved (`cd`, a checkout) has a stale summary everywhere it was sent: the
-    // server's listing and the clients that do not watch that session.
+    // A session that moved (`cd`, a checkout, its progress) has a stale summary everywhere it was
+    // sent: the server's listing and the clients that do not watch that session. The moves queued
+    // while one batch is read are taken together, each session once: its summary is read when
+    // it goes, so it has every move before it.
     tokio::spawn({
         let daemon = daemon.clone();
         async move {
-            while let Some(session) = moves.recv().await {
-                if let Some(summary) = daemon.worker.summary(session).await {
-                    let _sent =
-                        daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));
+            let mut moved = Vec::new();
+            while moves.recv_many(&mut moved, MOVES_AT_ONCE).await > 0 {
+                moved.sort_unstable();
+                moved.dedup();
+                for &session in &moved {
+                    if let Some(summary) = daemon.worker.summary(session).await {
+                        let _sent =
+                            daemon.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));
+                    }
                 }
+                moved.clear();
             }
         }
     });

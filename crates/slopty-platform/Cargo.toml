@@ -53,6 +53,9 @@ objc2-user-notifications = { workspace = true, features = [
     "bitflags",
     "block2",
     "UNNotification",
+    # The approval note's "Allow", "Deny" and "Show" (`notify::APPROVAL`).
+    "UNNotificationAction",
+    "UNNotificationCategory",
     "UNNotificationContent",
     "UNNotificationRequest",
     "UNNotificationResponse",

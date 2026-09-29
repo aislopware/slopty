@@ -1,8 +1,9 @@
 //! ptyd + worker + the app, all from this build, in a temporary directory.
 //!
 //! Binaries come from `SLOPTY_E2E_BIN_DIR` (set by `cargo xtask e2e`), else `target/debug`
-//! next to the workspace. Every process gets its own data directory under the temp dir, so
-//! nothing installed on the machine is read or written, and everything is killed on drop.
+//! next to the workspace, and run from a copy in the temporary directory ([`bin_dir`]). Every
+//! process gets its own data directory under the temp dir, so nothing installed on the machine is
+//! read or written, and everything is killed on drop.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -181,12 +182,20 @@ pub struct Simulator {
     pub bundle_id: String,
 }
 
-/// Where the binaries are.
+/// Where the binaries are: a copy of the build's in the temporary directory, or
+/// the build's own when the copy cannot be made.
 ///
 /// # Errors
 ///
 /// When neither the environment nor the default location holds them.
 pub fn bin_dir() -> Result<PathBuf> {
+    static STAGED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let built = built_dir()?;
+    Ok(STAGED.get_or_init(|| staged(&built)).clone().unwrap_or(built))
+}
+
+/// Where the build put the binaries.
+fn built_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("SLOPTY_E2E_BIN_DIR") {
         return Ok(PathBuf::from(dir));
     }
@@ -196,6 +205,47 @@ pub fn bin_dir() -> Result<PathBuf> {
         return Ok(dir);
     }
     bail!("no built binaries: run `cargo xtask e2e app` (builds them and sets SLOPTY_E2E_BIN_DIR)")
+}
+
+/// Copy every `slopty*` executable in `built` into a directory of the temporary one, kept
+/// between runs and brought up to date by size and modification time; `None` when it cannot be.
+///
+/// Each VideoToolbox session a process opens checks its binary's signature, and on a volume
+/// mounted without ownership (as the repository's is here) that check is not cached: a session
+/// took 28–31 s against 0.5 s from the boot volume (`docs/decisions/testing.md`), which no
+/// stream test's wait covers. They are copied together because ptyd finds the CLI beside itself.
+fn staged(built: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::env::temp_dir()
+        .join(format!("slopty-e2e-bin-{:08x}", fnv1a(&built.to_string_lossy())));
+    std::fs::create_dir_all(&dir).ok()?;
+    for entry in std::fs::read_dir(built).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let meta = entry.metadata().ok()?;
+        let executable = meta.is_file() && meta.permissions().mode() & 0o111 != 0;
+        if !executable || !name.to_string_lossy().starts_with("slopty") {
+            continue;
+        }
+        let target = dir.join(&name);
+        let current = std::fs::metadata(&target)
+            .is_ok_and(|t| t.len() == meta.len() && t.modified().ok() == meta.modified().ok());
+        if current {
+            continue;
+        }
+        // Another test process may be copying the same file: each writes its own and renames it
+        // into place, which is atomic.
+        let part = dir.join(format!(".{}.{}", name.to_string_lossy(), std::process::id()));
+        std::fs::copy(entry.path(), &part).ok()?;
+        std::fs::File::options()
+            .write(true)
+            .open(&part)
+            .ok()?
+            .set_modified(meta.modified().ok()?)
+            .ok()?;
+        std::fs::rename(&part, &target).ok()?;
+    }
+    Some(dir)
 }
 
 fn bin(name: &str) -> Result<PathBuf> {
@@ -240,7 +290,9 @@ async fn ctl(path: &Path, request: &Value) -> Result<Value> {
     let mut line = serde_json::to_vec(request)?;
     line.push(b'\n');
     wr.write_all(&line).await?;
-    wr.shutdown().await?;
+    // The worker may have answered and hung up already, which makes the half-close fail with
+    // ENOTCONN; the reply is still there to read.
+    let _half_closed = wr.shutdown().await;
     let mut reply = String::new();
     BufReader::new(rd).read_line(&mut reply).await?;
     serde_json::from_str(reply.trim()).context("the worker's reply is not JSON")

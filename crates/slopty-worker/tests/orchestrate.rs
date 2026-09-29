@@ -366,4 +366,47 @@ mod orchestrate {
         assert_ne!(found.pid, root.1, "a child of the shell, not the shell");
         send_input(h, &Input::Keys(vec!["ctrl+c".to_owned()])).await.unwrap();
     }
+    /// A `Search` whose request is dropped (the server's link went, or the task answering it
+    /// was aborted) stops walking at once, rather than walking the rest of the tree for nobody:
+    /// the one blocking thread it ran on is free again long before a whole walk would end.
+    #[test]
+    fn dropping_a_search_stops_its_walk() {
+        use slopty_proto::search::{MAX_LINES, SearchQuery};
+        use slopty_worker::orchestrate::search;
+
+        let dir = tempfile::tempdir().unwrap();
+        for d in 0..64 {
+            let sub = dir.path().join(format!("d{d}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            for f in 0..200 {
+                std::fs::write(sub.join(format!("f{f}.txt")), "hay\n".repeat(64)).unwrap();
+            }
+        }
+        let query = SearchQuery { pattern: "needle".to_owned(), ..SearchQuery::default() };
+        let forever = Duration::from_secs(600);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let root = dir.path().to_path_buf();
+            let started = std::time::Instant::now();
+            let (_, summary) =
+                search(root.clone(), query.clone(), MAX_LINES, forever).await.unwrap();
+            let whole = started.elapsed();
+            assert_eq!(summary.searched, 64 * 200);
+
+            let task = tokio::spawn(search(root, query, MAX_LINES, forever));
+            tokio::time::sleep(whole / 10).await;
+            task.abort();
+            let dropped = std::time::Instant::now();
+            // Queued behind the search on the pool's only thread: it runs once the walk ends.
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+            let freed = dropped.elapsed();
+            eprintln!("a whole walk {whole:?}; the dropped one ended {freed:?} after its drop");
+            assert!(freed < whole / 3, "{freed:?} against {whole:?}");
+        });
+    }
 }

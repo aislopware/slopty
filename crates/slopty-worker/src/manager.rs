@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::WorkerError;
 use crate::orchestrate::Agents;
-use crate::restore::{Keeper, Recipe};
+use crate::restore::{AgentLaunch, Keeper, Recipe};
 use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
@@ -239,11 +239,27 @@ impl Worker {
         Arc::clone(&self.inner.agents)
     }
 
-    /// Record a child exit reported by ptyd, and tell the session's viewers.
+    /// Record a child exit reported by ptyd, and tell the session's viewers. A clean exit
+    /// takes any conversation kept with the session with it: the person ended the program the
+    /// agent ran in, or the agent itself. A signal (what a reboot sends) does not.
     pub fn on_exit(&self, id: SessionId, status: i32) {
         if let Some(e) = self.inner.sessions.lock().get_mut(&id) {
             e.exited = Some(status);
             e.handle.exited(status);
+        }
+        if status == 0 {
+            self.inner.keeper.agent(id, None);
+        }
+    }
+
+    /// What the daemon's agent tick knows of the Claude Code conversation in session `id`,
+    /// kept so a reboot can resume it ([`crate::restore`]).
+    pub fn keep_agent(&self, id: SessionId, agent: slopty_agent::resume::Resumable) {
+        use slopty_agent::resume::Resumable;
+        match agent {
+            Resumable::Unknown => {}
+            Resumable::No => self.inner.keeper.agent(id, None),
+            Resumable::Yes(conversation) => self.inner.keeper.agent(id, Some(conversation)),
         }
     }
 
@@ -276,6 +292,7 @@ impl Worker {
             size: req.size,
             saved_ms: WallMs::ZERO,
             restored: None,
+            agent: None,
         };
         self.inner.ptyd.lock().await.spawn(id, spec).await?;
         self.inner.keeper.opened(id, recipe);
@@ -286,7 +303,8 @@ impl Worker {
     /// Reopen every kept session whose shell was lost (ptyd did not hold it when this worker
     /// connected), under its old id so its items keep their tiles: a new shell in the
     /// directory the old one was last in, below the old screen and a divider. The old
-    /// command runs again only when it was a shell itself ([`Recipe::reopen_command`]).
+    /// command runs again only when it was a shell itself ([`Recipe::reopen_command`]), and a
+    /// Claude Code conversation it held is resumed ([`Recipe::reopen`]).
     /// Returns the sessions reopened; one that fails stays kept for the next start.
     ///
     /// Call it once [`Self::set_session_env`] has said what every session gets.
@@ -297,9 +315,10 @@ impl Worker {
             return Vec::new();
         }
         let shells = crate::restore::system_shells();
+        let launch = self.agent_launch();
         let mut reopened = Vec::with_capacity(lost.len());
         for (id, recipe) in lost {
-            match self.reopen(id, &recipe, &shells).await {
+            match self.reopen(id, &recipe, &shells, &launch).await {
                 Ok(_handle) => {
                     tracing::info!(session = %id, cwd = ?recipe.cwd, "restored a session whose shell was lost");
                     reopened.push(id);
@@ -310,38 +329,63 @@ impl Worker {
         reopened
     }
 
+    /// What an agent resumed after a reboot is given besides its own flags: the relay beside
+    /// this binary, and the mod every session is told of.
+    fn agent_launch(&self) -> AgentLaunch {
+        let env = self.inner.session_env.lock().clone();
+        let var = |name: &str| env.iter().find(|(k, _v)| k == name).map(|(_k, v)| PathBuf::from(v));
+        let claude_mod = var(slopty_agent::claude_mod::DIR_ENV)
+            .zip(var(slopty_agent::claude_mod::SOCKET_ENV))
+            .map(|(dir, socket)| slopty_agent::claude_mod::Installed { dir, socket });
+        AgentLaunch {
+            relay: slopty_agent::hooks::relay_beside_this_binary()
+                .map(|relay| relay.to_string_lossy().into_owned()),
+            claude_mod,
+        }
+    }
+
     async fn reopen(
         &self,
         id: SessionId,
         recipe: &Recipe,
         shells: &str,
+        launch: &AgentLaunch,
     ) -> Result<SessionHandle, WorkerError> {
-        let command = recipe.reopen_command(shells);
-        let restored = recipe.restored(&command);
+        let plan = recipe.reopen(id, shells, &slopty_platform::dirs::home(), launch);
         let screen = self.inner.keeper.screen(id).await;
-        // A directory that is gone (deleted, an unmounted volume) leaves the shell at home.
-        let cwd = recipe
-            .cwd
-            .as_deref()
-            .map(|cwd| crate::file::expand_home(Path::new(cwd)))
-            .filter(|cwd| cwd.is_dir());
         let mut env = self.inner.session_env.lock().clone();
         env.extend(recipe.env.iter().cloned());
         env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));
-        let spec = SpawnSpec { command: command.clone(), cwd: cwd.clone(), env, size: recipe.size };
+        let spec = SpawnSpec {
+            command: plan.command.clone(),
+            cwd: plan.cwd.clone(),
+            env,
+            size: recipe.size,
+        };
         self.inner.ptyd.lock().await.spawn(id, spec).await?;
         self.inner.keeper.opened(
             id,
             Recipe {
-                command: command.clone(),
-                cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
-                restored: Some(restored.clone()),
+                command: plan.command.clone(),
+                cwd: plan.cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+                restored: Some(plan.restored.clone()),
+                agent: plan.agent,
                 ..recipe.clone()
             },
         );
-        let adoption =
-            Adoption { command, exited: None, restored: Some(restored), screen: Some(screen) };
-        self.adopt(id, recipe.size, adoption).await
+        let adoption = Adoption {
+            command: plan.command,
+            exited: None,
+            restored: Some(plan.restored),
+            screen: Some(screen),
+        };
+        let handle = self.adopt(id, recipe.size, adoption).await?;
+        if let Some(line) = plan.launch
+            && let Err(e) = handle.type_at_first_prompt(line)
+        {
+            tracing::warn!(session = %id, error = %e, "agent not resumed");
+        }
+        Ok(handle)
     }
 
     /// Write every session's newest screen to disk now, as the worker goes down.
@@ -444,6 +488,8 @@ impl Worker {
             viewers: snap.viewers,
             command,
             agent,
+            progress: snap.progress,
+            restored: snap.restored,
         })
     }
 

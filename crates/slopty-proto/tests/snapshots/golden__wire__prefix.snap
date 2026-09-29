@@ -1,0 +1,7 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: "rows.join(\"\\n\")"
+---
+53 4c 4f 50 54 59 ef cd ab 89 67 45 23 01 13 30
+2e 31 2e 30 2b 77 69 72 65 2e 30 31 32 33 34 35
+36 37

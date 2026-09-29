@@ -329,9 +329,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   format (`assert_eq!` in `draw_surfaces`) and samples the two planes as R8/RG8. Any other
   format would either abort the app or need a colour-space conversion on the client.
 
-- ✅ **Present**: `CAMetalDisplayLink`-driven tick; `displaySyncEnabled = false`, drawable count 2;
-  present on arrival (superseded 2026-09-05: slop-desk vsync-locked hypothesis settled by
-  present-on-arrival measurement without buffering; see ruling below).
+- ✅ **Present**: a `CVDisplayLink`-driven tick; the layer keeps `displaySyncEnabled` at its
+  default (on), `maximumDrawableCount` 3; present on arrival (superseded 2026-09-05: slop-desk
+  vsync-locked hypothesis settled by present-on-arrival measurement without buffering; see ruling
+  below). Corrected 2026-09-29: this entry used to say `CAMetalDisplayLink`, `displaySyncEnabled
+  = false` and two drawables, which the GPUI fork never did. At the pinned fork (`b2befefba5`),
+  `gpui_macos/src/display_link.rs` drives frames from one `CVDisplayLink` per display,
+  `gpui_apple/src/metal_renderer.rs` `configure_layer` sets `maximumDrawableCount(3)` and never
+  touches display sync, and `present_drawable` goes on the command buffer, synchronously through
+  `presentsWithTransaction` only while a window re-activates.
 
 - ✅ **Present on arrival, and the presentation path is measured rather than assumed**
   (2026-09-05). A decoded frame goes up on the first paint after the decoder returns it and is
@@ -1519,3 +1525,137 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   time). Follow-up the numbers point at: 3024 × 1964 was the slow size at both rates, while
   3840 × 2160 was not. Rounding a stream's sides to a multiple of 16 rather than 2 may be worth
   more than any rate policy at a MacBook's native size. That needs its own measurement.
+
+- ✅ **Small frames carry two parity fragments on a lossy link** (2026-09-29, no wire change;
+  `slopty_media::layout`, `MIN_PARITY_FRAGMENTS`). A frame got `ceil(data × ratio)` parity
+  fragments, at least one. Loss comes in clumps, and a clump of two in a frame of two to seven
+  fragments beat that one fragment, so the frame waited a NACK round trip or was refreshed.
+  Moonlight asks Sunshine for a floor of two for this reason (`minRequiredFecPackets`, "Require
+  at least 2 FEC packets for small frames", `SdpGenerator.c`). Now the floor is two once the
+  ratio is above `Redundancy::MIN` (50 ‰), which is to say once the receiver's reports have
+  shown loss. At 50 ‰ it stays one.
+  - Measured on a simulated link that loses datagrams in runs (a Gilbert channel), with the
+    packetizer, `Redundancy` and the reassembler in the loop and NACKs, refreshes and reports
+    travelling back over 10 ms (`tests/burst_loss.rs`, MEASUREMENTS "two parity fragments on
+    small frames"). On a still window, frames that waited a round trip fell from 111 to 78 at 1 %
+    loss in runs of two, 32 to 3 at 3 % single losses and 325 to 166 at 3 % in runs of two, and
+    refreshes from 8 to 3 at 3 % in runs of four. The picture stood still 4.3 s where it stood
+    7.6 s. That costs the still window 0.2 to 0.5 Mbit/s of parity on a 2 Mbit/s stream. On a
+    scrolling 1080p screen the frames are 7 to 17 fragments, the ratio already buys two or
+    more at 3 % loss, and the gain is smaller: 19 to 6 round trips at 1 % (for 0.25 Mbit/s more), 72 to 50 at 3 %.
+  - A floor of two on every link was measured first and rejected: on a clean link it adds a
+    fragment to every busy frame for no repair, 7.40 to 7.95 Mbit/s (+7 %) on the scrolling
+    screen at 0 % loss. The 2026-09-06 ruling ("Dropping parity on small frames") still holds;
+    this is its other side, more parity where the frames are small and the link has lost some.
+  - Tests: `the_parity_floor_is_two_on_a_lossy_link_and_one_on_a_clean_one` (packetize),
+    `a_small_frame_survives_two_losses_in_a_row_without_a_nack` (pipeline), and the ignored
+    measurement `parity_under_burst_loss`.
+
+- ❌ **The `VideoConferencing` compression preset is not adopted** (2026-09-29, M1 Max, macOS
+  27.0; MEASUREMENTS "compression presets and the low-latency encoder's keys"). macOS 26 added
+  `kVTCompressionPropertyKey_SupportedPresetDictionaries` and five presets; the header says
+  `VideoConferencing` needs `EnableLowLatencyRateControl`. The low-latency encoder offers only
+  that one, and all it sets is `{AverageBitRate = 11 118 750, EnableLTR = false, RealTime =
+  true}`. Applied on top of the worker's session it moved nothing in the encoder's time (1080p
+  7.4 against 7.6 ms p50 on a real-time beat, 4K 23.5 against 23.4, 5K 38.0 against 38.1). It
+  turns off LTR, which is Slopty's loss recovery, and its fixed 11.1 Mbit/s rate dropped 16 of
+  180 frames at 4K and 54 at 5K and cost 5 and 11 dB of PSNR. The hardware encoder without
+  low latency offers `Balanced`, `HighQuality`, `HighSpeed` and `ConsistentQuality`, all with
+  frame reordering or look-ahead, which are out for the same reasons as before.
+  - The low-latency encoder's supported-property list still names keys no SDK header exports:
+    `RequestedMaxEncoderLatency`, `NumberOfSubFrameSections`, `NumberOfSlices`,
+    `ReferenceBufferCount`, `MinNumberOfTemporalLayers`, `NumberOfTemporalLayers`,
+    `EnableFrameDropping`, `PeriodicRefreshMode`, `MaxRefreshFrameIntervalDuration`,
+    `ThroughputMode` and `SupportedThroughputModes`. The 2026-09-05 ruling that left
+    `RequestedMaxEncoderLatency` alone stands: private keys, set by name, are not used.
+    `NumberOfSubFrameSections` is the one that could matter (output before the whole frame is
+    encoded); it would need a public key first.
+  - Test: `compression_presets` in `crates/slopty-codec/tests/chroma444.rs`, ignored.
+
+- 🔬 **A stream's sides should be multiples of 16: otherwise the encoder takes one frame at a
+  time** (2026-09-29, M1 Max, macOS 27.0; MEASUREMENTS "encode time against frame size";
+  settles the follow-up in "The stream follows the screen's refresh"). The low-latency encoder
+  takes about the same time per frame at any size for its pixels (3024 × 1964, 3024 × 1968 and
+  3024 × 1952 all 18.2–18.4 ms one at a time). What differs is overlap. With both sides
+  multiples of 16 it works on the next frame before the last is out: 3840 × 2160 at 23.5 ms a
+  frame keeps up with 120 fps at 23.6 ms p50, and 3024 × 1968 and 3024 × 1952 hold 18.2–18.4 ms
+  at 60 and 120. With either side off 16 it does not overlap. Any frame that takes longer than
+  the period then queues to a steady 77–109 ms: 3024 × 1964, 1962 and 1960 (h % 16 = 12, 10, 8)
+  81–88 ms at 60 and at 120, 3020 × 1968 (width off) 85–88 ms, 3456 × 2234 107–109 ms against
+  22 ms at 3456 × 2240, 2880 × 1800 77 ms at 120 against 17.8 at 60, and 2000 × 1234 43 ms at
+  120. A size off 16 whose frame fits the period does not queue (1920 × 1080, 1500 × 946,
+  1282 × 802). So it is alignment, and 16 rather than 8: 1960 and 1800 are multiples of 8 and
+  queue too.
+  - The fix, not built (it lives in `slopty-capture`, the worker and the client, not here):
+    size the capture and the encoder session to the next multiples of 16. ScreenCaptureKit
+    draws the target at its true size into the top-left of that surface
+    (`SCStreamConfiguration.destinationRect` = the true pixel size, `backgroundColor` black),
+    so nothing is scaled. `Opened` keeps the true size, and the client crops the decoded
+    picture to it. The padding is at most 15 still black rows and columns, under 1 % of the
+    pixels and almost no bits.
+  - Until then the worker's `EncoderWatch` takes such a stream down a rung, which is what it
+    was built for, at the price of the rate.
+
+- ⏸ **The encoder writes every frame as a reference; half of them need not be** (2026-09-29,
+  M1 Max, macOS 27.0; MEASUREMENTS "temporal layers on the low-latency encoder"). The SPS
+  declares two temporal sub-layers (`annexb.rs` tests), but on the worker's session every
+  P-frame is `TRAIL_R` with `TemporalId` 0 and the attachment `IsDependedOnByOthers = true`:
+  nothing is marked non-reference, and `BaseLayerFrameRateFraction` reads back unset (-1).
+  Setting it to 0.5 (a public key, accepted with status 0) makes every other frame `TSA_R` at
+  `TemporalId` 1 with `IsDependedOnByOthers = false`.
+  - What a non-reference flag on the wire would save: a frame nothing refers to can be skipped
+    when parity and a NACK cannot repair it, with no refresh and no wait. Today every lost frame
+    costs a `RequestRefresh`, a round trip and an LTR refresh frame, and the picture stands
+    still meanwhile. With half the frames in layer 1, half of those refreshes go. It costs
+    bits: on the scrolling 1080p text at 16 Mbit/s the mean P-frame went from 14.2 KiB to 15.6
+    (17.9 KiB for base frames, 13.3 for layer-1 frames), about 10 %, and the encoder's time
+    was the same (7.8 against 7.4 ms p50, within noise).
+  - Deferred: it needs a media flag (the attachment is read in `encoder.rs` and would ride the
+    `MediaHeader`'s flags) and the reassembler skipping such a frame rather than giving up the
+    stream. That is a wire change, and the 10 % is worth measuring against the refreshes it
+    saves on the burst-loss simulation first. The keyframe's attachments also carry
+    `FECGroupID`, `FECLastFrameInGroup` and `FECLevelOfProtection` (3), hints VideoToolbox makes
+    for FaceTime's own FEC; nothing reads them.
+  - Test: `temporal_layers` in `crates/slopty-codec/tests/chroma444.rs`, ignored.
+
+- ✅ **A stream recovers with a keyframe until a reference is acknowledged, and one keyframe
+  answers the refreshes that cross it** (2026-09-29, M1 Max, macOS 27.0; MEASUREMENTS "refresh
+  storms on loopback"). On loopback with no loss, the drawn display at 3024 × 1964 failed its e2e
+  run half the time with decode errors, refreshes and a frame lost. There were four causes, and
+  each one fed the next:
+  - VideoToolbox answers `ForceLTRRefresh` with a sync frame when no token has been
+    acknowledged, and at that size (while the encoder drops frames) every frame after it fails
+    to decode with -12909 until the next keyframe. The client's refresh then caused the next
+    failure. `Shared::try_encode` now sends such a refresh as a keyframe (`refreshes_idr`), and
+    an LTR refresh only goes out when `ltr_usable()` holds.
+  - A quality or size change rebuilt the encoder, and the retired session's last frame came out
+    after the new session's keyframe. A P-frame from another session reached the decoder. Every
+    session now carries a generation, and `Shared::on_session_packet` drops a packet from a
+    session that is no longer in force.
+  - The first keyframe (about 160 kB) takes 60–130 ms to encode, longer than the client's first
+    refresh repeat, so a second keyframe was made behind the first. A keyframe handed to the
+    encoder now answers refreshes for `KEYFRAME_IN_FLIGHT_US` (400 ms). The client gives a new
+    stream's first keyframe `FIRST_KEYFRAME_WAIT` (400 ms, `Config::first_repeat_after`) before
+    it asks again, and no repeat goes out while a keyframe (or a refresh frame, when that is
+    awaited) is still arriving.
+  - The reassembler counted a frame's deadline from its first fragment. A keyframe crossing a
+    connection whose send window was still opening took longer than that, so it was given up on
+    half-way (the "one frame lost with 116 datagrams" on a lossless link). Its stragglers then
+    re-created the frame, which was lost again. The deadline now runs from the latest fragment
+    (fragments still arriving are in flight), and a frame given up on stays given up on.
+  - These fixes are ours, not the transport's: QUIC delivered every datagram.
+
+- ✅ **The remote picture keeps its aspect: letterboxed on the tile's surface, with the pointer
+  mapped through the same rectangle** (2026-09-29). The surface was stretched to the tile, so a
+  window between its resize and the worker's answer, a window that refuses the size, and any
+  display whose aspect is not the tile's all drew distorted, and a click landed off the point
+  under it.
+  - The picture is fitted with `ObjectFit::Contain`. `zoom::fit` computes the same rectangle,
+    and zoom, pan, pointer and cursor all work in fractions of that rectangle.
+  - A press on the bars goes nowhere. A release or scroll that ends on them is clamped to the
+    picture's edge.
+  - Window tiles still ask the worker for the tile's size (`resize_remote_windows`), so the bars
+    last only until the window follows.
+  - Tests: `a_picture_of_another_aspect_is_letterboxed_and_the_pointer_follows` and
+    `fit_keeps_the_pictures_aspect_and_centres_it` in `slopty-ui`. The stream goldens check
+    that the bars are bare surface.

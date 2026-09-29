@@ -605,6 +605,107 @@ mod actor {
         session.close();
     }
 
+    /// The session's summary carries its progress report, so a client that views nothing
+    /// shows it: each change of the report says the summary moved, and the snapshot has it
+    /// until the report is removed. A reopened session's snapshot says so for its whole life.
+    #[tokio::test]
+    async fn the_summary_carries_the_progress_and_the_restore() {
+        use slopty_proto::terminal::{Progress, ProgressState, Restored};
+
+        let (moves, mut moved) = mpsc::unbounded_channel();
+        let (session, mut child, _tap) = start_with(
+            &[
+                "/bin/sh",
+                "-c",
+                "printf '\\033]9;4;1;30\\007'; read x; printf '\\033]9;4;0\\007'; read x; exit 0",
+            ],
+            Vec::new(),
+            Some(moves),
+        );
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        let at_30 = Progress { state: ProgressState::Set, percent: Some(30) };
+        wait_for(&mut rx, |ev, _| ev.contains(&TermEvent::Progress(at_30))).await;
+        let snap = session.snapshot().await.unwrap();
+        assert_eq!((snap.progress, snap.restored), (Some(at_30), None));
+        assert_eq!(moved.try_recv().ok(), Some(session.id()), "the report moved the summary");
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        wait_for(&mut rx, |ev, _| ev.contains(&TermEvent::Progress(Progress::default()))).await;
+        assert_eq!(session.snapshot().await.unwrap().progress, None, "removed");
+        assert_eq!(moved.try_recv().ok(), Some(session.id()), "and so did its removal");
+        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+        child.wait().await.unwrap();
+        session.close();
+
+        let pty = Pty::open(size(40, 6)).unwrap();
+        let spec = SpawnSpec {
+            command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "read x".to_owned()],
+            cwd: None,
+            env: Vec::new(),
+            size: size(40, 6),
+        };
+        let mut child = pty.spawn(&spec).unwrap();
+        let (tap, _tap_rx) = mpsc::channel(64);
+        let restored =
+            Restored { saved_ms: slopty_core::WallMs::from_millis(7), command: Vec::new() };
+        let reopened = session::spawn(SessionStart {
+            id: SessionId::new(),
+            master: pty.into_master(),
+            checkpoint: Vec::new(),
+            backlog: Vec::new(),
+            tap,
+            size: size(40, 6),
+            scrollback_lines: 100,
+            exited: None,
+            port_hints: None,
+            moves: None,
+            touched: None,
+            restored: Some(restored.clone()),
+            divide: false,
+        })
+        .unwrap();
+        assert_eq!(reopened.snapshot().await.unwrap().restored, Some(restored));
+        reopened.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A program reporting its progress ten thousand times says the summary moved a bounded
+    /// number of times: a percent at most every [`session::PROGRESS_EVERY`], so a build's flood
+    /// is a handful of summaries rather than one each. The last value is still told: a percent
+    /// held back is told when its time comes, and the summary read then carries it.
+    #[tokio::test]
+    async fn a_flood_of_progress_moves_the_summary_a_bounded_number_of_times() {
+        use std::fmt::Write as _;
+
+        use slopty_proto::terminal::{Progress, ProgressState};
+
+        let burst = (0..250).fold(String::new(), |mut burst, n| {
+            let _written = write!(burst, "\u{1b}]9;4;1;{}\u{7}", n % 70);
+            burst
+        });
+        let script = "for c in $(seq 40); do printf '%s' \"$1\"; sleep 0.025; done; \
+                      sleep 0.1; printf '\\033]9;4;1;77\\007'; read x";
+        let (moves, mut moved) = mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let (session, mut child, _tap) =
+            start_with(&["/bin/sh", "-c", script, "sh", &burst], Vec::new(), Some(moves));
+        let mut told = Vec::new();
+        while let Ok(Some(id)) = tokio::time::timeout(Duration::from_secs(1), moved.recv()).await {
+            assert_eq!(id, session.id());
+            // What the daemon does with a move: read the summary as it stands now.
+            told.push(session.snapshot().await.unwrap().progress);
+        }
+        let elapsed = started.elapsed().saturating_sub(Duration::from_secs(1));
+        let bound = elapsed.as_millis() / session::PROGRESS_EVERY.as_millis() + 3;
+        eprintln!("10 000 reports over {elapsed:?}: {} moves", told.len());
+        assert!(told.len() as u128 <= bound, "{} moves in {elapsed:?}", told.len());
+        let last = Progress { state: ProgressState::Set, percent: Some(77) };
+        assert_eq!(told.last().copied().flatten(), Some(last), "the last value is told");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// The opener drives even when another client attaches first.
     #[tokio::test]
     async fn reserved_driver_beats_the_first_attach() {
@@ -1228,6 +1329,48 @@ done"#
         let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("back")).await;
         let after = events.iter().filter_map(modes).next_back().unwrap();
         assert!(!after.contains(TermModes::ECHO_OFF), "{after:?}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// The line that resumes an agent after a reboot waits for the shell's first prompt: a
+    /// line editor holding the tty is not enough until the shell has reported its directory.
+    #[tokio::test]
+    async fn a_line_is_typed_at_the_first_prompt_and_not_before() {
+        let script = "stty -icanon -echo; echo ready; \
+            if IFS= read -r -t 1 early; then echo \"early:$early\"; else echo quiet; fi; \
+            printf '\\033]7;file://localhost/tmp\\007'; IFS= read -r line; echo \"got:$line\"; \
+            sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        session.type_at_first_prompt("claude --resume abc".to_owned()).unwrap();
+        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("got:")).await;
+        let screen = text(&screen);
+        assert!(screen.contains("quiet") && screen.contains("got:claude --resume abc"), "{screen}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A viewer that types before the first prompt keeps the terminal to itself: the waiting
+    /// line is dropped, not typed after theirs.
+    #[tokio::test]
+    async fn a_viewer_typing_first_drops_the_waiting_line() {
+        let script = "stty -icanon -echo; echo ready; IFS= read -r line; echo \"got:$line\"; \
+            printf '\\033]7;file://localhost/tmp\\007'; \
+            if IFS= read -r -t 2 more; then echo \"more:$more\"; else echo done; fi; sleep 30";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(64);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        session.type_at_first_prompt("claude --resume abc".to_owned()).unwrap();
+        session.request(me, TermRequest::Raw(b"mine\r".to_vec())).unwrap();
+        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("done")).await;
+        let screen = text(&screen);
+        assert!(screen.contains("got:mine") && !screen.contains("more:"), "{screen}");
         session.close();
         let _killed = child.kill().await;
     }

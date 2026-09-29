@@ -31,8 +31,8 @@ use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::folder::FolderView;
 use crate::icons::{IconName, IconSize, Status};
-use crate::kit;
 use crate::terminal::TerminalView;
+use crate::{add_worker, kit};
 
 /// Below this zoom the overview draws a tile as its miniature: the header's surface without its
 /// words, the body as it stands at the zoom, and a label at chrome size under it that names the
@@ -78,6 +78,10 @@ pub const RECONNECTING: &str = "Reconnecting…";
 
 /// What the in-body pill says for a shell whose session is gone and whose status is not known.
 pub const SESSION_ENDED: &str = "Session ended";
+
+/// The in-body pill's action for a worker on another build: the command that updates it, to
+/// the clipboard.
+pub const COPY_COMMAND: &str = "Copy command";
 
 /// The accessible name of a tile's close button.
 pub const CLOSE_TILE: &str = "Close tile";
@@ -334,6 +338,8 @@ pub(super) enum BodyState {
     Exited(i32),
     /// The shell's session is gone and nothing says how it ended.
     Ended,
+    /// The tile's worker runs a different build: both builds, and the command that updates it.
+    NeedsUpdate(slopty_client::update::UpdateNotice),
 }
 
 impl BodyState {
@@ -346,6 +352,7 @@ impl BodyState {
             }
             Self::Exited(status) => format!("Exited · code {status}").into(),
             Self::Ended => SESSION_ENDED.into(),
+            Self::NeedsUpdate(notice) => notice.title().into(),
         }
     }
 
@@ -353,11 +360,67 @@ impl BodyState {
     const fn status(&self) -> Status {
         match self {
             Self::Away(_) => Status::Away,
-            Self::Exited(0) | Self::Ended => Status::Idle,
+            // Nothing is broken and nothing is lost: an update is all it takes.
+            Self::Exited(0) | Self::Ended | Self::NeedsUpdate(_) => Status::Idle,
             Self::Exited(_) => Status::Failed,
         }
     }
 }
+
+/// What the pill of a worker on a different build shows of its update, where the app can run
+/// one ([`add_worker::Updates`]): the offer, the step under way with its bar, or why it failed.
+struct UpdateState {
+    status: Status,
+    text: SharedString,
+    detail: Option<String>,
+    bar: Option<add_worker::Bar>,
+    failed: bool,
+    /// "Update" is on offer, so "Copy command" steps back to the secondary tone.
+    offered: bool,
+    start: Option<add_worker::Update>,
+}
+
+/// [`UpdateState`] for `state`; `None` for any other state, and where no update can run.
+fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
+    let BodyState::NeedsUpdate(notice) = state else { return None };
+    let updates = cx.try_global::<add_worker::Updates>()?;
+    let start = updates.start.clone();
+    let Some(run) = updates.runs.get(&notice.host) else {
+        return start.map(|start| UpdateState {
+            status: state.status(),
+            text: state.text(),
+            detail: Some(notice.detail()),
+            bar: None,
+            failed: false,
+            offered: true,
+            start: Some(start),
+        });
+    };
+    if let Some(failed) = &run.failed {
+        return Some(UpdateState {
+            status: Status::Failed,
+            text: failed.title.clone().into(),
+            detail: failed.hint.clone().or_else(|| failed.lines.last().cloned()),
+            bar: None,
+            failed: true,
+            offered: start.is_some(),
+            start,
+        });
+    }
+    let step = run.current();
+    Some(UpdateState {
+        status: Status::Running,
+        text: step.map_or_else(|| UPDATING.into(), |s| s.title.clone().into()),
+        detail: step.and_then(|s| s.detail.clone()),
+        bar: Some(run.bar),
+        failed: false,
+        offered: false,
+        start: None,
+    })
+}
+
+/// The pill's words while an update has no step to name yet.
+const UPDATING: &str = "Updating the worker";
 
 /// The icon a tile's header leads with: what the tile is.
 pub(super) const fn kind_icon(item: &Item, agent: bool) -> IconName {
@@ -1833,11 +1896,14 @@ impl WorkspaceView {
         let worker = self.workers.get(&tile.worker);
         if worker.is_none_or(|w| w.link.is_none()) {
             let name = worker.map_or("The worker", |w| w.name.as_str());
-            return Some(BodyState::Away(match worker.map(|w| &w.status) {
-                Some(WorkerStatus::Unreachable) => format!("{name} is unreachable").into(),
-                Some(WorkerStatus::Gone) => format!("{name} is gone").into(),
-                _ => RECONNECTING.into(),
-            }));
+            return Some(match worker.map(|w| &w.status) {
+                Some(WorkerStatus::NeedsUpdate(notice)) => BodyState::NeedsUpdate(notice.clone()),
+                Some(WorkerStatus::Unreachable) => {
+                    BodyState::Away(format!("{name} is unreachable").into())
+                }
+                Some(WorkerStatus::Gone) => BodyState::Away(format!("{name} is gone").into()),
+                _ => BodyState::Away(RECONNECTING.into()),
+            });
         }
         let ItemKind::Terminal { session } = item.kind else { return None };
         match self.summary(session).map(|s| &s.state) {
@@ -1862,16 +1928,19 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let k = chrome.k;
         let id = tile.item;
-        let status = state.status();
-        let text = state.text();
+        let update = update_state(state, cx);
+        let status = update.as_ref().map_or_else(|| state.status(), |u| u.status);
+        let text = update.as_ref().map_or_else(|| state.text(), |u| u.text.clone());
+        let quiet = update.as_ref().is_some_and(|u| u.offered);
         let button = |part: &'static str, label: &'static str| {
+            let tone = if quiet && part == "copy-command" { s.text_secondary } else { s.accent };
             let el = kit::pill_frame(theme, k)
                 .id(part)
                 .debug_selector(move || format!("{part}-{}", id.as_uuid()))
                 .role(Role::Button)
                 .aria_label(label)
                 .flex_none()
-                .text_color(hsla(s.accent))
+                .text_color(hsla(tone))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.raised)))
                 .child(ChromeText::new(label, px(theme.typography.small()), k));
@@ -1892,21 +1961,63 @@ impl WorkspaceView {
                 cx.listener(move |this, _ev, window, cx| this.close_tile(tile, window, cx)),
             )
         });
+        let (detail, copy) = match state {
+            BodyState::NeedsUpdate(notice) => {
+                let command = notice.command();
+                let running = update.as_ref().is_some_and(|u| u.bar.is_some());
+                let copy = (!running).then(|| {
+                    button("copy-command", COPY_COMMAND).on_click(move |_ev, _w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
+                    })
+                });
+                let said =
+                    update.as_ref().map_or_else(|| Some(notice.detail()), |u| u.detail.clone());
+                let detail = said.map(|said| {
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(hsla(s.text_muted))
+                        .child(ChromeText::new(said, px(theme.typography.small()), k))
+                });
+                (detail, copy)
+            }
+            _ => (None, None),
+        };
+        // Offered only where the app can run `ssh`; again after a failure, never while it runs.
+        let start = update.as_ref().and_then(|u| u.start.clone());
+        let host = match state {
+            BodyState::NeedsUpdate(notice) => notice.host.clone(),
+            _ => String::new(),
+        };
+        let again = update.as_ref().is_some_and(|u| u.failed);
+        let update_button = start.map(|start| {
+            let label = if again { add_worker::TRY_AGAIN } else { add_worker::UPDATE };
+            button("update-worker", label).on_click(move |_ev, window, cx| start(&host, window, cx))
+        });
+        let bar = update.as_ref().and_then(|u| u.bar).and_then(|bar| {
+            add_worker::bar(theme, bar, "update-progress", cx).map(|bar| {
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left(px(theme.spacing.md * k))
+                    .right(px(theme.spacing.md * k))
+                    .child(bar)
+            })
+        });
+        let actions =
+            restart.is_some() || close.is_some() || copy.is_some() || update_button.is_some();
         let pill = div()
             .id("state")
             .debug_selector(move || format!("state-{}", id.as_uuid()))
             .role(Role::Status)
             .aria_label(text.clone())
             .occlude()
+            .max_w_full()
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm * k))
             .pl(px(theme.spacing.md * k))
-            .pr(px(if restart.is_some() || close.is_some() {
-                theme.spacing.xs
-            } else {
-                theme.spacing.md
-            } * k))
+            .pr(px(if actions { theme.spacing.xs } else { theme.spacing.md } * k))
             .py(px(theme.spacing.xs * k))
             .rounded(px(theme.radii.md * k))
             .map(|el| kit::elevate(el, theme))
@@ -1923,8 +2034,12 @@ impl WorkspaceView {
                 .size(px(theme.typography.icon() * k)),
             )
             .child(ChromeText::new(text, px(theme.typography.small()), k).zooming(chrome.zooming))
+            .when_some(detail, gpui::ParentElement::child)
             .when_some(restart, gpui::ParentElement::child)
-            .when_some(close, gpui::ParentElement::child);
+            .when_some(close, gpui::ParentElement::child)
+            .when_some(update_button, gpui::ParentElement::child)
+            .when_some(copy, gpui::ParentElement::child)
+            .when_some(bar, |el, bar| el.relative().child(bar));
         div()
             .absolute()
             .left_0()
@@ -2145,6 +2260,19 @@ impl WorkspaceView {
         let well = || div().flex_1().w_full().into_any_element();
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
+                Some(_) if self.quick.holds(item.id) => {
+                    let wait = Wait::Lasting(super::quick::IN_QUICK_TERMINAL.into());
+                    div()
+                        .id(SharedString::from(format!("quick-{}", item.id.as_uuid())))
+                        .flex_1()
+                        .w_full()
+                        .flex()
+                        .on_click(cx.listener(|this, _, _window, cx| {
+                            this.show_quick_terminal(std::time::Instant::now(), cx);
+                        }))
+                        .child(self.waiting_body(item, wait, k, window, cx))
+                        .into_any_element()
+                }
                 _ if self.faces.held.contains(session)
                     || (self.terminals.contains_key(session)
                         && self.face_shown(*session)

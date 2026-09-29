@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+use slopty_client::update::UpdateNotice;
 use slopty_core::{ClientId, SessionId};
 use slopty_net::client::{WorkerConn, bind_client, connect};
 use slopty_net::known::{KnownWorker, KnownWorkers};
@@ -34,13 +35,24 @@ pub async fn close_endpoint(endpoint: &Endpoint) {
     let _drained = tokio::time::timeout(CLOSE_GRACE, endpoint.wait_idle()).await;
 }
 
+/// Connect to the worker at `address`. One on a different build fails with what updates it,
+/// the same words the app shows on it.
+async fn dial(endpoint: &Endpoint, address: &HostAddr, hello: Hello) -> Result<WorkerConn> {
+    connect(endpoint, address, hello).await.map_err(|e| {
+        match UpdateNotice::for_worker_dial(address.host(), &e) {
+            Some(notice) => notice.into(),
+            None => e.into(),
+        }
+    })
+}
+
 /// Connect to the worker at `address` and remember it under the id it answers with.
 pub async fn add(data_dir: &Path, address: &str) -> Result<()> {
     let address: HostAddr = address.parse()?;
     let mut me = known(data_dir)?;
     let endpoint = bind_client()?;
     eprintln!("connecting to {address}…");
-    let conn = connect(&endpoint, &address, hello(me.client())).await?;
+    let conn = dial(&endpoint, &address, hello(me.client())).await?;
     me.remember(KnownWorker {
         address: address.clone(),
         name: conn.ack.name.clone(),
@@ -136,7 +148,7 @@ pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session
     let client = me.client();
     let started = Instant::now();
     let endpoint = bind_client()?;
-    let conn = connect(&endpoint, &address, hello(client)).await?;
+    let conn = dial(&endpoint, &address, hello(client)).await?;
     Ok(Session { conn, client, endpoint, connect_time: started.elapsed() })
 }
 
@@ -227,6 +239,8 @@ mod tests {
             viewers: 1,
             command: Vec::new(),
             agent: None,
+            progress: None,
+            restored: None,
         }
     }
 

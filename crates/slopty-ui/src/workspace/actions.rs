@@ -1,7 +1,5 @@
-//! The workspace's actions, the keys that run them and the palette lines that name them.
-//!
-//! ⌘ is the app's modifier. A ⌃ or ⌥ chord without ⌘ belongs to the terminal (⌥ is Meta), so
-//! every layout chord carries ⌘. The table is `docs/decisions/workspace.md`'s.
+//! The workspace's actions and the palette lines that name them, with the keys that run them
+//! now: the keymap's ([`crate::keymap`]), where the default chords are.
 
 #![expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 
@@ -9,6 +7,7 @@ use gpui::{Action, KeyBinding, actions};
 
 use crate::conversation::{CycleDensity, Interrupt};
 use crate::icons::IconName;
+use crate::keymap::Scope;
 use crate::palette::PaletteItem;
 
 actions!(
@@ -51,6 +50,9 @@ actions!(
         /// Show the focused remote window or display in a window of its own on this Mac, the
         /// same stream going on; again, or closing that window, puts it back in its tile.
         ToggleOwnWindow,
+        /// Slide the quick terminal down from the top of the screen, or put it away: one shell
+        /// kept across shows, over any app. The Mac's system-wide chord runs it too.
+        ToggleQuickTerminal,
         /// Send the system's own shortcuts (⌘Tab, ⌘Space, Mission Control) to the focused
         /// remote Mac while its tile has the keyboard, or leave them to this Mac.
         ToggleSystemKeys,
@@ -192,150 +194,15 @@ pub struct MoveColumnToWorkspace {
     pub index: usize,
 }
 
-/// The key context the workspace binds in. A focused remote window gets every chord (its
-/// editor's ⌘W, ⌘T are not ours to take, as on Parsec); ⌃Tab alone stays, the keyboard's way
-/// back out of it.
-const CTX: Option<&str> = Some("Workspace && !Screen");
-const RING_CTX: Option<&str> = Some("Workspace");
-/// Inside a file tile's editor, gpui-kit's input binds some of the workspace's chords to
-/// editing (⌘⌥↑ adds a caret, ⌘F opens its own search); bound here after it, ours win there.
-const FILE_INPUT: Option<&str> = Some("FileEditor > Input");
-/// A conversation face, and its composer.
-const FACE: Option<&str> = Some(crate::conversation::CTX);
-const FACE_INPUT: Option<&str> = Some("Conversation > Input");
-/// A folder tile with the keyboard.
-const FOLDER: Option<&str> = Some(crate::folder::CTX);
-/// Search in files, its fields holding the keyboard.
-const SEARCH: Option<&str> = Some(crate::search::CTX);
 /// A tile's window of its own ([`super::popout`]): its picture takes every chord but the one
-/// that puts it back.
-const POP_OUT: Option<&str> = Some(super::popout::CTX);
-/// A focused page that does not hold the keyboard: a page that does keeps ⌘← and ⌘→ for its
-/// own fields.
-const PAGE: Option<&str> = Some("Workspace && Page && !Screen");
+/// that puts it back; the keymap binds that one there.
+pub(crate) const POP_OUT_CTX: &str = super::popout::CTX;
 
-/// Key bindings for the workspace context.
+/// The workspace's key bindings in effect: every scope of the keymap but the terminal's and the
+/// app's ([`crate::keymap`], where the table is).
 #[must_use]
 pub fn key_bindings() -> Vec<KeyBinding> {
-    let mut out = vec![
-        KeyBinding::new("cmd-t", NewTerminal, CTX),
-        KeyBinding::new("cmd-n", NewTerminal, CTX),
-        KeyBinding::new("cmd-shift-t", NewAgent, CTX),
-        KeyBinding::new("cmd-shift-n", NewNote, CTX),
-        KeyBinding::new("cmd-o", AddWindow, CTX),
-        KeyBinding::new("cmd-w", CloseItem, CTX),
-        KeyBinding::new("cmd-z", UndoClose, CTX),
-        KeyBinding::new("cmd-shift-a", NextAttention, CTX),
-        KeyBinding::new("cmd-shift-m", ToggleMute, CTX),
-        KeyBinding::new("cmd-shift-i", ToggleStats, CTX),
-        KeyBinding::new("ctrl-cmd-n", ToggleOwnWindow, CTX),
-        KeyBinding::new("ctrl-cmd-n", ToggleOwnWindow, POP_OUT),
-        KeyBinding::new("cmd-b", ToggleNavigator, CTX),
-        KeyBinding::new("cmd-f", crate::terminal::Find, CTX),
-        // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
-        KeyBinding::new("ctrl-tab", FocusNext, RING_CTX),
-        KeyBinding::new("ctrl-shift-tab", FocusPrev, RING_CTX),
-        KeyBinding::new("cmd-shift-p", OpenPalette, CTX),
-        KeyBinding::new("cmd-e", RenameItem, CTX),
-        KeyBinding::new("cmd-shift-o", PointOthers, CTX),
-        KeyBinding::new("cmd-shift-f", FindEverywhere, CTX),
-        // A focused field (a find bar, the palette, a note) is a gpui-kit input, whose own
-        // ⌘⇧F is replace; ours is bound in its context after it, so it wins there too.
-        KeyBinding::new("cmd-shift-f", FindEverywhere, Some("Input")),
-        KeyBinding::new("cmd-alt-f", SearchInFiles, CTX),
-        KeyBinding::new("cmd-alt-f", SearchInFiles, FILE_INPUT),
-        // The search surface's toggles, VS Code's keys.
-        KeyBinding::new("cmd-alt-c", crate::search::ToggleMatchCase, SEARCH),
-        KeyBinding::new("cmd-alt-w", crate::search::ToggleWholeWord, SEARCH),
-        KeyBinding::new("cmd-alt-r", crate::search::ToggleRegex, SEARCH),
-        KeyBinding::new("cmd-alt-left", FocusColumnLeft, CTX),
-        KeyBinding::new("cmd-alt-right", FocusColumnRight, CTX),
-        KeyBinding::new("cmd-alt-up", FocusUp, CTX),
-        KeyBinding::new("cmd-alt-down", FocusDown, CTX),
-        KeyBinding::new("cmd-alt-shift-left", MoveColumnLeft, CTX),
-        KeyBinding::new("cmd-alt-shift-right", MoveColumnRight, CTX),
-        KeyBinding::new("cmd-alt-shift-up", MoveUp, CTX),
-        KeyBinding::new("cmd-alt-shift-down", MoveDown, CTX),
-        // niri's Mod+Home/End and Mod+Ctrl+Home/End; ⇧ stands for niri's Ctrl, as on the arrows.
-        KeyBinding::new("cmd-alt-home", FocusColumnFirst, CTX),
-        KeyBinding::new("cmd-alt-end", FocusColumnLast, CTX),
-        KeyBinding::new("cmd-alt-shift-home", MoveColumnToFirst, CTX),
-        KeyBinding::new("cmd-alt-shift-end", MoveColumnToLast, CTX),
-        // The page keys are the workspace level: ⇧ moves the workspace itself, ⌃ carries the
-        // column to the next one (niri's Mod+Shift and Mod+Ctrl on Page Up/Down).
-        KeyBinding::new("cmd-alt-pageup", FocusWorkspaceUp, CTX),
-        KeyBinding::new("cmd-alt-pagedown", FocusWorkspaceDown, CTX),
-        KeyBinding::new("cmd-alt-shift-pageup", MoveWorkspaceUp, CTX),
-        KeyBinding::new("cmd-alt-shift-pagedown", MoveWorkspaceDown, CTX),
-        KeyBinding::new("ctrl-cmd-alt-pageup", MoveColumnToWorkspaceUp, CTX),
-        KeyBinding::new("ctrl-cmd-alt-pagedown", MoveColumnToWorkspaceDown, CTX),
-        KeyBinding::new("cmd-alt-`", FocusWorkspacePrevious, CTX),
-        KeyBinding::new("cmd-[", ConsumeOrExpelLeft, CTX),
-        KeyBinding::new("cmd-]", ConsumeOrExpelRight, CTX),
-        KeyBinding::new("cmd-r", CycleWidth, CTX),
-        KeyBinding::new("cmd-shift-r", CycleWidthBack, CTX),
-        KeyBinding::new("cmd-alt--", NarrowColumn, CTX),
-        KeyBinding::new("cmd-alt-=", WidenColumn, CTX),
-        KeyBinding::new("cmd-shift-enter", MaximizeColumn, CTX),
-        KeyBinding::new("ctrl-cmd-f", FullscreenTile, CTX),
-        KeyBinding::new("cmd-alt-c", CenterColumn, CTX),
-        KeyBinding::new("cmd-alt-shift-c", CenterVisibleColumns, CTX),
-        KeyBinding::new("cmd-alt-shift-f", ExpandColumn, CTX),
-        KeyBinding::new("cmd-alt-t", ToggleTabbed, CTX),
-        KeyBinding::new("cmd-alt-o", ToggleOverview, CTX),
-        KeyBinding::new("cmd-=", FontLarger, CTX),
-        KeyBinding::new("cmd-shift-=", FontLarger, CTX),
-        KeyBinding::new("cmd--", FontSmaller, CTX),
-        KeyBinding::new("cmd-0", FontReset, CTX),
-        KeyBinding::new("cmd-j", ToggleConversation, CTX),
-        KeyBinding::new("cmd-l", EditAddress, CTX),
-        // A browser's ⌘[ and ⌘] (and ⌘R) are the layout's here; ⌘← and ⌘→ are Chrome's others.
-        KeyBinding::new("cmd-left", PageBack, PAGE),
-        KeyBinding::new("cmd-right", PageForward, PAGE),
-        KeyBinding::new("ctrl-o", CycleDensity, FACE),
-        KeyBinding::new("escape", Interrupt, FACE),
-        KeyBinding::new("cmd-up", crate::terminal::PrevPrompt, FACE),
-        KeyBinding::new("cmd-down", crate::terminal::NextPrompt, FACE),
-        KeyBinding::new("cmd-f", crate::terminal::Find, FACE),
-        // The composer is where the keyboard sits in a face: bound after gpui-kit's input,
-        // these win there.
-        KeyBinding::new("ctrl-o", CycleDensity, FACE_INPUT),
-        KeyBinding::new("cmd-up", crate::terminal::PrevPrompt, FACE_INPUT),
-        KeyBinding::new("cmd-down", crate::terminal::NextPrompt, FACE_INPUT),
-        KeyBinding::new("cmd-f", crate::terminal::Find, FACE_INPUT),
-        KeyBinding::new("cmd-s", crate::file::SaveFile, Some(crate::file::CTX)),
-        KeyBinding::new("cmd-f", crate::terminal::Find, FILE_INPUT),
-        KeyBinding::new("cmd-alt-up", FocusUp, FILE_INPUT),
-        KeyBinding::new("cmd-alt-down", FocusDown, FILE_INPUT),
-        // A file tile's find bar: the terminal's find keys, in the bar's own context (no
-        // terminal around it).
-        KeyBinding::new("escape", crate::terminal::CloseFind, Some("FileSearch")),
-        KeyBinding::new("cmd-g", crate::terminal::FindNext, Some("FileSearch")),
-        KeyBinding::new("cmd-shift-g", crate::terminal::FindPrev, Some("FileSearch")),
-        // A folder tile: the arrows walk its rows, ↩ opens one, ⌫ and ⌘↑ go up.
-        KeyBinding::new("up", crate::folder::SelectPrevious, FOLDER),
-        KeyBinding::new("down", crate::folder::SelectNext, FOLDER),
-        KeyBinding::new("home", crate::folder::SelectFirst, FOLDER),
-        KeyBinding::new("end", crate::folder::SelectLast, FOLDER),
-        KeyBinding::new("enter", crate::folder::OpenSelected, FOLDER),
-        KeyBinding::new("backspace", crate::folder::OpenParent, FOLDER),
-        KeyBinding::new("cmd-up", crate::folder::OpenParent, FOLDER),
-        // A page's find bar, the same keys (Esc is the bar's own).
-        KeyBinding::new("cmd-g", crate::terminal::FindNext, Some("PageSearch")),
-        KeyBinding::new("cmd-shift-g", crate::terminal::FindPrev, Some("PageSearch")),
-    ];
-    for (n, key) in ["1", "2", "3", "4", "5", "6", "7", "8", "9"].into_iter().enumerate() {
-        out.push(KeyBinding::new(&format!("cmd-{key}"), FocusColumn { index: n }, CTX));
-        // niri's Mod+N and Mod+Ctrl+N. ⌘N is the column here, and ⇧ on a digit reaches the
-        // app as its symbol on most layouts, so the column's carry takes ⌃.
-        out.push(KeyBinding::new(&format!("cmd-alt-{key}"), FocusWorkspace { index: n }, CTX));
-        out.push(KeyBinding::new(
-            &format!("ctrl-cmd-alt-{key}"),
-            MoveColumnToWorkspace { index: n },
-            CTX,
-        ));
-    }
-    out
+    crate::keymap::current().bindings(|scope| !matches!(scope, Scope::Terminal | Scope::App))
 }
 
 /// The palette's lines for the workspace's and the terminal's actions, with their keys.

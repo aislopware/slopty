@@ -625,3 +625,64 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `doctor_report_names_the_binary_and_flags_missing_permissions`; goldens
     `ctl_health_pasteboard_asks_and_no_wake` and `ctl_pasteboard_access`, with the ctl
     doctor goldens moved by the new field.
+
+- ✅ **The app installs and updates workers over SSH** (2026-09-29). Before this, only the CLI
+  could deploy, the first run offered an address, the tailnet or this Mac, and a worker on
+  another build could only have its command copied.
+  - **One deploy, two front ends.** The plan moved out of `apps/slopty-cli/src/deploy.rs` into
+    the `slopty-deploy` crate. `deploy(runner, plan, on)` runs the same steps and reports each
+    as an `Event`: a step begun, the machine's platform once `uname` answered, bytes sent of all
+    the binaries, and each line the install printed. Every remote script goes through a
+    `Runner`. `Ssh` is the system `ssh`, one connection per step. The CLI's runner leaves the
+    install's output on the terminal and prints each upload as before, so its output did not
+    change. The app's runner (`Ssh::unattended`) passes `-o BatchMode=yes -o
+    ConnectTimeout=15` so that `ssh` never waits on a prompt nobody can see, adds `-l`/`-p` when
+    the person set them, and gets the install's output back as lines. A file goes up through
+    the child's stdin 256 KiB at a time, which is what moves the bar.
+  - **Errors are typed and keep the CLI's words.** `DeployError`'s `Display` and error chain
+    read as the old `anyhow` messages did. `DeployError::failure()` is how a window says it: a
+    title, what to do when that is known, and the last lines printed (`TAIL`, 8). When `ssh`
+    itself fails (exit 255), its message names the cause: a host key not yet trusted (connect
+    once in a terminal), a key refused, a name that does not resolve, Remote Login off, or a
+    host that does not answer. An install that fails keeps its last lines; after `--update`
+    those lines include the note that the previous worker is back.
+  - **The sheet.** The add panel lists "Install on a machine over SSH" beside "Use this Mac as
+    a worker", in one framed section headed "Set up a worker". The palette offers the same
+    (`app.install_over_ssh`, no default chord). The first run is that panel, so it offers SSH
+    too. The form asks for a host (`user@host` fills the user), then an optional user and port,
+    and says that it uses the person's ssh config and agent. While it runs, the form gives way
+    to five step lines: connect, copy, install, check, add. Under them is a bar that fills while
+    the binaries go up and sweeps otherwise; under Reduce Motion it stands still, set back.
+    Cancel drops the GPUI task. That drops the deploy, whose runtime task is aborted, and
+    `kill_on_drop` ends its `ssh`. A failure brings the form back with the failure above
+    "Try again". On success the worker is added at its tailnet name, then its tailnet IP, then
+    the host `ssh` reached, with the port when it is not 45550, and the panel closes onto it.
+    A Mac still missing Screen Recording or Accessibility is added anyway, and the notice says
+    its screen waits for someone there.
+  - **Update on the tile.** A worker's status carries the host it was dialled at, and "Update"
+    deploys to that host with `--update`. The pill beside it takes over the step's words and
+    detail, with the bar along its foot. "Copy command" stays beside Update in the quieter tone
+    and goes while a run is under way. Once the deploy ends the worker's link loop is woken, so
+    it dials at once rather than after `redial::WRONG_BUILD`. The link coming up ends the run.
+    A dial that meets another build again fails the run ("It still runs a different build") and
+    brings back the button as "Try again". The tiles learn of the app's update function and of
+    each run through a GPUI global (`slopty_ui::add_worker::Updates`), because `WorkspaceView`'s
+    worker state belongs to another part of the workspace. The app republishes the global and
+    notifies the view on every change.
+  - **Where it is offered.** Only on the Mac (`ssh::OFFERED`). The self-test gets no deployer,
+    so neither the entry nor Update appears there, and the goldens are unchanged.
+  - Tests: `slopty-deploy` `tests`: the fake-`ssh` deploys moved from the CLI (uploads byte for
+    byte, `--fresh`/`--update`, a mismatch refused after `uname`, a dashed target refused before
+    anything runs); a watched install's two streams returned as lines; and a scripted `Runner`
+    for the order of the steps, the byte count across the uploads, the 255 cases, an upload's
+    failure and the tail kept from a chatty install. CLI
+    `deploy::tests::the_options_reach_the_plan_and_the_report_says_what_is_next`. App
+    `ssh::tests` use a stand-in `Deployer` the test drives. They cover reading the fields, the
+    candidate addresses, the steps from events, the sheet from the first-run entry to an added
+    worker, Cancel dropping the deploy, a failure's words and output with Try again, and a
+    tile's Update deploying with `--update`, redialling at once, failing on a second wrong
+    build, and ending when the worker links. `slopty-ui` `add_worker::tests` cover the current
+    step and the button words.
+  - **Pending.** No deploy to a real machine was run from the app: the tests never reach a
+    host. The empty workspace's line ("Add a worker from the command palette", `strip.rs`)
+    could become a button that opens the panel.

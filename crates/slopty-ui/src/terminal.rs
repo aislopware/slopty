@@ -15,5 +15,6 @@ pub(crate) use element::{captions_drawn, family_picks, rows_prepared};
 pub use view::{
     BACK_TO_LIVE, ClearScreen, ClipHook, ClipPaste, CloseFind, Copy, CopyLastOutput, Find,
     FindNext, FindPrev, Guesses, LinkArrival, NextPrompt, NoteLastBlock, Paste, PlacedImage,
-    PrevPrompt, RerunLast, Selection, TOOK_MIN, TerminalView, TerminalViewEvent, key_bindings,
+    PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
+    Selection, TOOK_MIN, TerminalView, TerminalViewEvent, key_bindings,
 };

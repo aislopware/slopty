@@ -5,12 +5,16 @@
 //! asks the worker for a decision (`CtlRequest::Permission`). [`Holds`] decides what becomes of
 //! the question:
 //!
-//! - nobody follows the session: it is handed back at once, undecided, and the TUI shows its own
-//!   dialog as if there were no hook;
-//! - someone does: it is held under a new id and shown to the followers; the first answer from one
-//!   of them takes it, and anything after that finds nothing to take;
-//! - the last follower leaves (unfollows or disconnects), the worker has held it as long as it may,
-//!   or the relay went away: it is released, undecided. A release and an answer race for the same
+//! - nobody can answer it: it is handed back at once, undecided, and the TUI shows its own dialog
+//!   as if there were no hook;
+//! - someone follows the session: it is held under a new id and shown to the followers; the first
+//!   answer from one of them takes it, and anything after that finds nothing to take;
+//! - nobody follows, but a client answers approvals (from a notification or the inbox) and the
+//!   prompt is a yes or no ([`Held::approvable`]): it is held the same way for the approvers, for a
+//!   shorter time the caller sets ([`Reach::Approvers`]);
+//! - the last follower unfollows (the person went back to the TUI), nobody who could answer it is
+//!   connected any more, a client hands it to the TUI, the worker has held it as long as it may, or
+//!   the relay went away: it is released, undecided. A release and an answer race for the same
 //!   entry, and whichever comes first takes it.
 //!
 //! `R` is what the caller keeps with a held prompt (the reply channel, the prompt as shown);
@@ -49,27 +53,44 @@ use crate::clip::Link;
 /// state and never zero.
 pub const ORCHESTRATION: Link = 0;
 
+/// Who a prompt is held for, as it is asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// The session's followers (and the approvers too, for a yes or no).
+    Followers,
+    /// Nobody follows the session: the clients that answer approvals, for a bounded time.
+    Approvers,
+}
+
 /// A prompt being held, and for which session.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Held<R> {
     /// The session whose agent asks.
     pub session: SessionId,
+    /// A yes or no, which an approver may answer: not a question or a plan to read.
+    pub approvable: bool,
     /// What the caller keeps with it.
     pub reply: R,
 }
 
-/// Who follows which session, and the permission prompts held for them.
+/// Who follows which session, who answers approvals, and the permission prompts held for them.
 #[derive(Debug)]
 pub struct Holds<R> {
     /// The last id given; ids start at 1.
     last: u64,
     followers: HashMap<SessionId, BTreeSet<Link>>,
+    approvers: BTreeSet<Link>,
     held: BTreeMap<u64, Held<R>>,
 }
 
 impl<R> Default for Holds<R> {
     fn default() -> Self {
-        Self { last: 0, followers: HashMap::new(), held: BTreeMap::new() }
+        Self {
+            last: 0,
+            followers: HashMap::new(),
+            approvers: BTreeSet::new(),
+            held: BTreeMap::new(),
+        }
     }
 }
 
@@ -82,7 +103,8 @@ impl<R> Holds<R> {
     }
 
     /// `link` stops following `session`. When no follower is left, every prompt held for the
-    /// session is released and handed back, to be answered undecided.
+    /// session is released and handed back, to be answered undecided: the person went back to
+    /// the TUI, whoever else answers approvals.
     pub fn unfollow(&mut self, session: SessionId, link: Link) -> Vec<(u64, Held<R>)> {
         let Some(links) = self.followers.get_mut(&session) else { return Vec::new() };
         links.remove(&link);
@@ -93,17 +115,33 @@ impl<R> Holds<R> {
         self.held.extract_if(.., |_id, held| held.session == session).collect()
     }
 
-    /// `link`'s connection ended: it stops following everything, as [`Self::unfollow`].
+    /// `link` answers approvals from now on. Returns the ids of the yes-or-no prompts held that
+    /// it is to be shown, those it already sees as a follower left out.
+    pub fn approve(&mut self, link: Link) -> Vec<u64> {
+        self.approvers.insert(link);
+        self.held
+            .iter()
+            .filter(|(_id, held)| held.approvable && !self.follows(link, held.session))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// `link` stops answering approvals. Every prompt nobody else can answer now is released
+    /// and handed back.
+    pub fn stop_approving(&mut self, link: Link) -> Vec<(u64, Held<R>)> {
+        self.approvers.remove(&link);
+        self.orphans()
+    }
+
+    /// `link`'s connection ended: it stops following everything and answering approvals, and
+    /// every prompt nobody else can answer is handed back.
     pub fn leave(&mut self, link: Link) -> Vec<(u64, Held<R>)> {
-        let mut deserted = BTreeSet::new();
-        self.followers.retain(|session, links| {
+        self.followers.retain(|_session, links| {
             links.remove(&link);
-            if links.is_empty() {
-                deserted.insert(*session);
-            }
             !links.is_empty()
         });
-        self.held.extract_if(.., |_id, held| deserted.contains(&held.session)).collect()
+        self.approvers.remove(&link);
+        self.orphans()
     }
 
     /// `session` ended: nobody follows it any more, and every prompt held for it is handed back.
@@ -118,24 +156,48 @@ impl<R> Holds<R> {
         self.followers.get(&session).is_some_and(|links| links.contains(&link))
     }
 
-    /// Claude Code asks for a permission in `session`: held under a new id, what `make` builds
-    /// from it kept with it, while someone follows the session. `None` when nobody does and
-    /// the question is to be answered undecided at once; `make` is not called then.
-    pub fn ask(&mut self, session: SessionId, make: impl FnOnce(u64) -> R) -> Option<u64> {
-        if !self.followers.contains_key(&session) {
-            return None;
+    /// Whether `link` answers approvals.
+    #[must_use]
+    pub fn approves(&self, link: Link) -> bool {
+        self.approvers.contains(&link)
+    }
+
+    /// Who a prompt Claude Code asks in `session` would be held for; `None` when nobody could
+    /// answer it and it is to be handed back at once. A prompt that is not `approvable` waits
+    /// only for followers.
+    #[must_use]
+    pub fn reach(&self, session: SessionId, approvable: bool) -> Option<Reach> {
+        if self.followers.contains_key(&session) {
+            Some(Reach::Followers)
+        } else if approvable && !self.approvers.is_empty() {
+            Some(Reach::Approvers)
+        } else {
+            None
         }
+    }
+
+    /// Claude Code asks for a permission in `session`: held under a new id, what `make` builds
+    /// from it kept with it, while someone can answer it ([`Self::reach`]). `None` when nobody
+    /// can and the question is to be answered undecided at once; `make` is not called then.
+    pub fn ask(
+        &mut self,
+        session: SessionId,
+        approvable: bool,
+        make: impl FnOnce(u64) -> R,
+    ) -> Option<u64> {
+        self.reach(session, approvable)?;
         self.last = self.last.saturating_add(1);
-        self.held.insert(self.last, Held { session, reply: make(self.last) });
+        self.held.insert(self.last, Held { session, approvable, reply: make(self.last) });
         Some(self.last)
     }
 
-    /// A follower answers prompt `ask` of `session`: it is taken when it is still held there
-    /// and `link` follows the session. `None` for a second answer, one after a release, one
-    /// for another session, and one from a client that does not follow.
+    /// A client answers prompt `ask` of `session`, or hands it back to the TUI: it is taken
+    /// when it is still held there and was shown to `link` (a follower of the session, or an
+    /// approver for a yes or no). `None` for a second answer, one after a release, one for
+    /// another session, and one from a client it was not shown to.
     pub fn answer(&mut self, link: Link, session: SessionId, ask: u64) -> Option<Held<R>> {
         let held = self.held.get(&ask)?;
-        if held.session != session || !self.follows(link, session) {
+        if held.session != session || !self.shown(link, held) {
             return None;
         }
         self.held.remove(&ask)
@@ -156,19 +218,44 @@ impl<R> Holds<R> {
             .map(|(id, held)| (*id, &held.reply))
     }
 
-    /// The prompts held for every session `link` follows, oldest first: what it is to be shown
-    /// again when it missed the broadcast.
+    /// The prompts shown to `link`, oldest first: what it is to be shown again when it missed
+    /// the broadcast.
     pub fn shown_to(&self, link: Link) -> impl Iterator<Item = (u64, &R)> {
         self.held
             .iter()
-            .filter(move |(_id, held)| self.follows(link, held.session))
+            .filter(move |(_id, held)| self.shown(link, held))
             .map(|(id, held)| (*id, &held.reply))
+    }
+
+    /// Whether news of prompt `ask` of `session` goes to `link`: while it is held, whether it
+    /// is shown to it; once settled, whether it may have been (the client drops news of a
+    /// prompt it never had).
+    #[must_use]
+    pub fn tells(&self, link: Link, session: SessionId, ask: u64) -> bool {
+        match self.held.get(&ask) {
+            Some(held) => self.shown(link, held),
+            None => self.follows(link, session) || self.approves(link),
+        }
     }
 
     /// A held prompt.
     #[must_use]
     pub fn get(&self, ask: u64) -> Option<&Held<R>> {
         self.held.get(&ask)
+    }
+
+    fn shown(&self, link: Link, held: &Held<R>) -> bool {
+        self.follows(link, held.session) || (held.approvable && self.approves(link))
+    }
+
+    /// Hand back every prompt nobody can answer any more.
+    fn orphans(&mut self) -> Vec<(u64, Held<R>)> {
+        let (followers, approvers) = (&self.followers, !self.approvers.is_empty());
+        self.held
+            .extract_if(.., |_id, held| {
+                !(followers.contains_key(&held.session) || held.approvable && approvers)
+            })
+            .collect()
     }
 }
 
@@ -402,9 +489,13 @@ mod tests {
     #[test]
     fn with_no_follower_a_prompt_passes_at_once() {
         let mut holds = Holds::default();
-        assert_eq!(holds.ask(session(1), |_| "reply"), None);
+        assert_eq!(holds.ask(session(1), false, |_| "reply"), None);
         holds.follow(session(2), A);
-        assert_eq!(holds.ask(session(1), |_| "other"), None, "a follower of another session");
+        assert_eq!(
+            holds.ask(session(1), false, |_| "other"),
+            None,
+            "a follower of another session"
+        );
         assert!(holds.held_for(session(1)).next().is_none());
     }
 
@@ -415,9 +506,12 @@ mod tests {
         let s = session(1);
         holds.follow(s, A);
         holds.follow(s, B);
-        let ask = holds.ask(s, |_| "reply").expect("held");
+        let ask = holds.ask(s, false, |_| "reply").expect("held");
         assert_eq!(holds.held_for(s).collect::<Vec<_>>(), [(ask, &"reply")]);
-        assert_eq!(holds.answer(B, s, ask), Some(Held { session: s, reply: "reply" }));
+        assert_eq!(
+            holds.answer(B, s, ask),
+            Some(Held { session: s, approvable: false, reply: "reply" })
+        );
         assert_eq!(holds.answer(A, s, ask), None, "two answers");
         assert_eq!(holds.release(ask), None, "nothing left to release");
     }
@@ -429,10 +523,14 @@ mod tests {
         let mut holds = Holds::default();
         let s = session(1);
         holds.follow(s, A);
-        let ask = holds.ask(s, |_| 1).expect("held");
+        let ask = holds.ask(s, false, |_| 1).expect("held");
         assert_eq!(holds.answer(B, s, ask), None, "not a follower");
         assert_eq!(holds.answer(A, session(2), ask), None, "another session");
-        assert_eq!(holds.release(ask), Some(Held { session: s, reply: 1 }), "timed out");
+        assert_eq!(
+            holds.release(ask),
+            Some(Held { session: s, approvable: false, reply: 1 }),
+            "timed out"
+        );
         assert_eq!(holds.answer(A, s, ask), None, "answer after release");
     }
 
@@ -444,11 +542,14 @@ mod tests {
         holds.follow(s, A);
         holds.follow(s, B);
         holds.follow(t, B);
-        let first = holds.ask(s, |_| "s").expect("held");
-        let other = holds.ask(t, |_| "t").expect("held");
+        let first = holds.ask(s, false, |_| "s").expect("held");
+        let other = holds.ask(t, false, |_| "t").expect("held");
         assert!(holds.unfollow(s, A).is_empty(), "B still follows");
         assert_eq!(holds.get(first).map(|h| h.reply), Some("s"));
-        assert_eq!(holds.unfollow(s, B), [(first, Held { session: s, reply: "s" })]);
+        assert_eq!(
+            holds.unfollow(s, B),
+            [(first, Held { session: s, approvable: false, reply: "s" })]
+        );
         assert!(!holds.follows(B, s));
         assert_eq!(holds.answer(B, t, other).map(|h| h.reply), Some("t"), "t is unaffected");
         assert!(holds.unfollow(s, B).is_empty(), "unfollowing twice");
@@ -463,11 +564,11 @@ mod tests {
         holds.follow(s, A);
         holds.follow(t, A);
         holds.follow(t, B);
-        let on_s = holds.ask(s, |_| "s").expect("held");
-        let on_t = holds.ask(t, |_| "t").expect("held");
-        assert_eq!(holds.leave(A), [(on_s, Held { session: s, reply: "s" })]);
+        let on_s = holds.ask(s, false, |_| "s").expect("held");
+        let on_t = holds.ask(t, false, |_| "t").expect("held");
+        assert_eq!(holds.leave(A), [(on_s, Held { session: s, approvable: false, reply: "s" })]);
         assert!(holds.get(on_t).is_some(), "B still follows t");
-        assert_eq!(holds.ask(s, |_| "again"), None, "nobody follows s now");
+        assert_eq!(holds.ask(s, false, |_| "again"), None, "nobody follows s now");
     }
 
     /// A client that starts following while a prompt is held is shown it; ids are never reused.
@@ -476,8 +577,8 @@ mod tests {
         let mut holds = Holds::default();
         let s = session(1);
         assert!(holds.follow(s, A).is_empty());
-        let one = holds.ask(s, |_| ()).expect("held");
-        let two = holds.ask(s, |_| ()).expect("held");
+        let one = holds.ask(s, false, |_| ()).expect("held");
+        let two = holds.ask(s, false, |_| ()).expect("held");
         assert_eq!(holds.follow(s, B), [one, two]);
         assert_eq!(holds.follow(s, B), [one, two], "following twice is following once");
         let shown: Vec<u64> = holds.shown_to(B).map(|(id, _reply)| id).collect();
@@ -487,7 +588,7 @@ mod tests {
         holds.unfollow(s, A);
         holds.unfollow(s, B);
         holds.follow(s, A);
-        assert!(holds.ask(s, |_| ()).is_some_and(|three| three > two), "a fresh id");
+        assert!(holds.ask(s, false, |_| ()).is_some_and(|three| three > two), "a fresh id");
     }
 
     /// Orchestration follows like a connection: it holds a prompt, answers it, and a client
@@ -497,15 +598,57 @@ mod tests {
         let mut holds = Holds::default();
         let (s, t) = (session(1), session(2));
         assert!(holds.follow(s, ORCHESTRATION).is_empty());
-        let first = holds.ask(s, |_| "first").expect("held for orchestration");
+        let first = holds.ask(s, false, |_| "first").expect("held for orchestration");
         assert_eq!(holds.follow(s, A), [first], "a client that follows later is shown it");
         assert_eq!(holds.answer(ORCHESTRATION, s, first).map(|h| h.reply), Some("first"));
-        let second = holds.ask(s, |_| "second").expect("held");
+        let second = holds.ask(s, false, |_| "second").expect("held");
         holds.follow(t, ORCHESTRATION);
-        assert_eq!(holds.forget(s), [(second, Held { session: s, reply: "second" })]);
+        assert_eq!(
+            holds.forget(s),
+            [(second, Held { session: s, approvable: false, reply: "second" })]
+        );
         assert!(!holds.follows(ORCHESTRATION, s) && !holds.follows(A, s), "nobody follows s");
         assert!(holds.follows(ORCHESTRATION, t), "t is unaffected");
         assert!(holds.unfollow(s, A).is_empty(), "the connection's own unfollow finds nothing");
+    }
+
+    /// A client that answers approvals has a yes or no held for it with nobody following, and
+    /// is shown what already waits; a question waits only for followers. It answers or hands a
+    /// prompt back as a follower does, and the last approver going releases what only it could
+    /// answer, while a follower's unfollow still releases the session's prompts to the TUI.
+    #[test]
+    fn an_approver_is_held_for_without_following() {
+        let mut holds = Holds::default();
+        let (s, t) = (session(1), session(2));
+        assert_eq!(holds.reach(s, true), None, "nobody to answer");
+        holds.follow(t, B);
+        let question = holds.ask(t, false, |_| "question").expect("held for the follower");
+        let waiting = holds.ask(t, true, |_| "waiting").expect("held for the follower");
+        assert_eq!(
+            holds.approve(A),
+            [waiting],
+            "shown the yes or no already held, not the question"
+        );
+        assert_eq!(holds.approve(B), Vec::<u64>::new(), "a follower already sees them");
+        assert!(holds.stop_approving(B).is_empty(), "A still answers");
+        assert_eq!(holds.reach(s, true), Some(Reach::Approvers));
+        assert_eq!(holds.ask(s, false, |_| "question"), None, "a question needs a follower");
+        let yes = holds.ask(s, true, |_| "yes").expect("held for the approvers");
+        assert!(holds.tells(A, s, yes) && !holds.tells(A, t, question), "only the yes or no");
+        assert_eq!(holds.shown_to(A).map(|(id, _)| id).collect::<Vec<_>>(), [waiting, yes]);
+        assert_eq!(holds.answer(A, s, yes).map(|h| h.reply), Some("yes"), "an approver answers");
+        let no = holds.ask(s, true, |_| "no").expect("held");
+        let released = holds.stop_approving(A);
+        assert_eq!(released, [(no, Held { session: s, approvable: true, reply: "no" })]);
+        assert!(holds.get(waiting).is_some(), "B still follows t");
+        holds.approve(A);
+        let kept = holds.ask(s, true, |_| "kept").expect("held");
+        holds.follow(s, B);
+        let gone: Vec<u64> = holds.leave(B).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(gone, [question], "the question only B could answer");
+        assert!(holds.get(waiting).is_some() && holds.get(kept).is_some(), "A answers the rest");
+        holds.follow(s, B);
+        assert_eq!(holds.unfollow(s, B).len(), 1, "the person went back to the TUI");
     }
 
     /// The board keeps the latest meters and the named subagent files, and wakes a watcher on

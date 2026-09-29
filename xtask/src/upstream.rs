@@ -1,16 +1,23 @@
-//! `xtask upstream`: keep the GPUI and gpui-kit forks current with their upstreams.
+//! `xtask upstream`: keep the forks Slopty builds on current with their upstreams.
 //!
-//! The forks (`aislopware/zed` for `gpui`, `gpui_ios`, `gpui_platform`; `aislopware/gpui-kit`)
-//! are a handful of commits on top of a moving upstream. `xtask/upstream.toml` records where
-//! each fork branch sits (`base`, the upstream commit it was last rebased onto, and its date).
-//! `check` fetches both upstreams and reports the drift; `sync` rebases each fork onto the
-//! newest upstream, build-checks it, pushes it, moves this workspace's `Cargo.lock` pins and
-//! rewrites the base lines (plus `checked`, the day it confirmed the fork current). Once a fork
-//! was last known current longer ago than its own `check_every_days`, the gate asks its upstream
-//! for the branch head (`git ls-remote`, no fetch) and warns when it moved past the base.
+//! Three forks carry our commits on their default branch: `aislopware/gpui-fast` (`gpui`,
+//! `gpui_ios`, `gpui_platform`) on longbridge/gpui-fast, `aislopware/gpui-kit` and
+//! `aislopware/libghostty-rs`. gpui-fast is GPUI imported flat out of zed, and longbridge takes a
+//! newer zed only now and then, so the fork imports zed itself ([`zed`]) right after taking
+//! longbridge's branch: whatever longbridge already imported is never imported twice.
+//!
+//! `xtask/upstream.toml` records where each source stands (`base`, the upstream commit last
+//! taken, its date, and `checked`, the day a sync last confirmed it current). `check` fetches the
+//! upstreams and reports the drift; `sync` rebases or merges each fork onto its upstream, imports
+//! zed into gpui-fast, build-checks, pushes, moves this workspace's `Cargo.lock` pins and rewrites
+//! the base lines. Once a source was last known current longer ago than its own
+//! `check_every_days`, the gate asks its upstream for the branch head (`git ls-remote`, no fetch)
+//! and warns when it moved past the base.
 //!
 //! The checkouts live under the main checkout of this repository (shared by every worktree),
 //! cloned with `--filter=blob:none` on first use.
+
+mod zed;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,37 +31,83 @@ use crate::tools::{repo_root, step};
 
 /// The configuration file, relative to the repository root.
 const CONFIG: &str = "xtask/upstream.toml";
-/// Sync order: gpui-kit's lock resolves against the zed fork, so zed goes first.
 /// Where the vendored terminal source comes from.
 const GHOSTTY_UPSTREAM: &str = "https://github.com/ghostty-org/ghostty.git";
-
-const ORDER: [&str; 3] = ["zed", "gpui-kit", "libghostty-rs"];
-/// How many tags newer than the base `check` lists per fork.
+/// The fork zed is imported into.
+const GPUI_FAST: &str = "gpui-fast";
+/// Sync order: gpui-kit's lock resolves against the gpui-fast fork, so gpui-fast goes first.
+const ORDER: [&str; 3] = [GPUI_FAST, "gpui-kit", "libghostty-rs"];
+/// How many tags newer than the base `check` lists per source.
 const TAGS_SHOWN: usize = 6;
 
 /// `xtask upstream` subcommands.
 #[derive(Subcommand, Debug)]
 pub enum UpstreamCmd {
-    /// Fetch both upstreams and print how far each fork base is behind, plus the pin dates.
+    /// Fetch the upstreams and zed and print how far each fork is behind, plus the pins.
     Check,
-    /// Rebase each fork onto its upstream, build-check, push, and move the workspace pins.
+    /// Take each upstream into its fork, import zed into gpui-fast, build-check, push, and move
+    /// the workspace pins.
     Sync {
-        /// Only this fork (`zed` or `gpui-kit`).
+        /// Only this fork (`gpui-fast`, `gpui-kit` or `libghostty-rs`; `zed` is `gpui-fast`,
+        /// which takes longbridge's branch before it imports zed).
         #[arg(long)]
         only: Option<String>,
-        /// Rebase and build-check but neither push nor move the pins.
+        /// Take the upstreams and build-check but neither push nor move the pins.
         #[arg(long)]
         no_push: bool,
     },
 }
 
-/// One fork, as written in `upstream.toml`.
+/// Where a source stands on its upstream: what the gate's staleness check reads.
 #[derive(Debug, Deserialize)]
-struct Fork {
+struct Tracking {
     /// The upstream repository.
     upstream: String,
     /// The upstream branch we follow.
     upstream_branch: String,
+    /// The upstream commit last taken.
+    base: String,
+    /// Its commit date (`YYYY-MM-DD`).
+    base_date: String,
+    /// The day `sync` last confirmed the source current (`YYYY-MM-DD`); a quiet upstream keeps
+    /// an old `base_date`, and this is what keeps the gate from calling it stale.
+    checked: String,
+    /// How many days the source may go unconfirmed before the gate asks its upstream again: none
+    /// for an upstream that lands several changes a day (every gate asks), a week for the others.
+    check_every_days: i64,
+}
+
+impl Tracking {
+    /// Days since the source was last known current: the later of the base commit and the last
+    /// confirming `sync`.
+    fn days_since_current(&self, today: i64) -> Result<i64> {
+        let base = days_from_civil(&self.base_date)?;
+        let checked = days_from_civil(&self.checked)?;
+        Ok(today.saturating_sub(base.max(checked)).max(0))
+    }
+
+    /// Whether the source's interval has run out, so the gate asks its upstream.
+    fn due(&self, today: i64) -> Result<bool> {
+        Ok(self.days_since_current(today)? >= self.check_every_days)
+    }
+}
+
+/// How a fork takes its upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Strategy {
+    /// Replay our commits onto the upstream head (force-pushed with a lease).
+    Rebase,
+    /// Merge the upstream head into our branch. gpui-fast's zed imports are merges of vendor
+    /// commits that sit beside its branch; a rebase would replay or drop them.
+    Merge,
+}
+
+/// One fork, as written in `upstream.toml`.
+#[derive(Debug, Deserialize)]
+struct Fork {
+    #[serde(flatten)]
+    tracking: Tracking,
     /// Our fork.
     #[serde(rename = "fork")]
     url: String,
@@ -63,39 +116,26 @@ struct Fork {
     branch: String,
     /// Checkout directory, relative to the main checkout of this repository.
     checkout: Utf8PathBuf,
-    /// The upstream commit the fork branch was last rebased onto.
-    base: String,
-    /// Its commit date (`YYYY-MM-DD`).
-    base_date: String,
-    /// The day `sync` last confirmed the fork sits on the upstream head (`YYYY-MM-DD`); a quiet
-    /// upstream keeps an old `base_date`, and this is what keeps the gate from calling it stale.
-    #[serde(default)]
-    checked: String,
-    /// How many days the fork may go unconfirmed before the gate asks its upstream again: none
-    /// for an upstream that lands several changes a day (gpui-kit: every gate asks), a week for
-    /// the others.
-    check_every_days: i64,
+    strategy: Strategy,
 }
 
-impl Fork {
-    /// Days since the fork was last known current: the later of the base commit and the last
-    /// confirming `sync`.
-    fn days_since_current(&self, today: i64) -> Result<i64> {
-        let base = days_from_civil(&self.base_date)?;
-        let checked = if self.checked.is_empty() { base } else { days_from_civil(&self.checked)? };
-        Ok(today.saturating_sub(base.max(checked)).max(0))
-    }
-
-    /// Whether the fork's interval has run out, so the gate asks its upstream.
-    fn due(&self, today: i64) -> Result<bool> {
-        Ok(self.days_since_current(today)? >= self.check_every_days)
-    }
+/// zed, which is not forked but imported into gpui-fast.
+#[derive(Debug, Deserialize)]
+struct Import {
+    /// `base` is the zed commit the fork is known current with: the one it imported, or a later
+    /// one that changed nothing in the tracked directories.
+    #[serde(flatten)]
+    tracking: Tracking,
+    /// A zed clone, relative to the main checkout; only its objects are used.
+    checkout: Utf8PathBuf,
 }
 
-/// The whole file, in [`ORDER`].
+/// The whole file.
 #[derive(Debug, Deserialize)]
 struct Config {
-    zed: Fork,
+    #[serde(rename = "gpui-fast")]
+    gpui_fast: Fork,
+    zed: Import,
     #[serde(rename = "gpui-kit")]
     gpui_kit: Fork,
     #[serde(rename = "libghostty-rs")]
@@ -109,8 +149,32 @@ impl Config {
         toml::from_str(&text).with_context(|| format!("parsing {path}"))
     }
 
+    /// The forks, in [`ORDER`].
     const fn forks(&self) -> [(&'static str, &Fork); 3] {
-        [(ORDER[0], &self.zed), (ORDER[1], &self.gpui_kit), (ORDER[2], &self.libghostty_rs)]
+        [(ORDER[0], &self.gpui_fast), (ORDER[1], &self.gpui_kit), (ORDER[2], &self.libghostty_rs)]
+    }
+
+    /// Everything the gate watches.
+    const fn sources(&self) -> [(&'static str, &Tracking); 4] {
+        [
+            (ORDER[0], &self.gpui_fast.tracking),
+            ("zed", &self.zed.tracking),
+            (ORDER[1], &self.gpui_kit.tracking),
+            (ORDER[2], &self.libghostty_rs.tracking),
+        ]
+    }
+}
+
+/// The forks `--only` picks, in sync order. zed goes through gpui-fast, which takes longbridge's
+/// branch first.
+fn selected(only: Option<&str>) -> Result<Vec<&'static str>> {
+    match only {
+        None => Ok(ORDER.to_vec()),
+        Some("zed") => Ok(vec![GPUI_FAST]),
+        Some(name) => match ORDER.iter().find(|fork| **fork == name) {
+            Some(fork) => Ok(vec![*fork]),
+            None => bail!("no fork named {name:?} in {CONFIG}; expected zed or one of {ORDER:?}"),
+        },
     }
 }
 
@@ -121,21 +185,43 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
     match cmd {
         UpstreamCmd::Check => {
             for (name, fork) in config.forks() {
-                check(sh, &root, &main, name, fork)?;
+                let checked = check(sh, &root, &main, name, fork)?;
+                if name == GPUI_FAST {
+                    let zed_dir = ensure_checkout(
+                        sh,
+                        &main,
+                        &config.zed.checkout,
+                        &config.zed.tracking.upstream,
+                        None,
+                    )?;
+                    zed::check(
+                        sh,
+                        &config.zed,
+                        &zed_dir,
+                        &checked.dir,
+                        &checked.fork_head,
+                        &checked.upstream,
+                    )?;
+                }
             }
             Ok(())
         }
         UpstreamCmd::Sync { only, no_push } => {
+            let names = selected(only.as_deref())?;
             let mut synced = Vec::new();
             for (name, fork) in config.forks() {
-                if only.as_deref().is_some_and(|o| o != name) {
+                if !names.contains(&name) {
                     continue;
                 }
-                synced.push((name, sync(sh, &main, name, fork, *no_push)?));
+                let zed = (name == GPUI_FAST).then_some(&config.zed);
+                let done = sync(sh, &main, name, fork, zed, *no_push)?;
+                synced.push((name, done.upstream));
+                if let Some(head) = done.zed {
+                    synced.push(("zed", head));
+                }
             }
-            ensure!(!synced.is_empty(), "no fork named {only:?} in {CONFIG}");
             if *no_push {
-                println!("✔ rebased and checked; nothing pushed (--no-push)");
+                println!("✔ upstreams taken and checked; nothing pushed (--no-push)");
                 return Ok(());
             }
             let _dir = sh.push_dir(&root);
@@ -146,14 +232,15 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
             }
             println!(
                 "✔ forks pushed and pins moved; now `cargo xtask gate`, then `cargo xtask e2e app` \
-                 and `cargo xtask e2e ios --sim iphone`, and record the bases in docs/DECISIONS.md"
+                 and `cargo xtask e2e ios --sim iphone`, and record the bases in \
+                 docs/decisions/tooling.md"
             );
             Ok(())
         }
     }
 }
 
-/// Print a warning line for each fork past its `check_every_days` whose upstream branch moved
+/// Print a warning line for each source past its `check_every_days` whose upstream branch moved
 /// past its base; an upstream that cannot be reached is warned about by the dates alone. Never
 /// fails: the gate calls it and a broken config is reported as the warning itself.
 pub fn warn_if_stale() {
@@ -163,26 +250,25 @@ pub fn warn_if_stale() {
         let today = today_days()?;
         let sh = Shell::new()?;
         let mut stale = Vec::new();
-        for (name, fork) in config.forks() {
-            if !fork.due(today)? {
+        for (name, source) in config.sources() {
+            if !source.due(today)? {
                 continue;
             }
-            let age = fork.days_since_current(today)?;
-            match remote_head(&sh, fork) {
-                Ok(head) if head == fork.base => {}
+            let age = source.days_since_current(today)?;
+            match remote_head(&sh, source) {
+                Ok(head) if head == source.base => {}
                 Ok(head) => stale.push(format!(
                     "{name}'s upstream {} moved to {} since base {} ({}); run `cargo xtask \
                      upstream sync --only {name}`",
-                    fork.upstream_branch,
+                    source.upstream_branch,
                     short(&head),
-                    short(&fork.base),
-                    fork.base_date,
+                    short(&source.base),
+                    source.base_date,
                 )),
                 Err(error) => stale.push(format!(
                     "{name} was last known current {age} days ago (base {}, checked {}; upstream \
                      unreachable: {error:#}); run `cargo xtask upstream check`",
-                    fork.base_date,
-                    if fork.checked.is_empty() { "never" } else { &fork.checked }
+                    source.base_date, source.checked
                 )),
             }
         }
@@ -200,8 +286,8 @@ pub fn warn_if_stale() {
 
 /// The upstream branch's head, asked of the remote without fetching. A stalled connection gives
 /// up after a few seconds rather than holding the gate.
-fn remote_head(sh: &Shell, fork: &Fork) -> Result<String> {
-    let (url, branch) = (&fork.upstream, format!("refs/heads/{}", fork.upstream_branch));
+fn remote_head(sh: &Shell, source: &Tracking) -> Result<String> {
+    let (url, branch) = (&source.upstream, format!("refs/heads/{}", source.upstream_branch));
     let out =
         cmd!(sh, "git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 ls-remote {url} {branch}")
             .quiet()
@@ -210,43 +296,61 @@ fn remote_head(sh: &Shell, fork: &Fork) -> Result<String> {
     out.split_whitespace().next().map(str::to_owned).context("the branch is not on the remote")
 }
 
-/// A fetched upstream: head commit and date.
+/// A fetched head: commit and date.
 #[derive(Debug)]
 struct Head {
     sha: String,
     date: String,
 }
 
-fn check(sh: &Shell, root: &Utf8Path, main: &Utf8Path, name: &str, fork: &Fork) -> Result<()> {
-    let dir = ensure_checkout(sh, main, fork)?;
+/// What `check` fetched for a fork, for the zed check that follows gpui-fast's.
+#[derive(Debug)]
+struct Checked {
+    dir: Utf8PathBuf,
+    fork_head: String,
+    upstream: String,
+}
+
+fn check(sh: &Shell, root: &Utf8Path, main: &Utf8Path, name: &str, fork: &Fork) -> Result<Checked> {
+    let dir = ensure_checkout(sh, main, &fork.checkout, &fork.url, Some(&fork.branch))?;
     let _dir = sh.push_dir(&dir);
-    let upstream = fetch(sh, &fork.upstream, &fork.upstream_branch)?;
+    let tracking = &fork.tracking;
+    let upstream = fetch(sh, &tracking.upstream, &tracking.upstream_branch)?;
     let fork_head = fetch(sh, &fork.url, &fork.branch)?;
-    let range = format!("{}..{}", fork.base, upstream.sha);
+    let range = format!("{}..{}", tracking.base, upstream.sha);
     let behind = cmd!(sh, "git rev-list --count {range}").read()?;
-    let tags = tags_since(sh, &fork.base, &upstream.sha)?;
-    let age = fork.days_since_current(today_days()?)?;
+    let tags = tags_since(sh, &tracking.base, &upstream.sha)?;
+    let age = tracking.days_since_current(today_days()?)?;
     println!(
         "{name}: base {} ({}, current {age} days ago); upstream {} at {} ({}): {behind} commits \
          ahead",
-        short(&fork.base),
-        fork.base_date,
-        fork.upstream_branch,
+        short(&tracking.base),
+        tracking.base_date,
+        tracking.upstream_branch,
         short(&upstream.sha),
         upstream.date,
     );
     if !tags.is_empty() {
         println!("  tags since base: {}", tags.join(", "));
     }
-    let pin = lock_pin(root, fork)?;
-    let pin_date = commit_date(sh, &pin).unwrap_or_else(|_| "not fetched".to_owned());
-    let state = if pin == fork_head.sha { "= fork head" } else { "≠ fork head" };
-    println!(
-        "  Cargo.lock pins {} ({pin_date}) {state} {} ({})",
-        short(&pin),
-        short(&fork_head.sha),
-        fork_head.date
-    );
+    match lock_pin(root, &fork.url)? {
+        Some(pin) => {
+            let pin_date = commit_date(sh, &pin).unwrap_or_else(|_| "not fetched".to_owned());
+            let state = if pin == fork_head.sha { "= fork head" } else { "≠ fork head" };
+            println!(
+                "  Cargo.lock pins {} ({pin_date}) {state} {} ({})",
+                short(&pin),
+                short(&fork_head.sha),
+                fork_head.date
+            );
+        }
+        None => println!(
+            "  Cargo.lock pins nothing from {}; fork head {} ({})",
+            fork.url,
+            short(&fork_head.sha),
+            fork_head.date
+        ),
+    }
     let branch = &fork.branch;
     let local = cmd!(sh, "git rev-parse --verify --quiet {branch}")
         .ignore_stderr()
@@ -258,7 +362,7 @@ fn check(sh: &Shell, root: &Utf8Path, main: &Utf8Path, name: &str, fork: &Fork) 
     if name == "libghostty-rs" {
         ghostty_pin_report(sh, root, &fork_head.sha)?;
     }
-    Ok(())
+    Ok(Checked { dir, fork_head: fork_head.sha, upstream: upstream.sha })
 }
 
 /// The binding pins one ghostty commit (`GHOSTTY_COMMIT` in its sys build script) and the
@@ -290,11 +394,85 @@ fn ghostty_pin_report(sh: &Shell, root: &Utf8Path, fork_head: &str) -> Result<()
     Ok(())
 }
 
-/// Rebase, build-check and push one fork. Returns the new base (upstream head sha + date).
-fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> Result<Head> {
-    let dir = ensure_checkout(sh, main, fork)?;
+/// What one fork's sync took: the upstream head, and for gpui-fast the zed head it is now
+/// current with.
+#[derive(Debug)]
+struct Synced {
+    upstream: Head,
+    zed: Option<Head>,
+}
+
+/// Take the upstream into one fork, import zed when given, build-check and push.
+fn sync(
+    sh: &Shell,
+    main: &Utf8Path,
+    name: &str,
+    fork: &Fork,
+    zed: Option<&Import>,
+    no_push: bool,
+) -> Result<Synced> {
+    let dir = ensure_checkout(sh, main, &fork.checkout, &fork.url, Some(&fork.branch))?;
     let _dir = sh.push_dir(&dir);
     println!("▶ {name}: {dir}");
+    ensure_idle(sh, &dir)?;
+
+    let upstream = fetch(sh, &fork.tracking.upstream, &fork.tracking.upstream_branch)?;
+    let fork_head = fetch(sh, &fork.url, &fork.branch)?;
+    reconcile_local(sh, &dir, fork, &fork_head, &upstream)?;
+
+    let (branch, onto) = (&fork.branch, &upstream.sha);
+    let already = cmd!(sh, "git merge-base --is-ancestor {onto} {branch}").run().is_ok();
+    match fork.strategy {
+        Strategy::Rebase => {
+            if already {
+                println!("  {name} already contains upstream {}", short(onto));
+            } else if cmd!(sh, "git rebase {onto} {branch}").run().is_err() {
+                resolve_conflicts(sh, &dir, onto, Strategy::Rebase)?;
+            }
+        }
+        Strategy::Merge => {
+            cmd!(sh, "git switch --quiet {branch}").run()?;
+            if already {
+                println!("  {name} already contains upstream {}", short(onto));
+            } else {
+                let message = format!(
+                    "Merge {} {} at {}",
+                    repo_slug(&fork.tracking.upstream),
+                    fork.tracking.upstream_branch,
+                    short(onto)
+                );
+                if cmd!(sh, "git merge --no-edit -m {message} {onto}").run().is_err() {
+                    resolve_conflicts(sh, &dir, onto, Strategy::Merge)?;
+                }
+            }
+        }
+    }
+
+    let zed = match zed {
+        Some(zed) => {
+            let zed_dir = ensure_checkout(sh, main, &zed.checkout, &zed.tracking.upstream, None)?;
+            Some(zed::sync(sh, zed, &zed_dir, &dir, branch)?)
+        }
+        None => None,
+    };
+
+    for (title, command) in build_checks(name) {
+        let mut words = command.split(' ');
+        let program = words.next().unwrap_or_default();
+        step(title, &cmd!(sh, "{program} {words...}"))?;
+    }
+
+    if !no_push {
+        let remote = remote_for(sh, &fork.url)?;
+        let refspec = format!("{branch}:{branch}");
+        let lease = format!("--force-with-lease={branch}:{}", fork_head.sha);
+        step("push", &cmd!(sh, "git push {remote} {refspec} {lease}"))?;
+    }
+    Ok(Synced { upstream, zed })
+}
+
+/// A sync starts from a checkout with no rebase or merge in progress and nothing uncommitted.
+fn ensure_idle(sh: &Shell, dir: &Utf8Path) -> Result<()> {
     // `REBASE_HEAD` outlives a finished rebase; the state directories do not.
     let mid_rebase = ["rebase-merge", "rebase-apply"].into_iter().any(|state| {
         cmd!(sh, "git rev-parse --git-path {state}")
@@ -303,127 +481,124 @@ fn sync(sh: &Shell, main: &Utf8Path, name: &str, fork: &Fork, no_push: bool) -> 
             .is_ok_and(|path| Utf8Path::new(path.trim()).exists())
     });
     ensure!(!mid_rebase, "{dir} is mid-rebase; finish or abort it first");
+    let mid_merge =
+        cmd!(sh, "git rev-parse -q --verify MERGE_HEAD").quiet().ignore_stdout().run().is_ok();
+    ensure!(!mid_merge, "{dir} is mid-merge; finish it (`git commit`) or abort it first");
     let dirty = cmd!(sh, "git status --porcelain").read()?;
     ensure!(dirty.is_empty(), "{dir} has uncommitted changes:\n{dirty}");
+    Ok(())
+}
 
-    let upstream = fetch(sh, &fork.upstream, &fork.upstream_branch)?;
-    let fork_head = fetch(sh, &fork.url, &fork.branch)?;
+/// Make the local branch the one to build on: created at the fork head when missing, kept when it
+/// is the fork head or ahead of it, refused when it has diverged.
+fn reconcile_local(
+    sh: &Shell,
+    dir: &Utf8Path,
+    fork: &Fork,
+    fork_head: &Head,
+    upstream: &Head,
+) -> Result<()> {
     let branch = &fork.branch;
     let fork_sha = &fork_head.sha;
     let local = cmd!(sh, "git rev-parse --verify --quiet {branch}").ignore_stderr().read().ok();
-    match local {
-        None => {
-            step("branch", &cmd!(sh, "git branch --no-track {branch} {fork_sha}"))?;
-        }
-        Some(local) if local == fork_head.sha => {}
-        Some(local) => {
-            // The fork head is usually an ancestor. It is not when the previous `sync` rebased
-            // this branch and then stopped (a build-check failed and the fix landed here), so
-            // fall back to patches: a branch that carries every fork patch is ahead, not
-            // diverged. `git cherry` marks a patch missing from the branch with `+`.
-            let fork_is_ancestor =
-                cmd!(sh, "git merge-base --is-ancestor {fork_sha} {local}").run().is_ok();
-            let carries_every_patch = || {
-                cmd!(sh, "git cherry {local} {fork_sha}")
-                    .quiet()
-                    .read()
-                    .is_ok_and(|out| !out.lines().any(|line| line.starts_with('+')))
-            };
-            // A conflict resolved by hand rewrites the patch, so `git cherry` cannot vouch for
-            // it either: then accept the branch when it sits on a newer upstream than the fork
-            // and replays the fork's patches by subject, in order, before any fixes of its own.
-            // Upstream may have moved again since, so the branch's own base is what counts.
-            let upstream_sha = &upstream.sha;
-            let replays_every_patch = || {
-                let read = |cmd: xshell::Cmd<'_>| cmd.quiet().read().ok();
-                let subjects = |range: &str| {
-                    read(cmd!(sh, "git log --format=%s --reverse {range}"))
-                        .map(|out| out.lines().map(str::to_owned).collect::<Vec<_>>())
-                };
-                let (Some(fork_base), Some(local_base)) = (
-                    read(cmd!(sh, "git merge-base {fork_sha} {upstream_sha}")),
-                    read(cmd!(sh, "git merge-base {local} {upstream_sha}")),
-                ) else {
-                    return false;
-                };
-                let (fork_base, local_base) = (fork_base.trim(), local_base.trim());
-                let rebased = cmd!(sh, "git merge-base --is-ancestor {fork_base} {local_base}")
-                    .quiet()
-                    .run()
-                    .is_ok();
-                let (Some(replayed), Some(patches)) = (
-                    subjects(&format!("{local_base}..{local}")),
-                    subjects(&format!("{fork_base}..{fork_sha}")),
-                ) else {
-                    return false;
-                };
-                rebased && replayed.starts_with(&patches)
-            };
-            ensure!(
-                fork_is_ancestor || carries_every_patch() || replays_every_patch(),
-                "{}'s {} ({}) has diverged from {} ({}); reset it or push it first",
-                dir,
-                fork.branch,
-                short(&local),
-                fork.url,
-                short(&fork_head.sha)
-            );
-            println!("  note: {branch} is ahead of the fork; rebasing it too");
-        }
+    let Some(local) = local else {
+        return step("branch", &cmd!(sh, "git branch --no-track {branch} {fork_sha}"));
+    };
+    if local == fork_head.sha {
+        return Ok(());
     }
-
-    let onto = &upstream.sha;
-    let already = cmd!(sh, "git merge-base --is-ancestor {onto} {branch}").run().is_ok();
-    if already {
-        println!("  {name} already contains upstream {}", short(onto));
-    } else if cmd!(sh, "git rebase {onto} {branch}").run().is_err() {
-        resolve_conflicts(sh, &dir, onto)?;
-    }
-
-    for (title, args) in build_checks(name) {
-        let args = args.split(' ');
-        step(title, &cmd!(sh, "cargo {args...}"))?;
-    }
-
-    if !no_push {
-        let url = &fork.url;
-        let refspec = format!("{branch}:{branch}");
-        let lease = format!("--force-with-lease={}:{}", fork.branch, fork_head.sha);
-        step("push", &cmd!(sh, "git push {url} {refspec} {lease}"))?;
-    }
-    Ok(upstream)
+    // The fork head is usually an ancestor. Under a rebase it is not when the previous `sync`
+    // rebased this branch and then stopped (a build-check failed and the fix landed here), so fall
+    // back to patches: a branch that carries every fork patch is ahead, not diverged. `git
+    // cherry` marks a patch missing from the branch with `+`.
+    let fork_is_ancestor =
+        cmd!(sh, "git merge-base --is-ancestor {fork_sha} {local}").run().is_ok();
+    let carries_every_patch = || {
+        cmd!(sh, "git cherry {local} {fork_sha}")
+            .quiet()
+            .read()
+            .is_ok_and(|out| !out.lines().any(|line| line.starts_with('+')))
+    };
+    // A conflict resolved by hand rewrites the patch, so `git cherry` cannot vouch for it either:
+    // then accept the branch when it sits on a newer upstream than the fork and replays the
+    // fork's patches by subject, in order, before any fixes of its own. Upstream may have moved
+    // again since, so the branch's own base is what counts.
+    let upstream_sha = &upstream.sha;
+    let replays_every_patch = || {
+        let read = |cmd: xshell::Cmd<'_>| cmd.quiet().read().ok();
+        let subjects = |range: &str| {
+            read(cmd!(sh, "git log --format=%s --reverse {range}"))
+                .map(|out| out.lines().map(str::to_owned).collect::<Vec<_>>())
+        };
+        let (Some(fork_base), Some(local_base)) = (
+            read(cmd!(sh, "git merge-base {fork_sha} {upstream_sha}")),
+            read(cmd!(sh, "git merge-base {local} {upstream_sha}")),
+        ) else {
+            return false;
+        };
+        let (fork_base, local_base) = (fork_base.trim(), local_base.trim());
+        let rebased =
+            cmd!(sh, "git merge-base --is-ancestor {fork_base} {local_base}").quiet().run().is_ok();
+        let (Some(replayed), Some(patches)) = (
+            subjects(&format!("{local_base}..{local}")),
+            subjects(&format!("{fork_base}..{fork_sha}")),
+        ) else {
+            return false;
+        };
+        rebased && replayed.starts_with(&patches)
+    };
+    let rebased_ahead =
+        fork.strategy == Strategy::Rebase && (carries_every_patch() || replays_every_patch());
+    ensure!(
+        fork_is_ancestor || rebased_ahead,
+        "{}'s {} ({}) has diverged from {} ({}); reset it or push it first",
+        dir,
+        fork.branch,
+        short(&local),
+        fork.url,
+        short(&fork_head.sha)
+    );
+    println!("  note: {branch} is ahead of the fork; taking the upstream into it too");
+    Ok(())
 }
 
-/// The per-fork `cargo` invocations run inside the checkout after a rebase.
+/// The per-fork checks run inside the checkout once it holds the upstream: a program and its
+/// arguments, space-separated.
 fn build_checks(name: &str) -> &'static [(&'static str, &'static str)] {
     match name {
-        "zed" => &[
+        GPUI_FAST => &[
+            // gpui-fast's own rule that upstream files hold only small hooks.
+            ("check-upstream", "script/check-upstream"),
             (
                 "check gpui + gpui_ios (ios-sim)",
-                "check -p gpui -p gpui_ios --target aarch64-apple-ios-sim",
+                "cargo check -p gpui -p gpui_ios --target aarch64-apple-ios-sim",
             ),
-            ("check gpui + gpui_platform (host)", "check -p gpui -p gpui_platform"),
+            ("check gpui + gpui_platform (host)", "cargo check -p gpui -p gpui_platform"),
         ],
-        "gpui-kit" => &[("check gpui-kit", "check -p gpui-kit --features component,assets")],
+        "gpui-kit" => &[("check gpui-kit", "cargo check -p gpui-kit --features component,assets")],
         // `GHOSTTY_SOURCE_DIR` comes from this workspace's `.cargo/config.toml` (the checkout
         // sits under the main clone), so the check builds against `vendor/ghostty`.
-        "libghostty-rs" => &[("check libghostty-vt", "check -p libghostty-vt --all-targets")],
+        "libghostty-rs" => &[("check libghostty-vt", "cargo check -p libghostty-vt --all-targets")],
         _ => &[],
     }
 }
 
-/// A rebase stopped on conflicts. `Cargo.lock` alone is mechanical (our commits only add git
-/// sources to it): take upstream's lock and let cargo re-add ours. Anything else is left
-/// mid-rebase for a person or an agent, with the file list in the error.
-fn resolve_conflicts(sh: &Shell, dir: &Utf8Path, upstream: &str) -> Result<()> {
+/// A rebase or merge stopped on conflicts. `Cargo.lock` alone is mechanical (our commits only add
+/// git sources to it): take upstream's lock and let cargo re-add ours. Anything else is left
+/// mid-way for a person or an agent, with the file list in the error.
+fn resolve_conflicts(sh: &Shell, dir: &Utf8Path, upstream: &str, strategy: Strategy) -> Result<()> {
+    let (what, finish) = match strategy {
+        Strategy::Rebase => ("rebase", "`git rebase --continue`"),
+        Strategy::Merge => ("merge", "`git commit`"),
+    };
     loop {
         let conflicted = cmd!(sh, "git diff --name-only --diff-filter=U").read()?;
         let files: Vec<&str> = conflicted.lines().collect();
         if files != ["Cargo.lock"] {
             bail!(
-                "rebase stopped in {dir} on conflicts in: {}\n  resolve them there (read the \
-                 upstream change before choosing a side), `git rebase --continue`, then run \
-                 `cargo xtask upstream sync` again",
+                "{what} stopped in {dir} on conflicts in: {}\n  resolve them there (read the \
+                 upstream change before choosing a side), {finish}, then run `cargo xtask \
+                 upstream sync` again",
                 if files.is_empty() {
                     "(none listed; see `git status`)".to_owned()
                 } else {
@@ -436,23 +611,34 @@ fn resolve_conflicts(sh: &Shell, dir: &Utf8Path, upstream: &str) -> Result<()> {
         step("cargo update -w (lock from upstream)", &cmd!(sh, "cargo update -w"))?;
         cmd!(sh, "git add Cargo.lock").run()?;
         let _editor = sh.push_env("GIT_EDITOR", "true");
-        if cmd!(sh, "git rebase --continue").run().is_ok() {
+        let finished = match strategy {
+            Strategy::Rebase => cmd!(sh, "git rebase --continue").run(),
+            Strategy::Merge => cmd!(sh, "git commit --no-edit").run(),
+        };
+        if finished.is_ok() {
             return Ok(());
         }
     }
 }
 
-/// Clone the checkout on first use (fork branch, blobless), returning its absolute path.
-fn ensure_checkout(sh: &Shell, main: &Utf8Path, fork: &Fork) -> Result<Utf8PathBuf> {
-    let dir = main.join(&fork.checkout);
+/// Clone the checkout on first use (blobless; at `branch`, or without a work tree when there is
+/// none to build on), returning its absolute path.
+fn ensure_checkout(
+    sh: &Shell,
+    main: &Utf8Path,
+    checkout: &Utf8Path,
+    url: &str,
+    branch: Option<&str>,
+) -> Result<Utf8PathBuf> {
+    let dir = main.join(checkout);
     if !dir.join(".git").exists() {
         if let Some(parent) = dir.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("creating {parent}"))?;
         }
-        let (url, branch) = (&fork.url, &fork.branch);
+        let at: Vec<&str> = branch.map_or_else(|| vec!["--no-checkout"], |b| vec!["--branch", b]);
         step(
             &format!("clone {url}"),
-            &cmd!(sh, "git clone --filter=blob:none --branch {branch} {url} {dir}"),
+            &cmd!(sh, "git clone --filter=blob:none {at...} {url} {dir}"),
         )?;
     }
     Ok(dir)
@@ -481,7 +667,8 @@ fn fetch(sh: &Shell, url: &str, branch: &str) -> Result<Head> {
     Ok(Head { sha, date })
 }
 
-/// The remote whose URL is `url`, added as `upstream`/`fork`-style names when absent.
+/// The remote whose URL names the same repository as `url`, added under the owner's name when
+/// absent.
 fn remote_for(sh: &Shell, url: &str) -> Result<String> {
     let names = cmd!(sh, "git remote").read()?;
     for name in names.lines() {
@@ -499,9 +686,36 @@ fn remote_for(sh: &Shell, url: &str) -> Result<String> {
     Ok(name)
 }
 
+/// Whether two remote URLs name one repository, over HTTPS or SSH, with or without `.git`.
 fn same_repo(a: &str, b: &str) -> bool {
-    a.trim_end_matches('/').trim_end_matches(".git")
-        == b.trim_end_matches('/').trim_end_matches(".git")
+    repo_key(a) == repo_key(b)
+}
+
+/// `host/owner/repo` for a remote URL (`https://host/owner/repo.git`, `git@host:owner/repo`,
+/// `ssh://git@host/owner/repo`); a local path stays as it is.
+fn repo_key(url: &str) -> String {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url).trim_end_matches('/');
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest.to_owned(),
+        None if url.starts_with('/') || url.starts_with('.') => return url.to_owned(),
+        None => url.replacen(':', "/", 1),
+    };
+    let rest = match rest.split_once('@') {
+        Some((user, host)) if !user.contains('/') => host,
+        _ => &rest,
+    };
+    rest.to_ascii_lowercase()
+}
+
+/// `owner/repo` for a remote URL, for merge messages.
+fn repo_slug(url: &str) -> String {
+    let key = repo_key(url);
+    let mut parts = key.rsplit('/');
+    match (parts.next(), parts.next()) {
+        (Some(repo), Some(owner)) => format!("{owner}/{repo}"),
+        _ => key.clone(),
+    }
 }
 
 fn is_partial(sh: &Shell) -> bool {
@@ -534,18 +748,23 @@ fn tags_since(sh: &Shell, base: &str, head: &str) -> Result<Vec<String>> {
     Ok(tags)
 }
 
-/// The commit this workspace's `Cargo.lock` pins for the fork's git source.
-fn lock_pin(root: &Utf8Path, fork: &Fork) -> Result<String> {
+/// The commit this workspace's `Cargo.lock` pins for the git source at `url`, if it has one.
+fn lock_pin(root: &Utf8Path, url: &str) -> Result<Option<String>> {
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
-    let needle = format!("source = \"git+{}#", fork.url);
-    lock.lines()
-        .find_map(|line| line.strip_prefix(&needle))
-        .map(|rest| rest.trim_end_matches('"').to_owned())
-        .with_context(|| format!("Cargo.lock has no entry for {}", fork.url))
+    Ok(lock_pin_in(&lock, url))
+}
+
+fn lock_pin_in(lock: &str, url: &str) -> Option<String> {
+    lock.lines().find_map(|line| {
+        let source = line.strip_prefix("source = \"git+")?.strip_suffix('"')?;
+        let (location, sha) = source.rsplit_once('#')?;
+        let location = location.split_once('?').map_or(location, |(repo, _)| repo);
+        same_repo(location, url).then(|| sha.to_owned())
+    })
 }
 
 /// Rewrite the `base`, `base_date` and `checked` lines of one `[section]` in place, keeping
-/// comments; `checked` becomes `today` and is added after `base_date` when the section has none.
+/// comments; `checked` becomes `today`.
 fn write_base(root: &Utf8Path, name: &str, head: &Head, today: &str) -> Result<()> {
     use std::fmt::Write as _;
 
@@ -553,15 +772,10 @@ fn write_base(root: &Utf8Path, name: &str, head: &Head, today: &str) -> Result<(
     let text = std::fs::read_to_string(&path)?;
     let header = format!("[{name}]");
     let mut inside = false;
-    let mut checked_written = false;
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
         if line.starts_with('[') {
-            if inside && !checked_written {
-                let _written = writeln!(out, "checked = \"{today}\"");
-            }
             inside = line.trim() == header;
-            checked_written = false;
         }
         if inside && line.starts_with("base = ") {
             let _written = write!(out, "base = \"{}\"", head.sha);
@@ -569,17 +783,10 @@ fn write_base(root: &Utf8Path, name: &str, head: &Head, today: &str) -> Result<(
             let _written = write!(out, "base_date = \"{}\"", head.date);
         } else if inside && line.starts_with("checked = ") {
             let _written = write!(out, "checked = \"{today}\"");
-            checked_written = true;
-        } else if inside && line.is_empty() && !checked_written {
-            let _written = writeln!(out, "checked = \"{today}\"");
-            checked_written = true;
         } else {
             out.push_str(line);
         }
         out.push('\n');
-    }
-    if inside && !checked_written {
-        let _written = writeln!(out, "checked = \"{today}\"");
     }
     std::fs::write(&path, out).with_context(|| format!("writing {path}"))
 }
@@ -646,6 +853,17 @@ fn days_from_civil(date: &str) -> Result<i64> {
 mod tests {
     use super::*;
 
+    fn tracking(base_date: &str, checked: &str, check_every_days: i64) -> Tracking {
+        Tracking {
+            upstream: String::new(),
+            upstream_branch: String::new(),
+            base: String::new(),
+            base_date: base_date.to_owned(),
+            checked: checked.to_owned(),
+            check_every_days,
+        }
+    }
+
     #[test]
     fn epoch_and_known_dates() {
         assert_eq!(days_from_civil("1970-01-01").ok(), Some(0), "epoch");
@@ -660,30 +878,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("xtask-upstream-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("xtask")).expect("tmp dir");
         let root = Utf8PathBuf::from_path_buf(dir.clone()).expect("utf8 tmp dir");
-        std::fs::write(
-            root.join(CONFIG),
-            "# note\n[zed]\nbase = \"a\"\nbase_date = \"2020-01-01\"\n\n[gpui-kit]\nbase = \"b\"\nbase_date = \"2020-01-02\"\n",
-        )
-        .expect("write");
+        let before = "# note\n[gpui-fast]\nbase = \"a\"\nbase_date = \"2020-01-01\"\nchecked = \"2020-01-01\"\n\n\
+                      [zed]\nbase = \"b\"\nbase_date = \"2020-01-02\"\nchecked = \"2020-01-03\"\n";
+        std::fs::write(root.join(CONFIG), before).expect("write");
         let head = Head { sha: "c".to_owned(), date: "2026-09-05".to_owned() };
-        write_base(&root, "gpui-kit", &head, "2026-09-12").expect("rewrite");
-        let text = std::fs::read_to_string(root.join(CONFIG)).expect("read");
-        assert_eq!(
-            text,
-            "# note\n[zed]\nbase = \"a\"\nbase_date = \"2020-01-01\"\n\n[gpui-kit]\nbase = \"c\"\nbase_date = \"2026-09-05\"\nchecked = \"2026-09-12\"\n",
-            "only the gpui-kit section changes, and it gains a checked line"
-        );
-        // A second sync rewrites the checked line in place; a blank line after the section
-        // stays a separator.
-        std::fs::write(root.join(CONFIG), format!("{text}\n[other]\nbase = \"x\"\n"))
-            .expect("write");
-        write_base(&root, "gpui-kit", &head, "2026-09-20").expect("rewrite");
+        write_base(&root, "zed", &head, "2026-09-12").expect("rewrite");
         let text = std::fs::read_to_string(root.join(CONFIG)).expect("read");
         std::fs::remove_dir_all(&dir).expect("cleanup");
         assert_eq!(
             text,
-            "# note\n[zed]\nbase = \"a\"\nbase_date = \"2020-01-01\"\n\n[gpui-kit]\nbase = \"c\"\nbase_date = \"2026-09-05\"\nchecked = \"2026-09-20\"\n\n[other]\nbase = \"x\"\n",
-            "checked is rewritten, not duplicated"
+            "# note\n[gpui-fast]\nbase = \"a\"\nbase_date = \"2020-01-01\"\nchecked = \"2020-01-01\"\n\n\
+             [zed]\nbase = \"c\"\nbase_date = \"2026-09-05\"\nchecked = \"2026-09-12\"\n",
+            "only the zed section changes"
         );
     }
 
@@ -691,76 +897,89 @@ mod tests {
     fn civil_dates_round_trip() {
         for date in ["1970-01-01", "2000-02-29", "2026-09-12", "2100-12-31"] {
             let days = days_from_civil(date).expect("valid date");
-            assert_eq!(civil_from_days(days), date);
+            assert_eq!(civil_from_days(days), date, "round trip");
         }
     }
 
     #[test]
     fn a_quiet_upstream_is_current_from_its_last_check() {
-        let mut fork = Fork {
-            upstream: String::new(),
-            upstream_branch: String::new(),
-            url: String::new(),
-            branch: String::new(),
-            checkout: Utf8PathBuf::new(),
-            base: String::new(),
-            base_date: "2026-09-01".to_owned(),
-            checked: String::new(),
-            check_every_days: 7,
-        };
         let today = days_from_civil("2026-09-12").expect("date");
-        assert_eq!(fork.days_since_current(today).ok(), Some(11), "no check: the base counts");
-        fork.checked = "2026-09-12".to_owned();
-        assert_eq!(fork.days_since_current(today).ok(), Some(0), "checked today");
-        fork.checked = "2026-08-01".to_owned();
-        assert_eq!(fork.days_since_current(today).ok(), Some(11), "the later date wins");
+        let source = tracking("2026-09-01", "2026-09-12", 7);
+        assert_eq!(source.days_since_current(today).ok(), Some(0), "checked today");
+        let source = tracking("2026-09-01", "2026-08-01", 7);
+        assert_eq!(source.days_since_current(today).ok(), Some(11), "the later date wins");
     }
 
     #[test]
-    fn a_fork_is_due_past_its_own_interval() {
-        let mut fork = Fork {
-            upstream: String::new(),
-            upstream_branch: String::new(),
-            url: String::new(),
-            branch: String::new(),
-            checkout: Utf8PathBuf::new(),
-            base: String::new(),
-            base_date: "2026-09-10".to_owned(),
-            checked: "2026-09-11".to_owned(),
-            check_every_days: 7,
-        };
+    fn a_source_is_due_past_its_own_interval() {
         let today = days_from_civil("2026-09-13").expect("date");
-        assert_eq!(fork.due(today).ok(), Some(false), "two days into a week");
-        fork.check_every_days = 2;
-        assert_eq!(fork.due(today).ok(), Some(true), "two days, and two was the interval");
-        fork.check_every_days = 0;
-        fork.checked = "2026-09-13".to_owned();
-        assert_eq!(fork.due(today).ok(), Some(true), "no interval: asked even the day of a sync");
+        assert_eq!(
+            tracking("2026-09-10", "2026-09-11", 7).due(today).ok(),
+            Some(false),
+            "two days into a week"
+        );
+        assert_eq!(
+            tracking("2026-09-10", "2026-09-11", 2).due(today).ok(),
+            Some(true),
+            "two days, and two was the interval"
+        );
+        assert_eq!(
+            tracking("2026-09-10", "2026-09-13", 0).due(today).ok(),
+            Some(true),
+            "no interval: asked even the day of a sync"
+        );
+    }
+
+    #[test]
+    fn the_checked_in_config_parses_and_the_gate_watches_zed() {
+        let root = repo_root().expect("root");
+        let config = Config::load(&root).expect("xtask/upstream.toml");
+        assert_eq!(config.gpui_fast.strategy, Strategy::Merge, "gpui-fast merges its upstream");
+        assert_eq!(config.gpui_kit.strategy, Strategy::Rebase, "gpui-kit rebases");
+        assert_eq!(config.gpui_fast.tracking.check_every_days, 0, "every gate asks longbridge");
+        let names: Vec<&str> = config.sources().iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, [GPUI_FAST, "zed", "gpui-kit", "libghostty-rs"], "what the gate asks");
+    }
+
+    #[test]
+    fn only_picks_forks_and_zed_means_gpui_fast() {
+        assert_eq!(selected(None).ok(), Some(ORDER.to_vec()), "all, gpui-fast first");
+        assert_eq!(selected(Some("zed")).ok(), Some(vec![GPUI_FAST]), "zed through gpui-fast");
+        assert_eq!(selected(Some("gpui-kit")).ok(), Some(vec!["gpui-kit"]), "one fork");
+        assert!(selected(Some("zed-fork")).is_err(), "unknown");
+    }
+
+    #[test]
+    fn remotes_match_across_transports() {
+        let fork = "https://github.com/aislopware/gpui-fast.git";
+        assert!(same_repo("git@github.com:aislopware/gpui-fast.git", fork), "scp-style SSH");
+        assert!(same_repo("ssh://git@github.com/aislopware/gpui-fast", fork), "SSH URL");
+        assert!(same_repo("https://github.com/aislopware/gpui-fast/", fork), "no .git, slash");
+        assert!(!same_repo("https://github.com/longbridge/gpui-fast", fork), "another owner");
+        assert!(same_repo("/tmp/zed", "/tmp/zed/.git"), "local paths");
+        assert_eq!(
+            repo_slug("https://github.com/longbridge/gpui-fast"),
+            "longbridge/gpui-fast",
+            "slug"
+        );
     }
 
     #[test]
     fn lock_pin_reads_the_git_source() {
-        let dir = std::env::temp_dir().join(format!("xtask-lock-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("tmp dir");
-        let root = Utf8PathBuf::from_path_buf(dir.clone()).expect("utf8 tmp dir");
-        std::fs::write(
-            root.join("Cargo.lock"),
-            "[[package]]\nname = \"gpui\"\nsource = \"git+https://x/zed.git#abc\"\n",
-        )
-        .expect("write");
-        let fork = Fork {
-            upstream: String::new(),
-            upstream_branch: String::new(),
-            url: "https://x/zed.git".to_owned(),
-            branch: "main".to_owned(),
-            checkout: Utf8PathBuf::new(),
-            base: String::new(),
-            base_date: String::new(),
-            checked: String::new(),
-            check_every_days: 7,
-        };
-        let pin = lock_pin(&root, &fork);
-        std::fs::remove_dir_all(&dir).expect("cleanup");
-        assert_eq!(pin.ok().as_deref(), Some("abc"), "sha after the fragment");
+        let lock = "[[package]]\nname = \"gpui\"\n\
+                    source = \"git+https://github.com/aislopware/gpui-fast#abc\"\n\
+                    [[package]]\nname = \"gpui-kit\"\n\
+                    source = \"git+https://github.com/aislopware/gpui-kit.git?branch=main#def\"\n";
+        assert_eq!(
+            lock_pin_in(lock, "https://github.com/aislopware/gpui-fast.git").as_deref(),
+            Some("abc"),
+            "sha after the fragment, with or without .git"
+        );
+        assert_eq!(
+            lock_pin_in(lock, "https://github.com/aislopware/gpui-kit.git").as_deref(),
+            Some("def"),
+            "a query is not part of the repository"
+        );
+        assert_eq!(lock_pin_in(lock, "https://github.com/aislopware/zed.git"), None, "no pin");
     }
 }

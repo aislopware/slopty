@@ -27,8 +27,8 @@ mod redundancy;
 pub use cursor::{cursor_datagram, parse_cursor};
 pub use heartbeat::{HEARTBEAT_AFTER, heartbeat_datagram};
 pub use packetize::{
-    EncodedFrame, Layout, MAX_DATA_FRAGMENTS, MAX_PARITY_FRAGMENTS, Packetizer, SentFrame,
-    audio_datagram, layout,
+    EncodedFrame, Layout, MAX_DATA_FRAGMENTS, MAX_PARITY_FRAGMENTS, MIN_PARITY_FRAGMENTS,
+    Packetizer, SentFrame, audio_datagram, layout,
 };
 pub use rate::{
     Cadence, ChromaGate, Decision, EncoderWatch, FULL_CHROMA_ENTER_BPS, FULL_CHROMA_HOLD,

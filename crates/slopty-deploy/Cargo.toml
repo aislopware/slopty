@@ -1,0 +1,23 @@
+[package]
+name = "slopty-deploy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Slopty worker deploys over the system ssh: the plan, its steps and its failures, for the CLI and the app"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json.workspace = true
+slopty-platform.workspace = true
+slopty-proto.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+parking_lot.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = [ "test-util" ] }

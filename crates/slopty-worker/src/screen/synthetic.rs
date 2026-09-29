@@ -1,21 +1,35 @@
-//! A worker platform whose pictures are drawn, not captured: [`Drawn`].
+//! Worker platforms whose pictures are drawn, not captured: [`Drawn`] and [`Synthetic`].
 //!
-//! Its capture is [`slopty_capture::synthetic::Canvas`], which stands in for the displays and
-//! draws a picture on each one's beat. Its encoders are the real ones, and so is everything
-//! after them, so a [`Pipeline<Drawn>`](super::Pipeline) runs the same encode, packetize and
-//! send path as a real capture. Its input sink ([`Poke`]) stands in for the application a click
-//! lands in: every event it takes changes the next picture
+//! Their capture is [`slopty_capture::synthetic::Canvas`], which draws a picture on each
+//! target's beat: a dark desktop with a page of 5×7 glyphs scrolling in its middle, so every
+//! frame moves and has sharp edges. Their encoders are the real ones, and so is everything
+//! after them, so a [`Pipeline`](super::Pipeline) on either runs the same encode, packetize
+//! and send path as a real capture. Their input sink ([`Poke`]) stands in for the application
+//! a click lands in: every event it takes changes the next picture
 //! ([`slopty_capture::synthetic::take_input`]).
 //!
-//! It exists to time the frame path end to end where ScreenCaptureKit cannot run. Nothing in
-//! the product builds a stream on it; the measurement in its tests does
-//! (`docs/MEASUREMENTS.md`, "Capture to the glass").
+//! [`Drawn`] stands in for this Mac's own displays, at their sizes; the measurement in its
+//! tests times the frame path on it (`docs/MEASUREMENTS.md`, "Capture to the glass").
+//!
+//! [`Synthetic`] is a whole screen of its own: one display and two windows ([`DISPLAY`],
+//! [`WINDOWS`]), the same on every Mac, whose windows take a resize. A worker started with
+//! [`SWITCH`] set to `1` serves every window and display stream from it and lists nothing of
+//! the Mac it runs on, so the app self-test streams real video without the Screen Recording
+//! grant and its goldens do not depend on the machine (`docs/TESTING.md`).
 
+use std::sync::LazyLock;
 use std::time::Instant;
 
-use slopty_capture::Rect;
+use parking_lot::Mutex;
+use slopty_capture::synthetic::{Canvas, CanvasStream, CanvasTarget};
+use slopty_capture::{
+    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Rect,
+    TargetWindow, Went, WindowState,
+};
+use slopty_codec::PixelBuffer;
+use slopty_core::{DisplayId, WindowId};
 use slopty_input::{InputError, InputSink, PointerWatch};
-use slopty_proto::screen::{CaptureTarget, ScreenInput};
+use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, ScreenInput, WindowInfo};
 
 use crate::platform::Platform;
 
@@ -25,7 +39,7 @@ pub enum Drawn {}
 
 impl Platform for Drawn {
     type Audio = slopty_codec::Opus;
-    type Capture = slopty_capture::synthetic::Canvas;
+    type Capture = Canvas;
     type Input = Poke;
     type Video = slopty_codec::VideoToolbox;
 }
@@ -58,6 +72,310 @@ impl InputSink for Poke {
 
     fn pointer(&self) -> PointerWatch {
         self.pointer.clone()
+    }
+}
+
+/// The variable that makes a worker serve [`Synthetic`]: `1` turns it on, anything else leaves
+/// the worker on its own screen. A test knob, read once.
+pub const SWITCH: &str = "SLOPTY_SYNTHETIC_SCREEN";
+
+/// Whether this process serves [`Synthetic`] ([`SWITCH`]).
+#[must_use]
+pub fn serving() -> bool {
+    static ON: LazyLock<bool> =
+        LazyLock::new(|| switched_on(std::env::var(SWITCH).ok().as_deref()));
+    *ON
+}
+
+/// [`SWITCH`]'s value read as on or off.
+fn switched_on(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// A drawn screen: [`Studio`]'s display and windows, the real encoders, and [`Poke`].
+#[derive(Clone, Copy, Debug)]
+pub enum Synthetic {}
+
+impl Platform for Synthetic {
+    type Audio = slopty_codec::Opus;
+    type Capture = Studio;
+    type Input = Poke;
+    type Video = slopty_codec::VideoToolbox;
+}
+
+/// The one display [`Synthetic`] lists: a 14-inch laptop panel at its default scaling, 2× and
+/// 60 Hz.
+pub const DISPLAY: DisplayInfo =
+    DisplayInfo { id: DisplayId(1), w: 1512.0, h: 982.0, scale: 2.0, hz: 60.0 };
+
+/// The application every [`Synthetic`] window belongs to.
+pub const APP: &str = "Slopty synthetic";
+
+/// A window of [`Synthetic`] as a worker starts.
+#[derive(Clone, Copy, Debug)]
+pub struct Placed {
+    /// Its id.
+    pub id: WindowId,
+    /// Its title.
+    pub title: &'static str,
+    /// Its top-left corner on [`DISPLAY`], in points.
+    pub origin: (f32, f32),
+    /// Its size in points.
+    pub size: (f32, f32),
+}
+
+/// [`Synthetic`]'s windows as a worker starts.
+pub const WINDOWS: [Placed; 2] = [
+    Placed {
+        id: WindowId(7001),
+        title: "Synthetic editor",
+        origin: (96.0, 72.0),
+        size: (1280.0, 800.0),
+    },
+    Placed {
+        id: WindowId(7002),
+        title: "Synthetic terminal",
+        origin: (360.0, 280.0),
+        size: (800.0, 500.0),
+    },
+];
+
+/// The smallest a window is resized to, in points.
+const MIN_WINDOW: (f64, f64) = (160.0, 120.0);
+
+/// The windows as they are now: a resize changes them for every stream and every listing after.
+static SCENE: LazyLock<Mutex<Vec<WindowInfo>>> = LazyLock::new(|| {
+    let windows =
+        WINDOWS.iter().map(|&Placed { id, title, origin: (x, y), size: (w, h) }| WindowInfo {
+            id,
+            app: APP.to_owned(),
+            bundle_id: Some("io.slopty.synthetic".to_owned()),
+            title: title.to_owned(),
+            x,
+            y,
+            w,
+            h,
+            display: DISPLAY.id,
+            on_screen: true,
+        });
+    Mutex::new(windows.collect())
+});
+
+fn window(id: WindowId) -> Option<WindowInfo> {
+    SCENE.lock().iter().find(|w| w.id == id).cloned()
+}
+
+fn bounds(window: &WindowInfo) -> Rect {
+    Rect {
+        x: f64::from(window.x),
+        y: f64::from(window.y),
+        w: f64::from(window.w),
+        h: f64::from(window.h),
+    }
+}
+
+fn display_rect() -> Rect {
+    Rect { x: 0.0, y: 0.0, w: f64::from(DISPLAY.w), h: f64::from(DISPLAY.h) }
+}
+
+/// The process every window is owned by: this one, as far as anyone asks.
+fn owner() -> i32 {
+    i32::try_from(std::process::id()).unwrap_or(0)
+}
+
+/// What [`Studio`] shares: its windows when it was asked.
+#[derive(Clone, Debug)]
+pub struct Scene {
+    windows: Vec<WindowInfo>,
+}
+
+/// The capture of [`Synthetic`]: [`Canvas`] pictures of [`DISPLAY`] and the windows, at each
+/// one's size and at the display's beat, with a window list only it keeps.
+#[derive(Clone, Copy, Debug)]
+pub enum Studio {}
+
+impl CaptureSource for Studio {
+    type Content = Scene;
+    type HideWatch = ();
+    type Image = PixelBuffer;
+    type Stream = CanvasStream;
+    type Target = CanvasTarget;
+
+    fn can_capture() -> bool {
+        true
+    }
+
+    fn enumerate(done: impl FnOnce(Result<Scene, CaptureError>) + Send + 'static) {
+        done(Ok(Scene { windows: SCENE.lock().clone() }));
+    }
+
+    fn windows(content: &Scene) -> Vec<WindowInfo> {
+        content.windows.clone()
+    }
+
+    fn displays(_content: &Scene) -> Vec<DisplayInfo> {
+        vec![DISPLAY]
+    }
+
+    fn resolve(content: &Scene, kind: CaptureTarget) -> Result<CanvasTarget, CaptureError> {
+        let (w, h) = match kind {
+            CaptureTarget::Display(id) if id == DISPLAY.id => (DISPLAY.w, DISPLAY.h),
+            CaptureTarget::Window(id) => content
+                .windows
+                .iter()
+                .find(|w| w.id == id)
+                .map(|w| (w.w, w.h))
+                .ok_or(CaptureError::NotFound(kind))?,
+            CaptureTarget::Display(_) => return Err(CaptureError::NotFound(kind)),
+        };
+        // A window is drawn as a canvas of its own size, at the display's scale.
+        Canvas::resolve(&vec![DisplayInfo { w, h, ..DISPLAY }], CaptureTarget::Display(DISPLAY.id))
+    }
+
+    fn resolve_crop(_content: &Scene, _id: WindowId) -> Result<Option<CanvasTarget>, CaptureError> {
+        Ok(None)
+    }
+
+    fn crop(_target: &CanvasTarget) -> Option<Crop> {
+        None
+    }
+
+    fn pixel_size(target: &CanvasTarget) -> (u32, u32) {
+        Canvas::pixel_size(target)
+    }
+
+    fn point_scale(target: &CanvasTarget) -> f32 {
+        Canvas::point_scale(target)
+    }
+
+    fn start(
+        target: &CanvasTarget,
+        config: &CaptureConfig,
+        sink: impl Fn(CapturedFrame<PixelBuffer>) + Send + Sync + 'static,
+        audio: Option<AudioSink>,
+        on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) -> Result<CanvasStream, CaptureError> {
+        // The display's beat is [`DISPLAY`]'s, not that of whichever panel shares its id here.
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "60")]
+        let beat = DISPLAY.hz as u16;
+        let config =
+            CaptureConfig { fps: if config.fps == 0 { beat } else { config.fps }, ..*config };
+        Canvas::start(target, &config, sink, audio, on_stop, done)
+    }
+
+    fn update(
+        stream: &CanvasStream,
+        config: &CaptureConfig,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) {
+        Canvas::update(stream, config, done);
+    }
+
+    fn retarget(
+        stream: &CanvasStream,
+        target: &CanvasTarget,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) {
+        Canvas::retarget(stream, target, done);
+    }
+
+    fn stop(stream: &CanvasStream, done: impl FnOnce(Result<(), CaptureError>) + Send + 'static) {
+        Canvas::stop(stream, done);
+    }
+
+    fn now_us() -> u64 {
+        Canvas::now_us()
+    }
+
+    fn target_bounds(target: CaptureTarget) -> Option<Rect> {
+        match target {
+            CaptureTarget::Display(id) => (id == DISPLAY.id).then(display_rect),
+            CaptureTarget::Window(id) => window(id).as_ref().map(bounds),
+        }
+    }
+
+    fn refresh_hz(_target: CaptureTarget) -> Option<f64> {
+        Some(f64::from(DISPLAY.hz))
+    }
+
+    fn window_state(id: WindowId) -> Option<WindowState> {
+        let window = window(id)?;
+        Some(WindowState {
+            bounds: bounds(&window),
+            on_screen: window.on_screen,
+            owner_pid: owner(),
+        })
+    }
+
+    fn window_bounds(id: WindowId) -> Option<Rect> {
+        window(id).as_ref().map(bounds)
+    }
+
+    fn window_owner(id: WindowId) -> Option<i32> {
+        window(id).map(|_| owner())
+    }
+
+    fn window_on_screen(id: WindowId) -> bool {
+        window(id).is_some_and(|w| w.on_screen)
+    }
+
+    fn window_title(id: WindowId) -> Option<String> {
+        window(id).map(|w| w.title)
+    }
+
+    fn occluded(_id: WindowId, _bounds: &Rect, _owner: i32) -> bool {
+        false
+    }
+
+    // No window is ever served as a crop of the display: each is a canvas of its own.
+    fn display_enclosing(_rect: &Rect) -> Option<u32> {
+        None
+    }
+
+    fn display_bounds(_id: u32) -> Rect {
+        display_rect()
+    }
+
+    fn resize_window(
+        _pid: i32,
+        target: &TargetWindow,
+        width: f64,
+        height: f64,
+    ) -> Result<(), AxError> {
+        #[expect(clippy::cast_possible_truncation, reason = "points, clamped to the display")]
+        let side = |asked: f64, min: f64, max: f32| asked.clamp(min, f64::from(max)).round() as f32;
+        let (w, h) = (side(width, MIN_WINDOW.0, DISPLAY.w), side(height, MIN_WINDOW.1, DISPLAY.h));
+        SCENE
+            .lock()
+            .iter_mut()
+            .find(|window| Some(&window.title) == target.title.as_ref())
+            .map(|window| (window.w, window.h) = (w, h))
+            .ok_or(AxError::Unsupported)
+    }
+
+    fn watch_hides(
+        _pid: i32,
+        _target: TargetWindow,
+        _on_went: impl Fn(Went) + Send + Sync + 'static,
+    ) -> Result<(), AxError> {
+        Err(AxError::Unsupported)
+    }
+
+    fn watch_targeted((): &()) -> bool {
+        false
+    }
+
+    fn pointer_moves() -> u32 {
+        0
+    }
+
+    fn pointer_location() -> (f64, f64) {
+        (0.0, 0.0)
+    }
+
+    fn cursor_shape(_scale: u8) -> Option<CursorShape> {
+        None
     }
 }
 
@@ -168,7 +486,7 @@ mod tests {
     }
 
     /// The client's loss feedback, as the worker's connection answers it.
-    fn answer(control: &StreamControl<Drawn>, bytes: &[u8]) {
+    fn answer(control: &StreamControl, bytes: &[u8]) {
         match ClientDatagram::decode(bytes) {
             Some(ClientDatagram::Feedback(Feedback::Nack { frame, fragments, .. })) => {
                 control.nack(frame, &fragments);
@@ -246,7 +564,7 @@ mod tests {
             delay_line(one_way, move |bytes: Bytes, _at| answer(&control, &bytes))
         };
         let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
-        let decisions = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let decisions = Arc::new(Mutex::new(Vec::new()));
         let reporting = {
             let control = control.clone();
             let decisions = Arc::clone(&decisions);
@@ -585,6 +903,326 @@ mod tests {
             drain.abort();
             stream.close().await;
         });
+    }
+
+    /// `SLOPTY_SYNTHETIC_SCREEN=1` and nothing else turns the drawn screen on.
+    #[test]
+    fn only_a_one_switches_the_drawn_screen_on() {
+        assert!(switched_on(Some("1")));
+        for off in [None, Some(""), Some("0"), Some("yes")] {
+            assert!(!switched_on(off), "{off:?}");
+        }
+    }
+
+    /// The drawn screen lists its one display and its windows, the same on every Mac, and a
+    /// window takes a resize, held to the display and a floor: the window's bounds and the next
+    /// listing have the new size.
+    #[test]
+    fn the_drawn_screen_lists_its_windows_and_takes_a_resize() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+        runtime.unwrap().block_on(async {
+            let listing = Pipeline::<Synthetic>::listing().await.unwrap();
+            let ScreenEvent::Listing { windows, displays } = listing else { panic!("{listing:?}") };
+            assert_eq!(displays, [DISPLAY]);
+            let listed: Vec<_> =
+                windows.iter().map(|w| (w.id, w.title.as_str(), w.w, w.h)).collect();
+            let expected: Vec<_> =
+                WINDOWS.iter().map(|p| (p.id, p.title, p.size.0, p.size.1)).collect();
+            assert_eq!(listed, expected);
+            assert!(windows.iter().all(|w| w.on_screen && w.app == APP), "{windows:?}");
+
+            let terminal = WINDOWS[1].id;
+            Pipeline::<Synthetic>::resize_window(terminal, 640.0, 400.0).unwrap();
+            let bounds = Studio::window_bounds(terminal).unwrap();
+            assert_eq!((bounds.w, bounds.h), (640.0, 400.0));
+            Pipeline::<Synthetic>::resize_window(terminal, 10.0, 1e6).unwrap();
+            let state = Studio::window_state(terminal).unwrap();
+            assert_eq!((state.bounds.w, state.bounds.h), (160.0, f64::from(DISPLAY.h)));
+            let unknown = TargetWindow { bounds, title: Some("Mail".to_owned()) };
+            assert!(Studio::resize_window(0, &unknown, 640.0, 400.0).is_err());
+            assert!(Studio::window_bounds(WindowId(1)).is_none(), "no window of this Mac");
+        });
+    }
+
+    /// A window of the drawn screen streams as a canvas of its own size through the real
+    /// encoder, and the client decodes it with its strip readable. Drawn, never captured.
+    #[test]
+    fn a_drawn_window_streams_at_its_own_size() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let Placed { id: editor, size: (w, h), .. } = WINDOWS[0];
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router.clone(), None));
+            let quality = Quality { scale: 0.25, ..Quality::default() };
+            let (stream, opened) = Pipeline::<Synthetic>::open(
+                STREAM,
+                CaptureTarget::Window(editor),
+                quality,
+                wire,
+                |_event| {},
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, width, height, .. } = opened else {
+                panic!("{opened:?}")
+            };
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "points")]
+            let quarter = |points: f32| (points * DISPLAY.scale / 4.0) as u32;
+            assert_eq!((width, height), (quarter(w), quarter(h)));
+            let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+            let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+            let control = stream.control();
+            let uplink = Uplink {
+                control: reports_tx,
+                feedback: Box::new(move |bytes| {
+                    answer(&control, &bytes);
+                    true
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(1))),
+            };
+            let handle =
+                spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+            let mut frames = handle.frames();
+            let got = next_picture(&mut frames, |_any| true).await;
+            assert!(got.is_some_and(|(_format, strip)| strip), "a readable picture: {got:?}");
+            let picture = frames.borrow().clone().expect("the picture");
+            let image = picture.frame.image.as_cv();
+            assert_eq!(
+                (
+                    objc2_core_video::CVPixelBufferGetWidth(image),
+                    objc2_core_video::CVPixelBufferGetHeight(image)
+                ),
+                (usize::try_from(width).unwrap(), usize::try_from(height).unwrap())
+            );
+            drop(handle);
+            drain.abort();
+            stream.close().await;
+        });
+    }
+
+    /// The drawn display streamed as the app streams it: opened at its full size, the client's
+    /// reports and loss feedback answered, then asked for a quarter of that and back, a few
+    /// times, each change a new encoder session. Every frame of every session decodes: no
+    /// decode error, no refresh, nothing lost. Drawn, never captured.
+    #[test]
+    fn quality_changes_decode_without_a_refresh() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router.clone(), None));
+            let full = Quality { scale: 1.0, ..Quality::default() };
+            let (mut stream, opened) = Pipeline::<Synthetic>::open(
+                STREAM,
+                CaptureTarget::Display(DISPLAY.id),
+                full,
+                wire,
+                |_event| {},
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, .. } = opened else { panic!("{opened:?}") };
+            let control = stream.control();
+            let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+            let reporting = {
+                let control = control.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = reports.recv().await {
+                        if let ClientMsg::Screen(ScreenRequest::Report { report, .. }) = msg {
+                            let _decision = control.report(&report, None);
+                        }
+                    }
+                })
+            };
+            let answering = control.clone();
+            let uplink = Uplink {
+                control: reports_tx,
+                feedback: Box::new(move |bytes| {
+                    answer(&answering, &bytes);
+                    true
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(1))),
+            };
+            let handle =
+                spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+            let mut frames = handle.frames();
+            assert!(next_picture(&mut frames, |_any| true).await.is_some(), "a first picture");
+            for step in 0..6 {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let scale = if step % 2 == 0 { 0.25 } else { 0.5 };
+                let quality = Quality { scale, ..full };
+                let mut rebuild = stream.set_quality(&quality, None).expect("a new session");
+                let encoder = rebuild.built().await.unwrap();
+                assert_eq!(stream.finish_rebuild(rebuild, encoder), None);
+            }
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let stats = handle.stats();
+            let worker = stream.stats();
+            eprintln!(
+                "MEASURE quality changes: {} frames decoded, {} decode errors, {} refreshes, {} \
+                 lost, {} nacks | worker encoded {} refreshes {} ({} idr, {} delta)",
+                stats.frames,
+                stats.decode_errors,
+                stats.refreshes,
+                stats.frames_lost,
+                stats.nacks,
+                worker.encoded,
+                worker.refreshes,
+                worker.ltr.refreshes_idr,
+                worker.ltr.refreshes_delta,
+            );
+            assert_eq!(
+                (stats.decode_errors, stats.refreshes, stats.frames_lost),
+                (0, 0, 0),
+                "{stats:#?}"
+            );
+            drop(handle);
+            reporting.abort();
+            stream.close().await;
+        });
+    }
+
+    /// A 3024 × 1964 NV12 picture whose every pixel moves from one index to the next.
+    fn moving_picture(
+        index: usize,
+    ) -> objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer> {
+        use std::ptr::{self, NonNull};
+
+        use objc2_core_video::{
+            CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
+            CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        };
+        let mut raw: *mut objc2_core_video::CVPixelBuffer = ptr::null_mut();
+        // SAFETY: CoreVideo, `CVPixelBufferCreate`: a valid out-pointer and no attributes.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                BIG.0,
+                BIG.1,
+                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                None,
+                NonNull::from(&mut raw),
+            )
+        };
+        assert_eq!(status, 0);
+        // SAFETY: the create call returned a +1 reference.
+        let buffer =
+            unsafe { objc2_core_foundation::CFRetained::from_raw(NonNull::new(raw).unwrap()) };
+        // SAFETY: CoreVideo: the planes are written only between a lock and its unlock.
+        let locked =
+            unsafe { CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) };
+        assert_eq!(locked, 0);
+        for plane in 0..2 {
+            let base = CVPixelBufferGetBaseAddressOfPlane(&buffer, plane).cast::<u8>();
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(&buffer, plane);
+            let rows = if plane == 0 { BIG.1 } else { BIG.1 / 2 };
+            for y in 0..rows {
+                // SAFETY: the plane is locked and row `y < rows` starts `y * stride` bytes into it.
+                let start = unsafe { base.add(y * stride) };
+                // SAFETY: the same, and a row spans `stride >= width` bytes.
+                let row = unsafe { std::slice::from_raw_parts_mut(start, BIG.0) };
+                for (x, cell) in row.iter_mut().enumerate() {
+                    #[expect(clippy::cast_possible_truncation, reason = "a byte of a pattern")]
+                    let luma = ((x * 3 + y * 5 + index * 11) % 256) as u8;
+                    *cell = if plane == 0 { luma } else { 128 };
+                }
+            }
+        }
+        // SAFETY: matches the lock above.
+        let unlocked =
+            unsafe { CVPixelBufferUnlockBaseAddress(&buffer, CVPixelBufferLockFlags::empty()) };
+        assert_eq!(unlocked, 0);
+        buffer
+    }
+
+    /// The drawn display's size, where the encoder drops frames under real-time pressure.
+    const BIG: (usize, usize) = (3024, 1964);
+
+    /// Encode `steps` (keyframe, LTR refresh, acknowledged tokens) a display period apart at
+    /// [`BIG`], decode what comes out in order, and say what each frame was: `K` a sync frame,
+    /// `P` a delta, `r` a refresh, `t` its token, `!` a frame the decoder failed.
+    fn frames_through(steps: &[(bool, bool, Vec<u64>)]) -> (String, usize) {
+        use std::fmt::Write as _;
+
+        use slopty_codec::{Chroma, Decoder, Encoder, EncoderConfig, FrameOptions};
+        use slopty_proto::screen::VideoCodec;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let config = EncoderConfig {
+            width: u32::try_from(BIG.0).unwrap(),
+            height: u32::try_from(BIG.1).unwrap(),
+            codec: VideoCodec::Hevc,
+            fps: 60,
+            bitrate_bps: 12_000_000,
+            chroma: Chroma::Subsampled,
+        };
+        let encoder = Encoder::new(config, move |packet| {
+            let _gone = tx.send(packet);
+        })
+        .unwrap();
+        for (i, (keyframe, refresh, acked)) in steps.iter().enumerate() {
+            let options = FrameOptions {
+                force_keyframe: *keyframe,
+                force_ltr_refresh: *refresh,
+                acked_ltr: acked.clone(),
+            };
+            let pts = (u64::try_from(i).unwrap() + 1) * 16_667;
+            encoder.encode(&moving_picture(i), pts, &options).unwrap();
+            // Paced as a capture is, so the encoder drops what it cannot keep up with.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "a test's pacing between blocking encodes"
+            )]
+            std::thread::sleep(Duration::from_millis(17));
+        }
+        encoder.flush().unwrap();
+        let packets: Vec<_> = rx.try_iter().collect();
+        let (dtx, drx) = std::sync::mpsc::channel();
+        let mut decoder = Decoder::with_outcomes(VideoCodec::Hevc, move |outcome| {
+            let _gone = dtx.send(outcome.is_ok());
+        });
+        let mut line = String::new();
+        let mut failed = 0;
+        for packet in &packets {
+            let submitted = decoder.decode(&packet.data, packet.pts_us).is_ok();
+            let decoded = submitted && drx.recv_timeout(Duration::from_secs(5)) == Ok(true);
+            failed += usize::from(!decoded);
+            let index = (packet.pts_us / 16_667).saturating_sub(1);
+            let _infallible = write!(
+                line,
+                " {index}:{}{}{}{}",
+                if packet.keyframe { "K" } else { "P" },
+                if packet.ltr_refresh { "r" } else { "" },
+                packet.ltr_token.map_or(String::new(), |t| format!("t{t}")),
+                if decoded { "" } else { "!" },
+            );
+        }
+        (line, failed)
+    }
+
+    /// Why a refresh with nothing acknowledged goes out as a keyframe
+    /// (`Shared::try_encode`): VideoToolbox answers `ForceLTRRefresh` with no acknowledged
+    /// reference with a sync frame the frames after it cannot be decoded against, every one of
+    /// them until the next keyframe; asked for a keyframe instead, every frame decodes. At
+    /// 3024 × 1964 with the encoder dropping frames, as the drawn display streamed in the app
+    /// (MEASUREMENTS.md, "a refresh with nothing acknowledged").
+    #[test]
+    #[ignore = "measurement: prints what VideoToolbox makes of the two requests"]
+    fn a_refresh_with_nothing_acknowledged_breaks_the_frames_after_it() {
+        let plain = || (false, false, Vec::new());
+        let with = |refresh: (bool, bool, Vec<u64>)| {
+            let mut steps = vec![(true, false, Vec::new()), plain(), plain(), plain(), refresh];
+            steps.extend(std::iter::repeat_with(plain).take(12));
+            steps
+        };
+        let (line, failed) = frames_through(&with((false, true, Vec::new())));
+        eprintln!("MEASURE an LTR refresh with nothing acknowledged: {failed} failed:{line}");
+        let (line, keyframe_failed) = frames_through(&with((true, false, Vec::new())));
+        eprintln!("MEASURE a keyframe in its place: {keyframe_failed} failed:{line}");
+        assert_eq!(keyframe_failed, 0, "{line}");
     }
 
     /// A quality change that moves only the frame rate (the client's view went to a screen of

@@ -12,6 +12,7 @@ use slopty_proto::orchestration::{
     ItemRef, Line, Outcome, Port, Screen, Size, TermRef, Verb, WaitUntil, Waited,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
+use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
 use slopty_proto::server::WorkerInfo;
 use slopty_proto::terminal::SessionSummary;
 
@@ -25,6 +26,9 @@ pub const DEFAULT_WAIT_MS: u32 = 60_000;
 pub const DEFAULT_MAX_LINES: u32 = 200;
 /// How many entries a directory listing returns when the caller names no limit.
 pub const DEFAULT_MAX_ENTRIES: u32 = 1_000;
+/// How many matching lines a search in files returns when the caller names no limit: enough
+/// to see what a query is about, few enough for a model to read.
+pub const DEFAULT_MAX_MATCHES: u32 = 200;
 
 /// The directory and every terminal, each with its agent as the server last heard it: the
 /// two lists go out together.
@@ -283,6 +287,22 @@ pub async fn stat<D: Dispatch>(
     let worker = res.worker(worker).await?;
     match res.dispatch().call(Verb::Stat { worker, path }).await {
         Outcome::Stat(stat) => Ok(stat),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
+/// The lines matching `query` in the files under `root`, in path order, `max_lines` of them at
+/// most, and how the search ended.
+pub async fn search<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    worker: Option<&str>,
+    root: String,
+    query: SearchQuery,
+    max_lines: u32,
+) -> Result<(Vec<FileHits>, SearchSummary), ToolError> {
+    let worker = res.worker(worker).await?;
+    match res.dispatch().call(Verb::Search { worker, root, query, max_lines }).await {
+        Outcome::Search { files, summary } => Ok((files, summary)),
         other => Err(ToolError::unexpected(other)),
     }
 }

@@ -31,6 +31,7 @@ use crate::agent::{AgentEvent, AgentKind, AgentStatus, SessionAgent};
 use crate::conversation::{Entry, Meters, Origin, PermissionPrompt, Task, ThreadId, Verdict};
 use crate::items::{Item, ItemKind};
 use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
+use crate::search::{FileHits, SearchQuery, SearchSummary};
 use crate::server::{Liveness, WorkerInfo};
 use crate::terminal::SessionSummary;
 use crate::transfer::Hash;
@@ -443,6 +444,19 @@ pub enum Verb {
         /// The sleeping worker's ports that this one shares a subnet with.
         peer: Vec<crate::lan::LanPort>,
     },
+    /// The lines matching a query in the files under a directory, as search in files finds
+    /// them; answered with [`Outcome::Search`].
+    Search {
+        /// Where.
+        worker: WorkerId,
+        /// An absolute directory, or `~/…`.
+        root: String,
+        /// What to look for.
+        query: SearchQuery,
+        /// At most this many matching lines, capped by the worker at
+        /// [`crate::search::MAX_LINES`].
+        max_lines: u32,
+    },
 }
 
 /// One step of a [`Verb::Upload`].
@@ -504,6 +518,7 @@ impl Verb {
             | Self::ListPorts { .. }
             | Self::ListDir { .. }
             | Self::Stat { .. }
+            | Self::Search { .. }
             | Self::Events { .. }
             | Self::ListItems { .. }
             | Self::ListWindows { .. }
@@ -830,6 +845,13 @@ pub enum Outcome {
         by: String,
         /// The interfaces of the sleeping worker it was sent for (`en0`).
         to: Vec<String>,
+    },
+    /// For [`Verb::Search`]: the files with matches in path order, and how the search ended.
+    Search {
+        /// The files.
+        files: Vec<FileHits>,
+        /// What it found; `capped` when there were more lines than it returned.
+        summary: SearchSummary,
     },
 }
 

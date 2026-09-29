@@ -12,6 +12,7 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use schemars::JsonSchema;
@@ -40,6 +41,9 @@ pub mod bounds {
     pub const FPS: RangeInclusive<u16> = 15..=120;
     /// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
     pub const MBPS: RangeInclusive<u16> = 1..=200;
+    /// The quick terminal's height, in percent of the screen: a fifth still holds a prompt and
+    /// a few lines of output; all of it is a full-screen terminal.
+    pub const QUICK_HEIGHT: RangeInclusive<u8> = 20..=100;
 }
 
 /// File name inside the data directory.
@@ -422,6 +426,130 @@ impl Default for RemoteSettings {
     }
 }
 
+/// `[quick_terminal]`: the terminal a system-wide chord slides down from the top of the screen.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(title = "Quick terminal")]
+pub struct QuickTerminalSettings {
+    /// From any app; empty turns the chord off, the palette's command stays.
+    ///
+    /// The chord that shows and hides the quick terminal from any app, in the palette's key
+    /// syntax (`` ctrl-` ``, `cmd-alt-space`, `f12`). Empty registers none.
+    #[schemars(title = "Chord", example = "ctrl-`")]
+    pub hotkey: String,
+    /// How much of the screen it takes, from the top.
+    ///
+    /// Its height in percent of the screen under the pointer, below the menu bar.
+    #[schemars(
+        title = "Height",
+        range(min = *bounds::QUICK_HEIGHT.start(), max = *bounds::QUICK_HEIGHT.end()),
+        extend("x-step" = 5, "x-unit" = "%")
+    )]
+    pub height: u8,
+    /// It slides away when another window or app takes the keyboard.
+    ///
+    /// Hide the quick terminal once it loses the keyboard.
+    #[schemars(title = "Hide when unfocused")]
+    pub autohide: bool,
+}
+
+impl Default for QuickTerminalSettings {
+    fn default() -> Self {
+        Self { hotkey: "ctrl-`".to_owned(), height: 40, autohide: true }
+    }
+}
+
+/// `[keys]`: the app's key bindings the file changes.
+///
+/// A table per context (`[keys.workspace]`, `[keys.terminal]`) of action names and their
+/// chords. An action the file does not name keeps its default; which names and contexts exist
+/// is the app's keymap's (`slopty_ui::keymap`), which says what it does not know.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+#[schemars(title = "Keys")]
+pub struct KeySettings(pub BTreeMap<String, BTreeMap<String, Chords>>);
+
+impl KeySettings {
+    /// The chords the file gives `action` in `context`, if it names it.
+    #[must_use]
+    pub fn get(&self, context: &str, action: &str) -> Option<&Chords> {
+        self.0.get(context)?.get(action)
+    }
+}
+
+/// An action's chords as the file sets them: one (`"cmd-t"`), several (`["cmd-t", "cmd-n"]`),
+/// or none (`""`, `"none"` or `[]`), which unbinds it. Each is in the palette's key syntax,
+/// read by the keymap.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Chords(pub Vec<String>);
+
+impl Chords {
+    /// The chords as written, trimmed, the words that mean none dropped.
+    fn of(texts: impl IntoIterator<Item = String>) -> Self {
+        Self(
+            texts
+                .into_iter()
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("none"))
+                .collect(),
+        )
+    }
+}
+
+impl Serialize for Chords {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [] => serializer.serialize_str(""),
+            [one] => serializer.serialize_str(one),
+            many => many.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Chords {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Chords;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a chord (\"cmd-t\"), a list of chords, or \"\" for none")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Chords, E> {
+                Ok(Chords::of([v.to_owned()]))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Chords, A::Error> {
+                let mut texts = Vec::new();
+                while let Some(text) = seq.next_element::<String>()? {
+                    texts.push(text);
+                }
+                Ok(Chords::of(texts))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+impl JsonSchema for Chords {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Chords".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } },
+            ],
+        })
+    }
+}
+
 /// `[worker]`: what `slopty-worker` reads from the same file when it starts.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -510,8 +638,12 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     /// Remote window and display streams.
     pub remote: RemoteSettings,
+    /// The terminal a chord slides down from the top of the screen.
+    pub quick_terminal: QuickTerminalSettings,
     /// Terminal colours.
     pub colors: ColorSettings,
+    /// The app's key bindings the file changes.
+    pub keys: KeySettings,
     /// The worker daemon: who may connect, and the server it registers with.
     pub worker: WorkerSettings,
     /// The server daemon: who may connect.
@@ -667,6 +799,15 @@ muted = {muted}
 # bits. The worker sends it only while the link carries that rate, 4:2:0 below.
 sharp_text = {sharp_text}
 
+[quick_terminal]
+# The chord that slides a terminal down from the top of the screen, from any
+# app (\"ctrl-`\", \"cmd-alt-space\", \"f12\"); \"\" registers none.
+hotkey = {hotkey}
+# Its height in percent of the screen under the pointer (20 to 100).
+height = {quick_height}
+# Hide it once another window or app takes the keyboard.
+autohide = {autohide}
+
 [colors]
 # Terminal colours as \"#rrggbb\"; \"\" keeps the theme's own. They apply in
 # both appearances.
@@ -679,6 +820,16 @@ selection = \"\"
 # ANSI 0-15 in order: black, red, green, yellow, blue, magenta, cyan, white,
 # then their bright forms. Fewer than 16 keep the rest.
 ansi = []
+
+[keys]
+# The app's keys, a table per context: app, workspace, terminal, file,
+# conversation, folder, search and page. An action takes a chord in the
+# palette's syntax (\"cmd-shift-t\"), a list of them, or \"\" to unbind it; one
+# the file does not name keeps its default. Settings > Keyboard lists every
+# action by the name it has here, and records a new chord for it.
+#
+# [keys.workspace]
+# new_terminal = [\"cmd-t\", \"cmd-n\"]
 
 [worker]
 # Read when slopty-worker starts.
@@ -722,6 +873,9 @@ server = \"\"
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
             muted = d.remote.muted,
             sharp_text = d.remote.sharp_text,
+            hotkey = toml_string(&d.quick_terminal.hotkey),
+            quick_height = d.quick_terminal.height,
+            autohide = d.quick_terminal.autohide,
         )
     }
 
@@ -834,9 +988,13 @@ impl Loaded {
     }
 }
 
-/// Keys in `given` with no counterpart in `known`, recursively through tables.
+/// Keys in `given` with no counterpart in `known`, recursively through tables. `[keys]` names
+/// actions the keymap knows, not this crate, and the keymap says which it does not.
 fn unknown_keys(given: &toml::Table, known: &toml::Table, prefix: &str, out: &mut Vec<String>) {
     for (key, value) in given {
+        if prefix.is_empty() && key == "keys" {
+            continue;
+        }
         let full = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
         match known.get(key) {
             None => out.push(format!("unknown key `{full}`")),
@@ -956,6 +1114,53 @@ mod tests {
         );
         assert!(!Settings::default().remote.muted, "sound on, as the worker plays it");
         assert!(!Settings::default().remote.sharp_text, "4:2:0 unless asked: fewer bits");
+    }
+
+    #[test]
+    fn quick_terminal_keys() {
+        let loaded = Settings::parse(
+            "[quick_terminal]\nhotkey = \"cmd-alt-space\"\nheight = 60\nautohide = false\n",
+        );
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        assert_eq!(
+            loaded.settings.quick_terminal,
+            QuickTerminalSettings { hotkey: "cmd-alt-space".into(), height: 60, autohide: false }
+        );
+        let d = Settings::default().quick_terminal;
+        assert_eq!((d.hotkey.as_str(), d.height, d.autohide), ("ctrl-`", 40, true));
+        let off = Settings::parse("[quick_terminal]\nhotkey = \"\"\n");
+        assert_eq!(off.settings.quick_terminal.hotkey, "", "no chord: the palette's command only");
+        assert_eq!(off.settings.quick_terminal.height, 40, "the rest keeps its default");
+        let wrong = Settings::parse("[quick_terminal]\nheight = \"half\"\n");
+        assert!(wrong.error.is_some(), "a height is a number");
+    }
+
+    /// `[keys]` holds a table per context of action names and their chords: one, a list, or
+    /// none by `""`, `"none"` or `[]`. The names are the keymap's to check, so none is an
+    /// unknown key here; a value that is no chord at all is an error like any wrong type.
+    #[test]
+    fn key_bindings_by_context() {
+        let loaded = Settings::parse(
+            "[keys.workspace]\nnew_terminal = \" cmd-alt-t \"\nfont_larger = [\"cmd-=\", \"cmd-+\"]\nclose_tile = \"\"\n[keys.terminal]\ncopy = \"none\"\npaste = []\n",
+        );
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        let keys = &loaded.settings.keys;
+        let chords = |context, action| keys.get(context, action).map(|c| c.0.clone());
+        assert_eq!(chords("workspace", "new_terminal"), Some(vec!["cmd-alt-t".to_owned()]));
+        assert_eq!(chords("workspace", "font_larger").map(|c| c.len()), Some(2));
+        for (context, action) in [("workspace", "close_tile"), ("terminal", "copy")] {
+            assert_eq!(chords(context, action), Some(Vec::new()), "{action} unbound");
+        }
+        assert_eq!(chords("terminal", "paste"), Some(Vec::new()));
+        assert_eq!(chords("terminal", "find"), None, "not named: the default");
+        assert_eq!(Settings::default().keys, KeySettings::default(), "every default");
+
+        let wrong = Settings::parse("[keys.workspace]\nnew_terminal = 3\n");
+        let error = wrong.error.map(|e| e.to_string()).unwrap_or_default();
+        assert!(error.contains("a chord"), "{error}");
+
+        let back = toml::to_string(&loaded.settings).unwrap_or_default();
+        assert_eq!(Settings::parse(&back).settings.keys, *keys, "written back as read:\n{back}");
     }
 
     #[test]
@@ -1141,6 +1346,8 @@ mod tests {
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
         assert!(text.contains("allow = []"), "{text}");
         assert!(text.contains("server = \"\""), "{text}");
+        assert!(text.contains("hotkey = \"ctrl-`\""), "{text}");
+        assert!(text.contains("[keys]\n# The app's keys"), "{text}");
     }
 
     #[test]

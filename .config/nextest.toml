@@ -12,8 +12,11 @@ path = "junit.xml"
 store-success-output = false
 store-failure-output = true
 
+# A runner: the gate's profile (its named retries and no others), with the longer timeouts a
+# three-core runner needs and a JUnit report. A blanket retry here would hide any flake behind a
+# pass; only a test named under `profile.gate` is retried.
 [profile.ci]
-retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "10s", jitter = true }
+inherits = "gate"
 slow-timeout = { period = "60s", terminate-after = 3, grace-period = "10s" }
 fail-fast = false
 status-level = "fail"

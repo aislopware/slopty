@@ -1671,3 +1671,138 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   away, and the tile lays no away pill over it. It is let go once the worker has said again
   what runs in the session, or once its tile or worker is gone. Test:
   `a_face_stays_through_a_dropped_link_with_its_draft`.
+
+- ✅ **An agent comes back after a reboot** (2026-09-29). Session restore brought every lost
+  shell back but never what it ran, so a Claude Code conversation came back as a bare prompt.
+  A conversation the person left running is now resumed with `claude --resume <id>` (Claude
+  Code 2.1.283: `-r, --resume [value]`, by session id; it looks the id up under the directory
+  it runs in).
+  - **What is kept.** `AgentTable::resumable` says, per session, which conversation to bring
+    back (`slopty_agent::resume`). The id is the hooks' `session_id`, else the file name of the
+    transcript found for an unhooked agent. The directory is the agent process's own, else the
+    hook's `cwd`. The flags are the ones of its command line (read from the process table)
+    that shape the session: model, permission mode, effort, agent, name, added directories,
+    allowed and denied tools, plugin directories other than Slopty's mod, and the
+    skip-permissions pair. The prompt, `--settings`, `--mcp-config`, `--agents`, the system
+    prompts and everything else are left out, because they may carry tokens. A `--settings`
+    that carried Slopty's relay is noted instead, and the resumed agent gets the relay afresh.
+    The permission mode the hooks last reported replaces the one the agent started with.
+    `default` drops the flag. Leaving the skip-everything mode keeps only
+    `--allow-dangerously-skip-permissions`.
+  - **Which conversation.** The newest one. `/clear` and `/resume` end one conversation
+    (`SessionEnd` with `clear` or `resume`) and start the next (`SessionStart`), and the old
+    one stands until the new id is known. `SessionEnd` with `prompt_input_exit` or `logout`
+    is the person's own exit and ends it for good. So does an agent process gone while the
+    worker watched, by the tracker's usual rule. A clean exit (status 0) of the session's own
+    program clears it too. `other`, which is also what a signal gives, keeps it (the reasons
+    are the five in the 2.1.283 bundle's `SessionEnd` schema), because a reboot is exactly when
+    the agent should come back. It lasts until four probes in a row see something other than
+    the agent in the foreground. A `--print` run is never resumed.
+  - **How it gets to disk.** The daemon's agent tick (750 ms) hands each live session's
+    answer to `Worker::keep_agent`. The keeper writes the recipe only when the conversation
+    changed, and an "unknown yet" (an agent seen, its id not) leaves what was kept.
+  - **How it comes back.** A tile opened on `claude` runs `claude --resume <id> <flags>` as
+    its command, with Slopty's mod, as orchestration starts agents. A shell the person typed
+    `claude` into comes back as the shell, with the same line typed at its first prompt. That
+    is the prompt after its first OSC 7 of its own (the replayed screen's does not count),
+    while a line editor holds the tty (not canonical). The line goes through the person's own
+    shell, so its `PATH`, aliases and the integration's `claude` function (the mod) apply. It
+    lands in history, and the shell and its integration are still there when the agent exits.
+    Running `$SHELL -lic 'claude …; exec $SHELL -l'` instead would not type anything, but the
+    follow-up shell would lose the integration: zsh's bootstrap hands `ZDOTDIR` back before
+    the `-c` runs. The typed line is dropped when a viewer types first, or when no prompt
+    comes within 30 s (`FIRST_PROMPT_WAIT`). A shell without the integration never reports
+    OSC 7, so its agent is not resumed.
+  - **When it does not come back.** The transcript is gone (the hook's `transcript_path`,
+    else `~/.claude/projects/<escaped dir>/<id>.jsonl`), or the directory is gone. Then the
+    session is the shell alone, with one info line in the log and nothing on the terminal.
+  - Tests: `resume::tests` (flags kept and dropped, the relay, the mode, the end reasons, the
+    transcript path), `detect::tests::the_agents_own_arguments_follow_its_program_or_script`,
+    `the_newest_conversation_is_the_one_to_resume`,
+    `only_a_conversation_the_person_left_running_comes_back` and
+    `an_unhooked_agent_is_resumed_from_its_transcript` (the table), `restore::tests`
+    `a_kept_conversation_comes_back_resumed` and `each_session_keeps_its_own_conversation`,
+    `session_actor` `a_line_is_typed_at_the_first_prompt_and_not_before` and
+    `a_viewer_typing_first_drops_the_waiting_line`, and the e2e
+    `a_claude_code_conversation_comes_back_resumed` (apps/slopty-worker). The e2e types a
+    fake `claude` script into `/bin/bash`, posts a `SessionStart` hook to the control socket,
+    kills ptyd, and checks that the next worker runs the script again with `--resume <id>
+    --model … --permission-mode plan` in the same directory, and that the system prompt given
+    at the start is in neither the recipe nor the new command line.
+- ✅ **A yes or no is answered from the notification and the inbox** (2026-09-29; wire change,
+  goldens below). A permission prompt was held only while a client followed the session, so a
+  person away from the conversation face could only go to the terminal. Now any client may
+  answer approvals, without typing into the TUI and still only through the `PermissionRequest`
+  hook.
+  - **Who it is held for.** `ConversationRequest::Approvals { on }` makes a connection an
+    approver. `slopty_worker::conversation::Holds` holds a prompt for the session's followers
+    as before (`Reach::Followers`), and when nobody follows, for the approvers
+    (`Reach::Approvers`), but only a yes or no: `slopty_agent::permission::approvable`
+    leaves out `AskUserQuestion` and `ExitPlanMode`, whose answer is a pick or a plan to read.
+    An approver-only hold lasts `APPROVAL_HOLD` (120 s), or less when the relay's wait is
+    shorter, and then goes back to the TUI undecided as it always did. Answers and news go to
+    the clients a prompt was shown to (`Holds::tells`). The last follower unfollowing still
+    releases the session's prompts, since the person went back to the TUI. The last approver
+    leaving or stopping releases only what nobody else can answer. A follower that disconnects
+    leaves a yes or no to the approvers.
+  - **The TUI in front of the person.** A client that has the session's terminal focused
+    while the app is frontmost, showing the TUI rather than the face, sends
+    `ConversationRequest::Release { session, ask }` at once. Claude Code's own dialog then
+    shows where the person looks, and nothing waits on a button they will not press. The
+    release is taken like an answer: only from a client it was shown to, and only once.
+  - **The workspace** (`workspace::inbox::approvals`) asks every worker it links to for
+    approvals and keeps each session's approvable prompt. Its inbox row under *Needs you*
+    ends in "Deny" and "Allow" (`inbox-deny-<session>`, `inbox-allow-<session>`), which answer
+    it where it is. A deny carries no words, so the worker's own message goes to the model.
+  - **The note.** `slopty_platform::notify` registers categories with the centre when
+    `System` is made; that does not prompt. `APPROVAL` has "Allow"
+    (`AuthenticationRequired`: a locked iPhone asks to be unlocked first), "Deny"
+    (`Destructive`) and "Show" (`Foreground`). The delegate reads the response's
+    `actionIdentifier` against the framework's `UNNotificationDefaultActionIdentifier` and
+    `UNNotificationDismissActionIdentifier` (`notify::tap_of`) into `Tap::action`. The
+    prompt reaches the client a moment after the agent's blocked status, so the note already
+    up is replaced silently (`Note::silent`) with the buttons and the prompt's `ask` in its
+    `userInfo`. It is replaced again, without them, when the prompt is no longer held.
+    "Allow" and "Deny" answer through `WorkspaceView::answer_approval` and move nothing. A
+    press on a prompt that has gone says so in a notice. "Show" is a tap.
+  - Tests: `Holds` (`an_approver_is_held_for_without_following`), `hold_for`
+    (`an_approvers_hold_is_bounded`), `approvable`
+    (`only_a_tool_call_is_approvable_from_outside_the_conversation`), the note model and the
+    delegate's routing with no centre
+    (`the_approval_note_answers_in_place_and_shows_on_demand`,
+    `a_response_becomes_a_tap_or_a_button_press`), the workspace's keeping
+    (`a_yes_or_no_is_kept_until_it_settles_or_is_taken_once`), the note's buttons
+    (`an_approval_note_carries_the_buttons_while_its_prompt_is_held`), headless
+    `an_approval_is_answered_from_the_note_and_the_inbox_where_they_are` and
+    `a_prompt_whose_terminal_is_in_front_goes_back_to_it`, and the worker end to end
+    (`an_approver_answers_without_following_and_the_tui_asks_otherwise`). That last test runs
+    the real relay as its own child and sends the bounded hold as a control-socket request.
+    No test posts a real notification. Goldens: new `conversation__client_approvals_on` and
+    `conversation__client_release`.
+
+- ✅ **A note's verdict waits for its prompt, and an answered prompt takes its note away**
+  (2026-09-29). "Allow" on a note can arrive before its prompt: the tap launched the app, or
+  the link is new and the worker has not yet sent what it holds. The verdict now waits for the
+  prompt, answering it as it arrives, until the worker has had three seconds since it was asked
+  for approvals, or fifteen for a worker not reached; then it says the prompt no longer waits,
+  or that the worker was not reached, as a toast with the app in front and as a note of its
+  own while it is away. "Allow" and "Deny" no longer bring the app forward. Once this client
+  answered, the agent still reads as waiting until the worker says the prompt settled; its
+  note is withdrawn then instead of posted again without the buttons. Tests:
+  `a_notes_answer_waits_for_its_prompt`,
+  `an_approval_note_carries_the_buttons_while_its_prompt_is_held`.
+
+- ✅ **A resume is never typed with a control character, and a prompt is shown before it can
+  be settled** (2026-09-29).
+  - The flags a resume keeps include free text (`--name`, `--add-dir`, `--plugin-dir`), and a
+    resume in a shell is typed at its first prompt. Quoting does not stop the line editor from
+    acting on a `\r`, a `\x03` or an escape as it is typed. `resume::invocation` now leaves out a
+    value holding one, and `Recipe::reopen` refuses to type a line that holds one (a kept recipe
+    is a file) and reopens the shell alone. Tests: `a_value_with_a_control_character_is_not_kept`,
+    the tampered recipes in `a_kept_conversation_comes_back_resumed`.
+  - A client starting to answer approvals, or starting to follow, was sent the held prompts
+    after the follows' lock was let go, so another client's answer could settle one in between
+    and its `Settled` reach the client before the `Asked`, leaving a settled prompt on show.
+    `follow::show_held` now queues them under the lock, and a new prompt goes on the broadcast
+    under it too; a prompt is settled only under that lock, once out of the holds, so its
+    `Asked` is always ahead. Test: `a_prompt_shown_to_a_new_approver_goes_out_ahead_of_its_settling`.

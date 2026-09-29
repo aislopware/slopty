@@ -899,7 +899,8 @@ pub enum ConversationRequest {
         session: SessionId,
     },
     /// Answer a permission prompt. The first answer wins; one that comes after the prompt was
-    /// answered or released, or from a client that does not follow the session, is dropped.
+    /// answered or released, or from a client it was not shown to (one that neither follows the
+    /// session nor answers [`Self::Approvals`]), is dropped.
     Answer {
         /// The session.
         session: SessionId,
@@ -929,6 +930,23 @@ pub enum ConversationRequest {
         query: String,
         /// Paths wanted at most.
         limit: u32,
+    },
+    /// Answer permission prompts from outside the conversation (a notification, the inbox), or
+    /// stop. While on, the worker holds a yes-or-no prompt of any session for a bounded time
+    /// even when nobody follows it, and sends it here as it sends a follower's. The last
+    /// client to stop hands such prompts back to the TUI.
+    Approvals {
+        /// Answer them from now on.
+        on: bool,
+    },
+    /// Hand a held prompt back to the TUI now, undecided: the person is at the terminal and
+    /// answers there. Taken as an answer is: only from a client the prompt was shown to, and
+    /// only while it is still held.
+    Release {
+        /// The session.
+        session: SessionId,
+        /// [`PermissionPrompt::ask`].
+        ask: u64,
     },
 }
 
@@ -1118,10 +1136,19 @@ impl PermissionEvent {
             Self::Settled { session, .. } => *session,
         }
     }
+
+    /// The prompt's [`PermissionPrompt::ask`].
+    #[must_use]
+    pub const fn ask(&self) -> u64 {
+        match self {
+            Self::Asked(prompt) => prompt.ask,
+            Self::Settled { ask, .. } => *ask,
+        }
+    }
 }
 
 /// A permission Claude Code asks for before running a tool, held while a client follows the
-/// session.
+/// session or, for a yes-or-no prompt, while one answers [`ConversationRequest::Approvals`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PermissionPrompt {
     /// The terminal session the agent runs in.
@@ -1213,8 +1240,9 @@ pub enum Settled {
         /// Who gave it.
         by: ClientId,
     },
-    /// Handed back undecided: the TUI shows its own dialog now. The last follower left, or
-    /// the worker held it as long as it may.
+    /// Handed back undecided: the TUI shows its own dialog now. The last follower or approver
+    /// left, a client released it ([`ConversationRequest::Release`]), or the worker held it
+    /// as long as it may.
     Released,
     /// Claude Code stopped waiting (the turn was interrupted, the agent quit).
     Withdrawn,

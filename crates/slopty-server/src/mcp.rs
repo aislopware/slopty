@@ -104,7 +104,22 @@ pub async fn serve(listener: TcpListener, admission: Admission, hub: Hub) {
 ///
 /// An unspecified IPv6 address is bound dual-stack, so one socket answers loopback, the tailnet
 /// and the LAN in both families, including interfaces that come up after the server does.
+///
+/// XNU lets `[::]:p` bind beside an IPv4 socket on `0.0.0.0:p`, which then takes every IPv4
+/// connection, so a fixed port is first bound on `0.0.0.0` alone: held there, it is in use, as
+/// on Linux. A free port (0) needs no check, since TCP draws it clear of IPv4 sockets.
 pub fn bind(local: SocketAddr) -> std::io::Result<TcpListener> {
+    if local.ip().is_unspecified() && local.is_ipv6() && local.port() != 0 {
+        drop(tcp_socket(SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, local.port())))?);
+    }
+    let socket = tcp_socket(local)?;
+    socket.listen(128)?;
+    TcpListener::from_std(socket.into())
+}
+
+/// A non-blocking TCP socket bound on `local`, dual-stack when it is IPv6, reusing an address
+/// that closed connections still hold in `TIME_WAIT`.
+fn tcp_socket(local: SocketAddr) -> std::io::Result<socket2::Socket> {
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(local),
         socket2::Type::STREAM,
@@ -116,6 +131,5 @@ pub fn bind(local: SocketAddr) -> std::io::Result<TcpListener> {
     socket.set_reuse_address(true)?;
     socket.set_nonblocking(true)?;
     socket.bind(&local.into())?;
-    socket.listen(128)?;
-    TcpListener::from_std(socket.into())
+    Ok(socket)
 }

@@ -22,6 +22,8 @@ pub mod close_code {
     pub const PROTOCOL: u32 = 2;
     /// The tailnet grants the peer no role here.
     pub const NOT_GRANTED: u32 = 3;
+    /// The peer speaks another wire (`slopty_proto::wire`); the reason is the closer's build.
+    pub const WRONG_BUILD: u32 = 4;
 }
 
 /// The worker's listening endpoint and who it lets in.

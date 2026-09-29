@@ -2,8 +2,9 @@
 //!
 //! Three transports, one vocabulary:
 //!
-//! * **Control stream** — one bidirectional QUIC stream. [`ClientMsg`] one way, [`WorkerMsg`] the
-//!   other, each framed by [`codec`] (u32 length prefix + postcard).
+//! * **Control stream** — one bidirectional QUIC stream. Each end opens it with a [`wire::Prefix`]
+//!   (magic, wire fingerprint, build), then [`ClientMsg`] one way and [`WorkerMsg`] the other, each
+//!   framed by [`codec`] (u32 length prefix + postcard).
 //! * **Unidirectional streams** — each opens with a [`transfer::UniHead`]. A session stream (worker
 //!   → client, one per attached terminal) carries [`terminal::TermEvent`]s with the same framing;
 //!   input goes back on the control stream so it is never head-of-line blocked behind a large
@@ -50,6 +51,7 @@ pub mod server;
 pub mod tailnet;
 pub mod terminal;
 pub mod transfer;
+pub mod wire;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs};
@@ -254,7 +256,8 @@ pub enum WorkerMsg {
     /// What the worker can do changed since [`handshake::HelloAck::caps`]: a permission
     /// granted or taken, a display attached.
     Caps(server::WorkerCaps),
-    /// A permission prompt of a session this client follows, or its end.
+    /// A permission prompt of a session this client follows, or of any session while it answers
+    /// approvals (`ConversationRequest::Approvals`), or its end.
     Permission(conversation::PermissionEvent),
     /// The answer to `ClientMsg::ListFolder`.
     Folder {

@@ -33,7 +33,7 @@ mod actions {
 use actions::{Hide, HideOthers, Quit, ShowAll};
 
 /// The application menu. Items name the same actions the key bindings do, so the shortcuts
-/// shown next to them come from the keymap and the two can never disagree.
+/// shown next to them come from the keymap in effect whenever the menu is built.
 fn menus() -> Vec<Menu> {
     use slopty_ui::terminal::{Copy, Find, FindNext, FindPrev, Paste};
     use slopty_ui::workspace::{
@@ -154,8 +154,8 @@ fn main() -> Result<()> {
             return;
         }
         // After `open_workspace`: the menu reads its shortcut labels from the keymap, which the
-        // workspace fills in.
-        cx.set_menus(menus());
+        // workspace fills in, and it is built again whenever the keys are rebound.
+        slopty_app::set_app_menus(cx, menus);
         if !slopty_app::self_test() {
             cx.activate(true);
         }

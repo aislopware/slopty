@@ -132,6 +132,8 @@ fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
         viewers: 1,
         command: Vec::new(),
         agent: None,
+        progress: None,
+        restored: None,
     }
 }
 
@@ -1454,6 +1456,7 @@ mod overlays;
 mod page_chrome;
 mod palette;
 mod popout;
+mod quick;
 mod remote;
 mod save_copy;
 mod search;

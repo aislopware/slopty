@@ -226,7 +226,7 @@ fn the_empty_workspace_begins_a_terminal_an_agent_or_a_window(cx: &mut TestAppCo
     for label in ["New terminal", "New agent", "Add a window or display", "studio"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
     }
-    assert_eq!(*strip::BEGIN_KEYS, ["⌘T".to_owned(), "⇧⌘T".to_owned(), "⌘O".to_owned()]);
+    assert_eq!(strip::begin_keys(), ["⌘T".to_owned(), "⇧⌘T".to_owned(), "⌘O".to_owned()]);
 
     click(cx, "empty-terminal");
     assert!(

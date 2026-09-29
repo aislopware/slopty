@@ -3,6 +3,8 @@
 //! * [`terminal`] — the terminal view (an entity owning a `TermState`) and its element (the
 //!   painter). Rows are painted straight from the grid; no intermediate widget tree.
 //! * [`a11y`] — the keyboard ring and, for tests, the accessibility tree.
+//! * [`add_worker`] — a worker put on a machine over SSH, step by step, for the add sheet and a
+//!   tile on a different build.
 //! * [`workspace`] — every worker's items as tiles in scrollable columns, the titlebar, actions.
 //! * [`screen`] — a remote window or display painted from decoded frames, with input forwarding.
 //! * [`clipboard`] — the clipboard shared with the workers: announced, fetched on paste, echoes
@@ -17,6 +19,8 @@
 //! * [`picker`] — the "add a window" chooser.
 //! * [`search`] — search in files on a worker: the matches grouped by file as they stream in.
 //! * [`paste_key`] — the system's paste button over the iOS key bar's Paste.
+//! * `quick_terminal` — the panel a system-wide chord slides down from the top of the screen.
+//! * [`keymap`] — every command a key runs, its default chords, and `[keys]` laid over them.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
 //! * [`kit`] — gpui-kit's theme kept on the same tokens.
@@ -31,6 +35,7 @@
 )]
 
 pub mod a11y;
+pub mod add_worker;
 pub mod browser;
 
 pub mod chrome_text;
@@ -43,6 +48,7 @@ pub mod fonts;
 pub mod frames;
 pub mod highlight;
 pub mod icons;
+pub mod keymap;
 pub mod keys;
 pub mod kit;
 pub mod markdown;
@@ -50,6 +56,7 @@ pub mod note;
 pub mod palette;
 pub mod paste_key;
 pub mod picker;
+mod quick_terminal;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"

@@ -127,6 +127,81 @@ mod tests {
         outcome.unwrap();
     }
 
+    /// Search in files from a script and from an agent: `slopty search` narrows by glob and
+    /// prints the context round a match, `.gitignore` keeps a file out, and `search_files`
+    /// over MCP stops at the lines asked for and says there are more.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e server"]
+    async fn search_in_files_through_the_cli_and_mcp() {
+        let stack = ServerStack::launch("e2e-search").await.unwrap();
+        let outcome = search_scenario(&stack).await;
+        stack.shutdown().await;
+        outcome.unwrap();
+    }
+
+    async fn search_scenario(stack: &ServerStack) -> Result<()> {
+        let root = stack.dir.path().join("project");
+        std::fs::create_dir_all(root.join("src"))?;
+        std::fs::write(root.join(".gitignore"), "ignored.rs\n")?;
+        std::fs::write(root.join("ignored.rs"), "needle\n")?;
+        std::fs::write(root.join("src/a.rs"), "fn one() {}\n    // a needle\nfn two() {}\n")?;
+        std::fs::write(root.join("src/b.md"), "needle\nneedle again\n")?;
+        let dir = root.to_string_lossy().into_owned();
+        let worker = stack.worker.name();
+
+        let started = Instant::now();
+        let args = ["search", "needle", &dir, "--worker", worker, "--glob", "*.rs", "-C", "1"];
+        let found = stack.slopty(&args).await?;
+        eprintln!("  slopty search: {} ms", started.elapsed().as_millis());
+        let lines = |file: &Value| -> Vec<(u64, String, bool)> {
+            file["lines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|l| {
+                    let context = l["context"] == json!(true);
+                    (
+                        l["line"].as_u64().unwrap_or(0),
+                        str_of(l, "text").unwrap_or("").to_owned(),
+                        context,
+                    )
+                })
+                .collect()
+        };
+        let files = found["files"].as_array().context("files is a list")?;
+        ensure!(
+            files.len() == 1 && files[0]["path"] == "src/a.rs",
+            "the glob and .gitignore: {found}"
+        );
+        ensure!(
+            lines(&files[0])
+                == [
+                    (1, "fn one() {}".to_owned(), true),
+                    (2, "// a needle".to_owned(), false),
+                    (3, "fn two() {}".to_owned(), true),
+                ],
+            "the match and its context: {found}"
+        );
+        ensure!(files[0]["lines"][1]["matches"] == json!([[5, 11]]), "{found}");
+
+        let asked = json!({ "worker": worker, "root": dir, "pattern": "NEEDLE", "max_lines": 2 });
+        let found = tool(stack, 40, "search_files", asked).await?;
+        ensure!(found["capped"] == json!(true) && found["lines"] == json!(2), "{found}");
+        let cased =
+            json!({ "worker": worker, "root": dir, "pattern": "NEEDLE", "match_case": true });
+        let found = tool(stack, 41, "search_files", cased).await?;
+        ensure!(found["files"] == json!([]) && found["capped"] == json!(false), "{found}");
+
+        let bad = json!({ "worker": worker, "root": dir, "pattern": "(", "regex": true });
+        let params = json!({ "name": "search_files", "arguments": bad });
+        let called = stack.mcp(42, "tools/call", params).await?;
+        ensure!(
+            called["result"]["isError"] == json!(true),
+            "a pattern that does not parse: {called}"
+        );
+        Ok(())
+    }
+
     async fn scenario(stack: &mut ServerStack, clock: &mut Clock) -> Result<()> {
         // 1. The worker is online, with its capabilities.
         let entry = stack.worker_online(STEP).await?;

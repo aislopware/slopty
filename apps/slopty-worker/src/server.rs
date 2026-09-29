@@ -5,7 +5,8 @@
 //! wait on it: it hears the daemon's events on its own broadcast subscription (falling behind
 //! costs only this link a re-registration), answers every request in a task of its own (a
 //! long `WaitFor` holds up nothing), and when the server is down it dials again by the one
-//! redial rule every link follows ([`slopty_net::redial`]), forever.
+//! redial rule every link follows ([`slopty_net::redial`]), forever. A server on a different
+//! build is asked again only after [`slopty_net::redial::WRONG_BUILD`].
 
 use std::sync::Arc;
 
@@ -83,6 +84,16 @@ pub async fn run(
             Err(Ended::NotGranted) => {
                 tracing::warn!(server = %addr, "the tailnet policy does not grant this machine the worker role");
             }
+            // It changes only when someone updates it or this worker: asked again after a while.
+            Err(Ended::WrongBuild(wrong)) => {
+                let (server_build, this) = (wrong.peer_build(), slopty_proto::wire::BUILD);
+                tracing::warn!(
+                    server = %addr, server_build, this,
+                    "the server runs a different build; update whichever is behind"
+                );
+                tokio::time::sleep(slopty_net::redial::WRONG_BUILD).await;
+                continue;
+            }
             Err(Ended::Failed(e)) => {
                 tracing::info!(server = %addr, error = %e, "server link failed");
             }
@@ -97,6 +108,8 @@ enum Ended {
     Duplicate,
     /// The tailnet policy does not grant this machine the worker role.
     NotGranted,
+    /// The server runs a different build, whose messages this one cannot read.
+    WrongBuild(slopty_net::WrongBuild),
     /// Anything else.
     Failed(anyhow::Error),
 }
@@ -134,6 +147,9 @@ async fn session(
             Ok(link) => link,
             Err(DialError::Refused(Refusal::DuplicateWorker)) => return Err(Ended::Duplicate),
             Err(DialError::Refused(Refusal::NotGranted)) => return Err(Ended::NotGranted),
+            Err(DialError::Net(NetError::WrongBuild(wrong))) => {
+                return Err(Ended::WrongBuild(wrong));
+            }
             Err(DialError::Net(e)) => return Err(e.into()),
         };
     let ServerLink { conn, remote, name, tx, mut rx } = link;

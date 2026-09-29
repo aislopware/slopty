@@ -115,3 +115,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   became 8-bit only, and it went with the wire fields that echoed it; ruled in
   decisions/video.md ("HDR is not carried"). A file that still names it gets the unknown-key
   warning.
+
+- ✅ **Every key is rebindable in `[keys]`, per context** (2026-09-29). About 110 bindings were
+  hard-coded in two lists, and the file had no say in them, where Warp and Zed let every key
+  be moved. Now `slopty_ui::keymap` is the one table of every command a key can run, with its
+  default chords, and `[keys.<context>] <action> = …` lays the file over it: a chord in the
+  palette's syntax, a list of them, or `""`/`"none"` to unbind. What the file does not name
+  keeps its default, so a default is written once and a changed default reaches everyone who
+  did not move it. The contexts are the app's own (`app`, `workspace`, `terminal`, `file`,
+  `conversation`, `folder`, `search`, `page`), each command bound in the GPUI contexts it
+  needs (the workspace's ⇧⌘F in any text field too), so a rebind moves it everywhere it
+  answered. Chords are read by the quick terminal's parser (`Chord::read`, split from the
+  hot-key rule of `Chord::parse`), not a second one. One chord runs one command per context:
+  the file's command takes it from a default, the first of two of the file's own keeps it, and
+  either way the settings notice names both, as it names an unknown context, action or key; a
+  nested context (a terminal inside the workspace) is not a clash, as GPUI's deeper binding
+  wins there by design. A saved file rebinds at once: `keymap::install` replaces only the
+  bindings tagged as the keymap's, keeping gpui-kit's and the menu's ahead of them. The
+  settings form's Keyboard page records a chord through a keystroke interceptor, so a chord the
+  app binds is recorded rather than run, with ⌫ to unbind, Esc to cancel and a reset that takes
+  the line out of the file. Ruled out: Zed's JSON keymap file (a second file, and settings are
+  one TOML file here), action names as GPUI spells them (`workspace::NewTerminal` needs quoting
+  in TOML and names no context), and multi-key sequences (no command wants one yet). Tests:
+  `key_bindings_by_context` (slopty-settings), `the_table_reads_and_holds_no_clash`,
+  `the_file_is_told_what_it_named_wrong`, `the_file_overrides_unbinds_and_wins_a_clash`,
+  `installing_rebinds_in_place`, `the_palette_shows_the_chord_in_effect` (slopty-ui keymap),
+  `a_chord_is_recorded_into_the_file` (the form), `saved_keys_rebind_at_once` (slopty-app).
+
+- ✅ **The file's chord wins wherever it binds, and only a chord the app can own is recorded**
+  (2026-09-29). A default in a context nested inside the file's chord (the terminal's ⌘K
+  under `[keys.workspace]`, any context under `[keys.app]`) would win there, as GPUI's deeper
+  binding does, so the default gives the chord up and the notice says so; two defaults in
+  nested contexts are still the table's layering. The Keyboard page records only a chord with
+  ⌘ or ⌃, or an F key, except for a folder's commands, whose rows bare keys walk: a letter or
+  Tab bound in the workspace would take it from every shell. Tab and ⇧Tab end recording and go
+  along the ring; a key with no name says "This key can't be bound"; a keystroke in another
+  window (the quick terminal, a popped-out tile) is left to it. A file that does not parse
+  changes nothing, so the last good keys and quick terminal chord stay rather than the
+  defaults' (which took ⌃` from other apps); a chord that does not read is said when it
+  changes, not with every save. The menu bar is rebuilt from the keymap at every rebinding:
+  AppKit runs a menu item's key equivalent before any binding, so a menu built once kept
+  running the old chord (`slopty_app::set_app_menus`). The keymap words each command's chord
+  once as it is made (`Keymap::label_of`), so a frame looks labels up. Tests:
+  `the_files_chord_wins_over_a_deeper_default`, `a_chords_words_come_with_the_keymap`
+  (keymap), `recording_takes_only_a_chord_the_app_can_own`,
+  `a_folders_command_takes_a_key_alone` (the form), `the_menu_bar_follows_a_rebinding`,
+  `a_broken_file_keeps_the_keys_and_says_a_bad_chord_once` (slopty-app).

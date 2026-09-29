@@ -363,8 +363,11 @@ impl WorkspaceView {
         Some(if calm && self.face_live(session, cx) { Status::Working } else { status })
     }
 
-    /// A followed session's permission prompt was asked or settled.
-    pub fn permission_event(&self, event: PermissionEvent, cx: &mut Context<Self>) {
+    /// A permission prompt this client may answer was asked or settled: the face of a followed
+    /// session, and the inbox and notes for a yes or no.
+    pub fn permission_event(&mut self, event: PermissionEvent, cx: &mut Context<Self>) {
+        self.approval_event(&event, cx);
+        cx.notify();
         let session = event.session();
         if let Some(view) = self.faces.views.get(&session) {
             view.update(cx, |v, cx| v.permission(event, None, cx));
