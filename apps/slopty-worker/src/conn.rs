@@ -17,6 +17,7 @@ use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
 use slopty_proto::conversation::{ConversationRequest, PermissionEvent};
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::folder::Listing;
+use slopty_proto::handoff::HandoffReply;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::ItemSync;
 use slopty_proto::orchestration::ErrorCode;
@@ -24,9 +25,9 @@ use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, S
 use slopty_proto::terminal::{
     CloseReason, SessionSummary, TermError, TermEvent, TermRequest, TermSize,
 };
-use slopty_proto::transfer::{ClipFormat, ClipMsg, Dest, XferMsg};
+use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
 use slopty_worker::WorkerError;
-use slopty_worker::clip::Paste;
+use slopty_worker::clip::{Paste, PasteKind};
 use slopty_worker::screen::{StreamControl, listing};
 use slopty_worker::session::{ClientSink, Outbound, SessionHandle};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -83,12 +84,14 @@ impl Input {
         }
     }
 
-    /// Whether this input is a paste that must find the client's clipboard on the pasteboard:
-    /// ⌘V to a window, or a shell's paste of a picture.
-    fn is_paste(&self) -> bool {
+    /// Whether this input is a paste that must find the client's clipboard on the pasteboard,
+    /// and which: ⌘V to a window, or a shell's paste of a picture.
+    fn paste(&self) -> Option<PasteKind> {
         match self {
-            Self::Window(_, input) => input.is_paste_chord(),
-            Self::Term(_, req) => matches!(req, TermRequest::PastePicture(_)),
+            Self::Window(_, input) => input.is_paste_chord().then_some(PasteKind::Window),
+            Self::Term(_, req) => {
+                matches!(req, TermRequest::PastePicture(_)).then_some(PasteKind::Picture)
+            }
         }
     }
 }
@@ -118,29 +121,33 @@ enum Route {
     Now(Input),
     /// Behind the paste its window is waiting on.
     Held,
-    /// A paste chord that starts a hold: the clipboard is to be asked what it needs.
-    Began,
+    /// A paste chord of this kind that starts a hold: the clipboard is to be asked what it
+    /// needs.
+    Began(PasteKind),
 }
 
 /// Route one input. A paste holds its window or shell, and joins a hold already under way;
 /// input for a held target queues behind the paste, in order; anything else goes now.
 fn route(held: &mut Option<Held>, input: Input) -> Route {
-    let (paste, target) = (input.is_paste(), input.target());
+    let (paste, target) = (input.paste(), input.target());
     match held {
-        Some(held) if paste || held.targets.contains(&target) => {
+        Some(held) if paste.is_some() || held.targets.contains(&target) => {
             held.targets.insert(target);
             held.inputs.push(input);
             Route::Held
         }
-        None if paste => {
-            *held = Some(Held {
-                targets: HashSet::from([target]),
-                inputs: vec![input],
-                stage: Stage::Deciding,
-            });
-            Route::Began
-        }
-        Some(_) | None => Route::Now(input),
+        None => match paste {
+            Some(kind) => {
+                *held = Some(Held {
+                    targets: HashSet::from([target]),
+                    inputs: vec![input],
+                    stage: Stage::Deciding,
+                });
+                Route::Began(kind)
+            }
+            None => Route::Now(input),
+        },
+        Some(_) => Route::Now(input),
     }
 }
 
@@ -246,8 +253,12 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     };
     let mut greeting = vec![WorkerMsg::HelloAck(ack), WorkerMsg::Items(daemon.items.snapshot())];
     // Collected first: the locks must not be held across the sends.
-    let agents = daemon.agents.lock().snapshot();
+    let (agents, branches) = {
+        let table = daemon.agents.lock();
+        (table.snapshot(), table.branches())
+    };
     greeting.extend(agents.into_iter().map(WorkerMsg::Agent));
+    greeting.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let known = daemon.ports.lock().known();
     greeting.extend(known.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
     for msg in greeting {
@@ -281,6 +292,25 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let (watch_files, watched) = watch::channel(Vec::new());
     tasks.spawn(crate::files::watch(hello.client, conn.clone(), out.clone(), watched));
     let (told, mut told_rx) = mpsc::unbounded_channel();
+    daemon.clip.attach(link, clip_sink(out.clone(), hello.client));
+    let (saves, saved) = mpsc::unbounded_channel();
+    // Not one of the connection's tasks: saves and edit ends already sent are written and
+    // heard after the connection drops, so a waiting program still gets its answer.
+    tokio::spawn(crate::files::save_in_order(
+        Arc::clone(&daemon.handoffs),
+        hello.client,
+        out.clone(),
+        saved,
+    ));
+    let unwatched = daemon.handoffs.lock().join(
+        hello.client,
+        link,
+        hello.name.clone(),
+        handoff_sink(out.clone(), hello.client),
+    );
+    for session in unwatched {
+        let _sent = daemon.presence.send((session, false));
+    }
     let mut peer = Peer {
         daemon,
         conn,
@@ -304,6 +334,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         copies: slopty_net::echo::Copies::from_env(),
         follows: HashMap::new(),
         searches: slopty_worker::search::Searches::default(),
+        saves,
     };
     daemon.wake.lock().client_joined();
 
@@ -319,7 +350,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
             Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
             Some(copy) = copies_rx.recv() => peer.input_copy(copy),
-            Some(clip) = clips_rx.recv() => peer.clip_data(clip.generation, clip.format, clip.bytes),
+            Some(clip) = clips_rx.recv() => peer.clip_data(&clip.rep, clip.bytes),
             Some(done) = done_rx.recv() => {
                 if let Some(why) = peer.done(done) {
                     break Ok(why);
@@ -349,6 +380,12 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     peer.conn.close(0_u32.into(), b"done");
     drop(peer);
     result
+}
+
+/// Where the clipboard sends this client a fetch its promises need: the control stream, without
+/// waiting, since a promise is answered on a thread AppKit chose.
+fn clip_sink(out: mpsc::Sender<WorkerMsg>, client: ClientId) -> slopty_worker::clip::Sink {
+    Arc::new(move |msg| post(&out, client, WorkerMsg::Clip(msg)))
 }
 
 /// Wake when a paste waiting for the client's clipboard is due to go on regardless.
@@ -565,6 +602,11 @@ impl InputOrder {
     }
 }
 
+/// Where the handoffs send this client an ask: the control stream, without waiting.
+fn handoff_sink(out: mpsc::Sender<WorkerMsg>, client: ClientId) -> slopty_worker::handoff::Sink {
+    Arc::new(move |msg| post(&out, client, msg))
+}
+
 /// Tell the client a request about `session` failed, from a task that may wait for room.
 async fn report(out: &mpsc::Sender<WorkerMsg>, client: ClientId, session: SessionId, e: TermError) {
     tracing::warn!(%client, %session, error = %e, "request failed");
@@ -652,8 +694,12 @@ async fn resync(
     msgs.push(WorkerMsg::Items(daemon.items.snapshot()));
     msgs.push(WorkerMsg::Caps(daemon.caps.borrow().clone()));
     // Collected first: the locks must not be held across the sends.
-    let agents = daemon.agents.lock().snapshot();
+    let (agents, branches) = {
+        let table = daemon.agents.lock();
+        (table.snapshot(), table.branches())
+    };
     msgs.extend(agents.into_iter().map(WorkerMsg::Agent));
+    msgs.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let ports = daemon.ports.lock().known();
     msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
     msgs.extend(daemon.follows.lock().holds.shown_to(link).map(|(_ask, held)| {
@@ -835,6 +881,8 @@ struct Peer<'d> {
     follows: HashMap<SessionId, mpsc::UnboundedSender<crate::follow::Command>>,
     /// The text search this client runs, stopped by its next one and with the connection.
     searches: slopty_worker::search::Searches,
+    /// This client's saves and edit ends, taken in order ([`crate::files::save_in_order`]).
+    saves: mpsc::UnboundedSender<crate::files::Save>,
 }
 
 impl Drop for Peer<'_> {
@@ -853,6 +901,10 @@ impl Drop for Peer<'_> {
             task.abort();
         }
         self.daemon.clip.forget(self.link);
+        let unwatched = self.daemon.handoffs.lock().leave(self.client, self.link);
+        for session in unwatched {
+            let _sent = self.daemon.presence.send((session, false));
+        }
         let released = self.daemon.follows.lock().holds.leave(self.link);
         crate::follow::release(self.daemon, released);
         self.daemon.wake.lock().client_left();
@@ -966,12 +1018,15 @@ impl Peer<'_> {
                 self.watch_files.send_replace(paths);
             }
             ClientMsg::WriteFile { path, text, base_modified_ms } => {
-                let (client, out) = (self.client, self.out.clone());
-                self.tasks.spawn(async move {
-                    crate::files::write(client, &out, path, text.into_bytes(), base_modified_ms)
-                        .await;
-                });
+                let save =
+                    crate::files::Save::File { path, text: text.into_bytes(), base_modified_ms };
+                let _gone = self.saves.send(save);
             }
+            ClientMsg::Handoff(reply @ HandoffReply::Edited { .. }) => {
+                let _gone = self.saves.send(crate::files::Save::Edited(reply));
+            }
+            ClientMsg::Handoff(reply) => self.daemon.handoffs.lock().replied(self.client, reply),
+            ClientMsg::HandoffCaps(caps) => self.daemon.handoffs.lock().caps(self.client, caps),
             ClientMsg::Clip(msg) => self.clip(msg),
             ClientMsg::Xfer(msg) => self.xfer(msg),
             ClientMsg::Conversation(req) => self.conversation(req),
@@ -990,10 +1045,10 @@ impl Peer<'_> {
     fn done(&mut self, done: Done) -> Option<&'static str> {
         match done {
             Done::Attach { session, size } => self.attach(session, size),
-            Done::PastePlan(Some(Paste::Fetch { generation, formats })) => {
-                tracing::debug!(client = %self.client, generation, ?formats, "paste waits for the clipboard");
-                for format in formats {
-                    self.post(WorkerMsg::Clip(ClipMsg::Fetch { generation, format }));
+            Done::PastePlan(Some(Paste::Fetch(reps))) => {
+                tracing::debug!(client = %self.client, reps = reps.len(), "paste waits for the clipboard");
+                for rep in reps {
+                    self.post(WorkerMsg::Clip(ClipMsg::Fetch { rep, max: None, urgent: true }));
                 }
                 let until = tokio::time::Instant::now()
                     .checked_add(PASTE_WAIT)
@@ -1106,30 +1161,53 @@ impl Peer<'_> {
                 self.daemon.clip.watch(self.link, on);
             }
             ClipMsg::Offer(offer) => {
-                tracing::debug!(client = %self.client, generation = offer.generation, items = offer.items.len(), "client clipboard offered");
-                self.daemon.clip.offered(self.link, offer);
+                tracing::debug!(
+                    client = %self.client,
+                    generation = offer.generation,
+                    items = offer.items.len(),
+                    age_ms = offer.age_ms,
+                    concealed = offer.concealed,
+                    "client clipboard offered"
+                );
+                if self.daemon.clip.offered(self.link, offer, std::time::Instant::now()) {
+                    let (clip, link) = (Arc::clone(&self.daemon.clip), self.link);
+                    // Off the runtime: a write waits on the pasteboard server.
+                    self.tasks.spawn(async move {
+                        let _mirrored =
+                            tokio::task::spawn_blocking(move || clip.mirror(link)).await;
+                    });
+                }
             }
-            ClipMsg::Fetch { generation, format } => {
+            ClipMsg::Fetch { rep, max, urgent } => {
                 let (daemon, conn, out) =
                     (self.daemon.clone(), self.conn.clone(), self.out.clone());
                 self.tasks.spawn(async move {
-                    crate::xfer::send_clip(&daemon, &conn, &out, generation, format).await;
+                    crate::xfer::send_clip(&daemon, &conn, &out, rep, max, urgent).await;
                 });
             }
-            ClipMsg::Data { generation, format, bytes } => {
-                self.clip_data(generation, format, bytes);
+            ClipMsg::Data { rep, bytes } => self.clip_data(&rep, Some(bytes)),
+            ClipMsg::TooBig { rep, size } => {
+                tracing::debug!(client = %self.client, item = rep.item, size, "client clipboard too big");
+                if self.daemon.clip.refused(self.link, &rep) {
+                    self.write_held();
+                }
             }
-            ClipMsg::Unavailable { generation } => {
-                tracing::debug!(client = %self.client, generation, "client clipboard gone");
+            ClipMsg::Unavailable { source } => {
+                tracing::debug!(client = %self.client, "client clipboard gone");
+                self.daemon.clip.unavailable(self.link, source);
                 self.write_held();
             }
         }
     }
 
-    /// A representation of the client's clipboard arrived; the held paste goes on once all it
-    /// waits for is here.
-    fn clip_data(&mut self, generation: u64, format: ClipFormat, bytes: Vec<u8>) {
-        if self.daemon.clip.supply(self.link, generation, format, bytes) {
+    /// A representation of the client's clipboard arrived, or its stream was refused or cut
+    /// (`None`); the held paste goes on once all it waits for is here or not coming.
+    fn clip_data(&mut self, rep: &RepRef, bytes: Option<Vec<u8>>) {
+        let whole = match bytes {
+            Some(bytes) => self.daemon.clip.supply(self.link, rep, bytes),
+            None => self.daemon.clip.refused(self.link, rep),
+        };
+        if whole {
             self.write_held();
         }
     }
@@ -1144,7 +1222,8 @@ impl Peer<'_> {
         held.stage = Stage::Writing;
         let (clip, link, done) = (Arc::clone(&self.daemon.clip), self.link, self.done.clone());
         self.tasks.spawn(async move {
-            let _written = tokio::task::spawn_blocking(move || clip.write_incoming(link)).await;
+            let write = move || clip.write_incoming(link, std::time::Instant::now());
+            let _written = tokio::task::spawn_blocking(write).await;
             let _sent = done.send(Done::PasteWritten);
         });
     }
@@ -1163,11 +1242,11 @@ impl Peer<'_> {
         match route(&mut self.held, input) {
             Route::Now(input) => self.deliver(input),
             Route::Held => {}
-            Route::Began => {
+            Route::Began(kind) => {
                 let (clip, link) = (Arc::clone(&self.daemon.clip), self.link);
                 let done = self.done.clone();
                 self.tasks.spawn(async move {
-                    let plan = tokio::task::spawn_blocking(move || clip.paste(link)).await;
+                    let plan = tokio::task::spawn_blocking(move || clip.paste(link, kind)).await;
                     let _sent = done.send(Done::PastePlan(plan.ok()));
                 });
             }
@@ -1389,6 +1468,14 @@ impl Peer<'_> {
     }
 
     fn term(&mut self, session: SessionId, req: TermRequest) {
+        match &req {
+            TermRequest::Focus { focused } => self.focus(session, *focused),
+            TermRequest::Detach => self.focus(session, false),
+            input if input.is_input() => {
+                self.daemon.handoffs.lock().typed(session, self.client, std::time::Instant::now());
+            }
+            _ => {}
+        }
         match req {
             TermRequest::Attach { size } => self.attach(session, size),
             TermRequest::Detach => {
@@ -1412,6 +1499,15 @@ impl Peer<'_> {
             }
             input if input.is_input() => self.input(Input::Term(session, input)),
             other => self.request(session, other),
+        }
+    }
+
+    /// This client focused on `session`'s tile, or let go of it: the handoffs learn who is in
+    /// front of the session, and its presence file follows.
+    fn focus(&self, session: SessionId, focused: bool) {
+        let changed = self.daemon.handoffs.lock().focus(session, self.client, focused);
+        if let Some(present) = changed {
+            let _sent = self.daemon.presence.send((session, present));
         }
     }
 
@@ -1687,7 +1783,10 @@ mod tests {
         let mut held = None;
 
         assert_eq!(route(&mut held, typed(a, KeyCode::A)), Route::Now(typed(a, KeyCode::A)));
-        assert_eq!(route(&mut held, paste(a)), Route::Began);
+        assert_eq!(
+            route(&mut held, paste(a)),
+            Route::Began(slopty_worker::clip::PasteKind::Window)
+        );
         assert_eq!(route(&mut held, typed(a, KeyCode::B)), Route::Held, "behind the chord");
         assert_eq!(route(&mut held, typed(b, KeyCode::C)), Route::Now(typed(b, KeyCode::C)));
         assert_eq!(route(&mut held, paste(c)), Route::Held, "a second paste waits too");
@@ -1714,7 +1813,10 @@ mod tests {
         let mut held = None;
 
         assert_eq!(route(&mut held, text(a)), Route::Now(text(a)), "text pastes at once");
-        assert_eq!(route(&mut held, picture(a)), Route::Began);
+        assert_eq!(
+            route(&mut held, picture(a)),
+            Route::Began(slopty_worker::clip::PasteKind::Picture)
+        );
         assert_eq!(route(&mut held, raw(a, "x")), Route::Held, "behind the picture");
         assert_eq!(route(&mut held, raw(b, "y")), Route::Now(raw(b, "y")), "another shell");
         let window = || Input::Window(StreamId(1), key(KeyCode::A, Mods::empty()));

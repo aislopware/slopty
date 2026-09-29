@@ -64,6 +64,8 @@ blake3 = "1.8.7"
 rustc-hash = "2.1.3"
 parking_lot = "0.12.5"
 uuid = { version = "1.26.1", features = [ "v4", "v7", "serde", "fast-rng" ] }
+# WHATWG URL parsing: the host a handed-over web page opens at, as a browser reads it.
+url = "2.5.8"
 # The MCP SDK (protocol revision 2026-07-28): the server's Streamable HTTP endpoint and the
 # `slopty mcp` stdio shim. Each crate adds the transport it serves.
 rmcp = { version = "3.5.0", default-features = false, features = [ "server", "macros" ] }
@@ -126,9 +128,9 @@ rustix = { version = "1.1.5", features = [
 libc = "0.2.189"
 
 # networking: n0's noq (a quinn fork) standalone, with Slopty's null crypto provider
-# (docs/decisions/transport.md). No TLS, so no ring/rustls; `fast-apple-datapath` (private
-# `sendmsg_x`/`recvmsg_x`) costs ~50 ms of round-trip latency on macOS (measured 2026-09-04,
-# docs/MEASUREMENTS.md) and must never be enabled.
+# (docs/decisions/transport.md). No TLS, so no ring/rustls. `fast-apple-datapath` (private
+# `sendmsg_x`/`recvmsg_x`) is compiled in for macOS by slopty-net alone and on unless
+# `SLOPTY_BATCHED_UDP=0` (docs/decisions/transport.md, "The batched Apple datapath").
 noq = { version = "1.3.0", default-features = false, features = [ "runtime-tokio" ] }
 noq-proto = { version = "1.3.0", default-features = false }
 socket2 = "0.6.5"
@@ -303,18 +305,19 @@ objc2-io-kit = { version = "=0.3.2", default-features = false, features = [
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 
-# UI. GPUI from our zed fork and gpui-kit from our fork (upstream plus a few commits, one of them
-# pointing it at the zed fork). Each fork carries our commits on its default branch, and both name
-# the zed source the same way (no `branch`) so the two unify; Cargo.lock pins the commits.
-gpui = { git = "https://github.com/aislopware/zed.git" }
-gpui_ios = { git = "https://github.com/aislopware/zed.git", features = [
+# UI. GPUI from our gpui-fast fork (GPUI with Retained Mode, plus our iOS backend and video
+# surfaces) and gpui-kit from our fork (upstream plus a few commits, one of them pointing it at
+# gpui-fast). Each fork carries our commits on its default branch, and both name the gpui-fast
+# source the same way (no `branch`) so the two unify; Cargo.lock pins the commits.
+gpui = { git = "https://github.com/aislopware/gpui-fast.git" }
+gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = [
     "runtime_shaders",
 ] }
 # The platform crate behind `gpui_kit::application()`; named directly only so the `e2e`
 # feature can turn on its `test-support` (`Window::render_to_image` on a real window).
 # The native view under a GPUI window (the browser tile puts a web view in it).
 raw-window-handle = "0.6.2"
-gpui_platform = { git = "https://github.com/aislopware/zed.git" }
+gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git" }
 # PNG in/out for the e2e render snapshots; the version gpui already builds.
 image = { version = "0.25.10", default-features = false, features = [ "png" ] }
 # The kitty graphics PNG decoder the engine hands libghostty (the version it builds with).
@@ -349,11 +352,21 @@ pretty_assertions = "1.4.1"
 
 # noq-proto 1.3.0 with `TransportConfig::stream_priority_before_datagrams`, so a keystroke's
 # echo is not written behind a keyframe's datagrams, `stream_priority_unpaced`, so it does not
-# wait for the pacer either, two BBR3 fixes against the draft, and a pacer that lets BBR3's send
-# quantum out together (docs/decisions/transport.md). `vendor/noq-proto/SLOPTY.md` lists the
+# wait for the pacer either, BBR3 fixes for app-limited video, a pacer that lets BBR3's send
+# quantum out together, and ACKs bundled into packets that leave anyway
+# (docs/decisions/transport.md). `vendor/noq-proto/SLOPTY.md` lists the
 # patches and how to move them.
 [patch.crates-io]
 noq-proto = { path = "vendor/noq-proto" }
+# noq-udp 1.3.0 with quinn's fixes for Apple's batched datapath: a send that goes out in part is
+# reported, not dropped (quinn#2748), and `SO_SNDBUF` keeps clear of macOS's `EWOULDBLOCK`
+# (quinn#2727). `vendor/noq-udp/SLOPTY.md` lists them.
+noq-udp = { path = "vendor/noq-udp" }
+# objc2 0.6.4 with the unreleased fix for a use-after-free in `Retained::retain_autoreleased`
+# (objc2#861, fixed by #862); `vendor/objc2/SLOPTY.md` says why and when it goes.
+objc2 = { path = "vendor/objc2" }
+# The same fix backported to the objc2 0.5.2 that accesskit_macos still uses.
+objc2_05 = { package = "objc2", path = "vendor/objc2-0.5" }
 
 # ---------------------------------------------------------------------------------------------
 # Lints. Groups are `warn` here; the gate (`cargo gate`) runs clippy with `-D warnings`, so a
@@ -364,7 +377,7 @@ unsafe_op_in_unsafe_fn = "warn"
 missing_docs = "warn"
 missing_debug_implementations = "warn"
 unused_qualifications = "warn"
-unreachable_pub = "allow"                                         # binaries have many crate-level pub items; re-enable per crate
+unreachable_pub = "allow" # binaries have many crate-level pub items; re-enable per crate
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
 meta_variable_misuse = "warn"
@@ -383,7 +396,11 @@ absolute_paths_not_starting_with_crate = "warn"
 missing_copy_implementations = "warn"
 unnameable_types = "warn"
 rust_2024_compatibility = { level = "warn", priority = -1 }
-unexpected_cfgs = { level = "warn", check-cfg = [ "cfg(miri)" ] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(miri)",
+    # RealtimeSanitizer on the audio render callback: `cargo xtask deep sanitize realtime`.
+    "cfg(slopty_rtsan)",
+] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

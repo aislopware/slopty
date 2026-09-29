@@ -248,7 +248,7 @@ impl SettingsEditor {
     /// Escape from a control or a button closes: a text field's own Escape action covers it
     /// while it has the keyboard, captured below.
     fn key_down(this: &mut Self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if ev.keystroke.key != "escape" {
+        if ev.keystroke.key != "escape" || this.composing(cx) {
             return;
         }
         let typing = match this.mode {
@@ -259,6 +259,13 @@ impl SettingsEditor {
             this.close(cx);
             cx.stop_propagation();
         }
+    }
+}
+
+impl SettingsEditor {
+    /// Whether an input method holds uncommitted text in the TOML or in a field of the form.
+    fn composing(&self, cx: &gpui::App) -> bool {
+        self.text.read(cx).is_composing() || self.form.read(cx).composing(cx)
     }
 }
 
@@ -415,15 +422,18 @@ impl Render for SettingsEditor {
             .id("settings-backdrop")
             .key_context(CTX)
             .on_key_down(cx.listener(Self::key_down))
+            // While an input method composes in a field, Esc and Enter are its own.
             .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
-                this.close(cx);
-                cx.stop_propagation();
+                if !this.composing(cx) {
+                    this.close(cx);
+                    cx.stop_propagation();
+                }
             }))
             // ⌘↩ (a field's `secondary-enter`: ⌘ on macOS and iOS alike) saves the file's face and
             // closes the form; captured so the field does not also break the line. A control that
             // is not a field asks through the form.
             .capture_action(cx.listener(|this, enter: &Enter, _window, cx| {
-                if enter.secondary {
+                if enter.secondary && !this.composing(cx) {
                     match this.mode {
                         Mode::Form => this.close(cx),
                         Mode::Toml => this.save(cx),

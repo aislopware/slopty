@@ -325,6 +325,12 @@ impl WindowPicker {
         self.selected.min(count.saturating_sub(1))
     }
 
+    /// Whether an input method holds uncommitted text in the field (a Telex word, kana before
+    /// conversion): the keys it reads then (the arrows, Tab, Esc) are its own.
+    fn composing(&self, cx: &gpui::App) -> bool {
+        self.input.as_ref().is_some_and(|input| input.read(cx).is_composing())
+    }
+
     /// ↑/↓: the choice moves, wrapping.
     fn step(&mut self, delta: i64, cx: &mut Context<Self>) {
         let count = i64::try_from(self.visible().len()).unwrap_or(0);
@@ -376,8 +382,8 @@ impl WindowPicker {
         }
     }
 
-    fn key_down(_this: &mut Self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        if ev.keystroke.key == "escape" {
+    fn key_down(this: &mut Self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if ev.keystroke.key == "escape" && !this.composing(cx) {
             cx.emit(PickerEvent::Dismiss);
             cx.stop_propagation();
         }
@@ -542,10 +548,21 @@ impl Render for WindowPicker {
             .id("picker-backdrop")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
-            .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
-            .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
-            .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
-                cx.emit(PickerEvent::Dismiss);
+            // While an input method composes in the field, the arrows and Esc are its own.
+            .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {
+                if !this.composing(cx) {
+                    this.step(-1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| {
+                if !this.composing(cx) {
+                    this.step(1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
+                if !this.composing(cx) {
+                    cx.emit(PickerEvent::Dismiss);
+                }
             }))
             .on_mouse_down(
                 MouseButton::Left,

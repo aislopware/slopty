@@ -11,8 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WallMs, WorkerId, XferId};
 
-/// Clipboard contents at most this big ride inline in an [`Offer`] or [`ClipMsg::Data`];
-/// anything bigger is fetched over a bulk stream.
+/// Clipboard bytes at most this big ride inline: an [`Offer`]'s inline representations
+/// together, or one [`ClipMsg::Data`]. Anything bigger is fetched over a bulk stream.
 pub const INLINE_CLIP_BYTES: usize = 64 * 1024;
 
 /// A BLAKE3 digest.
@@ -21,6 +21,30 @@ pub type Hash = [u8; 32];
 /// The private pasteboard type every Slopty write carries, holding [`origin_bytes`]: a watcher
 /// that finds it knows the change came from Slopty and does not announce it back.
 pub const ORIGIN_TYPE: &str = "com.aislopware.slopty.origin";
+
+/// nspasteboard.org's marker for a secret, such as a password manager's copy: offered with
+/// [`Offer::concealed`] and never kept.
+pub const CONCEALED_TYPE: &str = "org.nspasteboard.ConcealedType";
+
+/// nspasteboard.org's marker for contents that are about to go again: offered and kept as a
+/// secret is.
+pub const TRANSIENT_TYPE: &str = "org.nspasteboard.TransientType";
+
+/// Whether a type on an Apple pasteboard travels in an offer.
+///
+/// Left behind: dynamic types (`dyn.…`), which name nothing on another machine; the
+/// pre-UTI names AppKit still lists beside their UTIs (`NSStringPboardType`, `Apple PNG
+/// pasteboard type`, `CorePasteboardFlavorType 0x…`), whose bytes the UTI already carries;
+/// file promises, which only the copying process can keep; and the markers, which an offer
+/// says in its own fields.
+#[must_use]
+pub fn carried(board_type: &str) -> bool {
+    let legacy = !board_type.contains('.') || board_type.contains(' ');
+    let marker = board_type == ORIGIN_TYPE || board_type.starts_with("org.nspasteboard.");
+    let promise = board_type.starts_with("com.apple.pasteboard.promised-")
+        || board_type == "com.apple.NSFilePromiseItemMetaData";
+    !(legacy || marker || promise || board_type.starts_with("dyn."))
+}
 
 /// What [`ORIGIN_TYPE`] holds: whose clipboard the contents came from and which of its changes
 /// they were, `(Peer, u64)` in the wire encoding.
@@ -72,13 +96,13 @@ pub enum Peer {
     Worker(WorkerId),
 }
 
-/// A representation clipboard sync carries, whatever the platform calls it.
+/// A representation every end knows by name, whatever its platform calls it.
 ///
-/// Each end maps it to its own pasteboard's types at its board (an Apple UTI on a Mac, a MIME
-/// type elsewhere). Anything else on a clipboard stays where it is.
+/// Each end maps it to its own pasteboard's types at its board (an Apple UTI on a Mac or an
+/// iPhone, a MIME type elsewhere).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ClipFormat {
-    /// Files, as `file://` URLs one per line (`text/uri-list`).
+    /// A file, as its `file://` URL: one per item (`text/uri-list`).
     FileUrls,
     /// `image/png`.
     Png,
@@ -93,7 +117,7 @@ pub enum ClipFormat {
 }
 
 impl ClipFormat {
-    /// Every format, richest first: the order an offer lists them in.
+    /// Every format, richest first.
     pub const ALL: [Self; 6] =
         [Self::FileUrls, Self::Png, Self::Tiff, Self::Rtf, Self::Html, Self::Text];
 
@@ -117,64 +141,185 @@ impl ClipFormat {
     }
 }
 
-/// One representation of the clipboard's contents.
+/// A representation's type: a format every end knows, or an Apple uniform type identifier.
+///
+/// Between two Apple ends, the common case, every type a pasteboard holds travels as it is
+/// (`com.apple.webarchive`, `com.adobe.pdf`, an app's private type), since macOS and iOS
+/// pasteboards both take any UTI. An end that is not Apple's leaves an `Apple` type alone.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ClipType {
+    /// A format with a name on every platform.
+    Format(ClipFormat),
+    /// An Apple uniform type identifier that is none of the formats.
+    Apple(String),
+}
+
+impl ClipType {
+    /// The format, when it is one.
+    #[must_use]
+    pub const fn format(&self) -> Option<ClipFormat> {
+        match self {
+            Self::Format(format) => Some(*format),
+            Self::Apple(_) => None,
+        }
+    }
+
+    /// Whether it is `format`.
+    #[must_use]
+    pub fn is(&self, format: ClipFormat) -> bool {
+        self.format() == Some(format)
+    }
+
+    /// A picture format.
+    #[must_use]
+    pub fn is_picture(&self) -> bool {
+        self.format().is_some_and(ClipFormat::is_picture)
+    }
+}
+
+/// One representation as announced.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ClipItem {
-    /// What it is. One item per format: [`ClipFormat::FileUrls`] holds every file's URL, one
-    /// per line.
-    pub format: ClipFormat,
-    /// Size in bytes.
-    pub size: u64,
-    /// Digest of the bytes: equal digests are the same contents, so an echo is recognised.
-    pub hash: Hash,
-    /// The bytes, when they fit [`INLINE_CLIP_BYTES`] and the type is plain text.
+pub struct Rep {
+    /// What it is.
+    pub kind: ClipType,
+    /// Its size, when the sender read it (inline text, a file URL); `None` while it is lazy,
+    /// read off the sender's pasteboard only when fetched.
+    pub size: Option<u64>,
+    /// Digest of the bytes, when read: the receiver checks what it fetches against it, and
+    /// equal digests are the same contents, so an echo is recognised.
+    pub hash: Option<Hash>,
+    /// The bytes, when they fit the offer's inline budget ([`INLINE_CLIP_BYTES`]).
     #[serde(with = "serde_bytes")]
     pub inline: Option<Vec<u8>>,
 }
 
+/// One item on a clipboard: a file of a Finder copy, a picture of a Photos copy, the one item
+/// of a text copy. Its representations, richest first as the copying app ranked them.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ClipEntry {
+    /// The representations.
+    pub reps: Vec<Rep>,
+}
+
+/// Whose representations a fetch names.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Source {
+    /// A clipboard offer: `generation` of `origin`'s clipboard. A client relaying a worker's
+    /// offer to another worker keeps its origin, so a fetch names where the bytes are.
+    Offer {
+        /// Whose clipboard.
+        origin: Peer,
+        /// Which of its changes.
+        generation: u64,
+    },
+}
+
+/// Representation `kind` of item `item` of `source`.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct RepRef {
+    /// Whose.
+    pub source: Source,
+    /// Which item, counted from 0.
+    pub item: u16,
+    /// Which representation.
+    pub kind: ClipType,
+}
+
+/// Most items an offer lists: past this a copy is a file transfer's worth
+/// ([`MAX_FILES`]), and the rest stay behind.
+pub const MAX_CLIP_ITEMS: usize = MAX_FILES;
+
 /// The clipboard changed: what it holds, announced and not pushed. The receiver puts promises
-/// on its own clipboard and fetches a representation when something pastes it.
+/// on its own clipboard and fetches a representation when something pastes it, or ahead of
+/// that under a budget.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Offer {
     /// Whose clipboard.
     pub origin: Peer,
     /// Increases with every change on `origin`; names the offer in fetches.
     pub generation: u64,
-    /// The representations, richest first.
-    pub items: Vec<ClipItem>,
+    /// Milliseconds since the copy, on the sender's clock: the receiver places the copy on its
+    /// own clock as arrival minus this, so the latest copy wins whichever machine made it.
+    pub age_ms: u64,
+    /// A secret (`org.nspasteboard.ConcealedType`) or contents about to go
+    /// (`org.nspasteboard.TransientType`): no bytes inline, never fetched ahead, never logged,
+    /// fetched only by a paste the person makes, and never kept on the receiver's clipboard
+    /// past that.
+    pub concealed: bool,
+    /// The items, in pasteboard order.
+    pub items: Vec<ClipEntry>,
+}
+
+impl Offer {
+    /// What a fetch of this offer names it by.
+    #[must_use]
+    pub const fn source(&self) -> Source {
+        Source::Offer { origin: self.origin, generation: self.generation }
+    }
+
+    /// Every representation with its item's index, in order.
+    pub fn reps(&self) -> impl Iterator<Item = (u16, &Rep)> {
+        self.items.iter().zip(0_u16..).flat_map(|(entry, n)| entry.reps.iter().map(move |r| (n, r)))
+    }
+
+    /// The representation `rep` names, when this offer lists it.
+    #[must_use]
+    pub fn rep(&self, rep: &RepRef) -> Option<&Rep> {
+        if rep.source != self.source() {
+            return None;
+        }
+        let entry = self.items.get(usize::from(rep.item))?;
+        entry.reps.iter().find(|r| r.kind == rep.kind)
+    }
+
+    /// A reference to representation `kind` of item `item` of this offer.
+    #[must_use]
+    pub const fn rep_ref(&self, item: u16, kind: ClipType) -> RepRef {
+        RepRef { source: self.source(), item, kind }
+    }
 }
 
 /// Clipboard sync.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ClipMsg {
     /// Client → worker: whether this client wants the worker's clipboard changes now (a remote
-    /// tile has focus, or the app is frontmost). The worker watches its pasteboard only while
+    /// tile has focus, and the app is frontmost). The worker watches its pasteboard only while
     /// some client wants it.
     Watch(bool),
-    /// Either way: the sender's clipboard changed.
+    /// Either way: the sender's clipboard, as it is now. A client sends it when a tile of the
+    /// worker takes the keyboard and ahead of a paste; the worker mirrors it onto its own
+    /// pasteboard unless its own contents are newer.
     Offer(Offer),
-    /// Either way: send representation `format` of offer `generation`.
+    /// Either way: send representation `rep`.
     Fetch {
-        /// The offer.
-        generation: u64,
-        /// Which representation.
-        format: ClipFormat,
+        /// Which.
+        rep: RepRef,
+        /// Answer [`ClipMsg::TooBig`] rather than send more than this: a fetch ahead of a paste,
+        /// under the receiver's budget. `None` for a paste, which takes it whatever its size.
+        max: Option<u64>,
+        /// A paste or a drop waits on it: its bytes go ahead of background transfers.
+        urgent: bool,
     },
     /// Either way: the answer to a [`ClipMsg::Fetch`], inline when it fits
-    /// [`INLINE_CLIP_BYTES`]; a bigger one arrives as a bulk stream with [`Purpose::Clip`].
+    /// [`INLINE_CLIP_BYTES`]; a bigger one arrives as a bulk stream with [`Purpose::Rep`].
     Data {
-        /// The offer.
-        generation: u64,
-        /// Which representation.
-        format: ClipFormat,
+        /// Which.
+        rep: RepRef,
         /// The bytes.
         #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
     },
-    /// Either way: that offer or representation is gone (the clipboard changed again).
+    /// Either way: the answer to a [`ClipMsg::Fetch`] whose `max` the representation passes.
+    TooBig {
+        /// Which.
+        rep: RepRef,
+        /// Its size.
+        size: u64,
+    },
+    /// Either way: that offer is gone (the clipboard changed again), or never was.
     Unavailable {
-        /// The offer.
-        generation: u64,
+        /// Which.
+        source: Source,
     },
 }
 
@@ -201,11 +346,9 @@ pub enum Purpose {
     /// Worker → client: a file the client fetched.
     Download,
     /// Either way: a clipboard representation too big to inline.
-    Clip {
-        /// The offer.
-        generation: u64,
-        /// Which representation.
-        format: ClipFormat,
+    Rep {
+        /// Which.
+        rep: RepRef,
     },
     /// Worker → client: the text of a file read too big to inline, announced on the control
     /// stream by [`crate::file::FileRead::Streamed`] with the same transfer.
@@ -229,7 +372,7 @@ pub struct BulkHeader {
     /// What the bytes are for.
     pub purpose: Purpose,
     /// Path relative to the transfer's root, `/`-separated, without `..`; empty for
-    /// [`Purpose::Clip`].
+    /// [`Purpose::Rep`].
     pub name: String,
     /// Whole file size.
     pub size: u64,
@@ -364,6 +507,51 @@ mod tests {
         }
         assert_eq!(relative_path("dir/a b.txt"), Some(PathBuf::from("dir/a b.txt")));
         assert_eq!(relative_path(".hidden/x"), Some(PathBuf::from(".hidden/x")));
+    }
+
+    /// Every Apple type travels but dynamic ones, the pre-UTI names, file promises and the
+    /// markers an offer says in its own fields.
+    #[test]
+    fn only_types_that_mean_something_elsewhere_travel() {
+        for kept in ["public.png", "com.apple.webarchive", "com.adobe.pdf", "public.file-url"] {
+            assert!(carried(kept), "{kept}");
+        }
+        for left in [
+            "dyn.ah62d4rv4gu8y",
+            "NSStringPboardType",
+            "Apple PNG pasteboard type",
+            "CorePasteboardFlavorType 0x75726C20",
+            "com.apple.pasteboard.promised-file-url",
+            ORIGIN_TYPE,
+            CONCEALED_TYPE,
+            TRANSIENT_TYPE,
+            "org.nspasteboard.source",
+        ] {
+            assert!(!carried(left), "{left}");
+        }
+    }
+
+    /// A reference names one representation of one item of one offer, and only that offer.
+    #[test]
+    fn a_rep_ref_finds_its_representation() {
+        let text = ClipType::Format(ClipFormat::Text);
+        let rep = |kind: ClipType| Rep { kind, size: None, hash: None, inline: None };
+        let offer = Offer {
+            origin: Peer::Client(ClientId::nil()),
+            generation: 2,
+            age_ms: 0,
+            concealed: false,
+            items: vec![
+                ClipEntry { reps: vec![rep(text.clone())] },
+                ClipEntry { reps: vec![rep(ClipType::Apple("com.adobe.pdf".to_owned()))] },
+            ],
+        };
+        assert_eq!(offer.reps().map(|(n, _)| n).collect::<Vec<_>>(), [0, 1]);
+        let pdf = offer.rep_ref(1, ClipType::Apple("com.adobe.pdf".to_owned()));
+        assert!(offer.rep(&pdf).is_some());
+        assert!(offer.rep(&offer.rep_ref(1, text)).is_none(), "not in that item");
+        let older = RepRef { source: Source::Offer { origin: offer.origin, generation: 1 }, ..pdf };
+        assert!(offer.rep(&older).is_none(), "another offer's");
     }
 
     #[test]

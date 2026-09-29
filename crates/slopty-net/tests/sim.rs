@@ -10,9 +10,17 @@
 #[cfg(test)]
 mod tests {
     use std::future::Future;
+    use std::io::{self, IoSliceMut};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::{Context, Poll, ready};
     use std::time::Duration;
 
+    use noq::udp::{RecvMeta, Transmit};
+    use noq::{AsyncUdpSocket, UdpSender};
+    use parking_lot::Mutex;
     use slopty_core::{ClientId, SessionId, WorkerId};
     use slopty_net::admission::{Admission, Cidr};
     use slopty_net::client::{WorkerConn, connect_addr};
@@ -110,12 +118,21 @@ mod tests {
     /// A worker and a client on `faults` drawn from `seed`, connected.
     async fn link(faults: Faults, seed: u64) -> Result<Linked, String> {
         let net = Net::new(faults, seed);
-        let socket = Box::new(net.bind(WORKER).unwrap());
-        let worker_end = endpoint::bind_on(socket, true, Some(seed)).unwrap();
+        let (worker, client) = (net.bind(WORKER).unwrap(), net.bind(CLIENT).unwrap());
+        link_on(net, Box::new(worker), Box::new(client), seed).await
+    }
+
+    /// A worker on `worker` and a client on `client`, sockets on `net`, connected.
+    async fn link_on(
+        net: Net,
+        worker: Box<dyn AsyncUdpSocket>,
+        client: Box<dyn AsyncUdpSocket>,
+        seed: u64,
+    ) -> Result<Linked, String> {
+        let worker_end = endpoint::bind_on(worker, true, Some(seed)).unwrap();
         let allow: Cidr = "192.0.2.0/24".parse().unwrap();
         let listener = WorkerListener::on(worker_end, Admission::with_tailnet(vec![allow], None));
-        let socket = Box::new(net.bind(CLIENT).unwrap());
-        let client_end = endpoint::bind_on(socket, false, Some(seed.rotate_left(32))).unwrap();
+        let client_end = endpoint::bind_on(client, false, Some(seed.rotate_left(32))).unwrap();
         let (client, worker, took) = dial(&client_end, &listener).await?;
         Ok(Linked {
             net,
@@ -478,6 +495,425 @@ mod tests {
             let (p50, p99, _) = simulate(seed, flooded);
             assert!(p50 < ms(150), "seed {seed}: echo p50 {p50:?}");
             assert!(p99 < ms(600), "seed {seed}: echo p99 {p99:?}");
+        }
+    }
+
+    // (f) Video beside keys on a 20 Mbit/s hop.
+
+    /// `echo_beside_flood`'s link: 20 Mbit/s, 2 ms each way, 100 ms of queue, and for the
+    /// report up to `SLOPTY_SIM_JITTER_US` more each way, as a Wi-Fi hop or a loaded host's
+    /// timers add.
+    fn video_link() -> Faults {
+        let rate = 2_500_000;
+        let jitter = std::env::var("SLOPTY_SIM_JITTER_US")
+            .ok()
+            .and_then(|us| us.parse().ok())
+            .map_or(Duration::ZERO, Duration::from_micros);
+        Faults::over(Link { delay: ms(2), jitter, rate, queue: rate / 10, ..Link::CLEAR })
+    }
+
+    const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
+    /// 12 Mbit/s of P-frames, and a keyframe of 52 ms of the link each second.
+    const P_FRAME: usize = 25_000;
+    const KEYFRAME: usize = 130_000;
+    const KEY_EVERY: u64 = 60;
+    /// What the capture guard lets QUIC hold before it skips a P-frame.
+    const GUARD_BYTES: usize = 50_000;
+    /// A datagram's frame number, its frame's part count, and when the frame was handed to
+    /// QUIC in microseconds since the run began.
+    const TAG_BYTES: usize = 18;
+    const VIDEO_WARMUP: Duration = Duration::from_secs(2);
+    const SAMPLE_EVERY: Duration = Duration::from_millis(10);
+
+    /// What a video run saw after its warm-up.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Watched {
+        /// From a frame's handover to QUIC to its last part at the client.
+        keyframes: Vec<Duration>,
+        p_frames: Vec<Duration>,
+        echoes: Vec<Duration>,
+        /// Frames handed to QUIC that the client never had whole.
+        missing: u64,
+        /// BBR3's state every [`SAMPLE_EVERY`], by name; empty under another controller.
+        states: std::collections::BTreeMap<&'static str, u32>,
+        /// The worker's window in force, noq's own window and its pacing rate every
+        /// [`SAMPLE_EVERY`], each sorted.
+        cwnd: Vec<u64>,
+        inner_cwnd: Vec<u64>,
+        pacing: Vec<u64>,
+        lost_packets: u64,
+        digest: u64,
+    }
+
+    fn micros(since: Duration) -> u64 {
+        u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// A frame of `bytes` cut into the path's largest datagrams, each tagged.
+    fn frame(conn: &Connection, bytes: usize, seq: u64, sent: u64) -> Vec<bytes::Bytes> {
+        let size = conn.max_datagram_size().unwrap_or(1_000);
+        let parts = bytes.div_ceil(size);
+        (0..parts)
+            .map(|i| {
+                let len = size.min(bytes.saturating_sub(i.saturating_mul(size))).max(TAG_BYTES);
+                let mut datagram = vec![0_u8; len];
+                datagram[..8].copy_from_slice(&seq.to_be_bytes());
+                datagram[8..10].copy_from_slice(&u16::try_from(parts).unwrap().to_be_bytes());
+                datagram[10..18].copy_from_slice(&sent.to_be_bytes());
+                bytes::Bytes::from(datagram)
+            })
+            .collect()
+    }
+
+    /// The worker's screen at 60 fps, a keyframe a second, a P-frame skipped while QUIC holds
+    /// more than [`GUARD_BYTES`], as the capture guard does. Counts the frames handed over
+    /// after the warm-up.
+    fn stream_video(conn: Connection, epoch: Instant, handed: Arc<AtomicU64>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut period = tokio::time::interval(FRAME_PERIOD);
+            let mut seq = 0_u64;
+            while conn.close_reason().is_none() {
+                period.tick().await;
+                seq = seq.saturating_add(1);
+                let key = seq % KEY_EVERY == 1;
+                let held =
+                    endpoint::DATAGRAM_BUFFER.saturating_sub(conn.datagram_send_buffer_space());
+                if !key && held > GUARD_BYTES {
+                    continue;
+                }
+                let sent = epoch.elapsed();
+                let datagrams =
+                    frame(&conn, if key { KEYFRAME } else { P_FRAME }, seq, micros(sent));
+                if sent >= VIDEO_WARMUP {
+                    handed.fetch_add(1, Ordering::Relaxed);
+                }
+                let _queued = conn.send_many_datagrams(&datagrams);
+            }
+        })
+    }
+
+    /// Frames the client has had whole, and those it still waits on.
+    #[derive(Default)]
+    struct Seen {
+        /// Frame number → parts still missing.
+        pending: std::collections::HashMap<u64, u16>,
+        keyframes: Vec<Duration>,
+        p_frames: Vec<Duration>,
+    }
+
+    /// The client's side of the video: every frame timed from its handover to its last part.
+    fn watch_video(conn: Connection, epoch: Instant, frames: Arc<Mutex<Seen>>) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Ok(datagram) = conn.read_datagram().await {
+                let seq = u64::from_be_bytes(datagram[..8].try_into().unwrap());
+                let parts = u16::from_be_bytes(datagram[8..10].try_into().unwrap());
+                let sent =
+                    Duration::from_micros(u64::from_be_bytes(datagram[10..18].try_into().unwrap()));
+                let mut frames = frames.lock();
+                let left = frames.pending.entry(seq).or_insert(parts);
+                *left = left.saturating_sub(1);
+                if *left > 0 {
+                    continue;
+                }
+                frames.pending.remove(&seq);
+                if sent < VIDEO_WARMUP {
+                    continue;
+                }
+                let took = epoch.elapsed().saturating_sub(sent);
+                if seq % KEY_EVERY == 1 {
+                    frames.keyframes.push(took);
+                } else {
+                    frames.p_frames.push(took);
+                }
+            }
+        })
+    }
+
+    /// The worker's congestion picture every [`SAMPLE_EVERY`] after the warm-up.
+    #[derive(Default)]
+    struct Sampled {
+        states: std::collections::BTreeMap<&'static str, u32>,
+        cwnd: Vec<u64>,
+        inner_cwnd: Vec<u64>,
+        pacing: Vec<u64>,
+    }
+
+    fn sample_path(
+        conn: Connection,
+        epoch: Instant,
+        sampled: Arc<Mutex<Sampled>>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            tokio::time::sleep_until(epoch.checked_add(VIDEO_WARMUP).unwrap()).await;
+            let mut tick = tokio::time::interval(SAMPLE_EVERY);
+            while conn.close_reason().is_none() {
+                tick.tick().await;
+                let Some(snapshot) = slopty_net::congestion::snapshot(&conn) else { continue };
+                let mut sampled = sampled.lock();
+                if let Some(state) = snapshot.model_state {
+                    let count = sampled.states.entry(state).or_default();
+                    *count = count.saturating_add(1);
+                }
+                sampled.cwnd.push(snapshot.cwnd);
+                sampled.inner_cwnd.push(snapshot.inner_cwnd);
+                sampled.pacing.extend(snapshot.pacing_rate);
+            }
+        })
+    }
+
+    /// Keys typed while the worker streams its screen through [`video_link`].
+    async fn video(seed: u64, keys: u16) -> Watched {
+        let mut pair =
+            link(video_link(), seed).await.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        let epoch = Instant::now();
+        let handed = Arc::new(AtomicU64::new(0));
+        let frames = Arc::new(Mutex::new(Seen::default()));
+        let sampled = Arc::new(Mutex::new(Sampled::default()));
+        let tasks = [
+            stream_video(pair.worker.clone(), epoch, Arc::clone(&handed)),
+            watch_video(pair.client.clone(), epoch, Arc::clone(&frames)),
+            sample_path(pair.worker.clone(), epoch, Arc::clone(&sampled)),
+        ];
+        let typed = type_through(&mut pair, keys, ms(50), None, VIDEO_WARMUP, |_| {}).await;
+        assert_once_in_order(&typed, keys, seed);
+        // The frames already handed over land before the count is read.
+        tokio::time::sleep(ms(500)).await;
+        tasks[0].abort();
+        tokio::time::sleep(ms(500)).await;
+        for task in tasks {
+            task.abort();
+        }
+        let lost_packets = pair.worker.path_stats(noq::PathId::ZERO).map_or(0, |s| s.lost_packets);
+        let frames = std::mem::take(&mut *frames.lock());
+        let whole =
+            u64::try_from(frames.keyframes.len().saturating_add(frames.p_frames.len())).unwrap();
+        let sampled = std::mem::take(&mut *sampled.lock());
+        let sort = |mut v: Vec<u64>| {
+            v.sort_unstable();
+            v
+        };
+        Watched {
+            missing: handed.load(Ordering::Relaxed).saturating_sub(whole),
+            keyframes: sorted(frames.keyframes),
+            p_frames: sorted(frames.p_frames),
+            echoes: sorted(typed.round_trips),
+            states: sampled.states,
+            cwnd: sort(sampled.cwnd),
+            inner_cwnd: sort(sampled.inner_cwnd),
+            pacing: sort(sampled.pacing),
+            lost_packets,
+            digest: pair.net.digest(),
+        }
+    }
+
+    /// Keys typed for 15 s over a 20 Mbit/s hop while the worker streams its screen.
+    async fn video_run(seed: u64) -> Watched {
+        video(seed, 300).await
+    }
+
+    /// Video that leaves the link idle between frames keeps its keyframes quick and every frame
+    /// whole: BBR3 refreshes its round-trip minimum from each frame's first packet instead of
+    /// dipping into `ProbeRTT`, which held a keyframe caught in it to 100 to 250 ms against 55
+    /// (noq-proto patch 13, `vendor/noq-proto/SLOPTY.md`).
+    #[test]
+    fn video_beside_keys_keeps_its_keyframes_out_of_probe_rtt() {
+        for seed in 1..=2 {
+            let run = simulate(seed, video_run);
+            let key_p99 = percentile(&run.keyframes, 99);
+            assert!(key_p99 < ms(80), "seed {seed}: keyframe p99 {key_p99:?}");
+            assert_eq!(run.states.get("ProbeRTT"), None, "seed {seed}: {:?}", run.states);
+            assert_eq!(run.states.get("Startup"), None, "seed {seed}: {:?}", run.states);
+            assert_eq!(run.lost_packets, 0, "seed {seed}");
+            assert!(run.missing <= 2, "seed {seed}: {} frames missing", run.missing);
+        }
+    }
+
+    /// What video beside keys does on [`video_link`], per seed, for `docs/MEASUREMENTS.md`
+    /// (`SLOPTY_CC` picks the controller).
+    #[test]
+    #[ignore = "diagnostic: cargo nextest run -p slopty-net --release --test sim --run-ignored only -E 'test(video_report)' --no-capture"]
+    fn video_report() {
+        let seeds: u64 =
+            std::env::var("SLOPTY_SIM_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+        let (mut keys, mut ps, mut echoes, mut missing, mut lost) =
+            (Vec::new(), Vec::new(), Vec::new(), 0, 0);
+        let (mut cwnd, mut inner, mut pacing) = (Vec::new(), Vec::new(), Vec::new());
+        let mut states = std::collections::BTreeMap::<&str, u32>::new();
+        for seed in 1..=seeds {
+            let run = simulate(seed, video_run);
+            println!(
+                "seed {seed}: keyframe p50 {:?} p99 {:?} · P-frame p99 {:?} · echo p50 {:?} p99 {:?} · missing {} · lost {} · {:?}",
+                percentile(&run.keyframes, 50),
+                percentile(&run.keyframes, 99),
+                percentile(&run.p_frames, 99),
+                percentile(&run.echoes, 50),
+                percentile(&run.echoes, 99),
+                run.missing,
+                run.lost_packets,
+                run.states,
+            );
+            cwnd.extend(run.cwnd);
+            inner.extend(run.inner_cwnd);
+            pacing.extend(run.pacing);
+            keys.extend(run.keyframes);
+            ps.extend(run.p_frames);
+            echoes.extend(run.echoes);
+            missing += run.missing;
+            lost += run.lost_packets;
+            for (state, n) in run.states {
+                *states.entry(state).or_default() += n;
+            }
+        }
+        let (keys, ps, echoes) = (sorted(keys), sorted(ps), sorted(echoes));
+        let mid = |mut v: Vec<u64>| {
+            v.sort_unstable();
+            (v.get(v.len() / 2).copied().unwrap_or(0), v.last().copied().unwrap_or(0))
+        };
+        println!(
+            "window in force p50/max {:?} · noq's window p50/max {:?} · pacing B/s p50/max {:?}",
+            mid(cwnd),
+            mid(inner),
+            mid(pacing)
+        );
+        println!(
+            "all: keyframe p50 {:?} p99 {:?} max {:?} · P-frame p50 {:?} p99 {:?} · echo p50 {:?} p99 {:?} max {:?} · missing {missing} · lost {lost} · {states:?}",
+            percentile(&keys, 50),
+            percentile(&keys, 99),
+            keys.last(),
+            percentile(&ps, 50),
+            percentile(&ps, 99),
+            percentile(&echoes, 50),
+            percentile(&echoes, 99),
+            echoes.last(),
+        );
+    }
+
+    // (g) Packets per keystroke.
+
+    /// Keys typed a tenth of a second apart on a quiet 5 ms hop: the packets each end sent per
+    /// key, worker then client.
+    async fn packets_per_key(seed: u64) -> (f64, f64) {
+        let mut pair = link(hop(0.0), seed).await.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        let keys = 50;
+        let sent = |conn: &Connection| conn.stats().udp_tx.datagrams;
+        let (worker_before, client_before) = (sent(&pair.worker), sent(&pair.client));
+        let typed = type_through(&mut pair, keys, ms(100), None, ms(0), |_| {}).await;
+        assert_once_in_order(&typed, keys, seed);
+        tokio::time::sleep(ms(50)).await;
+        #[expect(clippy::cast_precision_loss, reason = "packet counts below 2^53")]
+        let per_key = |n: u64| n as f64 / f64::from(keys);
+        (
+            per_key(sent(&pair.worker).saturating_sub(worker_before)),
+            per_key(sent(&pair.client).saturating_sub(client_before)),
+        )
+    }
+
+    /// The worker's echo leaves before its delayed-ACK timer on the key it answers, and carries
+    /// that ACK: one packet a key, where an ACK of its own made two (noq-proto patch 15,
+    /// `vendor/noq-proto/SLOPTY.md`).
+    #[test]
+    fn an_echo_carries_the_ack_of_its_key() {
+        for seed in 1..=2 {
+            let (worker, client) = simulate(seed, packets_per_key);
+            println!(
+                "seed {seed}: {worker:.2} packets a key from the worker, {client:.2} from the client"
+            );
+            assert!(worker < 1.2, "seed {seed}: {worker:.2} packets a key from the worker");
+        }
+    }
+
+    // (h) A path narrower than `PATH_MTU`.
+
+    /// Largest UDP payload an IPv4 path with a 1240-byte MTU carries, as some L2TP, IP security
+    /// and cellular VPNs have: above the handshake's 1200, below `endpoint::PATH_MTU`.
+    const NARROW: usize = 1240 - 28;
+
+    /// A socket whose path drops, without a word, every datagram larger than `max`.
+    #[derive(Debug)]
+    struct Narrow<S> {
+        inner: S,
+        max: usize,
+    }
+
+    impl AsyncUdpSocket for Narrow<slopty_shape::sim::Socket> {
+        fn create_sender(&self) -> Pin<Box<dyn UdpSender>> {
+            Box::pin(Narrow { inner: self.inner.create_sender(), max: self.max })
+        }
+
+        fn poll_recv(
+            &mut self,
+            cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+            meta: &mut [RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            self.inner.poll_recv(cx, bufs, meta)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+
+        fn may_fragment(&self) -> bool {
+            false
+        }
+    }
+
+    impl UdpSender for Narrow<Pin<Box<dyn UdpSender>>> {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            transmit: &Transmit<'_>,
+            cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let size = transmit.segment_size.unwrap_or(transmit.contents.len());
+            for datagram in transmit.contents.chunks(size).filter(|d| d.len() <= this.max) {
+                let one = Transmit { contents: datagram, segment_size: None, ..*transmit };
+                // The simulated network takes every send at once, so nothing is sent twice.
+                ready!(this.inner.as_mut().poll_send(&one, cx))?;
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// 256 kB from the worker to the client over a [`NARROW`] path, as full packets: how long
+    /// it took, the MTU the worker ended on, and the black holes it detected.
+    async fn narrow_path(seed: u64) -> (Duration, u16, u64) {
+        let net = Net::new(hop(0.0), seed);
+        let narrow = |at| Narrow { inner: net.bind(at).unwrap(), max: NARROW };
+        let (worker, client) = (Box::new(narrow(WORKER)), Box::new(narrow(CLIENT)));
+        let pair = link_on(net.clone(), worker, client, seed)
+            .await
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        let bytes = vec![7_u8; 256 * 1024];
+        let started = Instant::now();
+        let sending = tokio::spawn({
+            let (worker, bytes) = (pair.worker.clone(), bytes.clone());
+            async move {
+                let mut tx = worker.open_uni().await.unwrap();
+                tx.write_all(&bytes).await.unwrap();
+                tx.finish().unwrap();
+            }
+        });
+        let mut rx = pair.client.accept_uni().await.unwrap();
+        let got = rx.read_to_end(bytes.len()).await.unwrap();
+        let took = started.elapsed();
+        sending.await.unwrap();
+        assert_eq!(got, bytes, "seed {seed}");
+        let path = pair.worker.path_stats(noq::PathId::ZERO).unwrap();
+        (took, path.current_mtu, path.black_holes_detected)
+    }
+
+    /// A path narrower than `PATH_MTU` carries the handshake, which is padded to 1200 only, and
+    /// then loses every full packet. Black-hole detection sees the bursts and falls back to
+    /// `MIN_MTU`, and the connection carries on at it.
+    #[test]
+    fn a_path_narrower_than_the_packets_falls_back_to_the_minimum() {
+        for seed in GATE_SEEDS {
+            let (took, mtu, black_holes) = simulate(seed, narrow_path);
+            println!("seed {seed}: 256 kB in {took:?}, MTU {mtu}, {black_holes} black holes");
+            assert_eq!(mtu, endpoint::MIN_MTU, "seed {seed}");
+            assert!(black_holes >= 1, "seed {seed}");
+            assert!(took < Duration::from_secs(5), "seed {seed}: {took:?}");
         }
     }
 

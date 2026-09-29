@@ -22,6 +22,8 @@ resvg.workspace = true
 icns.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `statvfs`: the free space `xtask prune` and the gate keep on the build volume.
+rustix.workspace = true
 # The daemons' footprint, descriptors and threads for `soak`, and the percentiles.
 slopty-testkit.workspace = true
 toml.workspace = true

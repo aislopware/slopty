@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+{"reply":"wake","clients":0,"streams":0,"agents":1,"system":true,"display":false}

@@ -20,6 +20,7 @@ serde_json.workspace = true
 slopty-core.workspace = true
 slopty-grid.workspace = true
 thiserror.workspace = true
+url.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]

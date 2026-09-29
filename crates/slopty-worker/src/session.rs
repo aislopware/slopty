@@ -732,6 +732,9 @@ struct Actor {
     burst: EchoBurst,
     viewers: Vec<Viewer>,
     driver: Option<ClientId>,
+    /// The clients focused on the session's tile: the program hears focus gained (DEC 1004)
+    /// when the first one focuses and lost when the last one leaves, whichever client it is.
+    focused: Vec<ClientId>,
     /// The driver's sink closed and no detach has said why yet: the seat is kept for it, with
     /// the sink, until its connection detaches that sink (then it passes on) or the client
     /// attaches again (then it keeps it). A closed sink alone is also what a re-attach looks
@@ -926,6 +929,7 @@ impl Actor {
             input: Input::default(),
             viewers: Vec::new(),
             driver: None,
+            focused: Vec::new(),
             orphan: None,
             next_marker: 0,
             title,
@@ -1790,6 +1794,9 @@ impl Actor {
     /// `client` detached: the size passes to another viewer if it drove and has no other
     /// view of the session.
     fn on_viewer_gone(&mut self, client: ClientId) {
+        if !self.viewers.iter().any(|v| v.client == client) {
+            self.focus(client, false);
+        }
         if self.driver == Some(client) && !self.viewers.iter().any(|v| v.client == client) {
             self.orphan = None;
             self.driver = None;
@@ -2055,7 +2062,9 @@ impl Actor {
                 bytes = vec![0x0c];
                 Ok(())
             }
-            TermRequest::Focus { focused } => self.engine.encode_focus(focused, &mut bytes),
+            TermRequest::Focus { focused } => {
+                return self.focus(client, focused);
+            }
             TermRequest::FetchLines { start, count } => {
                 match self.engine.lines(start, count.min(MAX_FETCH_LINES)) {
                     Ok((start, lines)) => {
@@ -2083,6 +2092,28 @@ impl Actor {
             .map_err(|e| TermError::Engine(e.to_string()))
             .and_then(|()| self.queue_input(&bytes, Origin::Viewer { key }));
         if let Err(e) = queued {
+            self.send_to(client, &TermEvent::Error(e));
+        }
+    }
+}
+
+impl Actor {
+    /// `client` focused on the session's tile or let go of it: the program hears a change of
+    /// the session's focus as a whole, when it asked to (DEC 1004).
+    fn focus(&mut self, client: ClientId, focused: bool) {
+        let before = !self.focused.is_empty();
+        self.focused.retain(|c| *c != client);
+        if focused {
+            self.focused.push(client);
+        }
+        let now = !self.focused.is_empty();
+        if before == now {
+            return;
+        }
+        let mut bytes = Vec::new();
+        let encoded =
+            self.engine.encode_focus(now, &mut bytes).map_err(|e| TermError::Engine(e.to_string()));
+        if let Err(e) = encoded.and_then(|()| self.queue_input(&bytes, Origin::Engine)) {
             self.send_to(client, &TermEvent::Error(e));
         }
     }

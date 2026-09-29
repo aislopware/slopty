@@ -476,6 +476,10 @@ pub struct Dump {
     pub hooks_offered: bool,
     /// The UI's frame times since the last [`Command::FramesReset`].
     pub frames: FrameInfo,
+    /// Where the frame the app drew for this dump differs from the same state drawn from
+    /// scratch: a view showing an old state. [`crate::Driver::dump`] fails on it.
+    #[serde(default)]
+    pub stale: Option<String>,
     /// This app's client id on the wire (what the worker's `screens` listing names).
     #[serde(default)]
     pub client: String,

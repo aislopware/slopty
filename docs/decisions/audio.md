@@ -108,7 +108,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **The host announces its clipboard only while watched, and writes a client's on that
   client's paste chord** (2026-09-25, protocol 52; replaces the two push-ahead-of-⌘V entries
-  above on the worker side).
+  above on the worker side; the poll period, eager reads and write-only-on-⌘V superseded
+  2026-09-30 by **Clipboard v2**).
   - The worker reads `changeCount` every 200 ms only while some client has sent
     `ClipMsg::Watch(true)`; otherwise the poller sleeps on a watch channel and reads nothing.
     Watching starts from the pasteboard as it is: a change made while nobody watched was made
@@ -575,3 +576,124 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`one_large_render_does_not_hold_the_depth_up_for_good`), the target goes 20 → 86 → 20 ms and the listener hears 21 ms after it against 94 ms with the
   old mark; one underrun, the large render itself. The existing traces render one size
   throughout, so their numbers are unchanged.
+
+- ✅ **Clipboard v2: lazy on both ends, the focused client's copy mirrored, one worker's copy
+  relayed to the next** (2026-09-30, `.research/design-dragdrop-clipboard.md` §3.5 and stage
+  S1; supersedes the 200 ms poll and the write-only-on-⌘V rule of **The host announces its
+  clipboard only while watched**).
+  - **The bug.** Copy in a window of worker A, focus worker B, ⌘V: B pasted its own old
+    clipboard. The client wrote A's offer to its pasteboard stamped with the origin marker,
+    and `ClipSync::hold` skipped every contents carrying that marker, its own write included,
+    so B was never offered anything. Now the client re-offers what it wrote to every other
+    worker, origin kept (`Source::Offer { origin: Worker(A), .. }`). A fetch from B is
+    answered by fetching from A (`Answer::From(A)`, `slopty_client::clip::relay`), off the main
+    thread. Tests: `a_worker_offer_is_relayed_to_another_worker_and_fetched_through_the_first`
+    (`slopty_client::clip::local`), `a_copy_on_one_worker_is_relayed_to_the_next_one_focused`
+    (headless workspace).
+  - **Every type, every item.** A representation is a `ClipType`: one of the six formats, or
+    `Apple(String)`, a UTI, which both Apple pasteboards take as they are. An offer lists items,
+    each with its representations, so twenty copied files or three pictures keep their shape.
+    `transfer::carried` drops what means nothing elsewhere: `dyn.*`, the pre-UTI names, promise
+    bookkeeping and our markers. A fetch names one representation by `RepRef` (source, item,
+    type). Goldens below.
+  - **Lazy reads.** A poll reads the change count, each item's types and the markers. Only text
+    and file URLs are read, and only while together they fit 64 KiB inline; past that a read is
+    capped (`Board::data_within`, `Pasteboard::item_data_within`): the length is checked before
+    the bytes are copied, so a long text is listed with its size and nothing kept. Anything else
+    is listed with `size: None` and read when fetched, capped the same way, and only while the
+    change count says the same contents before and after the read: otherwise the answer is
+    `Unavailable`. A fetch keeps what it read for the offer only up to 8 MiB. A 200 MB copy on
+    the worker costs a types list until someone pastes it.
+  - **The worker polls every 50 ms while watched** and reads the count alone every 250 ms while
+    clients are linked but none watches, which stamps its own copies with the time they were
+    seen. A look at an unchanged board takes 1.5–4.5 µs, about 0.01 % of a core at 50 ms
+    (`a_look_at_an_unchanged_board_is_one_cheap_call`).
+  - **The worker's pasteboard mirrors the focused client's clipboard, latest copy wins.** An
+    offer carries `age_ms`, the time since the copy on the sender's clock. The worker places it
+    at arrival − age on its own clock and compares that with when its own last copy was seen.
+    What the worker's first look after it starts finds was copied at a time nobody knows, so it
+    is older than any client's copy; a change found when a client comes back after none was
+    linked is placed at when the last one left. (The first version started the count at 0 and
+    stamped the board as copied at the first look, so after every restart the client's copy
+    lost and ⌘V pasted the worker's old clipboard again.) Offer generations start from the wall
+    clock on both ends, since the ids outlive the process and a restart must not reuse one.
+    A newer client copy goes on the pasteboard at once as promises (`NSPasteboardItemDataProvider`,
+    one per item); an older one waits for a paste. The window ⌘V hold stays as the fence for
+    the offer overtaking the chord, and it re-writes the paster's own offer when two clients
+    share a worker, unless the worker's own copy is newer. A promise's read on the worker sends
+    an urgent `Fetch` to the client and waits at most 5 s (`PROVIDE_WAIT`).
+  - **Prefetch under a budget.** After an offer the client fetches in the background, at bulk
+    priority, every representation whose size the worker knows that fits
+    `min(8 MiB, cwnd ÷ rtt × 250 ms)` (`prefetch_budget`, from quinn's path stats). One of
+    unknown size is not fetched ahead: the first version probed those one at a time with
+    `Fetch { max }`, which made the worker read each whole, so a 200 MB copy was read on every
+    offer. `Fetch { max }` and `TooBig { size }` stay for a relay's cap and for the most a client
+    takes (256 MiB); a `TooBig` answering a capped ask leaves alone a paste that has asked
+    since for the whole. A fetch a paste waits on is `urgent`, and its bulk stream is raised to
+    the tunnels' level (−1), ahead of background uploads.
+  - **A wait lasts while bytes move.** A promise on the worker (`PROVIDE_WAIT`, 5 s) and a
+    paste on the client (the UI's wait) give up only after that long with nothing arriving:
+    each chunk of the representation's bulk stream moves the deadline, so a 60 MB picture over
+    100 Mbit/s pastes. A stream longer or shorter than its header said is dropped on both ends,
+    and the worker's held paste is told at once rather than after its 3 s.
+  - **The worker's promises run on its main run loop.** AppKit asks a promise from a block the
+    main run loop runs (`__CFRunLoopDoBlocks` under `park_main`, seen in the stack), and that
+    loop also serves the virtual displays and the input sources. A promise waiting on a client
+    runs it every 10 ms (`serve_main_run_loop`) instead of stalling them for the wait.
+  - **No file names cross.** Neither end writes a representation that names a file:
+    `public.file-url` by either spelling, Finder's node, a file promise's bookkeeping, or a
+    `public.url` whose scheme is `file`, inline or found when a promise is kept
+    (`slopty_platform::pasteboard::names_a_file`). Types that do not travel (`carried`) are
+    dropped on the receiving end too, however they were spelled. The first version wrote a
+    worker's file URLs on the client's pasteboard: with the same user name, ⌘V in Finder copied
+    the client's own file at that path, and a worker could name `~/.ssh/id_ed25519` for a mail
+    to attach. Files still paste by moving them (`ClipSync::files`).
+  - **The worker's clipboard managers leave a mirror out.** Every write of a client's copy is
+    marked `org.nspasteboard.AutoGeneratedType` ("the user had no intention to Copy this
+    content", nspasteboard.org), so Maccy or Raycast on the worker do not record it, nor pull
+    its promises across after each mirror.
+  - **A tap of iOS's paste button loads what is clipboard-sized.** No video or audio (a Photos
+    video is gigabytes), an item's pictures once in their first format (the rest are
+    conversions made on demand), at most 64 MiB a representation and 128 MiB a tap, each
+    checked on its length before it is copied.
+  - **Secrets.** Concealed or transient contents are offered with `concealed: true` and types
+    only: never inline, never prefetched, never mirrored. A paste chord fetches them. The worker
+    writes them whole, marked concealed and transient, and clears them after 60 s
+    (`CONCEALED_FOR`) or when that client's clipboard moves on.
+  - **The macOS client asks `accessBehavior` before a focus-time read.** When reading the
+    general pasteboard would raise the paste alert, focus sends no offer and the read waits for
+    a paste (`Pasteboard::reads_ask` on macOS as on iOS). Relaying a worker's own offer needs no
+    read, so it still goes on focus.
+  - **Writes are for this Mac only.** Both ends write with
+    `prepareForNewContentsWithOptions(CurrentHostOnly)`, so Universal Clipboard does not fetch
+    every promise at once to hand to the person's other devices.
+  - Goldens: `client_clip_offer`, `client_clip_offer_items`, `client_clip_fetch_max`,
+    `worker_clip_fetch`, `worker_clip_data`, `worker_clip_too_big`, `worker_clip_unavailable`,
+    `uni_bulk_rep`. Tests: the `slopty_worker::clip` unit tests on a fake board
+    (`a_big_copy_reads_only_its_types_until_fetched`,
+    `a_fetch_after_the_board_moved_is_unavailable`,
+    `the_focused_clients_copy_is_mirrored_unless_the_workers_is_newer`,
+    `a_concealed_copy_is_written_only_by_a_paste_and_cleared_after`,
+    `every_item_and_apple_type_round_trips`, `a_workers_secret_is_offered_without_bytes`,
+    `contents_found_at_start_lose_to_any_clients_copy`,
+    `a_copy_made_while_no_client_was_linked_is_placed_when_the_last_left`,
+    `a_restarted_workers_first_offer_is_a_new_generation`,
+    `a_poll_inside_a_write_of_promises_announces_nothing`,
+    `a_clients_file_names_never_go_on_the_pasteboard`,
+    `a_copy_landing_during_a_fetch_is_not_served_under_the_old_offer`,
+    `long_text_is_measured_at_a_poll_and_not_kept`,
+    `a_promise_waits_on_while_the_bytes_keep_coming`);
+    `slopty_client::clip`'s `prefetch_stays_in_its_budget`,
+    `a_secret_is_fetched_only_by_a_paste`, `a_multi_item_copy_keeps_its_items`,
+    `a_focus_read_waits_for_a_paste_when_reads_ask`, `a_paste_during_a_capped_fetch_gets_the_whole`,
+    `a_paste_waits_on_while_its_bytes_keep_coming`, `a_workers_file_names_never_go_on_this_pasteboard`,
+    `a_workers_fetch_reads_no_more_than_its_cap`, `a_relaunched_clients_first_offer_is_a_new_generation`;
+    `slopty_platform`'s `a_file_named_any_way_is_not_contents`; `slopty_input`'s
+    `a_promise_is_kept_when_read`, `a_capped_read_of_a_big_copy_copies_nothing`; and the worker e2e
+    `pbpaste_on_the_worker_sees_the_focused_clients_copy` (a real cross-process promise read
+    on a named pasteboard, the worker's board holding a copy from before it started and the
+    client's copy half a minute old) and `a_copy_reaches_a_watching_client_within_a_poll`. Numbers in
+    `docs/MEASUREMENTS.md`, "Clipboard v2".
+  - Not in this stage: files as File Provider placeholders (S2 on), and the exception for a
+    copy made in a streamed window just before its client switched tiles, which is still not
+    announced to that client.

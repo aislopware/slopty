@@ -4172,6 +4172,43 @@ fn voluntary_ack_with_large_datagrams() {
     );
 }
 
+/// An ACK the delayed-ACK timer holds rides the next packet that leaves anyway: the server's
+/// datagram after the client's carries it, and no ACK-only packet follows
+/// (quinn-rs/quinn#2747). A terminal's echo answers a key this way.
+#[test]
+fn ack_bundled_with_datagrams() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+
+    pair.client_datagrams(client_ch)
+        .send(vec![0; 1].into(), false)
+        .unwrap();
+    pair.drive_client();
+    pair.drive_server();
+
+    let acks_before = pair.server_conn_mut(server_ch).stats().frame_tx.acks;
+    let packets_before = pair.server_conn_mut(server_ch).stats().udp_tx.datagrams;
+    pair.server_datagrams(server_ch)
+        .send(vec![0; 1].into(), false)
+        .unwrap();
+    pair.drive_server();
+    let acks_after = pair.server_conn_mut(server_ch).stats().frame_tx.acks;
+    assert_eq!(acks_before + 1, acks_after, "the ACK rode the datagram");
+    assert_eq!(
+        packets_before + 1,
+        pair.server_conn_mut(server_ch).stats().udp_tx.datagrams,
+        "one packet carried both"
+    );
+
+    pair.drive();
+    assert_eq!(
+        acks_after,
+        pair.server_conn_mut(server_ch).stats().frame_tx.acks,
+        "no ACK-only packet followed"
+    );
+}
+
 /// Test the address discovery extension on a normal setup.
 #[test]
 fn address_discovery() {

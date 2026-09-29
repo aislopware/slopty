@@ -10,6 +10,29 @@
    `slopty_ui::a11y::tree(window)` after `window.set_a11y_active(true)` for roles, labels and
    the focused node. No pixels, no process, runs under `cargo gate`. Every workspace/terminal
    behaviour gets a test here first.
+   **Retained frames.** GPUI draws only the views that heard of a change, so a view left out
+   keeps showing the old state while every assertion on state passes. `retained::stale` is the
+   oracle: it takes what the window last painted (every quad and sprite with its bounds, clip
+   and colour, as sorted lines), draws the same state again with every view built from scratch,
+   and names the lines only one side holds. `workspace/tests/retained.rs` runs it after each
+   step of an echo, a command starting (in a shell on the strip and in one scrolled off it), a
+   spring, a trackpad scroll, a hover, a window resize and the overview around a stream, and a
+   page tile whose page fails as it is drawn, with the workspace's clock held so a frame of motion and its scratch twin fall on
+   the same instant; its own test proves it catches a view changed without a notify and that
+   scratch after scratch agrees. The oracle compares quads and sprites, so what they cannot
+   show is asserted beside it: a stream's picture laid out at the bounds its view was drawn in,
+   a view drawn again after a change (`renders()`), a shell not built again when only its strip
+   was. In the app self-test every `dump` carries the same check
+   (`Dump::stale`), and `render` answers with an error, the scratch frame saved beside the
+   render, when the frame the app drew is stale: the goldens are the frames the app draws
+   through its notifies, never a forced full redraw. The check runs once the frame's
+   next-frame callbacks have run, so an animation's own notify is in the frame it judges. A
+   notify raised while a frame is drawn (in a paint, or in a focus listener) wakes nothing,
+   and the check sees what it left out. A
+   live app cannot hold the clock, so what moves on it paints differently between the frame
+   and its scratch twin a few milliseconds later: the self-test runs under GPUI's Reduce Motion
+   (the frame-time runs set `SLOPTY_E2E_MOTION=1` to keep it), and a frame whose two scratch
+   draws disagree is in motion and not judged.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches ptyd + the worker + the app (built with `--features slopty/e2e`) in a temp dir, pairs
    them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,

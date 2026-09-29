@@ -86,17 +86,19 @@ filter = '''
 test-group = 'videotoolbox'
 
 # The gate's tests lane (`cargo gate`): the default profile, plus retries for the tests named
-# below. They time the session actor against the rest of the suite's load: in a loaded gate they
-# have missed their deadline, and alone they pass (2026-09-28). A pass on a retry shows as FLAKY
-# in the gate log; failing every try still fails the gate. Name a test here only when it is
+# below. They time the session actor or the relay's timer against the machine's load: in a loaded
+# gate they have missed their deadline, even run alone in nextest (the gate's other lanes still
+# compile beside them), and alone they pass (2026-09-28, 2026-09-30). A pass on a retry shows as
+# FLAKY in the gate log; failing every try still fails the gate. Name a test here only when it is
 # timing-sensitive this way, never by pattern.
 [profile.gate]
 
 [[profile.gate.overrides]]
 filter = '''
-package(slopty-worker) & binary(session_actor) & (
+(package(slopty-worker) & binary(session_actor) & (
     test(=actor::a_slow_viewer_is_skipped_then_caught_up_never_dropped)
     | test(=actor::a_silent_command_after_a_clear_is_seen_running_at_once)
-    | test(=actor::an_echo_beside_a_flood_is_not_held_to_the_frame_pace))
+    | test(=actor::an_echo_beside_a_flood_is_not_held_to_the_frame_pace)))
+| (package(slopty-shape) & test(=relay::tests::a_short_wait_ends_when_it_was_asked_to))
 '''
 retries = { backoff = "fixed", count = 2, delay = "1s" }

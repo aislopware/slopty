@@ -3,9 +3,17 @@
 //!
 //! libghostty-vt consumes OSC 133 for its per-row prompt flags, but a flag cannot tell two
 //! prompts on adjacent rows apart (a command with no output), and the status `D` carries is not
-//! exposed at all. So the engine watches the bytes itself and notes the cursor row at each
-//! mark. The scanner keeps its state across writes: a sequence split over two PTY reads is
-//! still found.
+//! exposed at all. Nor does its unknown-sequence callback help: it reports only the OSC numbers
+//! libghostty does not implement, and 133 is one it does. So the engine watches the bytes itself
+//! and notes the cursor row at each mark. The scanner keeps its state across writes: a sequence
+//! split over two PTY reads is still found.
+//!
+//! A mark is found exactly where libghostty's parser (`Parser.zig`, `parse_table.zig`) acts on
+//! it. Every state of that parser takes ESC as the start of a new sequence, so the scanner jumps
+//! from one ESC to the next and never tracks CSI, DCS, APC or text. An OSC ends on BEL, or on
+//! ESC whatever follows it (the ESC starts the next sequence), and CAN or SUB cancel it with no
+//! effect. The other C0 controls inside an OSC are dropped, not part of its payload, and inside
+//! an escape they run without ending it.
 
 /// Which of its prompt a shell redraws after a resize, as libghostty-vt reads `133;A;redraw=`:
 /// it clears those rows first. The terminal keeps the last one an `A` gave.
@@ -20,39 +28,47 @@ pub enum Redraw {
     Last,
 }
 
-/// Longest OSC payload worth collecting; `133;D;<status>` fits with room for parameters.
-const MAX_PAYLOAD: usize = 32;
+/// Longest OSC payload worth collecting. ghostty's own bash integration writes
+/// `133;A;redraw=last;cl=line;aid=<pid>`, past 32 bytes; room is left for more parameters.
+const MAX_PAYLOAD: usize = 128;
 
-/// Incremental scanner for `ESC ] 133 ; (A | D [; status]) … (BEL | ESC \)`.
-#[derive(Debug, Default)]
+// Byte values the VT parser gives a meaning inside an OSC or an escape.
+const BEL: u8 = 0x07;
+const CAN: u8 = 0x18;
+const SUB: u8 = 0x1a;
+const ESC: u8 = 0x1b;
+
+/// Incremental scanner for `ESC ] 133 ; (A | P | C | D [; status]) … (BEL | ESC)`.
+#[derive(Debug)]
+#[expect(missing_copy_implementations, reason = "a copy would fork the stream's state")]
 pub struct Scanner {
     state: State,
+    /// The payload of the OSC in progress while it may still be a mark: `payload[..len]`.
+    payload: [u8; MAX_PAYLOAD],
+    len: usize,
 }
 
-#[derive(Debug, Default)]
+impl Default for Scanner {
+    fn default() -> Self {
+        Self { state: State::Ground, payload: [0; MAX_PAYLOAD], len: 0 }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
-    #[default]
+    /// Anywhere but an escape or an OSC that may be a mark: waiting for the next ESC.
     Ground,
     /// Saw `ESC`.
     Esc,
     /// Saw `ESC ]` and a payload that may still be `133;…`; collecting it.
-    Osc {
-        payload: [u8; MAX_PAYLOAD],
-        len: usize,
-        /// The last byte was `ESC` (an `ESC \` terminator in progress).
-        esc: bool,
-    },
-    /// Inside an OSC that is not a mark (a title, an OSC 8 link): skipped to its terminator.
-    Skip {
-        /// The last byte was `ESC`.
-        esc: bool,
-    },
+    Osc,
 }
 
 /// A completed mark.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Found {
-    /// Bytes consumed up to and including the terminator.
+    /// Bytes consumed up to and including the byte that ended the OSC (BEL, or the ESC that
+    /// ends it and starts the next sequence).
     pub end: usize,
     /// Which mark.
     pub mark: Mark,
@@ -79,77 +95,53 @@ pub enum Mark {
 }
 
 impl Scanner {
-    /// Scan `bytes` from the start; stop at the first complete `133;A`/`133;D` and say where it
-    /// ended. Bytes after it are not looked at (call again with them). `None` means the whole
-    /// slice was consumed; a sequence still open at the end carries over to the next call.
+    /// Scan `bytes` from the start; stop at the first complete mark and say where it ended.
+    /// Bytes after it are not looked at (call again with them). `None` means the whole slice
+    /// was consumed; a sequence still open at the end carries over to the next call.
     pub fn scan(&mut self, bytes: &[u8]) -> Option<Found> {
         const PREFIX: &[u8] = b"133;";
         let mut i = 0;
         while let Some(&b) = bytes.get(i) {
             let at = i;
             i = i.saturating_add(1);
-            let done = match &mut self.state {
+            match self.state {
                 State::Ground => {
                     // Output is mostly text: jump to the next escape rather than stepping to it.
-                    let skip = memchr::memchr(0x1b, bytes.get(at..).unwrap_or_default())?;
+                    let skip = memchr::memchr(ESC, bytes.get(at..).unwrap_or_default())?;
                     self.state = State::Esc;
                     i = at.saturating_add(skip).saturating_add(1);
-                    None
                 }
                 State::Esc => {
                     self.state = match b {
-                        b']' => State::Osc { payload: [0; MAX_PAYLOAD], len: 0, esc: false },
-                        0x1b => State::Esc,
+                        b']' => {
+                            self.len = 0;
+                            State::Osc
+                        }
+                        CAN | SUB => State::Ground,
+                        // Run (DEL: dropped) with the escape still open; ESC opens it again.
+                        0x00..=0x1f | 0x7f => State::Esc,
                         _ => State::Ground,
                     };
-                    None
                 }
-                State::Osc { esc: true, .. } | State::Skip { esc: true } if b != b'\\' => {
-                    // Not a terminator: the OSC was cut short, and this escape starts whatever
-                    // comes next.
-                    self.state = State::Esc;
-                    i = at;
-                    None
-                }
-                State::Osc { payload, len, esc } => {
-                    if *esc || b == 0x07 {
-                        Some(mark(payload.get(..*len).unwrap_or_default()))
-                    } else if b == 0x1b {
-                        *esc = true;
-                        None
-                    } else if *len >= MAX_PAYLOAD || PREFIX.get(*len).is_some_and(|&p| p != b) {
-                        self.state = State::Skip { esc: false };
-                        None
-                    } else {
-                        if let Some(slot) = payload.get_mut(*len) {
+                State::Osc => match b {
+                    BEL | ESC => {
+                        self.state = if b == ESC { State::Esc } else { State::Ground };
+                        if let Some(mark) = mark(self.payload.get(..self.len).unwrap_or_default()) {
+                            return Some(Found { end: i, mark });
+                        }
+                    }
+                    CAN | SUB => self.state = State::Ground,
+                    0x00..=0x1f => {}
+                    _ => match self.payload.get_mut(self.len) {
+                        Some(slot) if PREFIX.get(self.len).is_none_or(|&p| p == b) => {
                             *slot = b;
+                            self.len = self.len.saturating_add(1);
                         }
-                        *len = len.saturating_add(1);
-                        None
-                    }
-                }
-                State::Skip { esc } => {
-                    if *esc || b == 0x07 {
-                        Some(None)
-                    } else {
-                        // Jump to the terminator's first byte: an OSC 8 target or a title is
-                        // not looked at byte by byte.
-                        let rest = bytes.get(at..).unwrap_or_default();
-                        let skip = memchr::memchr2(0x07, 0x1b, rest)?;
-                        i = at.saturating_add(skip);
-                        if rest.get(skip) == Some(&0x1b) {
-                            *esc = true;
-                            i = i.saturating_add(1);
-                        }
-                        None
-                    }
-                }
-            };
-            if let Some(found) = done {
-                self.state = State::Ground;
-                if let Some(mark) = found {
-                    return Some(Found { end: i, mark });
-                }
+                        // Not a mark (a title, an OSC 8 link), or too long to be one: it ends at
+                        // the next ESC, or on a byte that cannot start a mark.
+                        _ => self.state = State::Ground,
+                    },
+                },
             }
         }
         None
@@ -207,7 +199,12 @@ mod tests {
     fn finds_status_with_both_terminators() {
         let mut s = Scanner::default();
         assert_eq!(s.scan(b"out\x1b]133;D;1\x07more"), Some(end(13, Some(1))));
-        assert_eq!(s.scan(b"\x1b]133;D;130\x1b\\x"), Some(end(13, Some(130))));
+        assert_eq!(
+            s.scan(b"\x1b]133;D;130\x1b\\x"),
+            Some(end(12, Some(130))),
+            "the ESC of ST ends it; the backslash is fed after the mark"
+        );
+        assert_eq!(s.scan(b"\\x"), None);
     }
 
     #[test]
@@ -246,8 +243,13 @@ mod tests {
         assert_eq!(redraw(&mut s, b"\x1b]133;A;redraw=1\x07"), Some(Redraw::Full));
         assert_eq!(redraw(&mut s, b"\x1b]133;A;cl=line;redraw=last\x07"), Some(Redraw::Last));
         assert_eq!(redraw(&mut s, b"\x1b]133;A;redraw=0\x1b\\"), Some(Redraw::Off));
-        assert_eq!(redraw(&mut s, b"\x1b]133;A;redraw=2\x07"), None, "not a value");
+        assert_eq!(redraw(&mut s, b"\\\x1b]133;A;redraw=2\x07"), None, "not a value");
         assert_eq!(redraw(&mut s, b"\x1b]133;P;k=i;redraw=1\x07"), None, "read on `A` only");
+        assert_eq!(
+            redraw(&mut s, b"\x1b]133;A;redraw=last;cl=line;aid=4294967295\x07"),
+            Some(Redraw::Last),
+            "ghostty's own bash integration, past 32 bytes"
+        );
     }
 
     #[test]
@@ -265,16 +267,55 @@ mod tests {
         );
         assert_eq!(s.scan(b"\x1b]133;P;k=s\x07"), None, "a continuation, as with A");
         assert_eq!(s.scan(b"\x1b]0;title\x07\x1b[31m\x1b]8;;http://x\x1b\\"), None);
-        assert_eq!(s.scan(b"\x1b]133;D;3\x1b[0m"), None, "ESC that is not ST aborts the OSC");
-        assert_eq!(
-            s.scan(b"\x1b]133;D;3\x1b\x1b]133;D;4\x07"),
-            Some(end(20, Some(4))),
-            "the escape that cut the OSC short starts the next sequence"
-        );
-        assert_eq!(s.scan(b"\x1b\x1b]133;D;2\x07"), Some(end(11, Some(2))), "ESC ESC");
-        assert_eq!(s.scan(b"\x1b]133;D;0\x07"), Some(end(10, Some(0))));
-        let long = [b"\x1b]133;D;".as_slice(), &[b'9'; 64], b"\x07"].concat();
+        assert_eq!(s.scan(b"\x1b[?2004h\x1bP+q544e\x1b\\\x1b_Gi=1;AAAA\x1b\\"), None);
+        let long = [b"\x1b]133;D;".as_slice(), &[b'9'; MAX_PAYLOAD], b"\x07"].concat();
         assert_eq!(s.scan(&long), None, "overlong payloads are dropped");
+    }
+
+    /// An OSC ends where libghostty's parser ends it: on ESC whatever follows (the ESC starts
+    /// the next sequence), so a cut-short mark still counts, as it does for the terminal.
+    #[test]
+    fn any_escape_ends_the_mark_and_starts_the_next_sequence() {
+        let mut s = Scanner::default();
+        assert_eq!(s.scan(b"\x1b]133;D;3\x1b[0m"), Some(end(10, Some(3))));
+        assert_eq!(s.scan(b"[0m"), None);
+        assert_eq!(
+            s.scan(b"\x1b]133;D;3\x1b]133;D;4\x07"),
+            Some(end(10, Some(3))),
+            "two marks back to back, the first cut short"
+        );
+        assert_eq!(s.scan(b"]133;D;4\x07"), Some(end(9, Some(4))));
+        assert_eq!(s.scan(b"\x1b\x1b]133;D;2\x07"), Some(end(11, Some(2))), "ESC ESC");
+        assert_eq!(s.scan(b"\x1b]0;x\x1b]133;D;5\x07"), Some(end(15, Some(5))), "after a title");
+    }
+
+    /// CAN and SUB cancel an OSC in progress, or an escape, and the terminal acts on nothing in
+    /// it: a mark cut off by one is not reported, whole or split across reads.
+    #[test]
+    fn can_and_sub_cancel_a_mark() {
+        let mut s = Scanner::default();
+        assert_eq!(s.scan(b"\x1b]133;A\x18$ "), None);
+        assert_eq!(s.scan(b"\x1b]133;D;1\x1a\x07"), None, "the BEL after it is a bell");
+        assert_eq!(s.scan(b"\x1b]133;D;1"), None);
+        assert_eq!(s.scan(b"\x18\x07"), None, "cancelled in the next read");
+        assert_eq!(s.scan(b"\x1b\x18]133;A\x07"), None, "an escape cancelled before its `]`");
+        assert_eq!(
+            s.scan(b"\x1b]133;A\x18\x1b]133;D;0\x07"),
+            Some(end(18, Some(0))),
+            "the next sequence after a cancel is read"
+        );
+    }
+
+    /// The other C0 controls are dropped inside an OSC, and run inside an escape without
+    /// ending it, as in libghostty's parse table.
+    #[test]
+    fn other_controls_do_not_end_a_mark() {
+        let mut s = Scanner::default();
+        assert_eq!(s.scan(b"\x1b]133;D;\x001\x0d\x07"), Some(end(12, Some(1))));
+        assert_eq!(
+            s.scan(b"\x1b\x05]133;A\x07"),
+            Some(Found { end: 9, mark: Mark::PromptStart { redraw: None } })
+        );
     }
 
     /// What scanning costs per OSC that is not a mark (titles, OSC 8 links: a `ls

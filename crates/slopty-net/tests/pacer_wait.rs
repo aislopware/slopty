@@ -23,7 +23,7 @@ mod tests {
     use noq::congestion::{Controller, ControllerFactory, ControllerMetrics};
     use slopty_net::{crypto, endpoint, streams};
 
-    const MTU: u64 = 1252;
+    const MTU: u64 = endpoint::PATH_MTU as u64;
     const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
     const P_FRAME: usize = 25_000;
     const KEYFRAME: usize = 130_000;

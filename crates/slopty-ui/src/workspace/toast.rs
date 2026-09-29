@@ -21,6 +21,7 @@ use super::WorkspaceView;
 use super::actions::PointOthers;
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
+use crate::draw::Draw;
 use crate::icons::{IconName, IconSize};
 
 /// How long a pointing or a word stays up.
@@ -186,7 +187,7 @@ impl WorkspaceView {
 
     /// One notice: a mark for what it is about, its line, and its one action. The action is
     /// the only accent: a notice is not a primary action, only a way to one.
-    fn render_one(&self, shown: &Shown, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_one(&self, shown: &Shown, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let line = self.toast_line(&shown.what, cx)?;
@@ -295,7 +296,7 @@ impl WorkspaceView {
     /// The notices, stacked up from the strip's bottom-right corner, the newest lowest. In the
     /// corner because the top of the strip is where the tiles' headers are, and the middle of
     /// its foot is where a tile's own state pill sits.
-    pub(super) fn render_toast(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn render_toast(&self, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let toast = self.toast.as_ref()?;
         let notices: Vec<gpui::AnyElement> =
@@ -304,7 +305,7 @@ impl WorkspaceView {
             return None;
         }
         let drawn = std::rc::Rc::clone(&self.toast_drawn);
-        let frame = self.frames_drawn;
+        let frame = self.drawn.builds.get();
         // Where the notices are, for a browser tile's page to stop above them.
         let measure = gpui::canvas(
             move |bounds, _window, _cx| drawn.set(Some((frame, bounds))),

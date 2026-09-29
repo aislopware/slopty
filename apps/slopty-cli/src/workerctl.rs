@@ -18,6 +18,8 @@ pub enum WorkerCmd {
     /// Screen streams open right now (and the last few closed) with the worker-side counters:
     /// capture and encode latency, capture path, drops.
     Screens,
+    /// What keeps this machine awake: connected clients, working agents, live streams.
+    Wake,
     /// Run `slopty-ptyd` and `slopty-worker` as services of this session (`LaunchAgents` on macOS,
     /// systemd user units on Linux): they start now and at every login.
     Install(service::InstallOpts),
@@ -55,6 +57,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         WorkerCmd::Status => CtlRequest::Status,
         WorkerCmd::Doctor => CtlRequest::Doctor,
         WorkerCmd::Screens => CtlRequest::Screens,
+        WorkerCmd::Wake => CtlRequest::Wake,
         WorkerCmd::Install(opts) => return service::install(&opts, server, data_dir).await,
         WorkerCmd::Uninstall => return service::uninstall().await,
         WorkerCmd::Service => {
@@ -105,8 +108,21 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
                 }
             }
         }
+        CtlReply::Wake(awake) if json => println!("{}", serde_json::to_string(&awake)?),
+        CtlReply::Wake(awake) => {
+            let held = |on: bool| if on { "held awake" } else { "free to sleep" };
+            println!(
+                "machine {}: {} client(s), {} working agent(s)\ndisplay {}: {} stream(s)",
+                held(awake.system),
+                awake.clients,
+                awake.agents,
+                held(awake.display),
+                awake.streams
+            );
+        }
         CtlReply::Ok { changed } => println!("{}", if changed { "done" } else { "no change" }),
         CtlReply::Permission(answer) => bail!("a permission decision nobody asked for: {answer:?}"),
+        CtlReply::Handoff(handed) => bail!("a handoff nobody asked for: {handed:?}"),
         CtlReply::Error { message } => bail!("{message}"),
     }
     Ok(())

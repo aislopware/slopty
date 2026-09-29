@@ -788,7 +788,9 @@ fn vendor_commit(
                 .quiet()
         };
         git(&["read-tree", import]).run()?;
-        let mut remove = vec!["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"];
+        // `-f`: HEAD is the fork's branch, whose own commits differ from the import in these
+        // directories, and a plain `rm --cached` refuses an entry unlike both HEAD and the file.
+        let mut remove = vec!["rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--"];
         remove.extend(every.iter().map(String::as_str));
         git(&remove).run()?;
         let mut add = vec!["add", "-f", "--"];
@@ -1141,6 +1143,7 @@ mod tests {
                 base_date: "2026-09-01".to_owned(),
                 checked: "2026-09-01".to_owned(),
                 check_every_days: 7,
+                paths: Vec::new(),
             },
             checkout: Utf8PathBuf::from("zed-checkout"),
         };

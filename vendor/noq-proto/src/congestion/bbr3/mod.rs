@@ -99,6 +99,10 @@ const HEADROOM: f64 = 0.15;
 /// filter window, BBR.MinRTTFilterLen is 10 secs.
 const MIN_RTT_FILTER_LEN: u64 = 10;
 
+/// Linux `tcp_bbr.c`'s `bbr_extra_acked_max_us`: the ACK-aggregation allowance added to the
+/// window never exceeds this much time at `BBR.bw`.
+const EXTRA_ACKED_MAX_MS: u64 = 100;
+
 /// multiplier used to check growth when validating if the full bandwidth has been reached
 /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.1.2-6>
 const FULL_BW_GROWTH: f64 = 1.25;
@@ -486,6 +490,13 @@ pub struct Bbr3 {
     /// BBR.probe_rtt_min_delay has expired and is due for a refresh with an application idle
     /// period or a transition into ProbeRTT state.
     probe_rtt_expired: bool,
+    /// When the last round-trip sample came from a packet sent with no more in flight than
+    /// ProbeRTT holds (`BBRProbeRTTCwnd`). Such a sample measures what ProbeRTT would, so a flow
+    /// that goes that quiet on its own is not made to dip for it.
+    quiet_sample_stamp: Option<Instant>,
+    /// Whether the pacing rate has been re-derived from a measured round trip, as Linux BBR's
+    /// `has_seen_rtt`.
+    has_seen_rtt: bool,
     /// equivalent to C.delivered_time: The wall clock time when C.delivered was last updated. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-4.1.1.2.1>
     delivered_time: Option<Instant>,
     /// equivalent to C.first_send_time: If packets are in flight, then this holds the send time of
@@ -670,6 +681,8 @@ impl Bbr3 {
             probe_rtt_min_delay: Duration::from_secs(u64::MAX),
             probe_rtt_min_stamp: None,
             probe_rtt_expired: false,
+            quiet_sample_stamp: None,
+            has_seen_rtt: false,
             delivered_time: None,
             first_send_time: None,
             app_limited: 0,
@@ -1134,10 +1147,24 @@ impl Bbr3 {
         };
         if let Some(rate_sample) = self.rs
             && rate_sample.rtt >= Duration::from_secs(0)
-            && (rate_sample.rtt < self.probe_rtt_min_delay || self.probe_rtt_expired)
         {
-            self.probe_rtt_min_delay = rate_sample.rtt;
-            self.probe_rtt_min_stamp = Some(now);
+            let quiet = rate_sample.tx_in_flight <= self.quiet_inflight();
+            // A flow quiet within the last ProbeRTT's length will be again soon: the refresh
+            // waits for that moment rather than dipping for one.
+            let quiet_lately = self.quiet_sample_stamp.is_some_and(|at| {
+                now.saturating_duration_since(at) <= self.probe_rtt_duration
+            });
+            if quiet {
+                self.quiet_sample_stamp = Some(now);
+            }
+            let refresh = self.probe_rtt_expired && (quiet || !quiet_lately);
+            if rate_sample.rtt < self.probe_rtt_min_delay || refresh {
+                self.probe_rtt_min_delay = rate_sample.rtt;
+                self.probe_rtt_min_stamp = Some(now);
+            }
+            if self.probe_rtt_expired && (quiet || quiet_lately) {
+                self.probe_rtt_expired = false;
+            }
         }
 
         let min_rtt_expired;
@@ -1153,6 +1180,16 @@ impl Bbr3 {
             self.min_rtt = self.probe_rtt_min_delay;
             self.min_rtt_stamp = self.probe_rtt_min_stamp;
         }
+    }
+
+    /// The most in flight a packet may have been sent with for its round trip to count as
+    /// ProbeRTT's: `BBRProbeRTTCwnd`, without its side effect on `BBR.bdp`.
+    fn quiet_inflight(&self) -> u64 {
+        if self.min_rtt == Duration::from_secs(u64::MAX) {
+            return self.min_pipe_cwnd;
+        }
+        let bdp = (self.bw * self.min_rtt.as_secs_f64()).round();
+        Ord::max((self.probe_rtt_cwnd_gain * bdp) as u64, self.min_pipe_cwnd)
     }
 
     /// equivalent to BBRCheckProbeRTT <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.4.3-4>
@@ -1354,8 +1391,16 @@ impl Bbr3 {
     /// equivalent to BBRUpdateMaxInflight <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2-2>
     fn update_max_inflight(&mut self) {
         let mut inflight_cap = self.bdp_multiple(self.max_bw, self.cwnd_gain);
-        inflight_cap += self.extra_acked;
+        inflight_cap += Ord::min(self.extra_acked, self.extra_acked_cap());
         self.max_inflight = self.quantization_budget(inflight_cap);
+    }
+
+    /// The most ACK aggregation the window allows for: [`EXTRA_ACKED_MAX_MS`] at `BBR.bw`, as
+    /// Linux's `bbr_ack_aggregation_cwnd` caps it. The draft has no cap; without one an
+    /// aggregation estimate that runs away (a clumping path, or a count that outlives its
+    /// interval) grows the window with it.
+    fn extra_acked_cap(&self) -> u64 {
+        (self.bw * Duration::from_millis(EXTRA_ACKED_MAX_MS).as_secs_f64()) as u64
     }
 
     /// equivalent to BBRQuantizationBudget <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.6.4.2-2>
@@ -1454,6 +1499,22 @@ impl Bbr3 {
         if self.full_bw_reached || rate > self.pacing_rate {
             self.pacing_rate = rate;
         }
+    }
+
+    /// equivalent to BBRInitPacingRate once there is a round trip to divide by, as Linux BBR's
+    /// `bbr_init_pacing_rate_from_rtt` on `has_seen_rtt`
+    /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.2>.
+    ///
+    /// At construction there is no SRTT, so the rate is `InitialCwnd / 1 ms`, and until Startup
+    /// ends `BBRSetPacingRateWithGain` only ever raises it. A flow that stays application-limited
+    /// never ends Startup, and without this it keeps that placeholder, which on any path longer
+    /// than a millisecond is no pacing at all. `rtt` is the first acknowledged packet's own round
+    /// trip: the connection hands the controller an ACK before the estimator takes its sample.
+    fn init_pacing_rate_from_rtt(&mut self, rtt: Duration) {
+        let rtt = rtt.as_secs_f64().max(1e-6);
+        let nominal_bandwidth = self.initial_cwnd as f64 / rtt;
+        self.pacing_rate = self.startup_pacing_gain * nominal_bandwidth;
+        self.set_send_quantum();
     }
 
     /// equivalent to BBRSetSendQuantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3>
@@ -1630,6 +1691,20 @@ impl Bbr3 {
         self.min_rtt
     }
 
+    /// The state the model is in, by the draft's name: `Startup`, `Drain`, `ProbeBW_DOWN`,
+    /// `ProbeBW_CRUISE`, `ProbeBW_REFILL`, `ProbeBW_UP` or `ProbeRTT`.
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            BbrState::Startup => "Startup",
+            BbrState::Drain => "Drain",
+            BbrState::ProbeBw(ProbeBwSubstate::Down) => "ProbeBW_DOWN",
+            BbrState::ProbeBw(ProbeBwSubstate::Cruise) => "ProbeBW_CRUISE",
+            BbrState::ProbeBw(ProbeBwSubstate::Refill) => "ProbeBW_REFILL",
+            BbrState::ProbeBw(ProbeBwSubstate::Up) => "ProbeBW_UP",
+            BbrState::ProbeRtt => "ProbeRTT",
+        }
+    }
+
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, pn: u64, space: SpaceKind) {
         self.handle_restart_from_idle(now);
         if self.inflight == 0 {
@@ -1673,6 +1748,10 @@ impl Bbr3 {
         _app_limited: bool,
         _rtt: &RttEstimator,
     ) {
+        if !self.has_seen_rtt {
+            self.has_seen_rtt = true;
+            self.init_pacing_rate_from_rtt(now.saturating_duration_since(sent));
+        }
         self.check_recovery_done(sent);
         self.delivered += bytes;
         self.delivered_time = Some(now);
@@ -4029,9 +4108,12 @@ mod test {
                 bbr.on_end_acks(at(now_ns), inflight, false, Some(p.pn), SpaceKind::Data);
 
                 if p.pn == resume_pn {
-                    // Snapshot right after the restarting packet's ack: the re-probe was
-                    // due (probe_rtt_expired) so only idle_restart could suppress entry.
-                    probe_rtt_expired_at_resume = Some(bbr.probe_rtt_expired);
+                    // Snapshot right after the restarting packet's ack: the re-probe was due,
+                    // and that packet, sent with nothing else in flight, is itself the
+                    // measurement ProbeRTT would take (Slopty's quiet-sample refresh), so it
+                    // refreshed the filter at this ack.
+                    probe_rtt_expired_at_resume =
+                        Some(bbr.probe_rtt_min_stamp == Some(at(now_ns)));
                 }
                 acks_after_resume += 1;
 
@@ -4047,13 +4129,12 @@ mod test {
             }
         }
 
-        // The min-RTT re-probe was due at resume (the same trigger that entered
-        // PROBE_RTT in A.10), so idle_restart is the only thing that could suppress entry.
+        // The min-RTT re-probe was due at resume (the same trigger that entered PROBE_RTT in
+        // A.10), and the resume packet's own round trip refreshed it.
         assert_eq!(
             probe_rtt_expired_at_resume,
             Some(true),
-            "probe_rtt_expired should be true at resume (5 s elapsed), making the \
-             PROBE_RTT skip attributable to idle_restart"
+            "the resume packet's quiet round trip should refresh the expired min-RTT filter"
         );
         // The connection skipped PROBE_RTT: idleness was a sufficient queue drain.
         assert!(
@@ -7367,6 +7448,100 @@ mod test {
             |_, _, _, _| ControlFlow::Continue(()),
         );
         assert_eq!(sent_in_probe_rtt, [true; 10]);
+    }
+
+    /// The pacing rate starts from the first measured round trip, not from the 1 ms placeholder
+    /// the constructor has to use, as Linux BBR's `bbr_init_pacing_rate_from_rtt` does
+    /// (noq#800, noq#802). Startup only ever raises the rate, so a flow that stays
+    /// application-limited would otherwise keep `2.77 * InitialCwnd / 1 ms` for good: 106 MB/s
+    /// for a 38 400 B window, unpaced on any real path.
+    #[test]
+    fn the_first_round_trip_sets_the_startup_pacing_rate() {
+        const MSS: u64 = 1200;
+        let mut config = Bbr3Config::default();
+        config.initial_window(32 * MSS);
+        let mut bbr = Bbr3::new(Arc::new(config), MSS as u16);
+        let placeholder = STARTUP_PACING_GAIN * (32 * MSS) as f64 / 0.001;
+        assert!((bbr.pacing_rate - placeholder).abs() < 1.0);
+        let path_rtt = Duration::from_millis(40);
+        // What the connection passes the controller: the estimator before this ACK's sample.
+        let rtt = RttEstimator::new(Duration::from_millis(5));
+        let sent = Instant::now();
+        for pn in 0..4 {
+            bbr.on_packet_sent(sent, MSS as u16, pn, SpaceKind::Data);
+        }
+        bbr.on_ack(sent + path_rtt, sent, MSS, 0, SpaceKind::Data, true, &rtt);
+        let expected = STARTUP_PACING_GAIN * (32 * MSS) as f64 / path_rtt.as_secs_f64();
+        assert!(
+            (bbr.pacing_rate - expected).abs() / expected < 0.01,
+            "pacing {} B/s, expected {expected} B/s from the 40 ms round trip",
+            bbr.pacing_rate
+        );
+        assert_eq!(bbr.send_quantum, (expected / 1000.0) as u64);
+    }
+
+    /// The ACK-aggregation allowance adds at most 100 ms of `BBR.bw` to the window, Linux's
+    /// `bbr_extra_acked_max_us`. On a 20 Mbit/s path with a 4 ms round trip that is 250 kB,
+    /// however large the aggregation estimate has grown.
+    #[test]
+    fn ack_aggregation_adds_at_most_100_ms_of_bandwidth() {
+        const MSS: u64 = 1200;
+        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), MSS as u16);
+        bbr.max_bw = 2_500_000.0;
+        bbr.bw = 2_500_000.0;
+        bbr.min_rtt = Duration::from_millis(4);
+        bbr.extra_acked = 5_000_000;
+        bbr.update_max_inflight();
+        let bdp = 10_000;
+        assert_eq!(bbr.max_inflight, 2 * bdp + 250_000);
+        bbr.extra_acked = 3_000;
+        bbr.update_max_inflight();
+        assert_eq!(bbr.max_inflight, 2 * bdp + 3_000, "a small allowance is taken whole");
+    }
+
+    /// Video goes idle between frames, and the first packet of each frame leaves with nothing
+    /// else in flight. Its round trip is what ProbeRTT would measure by holding the window to
+    /// half a BDP for 200 ms, so the expired filter refreshes from it, and the flow never dips.
+    /// A ProbeRTT dip cost a P-frame handed over in it 70 to 90 ms against 12, and a keyframe
+    /// 100 to 250 ms against 55 (Slopty's docs/MEASUREMENTS.md, "noq's BBR3 against the draft").
+    #[test]
+    fn a_flow_quiet_between_frames_refreshes_min_rtt_without_probe_rtt() {
+        let mut sim = VideoSim::new(1_000_000);
+        sim.run(2_000_000_000, 32_000_000_000);
+        assert_eq!(sim.probe_rtt_entries, 0, "ProbeRTT entered");
+        let stamp = sim.bbr.probe_rtt_min_stamp.unwrap();
+        let age = sim.at(sim.now_ns).saturating_duration_since(stamp);
+        assert!(age <= sim.bbr.probe_rtt_interval, "min RTT not refreshed for {age:?}");
+        assert!(
+            sim.bbr.min_rtt >= Duration::from_nanos(VideoSim::RTT_NS)
+                && sim.bbr.min_rtt <= Duration::from_nanos(VideoSim::RTT_NS + 2_000_000),
+            "min RTT {:?} is not the path's",
+            sim.bbr.min_rtt
+        );
+    }
+
+    /// A flow that never goes quiet still gets its ProbeRTT: the refresh waits for a quiet
+    /// sample only while the flow had one within the last ProbeRTT's length.
+    #[test]
+    fn a_flow_never_quiet_still_probes_rtt() {
+        const MSS: u64 = 1200;
+        const BW: f64 = 1_250_000.0;
+        const RTT_NS: u64 = 20_000_000;
+        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        let mut entered_at = None;
+        sim.run(
+            1_000_000,
+            |_| ControlFlow::Continue(()),
+            |bbr, now_ns, _, _| {
+                if bbr.state == BbrState::ProbeRtt && now_ns > 1_000_000_000 {
+                    entered_at = Some(now_ns);
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(())
+            },
+        );
+        let at = entered_at.expect("a bulk flow never entered ProbeRTT");
+        assert!(at < 7_000_000_000, "ProbeRTT only at {} ms", at / 1_000_000);
     }
 
     /// What the draft's BBR does with a screen encoder's traffic: shares of time by state,

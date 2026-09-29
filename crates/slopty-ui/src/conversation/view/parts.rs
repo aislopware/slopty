@@ -3,6 +3,9 @@
 //! prompt, and the composer's floating shell, which holds the background work and the task
 //! list over the field, and the permission prompt in the field's place while one is asked.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -224,15 +227,18 @@ impl ConversationView {
 
     /// The list's lower edge fading into the body's surface over the composer, so rows slide under
     /// it rather than stop at a line, and its top edge once the list is scrolled off its start,
-    /// so a row is not sliced by the header: the one gradient the face draws, as a mask.
-    pub(super) fn list_fade(&self) -> Vec<AnyElement> {
+    /// so a row is not sliced by the header: the one gradient the face draws, as a mask. The
+    /// top one is judged after the list has laid out, since following its tail scrolls it then.
+    pub(super) fn list_fade(&self) -> [AnyElement; 2] {
         let surface = self.theme.content();
         let bottom = kit::edge_fade(kit::Edge::Bottom, surface, self.z(self.theme.spacing.xl));
-        let top = self.list.logical_scroll_top();
-        let scrolled = top.item_ix > 0 || top.offset_in_item > px(0.0);
-        let top = scrolled
-            .then(|| kit::edge_fade(kit::Edge::Top, surface, self.z(self.theme.spacing.md)));
-        std::iter::once(bottom).chain(top).map(gpui::IntoElement::into_any_element).collect()
+        let list = self.list.clone();
+        let scrolled = move |_: &gpui::App| {
+            let top = list.logical_scroll_top();
+            top.item_ix > 0 || top.offset_in_item > px(0.0)
+        };
+        let top = kit::edge_fade(kit::Edge::Top, surface, self.z(self.theme.spacing.md));
+        [bottom.into_any_element(), kit::painted_while(scrolled, top).into_any_element()]
     }
 
     /// The held permission prompt, in the composer's shell: a statement of what Claude wants,
@@ -927,14 +933,68 @@ impl ConversationView {
     }
 }
 
+/// What a tile's header shows of its face: the lines the conversation changed and how full
+/// the context window is.
+///
+/// Copied out of the face when it changes, so the header is drawn without reading the face,
+/// which changes with every word it streams.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HeaderChips {
+    added: u32,
+    removed: u32,
+    /// The face shows the changes.
+    changes_open: bool,
+    /// The share of the context window in use, and whether its popover is open.
+    context: Option<(f64, bool)>,
+    /// Where the ring was last drawn, in the window: the popover hangs under it.
+    anchor: ChipAnchor,
+}
+
+/// Where the context ring was drawn: the face's own cell, one per face, which the header's
+/// ring writes as it is laid out.
+#[derive(Clone, Default)]
+struct ChipAnchor(Rc<Cell<Bounds<Pixels>>>);
+
+impl PartialEq for ChipAnchor {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for ChipAnchor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ChipAnchor").field(&self.0.get()).finish()
+    }
+}
+
 impl ConversationView {
-    /// What the tile's header says about the session, at the chrome's scale `k`: the lines
-    /// the conversation changed (a click shows them), how full the context window is, and the
-    /// model.
+    /// What the tile's header shows of the session now ([`Self::header_chips`]).
     #[must_use]
-    pub fn header_chips(this: &gpui::Entity<Self>, k: f32, cx: &gpui::App) -> Vec<AnyElement> {
-        let view = this.read(cx);
-        let theme = &view.theme;
+    pub fn header_chips_state(&self) -> HeaderChips {
+        let (added, removed) = self.model.changed_lines();
+        HeaderChips {
+            added,
+            removed,
+            changes_open: *self.pane() == Pane::Changes,
+            context: self
+                .model
+                .meters()
+                .and_then(|m| m.context_used_pct)
+                .map(|used| (used, self.context_open)),
+            anchor: ChipAnchor(Rc::clone(&self.context_chip)),
+        }
+    }
+
+    /// What the tile's header says about the session, at the chrome's scale `k`: the lines
+    /// the conversation changed (a click shows them) and how full the context window is (a
+    /// click shows what fills it). `this` is the face, which the clicks go to.
+    #[must_use]
+    pub fn header_chips(
+        this: &gpui::Entity<Self>,
+        chips: &HeaderChips,
+        theme: &Theme,
+        k: f32,
+    ) -> Vec<AnyElement> {
         let s = theme.surfaces;
         let size = px(theme.typography.small() * k);
         let chip = |id: &'static str| {
@@ -949,10 +1009,10 @@ impl ConversationView {
                 .whitespace_nowrap()
         };
         let mut out = Vec::new();
-        let (added, removed) = view.model.changed_lines();
+        let (added, removed) = (chips.added, chips.removed);
         if added > 0 || removed > 0 {
             let entity = this.clone();
-            let open = *view.pane() == Pane::Changes;
+            let open = chips.changes_open;
             out.push(
                 crate::a11y::tab_stop(
                     kit::tabular(chip("chip-changes"))
@@ -974,10 +1034,9 @@ impl ConversationView {
                 .into_any_element(),
             );
         }
-        if let Some(used) = view.model.meters().and_then(|m| m.context_used_pct) {
+        if let Some((used, open)) = chips.context {
             let words = SharedString::from(format!("Context {used:.0}% used"));
-            let (entity, at) = (this.clone(), std::rc::Rc::clone(&view.context_chip));
-            let open = view.context_open;
+            let (entity, at) = (this.clone(), Rc::clone(&chips.anchor.0));
             // Where the ring is drawn, for the popover to hang under it.
             let place = canvas(move |bounds, _window, _cx| at.set(bounds), |_, (), _, _| {})
                 .absolute()

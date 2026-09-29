@@ -140,6 +140,7 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
     if lock.try_lock().is_err() {
         bail!("another `cargo gate` is running on this checkout; wait for it");
     }
+    crate::prune::ensure_room(&root.join("target"))?;
     if opts.in_place && opts.since_pass {
         bail!("--since-pass compares snapshots of the index; it cannot check the tree in place");
     }
@@ -362,6 +363,8 @@ fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> R
 /// while it builds, and the build is done, so neither waits for the other.
 fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) -> Result<()> {
     quiet_step("nextest build", cmd!(sh, "cargo nextest run --workspace --no-run"))?;
+    // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
+    let runner = crate::runner::command()?;
     let filter: Vec<String> = only.map_or_else(Vec::new, |packages| {
         let expr = packages.iter().map(|p| format!("package(={p})")).collect::<Vec<_>>();
         vec!["--no-tests=warn".to_owned(), "-E".to_owned(), expr.join(" | ")]
@@ -371,7 +374,8 @@ fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) 
             .spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test --workspace --doc")));
         let tests = quiet_step(
             "nextest",
-            cmd!(sh, "cargo nextest run --workspace --profile {profile} {filter...}"),
+            cmd!(sh, "cargo nextest run --workspace --profile {profile} {filter...}")
+                .env(crate::runner::RUNNER_VAR, &runner),
         );
         let doctests = join(doctests);
         tests.and(doctests)

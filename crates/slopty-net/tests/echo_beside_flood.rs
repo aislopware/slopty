@@ -484,6 +484,9 @@ mod tests {
         frames: u64,
         /// Handed to QUIC → last datagram arrived, ms.
         keyframe: (f64, f64, f64),
+        /// Every keyframe's and every echo's time, ms, sorted: runs pool them.
+        keyframes: Vec<f64>,
+        echoes: Vec<f64>,
         p_frame: (f64, f64, f64),
         /// Frames sent after the warm-up whose every datagram arrived.
         complete: usize,
@@ -632,6 +635,8 @@ mod tests {
             congestion: delta(|s| s.congestion),
             frames: frames.load(Ordering::Relaxed),
             keyframe: quantiles(&mut received.keyframes),
+            keyframes: received.keyframes.clone(),
+            echoes: took.clone(),
             p_frame: quantiles(&mut received.p_frames),
             complete,
             goodput,
@@ -708,6 +713,10 @@ mod tests {
                 run.goodput,
                 run.stalls,
             );
+            let list =
+                |ms: &[f64]| ms.iter().map(|m| format!("{m:.1}")).collect::<Vec<_>>().join(" ");
+            eprintln!("MEASURE {video:?} keyframes ms: {}", list(&run.keyframes));
+            eprintln!("MEASURE {video:?} echoes ms: {}", list(&run.echoes));
             rows.push((video, run));
         }
         // Load-independent, unlike the round trip on a shared machine: what QUIC held in front

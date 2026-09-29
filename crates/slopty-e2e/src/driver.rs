@@ -275,10 +275,14 @@ impl Driver {
     ///
     /// # Errors
     ///
-    /// When the socket breaks.
+    /// When the socket breaks, or when the frame the app drew for the dump differs from the
+    /// same state drawn from scratch ([`Dump::stale`]).
     pub async fn dump(&mut self) -> Result<Dump> {
         match self.call(&Command::Dump).await? {
-            Reply::Dump(dump) => Ok(*dump),
+            Reply::Dump(dump) => match &dump.stale {
+                Some(stale) => bail!("the app drew a stale frame: {stale}"),
+                None => Ok(*dump),
+            },
             Reply::Error { message } => bail!("dump: {message}"),
             other => bail!("dump: unexpected {other:?}"),
         }

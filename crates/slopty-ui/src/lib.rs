@@ -25,7 +25,9 @@
 //! * [`colors`] — theme tokens → GPUI colours.
 //! * [`kit`] — gpui-kit's theme kept on the same tokens.
 //! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
+//! * `draw` — a view's elements built from another entity's state, read and never written.
 //! * [`shown`] — work timed at the instant a paint reached the display.
+//! * `retained` — the oracle: the frame shown against the same state drawn from scratch (tests).
 //! * [`fonts`] — bundled `JetBrains Mono` + Nerd symbols, registered at startup.
 
 #![warn(unreachable_pub)]
@@ -42,6 +44,7 @@ pub mod chrome_text;
 pub mod clipboard;
 pub mod colors;
 pub mod conversation;
+mod draw;
 pub mod file;
 pub mod folder;
 pub mod fonts;
@@ -57,6 +60,8 @@ pub mod palette;
 pub mod paste_key;
 pub mod picker;
 mod quick_terminal;
+#[cfg(any(test, feature = "e2e"))]
+pub mod retained;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"

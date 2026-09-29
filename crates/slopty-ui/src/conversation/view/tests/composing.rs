@@ -105,6 +105,59 @@ fn a_leading_slash_opens_the_command_menu_and_a_pick_is_written(cx: &mut TestApp
     );
 }
 
+/// While an input method holds a word in the composer (Telex on its way to "cơm", kana before
+/// conversion), the keys it reads are its own: with the command menu open, the arrows, Enter
+/// and Esc pick nothing, move nothing, close nothing and send nothing. Once the word is
+/// committed, Enter picks from the menu as it always does.
+#[gpui::test]
+fn the_keys_an_input_method_reads_are_its_own_while_it_composes(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (view, cx) = face(cx, "tools");
+    let seen = events(&view, cx);
+    feed(
+        &view,
+        cx,
+        vec![ConversationEvent::Commands(vec![
+            command("commit", "Commit the staged work", CommandSource::Project),
+            command("compact", "Free up context", CommandSource::BuiltIn),
+        ])],
+    );
+    cx.simulate_input("/co");
+    cx.run_until_parked();
+    let listed = Some(vec!["commit".to_owned(), "compact".to_owned()]);
+    assert_eq!(menu_names(&view, cx), listed, "the menu is open over the word");
+    view.update_in(cx, |v, window, cx| {
+        v.composer.update(cx, |field, cx| {
+            field.replace_and_mark_text_in_range(None, "m", Some(1..1), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let composing =
+        |cx: &mut VisualTestContext| view.read_with(cx, |v, cx| v.composer.read(cx).is_composing());
+    assert!(composing(cx), "the input method holds its word");
+    // Tab is left out: gpui-kit's field puts a tab over the marked word, which is the kit's
+    // to fix; the face's part, not picking the menu's row on it, is the same guard as Enter's.
+    for key in ["down", "up", "enter", "escape"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(draft(&view, cx), "/com", "{key} mid-word leaves the draft as it is");
+        assert_eq!(menu_names(&view, cx), listed, "{key} mid-word leaves the menu open");
+    }
+    assert!(
+        seen.borrow().iter().all(|e| !matches!(e, FaceEvent::Submit { .. })),
+        "nothing was sent mid-word: {:?}",
+        seen.borrow()
+    );
+    view.update_in(cx, |v, window, cx| {
+        v.composer.update(cx, |field, cx| field.replace_text_in_range(None, "m", window, cx));
+    });
+    cx.run_until_parked();
+    assert!(!composing(cx), "the word is committed");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(draft(&view, cx), "/commit ", "the Enter after the word picks the first row");
+}
+
 /// An `@` starting a word asks the worker for what the rest of the word matches; its answer
 /// fills the menu, and a pick writes the path over the word.
 #[gpui::test]

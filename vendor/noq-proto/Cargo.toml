@@ -278,3 +278,7 @@ unreachable_pub = "warn"
 level = "warn"
 priority = 0
 check-cfg = ["cfg(fuzzing)"]
+
+# Slopty: its own workspace root, so cargo never looks for an enclosing one (the gate checks
+# a snapshot under target/, inside this repository).
+[workspace]

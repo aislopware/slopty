@@ -15,8 +15,8 @@
 //! the title, then one muted line of where it is and the worker where there are several.
 
 use gpui::{
-    Context, FontWeight, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, Styled as _, div, px,
+    FontWeight, InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
+    Styled as _, div, px,
 };
 use slopty_client::layout::Placed;
 use slopty_proto::items::{Item, ItemKind};
@@ -24,6 +24,7 @@ use slopty_theme::Typography;
 
 use super::WorkspaceView;
 use crate::colors::hsla;
+use crate::draw::Draw;
 
 impl WorkspaceView {
     /// The body `content` as its tile's miniature, with its label at its foot.
@@ -32,7 +33,7 @@ impl WorkspaceView {
         placed: &Placed,
         item: &Item,
         content: gpui::AnyElement,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let id = item.id;
         let label = self.miniature_label(placed, item, cx);
@@ -56,7 +57,7 @@ impl WorkspaceView {
         &self,
         placed: &Placed,
         item: &Item,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -64,7 +65,7 @@ impl WorkspaceView {
         let id = item.id;
         let muted = hsla(s.text_muted);
         let agent = matches!(item.kind, ItemKind::Terminal { session } if self.agent_state(session).is_some());
-        let (mark, _) = self.tile_marks(placed.tile, item, cx);
+        let (mark, _) = self.tile_marks(placed.tile, item);
         let lead = crate::palette::status_slot(
             theme,
             super::tile::kind_icon(item, agent),

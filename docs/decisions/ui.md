@@ -3770,3 +3770,67 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Tests: `workspace::tests::quick::the_palettes_command_puts_a_shown_quick_terminal_away`;
   `ssh::tests::reopening_the_panel_and_the_sheet_keeps_no_subscription` (the panel's, the SSH
   sheet's and the settings dialog's subscriptions go with them).
+- ✅ **The strip and the chrome read facts, never a tile's body** (2026-09-29, the gpui-fast
+  switch). Under retention a view is built again when anything it read changed. A header that
+  read its terminal for the title was built with every line the shell printed, a navigator row
+  that read a face with every word the agent streamed, and a stream's health mark with every
+  frame, while what they showed stayed the same. The workspace now keeps
+  `workspace::facts`: what the chrome and the strip show of each body, copied in that body's
+  observer and compared with the copy before. A change goes only to the views that show it: a
+  shell's command to the navigator and the strip, its last command to the navigator, a face's
+  one-line summary to the navigator and the strip, its header chips to the strip alone; a turn,
+  a first prompt or an approval, which every mark and title reads, to the whole workspace. The
+  strip hands each body its zoom and size by comparing with what it handed the build before
+  (`strip::Handed`), not by reading the body back, and the chrome and the strip build from a
+  read of the workspace (`draw::Draw`) that holds every write back until the read is over. What
+  it costs: a fact the workspace forgets to copy is a stale title, which the retained-frame
+  oracle (`retained::stale`) catches and a state assertion does not. Tests:
+  `workspace::tests::retained` (each step drawn as from scratch),
+  `workspace::tests::chrome::a_frame_of_motion_is_no_news_for_the_chrome`,
+  `retained::tests::a_view_changed_untold_is_stale_until_told`.
+- ✅ **What a view keeps but does not show is not written through the view** (2026-09-30).
+  Under retention an entity updated without a notify is a change for every view drawn inside a
+  view notified since, so the terminal's key-to-glass record, written when a frame reaches the
+  display, built the typed-into shell again with its strip's next build (a working mark's turn,
+  a hover on a header) though nothing it shows had moved. The record now lives in a cell the
+  view shares with its element (`TerminalView::latency_record`), and the element writes it
+  there. The rule it follows: an update of an entity is news; bookkeeping that no render reads
+  goes beside the entity, not through it. Test:
+  `workspace::tests::retained::the_strip_built_again_replays_a_shell_typed_into`.
+- ✅ **While an input method composes, its keys are its own** (2026-09-30). Our views take
+  Enter, Esc, the arrows and Tab over a field in the capture phase (a menu's pick, prompt
+  recall, closing a panel), which runs before the field sees the key. A Telex or kana word
+  still marked in the field needs those keys to commit it or pick a candidate, and the face's
+  command menu took the Enter meant to commit the word as a pick. Every such capture now stands
+  aside while its field `is_composing()` (gpui-kit): the conversation face, the palette,
+  project search, the picker, the settings form and editor, the navigator's filter and the
+  tile rename. gpui-kit's own Enter already waits; its Tab still types over a marked word,
+  which is the kit's to fix. Test:
+  `conversation::view::tests::composing::the_keys_an_input_method_reads_are_its_own_while_it_composes`.
+- ✅ **Dotted and dashed underlines are drawn as dots and dashes** (2026-09-30). The engine
+  carries all five SGR 4:x styles; the terminal drew dotted and dashed as solid lines. A
+  dotted cell now holds round dots as wide as the stroke is thick, evenly spaced, and a dashed
+  cell a dash at each end (ghostty's pattern, so neighbours join into one dash), each piece
+  snapped to device pixels at the window's scale, at the font's underline position and
+  thickness. Test: `terminal::view::tests::dotted_and_dashed_underlines_are_drawn_in_pieces`.
+- ✅ **The file tile parses again only as far as an edit reaches** (2026-09-30). Each line
+  keeps the parser's state it starts in; a parse runs from the edited line down to the first
+  line that starts in the state it started in before, and the first parse starts as the text
+  arrives rather than after the typing pause. A keystroke's parse in a 2 000-line file went
+  from 180–210 ms to 0.3–0.8 ms (MEASUREMENTS, "a keystroke's parse in the file tile"). Test:
+  `highlight::editor::tests::an_edit_is_parsed_again_only_as_far_as_it_reaches`.
+- ⏳ **Two stale frames are GPUI's, not Slopty's** (2026-09-30). A notify raised while a
+  frame is drawn wakes nothing, and the app self-test's check sees what it left out. gpui-kit's
+  editor finds its scroll to the caret in its paint, after it laid the lines out at the old
+  scroll, so a file opened at a far line shows no text for its first frame; the file tile asks
+  for the next frame, so it is one frame and not until the next keystroke or caret blink. And
+  gpui-kit starts a caret from a focus listener, which runs in the draw's focus phase, so the
+  caret's first phase is not drawn. Both wait on the forks: gpui-kit laying the lines out at
+  the caret's scroll, gpui-fast waking the window for a notify raised after the paint. Test of
+  the second, ignored until then:
+  `workspace::tests::remote::a_caret_started_by_focus_is_drawn_as_from_scratch`.
+- ✅ **A page's next dialog keeps the keyboard** (2026-09-30). Answering a script's dialog hands
+  the keyboard back to the workspace in its next build; a page that asks again at once (an
+  alert then a confirm) put up a sheet that build then took the keyboard from, so ↩ went to
+  the workspace. The workspace now leaves the keyboard with a dialog that holds it. Test: the
+  app self-test `tiles::a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it`.

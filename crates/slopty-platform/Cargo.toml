@@ -42,6 +42,8 @@ objc2-foundation = { workspace = true, features = [
     # The iOS pasteboard's promises and the iPad's drops (`pasteboard`, `file_drop`).
     "NSItemProvider",
     "NSProgress",
+    # The iOS pasteboard's items, one by one (`pasteboard`).
+    "NSIndexSet",
     "block2",
     # A page's ⌘Z and ⇧⌘Z go to its own undo manager (`web`).
     "NSUndoManager",

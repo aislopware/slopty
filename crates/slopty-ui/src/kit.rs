@@ -203,6 +203,93 @@ pub fn edge_fade(edge: Edge, surface: Rgb, depth: gpui::Pixels) -> Div {
     ))
 }
 
+/// `child`, painted only while `shown` holds as the frame is prepainted.
+///
+/// It is judged after the elements before it have laid out. For a mark that follows what another
+/// element settles while it lays out, such as a list's scroll once it has followed its tail:
+/// decided while building, it would show the scroll of the frame before, and a view drawn from the
+/// last frame would keep it.
+pub fn painted_while(
+    shown: impl Fn(&App) -> bool + 'static,
+    child: impl IntoElement,
+) -> PaintedWhile {
+    PaintedWhile { shown: Box::new(shown), child: child.into_any_element() }
+}
+
+/// [`painted_while`]'s element.
+pub struct PaintedWhile {
+    shown: Box<dyn Fn(&App) -> bool>,
+    child: gpui::AnyElement,
+}
+
+impl std::fmt::Debug for PaintedWhile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaintedWhile").finish_non_exhaustive()
+    }
+}
+
+impl IntoElement for PaintedWhile {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for PaintedWhile {
+    type PrepaintState = bool;
+    type RequestLayoutState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        let shown = (self.shown)(cx);
+        if shown {
+            self.child.prepaint(window, cx);
+        }
+        shown
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if *prepaint {
+            self.child.paint(window, cx);
+        }
+    }
+}
+
 /// A diff's size as words, `+12 −3`: the side that is zero left out, and nothing for no
 /// change. For a line of plain text (a fold's summary, a tool's facts); a readout draws
 /// [`changes`].

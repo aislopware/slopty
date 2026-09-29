@@ -145,7 +145,7 @@ fn without_a_keyboard_the_palette_prints_no_chords(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("palette-cancel").is_none(), "Esc closes it: no Cancel");
     assert!(cx.debug_bounds("palette-scrim").is_none(), "and it floats undimmed");
     cx.simulate_keystrokes("escape");
-    view.update(cx, |v, _| v.set_hardware_keyboard(false));
+    view.update(cx, |v, cx| v.set_hardware_keyboard(false, cx));
     open_palette(cx);
     assert_eq!(chords(cx), 0, "no keyboard, no chords");
     assert!(cx.debug_bounds("palette-legend").is_none(), "nor a legend");
@@ -322,7 +322,7 @@ fn the_overview_labels_keep_their_size_at_any_zoom(cx: &mut TestAppContext) {
     let overview = |cx: &mut VisualTestContext| {
         cx.simulate_keystrokes("cmd-alt-o");
         cx.run_until_parked();
-        let zoom = view.read_with(cx, |v, _| v.drawn_zoom);
+        let zoom = view.read_with(cx, |v, _| v.drawn.zoom.get());
         let name = cx.debug_bounds("overview-name-0").expect("the first workspace's name");
         let new = cx.debug_bounds("overview-new-workspace-words").expect("the new one's words");
         cx.simulate_keystrokes("cmd-alt-o");
@@ -458,7 +458,7 @@ fn the_palette_finds_an_agent_by_its_first_prompt_and_last_answer(cx: &mut TestA
                 .any(|line| matches!(line.run, PaletteRun::Session(s) if s == session))
         })
     };
-    let title = view.read_with(cx, |v, cx| v.terminal_title(session, cx));
+    let title = view.read_with(cx, |v, _| v.terminal_title(session));
     assert!(!title.contains("gamma"), "the title stops short of it: {title}");
     assert!(found(cx, "gamma delta"), "by the first prompt");
     assert!(found(cx, "correct step"), "by the last answer");

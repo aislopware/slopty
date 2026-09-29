@@ -13,14 +13,19 @@
 //!   (workspaces of columns of tiles), with its springs and gestures; pure, clocked by the caller.
 //! * [`xfer`] — files both ways: uploads of dropped files (resumed after a cut stream), downloads
 //!   of a worker's files, and how a path is typed into a shell.
-//! * [`clip`] — [`clip::ClipCache`]: the bytes of the worker's clipboard offer, fetched ahead or on
-//!   paste, for a pasteboard provider that must answer before it returns.
+//! * [`clip`] — [`clip::ClipCache`]: the bytes of the worker's clipboard offer, fetched ahead under
+//!   a budget or on paste, for a pasteboard provider that must answer before it returns; and
+//!   `clip::ClipSync`, this client's pasteboard in step with the workers, relaying one worker's
+//!   copy to another.
 //! * [`tunnel`] — [`tunnel::Forwards`]: a worker's listening ports served on this machine's
 //!   loopback, each connection a tunnel stream.
 //! * [`remote`] — [`remote::Remote`]: what the UI asks of a worker beyond the control stream.
 //! * [`screen`] — [`screen::ScreenHandle`]: one remote window stream, reassembled, decoded, and
 //!   published as its newest frame plus the worker's cursor position. Apple only: it decodes with
 //!   `VideoToolbox`, so a Linux client (the CLI) has terminals and no screens.
+//! * [`handoff`] — [`handoff::Handoffs`]: what to do when a program in a worker's shell hands this
+//!   client a web page to open or offer, or a file to edit, and what to answer;
+//!   [`handoff::declare`], which handoffs this client takes.
 //! * [`relay`] — [`relay::RelayWatch`]: whether a worker's link has stayed on a Tailscale DERP
 //!   relay long enough to say so, and what to say.
 //! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
@@ -39,6 +44,7 @@
 
 pub mod clip;
 pub mod directory;
+pub mod handoff;
 pub mod items;
 pub mod layout;
 pub mod link;

@@ -73,6 +73,21 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
             }
             Err(message) => CtlReply::Error { message },
         },
+        CtlRequest::Open { session, url } => match slopty_proto::handoff::page(&url) {
+            Some(page) => CtlReply::Handoff(crate::handoff::open(&daemon, session, page).await),
+            None => CtlReply::Error {
+                message: "only an http or https address with a host is opened".to_owned(),
+            },
+        },
+        CtlRequest::Edit(ask) if !Path::new(&ask.path).is_absolute() => {
+            CtlReply::Error { message: "the file is named by an absolute path".to_owned() }
+        }
+        // Held while the person edits. The CLI keeps its end open while it waits; its closing
+        // gives the edit up.
+        CtlRequest::Edit(ask) => {
+            CtlReply::Handoff(crate::handoff::edit(&daemon, ask, closed(rd)).await)
+        }
+        CtlRequest::Wake => CtlReply::Wake(daemon.wake.lock().awake()),
     };
     let mut out = serde_json::to_vec(&reply)?;
     out.push(b'\n');
@@ -142,7 +157,14 @@ async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Ho
         return Err("no such session".to_owned());
     }
     daemon.follows.lock().board.heard(session, &hook);
-    let mut event = daemon.agents.lock().apply(session, &hook);
+    let (mut event, branch) = {
+        let mut agents = daemon.agents.lock();
+        let event = agents.apply(session, &hook);
+        (event, agents.branch(session, &hook))
+    };
+    if let Some(branch) = branch {
+        let _sent = daemon.events.send(WorkerMsg::AgentBranch(branch));
+    }
     // A question or an elicitation the notification did not spell out (a `Stop` always carries
     // its last message): the transcript tail has the line. Read off the runtime's blocking
     // pool; the table lock is not held meanwhile.

@@ -4,18 +4,24 @@ The repository, the commands and the loop. Rules of the game are in `CLAUDE.md`;
 `docs/ARCHITECTURE.md`; rulings and evidence are under `docs/decisions/`.
 
 ## Layout
-`crates/*` libraries, `apps/*` binaries, `xtask/` automation, `vendor/ghostty` pinned submodule
-(libghostty-vt source), `docs/` design + decisions. GPUI comes from `aislopware/gpui-fast`,
-gpui-kit from `aislopware/gpui-kit` and libghostty-vt from `aislopware/libghostty-rs`, as
-rev-pinned git dependencies. Each fork carries our commits on its default branch: gpui-fast merges
-longbridge's branch in, the other two are rebased onto theirs. gpui-fast is GPUI imported flat out
-of zed, and the fork imports zed itself so it is never behind zed while longbridge lags.
+`crates/*` libraries, `apps/*` binaries, `xtask/` automation, `vendor/ghostty` the libghostty-vt
+source, `docs/` design + decisions. GPUI comes from `aislopware/gpui-fast`, gpui-kit from
+`aislopware/gpui-kit` and libghostty-vt from `aislopware/libghostty-rs`, as rev-pinned git
+dependencies. `vendor/ghostty` is a submodule on our fork `aislopware/ghostty`, not on
+ghostty-org's repository, and libghostty-rs pins the same commit (`GHOSTTY_COMMIT`). Each fork
+carries our commits on its default branch: gpui-fast merges longbridge's branch in, the other
+three are rebased onto theirs. gpui-fast is GPUI imported flat out of zed, and the fork imports
+zed itself so it is never behind zed while longbridge lags.
 
 ## Dev loop
 - Before coding, bring the ground up to date: `cargo xtask upstream check` and `sync` whatever
-  is behind (the three forks, zed and `vendor/ghostty`), `rustup update`, `cargo update -w`, and
+  is behind (the four forks and zed; ghostty is `vendor/ghostty`), `rustup update`, `cargo update -w`, and
   `cargo binstall -y <tool>` for any gate tool `cargo info <tool>` shows behind.
-- `cargo xtask setup` installs tools (binstall) and initialises submodules.
+- `cargo xtask setup` installs tools (binstall) and initialises submodules, then runs
+  `cargo xtask doctor`: it times the first launch of fresh binaries, and when `XProtect` scans
+  them it names the app to switch on under System Settings → Privacy & Security → Developer
+  Tools (the terminal, or the multiplexer if builds run inside one; only you can switch it). It
+  also checks the free space against the floor below.
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask e2e <case>` runs the live tests (`docs/TESTING.md`); `cargo xtask e2e server`
@@ -24,6 +30,11 @@ of zed, and the fork imports zed itself so it is never behind zed while longbrid
   scenario), and `--no-build` reruns the last build as it is, without cargo. Every case
   runs on this Mac alone: `workers` starts its second worker here, behind a relay shaped like
   the tailnet, so nothing waits on another machine.
+- The UI draws under gpui-fast's view retention: a view is built again only when it was told
+  of a change or something it read changed (`docs/ARCHITECTURE.md` §6, "Drawing under
+  retention"). A view that shows an old state is a missing notify; `GPUI_VIEW_RETENTION=0` on the
+  app turns retention off to confirm it, and a step in `workspace/tests/retained.rs` is how it
+  stays fixed.
 - `cargo xtask fixtures claude [--only <name>]` records the conversation fixtures from a real
   session (it uses the model and your login), and `cargo xtask fixtures claude-mod` records the
   mod's against a canned local API with no account. Both run the official Claude Code build
@@ -45,14 +56,26 @@ of zed, and the fork imports zed itself so it is never behind zed while longbrid
   identifiers, so one approval of Screen Recording and Accessibility survives every later build
   (`run worker` does it for you). Without it a rebuilt daemon is a new executable to TCC and
   loses both, which surfaces as ScreenCaptureKit `-3801` and no prompt (`docs/decisions/input.md`).
-- `cargo xtask upstream check` shows how far the gpui-fast, gpui-kit and libghostty forks are
-  behind upstream, and how far zed is ahead of gpui-fast's import (bases in `xtask/upstream.toml`).
+- `cargo xtask upstream check` shows how far the gpui-fast, gpui-kit, ghostty and libghostty-rs
+  forks are behind upstream, and how far zed is ahead of gpui-fast's import (bases in `xtask/upstream.toml`).
   For zed it reads `zed_commit` from the fork's `UPSTREAM`, counts the zed commits since that touch
   the tracked directories, and lists what an import would ask for by hand: crates joining or
   leaving the tracked set, and redirected files zed changed. Once a source's `check_every_days`
   has run out (none for gpui-fast and gpui-kit, which land changes most days, so every gate asks;
-  a week for zed and libghostty-rs), the gate asks the upstream for its head (`git ls-remote`)
-  and warns when it moved.
+  a day for ghostty; a week for zed and libghostty-rs), the gate asks the upstream for its head
+  (`git ls-remote`) and warns when it moved. A source with `paths` (ghostty) warns only when
+  GitHub's compare says the move changed a file under them. For ghostty, `check` also lists the
+  upstream commits since the base that touch those paths (the terminal, its C API and headers,
+  SIMD, Unicode, the key and mouse encoders, the lib-vt build, `build.zig.zon`), and where
+  `vendor/ghostty` stands against the fork head and the commit this repository records.
+- `cargo xtask upstream watch [--interval 300] [--once]` prints a line whenever a watched
+  upstream's default branch moves (its subject and how many commits it is past our base) or a
+  pull request there is opened, updated, merged, closed or reopened. It watches the forks'
+  upstreams and the vendored noq and objc2 (`xtask/upstream.toml`), and never syncs. For ghostty
+  it names a head move only when the commits since the last look touch its `paths` (the line
+  lists the files), and a pull request only when it does. What it saw
+  is kept in `target/upstream-watch/state.json`, so a restart does not announce it again, and
+  an upstream that does not answer is skipped for the round.
 - `cargo xtask upstream sync [--only <fork>]` works in the checkouts under `.research/` in the
   main checkout. It rebases gpui-kit and libghostty-rs and merges longbridge's branch into
   gpui-fast. Then it imports zed into gpui-fast by the procedure in gpui-fast's
@@ -66,6 +89,20 @@ of zed, and the fork imports zed itself so it is never behind zed while longbrid
   mid-merge with `UPSTREAM` already staged and prints the list; finish there, `git commit`, and
   run `sync` again. `--only zed` is `--only gpui-fast`. Then gate, e2e app + ios, and a
   DECISIONS entry.
+- ghostty goes through the same `sync` (`--only ghostty` brings libghostty-rs with it). It never
+  rebases in `vendor/ghostty`, which every build compiles: the fork's `main` is checked out in
+  the worktree `.research/ghostty` and rebased onto ghostty-org's `main` there, so a conflict
+  stops the sync with the file list and `vendor/ghostty`, both forks and every pin untouched;
+  resolve it in that worktree, `git rebase --continue`, and run `sync` again. Everything is
+  then built and checked before anything is pushed: libghostty-rs is rebased onto its upstream,
+  its `GHOSTTY_COMMIT` moves to the rebased head, the bindings are regenerated from that tree
+  (the crate's `gen-bindings`) and committed, and `cargo check` and `cargo test -p
+  libghostty-vt` run with `GHOSTTY_SOURCE_DIR` on it. Only then does it publish, in the order
+  the pins need and confirming each: push the ghostty fork, move `vendor/ghostty` (detached)
+  to that head, push libghostty-rs, `cargo update -p libghostty-vt` and check the lock pins
+  the pushed binding. Stage `vendor/ghostty` with `Cargo.lock`. `--no-push` stops after the
+  checks with `vendor/ghostty` and the lock as they were. `sync --only libghostty-rs` pins
+  whatever `vendor/ghostty` holds, and refuses a commit the ghostty fork does not have.
 
 ## Gate
 `cargo gate` is fmt, clippy `-D warnings` on all targets and all three Apple triples, clippy for
@@ -131,11 +168,27 @@ resolves its own and builds its own copies (add `-p workspace-hack` to share).
 ## Disk
 `target/` would grow without end: cargo never deletes a unit, and every `cargo update`, fork
 rebase, toolchain or new feature set leaves the old ones behind. `cargo xtask prune` deletes, in
-every target dir under `target/`, the units no build has read for a day (with their `deps/`
-and `build/` artifacts) and the incremental caches no compile has touched for a day. It runs
-after every `check` and `gate`, skipping a dir whose build lock is held; by hand it waits for
-the lock (`--idle-hours N`, `--dry-run`). How it knows a unit is in use:
-`docs/decisions/tooling.md`, "target/ stays bounded".
+every target dir under `target/` and in both of cargo's layouts (to 1.99 and from 1.100):
+- the units no build has read for a day, with their artifacts;
+- the incremental caches no compile has touched for a day;
+- the object files a binary's earlier compiles left beside it.
+
+Then, when `target/` is over its budget (160 GB, `SLOPTY_TARGET_BUDGET_GB` or `--budget-gb`) or
+its volume has less than the floor free (50 GB, `SLOPTY_DISK_FLOOR_GB` or `--floor-gb`), it
+deletes the least recently used units and caches until both hold with a tenth to spare. Nothing
+used in the last hour goes that way. It runs after every `check` and `gate`, skipping a dir whose
+build lock is held; by hand it waits for the lock (`--idle-hours N`, `--dry-run`). It prints
+what went, the largest entries and how much was used how recently. The gate will not start
+under the floor: it prunes first, and if that is not enough it names what takes the space. How
+prune knows a unit is in use: `docs/decisions/tooling.md`, "target/ stays under a byte budget".
+
+A test binary runs slowly from a large directory: every process that opens `VideoToolbox` or
+`CoreAudio` pays for the entries beside its executable, and `deps/` holds tens of thousands
+(`docs/decisions/tooling.md`, "A test binary's directory, not the volume"). The gate's tests lane
+and `cargo xtask check` therefore run each test binary through `cargo xtask test-runner`,
+which runs it from a hard link in `<profile>/run/`. A bare `cargo nextest run` does not do this.
+To get it, set `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="$PWD/target/xtask/debug/xtask-runner
+test-runner"`.
 
 ## Deep checks (on a schedule, not per commit)
 `cargo xtask deep <check>` runs what is too slow for the gate, each on its own target dir
@@ -145,6 +198,9 @@ under `target/deep/`:
 - `sanitize [address|thread]` — the tests of the daemons, the codec, `slopty-platform` and
   `slopty-capture` (the crates with the most `unsafe`) built with `-Zsanitizer` and
   `-Zbuild-std` on nightly.
+- `sanitize realtime` — the codec's tests under `RealtimeSanitizer`, with the audio render
+  callback marked real-time (`--cfg slopty_rtsan`): an allocation, lock or blocking call
+  reached from it aborts. One test proves it trips, on an allocation armed in a child process.
 - `features` — `cargo hack check --each-feature` over the workspace: every feature alone,
   none, and all.
 - `coverage [--html]` — `cargo llvm-cov nextest` line coverage per crate (the live e2e crate

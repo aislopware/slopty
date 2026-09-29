@@ -15,6 +15,9 @@
 //! Output is delivered on VideoToolbox's own threads through the sink closure given at
 //! construction; sinks must be cheap (hand the packet to a channel).
 
+// RealtimeSanitizer's attribute on the audio render callback, in the nightly deep lane only
+// (`cargo xtask deep sanitize-realtime`).
+#![cfg_attr(slopty_rtsan, feature(sanitize))]
 #![warn(unreachable_pub)]
 #![allow(
     clippy::redundant_pub_crate,

@@ -257,7 +257,7 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
     .expect("pixel buffer");
     screen.update(cx, |s, cx| s.show_picture(picture, cx));
     cx.run_until_parked();
-    let roots = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.frames_drawn);
+    let roots = |cx: &VisualTestContext| view.read_with(cx, |v, _| v.drawn.builds.get());
     let screens = |cx: &VisualTestContext| screen.read_with(cx, |s, _| s.renders());
     let (root_before, screen_before) = (roots(cx), screens(cx));
     let stream = time(cx, |cx| screen.update(cx, |_, cx| cx.notify()));

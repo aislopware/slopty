@@ -391,7 +391,11 @@ impl Board {
             if let Some(meters) = &hook.meters {
                 seen.meters = Some(meters.clone());
             }
-            if let Some(path) = &hook.agent_transcript_path {
+            // Claude Code's own agents (a compaction's summary, a prompt suggestion) are not
+            // the model's subagents, and get no thread.
+            if let Some(path) =
+                hook.agent_transcript_path.as_ref().filter(|_| !hook.is_internal_subagent())
+            {
                 seen.subagents.insert(PathBuf::from(path));
             }
         });
@@ -674,6 +678,12 @@ mod tests {
             now.subagents.into_iter().collect::<Vec<_>>(),
             [PathBuf::from("/t/s/subagents/agent-a1.jsonl")]
         );
+        let internal = Hook::parse(
+            r#"{"hook_event_name":"SubagentStop","agent_id":"a2","agent_type":"","agent_transcript_path":"/t/s/subagents/agent-a2.jsonl"}"#,
+        )
+        .expect("hook");
+        board.heard(s, &internal);
+        assert_eq!(seen.borrow_and_update().subagents.len(), 1, "a compaction gets no thread");
         board.forget(s);
         assert!(seen.has_changed().is_err(), "the watch closes with the session");
     }

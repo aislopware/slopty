@@ -1,5 +1,5 @@
 use bytes::{BufMut, BytesMut};
-use proptest::{prelude::*, prop_assert_ne};
+use proptest::{prelude::*, prop_assert_eq, prop_assert_ne};
 use test_strategy::proptest;
 
 use crate::{
@@ -90,4 +90,21 @@ fn maybe_frame_known_never_padding(frame: MaybeFrame) {
     if let MaybeFrame::Known(ft) = frame {
         prop_assert_ne!(ft, FrameType::Padding);
     }
+}
+
+#[proptest]
+fn ack_size_is_its_encoded_length(ack: Ack, path_ack: PathAck) {
+    let encoder = Ack::encoder(ack.delay, &ack.ranges, ack.ecn.as_ref());
+    let mut encoded = Vec::new();
+    encoder.encode(&mut encoded);
+    prop_assert_eq!(encoder.size(), encoded.len());
+    let encoder = PathAck::encoder(
+        path_ack.path_id,
+        path_ack.delay,
+        &path_ack.ranges,
+        path_ack.ecn.as_ref(),
+    );
+    let mut encoded = Vec::new();
+    encoder.encode(&mut encoded);
+    prop_assert_eq!(encoder.size(), encoded.len());
 }

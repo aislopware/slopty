@@ -11,26 +11,29 @@
 //! that begins over a remote picture which would take a sideways swipe zooms that picture
 //! instead (`screen::zoom`), for the whole of the pinch.
 
-use std::collections::HashSet;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Animation, AnimationExt as _, Bounds, Context, DispatchPhase, FontWeight,
-    InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement as _, Styled as _, TouchPhase, Window, canvas, div,
-    px,
+    Animation, AnimationExt as _, App, Bounds, Context, DispatchPhase, Entity, EntityId,
+    FocusHandle, FontWeight, InteractiveElement as _, IntoElement as _, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point,
+    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TouchPhase, WeakEntity, Window, canvas, div, px,
 };
 use slopty_client::layout::{
-    Axis, AxisLock, DropTarget, Frame, Rect, TileRef, WHEEL_TICK, WorkerKey,
+    Axis, AxisLock, DropTarget, Frame, Rect, Strip, TileRef, WHEEL_TICK, WorkerKey,
 };
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::ItemKind;
 use slopty_theme::{Typography, alpha};
 
 use super::WorkspaceView;
+use super::marks::Marks;
 use super::tile::Chrome;
 use crate::colors::{hsla, hsla_alpha};
+use crate::draw::Draw;
 use crate::icons::IconName;
 use crate::kit;
 
@@ -103,7 +106,94 @@ enum Phase {
     Content,
 }
 
+/// What the strip drew, kept by the strip's view ([`super::StripHost`]) and read by the
+/// workspace's handlers: where each tile went, the zoom and the strip's bounds, the tiles on
+/// screen, where the thumb sits and whether it shows. The strip's build writes it while it
+/// reads the workspace and writes nothing there, so a frame of motion is no news for anything
+/// else; hence cells, which the build holds shared.
+pub(super) struct Drawn {
+    /// The active workspace's strip as the last build laid it out: where the thumb sits.
+    pub strip: RefCell<Strip>,
+    /// The zoom the tiles were last drawn at (the overview's).
+    pub zoom: Cell<f32>,
+    /// The strip's bounds in the window, as of the last frame.
+    pub viewport: Cell<Bounds<Pixels>>,
+    /// Where each drawn tile was last frame, in window coordinates.
+    pub placed: RefCell<Vec<(TileRef, Bounds<Pixels>)>>,
+    /// The tile focused when the tiles were last drawn.
+    pub focus: Cell<Option<TileRef>>,
+    /// What had the keyboard when the tiles were last drawn.
+    pub keys: RefCell<Option<FocusHandle>>,
+    /// Tiles on screen in the frame last drawn: what the status bar need not count again.
+    pub on_screen: RefCell<HashSet<ItemId>>,
+    /// Bumped every time the strip builds, so a notice knows whether it was drawn in this one.
+    pub builds: Cell<u64>,
+    /// The browser tiles the last build drew, at their opacity: the pages to show.
+    pub browsers: RefCell<Vec<(ItemId, f32)>>,
+    /// What the last build handed each body it drew, and what the one before handed
+    /// ([`WorkspaceView::hand_over`]).
+    pub handed: RefCell<HashMap<EntityId, Handed>>,
+    pub handed_before: RefCell<HashMap<EntityId, Handed>>,
+    /// Whether the thumb shows ([`super::marks`]), the pointer is near the strip's bottom
+    /// edge, the timer that takes the thumb down, and the generation of its fade.
+    pub marks: Cell<Marks>,
+    pub marks_near: Cell<bool>,
+    pub marks_timer: RefCell<Option<gpui::Task<()>>>,
+    pub marks_gen: Cell<u64>,
+}
+
+/// What a body takes from its tile: its zoom, and what else its kind is laid out by.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Handed {
+    Shell { zoom: f32, covered: bool, zooming: bool },
+    Face { zoom: f32, width: f32 },
+    Stream { painted: f32 },
+    Text { zoom: f32, pad: f32, size: f32 },
+    Folder { zoom: f32 },
+}
+
+impl Default for Drawn {
+    fn default() -> Self {
+        Self {
+            strip: RefCell::default(),
+            zoom: Cell::new(1.0),
+            viewport: Cell::default(),
+            placed: RefCell::default(),
+            focus: Cell::default(),
+            keys: RefCell::default(),
+            on_screen: RefCell::default(),
+            builds: Cell::default(),
+            browsers: RefCell::default(),
+            handed: RefCell::default(),
+            handed_before: RefCell::default(),
+            marks: Cell::default(),
+            marks_near: Cell::default(),
+            marks_timer: RefCell::default(),
+            marks_gen: Cell::default(),
+        }
+    }
+}
+
 impl WorkspaceView {
+    /// Hand `view` what it takes from its tile, `handed`, once the strip has read the
+    /// workspace, and only when it differs from what the last build handed it: the body is then
+    /// built again in this frame. Compared with what was handed, never read off the body: a read
+    /// would build the strip again with everything the body does.
+    pub(super) fn hand_over<V: 'static>(
+        &self,
+        cx: &Draw<'_, Self>,
+        view: &Entity<V>,
+        handed: Handed,
+        set: impl FnOnce(&mut V, &mut Context<V>) + 'static,
+    ) {
+        let id = view.entity_id();
+        self.drawn.handed.borrow_mut().insert(id, handed);
+        if self.drawn.handed_before.borrow().get(&id) != Some(&handed) {
+            let view = view.clone();
+            cx.later(move |_window, cx| view.update(cx, set));
+        }
+    }
+
     /// A tile was pressed: it takes the focus (and in the overview, the overview closes on it).
     pub(super) fn click_tile(&mut self, tile: TileRef, cx: &mut Context<Self>) {
         let overview = self.layout.overview_open();
@@ -162,12 +252,13 @@ impl WorkspaceView {
     }
 
     fn local(&self, p: Point<Pixels>) -> (f32, f32) {
-        let d = p - self.viewport.origin;
+        let d = p - self.drawn.viewport.get().origin;
         (f32::from(d.x), f32::from(d.y))
     }
 
     fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        let (top, height) = (self.viewport.top(), self.viewport.size.height);
+        let viewport = self.drawn.viewport.get();
+        let (top, height) = (viewport.top(), viewport.size.height);
         self.pointer_over_strip(f32::from(ev.position.y - top), f32::from(height), cx);
         if self.drag.is_none() {
             return;
@@ -223,8 +314,9 @@ impl WorkspaceView {
     /// Where a scroll event lands: the tile under it and whether it is on the body (not the
     /// header).
     pub(super) fn under(&self, p: Point<Pixels>) -> Option<(TileRef, bool)> {
-        self.placed.iter().rev().find(|(_, b)| b.contains(&p)).map(|(tile, b)| {
-            let body = p.y > b.origin.y + px(self.theme.density.header * self.drawn_zoom);
+        let zoom = self.drawn.zoom.get();
+        self.drawn.placed.borrow().iter().rev().find(|(_, b)| b.contains(&p)).map(|(tile, b)| {
+            let body = p.y > b.origin.y + px(self.theme.density.header * zoom);
             (*tile, body)
         })
     }
@@ -259,7 +351,7 @@ impl WorkspaceView {
             ScrollDelta::Lines(l) => (l.x * WHEEL_TICK, l.y * WHEEL_TICK),
         };
         self.tick();
-        let now = self.epoch.elapsed();
+        let now = self.now();
         if ev.modifiers.platform && ev.modifiers.alt {
             if self.layout.wheel(-dx, -dy, now) {
                 self.after_focus_moved(cx);
@@ -388,25 +480,19 @@ impl WorkspaceView {
         }
     }
 
-    /// The strip's area was measured: the layout lays out for it.
-    fn measured(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
-        if self.viewport.size != bounds.size {
-            self.layout.set_viewport(f32::from(bounds.size.width), f32::from(bounds.size.height));
-            // This frame was laid out for the old size; one more draws the new one. A notify
-            // while drawing only marks the view, so it goes through a deferred effect.
-            let this = cx.weak_entity();
-            cx.defer(move |cx| {
-                if let Some(this) = this.upgrade() {
-                    this.update(cx, |_, cx| cx.notify());
-                }
-            });
-        }
-        self.viewport = bounds;
+    /// The strip's area was measured at a new size: the layout lays out for it, and one more
+    /// frame draws the new size. Called once the frame that measured it is over.
+    fn strip_resized(&mut self, size: gpui::Size<Pixels>, cx: &mut Context<Self>) {
+        self.layout.set_viewport(f32::from(size.width), f32::from(size.height));
+        cx.notify();
     }
 
-    /// Remote tiles off screen are counted; after the grace their streams go. A timer
-    /// comes back for them once the grace is up, since an idle strip draws no frames.
-    fn track_visibility(&mut self, frame: &Frame, window: &Window, cx: &Context<Self>) {
+    /// The tiles on screen in this build: `visible`, remote ones first seen off screen from
+    /// now, and the streams of those off screen past the grace let go. What changed is the
+    /// workspace's, so it is done once the frame is over, and only when there is something to
+    /// do: a timer comes back for the streams once the grace is up, since an idle strip draws
+    /// no frames.
+    fn track_visibility(&self, frame: &Frame, window: &Window, cx: &Draw<'_, Self>) {
         let (w, h) = self.layout.viewport();
         let screen = Rect { x: 0.0, y: 0.0, w, h };
         let visible: Vec<ItemId> = frame
@@ -415,13 +501,27 @@ impl WorkspaceView {
             .filter(|p| !p.hidden && p.rect.intersects(&screen))
             .map(|p| p.tile.item)
             .collect();
-        self.note_visible(&visible);
-        let on_screen: HashSet<ItemId> = visible.into_iter().collect();
-        if on_screen != self.on_screen {
+        let on_screen: HashSet<ItemId> = visible.iter().copied().collect();
+        let moved = on_screen != *self.drawn.on_screen.borrow();
+        if moved {
             // The status bar counts the agents at work off screen.
             self.chrome_next_frame(super::Region::Statusbar, window);
-            self.on_screen = on_screen;
+            *self.drawn.on_screen.borrow_mut() = on_screen;
         }
+        if !moved && !self.visibility_due(&visible) {
+            return;
+        }
+        let this = cx.weak_entity();
+        cx.later(move |_window, cx| {
+            cx.defer(move |cx| {
+                let _gone = this.update(cx, |this, cx| this.visibility_changed(&visible, cx));
+            });
+        });
+    }
+
+    /// The remote tiles' seen and unseen marks after `visible`, and the park timer.
+    fn visibility_changed(&mut self, visible: &[ItemId], cx: &Context<Self>) {
+        self.note_visible(visible);
         let waiting = self.unseen.keys().any(|id| !self.parked.contains(id));
         if waiting && !self.park_pending {
             self.park_pending = true;
@@ -522,7 +622,7 @@ impl WorkspaceView {
     /// line: a drag resizes the column on its left, a double-click puts it back at the width a
     /// column opens at. Its accent line lies over the divider while the pointer is on it and
     /// while it is dragged.
-    fn resize_handles(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+    fn resize_handles(&self, frame: &Frame, cx: &Draw<'_, Self>) -> Vec<gpui::AnyElement> {
         if frame.overview > 0.0 {
             return Vec::new();
         }
@@ -582,9 +682,9 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// The layout's frame for this draw: the clock moved to now, a drag held in an edge band
-    /// scrolled on, then the frame worked out once for the bar and the strip.
-    pub(super) fn frame_at_clock(&mut self, window: &Window) -> Frame {
+    /// The layout moved on to now for the frame about to be drawn: the clock, the overview's
+    /// gaps, and a drag held in an edge band scrolled on. Whether that drag keeps scrolling.
+    pub(super) fn advance(&mut self, window: &Window) -> bool {
         self.tick();
         // The overview's gaps hold the names drawn in them, and the blocks' margins either side.
         let spacing = self.theme.spacing;
@@ -592,29 +692,57 @@ impl WorkspaceView {
         if let Some(Drag::Move { moving: true, .. }) = self.drag {
             // The pointer resting in an edge band keeps the strip scrolling.
             let (x, _) = self.local(window.mouse_position());
-            if self.layout.dnd_edge_scroll(x) {
-                self.next_frame(window);
-            }
+            return self.layout.dnd_edge_scroll(x);
         }
-        let frame = self.layout.frame();
-        if frame.animating {
-            self.next_frame(window);
-        }
-        frame
+        false
     }
 
-    /// The strip, drawn from the frame of [`Self::frame_at_clock`].
+    /// Another frame of the strip's motion: before it is drawn, the layout moves on to its
+    /// time and the strip's view, `host`, is built again. The workspace is updated but not
+    /// notified, which is news only for what is inside the strip's view: a frame of motion
+    /// draws nothing else.
+    pub(super) fn motion_frame(this: WeakEntity<Self>, host: EntityId, window: &Window) {
+        window.on_next_frame(move |window, cx| {
+            let edge = this.update(cx, |this, _cx| this.advance(window)).unwrap_or(false);
+            cx.notify(host);
+            if edge {
+                Self::motion_frame(this, host, window);
+            }
+        });
+    }
+
+    /// The strip, drawn from the layout's frame at the clock the workspace last moved it to,
+    /// by the strip's own view `host`: read here, never written. What the strip drew goes to
+    /// [`Drawn`]; what a tile's body takes from its tile (a zoom, a width) goes to it after the
+    /// read (`Draw::later`), and only where it changed.
     pub(super) fn render_strip(
-        &mut self,
-        frame: &Frame,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        &self,
+        host: EntityId,
+        window: &Window,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
+        let frame = self.layout.frame();
+        if frame.animating {
+            Self::motion_frame(cx.weak_entity(), host, window);
+        }
+        let drawn = &self.drawn;
+        drawn.builds.set(drawn.builds.get().wrapping_add(1));
+        drawn.browsers.borrow_mut().clear();
+        drawn.handed_before.swap(&drawn.handed);
+        drawn.handed.borrow_mut().clear();
+        if *drawn.strip.borrow() != frame.strip {
+            let scrolled = (frame.strip.view.0 - drawn.strip.borrow().view.0).abs() > f32::EPSILON;
+            *drawn.strip.borrow_mut() = frame.strip.clone();
+            // Not under the self-test, whose frames are still pictures of where things land.
+            if scrolled && self.animate && super::marks::thumb(&frame.strip).is_some() {
+                self.strip_scrolled(cx);
+            }
+        }
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
         let chrome = Chrome { k: frame.zoom, zooming };
-        self.drawn_zoom = frame.zoom;
-        self.track_visibility(frame, window, cx);
-        let origin = self.viewport.origin;
+        drawn.zoom.set(frame.zoom);
+        self.track_visibility(&frame, window, cx);
+        let origin = drawn.viewport.get().origin;
         let dragged = match &self.drag {
             Some(Drag::Move { tile, moving: true, .. }) => Some(*tile),
             _ => None,
@@ -639,27 +767,27 @@ impl WorkspaceView {
                 ));
             }
         }
-        self.placed = placed;
-        self.drawn_focus = self.layout.focused();
-        self.drawn_keys = window.focused(cx);
+        *drawn.placed.borrow_mut() = placed;
+        drawn.focus.set(self.layout.focused());
+        *drawn.keys.borrow_mut() = window.focused(cx);
         let closing: Vec<gpui::AnyElement> =
             frame.closing.iter().filter_map(|c| self.render_closing(c, chrome, cx)).collect();
         let backdrops =
-            if frame.overview > 0.0 { self.overview_blocks(frame, cx) } else { Vec::new() };
-        let hint = self.drop_hint(frame);
-        let handles = self.resize_handles(frame, cx);
-        let entity = cx.entity();
+            if frame.overview > 0.0 { self.overview_blocks(&frame, cx) } else { Vec::new() };
+        let hint = self.drop_hint(&frame);
+        let handles = self.resize_handles(&frame, cx);
+        let this = cx.weak_entity();
         let measure = canvas(
             {
-                let entity = entity.clone();
-                move |bounds, _window, cx| entity.update(cx, |this, cx| this.measured(bounds, cx))
+                let (this, drawn) = (this.clone(), std::rc::Rc::clone(drawn));
+                move |bounds, _window, cx| Self::strip_measured(&this, &drawn, bounds, cx)
             },
             move |bounds, (), window, _cx| {
                 window.on_mouse_event(move |ev: &ScrollWheelEvent, phase, _window, cx| {
                     if phase != DispatchPhase::Capture || !bounds.contains(&ev.position) {
                         return;
                     }
-                    entity.update(cx, |this, cx| this.scroll_captured(ev, cx));
+                    let _gone = this.update(cx, |this, cx| this.scroll_captured(ev, cx));
                 });
             },
         )
@@ -671,7 +799,7 @@ impl WorkspaceView {
         let bare = self.layout.workspaces().get(active).is_none_or(|w| w.columns().is_empty());
         let empty =
             (bare && frame.overview <= 0.0 && !frame.animating).then(|| self.render_empty(cx));
-        div()
+        let strip = div()
             .id("strip")
             .debug_selector(|| "strip".to_owned())
             .relative()
@@ -691,7 +819,28 @@ impl WorkspaceView {
             .children(hint)
             .children(empty)
             .children(self.render_marks())
-            .into_any_element()
+            // The notices sit in the strip's corner; the pages stop above them.
+            .children(self.render_toast(cx))
+            .child(Self::browser_sync(cx));
+        self.chrome_due.set(false);
+        strip.into_any_element()
+    }
+
+    /// The strip laid out at `bounds`: kept for the handlers, and a new size is the layout's,
+    /// once this frame is over.
+    fn strip_measured(
+        this: &WeakEntity<Self>,
+        drawn: &Drawn,
+        bounds: Bounds<Pixels>,
+        cx: &mut App,
+    ) {
+        let was = drawn.viewport.replace(bounds);
+        if was.size != bounds.size {
+            let this = this.clone();
+            cx.defer(move |cx| {
+                let _gone = this.update(cx, |this, cx| this.strip_resized(bounds.size, cx));
+            });
+        }
     }
 
     /// The overview's blocks, under the tiles: each workspace with tiles is one block on the
@@ -702,7 +851,7 @@ impl WorkspaceView {
     /// sits above its block at the medium weight, its count in the meta size. The empty
     /// workspace kept at the end is where the next one goes: a ghost "New workspace" button
     /// under the last block, on its left edge, which opens it.
-    fn overview_blocks(&self, frame: &Frame, cx: &Context<Self>) -> Vec<gpui::AnyElement> {
+    fn overview_blocks(&self, frame: &Frame, cx: &Draw<'_, Self>) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         // A base unit, so the panes' square corners sit well inside the block's round ones.
@@ -836,7 +985,7 @@ impl WorkspaceView {
                 .child(super::rollup::rollup_slot(
                     theme,
                     format!("overview-rollup-{ix}"),
-                    self.workspace_rollup(ix, cx).0,
+                    self.workspace_rollup(ix).0,
                     true,
                 ));
             out.push(block.into_any_element());
@@ -854,7 +1003,7 @@ impl WorkspaceView {
     /// each opening another shell there; then the workers, each marked only where its link is
     /// not up, each opening a shell on itself here. With no worker there is nothing to open,
     /// and the page says where one comes from.
-    fn render_empty(&self, cx: &Context<Self>) -> gpui::AnyElement {
+    fn render_empty(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
@@ -992,7 +1141,7 @@ impl WorkspaceView {
         };
         // The strip is the content step with or without a tile on it: the empty workspace is
         // the page a tile would be, not a hole down to the bars' `canvas`.
-        let top = f32::from(self.viewport.size.height) * kit::MODAL_ANCHOR;
+        let top = f32::from(self.drawn.viewport.get().size.height) * kit::MODAL_ANCHOR;
         div()
             .id("empty-workspace")
             .absolute()

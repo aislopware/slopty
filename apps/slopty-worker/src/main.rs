@@ -14,6 +14,7 @@ mod conn;
 mod ctl;
 mod files;
 pub mod follow;
+mod handoff;
 mod modsock;
 mod paths;
 mod ports;
@@ -187,6 +188,12 @@ pub struct Daemon {
     /// The keyboard input sources the streams' clients asked for, one claim each, and the
     /// worker's own kept beside the data to come back even after a crash.
     pub sources: slopty_input::sources::Sources,
+    /// Connected clients, what each focuses and typed into, and the pages and edits a shell
+    /// handed them.
+    pub handoffs: Arc<parking_lot::Mutex<slopty_worker::handoff::Handoffs>>,
+    /// Where a session's presence file is made (`true`) or removed, in order
+    /// ([`handoff::presence`]).
+    pub presence: tokio::sync::mpsc::UnboundedSender<(SessionId, bool)>,
 }
 
 impl Daemon {
@@ -209,6 +216,15 @@ impl Daemon {
         // Past the table the session is gone whatever ptyd answered; a failed ptyd close is
         // the caller's to report, but the clients must still hear of it.
         self.agents.lock().forget(session);
+        let watched = {
+            let mut handoffs = self.handoffs.lock();
+            let watched = handoffs.watched(session);
+            handoffs.forget(session);
+            watched
+        };
+        if watched {
+            let _sent = self.presence.send((session, false));
+        }
         let released = {
             let mut follows = self.follows.lock();
             follows.board.forget(session);
@@ -256,7 +272,7 @@ pub struct Assertions {
 impl slopty_worker::wake::Holds for Assertions {
     fn system(&mut self, hold: bool) {
         self.system =
-            hold.then(|| slopty_platform::Activity::system_awake("Slopty client attached"));
+            hold.then(|| slopty_platform::Activity::system_awake("Slopty client or agent at work"));
         tracing::info!(hold, "system sleep hold");
     }
 
@@ -465,6 +481,8 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             None
         }
     };
+    let presence_dir = data_dir.join("presence");
+    let (presence, presence_changes) = tokio::sync::mpsc::unbounded_channel();
     let daemon = Daemon {
         worker,
         listener,
@@ -490,6 +508,8 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         load,
         home: slopty_platform::dirs::home().to_str().map(str::to_owned).unwrap_or_default(),
         follows: Arc::default(),
+        handoffs: Arc::default(),
+        presence,
         claude_mod,
         displays,
         sources,
@@ -561,6 +581,8 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         tokio::spawn(modsock::serve(daemon.clone(), mod_path));
     }
     daemon.worker.set_session_env(session_env);
+    daemon.worker.set_presence_dir(presence_dir.clone());
+    tokio::spawn(handoff::presence(presence_dir.clone(), presence_changes));
     // Sessions whose shells were lost to a reboot or to ptyd ending come back under their old
     // ids, before any client asks for them, so every item keeps its tile.
     for session in daemon.worker.restore().await {
@@ -607,6 +629,13 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             }
         }
     };
+    // Nobody is in front of anything once the worker is gone: Claude Code only checks that a
+    // presence file exists, so one left behind would hold its phone pushes for good.
+    if let Err(e) = std::fs::remove_dir_all(&presence_dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(dir = %presence_dir.display(), error = %e, "presence files left behind");
+    }
     // A reboot stops the worker before it stops ptyd: this is the last chance to keep the
     // screens as they are now.
     daemon.worker.keep_now().await;

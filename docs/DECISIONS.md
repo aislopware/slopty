@@ -14,7 +14,7 @@ One file per topic under `docs/decisions/`; an entry is cited by its bold title 
 - [Terminal](decisions/terminal.md)
 - [Transport](decisions/transport.md)
 - [Video](decisions/video.md)
-- [Audio](decisions/audio.md)
+- [Audio, clipboard and files](decisions/audio.md)
 - [Input](decisions/input.md)
 - [Testing](decisions/testing.md)
 - [Tooling](decisions/tooling.md)

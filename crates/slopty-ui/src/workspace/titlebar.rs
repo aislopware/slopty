@@ -47,6 +47,7 @@ use super::strip::NEW_WORKSPACE;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
+use crate::draw::Draw;
 use crate::icons::IconName;
 use crate::kit;
 
@@ -112,26 +113,40 @@ pub(super) enum MenuKind {
     Inbox,
 }
 
+/// A tab folding away where it stood.
+struct ClosingTab {
+    /// Its workspace's id.
+    id: u64,
+    /// Its name, as drawn.
+    name: String,
+    /// Its width as laid out.
+    width: f32,
+    /// Its place in the row.
+    at: usize,
+    /// Since when it folds.
+    since: Instant,
+}
+
 /// The tabs as last drawn, so a tab that goes can fold away where it was.
 #[derive(Default)]
 pub(super) struct Tabs {
     /// Each tab drawn, by its workspace's id: its name.
-    drawn: Vec<(u64, String)>,
+    drawn: RefCell<Vec<(u64, String)>>,
     /// Each tab's left edge in the window and its width as laid out, by its workspace's id.
     widths: Rc<RefCell<HashMap<u64, (f32, f32)>>>,
     /// The tab row's left edge in the window as last laid out.
     row_at: Rc<Cell<f32>>,
-    /// Tabs folding away: the workspace's id, its name and width, where it stood, since when.
-    closing: Vec<(u64, String, f32, usize, Instant)>,
+    /// Tabs folding away.
+    closing: RefCell<Vec<ClosingTab>>,
     /// Tabs growing in: the workspace's id, since when.
-    opening: Vec<(u64, Instant)>,
+    opening: RefCell<Vec<(u64, Instant)>>,
     /// The active tab as last drawn, by its workspace's id.
-    active: Option<u64>,
+    active: Cell<Option<u64>>,
     /// The active fill on its way between two tabs: where it left from (left edge in the row,
     /// width), the tab it goes to, how many slides there have been, since when.
-    slide: Option<Slide>,
+    slide: Cell<Option<Slide>>,
     /// Slides so far: each one's animation is its own.
-    slides: u64,
+    slides: Cell<u64>,
     /// The left edge of "+" in the window as last laid out, where its menu hangs from.
     new_at: Rc<Cell<f32>>,
 }
@@ -147,7 +162,7 @@ struct Slide {
 
 impl std::fmt::Debug for Tabs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tabs").field("drawn", &self.drawn.len()).finish_non_exhaustive()
+        f.debug_struct("Tabs").field("drawn", &self.drawn.borrow().len()).finish_non_exhaustive()
     }
 }
 
@@ -221,14 +236,14 @@ impl WorkspaceView {
     }
 
     /// What workspace `ix`'s tiles add up to, and how many there are.
-    pub(super) fn workspace_rollup(&self, ix: usize, cx: &gpui::App) -> (Rollup, usize) {
+    pub(super) fn workspace_rollup(&self, ix: usize) -> (Rollup, usize) {
         let mut rollup = Rollup::default();
         let mut count = 0_usize;
         let Some(ws) = self.layout.workspaces().get(ix) else { return (rollup, count) };
         for tile in ws.columns().iter().flat_map(Column::tiles).map(Tile::tile) {
             count = count.saturating_add(1);
             if let Some(item) = self.item(tile) {
-                let (mark, unseen) = self.tile_marks(tile, item, cx);
+                let (mark, unseen) = self.tile_marks(tile, item);
                 rollup.add(mark, unseen);
             }
         }
@@ -252,11 +267,7 @@ impl WorkspaceView {
     }
 
     /// The bar. `safe_top` is the notch's inset on a phone, zero on a Mac.
-    pub(super) fn render_titlebar(
-        &mut self,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
+    pub(super) fn render_titlebar(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let spacing = self.theme.spacing;
         let safe = window.insets().effective();
         // Nothing to open, no column to mark and no one to point at before the first worker:
@@ -394,12 +405,12 @@ impl WorkspaceView {
     /// A phone's title: the active workspace's name at the navigation title's size and the
     /// strong weight, as an iOS navigation bar names its screen. The navigator and a swipe go
     /// between workspaces; a row of tabs has no room at this width.
-    fn render_phone_title(&mut self, cx: &Context<Self>) -> gpui::AnyElement {
+    fn render_phone_title(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let ids = self.tab_ids();
         self.fold_closed_tabs(&ids, cx);
         let ix = self.layout.active_workspace();
         let theme = &self.theme;
-        let (label, _rollup) = self.tab_words(ix, cx);
+        let (label, _rollup) = self.tab_words(ix);
         div()
             .id(("ws-tab", ix))
             .debug_selector(move || format!("ws-tab-{ix}"))
@@ -429,7 +440,7 @@ impl WorkspaceView {
     }
 
     /// The workspaces: a tab each where there are several, the name alone where there is one.
-    fn render_workspace_tabs(&mut self, window: &Window, cx: &Context<Self>) -> gpui::AnyElement {
+    fn render_workspace_tabs(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let active = self.layout.active_workspace();
         let tabbed = self.tabbed_workspaces();
         let ids = self.tab_ids();
@@ -438,9 +449,9 @@ impl WorkspaceView {
             self.layout.workspaces().get(active).map(slopty_client::layout::Workspace::id);
         self.follow_active_tab(active_id, tabbed.len() > 1, cx);
         if let [only] = tabbed.as_slice() {
-            return self.render_lone_workspace(*only, cx);
+            return self.render_lone_workspace(*only);
         }
-        let sliding = self.tabs.slide.map(|slide| slide.to);
+        let sliding = self.tabs.slide.get().map(|slide| slide.to);
         let mut tabs: Vec<gpui::AnyElement> = tabbed
             .iter()
             .map(|ix| {
@@ -449,12 +460,12 @@ impl WorkspaceView {
                     .workspaces()
                     .get(*ix)
                     .map_or(0, slopty_client::layout::Workspace::id);
-                let opening = self.tabs.opening.iter().any(|(o, _)| *o == id);
+                let opening = self.tabs.opening.borrow().iter().any(|(o, _)| *o == id);
                 let tab = self.render_tab(*ix, *ix == active, sliding == Some(id), cx);
                 if opening { self.open_tab(tab, id, &ids, window) } else { tab }
             })
             .collect();
-        for (id, name, width, at, _) in &self.tabs.closing {
+        for ClosingTab { id, name, width, at, .. } in self.tabs.closing.borrow().iter() {
             let ghost = self.render_closing_tab(*id, name, *width);
             tabs.insert((*at).min(tabs.len()), ghost);
         }
@@ -487,12 +498,13 @@ impl WorkspaceView {
 
     /// Note a change of the active tab: its fill slides from where the old one's was, when
     /// both were laid out and chrome moves; a slide done is forgotten.
-    fn follow_active_tab(&mut self, active: Option<u64>, tabbed: bool, cx: &gpui::App) {
+    fn follow_active_tab(&self, active: Option<u64>, tabbed: bool, cx: &gpui::App) {
         let moves = self.chrome_moves(cx);
-        if !moves || self.tabs.slide.is_some_and(|slide| slide.since.elapsed() >= TAB_SETTLE) {
-            self.tabs.slide = None;
+        if !moves || self.tabs.slide.get().is_some_and(|slide| slide.since.elapsed() >= TAB_SETTLE)
+        {
+            self.tabs.slide.set(None);
         }
-        let was = std::mem::replace(&mut self.tabs.active, active);
+        let was = self.tabs.active.replace(active);
         if was == active || !tabbed || !moves {
             return;
         }
@@ -501,9 +513,9 @@ impl WorkspaceView {
         let from = was.and_then(|id| widths.get(&id)).map(|(x, w)| (x - row, *w));
         let known = active.is_some_and(|id| widths.contains_key(&id));
         if let (Some(from), Some(to), true) = (from, active, known) {
-            self.tabs.slides = self.tabs.slides.wrapping_add(1);
-            self.tabs.slide =
-                Some(Slide { from, to, seq: self.tabs.slides, since: Instant::now() });
+            let seq = self.tabs.slides.get().wrapping_add(1);
+            self.tabs.slides.set(seq);
+            self.tabs.slide.set(Some(Slide { from, to, seq, since: Instant::now() }));
         }
     }
 
@@ -511,7 +523,7 @@ impl WorkspaceView {
     /// width move from the old tab's to the new one's, drawn under the words. The new tab
     /// draws its own fill once it lands.
     fn render_sliding_fill(&self) -> Option<gpui::AnyElement> {
-        let slide = self.tabs.slide?;
+        let slide = self.tabs.slide.get()?;
         let (to_x, to_w) = self
             .tabs
             .widths
@@ -589,39 +601,41 @@ impl WorkspaceView {
     /// Note which tabs went since the last drawing, and which came: each that went folds away
     /// where it stood and each that came grows in, unless motion is reduced (or moves are
     /// off, as under the self-test). Those done folding or growing, or back, are forgotten.
-    fn fold_closed_tabs(&mut self, ids: &[(u64, String)], cx: &gpui::App) {
+    fn fold_closed_tabs(&self, ids: &[(u64, String)], cx: &gpui::App) {
         // The fold runs on the wall clock, as GPUI's animations do.
         let now = Instant::now();
-        self.tabs.closing.retain(|(id, .., since)| {
-            now.saturating_duration_since(*since) < TAB_SETTLE
-                && !ids.iter().any(|(kept, _)| kept == id)
+        let (mut closing, mut opening) =
+            (self.tabs.closing.borrow_mut(), self.tabs.opening.borrow_mut());
+        closing.retain(|gone| {
+            now.saturating_duration_since(gone.since) < TAB_SETTLE
+                && !ids.iter().any(|(kept, _)| *kept == gone.id)
         });
-        self.tabs.opening.retain(|(_, since)| now.saturating_duration_since(*since) < TAB_SETTLE);
+        opening.retain(|(_, since)| now.saturating_duration_since(*since) < TAB_SETTLE);
         let moves = self.chrome_moves(cx);
         if !moves {
-            self.tabs.closing.clear();
-            self.tabs.opening.clear();
+            closing.clear();
+            opening.clear();
         }
+        let mut drawn = self.tabs.drawn.borrow_mut();
         // The first drawing opens nothing: the bar was not there to grow in.
-        if moves && !self.tabs.drawn.is_empty() {
+        if moves && !drawn.is_empty() {
             let widths = self.tabs.widths.borrow();
-            for (at, (id, name)) in self.tabs.drawn.iter().enumerate() {
+            for (at, (id, name)) in drawn.iter().enumerate() {
                 if ids.iter().any(|(kept, _)| kept == id) {
                     continue;
                 }
                 let width = widths.get(id).map_or(TAB_MIN_W, |(_, w)| *w);
-                self.tabs.closing.push((*id, name.clone(), width, at, now));
+                closing.push(ClosingTab { id: *id, name: name.clone(), width, at, since: now });
             }
             for (id, _) in ids {
-                if !self.tabs.drawn.iter().any(|(was, _)| was == id) {
-                    self.tabs.opening.push((*id, now));
+                if !drawn.iter().any(|(was, _)| was == id) {
+                    opening.push((*id, now));
                 }
             }
         }
-        self.tabs.drawn = ids.to_vec();
-        let closing = &self.tabs.closing;
+        *drawn = ids.to_vec();
         self.tabs.widths.borrow_mut().retain(|id, _| {
-            ids.iter().any(|(kept, _)| kept == id) || closing.iter().any(|(gone, ..)| gone == id)
+            ids.iter().any(|(kept, _)| kept == id) || closing.iter().any(|gone| gone.id == *id)
         });
     }
 
@@ -677,9 +691,9 @@ impl WorkspaceView {
 
     /// What a workspace's tab says to a screen reader: its name, how many tiles it holds, and
     /// what they add up to.
-    fn tab_words(&self, ix: usize, cx: &gpui::App) -> (SharedString, Rollup) {
+    fn tab_words(&self, ix: usize) -> (SharedString, Rollup) {
         let name = self.workspace_name_at(ix);
-        let (rollup, count) = self.workspace_rollup(ix, cx);
+        let (rollup, count) = self.workspace_rollup(ix);
         let noun = if count == 1 { "tile" } else { "tiles" };
         let label = match rollup.words() {
             Some(words) => format!("{name}, {count} {noun}, {words}"),
@@ -697,13 +711,13 @@ impl WorkspaceView {
         ix: usize,
         selected: bool,
         sliding: bool,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let spacing = theme.spacing;
         let name = SharedString::from(self.workspace_name_at(ix));
-        let (label, rollup) = self.tab_words(ix, cx);
+        let (label, rollup) = self.tab_words(ix);
         let id = self.layout.workspaces().get(ix).map_or(0, slopty_client::layout::Workspace::id);
         let widths = Rc::clone(&self.tabs.widths);
         let measure = canvas(
@@ -773,10 +787,10 @@ impl WorkspaceView {
     /// The one workspace there is: its name in the medium weight, nothing to switch between,
     /// so no tab. Nor a count or a rollup: the navigator and the overview count its tiles, and
     /// with one workspace a mark says only what the bell's badge already counts.
-    fn render_lone_workspace(&self, ix: usize, cx: &gpui::App) -> gpui::AnyElement {
+    fn render_lone_workspace(&self, ix: usize) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let (label, _rollup) = self.tab_words(ix, cx);
+        let (label, _rollup) = self.tab_words(ix);
         div()
             .id(("ws-tab", ix))
             .debug_selector(move || format!("ws-tab-{ix}"))

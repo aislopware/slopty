@@ -13,6 +13,7 @@ use slopty_proto::items::{Item, ItemKind, ItemOp};
 use super::actions::{EditAddress, InspectPage, OpenUrl, PageBack, PageForward, ReloadPage};
 use super::{Field, WorkspaceView};
 use crate::browser::{BrowserEvent, BrowserView, Cover, Zoom};
+use crate::draw::Draw;
 use crate::palette::CommandPalette;
 
 /// What the "Open URL…" palette starts with: the forwarded ports live on localhost.
@@ -253,7 +254,7 @@ impl WorkspaceView {
     /// Where each page loads on this client: an address on the worker's loopback goes to the
     /// local port this client serves that port on, asked of the worker's link the first time
     /// and again whenever the link is a new one.
-    fn serve_browsers(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn serve_browsers(&mut self, cx: &mut Context<Self>) {
         let views: Vec<Entity<BrowserView>> = self.browsers.values().cloned().collect();
         for view in views {
             let (id, key, url, needs) = {
@@ -289,6 +290,7 @@ impl WorkspaceView {
 
     /// What GPUI draws over the strip this frame, for the pages to hide under.
     fn cover(&self) -> Cover {
+        let frame = self.drawn.builds.get();
         Cover {
             overlay: self.covered
                 || self.palette.is_some()
@@ -296,52 +298,61 @@ impl WorkspaceView {
                 || self.picker.is_some()
                 || self.menu.is_some()
                 || self.nav.open,
-            overview: self.layout.overview_open() || self.drawn_zoom < 1.0,
-            toast: self.toast_drawn.get().filter(|(frame, _)| *frame == self.frames_drawn).map(
-                |(_, b)| Rect {
-                    x: f32::from(b.origin.x),
-                    y: f32::from(b.origin.y),
-                    w: f32::from(b.size.width),
-                    h: f32::from(b.size.height),
-                },
-            ),
+            overview: self.layout.overview_open() || self.drawn.zoom.get() < 1.0,
+            toast: self.toast_drawn.get().filter(|(drawn, _)| *drawn == frame).map(|(_, b)| Rect {
+                x: f32::from(b.origin.x),
+                y: f32::from(b.origin.y),
+                w: f32::from(b.size.width),
+                h: f32::from(b.size.height),
+            }),
         }
     }
 
-    /// Each page over its tile's body as drawn this frame, or hidden.
-    fn sync_browsers(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.serve_browsers(cx);
-        let frame = self.frames_drawn;
+    /// Where each page goes, over its tile's body where the strip drew it in this build, or
+    /// hidden.
+    fn browser_placements(
+        &self,
+        cx: &App,
+    ) -> Vec<(Entity<BrowserView>, crate::browser::Placement)> {
+        let drawn = self.drawn.browsers.borrow();
         let cover = self.cover();
-        let v = self.viewport;
+        let v = self.drawn.viewport.get();
         let strip = Rect {
             x: f32::from(v.origin.x),
             y: f32::from(v.origin.y),
             w: f32::from(v.size.width),
             h: f32::from(v.size.height),
         };
-        for view in self.browsers.values() {
-            let (body, alpha) = {
-                let v = view.read(cx);
-                let body = v.drawn_in(frame).map(|b| Rect {
+        self.browsers
+            .iter()
+            .map(|(id, view)| {
+                let alpha = drawn.iter().find(|(drawn, _)| drawn == id).map(|(_, alpha)| *alpha);
+                let body = alpha.and_then(|_| view.read(cx).page_area()).map(|b| Rect {
                     x: f32::from(b.origin.x),
                     y: f32::from(b.origin.y),
                     w: f32::from(b.size.width),
                     h: f32::from(b.size.height),
                 });
-                (body, v.alpha())
-            };
-            let placement = crate::browser::placement(body, strip, alpha, cover);
-            view.update(cx, |v, cx| v.apply(placement, window, cx));
-        }
+                let alpha = alpha.unwrap_or_default();
+                (view.clone(), crate::browser::placement(body, strip, alpha, cover))
+            })
+            .collect()
     }
 
-    /// An empty element whose prepaint, after every tile's, puts the pages where the tiles
-    /// were drawn.
-    pub(super) fn browser_sync(cx: &Context<Self>) -> gpui::AnyElement {
-        let entity = cx.entity();
+    /// An empty element, the strip's last, whose prepaint, after every tile's and the notices',
+    /// puts the pages where the tiles were drawn. The workspace is read; the pages are told.
+    pub(super) fn browser_sync(cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let this = cx.weak_entity();
         canvas(
-            move |_bounds, window, cx| entity.update(cx, |this, cx| this.sync_browsers(window, cx)),
+            move |_bounds, window, cx| {
+                let Some(this) = this.upgrade() else { return };
+                let placements = this.read(cx).browser_placements(cx);
+                for (view, placement) in placements {
+                    if !view.read(cx).place(placement) {
+                        view.update(cx, |v, cx| v.open_at(placement, window, cx));
+                    }
+                }
+            },
             |_bounds, (), _window, _cx| {},
         )
         .absolute()

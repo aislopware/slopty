@@ -10,6 +10,8 @@
 //! * `slopty worker deploy <ssh target>` puts a worker on another machine over `ssh`.
 //! * `slopty hook` is the Claude Code hook relay (`slopty hook install` registers it).
 //! * `slopty ssh` is `ssh` with a terminal the far side knows; a Slopty shell's `ssh` runs it.
+//! * `slopty browse` and `slopty edit` hand a shell's web pages and files to the client in front of
+//!   it; a Slopty session's `BROWSER`, `EDITOR` and `open` are this binary under other names.
 //! * `slopty add <host[:port]>` remembers a worker (today's `slopty-worker`) by its address.
 //! * `slopty sessions|attach` are a real client over QUIC straight to a worker: a raw-mode terminal
 //!   that renders frames locally. It is the reference client for latency measurements and works
@@ -22,6 +24,7 @@ mod attach;
 mod bench;
 mod client;
 mod deploy;
+mod handoff;
 mod hook;
 mod link;
 mod mcp;
@@ -87,6 +90,23 @@ enum Cmd {
         ssh: PathBuf,
         /// `ssh`'s own arguments, as typed (after `--`).
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        args: Vec<std::ffi::OsString>,
+    },
+    /// Open web pages in the browser of the client in front of this shell (a Slopty session's
+    /// `BROWSER`); anything but a web address goes to this machine's opener.
+    Browse {
+        /// `http` or `https` addresses.
+        #[arg(required = true)]
+        targets: Vec<String>,
+    },
+    /// Show a file in a file tile of the client in front of this shell; with `--wait`, return
+    /// once you are done with it (a Slopty session's `EDITOR` is this with `--wait`).
+    Edit {
+        /// Return once the tile is done with: 0, or 1 when the edit was given up.
+        #[arg(long)]
+        wait: bool,
+        /// `[+line] <file>`.
+        #[arg(required = true, allow_hyphen_values = true)]
         args: Vec<std::ffi::OsString>,
     },
     /// Claude Code hook relay: forwards the hook on stdin to the worker daemon (exits 0 always).
@@ -225,6 +245,9 @@ async fn run() -> Result<ExitCode> {
         )
         .with_writer(std::io::stderr)
         .init();
+    if let Some(done) = handoff::by_name().await {
+        return done;
+    }
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(slopty_platform::dirs::data_dir);
     let done = match cli.cmd {
@@ -240,6 +263,8 @@ async fn run() -> Result<ExitCode> {
             let e = std::os::unix::process::CommandExt::exec(&mut ssh);
             return Err(anyhow::anyhow!("run {}: {e}", opts.ssh.display()));
         }
+        Cmd::Browse { targets } => return handoff::browse(&data_dir, &targets).await,
+        Cmd::Edit { wait, args } => return handoff::edit(&data_dir, wait, args).await,
         Cmd::Hook { cmd: None } => {
             hook::relay(&data_dir).await;
             Ok(())

@@ -95,6 +95,7 @@ mod tests {
         assert!(slopty_net::endpoint::received_datagrams(&conn.conn) > 1, "a handshake is several");
         let path = slopty_net::endpoint::describe_path(&conn.conn);
         assert!(path.starts_with(&format!("127.0.0.1:{port} rtt")), "{path}");
+        assert!(path.contains(" lost 0 of "), "this end's losses: {path}");
         let health = slopty_net::endpoint::describe_health(&conn.conn);
         assert!(health.contains("cwnd") && health.contains("mtu"), "{health}");
         let (srtt, cwnd) = slopty_net::endpoint::path_rtt_cwnd(&conn.conn).unwrap();
@@ -107,6 +108,48 @@ mod tests {
 
     /// A client that lets the worker open no stream at all: the session stream gives up after
     /// its wait with a timeout, where it used to wait for as long as the client liked.
+    /// A key and its echo on one stream, 200 times, over the socket every endpoint ships with
+    /// (`endpoint::bind`: the batched `sendmsg_x`/`recvmsg_x` path on macOS, the 4 MiB receive
+    /// buffer). Through iroh the batched path cost 53 ms a round trip, which a median under
+    /// 5 ms rules out whatever the machine's load (docs/decisions/transport.md, "The batched
+    /// Apple datapath is on").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_round_trip_over_the_shipped_socket_takes_a_millisecond_not_fifty() {
+        assert!(
+            !cfg!(target_os = "macos") || slopty_net::endpoint::tuning().batched_udp,
+            "this test is for the shipped socket: run it without SLOPTY_BATCHED_UDP=0"
+        );
+        let localhost = SocketAddr::from(([127, 0, 0, 1], 0));
+        let server = slopty_net::endpoint::bind(localhost, true).unwrap();
+        let client = slopty_net::endpoint::bind(localhost, false).unwrap();
+        let to = server.local_addr().unwrap();
+        let echo = tokio::spawn(async move {
+            let conn = server.accept().await.unwrap().await.unwrap();
+            let (mut tx, mut rx) = conn.accept_bi().await.unwrap();
+            let mut key = [0_u8; 1];
+            while rx.read_exact(&mut key).await.is_ok() {
+                tx.write_all(&key).await.unwrap();
+            }
+        });
+        let conn = client.connect(to, "localhost").unwrap().await.unwrap();
+        let (mut tx, mut rx) = conn.open_bi().await.unwrap();
+        let mut times = Vec::new();
+        let mut echoed = [0_u8; 1];
+        for key in 0..200_u8 {
+            let sent = Instant::now();
+            tx.write_all(&[key]).await.unwrap();
+            rx.read_exact(&mut echoed).await.unwrap();
+            times.push(sent.elapsed());
+            assert_eq!(echoed, [key]);
+        }
+        tx.finish().unwrap();
+        echo.await.unwrap();
+        times.sort_unstable();
+        let (median, worst) = (times[times.len() / 2], times[times.len() - 1]);
+        println!("round trip median {median:?}, worst {worst:?}");
+        assert!(median < Duration::from_millis(5), "median {median:?}, worst {worst:?}");
+    }
+
     #[tokio::test]
     async fn a_session_stream_the_client_never_allows_times_out() {
         let (listener, port, id) = worker(Admission::default());

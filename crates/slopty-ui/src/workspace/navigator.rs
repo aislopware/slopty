@@ -40,6 +40,7 @@
 //! in view, and a couple of rows' height past either edge, are laid out and drawn. A focused
 //! tile whose row is out of view scrolls into it.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::mem::{Discriminant, discriminant};
 use std::time::{Duration, SystemTime};
@@ -70,6 +71,7 @@ use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
+use crate::draw::Draw;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon, status_mark};
 use crate::kit::{self, meta, tabular};
 use crate::palette::Plate;
@@ -155,7 +157,7 @@ pub(super) struct NavState {
     /// Its rows, as the list lays them out.
     pub list: NavList,
     /// Draws it again when a label it shows changes with the clock (a turn's time, an age).
-    pub tick: Option<Task<()>>,
+    pub tick: RefCell<Option<Task<()>>>,
 }
 
 /// The navigator's rows and the virtual list that shows them.
@@ -165,15 +167,15 @@ pub(super) struct NavList {
     /// sends only the rows whose kind changed to be measured again.
     state: ListState,
     /// This frame's rows, in order; the list draws the ones in view from here.
-    rows: Vec<NavRow>,
+    rows: RefCell<Vec<NavRow>>,
     /// The tile whose row is selected: the focused one.
-    selected: Option<TileRef>,
+    selected: Cell<Option<TileRef>>,
     /// The focused tile the list last brought into view, so a row is revealed once per move
     /// of the focus, and a list the human scrolled away stays where they left it.
-    revealed: Option<TileRef>,
+    revealed: Cell<Option<TileRef>>,
     /// The tile being revealed this frame: its row, once laid out, asks the list to scroll it
     /// fully into view.
-    autoscroll: Option<TileRef>,
+    autoscroll: Cell<Option<TileRef>>,
     /// The fill under the selected row.
     plate: Plate,
     /// The fill under the active workspace's row, on a phone: a plate of its own, since the
@@ -185,10 +187,10 @@ impl Default for NavList {
     fn default() -> Self {
         Self {
             state: ListState::new(0, ListAlignment::Top, px(OVERDRAW)).measure_all(),
-            rows: Vec::new(),
-            selected: None,
-            revealed: None,
-            autoscroll: None,
+            rows: RefCell::default(),
+            selected: Cell::default(),
+            revealed: Cell::default(),
+            autoscroll: Cell::default(),
             plate: Plate::default(),
             space_plate: Plate::default(),
         }
@@ -201,16 +203,17 @@ impl NavList {
     ///
     /// A list at its very top stays there: a section that opens above the first row (*Needs
     /// you*, *Working*) shows, rather than pushing the view down past it.
-    fn set_rows(&mut self, rows: Vec<NavRow>) {
+    fn set_rows(&self, rows: Vec<NavRow>) {
         let scrolled = self.state.logical_scroll_top();
         let at_top = scrolled.item_ix == 0 && scrolled.offset_in_item <= px(0.0);
         let same = |(a, b): &(&NavRow, &NavRow)| a.shape() == b.shape();
-        let old = self.rows.len();
-        let head = self.rows.iter().zip(&rows).take_while(same).count();
+        let mut was = self.rows.borrow_mut();
+        let old = was.len();
+        let head = was.iter().zip(&rows).take_while(same).count();
         let spliced = head != old || old != rows.len();
         if spliced {
             let most = old.min(rows.len()).saturating_sub(head);
-            let tail = self.rows.iter().rev().zip(rows.iter().rev()).take(most).take_while(same);
+            let tail = was.iter().rev().zip(rows.iter().rev()).take(most).take_while(same);
             let tail = tail.count();
             let added = head..rows.len().saturating_sub(tail);
             self.state.splice(head..old.saturating_sub(tail), added.len());
@@ -221,7 +224,7 @@ impl NavList {
                 self.state.scroll_to(ListOffset::default());
             }
         }
-        self.rows = rows;
+        *was = rows;
     }
 
     /// Whether `tile`'s row was in view in the last layout. A row the list has not placed yet
@@ -229,7 +232,7 @@ impl NavList {
     /// for a frame on its account; a row above the list's top is out.
     fn in_view(&self, tile: TileRef) -> bool {
         let Some(ix) =
-            self.rows.iter().position(|r| matches!(r, NavRow::Tile(t) if t.tile == tile))
+            self.rows.borrow().iter().position(|r| matches!(r, NavRow::Tile(t) if t.tile == tile))
         else {
             return true;
         };
@@ -246,16 +249,19 @@ impl NavList {
     /// The list places it by the heights it has measured, and a row added this frame has none
     /// yet, so the row also asks for the rest once it is laid out, in the same frame. Before the
     /// list's first layout there is no height to place it by, and the reveal waits a frame.
-    fn reveal_selected(&mut self, window: &Window) {
-        self.autoscroll = None;
-        if self.selected == self.revealed {
+    fn reveal_selected(&self, window: &Window) {
+        self.autoscroll.set(None);
+        let selected = self.selected.get();
+        if selected == self.revealed.get() {
             return;
         }
-        let selected = self.selected;
-        let row =
-            self.rows.iter().position(|r| matches!(r, NavRow::Tile(t) if Some(t.tile) == selected));
+        let row = self
+            .rows
+            .borrow()
+            .iter()
+            .position(|r| matches!(r, NavRow::Tile(t) if Some(t.tile) == selected));
         let Some(ix) = row else {
-            self.revealed = selected;
+            self.revealed.set(selected);
             return;
         };
         if self.state.viewport_bounds().size.height <= px(0.0) {
@@ -263,8 +269,8 @@ impl NavList {
             return;
         }
         self.state.scroll_to_reveal_item(ix);
-        self.revealed = selected;
-        self.autoscroll = selected;
+        self.revealed.set(selected);
+        self.autoscroll.set(selected);
     }
 }
 
@@ -755,7 +761,7 @@ impl WorkspaceView {
         self.nav.rail = !visible && mode == Mode::Docked && !self.workers.is_empty();
         if !visible {
             self.nav.resize = None;
-            self.nav.tick = None;
+            self.nav.tick.take();
         }
     }
 
@@ -850,13 +856,8 @@ impl WorkspaceView {
 
     /// A tile's status mark, and whether it holds news the human has not looked at: a long
     /// command that finished unwatched, while the tile is not busy or waiting.
-    pub(super) fn tile_marks(
-        &self,
-        tile: TileRef,
-        item: &Item,
-        cx: &gpui::App,
-    ) -> (Option<Status>, bool) {
-        let mark = self.tile_status(tile, item, cx);
+    pub(super) fn tile_marks(&self, tile: TileRef, item: &Item) -> (Option<Status>, bool) {
+        let mark = self.tile_status(tile, item);
         let unwatched = match item.kind {
             ItemKind::Terminal { session } => self.finished.contains_key(&session),
             _ => false,
@@ -865,13 +866,13 @@ impl WorkspaceView {
     }
 
     /// What `worker`'s tiles add up to.
-    pub(super) fn worker_rollup(&self, worker: WorkerKey, cx: &gpui::App) -> Rollup {
+    pub(super) fn worker_rollup(&self, worker: WorkerKey) -> Rollup {
         let mut rollup = Rollup::default();
         let Some(w) = self.workers.get(&worker) else { return rollup };
         for item in w.doc.items() {
             let tile = TileRef { worker, item: item.id };
             if self.layout.contains(tile) {
-                let (mark, unseen) = self.tile_marks(tile, item, cx);
+                let (mark, unseen) = self.tile_marks(tile, item);
                 rollup.add(mark, unseen);
             }
         }
@@ -900,8 +901,8 @@ impl WorkspaceView {
                 let state = self.agent_state(*session).filter(|a| a.status != AgentStatus::None);
                 // A followed conversation says more than the hooks: the call the agent is on
                 // where the hooks name none, and the gist of its last answer once it stopped.
-                let face = state.and_then(|_| self.face_summary(*session, cx));
-                let marked_working = self.agent_mark(*session, cx) == Some(Status::Working);
+                let face = state.and_then(|_| self.face_summary(*session));
+                let marked_working = self.agent_mark(*session) == Some(Status::Working);
                 let resting = state.filter(|a| at_rest(a) && !marked_working);
                 let agent = match (state, face) {
                     (Some(a), _) if needs_human(a) => agent_ask_line(a),
@@ -918,7 +919,7 @@ impl WorkspaceView {
                     }
                     (a, _) => a.map(agent_status_text),
                 };
-                let command = state.is_none().then(|| self.last_command(*session, cx)).flatten();
+                let command = state.is_none().then(|| self.last_command(*session)).flatten();
                 let doing = agent.or(command);
                 let branch = summary.and_then(|s| s.branch.as_deref());
                 let place = self
@@ -944,11 +945,9 @@ impl WorkspaceView {
 
     /// The command a shell runs now, else the last one it ran, else the one that finished
     /// unwatched: its first line.
-    fn last_command(&self, session: slopty_core::SessionId, cx: &gpui::App) -> Option<String> {
-        let state = self.terminals.get(&session).map(|v| v.read(cx).state());
-        let typed = state.and_then(|state| {
-            state.running_command().map(str::to_owned).or_else(|| state.last_command())
-        });
+    fn last_command(&self, session: slopty_core::SessionId) -> Option<String> {
+        let shell = self.shell(session);
+        let typed = shell.and_then(|s| s.running.clone().or_else(|| s.last.clone()));
         let typed = typed.or_else(|| self.finished.get(&session).map(|f| f.command.clone()))?;
         typed.lines().next().map(str::to_owned).filter(|l| !l.trim().is_empty())
     }
@@ -969,7 +968,7 @@ impl WorkspaceView {
             let mut tiles: Vec<(u8, NavTile)> = Vec::new();
             for &tile in order.iter().filter(|t| t.worker == key) {
                 let Some(item) = w.doc.get(tile.item) else { continue };
-                let (mark, unseen) = self.tile_marks(tile, item, cx);
+                let (mark, unseen) = self.tile_marks(tile, item);
                 rollup.add(mark, unseen);
                 let title = self.tile_title(item, cx);
                 let (meta, age) = self.tile_meta(item, now, cx);
@@ -986,7 +985,7 @@ impl WorkspaceView {
                 let restored = summary.is_some_and(|s| s.restored.is_some());
                 let running = match (mark, &item.kind) {
                     (Some(Status::Running), ItemKind::Terminal { session }) => {
-                        self.running_for(*session, cx).map(turn_label)
+                        self.running_for(*session).map(turn_label)
                     }
                     _ => None,
                 };
@@ -1060,7 +1059,7 @@ impl WorkspaceView {
                 } else if status == Status::Working && calm(a) {
                     // Listed as working by its face while the hook lags: what the face says,
                     // or nothing yet, never the hook's calm word.
-                    self.face_summary(at.session, cx).unwrap_or_default()
+                    self.face_summary(at.session).unwrap_or_default()
                 } else {
                     agent_status_text(a)
                 }
@@ -1125,9 +1124,9 @@ impl WorkspaceView {
     /// The navigator's region of the frame as [`Self::place_navigator`] placed it: the panel,
     /// the rail, or nothing.
     pub(super) fn render_navigator_region(
-        &mut self,
+        &self,
         window: &Window,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         match self.nav.drawn {
             Some(mode) => self.navigator_panel(mode, window, cx),
@@ -1140,7 +1139,7 @@ impl WorkspaceView {
     /// filter's field, a raised well a row tall, the base unit in from the panel's edge. No
     /// hairline under it: the panel is one surface from the top to the bottom, as T3 Code's and
     /// Linear's sidebars are, and the rows under the field need no rule to start.
-    fn navigator_header(&self, window: &Window, cx: &Context<Self>) -> Div {
+    fn navigator_header(&self, window: &Window, cx: &Draw<'_, Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
@@ -1222,7 +1221,7 @@ impl WorkspaceView {
         };
         let mut rows = Vec::new();
         if query.is_empty() && self.nav.drawn == Some(Mode::Drawer) {
-            rows.extend(self.space_rows(cx));
+            rows.extend(self.space_rows());
         }
         let agents = |list: &[Waiting], status: Status| -> Vec<NavAgent> {
             list.iter()
@@ -1240,7 +1239,7 @@ impl WorkspaceView {
             });
             rows.extend(waiting.into_iter().map(NavRow::Agent));
         }
-        let working = agents(&self.working(cx), Status::Working);
+        let working = agents(&self.working(), Status::Working);
         if !working.is_empty() {
             let count = working.len();
             rows.push(NavRow::Heading {
@@ -1282,13 +1281,13 @@ impl WorkspaceView {
 
     /// *Workspaces*, as a phone's drawer heads its list: each workspace the title bar would tab,
     /// named, with its tile count, and "New workspace" unless the active one is that new one.
-    fn space_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
+    fn space_rows(&self) -> Vec<NavRow> {
         let active = self.layout.active_workspace();
         let spaces: Vec<NavRow> = self
             .tabbed_workspaces()
             .into_iter()
             .map(|ix| {
-                let (_, tiles) = self.workspace_rollup(ix, cx);
+                let (_, tiles) = self.workspace_rollup(ix);
                 let name = self.workspace_name_at(ix);
                 NavRow::Space(NavSpace { ix, name, tiles, active: ix == active })
             })
@@ -1301,16 +1300,13 @@ impl WorkspaceView {
 
     /// Draw the navigator again when the soonest label it shows changes: a turn's time every
     /// second while *Working* ticks, else an age at its next minute (or hour).
-    fn schedule_navigator_tick(&mut self, cx: &Context<Self>) {
-        let rows = &self.nav.list.rows;
-        let live = rows.iter().any(|r| match r {
-            NavRow::Agent(a) => a.status == Status::Working && a.since_ms > 0,
-            NavRow::Tile(t) => t.running.is_some(),
-            _ => false,
-        });
+    fn schedule_navigator_tick(&self, cx: &gpui::App) {
+        let rows = self.nav.list.rows.borrow();
+        // A turn's time and a command's are the readouts' clock's to move
+        // ([`WorkspaceView::keep_time`]); an age at rest changes on its own schedule.
         let now = now_ms();
         let waited = rows.iter().filter_map(|r| match r {
-            NavRow::Agent(a) if a.since_ms > 0 => {
+            NavRow::Agent(a) if a.since_ms > 0 && a.status != Status::Working => {
                 Some(until_age_changes(Duration::from_millis(now.saturating_sub(a.since_ms))))
             }
             _ => None,
@@ -1319,10 +1315,10 @@ impl WorkspaceView {
             NavRow::Tile(t) => t.age_changes,
             _ => None,
         });
-        let next = if live { Some(Duration::from_secs(1)) } else { waited.chain(aged).min() };
-        self.nav.tick = next.map(|wait| {
+        let next = waited.chain(aged).min();
+        *self.nav.tick.borrow_mut() = next.map(|wait| {
             let navigator = self.chrome.navigator.downgrade();
-            cx.spawn(async move |_this, cx| {
+            cx.spawn(async move |cx| {
                 cx.background_executor().timer(wait).await;
                 let _gone = navigator.update(cx, |_, cx| cx.notify());
             })
@@ -1331,8 +1327,8 @@ impl WorkspaceView {
 
     /// Row `ix` of the list, drawn only while it is in view or measured. The list lays a row
     /// out at its own size; the wrapper gives it the list's width, less its margins.
-    fn nav_row(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
-        let gap = matches!(self.nav.list.rows.get(ix), Some(NavRow::Worker(h)) if h.gap);
+    fn nav_row(&self, ix: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let gap = matches!(self.nav.list.rows.borrow().get(ix), Some(NavRow::Worker(h)) if h.gap);
         div()
             .w_full()
             .flex()
@@ -1342,9 +1338,10 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    fn nav_row_content(&self, ix: usize, cx: &Context<Self>) -> gpui::AnyElement {
+    fn nav_row_content(&self, ix: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
-        match self.nav.list.rows.get(ix) {
+        let rows = self.nav.list.rows.borrow();
+        match rows.get(ix) {
             Some(NavRow::Heading { selector, text, working }) => {
                 heading(theme, selector, text, *working).into_any_element()
             }
@@ -1353,7 +1350,7 @@ impl WorkspaceView {
             Some(NavRow::Space(space)) => self.space_row(space, cx),
             Some(NavRow::NewSpace) => self.new_space_row(cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
-            Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected, cx),
+            Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected.get(), cx),
             Some(NavRow::Vacant(key)) => {
                 let key = *key;
                 // On the tiles' titles' edge: past the worker's glyph and its gap, as a tile's
@@ -1384,19 +1381,20 @@ impl WorkspaceView {
     /// The panel itself, docked or laid over the frame. The frame places it and sizes it
     /// (`WorkspaceView::render_frame`); this fills that box.
     fn navigator_panel(
-        &mut self,
+        &self,
         mode: Mode,
         window: &Window,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let rows = self.nav_rows(cx);
         self.nav.list.set_rows(rows);
-        self.nav.list.selected = self.focused();
+        self.nav.list.selected.set(self.focused());
         self.nav.list.reveal_selected(window);
         self.schedule_navigator_tick(cx);
         let theme = &self.theme;
         let s = theme.surfaces;
         let safe = window.insets().effective();
+        let moves = self.chrome_moves(cx);
         let rows = list(
             self.nav.list.state.clone(),
             cx.processor(|this, ix: usize, _window, cx| this.nav_row(ix, cx)),
@@ -1411,8 +1409,8 @@ impl WorkspaceView {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.nav.list.space_plate.under(theme))
-            .child(self.nav.list.plate.under(theme))
+            .child(self.nav.list.space_plate.under_moving(theme, moves))
+            .child(self.nav.list.plate.under_moving(theme, moves))
             .child(rows);
         div()
             .id("navigator")
@@ -1438,7 +1436,9 @@ impl WorkspaceView {
             .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme).border_0().border_r_1())
             // Esc in the filter empties it and hands the keyboard back.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
-                if !this.nav.filter.query.is_empty() {
+                let composing =
+                    this.nav.filter.input.as_ref().is_some_and(|i| i.read(cx).is_composing());
+                if !this.nav.filter.query.is_empty() && !composing {
                     this.clear_navigator_filter(window, cx);
                     cx.stop_propagation();
                 }
@@ -1450,7 +1450,7 @@ impl WorkspaceView {
 
     /// Where the navigator is hidden but would dock: a column of one server glyph per worker,
     /// each with what its tiles add up to under it. A click flies to the worker.
-    fn navigator_rail(&self, cx: &Context<Self>) -> gpui::AnyElement {
+    fn navigator_rail(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
@@ -1460,7 +1460,7 @@ impl WorkspaceView {
             .iter()
             .map(|(key, w)| {
                 let key = *key;
-                let rollup = self.worker_rollup(key, cx);
+                let rollup = self.worker_rollup(key);
                 let health = worker_health(&w.status);
                 let label = [Some(w.name.clone()), health.map(|(_, word)| word.to_owned())]
                     .into_iter()
@@ -1585,7 +1585,7 @@ impl WorkspaceView {
 
     /// A row of *Needs you* or *Working*: what it is and how long it has waited or worked,
     /// then what the agent says in its status's tone, its worker and its directory.
-    fn agent_row(&self, agent: &NavAgent, cx: &Context<Self>) -> gpui::AnyElement {
+    fn agent_row(&self, agent: &NavAgent, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (first, second) = line_heights(theme);
@@ -1597,7 +1597,9 @@ impl WorkspaceView {
             .collect::<Vec<_>>()
             .join(", ");
         let time = (agent.since_ms > 0)
-            .then(|| Duration::from_millis(now_ms().saturating_sub(agent.since_ms)))
+            .then_some(self.ticked())
+            .flatten()
+            .map(|(_, now)| Duration::from_millis(now.saturating_sub(agent.since_ms)))
             .and_then(|elapsed| match agent.status {
                 Status::Working => Some(turn_label(elapsed)),
                 _ => age_shown(elapsed),
@@ -1669,7 +1671,7 @@ impl WorkspaceView {
 
     /// A workspace in the phone's drawer: its glyph, its name and how many tiles it holds. The
     /// active one sits on its plate; a press goes there and closes the drawer.
-    fn space_row(&self, space: &NavSpace, cx: &Context<Self>) -> gpui::AnyElement {
+    fn space_row(&self, space: &NavSpace, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let ix = space.ix;
@@ -1703,7 +1705,7 @@ impl WorkspaceView {
 
     /// "New workspace", the last row of the phone's *Workspaces*: the empty workspace the
     /// layout always keeps last.
-    fn new_space_row(&self, cx: &Context<Self>) -> gpui::AnyElement {
+    fn new_space_row(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let text = super::strip::NEW_WORKSPACE;
@@ -1722,7 +1724,7 @@ impl WorkspaceView {
     }
 
     /// "Show N more" under the first few of *Working*.
-    fn more_row(&self, hidden: usize, cx: &Context<Self>) -> gpui::AnyElement {
+    fn more_row(&self, hidden: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let text = SharedString::from(format!("Show {hidden} more"));
         row(
@@ -1748,7 +1750,7 @@ impl WorkspaceView {
     /// the name, then on the right edge what is wrong with its link or its round trip when it
     /// is slow, led by what a folded worker's tiles add up to. Under the pointer the chevron
     /// and "+" take the readouts' place; nothing moves when either shows.
-    fn worker_header(&self, worker: &NavHeader, cx: &Context<Self>) -> gpui::AnyElement {
+    fn worker_header(&self, worker: &NavHeader, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let key = worker.key;
@@ -1896,7 +1898,7 @@ impl WorkspaceView {
         &self,
         t: &NavTile,
         focused: Option<TileRef>,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -2036,7 +2038,7 @@ impl WorkspaceView {
                 ),
         )
         .map(|row| if selected { self.nav.list.plate.mark(row, tile) } else { row })
-        .when(self.nav.list.autoscroll == Some(tile), |row| {
+        .when(self.nav.list.autoscroll.get() == Some(tile), |row| {
             row.child(
                 canvas(|bounds, window, _cx| window.request_autoscroll(bounds), |_, (), _, _| {})
                     .absolute()
@@ -2105,7 +2107,7 @@ impl WorkspaceView {
     /// The tiles the navigator's list holds, in its order, whether or not they are in view.
     pub(super) fn navigator_tiles(&self) -> Vec<TileRef> {
         let tile = |r: &NavRow| if let NavRow::Tile(t) = r { Some(t.tile) } else { None };
-        self.nav.list.rows.iter().filter_map(tile).collect()
+        self.nav.list.rows.borrow().iter().filter_map(tile).collect()
     }
 
     /// The sessions *Working* lists, in its order.
@@ -2114,7 +2116,7 @@ impl WorkspaceView {
             NavRow::Agent(a) if a.status == Status::Working => Some(a.at.session),
             _ => None,
         };
-        self.nav.list.rows.iter().filter_map(working).collect()
+        self.nav.list.rows.borrow().iter().filter_map(working).collect()
     }
 
     /// Where the plate under the phone's active workspace row was drawn in the last frame.

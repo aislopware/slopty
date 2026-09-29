@@ -5,13 +5,16 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{ExternalPaths, FileDropEvent};
+use slopty_client::clip::Fetched;
 use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
 use slopty_client::xfer::XferError;
 use slopty_core::XferId;
 use slopty_platform::pasteboard::{Memory, Pasteboard, TEXT_UTI};
 use slopty_proto::orchestration::Port;
-use slopty_proto::transfer::{ClipFormat, ClipItem, ClipMsg, Dest, Offer, Peer, XferMsg};
+use slopty_proto::transfer::{
+    ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Rep, RepRef, XferMsg,
+};
 
 use super::*;
 use crate::conversation::ConversationView;
@@ -22,18 +25,18 @@ use crate::conversation::composer::Attachment;
 enum Call {
     Upload(XferId, Vec<PathBuf>, Dest),
     Cancel(XferId),
-    SendClip(u64, ClipFormat, Vec<u8>),
+    SendClip(RepRef, Fetched, bool),
     Forward(u16),
 }
 
 /// Records the calls; serves a worker port here `offset` ports up, as a client whose ports
-/// are partly taken would. Its copied files are [`WORKER_FILES`], and a download of one
-/// writes a file of that name whose text is the path.
+/// are partly taken would. Its copied files are [`WORKER_FILES`], one item each, its pictures
+/// `PNG`, and a download of one writes a file of that name whose text is the path.
 #[derive(Debug)]
 struct Recorder(mpsc::UnboundedSender<Call>, u16);
 
-/// The `public.file-url` of the files a worker copied.
-const WORKER_FILES: &[u8] = b"file:///Users/w/a%20b.txt\nfile:///Users/w/c.txt";
+/// The `public.file-url` of each file a worker copied.
+const WORKER_FILES: [&[u8]; 2] = [b"file:///Users/w/a%20b.txt", b"file:///Users/w/c.txt"];
 
 impl Remote for Recorder {
     fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest) {
@@ -52,16 +55,18 @@ impl Remote for Recorder {
         Ok(vec![file])
     }
 
-    fn clip_data(&self, _generation: u64, format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
-        match format {
-            ClipFormat::Png => Some(b"PNG".to_vec()),
-            ClipFormat::FileUrls => Some(WORKER_FILES.to_vec()),
-            _ => None,
+    fn clip_fetch(&self, rep: &RepRef, _max: Option<u64>, _wait: Duration) -> Fetched {
+        match rep.kind {
+            ClipType::Format(ClipFormat::Png) => Fetched::Data(b"PNG".to_vec()),
+            ClipType::Format(ClipFormat::FileUrls) => WORKER_FILES
+                .get(usize::from(rep.item))
+                .map_or(Fetched::Gone, |url| Fetched::Data(url.to_vec())),
+            _ => Fetched::Gone,
         }
     }
 
-    fn send_clip(&self, generation: u64, format: ClipFormat, bytes: Vec<u8>) {
-        self.0.send(Call::SendClip(generation, format, bytes)).unwrap();
+    fn send_clip(&self, rep: RepRef, answer: Fetched, urgent: bool) {
+        self.0.send(Call::SendClip(rep, answer, urgent)).unwrap();
     }
 
     fn forward(&self, port: u16) -> Option<u16> {
@@ -141,15 +146,40 @@ fn paste_in(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, shell: Ses
 
 /// The offer of worker `generation`'s copied files, announced to this client.
 fn worker_copied_files(generation: u64) -> Offer {
+    let item = |url: &[u8]| ClipEntry {
+        reps: vec![Rep {
+            kind: ClipType::Format(ClipFormat::FileUrls),
+            size: Some(url.len() as u64),
+            hash: Some(crate::clipboard::digest(url)),
+            inline: None,
+        }],
+    };
+    worker_offer(generation, WORKER_FILES.iter().map(|url| item(url)).collect())
+}
+
+/// Worker offer `generation` of `items`.
+fn worker_offer(generation: u64, items: Vec<ClipEntry>) -> Offer {
     Offer {
         origin: Peer::Worker(slopty_core::WorkerId::new()),
         generation,
-        items: vec![ClipItem {
-            format: ClipFormat::FileUrls,
-            size: WORKER_FILES.len() as u64,
-            hash: crate::clipboard::digest(WORKER_FILES),
-            inline: None,
-        }],
+        age_ms: 0,
+        concealed: false,
+        items,
+    }
+}
+
+/// One item of `reps`.
+fn entry(reps: Vec<Rep>) -> ClipEntry {
+    ClipEntry { reps }
+}
+
+/// A representation listed by its digest, fetched when pasted.
+fn listed(format: ClipFormat, bytes: &[u8]) -> Rep {
+    Rep {
+        kind: ClipType::Format(format),
+        size: Some(bytes.len() as u64),
+        hash: Some(crate::clipboard::digest(bytes)),
+        inline: None,
     }
 }
 
@@ -167,8 +197,12 @@ fn files_copied_here_paste_into_a_shell_as_a_drop(cx: &mut TestAppContext) {
     let shell = SessionId::new();
     opens(&view, cx, &studio, shell, studio.me, 1);
     let offer = offers(&studio.drain()).pop().expect("announced on focus");
-    assert_eq!(offer.items.len(), 1);
-    assert_eq!(offer.items[0].format, ClipFormat::FileUrls, "the URLs alone");
+    assert_eq!(offer.items.len(), 1, "one item a file");
+    assert_eq!(
+        offer.items[0].reps[0].kind,
+        ClipType::Format(ClipFormat::FileUrls),
+        "the URLs alone"
+    );
 
     paste_in(&view, cx, shell);
     let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
@@ -190,8 +224,8 @@ fn files_a_worker_copied_paste_into_its_shell_or_travel_to_another(cx: &mut Test
     let (mut studio, mut studio_calls, _board) = connect_remote(&view, cx);
     let (mut laptop, mut laptop_calls) = link_remote(&view, cx, 8, "laptop", 0);
     let key = studio.key;
-    view.update_in(cx, |v, _window, _cx| {
-        v.clip_message(key, ClipMsg::Offer(worker_copied_files(5)));
+    view.update_in(cx, |v, _window, cx| {
+        v.clip_message(key, ClipMsg::Offer(worker_copied_files(5)), cx);
     });
     let here = SessionId::new();
     opens(&view, cx, &studio, here, studio.me, 1);
@@ -275,7 +309,7 @@ fn files_pasted_into_a_window_are_staged_before_the_chord_goes(cx: &mut TestAppC
     assert!(!screen.read_with(cx, |v, _| v.paste_held()), "and goes once they are there");
     assert_eq!(view.read_with(cx, WorkspaceView::toast_text), None, "a paste says nothing");
 
-    let on_worker = ClipFiles::Worker { worker: studio.key, generation: 2 };
+    let on_worker = ClipFiles::Worker { worker: studio.key, urls: Vec::new() };
     let weak = hold(cx, on_worker.clone());
     view.update_in(cx, |v, _window, cx| v.paste_files_in_window(window, &weak, on_worker, cx));
     assert!(calls.try_recv().is_err(), "nothing to send");
@@ -314,7 +348,7 @@ fn the_worker_clipboard_is_watched_only_while_its_tile_has_the_keyboard(cx: &mut
     assert_eq!(watches(&sent), [true], "a shell of the worker took the keyboard");
     let offer = offers(&sent);
     assert_eq!(offer.len(), 1, "{sent:?}");
-    assert_eq!(offer[0].items[0].inline.as_deref(), Some(&b"copied here"[..]));
+    assert_eq!(offer[0].items[0].reps[0].inline.as_deref(), Some(&b"copied here"[..]));
     assert_eq!(offer[0].origin, Peer::Client(studio.me));
 
     view.update_in(cx, |v, window, cx| v.new_note(&NewNote, window, cx));
@@ -362,7 +396,7 @@ fn a_clipboard_that_asks_is_read_only_for_a_paste(cx: &mut TestAppContext) {
     let Some(ClientMsg::Clip(ClipMsg::Offer(offer))) = hook().offer else {
         panic!("an offer to paste")
     };
-    assert_eq!(offer.items[0].inline.as_deref(), Some(&b"copied on the phone"[..]));
+    assert_eq!(offer.items[0].reps[0].inline.as_deref(), Some(&b"copied on the phone"[..]));
     assert!(board.reads() > 0, "read for the paste");
 }
 
@@ -394,7 +428,7 @@ fn a_paste_through_the_system_button_reads_the_clipboard_no_further(cx: &mut Tes
     let sent = studio.drain();
     let offer = offers(&sent);
     assert_eq!(offer.len(), 1, "{sent:?}");
-    assert_eq!(offer[0].items[0].format, ClipFormat::Png);
+    assert_eq!(offer[0].items[0].reps[0].kind, ClipType::Format(ClipFormat::Png));
     let chord = |m: &ClientMsg| matches!(m, ClientMsg::Term { session, req: TermRequest::PastePicture(_) } if *session == shell);
     assert!(sent.iter().any(chord), "{sent:?}");
     assert_eq!(board.reads(), 0, "the clipboard itself was never read");
@@ -406,26 +440,10 @@ fn a_paste_through_the_system_button_reads_the_clipboard_no_further(cx: &mut Tes
 fn offers_land_as_promises_and_fetches_are_answered(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (mut studio, mut calls, board) = connect_remote(&view, cx);
-    let offer = Offer {
-        origin: Peer::Worker(slopty_core::WorkerId::new()),
-        generation: 3,
-        items: vec![
-            ClipItem {
-                format: ClipFormat::Png,
-                size: 3,
-                hash: crate::clipboard::digest(b"PNG"),
-                inline: None,
-            },
-            ClipItem {
-                format: ClipFormat::Text,
-                size: 2,
-                hash: crate::clipboard::digest(b"hi"),
-                inline: Some(b"hi".to_vec()),
-            },
-        ],
-    };
+    let hi = Rep { inline: Some(b"hi".to_vec()), ..listed(ClipFormat::Text, b"hi") };
+    let offer = worker_offer(3, vec![entry(vec![listed(ClipFormat::Png, b"PNG"), hi])]);
     let key = studio.key;
-    view.update_in(cx, |v, _window, _cx| v.clip_message(key, ClipMsg::Offer(offer)));
+    view.update_in(cx, |v, _window, cx| v.clip_message(key, ClipMsg::Offer(offer), cx));
     assert_eq!(board.data(TEXT_UTI).as_deref(), Some(&b"hi"[..]));
     assert_eq!(board.data("public.png").as_deref(), Some(&b"PNG"[..]), "fetched on paste");
 
@@ -433,22 +451,58 @@ fn offers_land_as_promises_and_fetches_are_answered(cx: &mut TestAppContext) {
     let shell = SessionId::new();
     opens(&view, cx, &studio, shell, studio.me, 1);
     let mine = offers(&studio.drain()).pop().expect("announced on focus");
-    let fetch = ClipMsg::Fetch { generation: mine.generation, format: ClipFormat::Text };
-    view.update_in(cx, |v, _window, _cx| v.clip_message(key, fetch));
+    let rep = mine.rep_ref(0, ClipType::Format(ClipFormat::Text));
+    let fetch = ClipMsg::Fetch { rep: rep.clone(), max: None, urgent: true };
+    view.update_in(cx, |v, _window, cx| v.clip_message(key, fetch, cx));
     match calls.try_recv().unwrap() {
-        Call::SendClip(generation, format, bytes) => {
-            assert_eq!(
-                (generation, format, bytes.as_slice()),
-                (mine.generation, ClipFormat::Text, &b"mine"[..])
-            );
+        Call::SendClip(sent, answer, urgent) => {
+            assert_eq!((sent, answer, urgent), (rep, Fetched::Data(b"mine".to_vec()), true));
         }
         other => panic!("{other:?}"),
     }
-    let stale =
-        ClipMsg::Fetch { generation: mine.generation.wrapping_add(5), format: ClipFormat::Text };
-    view.update_in(cx, |v, _window, _cx| v.clip_message(key, stale));
-    let sent = studio.drain();
-    assert!(matches!(sent.as_slice(), [ClientMsg::Clip(ClipMsg::Unavailable { .. })]), "{sent:?}");
+    let old = Offer { generation: mine.generation.wrapping_add(5), ..mine };
+    let stale = old.rep_ref(0, ClipType::Format(ClipFormat::Text));
+    let fetch = ClipMsg::Fetch { rep: stale.clone(), max: None, urgent: false };
+    view.update_in(cx, |v, _window, cx| v.clip_message(key, fetch, cx));
+    match calls.try_recv().unwrap() {
+        Call::SendClip(sent, answer, _) => assert_eq!((sent, answer), (stale, Fetched::Gone)),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A copy on one worker reaches another worker whose tile takes the keyboard next: its offer
+/// goes on as it came, origin kept, and that worker's fetch of the picture is answered with the
+/// first worker's bytes, fetched through the first worker's link. Before, the second worker
+/// heard nothing, and ⌘V in its window pasted its own old clipboard.
+#[gpui::test]
+fn a_copy_on_one_worker_is_relayed_to_the_next_one_focused(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, _studio_calls, _board) = connect_remote(&view, cx);
+    let (mut laptop, mut laptop_calls) = link_remote(&view, cx, 8, "laptop", 0);
+    let hi = Rep { inline: Some(b"hi".to_vec()), ..listed(ClipFormat::Text, b"hi") };
+    let copied = worker_offer(9, vec![entry(vec![listed(ClipFormat::Png, b"PNG"), hi])]);
+    let studio_key = studio.key;
+    let offer = copied.clone();
+    view.update_in(cx, |v, _window, cx| v.clip_message(studio_key, ClipMsg::Offer(offer), cx));
+
+    let there = SessionId::new();
+    opens(&view, cx, &laptop, there, laptop.me, 1);
+    let sent = laptop.drain();
+    let relayed = offers(&sent).pop().expect("the studio's copy, relayed to the laptop");
+    assert_eq!((relayed.origin, relayed.generation), (copied.origin, 9), "origin kept");
+    assert_eq!(relayed.items, copied.items);
+
+    let picture = copied.rep_ref(0, ClipType::Format(ClipFormat::Png));
+    let fetch = ClipMsg::Fetch { rep: picture.clone(), max: None, urgent: true };
+    let laptop_key = laptop.key;
+    view.update_in(cx, |v, _window, cx| v.clip_message(laptop_key, fetch, cx));
+    cx.run_until_parked();
+    match laptop_calls.try_recv().expect("the laptop is answered") {
+        Call::SendClip(rep, answer, urgent) => {
+            assert_eq!((rep, answer, urgent), (picture, Fetched::Data(b"PNG".to_vec()), true));
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 /// A worker link that serves one clipboard representation and counts the fetches.
@@ -464,12 +518,12 @@ impl Remote for Serves {
         Err(XferError::Worker("clipboard only".to_owned()))
     }
 
-    fn clip_data(&self, _generation: u64, _format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
+    fn clip_fetch(&self, _rep: &RepRef, _max: Option<u64>, _wait: Duration) -> Fetched {
         self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Some(self.0.to_vec())
+        Fetched::Data(self.0.to_vec())
     }
 
-    fn send_clip(&self, _generation: u64, _format: ClipFormat, _bytes: Vec<u8>) {}
+    fn send_clip(&self, _rep: RepRef, _answer: Fetched, _urgent: bool) {}
 
     fn forward(&self, _port: u16) -> Option<u16> {
         None
@@ -485,17 +539,8 @@ fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext
     let (view, cx) = workspace(cx);
     let (studio, _calls, board) = connect_remote(&view, cx);
     let key = studio.key;
-    let offer = Offer {
-        origin: Peer::Worker(slopty_core::WorkerId::new()),
-        generation: 3,
-        items: vec![ClipItem {
-            format: ClipFormat::Png,
-            size: 3,
-            hash: crate::clipboard::digest(b"PNG"),
-            inline: None,
-        }],
-    };
-    view.update_in(cx, |v, _window, _cx| v.clip_message(key, ClipMsg::Offer(offer)));
+    let offer = worker_offer(3, vec![entry(vec![listed(ClipFormat::Png, b"PNG")])]);
+    view.update_in(cx, |v, _window, cx| v.clip_message(key, ClipMsg::Offer(offer), cx));
     view.update_in(cx, |v, _window, cx| {
         v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
     });
@@ -854,4 +899,34 @@ fn a_drops_landing_goes_once_nothing_uploads_from_it(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(!on_window.exists(), "gone once the upload is over");
+}
+
+/// A composer that has the keyboard as the window becomes active starts its caret from a focus
+/// listener, which runs after the frame is painted: the frame after is drawn as from scratch,
+/// and so is the chip of a file dropped on the face.
+#[gpui::test]
+#[ignore = "fails until gpui-fast wakes the window for a notify raised by a focus listener"]
+fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, _calls, _board) = connect_remote(&view, cx);
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.focus_tile(tile, cx);
+        v.show_face(session, true, cx);
+    });
+    cx.update(|window, _cx| window.activate_window());
+    cx.run_until_parked();
+    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    assert!(stale.is_none(), "the caret: {}", stale.unwrap_or_default());
+
+    let dir = tempfile::tempdir().unwrap();
+    let dropped = dir.path().join("screen-recording.mov");
+    std::fs::write(&dropped, b"mov").unwrap();
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, std::slice::from_ref(&dropped), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("composer-attachment").is_some(), "the chip");
+    let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+    assert!(stale.is_none(), "the chip: {}", stale.unwrap_or_default());
 }

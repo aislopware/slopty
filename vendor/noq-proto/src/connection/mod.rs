@@ -6591,6 +6591,37 @@ impl Connection {
             self.streams
                 .write_stream_frames(builder, self.config.send_fairness, None, stats);
         }
+
+        // ACK, bundled: the one the delayed-ACK timer still holds for this path rides a packet
+        // that leaves on it anyway, where it would have cost a packet of its own when the timer
+        // fired (quinn-rs/quinn#2747). An echo leaves before the timer on the key it answers.
+        // Only this path's: a packet on a path still being validated is often lost.
+        let space = &mut self.spaces[space_id];
+        if !scheduling_info.is_abandoned
+            && scheduling_info.may_send_data
+            && space_has_keys
+            && builder.ack_eliciting
+            && !builder.sent_frames().largest_acked.contains_key(&path_id)
+            && space
+                .number_spaces
+                .get(&path_id)
+                .is_some_and(|pns| pns.pending_acks.can_bundle())
+        {
+            let frame = Self::ack_frame(
+                now,
+                self.receiving_ecn,
+                path_id,
+                space_id,
+                space,
+                is_multipath_negotiated,
+            );
+            if frame
+                .ack_size()
+                .is_some_and(|size| size <= builder.frame_space_remaining())
+            {
+                builder.write_frame(frame, stats);
+            }
+        }
     }
 
     /// Write pending ACKs into a buffer
@@ -6619,7 +6650,27 @@ impl Connection {
             );
         }
 
-        let pns = space.for_path(path_id);
+        let frame = Self::ack_frame(
+            now,
+            receiving_ecn,
+            path_id,
+            space_id,
+            space,
+            is_multipath_negotiated,
+        );
+        builder.write_frame(frame, stats);
+    }
+
+    /// The ACK (or PATH_ACK) frame for `path_id`'s pending acknowledgements in `space`
+    fn ack_frame(
+        now: Instant,
+        receiving_ecn: bool,
+        path_id: PathId,
+        space_id: SpaceId,
+        space: &PacketSpace,
+        is_multipath_negotiated: bool,
+    ) -> frame::EncodableFrame<'_> {
+        let pns = &space.number_spaces[&path_id];
         let ranges = pns.pending_acks.ranges();
         debug_assert!(!ranges.is_empty(), "can not send empty ACK range");
         let ecn = if receiving_ecn {
@@ -6634,12 +6685,9 @@ impl Connection {
         let delay = delay_micros >> ack_delay_exp.into_inner();
 
         if is_multipath_negotiated && space_id == SpaceId::Data {
-            if !ranges.is_empty() {
-                let frame = frame::PathAck::encoder(path_id, delay, ranges, ecn);
-                builder.write_frame(frame, stats);
-            }
+            frame::PathAck::encoder(path_id, delay, ranges, ecn).into()
         } else {
-            builder.write_frame(frame::Ack::encoder(delay, ranges, ecn), stats);
+            frame::Ack::encoder(delay, ranges, ecn).into()
         }
     }
 
@@ -7665,6 +7713,7 @@ impl SentFrames {
             && !self.non_retransmits
             && self.stream_frames.is_empty()
             && self.retransmits.is_empty(streams)
+            && self.path_retransmits.is_empty()
     }
 
     fn retransmits_mut(&mut self) -> &mut Retransmits {

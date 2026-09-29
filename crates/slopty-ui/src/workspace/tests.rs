@@ -799,7 +799,7 @@ fn tiles_far_from_the_view_are_not_drawn(cx: &mut TestAppContext) {
     }
     let first = tiles[0];
     assert!(cx.debug_bounds(selector("item", first.item)).is_none(), "far left: not drawn");
-    let drawn = view.read_with(cx, |v, _| v.placed.len());
+    let drawn = view.read_with(cx, |v, _| v.drawn.placed.borrow().len());
     assert!(drawn < tiles.len(), "{drawn} of {} drawn", tiles.len());
     let rows = cx.update(|_window, cx| crate::terminal::rows_prepared(cx));
     let per_grid = view.read_with(cx, |v, cx| {
@@ -1458,6 +1458,7 @@ mod palette;
 mod popout;
 mod quick;
 mod remote;
+mod retained;
 mod save_copy;
 mod search;
 mod shell_drag;

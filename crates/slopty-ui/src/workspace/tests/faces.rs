@@ -317,10 +317,10 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
     });
     cx.run_until_parked();
     let mark = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| v.item(tile).and_then(|item| v.tile_status(tile, item, cx)))
+        view.read_with(cx, |v, _| v.item(tile).and_then(|item| v.tile_status(tile, item)))
     };
     let listed = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| v.working(cx).iter().any(|w| w.session == session))
+        view.read_with(cx, |v, _| v.working().iter().any(|w| w.session == session))
     };
     assert_eq!(mark(cx), Some(Status::Idle), "the hook's word");
 
@@ -337,7 +337,7 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
         view.read_with(cx, |v, cx| {
             let meta = v.item(tile).map(|item| v.tile_meta(item, SystemTime::now(), cx).0);
             let words = v
-                .working(cx)
+                .working()
                 .into_iter()
                 .find(|w| w.session == session)
                 .map(|at| v.working_words(at, cx));
@@ -455,8 +455,7 @@ fn an_untitled_agent_is_named_by_its_first_prompt(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (_tile, session) = agent_tile(&view, cx, &mut studio);
-    let title =
-        |cx: &mut VisualTestContext| view.read_with(cx, |v, cx| v.terminal_title(session, cx));
+    let title = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.terminal_title(session));
     assert_eq!(title(cx), "Claude Code", "nothing read yet");
     cx.simulate_keystrokes("cmd-j");
     cx.run_until_parked();

@@ -240,7 +240,7 @@ impl DatagramState {
     pub(super) fn drop_oversized(&mut self, max_payload: usize) -> bool {
         let mut dropped_any = false;
         self.outgoing.retain(|datagram| {
-            let result = datagram.data.len() < max_payload;
+            let result = datagram.data.len() <= max_payload;
             if !result {
                 trace!(
                     "dropping {} byte datagram violating {} byte limit",
@@ -305,6 +305,23 @@ impl DatagramState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A datagram exactly as large as the new limit still fits it, as `send` accepted it.
+    #[test]
+    fn drop_oversized_keeps_datagrams_at_limit() {
+        let mut state = DatagramState::default();
+        state.outgoing.push_back(Datagram {
+            data: Bytes::from_static(&[0; 10]),
+        });
+        state.outgoing.push_back(Datagram {
+            data: Bytes::from_static(&[0; 11]),
+        });
+        state.outgoing_total = 21;
+        assert!(state.drop_oversized(10));
+        assert_eq!(state.outgoing.len(), 1);
+        assert_eq!(state.outgoing[0].data.len(), 10);
+        assert_eq!(state.outgoing_total, 10);
+    }
 
     #[test]
     fn make_space_for_accounts_for_new_datagram() {

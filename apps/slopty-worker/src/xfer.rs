@@ -9,7 +9,7 @@ use slopty_core::{ClientId, WallMs, XferId};
 use slopty_net::streams::{self, RawRecv, Uni};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FILE_BYTES, WriteResult};
-use slopty_proto::transfer::{BulkHeader, ClipFormat, Hash, INLINE_CLIP_BYTES, Purpose, XferMsg};
+use slopty_proto::transfer::{BulkHeader, Hash, INLINE_CLIP_BYTES, Purpose, RepRef, XferMsg};
 use slopty_worker::clip::MAX_REP_BYTES;
 use slopty_worker::xfer::{Landed, Receiving, Transfers, XferError, outgoing};
 use tokio::io::AsyncReadExt as _;
@@ -27,12 +27,11 @@ const BEGIN_WAIT: Duration = Duration::from_secs(5);
 /// Clipboard bytes a client sent up as a bulk stream, for the connection's loop.
 #[derive(Debug)]
 pub struct ClipData {
-    /// The client's offer.
-    pub generation: u64,
-    /// In which format.
-    pub format: ClipFormat,
-    /// The bytes.
-    pub bytes: Vec<u8>,
+    /// Which representation of the client's offer.
+    pub rep: RepRef,
+    /// The bytes; `None` when the stream was refused (past [`MAX_REP_BYTES`], or longer than
+    /// it said) or cut, so nothing of it is coming and a paste waiting on it goes on.
+    pub bytes: Option<Vec<u8>>,
 }
 
 /// Accept the client's unidirectional streams until the connection ends: files are written
@@ -81,14 +80,17 @@ async fn take(
         }
         Uni::Bulk { header, mut rx } => match header.purpose.clone() {
             Purpose::Upload => receive(daemon, header, rx, out).await,
-            Purpose::Clip { generation, format } => {
-                if let Some(bytes) = read_whole(&header, &mut rx, MAX_REP_BYTES).await {
-                    let _sent = clips.send(ClipData { generation, format, bytes }).await;
+            Purpose::Rep { rep } => {
+                let bytes = read_rep(&daemon, &header, &rep, &mut rx).await;
+                if bytes.is_none() {
+                    tracing::debug!(%client, item = rep.item, size = header.size, "clipboard stream refused or cut");
                 }
+                let _sent = clips.send(ClipData { rep, bytes }).await;
             }
             Purpose::Save { path, base_modified_ms } => {
                 if let Some(text) = read_whole(&header, &mut rx, FILE_BYTES).await {
-                    crate::files::write(client, &out, path, text, base_modified_ms).await;
+                    let handoffs = &daemon.handoffs;
+                    crate::files::write(handoffs, client, &out, path, text, base_modified_ms).await;
                 } else {
                     tracing::info!(%client, %path, size = header.size, "save stream refused");
                     let error = if header.size > FILE_BYTES {
@@ -108,8 +110,33 @@ async fn take(
     }
 }
 
+/// A clipboard representation's bytes, when its stream carries all its header announced and
+/// that is no more than [`MAX_REP_BYTES`]. Each chunk tells the clipboard the bytes are still
+/// coming, so a promise waiting on them waits on.
+async fn read_rep(
+    daemon: &Daemon,
+    header: &BulkHeader,
+    rep: &RepRef,
+    rx: &mut RawRecv,
+) -> Option<Vec<u8>> {
+    if header.size > MAX_REP_BYTES {
+        rx.stop();
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(header.size).ok()?);
+    while let Some(chunk) = rx.chunk(CHUNK).await.ok()? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() as u64 > header.size {
+            rx.stop();
+            return None;
+        }
+        daemon.clip.receiving(rep);
+    }
+    (bytes.len() as u64 == header.size).then_some(bytes)
+}
+
 /// A stream's bytes, when it carries all its header announced and that is no more than `max`
-/// (a clipboard representation, a file tile's save).
+/// (a file tile's save).
 async fn read_whole(header: &BulkHeader, rx: &mut RawRecv, max: u64) -> Option<Vec<u8>> {
     if header.size > max {
         rx.stop();
@@ -158,7 +185,8 @@ async fn receive(
     if finished.staging {
         let clip = Arc::clone(&daemon.clip);
         let paths = finished.paths.clone();
-        let _written = tokio::task::spawn_blocking(move || clip.write_files(&paths)).await;
+        let write = move || clip.write_files(&paths, Instant::now());
+        let _written = tokio::task::spawn_blocking(write).await;
     }
     let paths = finished.paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     let _sent = out.send(WorkerMsg::Xfer(XferMsg::Finished { xfer, paths })).await;
@@ -343,27 +371,42 @@ async fn send_file(
 }
 
 /// Answer a client's fetch of the worker's clipboard: inline when it fits, a bulk stream when
-/// not, `Unavailable` when the pasteboard changed since the offer.
+/// not (ahead of background transfers when a paste waits on it), `TooBig` past the fetch's cap,
+/// `Unavailable` when the pasteboard changed since the offer.
 pub async fn send_clip(
     daemon: &Daemon,
     conn: &Connection,
     out: &mpsc::Sender<WorkerMsg>,
-    generation: u64,
-    format: ClipFormat,
+    rep: RepRef,
+    max: Option<u64>,
+    urgent: bool,
 ) {
     use slopty_proto::transfer::ClipMsg;
-    let Some(bytes) = daemon.clip.fetch(generation, format) else {
-        let _sent = out.send(WorkerMsg::Clip(ClipMsg::Unavailable { generation })).await;
-        return;
+    use slopty_worker::clip::Fetched;
+    let (clip, asked) = (Arc::clone(&daemon.clip), rep.clone());
+    // Off the runtime: a representation the poll left alone is read off the pasteboard now.
+    let fetched = tokio::task::spawn_blocking(move || clip.fetch(&asked, max)).await;
+    let bytes = match fetched.unwrap_or(Fetched::Unavailable) {
+        Fetched::Data(bytes) if bytes.len() > INLINE_CLIP_BYTES => bytes,
+        Fetched::Data(bytes) => {
+            let data = ClipMsg::Data { rep, bytes: bytes.to_vec() };
+            let _sent = out.send(WorkerMsg::Clip(data)).await;
+            return;
+        }
+        Fetched::TooBig(size) => {
+            let _sent = out.send(WorkerMsg::Clip(ClipMsg::TooBig { rep, size })).await;
+            return;
+        }
+        Fetched::Unavailable => {
+            let source = rep.source;
+            let _sent = out.send(WorkerMsg::Clip(ClipMsg::Unavailable { source })).await;
+            return;
+        }
     };
-    if bytes.len() <= INLINE_CLIP_BYTES {
-        let data = ClipMsg::Data { generation, format, bytes: bytes.to_vec() };
-        let _sent = out.send(WorkerMsg::Clip(data)).await;
-        return;
-    }
+    let item = rep.item;
     let header = BulkHeader {
         xfer: XferId::new(),
-        purpose: Purpose::Clip { generation, format },
+        purpose: Purpose::Rep { rep },
         name: String::new(),
         size: bytes.len() as u64,
         mtime_ms: WallMs::ZERO,
@@ -374,11 +417,15 @@ pub async fn send_clip(
     drop(tokio::spawn(async move {
         let sent = async {
             let mut send = streams::open_bulk(&conn, header).await?;
+            if urgent {
+                // A paste waits on it: level with the tunnels, ahead of files.
+                send.set_priority(streams::TUNNEL_PRIORITY).map_err(|e| NetError::stream(&e))?;
+            }
             send.write_all(&bytes).await.map_err(|e| NetError::stream(&e))?;
             send.finish().map_err(|e| NetError::stream(&e))
         };
         if let Err(e) = sent.await {
-            tracing::debug!(generation, error = %e, "clipboard data not sent");
+            tracing::debug!(item, error = %e, "clipboard data not sent");
         }
     }));
 }

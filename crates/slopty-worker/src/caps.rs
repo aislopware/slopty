@@ -40,28 +40,39 @@ pub async fn installed_agents() -> Vec<InstalledAgent> {
 }
 
 async fn version_of(program: &str) -> Option<String> {
+    let stdout = agent_output(program, &["--version"], VERSION_TIMEOUT).await?;
+    let text = String::from_utf8_lossy(&stdout);
+    text.lines().map(str::trim).rfind(|line| !line.is_empty()).map(str::to_owned)
+}
+
+/// What an agent's command line `program args…` prints, when it succeeds within `wait`.
+///
+/// It runs straight when the daemon's own `PATH` has the program, else through the person's
+/// login shell, as ptyd runs such a program.
+pub async fn agent_output(program: &str, args: &[&str], wait: Duration) -> Option<Vec<u8>> {
     let on_path = std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()));
     let mut command = if on_path {
         let mut direct = tokio::process::Command::new(program);
-        direct.arg("--version");
+        direct.args(args);
         direct
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+        let line = std::iter::once(program)
+            .chain(args.iter().copied())
+            .map(slopty_core::shell_quote)
+            .collect::<Vec<_>>()
+            .join(" ");
         let mut login = tokio::process::Command::new(shell);
-        login.args(["-l", "-i", "-c", &format!("{program} --version")]);
+        login.args(["-l", "-i", "-c", &line]);
         login
     };
     command
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    let output = tokio::time::timeout(VERSION_TIMEOUT, command.output()).await.ok()?.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines().map(str::trim).rfind(|line| !line.is_empty()).map(str::to_owned)
+    let output = tokio::time::timeout(wait, command.output()).await.ok()?.ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 /// Everything about this worker as it is now; `agents` from [`installed_agents`] and

@@ -81,7 +81,7 @@ fn a_shell_is_titled_by_what_it_runs_then_its_own_title_then_where_it_is(cx: &mu
     let said = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
         view.read_with(cx, |v, cx| {
             let place = v.item(tile).and_then(|item| v.tile_place(item, cx));
-            (v.terminal_title(session, cx), place)
+            (v.terminal_title(session), place)
         })
     };
     assert_eq!(said(&view, cx), ("Terminal".into(), Some("~".into())), "home, known exactly");
@@ -121,10 +121,10 @@ fn a_shell_is_titled_by_what_it_runs_then_its_own_title_then_where_it_is(cx: &mu
         v.agent_event(working, cx);
     });
     cx.run_until_parked();
-    let agent = view.read_with(cx, |v, cx| v.terminal_title(session, cx));
+    let agent = view.read_with(cx, |v, _| v.terminal_title(session));
     assert_eq!(agent, "claude", "a title its program set");
     title(&view, cx, "/Volumes/Data/me");
-    let agent = view.read_with(cx, |v, cx| v.terminal_title(session, cx));
+    let agent = view.read_with(cx, |v, _| v.terminal_title(session));
     assert_eq!(agent, "Claude Code", "else the agent's name");
 
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
@@ -144,16 +144,16 @@ fn a_long_command_shows_running_and_its_time_everywhere(cx: &mut TestAppContext)
     run(&view, cx, session, "sleep 60");
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    let mark = view.read_with(cx, |v, cx| {
+    let mark = view.read_with(cx, |v, _| {
         let item = v.item(tile).cloned();
-        item.and_then(|item| v.tile_status(tile, &item, cx))
+        item.and_then(|item| v.tile_status(tile, &item))
     });
     assert_eq!(mark, Some(Status::Running));
     let id = tile.item.as_uuid();
     assert!(cx.debug_bounds(leak(format!("running-{id}"))).is_some(), "the header's time");
     assert!(cx.debug_bounds(leak(format!("nav-running-{id}"))).is_some(), "the row's time");
     assert!(cx.debug_bounds("status-facts").is_some(), "the status bar's");
-    let rollup = view.read_with(cx, |v, cx| v.worker_rollup(fake.key, cx));
+    let rollup = view.read_with(cx, |v, _| v.worker_rollup(fake.key));
     assert_eq!(rollup.shown(), Some(rollup::Shown::Running));
 
     // Under the threshold, nothing: a quick command ends before a mark would be read.

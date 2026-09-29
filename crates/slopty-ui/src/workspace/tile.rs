@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnimationExt as _, App, Context, Div, ElementId, ExternalPaths, FontWeight,
+    AnimationExt as _, App, Context, Div, ElementId, Entity, ExternalPaths, FontWeight,
     InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _,
-    SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window,
-    div, px,
+    Render, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
+    Window, div, px,
 };
 use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef, WorkerKey};
@@ -18,20 +18,20 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
-use slopty_proto::screen::SourceState;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_theme::{Theme, Typography};
 
 use super::actions::{CloseItem, FullscreenTile};
 use super::browsers::ADDRESS;
+use super::strip::Handed;
 use super::{Field, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
+use crate::draw::Draw;
 use crate::folder::FolderView;
 use crate::icons::{IconName, IconSize, Status};
-use crate::terminal::TerminalView;
 use crate::{add_worker, kit};
 
 /// Below this zoom the overview draws a tile as its miniature: the header's surface without its
@@ -496,7 +496,7 @@ impl WorkspaceView {
     /// note's first line, a file's `name · parent`.
     pub(super) fn derived_title(&self, item: &Item, cx: &App) -> String {
         match &item.kind {
-            ItemKind::Terminal { session } => self.terminal_title(*session, cx),
+            ItemKind::Terminal { session } => self.terminal_title(*session),
             ItemKind::Window { window } => {
                 self.titles.get(&item.id).cloned().unwrap_or_else(|| format!("Window {}", window.0))
             }
@@ -584,12 +584,12 @@ impl WorkspaceView {
     /// directory it stands in, else "Terminal". An agent's shell takes the agent's own title, else
     /// the agent's name.
     #[must_use]
-    pub fn terminal_title(&self, session: SessionId, cx: &App) -> String {
-        let view = self.terminals.get(&session).map(|v| v.read(cx));
+    pub fn terminal_title(&self, session: SessionId) -> String {
+        let shell = self.shell(session);
         let summary = self.session_on(session);
         let program = summary.and_then(|(_, s)| s.command.first()).map(String::as_str);
-        let set = view
-            .and_then(TerminalView::title)
+        let set = shell
+            .and_then(|s| s.title.as_deref())
             .or_else(|| summary.map(|(_, s)| s.title.as_str()))
             .map(str::trim)
             .filter(|t| own_title(t, program));
@@ -598,11 +598,11 @@ impl WorkspaceView {
         if let Some(agent) = self.agent_state(session).filter(|a| a.status != AgentStatus::None) {
             return set
                 .map(str::to_owned)
-                .or_else(|| self.faces.views.get(&session)?.read(cx).first_prompt())
+                .or_else(|| self.face(session)?.first_prompt.clone())
                 .unwrap_or_else(|| agent_name(agent.kind).to_owned());
         }
-        let running = view
-            .and_then(|v| v.state().running_command())
+        let running = shell
+            .and_then(|s| s.running.as_deref())
             .and_then(|c| c.lines().next())
             .map(str::trim)
             .filter(|c| !c.is_empty());
@@ -655,8 +655,8 @@ impl WorkspaceView {
         &self,
         placed: &Placed,
         chrome: Chrome,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        window: &Window,
+        cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
         let item = self.item(tile)?;
@@ -779,9 +779,27 @@ impl WorkspaceView {
     /// stream, a flood, an animation step) never draws it again, and every key, caret blink and
     /// selection does.
     fn cacheable(&self, placed: &Placed, window: &Window, cx: &App) -> bool {
-        let moved = placed.focused != (self.drawn_focus == Some(placed.tile));
-        let keys_moved = placed.focused && window.focused(cx) != self.drawn_keys;
+        let moved = placed.focused != (self.drawn.focus.get() == Some(placed.tile));
+        let keys_moved = placed.focused && window.focused(cx) != *self.drawn.keys.borrow();
         !moved && !keys_moved
+    }
+
+    /// A body's view as the strip draws it: from its cached drawing unless it is not
+    /// [`Self::cacheable`]. Then it is built again in this frame: the focus the strip follows
+    /// is given while the window draws, which tells no view.
+    fn body_view<V: Render>(
+        &self,
+        view: &Entity<V>,
+        placed: &Placed,
+        window: &Window,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        if self.cacheable(placed, window, cx) {
+            return view.clone().cached(StyleRefinement::default().size_full()).into_any_element();
+        }
+        let id = view.entity_id();
+        cx.later(move |_window, cx| cx.notify(id));
+        view.clone().into_any_element()
     }
 
     /// A tile fading out where it stood, over a fade: its surface and its header's glyph and
@@ -849,7 +867,7 @@ impl WorkspaceView {
         item: &Item,
         title: String,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -923,7 +941,7 @@ impl WorkspaceView {
         // The face's approval card is the tile's statement while it shows: a pill over it would
         // say the same thing a few hundred points higher.
         let badge = agent
-            .filter(|(session, _)| !self.face_asks(*session, cx))
+            .filter(|(session, _)| !self.face_asks(*session))
             .and_then(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
@@ -987,11 +1005,11 @@ impl WorkspaceView {
             .children(actions);
         // How long a command has run, beside its calm mark, while no agent speaks for the shell.
         let running = match &item.kind {
-            ItemKind::Terminal { session } if agent.is_none() => self.running_for(*session, cx),
+            ItemKind::Terminal { session } if agent.is_none() => self.running_for(*session),
             _ => None,
         };
         let running = running.map(|ran| {
-            let text = SharedString::from(kit::duration(ran));
+            let text = SharedString::from(super::navigator::turn_label(ran));
             kit::tabular(div())
                 .id("running")
                 .debug_selector(move || format!("running-{}", id.as_uuid()))
@@ -1194,7 +1212,7 @@ impl WorkspaceView {
         item: &Item,
         focused: bool,
         k: f32,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let id = item.id;
         let s = &self.theme.surfaces;
@@ -1203,9 +1221,9 @@ impl WorkspaceView {
             _ => false,
         };
         // A remote picture on its way turns its mark in the body, which says what opens.
-        let opening = self.opening(item, cx);
+        let opening = self.opening(item);
         let status = self
-            .tile_status(tile, item, cx)
+            .tile_status(tile, item)
             .filter(|st| !(agent && matches!(st, Status::NeedsYou | Status::Idle)))
             .filter(|st| !(opening && *st == Status::Working));
         let ink = if focused { s.text_secondary } else { s.text_muted };
@@ -1265,7 +1283,7 @@ impl WorkspaceView {
         tile: TileRef,
         focused: bool,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
         let url = self.browsers.get(&tile.item)?.read(cx).page().url.clone();
         let (scheme, host, rest) = crate::browser::address_parts(&url)?;
@@ -1316,7 +1334,12 @@ impl WorkspaceView {
     /// its title and a close button that shows on the tab's hover (always on the one shown).
     /// The shown tab is its body's surface with no edge under it, as the focused header is;
     /// the rest sit on the panel with the bar's hairline under them.
-    fn render_tabs(&self, placed: &Placed, chrome: Chrome, cx: &Context<Self>) -> gpui::AnyElement {
+    fn render_tabs(
+        &self,
+        placed: &Placed,
+        chrome: Chrome,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let k = chrome.k;
@@ -1341,7 +1364,7 @@ impl WorkspaceView {
                 ItemKind::Terminal { session } => self.agent_state(session).is_some(),
                 _ => false,
             };
-            let status = self.tile_status(tab, item, cx);
+            let status = self.tile_status(tab, item);
             let slot =
                 crate::palette::status_slot(theme, kind_icon(item, agent), status, hsla(ink), k)
                     .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
@@ -1423,18 +1446,18 @@ impl WorkspaceView {
     /// How the tile is doing, in the one status vocabulary: its agent's state (as its face
     /// knows it, [`Self::agent_mark`]); else, out of reach; else a remote picture on its way;
     /// else a shell's last command, failed or finished unwatched.
-    pub(super) fn tile_status(&self, tile: TileRef, item: &Item, cx: &App) -> Option<Status> {
+    pub(super) fn tile_status(&self, tile: TileRef, item: &Item) -> Option<Status> {
         let session = match item.kind {
             ItemKind::Terminal { session } => Some(session),
             _ => None,
         };
-        if let Some(status) = session.and_then(|s| self.agent_mark(s, cx)) {
+        if let Some(status) = session.and_then(|s| self.agent_mark(s)) {
             return Some(status);
         }
         if self.workers.get(&tile.worker).is_none_or(|w| w.link.is_none()) {
             return Some(Status::Away);
         }
-        if self.opening(item, cx) {
+        if self.opening(item) {
             return Some(Status::Working);
         }
         let session = session?;
@@ -1445,40 +1468,33 @@ impl WorkspaceView {
         if let Some(SessionState::Exited { status }) = self.summary(session).map(|s| &s.state) {
             return Some(failed(i64::from(*status)));
         }
-        // The newest prompt carries the status of the command before it: one lookup in the
-        // prompt index, never a walk over the rows.
-        let view = self.terminals.get(&session)?.read(cx);
-        let state = view.state();
-        if state.command_running() {
-            return self.running_for(session, cx).map(|_| Status::Running);
+        // The newest prompt carries the status of the command before it.
+        let shell = self.shell(session)?;
+        if shell.running.is_some() {
+            return self.running_for(session).map(|_| Status::Running);
         }
-        let prompt = state.prompt_before(slopty_grid::LineIndex(u64::MAX))?;
-        let exit = state.line(prompt)?.mark.exit()?;
         // A failure the grid is showing, washed and barred, is not marked a second time here.
-        let shown = view.failure_in_view();
-        (exit != 0 && !shown).then_some(Status::Failed)
+        (shell.exit? != 0 && !shell.failure_in_view).then_some(Status::Failed)
     }
 
     /// How long `session`'s command has run, once that is past [`RUNNING_AFTER`]: what its
     /// tile's header, its navigator row and the status bar count.
     ///
     /// [`RUNNING_AFTER`]: super::RUNNING_AFTER
-    pub(super) fn running_for(&self, session: SessionId, cx: &App) -> Option<std::time::Duration> {
-        let ran = self.terminals.get(&session)?.read(cx).running_for()?;
+    pub(super) fn running_for(&self, session: SessionId) -> Option<std::time::Duration> {
+        let (now, _) = self.ticked()?;
+        let ran = now.saturating_duration_since(self.shell(session)?.started?);
         (ran >= self.running_after).then_some(ran)
     }
 
     /// Whether a remote window or display is on its way: asked for and not yet drawn, while
     /// its worker is up. Neither asleep nor let go off screen, which wait on nothing.
-    fn opening(&self, item: &Item, cx: &App) -> bool {
+    fn opening(&self, item: &Item) -> bool {
         if !matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. }) {
             return false;
         }
         match self.screens.get(&item.id) {
-            Some(view) => {
-                let view = view.read(cx);
-                view.frames() == 0 && view.source_state() == SourceState::Live
-            }
+            Some(_) => self.stream(item.id).is_some_and(|stream| stream.waiting),
             None => !item.sleeping && !self.parked.contains(&item.id),
         }
     }
@@ -1490,7 +1506,7 @@ impl WorkspaceView {
         tile: TileRef,
         item: &Item,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let id = item.id;
@@ -1571,12 +1587,13 @@ impl WorkspaceView {
         tile: TileRef,
         item: &Item,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let id = item.id;
         // A muted window always says so: a silenced tile must not pass for a quiet one.
-        let muted = self.screens.get(&id).is_some_and(|v| v.read(cx).muted());
+        let stream = self.stream(id).copied().unwrap_or_default();
+        let muted = stream.muted;
         let mut actions: Vec<gpui::AnyElement> = Vec::new();
         match &item.kind {
             ItemKind::Terminal { session } => {
@@ -1585,14 +1602,18 @@ impl WorkspaceView {
                 if self.face_shown(session)
                     && !self.layout.is_phone()
                     && let Some(view) = self.faces.views.get(&session)
+                    && let Some(face) = self.face(session)
                 {
                     actions.extend(crate::conversation::ConversationView::header_chips(
-                        view, chrome.k, cx,
+                        view,
+                        &face.chips,
+                        theme,
+                        chrome.k,
                     ));
                 }
                 let session = &session;
                 // Another client's size rules this PTY: offer to take it.
-                if self.terminals.get(session).is_some_and(|v| !v.read(cx).driving()) {
+                if self.shell(*session).is_some_and(|s| !s.driving) {
                     let pill = pill("take", id, TAKE, theme.surfaces.accent, theme, chrome)
                         .role(Role::Button)
                         .aria_label(TAKE_OVER);
@@ -1606,21 +1627,16 @@ impl WorkspaceView {
                 }
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
-                if let Some(view) = self.screens.get(&id)
-                    && let Some(mark) =
-                        crate::screen::ScreenView::health_mark(view, theme, chrome.k, cx)
-                {
-                    actions.push(mark);
-                }
-                if let Some(view) = self.screens.get(&id)
-                    && let Some(button) =
-                        crate::screen::ScreenView::trackpad_button(view, theme, chrome.k, cx)
-                {
-                    actions.push(button);
+                if let Some(view) = self.screens.get(&id) {
+                    use crate::screen::ScreenView;
+                    actions.extend(ScreenView::health_mark(view, stream.header, theme, chrome.k));
+                    let trackpad =
+                        ScreenView::trackpad_button(view, stream.header, theme, chrome.k);
+                    actions.extend(trackpad);
                 }
                 // Only while the system's shortcuts go to the worker: this Mac's ⌘Tab not
                 // working is a state to see, and a click here gives it back.
-                if self.screens.get(&id).is_some_and(|v| v.read(cx).system_keys()) {
+                if stream.system_keys {
                     let toggle = kit::icon_toggle(
                         theme,
                         format!("system-keys-{}", id.as_uuid()),
@@ -1637,9 +1653,7 @@ impl WorkspaceView {
                             .into_any_element(),
                     );
                 }
-                if let Some(view) = self.screens.get(&id).map(|v| v.read(cx))
-                    && (muted || view.has_audio())
-                {
+                if self.screens.contains_key(&id) && (muted || stream.has_audio) {
                     let icon = if muted { IconName::VolumeX } else { IconName::Volume2 };
                     let toggle = kit::icon_toggle(
                         theme,
@@ -1654,7 +1668,7 @@ impl WorkspaceView {
                             .on_click(cx.listener(move |this, _ev, _w, cx| {
                                 if let Some(view) = this.screens.get(&id) {
                                     view.read(cx).toggle_mute();
-                                    cx.notify();
+                                    this.stream_changed(id, cx);
                                 }
                             }))
                             .into_any_element(),
@@ -1725,7 +1739,7 @@ impl WorkspaceView {
         tile: TileRef,
         session: SessionId,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
         if self.agent_state(session).is_none_or(|a| a.status == AgentStatus::None) {
             return None;
@@ -1756,7 +1770,7 @@ impl WorkspaceView {
         session: SessionId,
         done: &super::Finished,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -1794,13 +1808,13 @@ impl WorkspaceView {
         readouts: Vec<gpui::AnyElement>,
         face: Option<gpui::AnyElement>,
         k: f32,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let (tile, focused) = (placed.tile, placed.focused);
         let id = tile.item.as_uuid();
         // On a phone a column is the screen's width already: fullscreen would add nothing.
-        let view_w = f32::from(self.viewport.size.width);
+        let view_w = f32::from(self.drawn.viewport.get().size.width);
         let offer_fullscreen =
             view_w >= self.layout.config().phone_below || placed.target.w + 1.0 < view_w;
         let fullscreen = offer_fullscreen.then(|| {
@@ -1922,7 +1936,7 @@ impl WorkspaceView {
         item: &Item,
         state: &BodyState,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -2061,7 +2075,7 @@ impl WorkspaceView {
         tile: TileRef,
         lead: gpui::AnyElement,
         k: f32,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let ItemKind::File { path } = &item.kind else { return lead };
         let theme = &self.theme;
@@ -2101,7 +2115,7 @@ impl WorkspaceView {
         _tile: TileRef,
         lead: gpui::AnyElement,
         _k: f32,
-        _cx: &Context<Self>,
+        _cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         lead
     }
@@ -2115,8 +2129,8 @@ impl WorkspaceView {
         placed: &Placed,
         item: &Item,
         chrome: Chrome,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        window: &Window,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let bare = chrome.k < SHAPES_BELOW;
         // A face held through a dropped link says the worker is away in its own composer.
@@ -2149,22 +2163,30 @@ impl WorkspaceView {
     /// that lasts (asleep, let go off screen), and only past [`crate::screen::LOADING_GRACE`]
     /// for one the worker is about to end (opening, reading, attaching), so a fast answer
     /// never flashes a word. Blank in the overview's shapes-only zoom.
-    fn waiting_body(
-        &self,
-        item: &Item,
-        wait: Wait,
-        k: f32,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> gpui::AnyElement {
+    fn waiting_body(&self, item: &Item, wait: Wait, k: f32) -> gpui::AnyElement {
         let theme = &self.theme;
         let id = item.id;
         let (text, loading) = match wait {
             Wait::Lasting(text) => (text, false),
             Wait::Loading(text) => (text, true),
         };
-        let grace = SharedString::from(format!("grace-{}", id.as_uuid()));
-        let shown = k >= SHAPES_BELOW && (!loading || crate::screen::past_grace(grace, window, cx));
+        let said = (k >= SHAPES_BELOW).then(|| {
+            let said = div()
+                .id("waiting-words")
+                .debug_selector(move || format!("waiting-{}", id.as_uuid()))
+                .role(Role::Status)
+                .aria_label(text.clone())
+                .text_size(px(theme.typography.small() * k))
+                .text_color(hsla(theme.surfaces.text_muted))
+                .font_family(theme.typography.ui_family.clone())
+                .child(text);
+            if loading {
+                let grace = SharedString::from(format!("grace-{}", id.as_uuid()));
+                crate::screen::AfterGrace::new(grace, said).into_any_element()
+            } else {
+                said.into_any_element()
+            }
+        });
         div()
             .id(SharedString::from(format!("waiting-{}", id.as_uuid())))
             .flex_1()
@@ -2172,15 +2194,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_center()
-            .when(shown, |el| {
-                el.debug_selector(move || format!("waiting-{}", id.as_uuid()))
-                    .role(Role::Status)
-                    .aria_label(text.clone())
-                    .text_size(px(theme.typography.small() * k))
-                    .text_color(hsla(theme.surfaces.text_muted))
-                    .font_family(theme.typography.ui_family.clone())
-                    .child(text)
-            })
+            .children(said)
             .into_any_element()
     }
 
@@ -2188,14 +2202,7 @@ impl WorkspaceView {
     /// "Opening Safari" and the worker under it, one composed block in the body's middle. The
     /// mark is the body's, not the header's, until the first frame: a sentence alone in the
     /// void with a spinner far above it read as two things waiting.
-    fn opening_body(
-        &self,
-        tile: TileRef,
-        item: &Item,
-        k: f32,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> gpui::AnyElement {
+    fn opening_body(&self, tile: TileRef, item: &Item, k: f32, cx: &App) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let id = item.id;
@@ -2205,20 +2212,26 @@ impl WorkspaceView {
             Some(worker) => format!("Opening {what} on {worker}…"),
             None => format!("Opening {what}…"),
         });
-        let grace = SharedString::from(format!("grace-{}", id.as_uuid()));
-        let shown = k >= SHAPES_BELOW && crate::screen::past_grace(grace, window, cx);
-        let block = shown.then(|| {
+        let block = (k >= SHAPES_BELOW).then(|| {
             let mark = crate::icons::status_icon(
                 theme,
                 Status::Running,
                 px(theme.typography.icon_large() * k),
                 hsla(s.text_muted),
             );
-            kit::notice(theme, k, mark, format!("Opening {what}"), worker.map(SharedString::from))
-                .debug_selector(move || format!("waiting-{}", id.as_uuid()))
-                .id("opening")
-                .role(Role::Status)
-                .aria_label(said)
+            let block = kit::notice(
+                theme,
+                k,
+                mark,
+                format!("Opening {what}"),
+                worker.map(SharedString::from),
+            )
+            .debug_selector(move || format!("waiting-{}", id.as_uuid()))
+            .id("opening")
+            .role(Role::Status)
+            .aria_label(said);
+            let grace = SharedString::from(format!("grace-{}", id.as_uuid()));
+            crate::screen::AfterGrace::new(grace, block)
         });
         div()
             .id(SharedString::from(format!("waiting-{}", id.as_uuid())))
@@ -2239,8 +2252,8 @@ impl WorkspaceView {
         placed: &Placed,
         item: &Item,
         chrome: Chrome,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        window: &Window,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let k = chrome.k;
@@ -2270,7 +2283,7 @@ impl WorkspaceView {
                         .on_click(cx.listener(|this, _, _window, cx| {
                             this.show_quick_terminal(std::time::Instant::now(), cx);
                         }))
-                        .child(self.waiting_body(item, wait, k, window, cx))
+                        .child(self.waiting_body(item, wait, k))
                         .into_any_element()
                 }
                 _ if self.faces.held.contains(session)
@@ -2279,35 +2292,27 @@ impl WorkspaceView {
                         && self.body_state(placed.tile, item).is_none()) =>
                 {
                     let Some(face) = self.faces.views.get(session) else { return well() };
-                    face.update(cx, |v, cx| v.set_layout(k, placed.target.w, cx));
-                    let body = if self.cacheable(placed, window, cx) {
-                        face.clone()
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    } else {
-                        face.clone().into_any_element()
-                    };
+                    let width = placed.target.w;
+                    let handed = Handed::Face { zoom: k, width };
+                    self.hand_over(cx, face, handed, move |v, cx| v.set_layout(k, width, cx));
+                    let body = self.body_view(face, placed, window, cx);
                     fixed(body)
                 }
                 Some(view) => {
                     let covered = self.body_state(placed.tile, item).is_some();
-                    let restyled = view.update(cx, |v, _| {
+                    let zooming = chrome.zooming;
+                    let handed = Handed::Shell { zoom: k, covered, zooming };
+                    self.hand_over(cx, view, handed, move |v, _| {
                         v.set_zoom(k);
-                        let covered = v.set_covered(covered);
-                        v.set_zooming(chrome.zooming) || covered
+                        v.set_covered(covered);
+                        v.set_zooming(zooming);
                     });
-                    let body = if self.cacheable(placed, window, cx) && !restyled {
-                        view.clone()
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    } else {
-                        view.clone().into_any_element()
-                    };
+                    let body = self.body_view(view, placed, window, cx);
                     fixed(body)
                 }
                 None if !worker_up => well(),
                 None if self.summary(*session).is_some() => {
-                    self.waiting_body(item, Wait::Loading(ATTACHING.into()), k, window, cx)
+                    self.waiting_body(item, Wait::Loading(ATTACHING.into()), k)
                 }
                 None => well(),
             },
@@ -2324,45 +2329,39 @@ impl WorkspaceView {
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.raise_popped(id, cx);
                             }))
-                            .child(self.waiting_body(item, wait, k, window, cx))
+                            .child(self.waiting_body(item, wait, k))
                             .into_any_element()
                     }
                     Some(view) => {
                         let painted = placed.rect.w * window.scale_factor();
-                        view.update(cx, |v, cx| v.set_painted_width(painted, cx));
-                        let body = if self.cacheable(placed, window, cx) {
-                            view.clone()
-                                .cached(StyleRefinement::default().size_full())
-                                .into_any_element()
-                        } else {
-                            view.clone().into_any_element()
-                        };
+                        let handed = Handed::Stream { painted };
+                        self.hand_over(cx, view, handed, move |v, cx| {
+                            v.set_painted_width(painted, cx);
+                        });
+                        let body = self.body_view(view, placed, window, cx);
                         div().flex_1().w_full().overflow_hidden().child(body).into_any_element()
                     }
                     None if !worker_up => well(),
                     None if item.sleeping => {
-                        self.waiting_body(item, Wait::Lasting(SLEEPING.into()), k, window, cx)
+                        self.waiting_body(item, Wait::Lasting(SLEEPING.into()), k)
                     }
                     None if self.parked.contains(&item.id) => {
-                        self.waiting_body(item, Wait::Lasting(PAUSED.into()), k, window, cx)
+                        self.waiting_body(item, Wait::Lasting(PAUSED.into()), k)
                     }
-                    None => self.opening_body(placed.tile, item, k, window, cx),
+                    None => self.opening_body(placed.tile, item, k, cx),
                 }
             }
             ItemKind::Note { .. } => match self.notes.get(&item.id) {
                 Some(view) => {
                     let (pad, text_size) = (theme.spacing.inset(), theme.typography.ui_size);
-                    view.update(cx, |v, cx| v.set_layout(k, pad, text_size, cx));
+                    let handed = Handed::Text { zoom: k, pad, size: text_size };
+                    self.hand_over(cx, view, handed, move |v, cx| {
+                        v.set_layout(k, pad, text_size, cx);
+                    });
                     // Cached as a file tile is: a note's Markdown is laid out again only when
                     // the note changes, not on every frame a shell or a stream draws. Focused,
                     // the keyboard is in its editor, which the note watches.
-                    let body = if self.cacheable(placed, window, cx) {
-                        view.clone()
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    } else {
-                        view.clone().into_any_element()
-                    };
+                    let body = self.body_view(view, placed, window, cx);
                     div()
                         .flex_1()
                         .w_full()
@@ -2372,12 +2371,11 @@ impl WorkspaceView {
                         .child(body)
                         .into_any_element()
                 }
-                None => self.waiting_body(item, Wait::Loading(NOTE.into()), k, window, cx),
+                None => self.waiting_body(item, Wait::Loading(NOTE.into()), k),
             },
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
                 Some(view) => {
-                    let frame = self.frames_drawn;
-                    view.update(cx, |v, _| v.set_drawn(placed.alpha, frame));
+                    self.drawn.browsers.borrow_mut().push((item.id, placed.alpha));
                     div()
                         .flex_1()
                         .min_h_0()
@@ -2386,19 +2384,14 @@ impl WorkspaceView {
                         .child(view.clone())
                         .into_any_element()
                 }
-                None => self.waiting_body(item, Wait::Loading(OPENING.into()), k, window, cx),
+                None => self.waiting_body(item, Wait::Loading(OPENING.into()), k),
             },
             ItemKind::File { .. } => match self.files.get(&item.id) {
                 Some(view) => {
                     let (pad, text_size) = (theme.spacing.inset(), theme.typography.mono_size);
-                    view.update(cx, |v, _| v.set_layout(k, pad, text_size));
-                    let body = if self.cacheable(placed, window, cx) {
-                        view.clone()
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    } else {
-                        view.clone().into_any_element()
-                    };
+                    let handed = Handed::Text { zoom: k, pad, size: text_size };
+                    self.hand_over(cx, view, handed, move |v, _| v.set_layout(k, pad, text_size));
+                    let body = self.body_view(view, placed, window, cx);
                     div()
                         .flex_1()
                         .min_h_0()
@@ -2408,18 +2401,12 @@ impl WorkspaceView {
                         .into_any_element()
                 }
                 None if !worker_up => well(),
-                None => self.waiting_body(item, Wait::Loading(READING.into()), k, window, cx),
+                None => self.waiting_body(item, Wait::Loading(READING.into()), k),
             },
             ItemKind::Folder { .. } => match self.folders.get(&item.id) {
                 Some(view) => {
-                    view.update(cx, |v, _| v.set_zoom(k));
-                    let body = if self.cacheable(placed, window, cx) {
-                        view.clone()
-                            .cached(StyleRefinement::default().size_full())
-                            .into_any_element()
-                    } else {
-                        view.clone().into_any_element()
-                    };
+                    self.hand_over(cx, view, Handed::Folder { zoom: k }, move |v, _| v.set_zoom(k));
+                    let body = self.body_view(view, placed, window, cx);
                     div()
                         .flex_1()
                         .min_h_0()
@@ -2429,7 +2416,7 @@ impl WorkspaceView {
                         .into_any_element()
                 }
                 None if !worker_up => well(),
-                None => self.waiting_body(item, Wait::Loading(READING.into()), k, window, cx),
+                None => self.waiting_body(item, Wait::Loading(READING.into()), k),
             },
         }
     }

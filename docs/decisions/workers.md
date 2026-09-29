@@ -191,6 +191,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   panel) and lets go when every agent is idle, blocked on the human, or gone
   (`a_working_agent_keeps_the_device_awake`). Not done, ⏸ until asked: a host setting to opt
   out (`pmset` still wins over an activity for a forced sleep).
+  - Amended 2026-09-30: **a working agent keeps the host awake with nobody attached, while it
+    shows signs of work.** A person starts a long turn from the phone and pockets it, or closes
+    the laptop that was the client. The host used to idle to sleep there, stalling the turn
+    mid-tool with no one to notice. `Wake` now counts working agents beside clients, and holds
+    the system (not the display) while either is above zero.
+    - **What counts.** An agent counts while it is `Working`, in a `Tool`, or `Waiting` on
+      background work (`tasks > 0`, Claude Code ruling **A turn that leaves work running is
+      paused, not done**). It counts only while it showed a sign of work within
+      `SILENT_CAP` = 15 minutes (`wake::Quiet`, sampled on the agents tick).
+    - **Signs of work in a turn.** The session's output. Claude Code repaints its spinner and
+      elapsed time every second during a turn, so 15 silent minutes mean the turn hung or its
+      end was never heard: a Claude Code killed without a `Stop` stays `Working` until the
+      process probe sees it gone.
+    - **Signs of work in a paused turn.** Its prompt is quiet on screen, so it also counts the
+      processor time of the agent's descendant processes, the commands it left running
+      (`ports::descendants_cpu`: libproc `PROC_PIDTASKINFO` on macOS, `/proc/<pid>/stat` on
+      Linux, summed over the live tree without the agent itself). A build computes; a dev
+      server waiting for requests does not, and lets the host go after 15 minutes.
+    - **A ceiling for paused turns.** `PAUSED_CEILING` = 2 hours from the pause, whatever the
+      commands do, since a watcher that polls never ends.
+    - Blocked and idle agents do not count: they wait on the person, and the person is not
+      there. `slopty worker wake` (`CtlRequest::Wake` → `ctl::Awake`) prints what holds the
+      host now.
+    - Tests:
+      - `wake::tests`: `a_working_agent_holds_the_machine_with_nobody_attached`,
+        `the_cap_lets_a_silent_agent_go` and
+        `a_paused_turn_counts_while_its_commands_compute_up_to_the_ceiling`.
+      - `ports::tests::a_busy_descendant_moves_the_processor_time_and_a_sleeping_one_does_not`.
+      - `slopty-workerd` `handoff`
+        `a_working_agent_keeps_the_worker_awake_with_nobody_connected`. Hooks are sent to the
+        control socket, and the test checks the real assertion in the power manager's table
+        (`pmset -g assertions`: `PreventUserIdleSystemSleep` held by the worker's pid under
+        its reason), not only the policy's flag.
 
 - ✅ **Hosts are added by address and keyed by their `WorkerId`** (2026-09-24, with the transport
   ruling **Plaintext QUIC on noq, standalone; iroh removed**). A host is typed as `host[:port]` —

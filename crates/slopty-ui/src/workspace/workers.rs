@@ -114,7 +114,6 @@ impl WorkspaceView {
                 self.faces.held.insert(*session);
             }
             self.terminals.remove(session);
-            self.running.remove(session);
             self.agents.remove(session);
         }
         for item in &items {
@@ -234,7 +233,7 @@ impl WorkspaceView {
         }
         for item in items {
             if let Some(view) = self.screens.get(&item) {
-                view.update(cx, |v, _| v.set_rtt(rtt));
+                view.update(cx, |v, cx| v.set_rtt(rtt, cx));
             }
         }
         // The bars and the navigator show it: repaint only when what they print moved.
@@ -579,7 +578,6 @@ impl WorkspaceView {
                 self.send_session(session, ClientMsg::Term { session, req: TermRequest::Detach });
             }
             self.terminals.remove(&session);
-            self.running.remove(&session);
         }
         self.reconcile_screens();
         self.update_run_targets(cx);
@@ -610,7 +608,7 @@ impl WorkspaceView {
             TerminalViewEvent::Notification { .. } => cx.emit(WorkspaceEvent::Attention(sid)),
             TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
-            TerminalViewEvent::Title(_) => this.retitled(sid, cx),
+            TerminalViewEvent::Title(_) => this.terminal_changed(sid, cx),
             TerminalViewEvent::Cwd { path, repo, branch } => {
                 this.session_moved(sid, path, repo.as_deref(), branch.as_deref());
                 cx.notify();
@@ -659,6 +657,8 @@ impl WorkspaceView {
             view.update(cx, |v, _| v.set_rtt(Some(rtt)));
         }
         self.terminals.insert(session, view);
+        // As it starts: a shell attached mid-command is drawn running from its first frame.
+        let _news = self.copy_shell(session, cx);
     }
 
     /// Requested quality for a new stream: the settings' ceilings and depth at full scale, at
@@ -800,7 +800,7 @@ impl WorkspaceView {
                     view
                 });
                 view.update(cx, |v, cx| {
-                    v.set_rtt(rtt);
+                    v.set_rtt(rtt, cx);
                     if show_stats {
                         v.set_hud(true, cx);
                     }
@@ -816,7 +816,10 @@ impl WorkspaceView {
                     }
                 })
                 .detach();
+                // Its facts, copied whenever it changes: its first frame, its sound.
+                cx.observe(&view, move |this, _view, cx| this.stream_changed(id, cx)).detach();
                 self.screens.insert(id, view);
+                self.stream_changed(id, cx);
             }
             ScreenEvent::Closed { stream, reason } => {
                 // A display made for this device that ends goes back to the physical one,
@@ -836,7 +839,7 @@ impl WorkspaceView {
                 if width > 0 && height > 0 {
                     for id in self.streams_of(key, stream, cx) {
                         if let Some(view) = self.screens.get(&id) {
-                            view.update(cx, |v, _| v.set_geometry(width, height));
+                            view.update(cx, |v, cx| v.set_geometry(width, height, cx));
                         }
                     }
                 }
@@ -844,7 +847,7 @@ impl WorkspaceView {
             ScreenEvent::Rate { stream, target_bps, verdict, capped } => {
                 for id in self.streams_of(key, stream, cx) {
                     if let Some(view) = self.screens.get(&id) {
-                        view.update(cx, |v, _| v.set_rate(target_bps, verdict, capped));
+                        view.update(cx, |v, cx| v.set_rate(target_bps, verdict, capped, cx));
                     }
                 }
             }
@@ -1078,6 +1081,33 @@ impl WorkspaceView {
         if let Some(w) = self.workers.get(&worker) {
             w.send(ClientMsg::ReadFile { path });
         }
+    }
+
+    /// Whether [`Self::note_visible`] has anything to do for `visible`: a remote tile that
+    /// came on screen or went off it, a stream due to be let go, or one waiting with no timer
+    /// out for it.
+    pub(super) fn visibility_due(&self, visible: &[ItemId]) -> bool {
+        let now = std::time::Instant::now();
+        let remote = self
+            .items()
+            .filter(|(_, i)| matches!(i.kind, ItemKind::Window { .. } | ItemKind::Display { .. }));
+        let mut waiting = false;
+        for (_, item) in remote {
+            let id = item.id;
+            let seen = visible.contains(&id) || self.popouts.holds(id);
+            match (seen, self.unseen.get(&id)) {
+                (true, Some(_)) | (false, None) => return true,
+                (true, None) => {}
+                (false, Some(since)) => {
+                    let parked = self.parked.contains(&id);
+                    if !parked && now.saturating_duration_since(*since) >= self.stream_grace {
+                        return true;
+                    }
+                    waiting |= !parked;
+                }
+            }
+        }
+        waiting && !self.park_pending
     }
 
     /// Mark which remote tiles are off screen this frame, and park or wake streams: called

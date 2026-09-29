@@ -434,6 +434,7 @@ fn reported(kind: AgentKind, status: &AgentStatus, source: Option<AgentSource>) 
             ("blocked", tool, Some(reason_key(reason)))
         }
         AgentStatus::Done => ("done", None, None),
+        AgentStatus::Waiting { .. } => ("paused", None, None),
     };
     AgentView {
         agent: Some(agent_key(kind)),
@@ -460,11 +461,28 @@ fn status_text(status: &AgentStatus, source: Option<AgentSource>) -> String {
         AgentStatus::Tool { tool } => format!("running {tool}"),
         AgentStatus::Blocked(reason) => format!("waiting: {}", reason_text(reason)),
         AgentStatus::Done => "done".to_owned(),
+        AgentStatus::Waiting { tasks, crons } => {
+            format!("paused: {}", pending_text(*tasks, *crons))
+        }
     };
     match source {
         Some(source) => format!("{what} ({})", source_name(source)),
         None => what,
     }
+}
+
+/// The work a paused agent waits on: "2 background tasks, 1 scheduled prompt".
+fn pending_text(tasks: u32, crons: u32) -> String {
+    let count = |n: u32, one: &str| match n {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        n => Some(format!("{n} {one}s")),
+    };
+    [count(tasks, "background task"), count(crons, "scheduled prompt")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn reason_text(reason: &BlockReason) -> String {

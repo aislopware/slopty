@@ -96,12 +96,51 @@ fn enter_raw() -> Result<RawGuard> {
     Ok(RawGuard(saved))
 }
 
+/// Do what a handoff asks of this terminal client: open a page with this machine's opener;
+/// refuse an edit, and a page to offer, since a raw terminal has nowhere to show a notice. The
+/// answer to send, if any.
+fn handoff(
+    handoffs: &mut slopty_client::handoff::Handoffs,
+    event: slopty_proto::handoff::HandoffEvent,
+) -> Option<ClientMsg> {
+    use slopty_client::handoff::Todo;
+    use slopty_proto::handoff::HandoffReply;
+    match handoffs.heard(event, false, slopty_core::WallMs::now()) {
+        Todo::Open { url, reply } => {
+            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+            // Tokio reaps it once it exits, which `open` does at once.
+            let opened = tokio::process::Command::new(opener)
+                .arg(&url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match opened {
+                Ok(_child) => Some(reply),
+                Err(e) => {
+                    tracing::warn!(error = %e, "no opener for a page the shell handed over");
+                    let id = match reply {
+                        ClientMsg::Handoff(r) => r.id(),
+                        _ => return None,
+                    };
+                    Some(ClientMsg::Handoff(HandoffReply::Refused { id }))
+                }
+            }
+        }
+        Todo::Refuse { reply } => Some(reply),
+        Todo::Offer { open, .. } => Some(ClientMsg::Handoff(HandoffReply::Refused { id: open.id })),
+        Todo::Edit { .. } | Todo::Withdraw { .. } => None,
+    }
+}
+
 async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
     let Session { conn, endpoint, .. } = session;
     let size = local_size()?;
     let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events taken")?;
     let mut state = TermState::new(size);
+    let mut handoffs = slopty_client::handoff::Handoffs::default();
+    link.send(slopty_client::handoff::declare(true, false)).await?;
     let raw = enter_raw()?;
     let mut stdin = read_on_a_thread(std::io::stdin())?;
     let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
@@ -150,6 +189,13 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
                         .to_owned(),
                         0,
                     ));
+                }
+                // This terminal is on the person's own machine: a page opens here. It has no
+                // file tiles, so an edit goes to another client, or to `vi` in the shell.
+                Some(LinkEvent::Control(WorkerMsg::Handoff(event))) => {
+                    if let Some(reply) = handoff(&mut handoffs, event) {
+                        link.send(reply).await?;
+                    }
                 }
                 Some(
                     LinkEvent::Control(_)

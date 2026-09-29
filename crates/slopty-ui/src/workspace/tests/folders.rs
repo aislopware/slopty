@@ -7,12 +7,13 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{ExternalPaths, FileDropEvent};
+use slopty_client::clip::Fetched;
 use slopty_client::remote::Remote;
 use slopty_client::xfer::XferError;
 use slopty_core::{WallMs, XferId};
 use slopty_proto::folder::{FolderEntry, Listing};
 use slopty_proto::orchestration::FileKind;
-use slopty_proto::transfer::{ClipFormat, Dest, XferMsg};
+use slopty_proto::transfer::{Dest, RepRef, XferMsg};
 
 use super::*;
 
@@ -233,11 +234,11 @@ impl Remote for Uploads {
         Ok(vec![file])
     }
 
-    fn clip_data(&self, _generation: u64, _format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
-        None
+    fn clip_fetch(&self, _rep: &RepRef, _max: Option<u64>, _wait: Duration) -> Fetched {
+        Fetched::Gone
     }
 
-    fn send_clip(&self, _generation: u64, _format: ClipFormat, _bytes: Vec<u8>) {}
+    fn send_clip(&self, _rep: RepRef, _answer: Fetched, _urgent: bool) {}
 
     fn forward(&self, _port: u16) -> Option<u16> {
         None

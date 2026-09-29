@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+[{"reply":"handoff","handed":"taken","client":"Studio"},{"reply":"handoff","handed":"offered","client":"Studio","why":"NotTyped"},{"reply":"handoff","handed":"offered","client":"Studio","why":{"Wary":"UserInfo"}},{"reply":"handoff","handed":"nobody","why":"none_connected"},{"reply":"handoff","handed":"nobody","why":"none_capable"},{"reply":"handoff","handed":"nobody","why":"refused"},{"reply":"handoff","handed":"nobody","why":"timed_out"},{"reply":"handoff","handed":"edited","outcome":"done"},{"reply":"handoff","handed":"lost"}]

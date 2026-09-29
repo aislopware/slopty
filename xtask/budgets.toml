@@ -18,6 +18,10 @@
 "engine.frame_cost.take_frame" = 34324
 "engine.frame_cost.write" = 861
 "engine.osc_scan_cost.per_osc" = 172
+"engine.osc_write_cost.per_osc" = 7221
+"engine.osc_write_cost.per_osc_raw_vt" = 6919
+"engine.png_decode_cost.rgb_1024x768" = 42581941
+"engine.png_decode_cost.rgba_1024x768" = 10460416
 "engine.scroll_frame_cost.200x60" = 5301643
 "engine.scroll_frame_cost.80x24" = 881550
 "engine.search_after_output_cost.plain" = 1877298

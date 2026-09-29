@@ -42,6 +42,9 @@ pub enum Sanitizer {
     Address,
     /// `ThreadSanitizer`: data races.
     Thread,
+    /// `RealtimeSanitizer`: an allocation, lock or blocking call in a function marked real-time,
+    /// which is the audio render callback (`crates/slopty-codec/src/audio.rs`, `render`).
+    Realtime,
 }
 
 impl Sanitizer {
@@ -49,6 +52,7 @@ impl Sanitizer {
         match self {
             Self::Address => "address",
             Self::Thread => "thread",
+            Self::Realtime => "realtime",
         }
     }
 }
@@ -150,8 +154,25 @@ fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
 
 /// `-Zbuild-std` so the standard library is instrumented too (a race through `std` is still
 /// a race); the host triple is passed explicitly because build-std needs it.
+///
+/// `RealtimeSanitizer` needs neither: its runtime intercepts `malloc`, locks and system calls
+/// whatever called them, and it checks only functions marked `#[sanitize(realtime =
+/// "nonblocking")]`, so it builds the codec alone with `--cfg slopty_rtsan`, which marks the
+/// render callback and adds the test that proves an allocation there aborts.
 fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
     let flag = which.flag();
+    if matches!(which, Sanitizer::Realtime) {
+        let _dir = sh.push_env("CARGO_TARGET_DIR", "target/deep/realtime");
+        let flags = "-Zsanitizer=realtime --cfg slopty_rtsan -C target-cpu=apple-m1";
+        let _flags = sh.push_env("RUSTFLAGS", flags);
+        let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
+        let packages = packages(chosen, &["slopty-codec"]);
+        let host = TRIPLES[0];
+        return quiet_step(
+            "realtime sanitizer",
+            cmd!(sh, "cargo +nightly nextest run --target {host} {packages...}"),
+        );
+    }
     let _dir = sh.push_env("CARGO_TARGET_DIR", format!("target/deep/{flag}"));
     let _flags = sh.push_env("RUSTFLAGS", format!("-Zsanitizer={flag} -C target-cpu=apple-m1"));
     let _wrapper = sh.push_env("RUSTC_WRAPPER", "");

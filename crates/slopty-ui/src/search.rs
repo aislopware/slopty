@@ -494,6 +494,12 @@ impl ProjectSearch {
         self.rows.get(ix).is_some_and(|r| !matches!(r, Row::Context { .. }))
     }
 
+    /// Whether an input method holds uncommitted text in a field (a Telex word, kana before
+    /// conversion): the keys it reads then (the arrows, Tab, Esc) are its own.
+    fn composing(&self, cx: &App) -> bool {
+        [&self.query, &self.replace, &self.files].iter().any(|f| f.read(cx).is_composing())
+    }
+
     /// Move the selection `delta` rows it can land on, stopping at the ends.
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(last) = self.rows.len().checked_sub(1) else { return };
@@ -1114,22 +1120,41 @@ impl Render for ProjectSearch {
         let root = crate::kit::anchor(&theme, window)
             .id("search-backdrop")
             .child(panel)
-            .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
-            .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
+            // While an input method composes in a field, these keys are its own.
+            .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {
+                if !this.composing(cx) {
+                    this.step(-1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| {
+                if !this.composing(cx) {
+                    this.step(1, cx);
+                }
+            }))
             .capture_action(cx.listener(move |this, _: &MovePageUp, _window, cx| {
-                this.step(page.saturating_neg(), cx);
+                if !this.composing(cx) {
+                    this.step(page.saturating_neg(), cx);
+                }
             }))
             .capture_action(cx.listener(move |this, _: &MovePageDown, _window, cx| {
-                this.step(page, cx);
+                if !this.composing(cx) {
+                    this.step(page, cx);
+                }
             }))
             .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                this.cycle(true, window, cx);
+                if !this.composing(cx) {
+                    this.cycle(true, window, cx);
+                }
             }))
             .capture_action(cx.listener(|this, _: &OutdentInline, window, cx| {
-                this.cycle(false, window, cx);
+                if !this.composing(cx) {
+                    this.cycle(false, window, cx);
+                }
             }))
-            .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
-                cx.emit(ProjectSearchEvent::Dismiss);
+            .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
+                if !this.composing(cx) {
+                    cx.emit(ProjectSearchEvent::Dismiss);
+                }
             }))
             .on_action(cx.listener(|this, _: &ToggleMatchCase, _window, cx| {
                 this.toggle(|t| &mut t.match_case, cx);

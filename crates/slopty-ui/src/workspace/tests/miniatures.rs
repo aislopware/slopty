@@ -25,7 +25,7 @@ fn an_open_overview_draws_a_miniature_per_tile_and_none_while_closed(cx: &mut Te
 
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();
-    let zoom = view.read_with(cx, |v, _| v.drawn_zoom);
+    let zoom = view.read_with(cx, |v, _| v.drawn.zoom.get());
     assert!(zoom < tile::SHAPES_BELOW, "five columns zoom under half: {zoom}");
     let chrome = Theme::default().typography.icon_large();
     for t in &tiles {

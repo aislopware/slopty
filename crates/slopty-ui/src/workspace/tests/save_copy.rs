@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use slopty_client::clip::Fetched;
 use slopty_client::remote::Remote;
 use slopty_client::xfer::XferError;
 use slopty_core::{WallMs, XferId};
 use slopty_proto::file::{FILE_BYTES, FileRead, INLINE_FILE_BYTES};
-use slopty_proto::transfer::{ClipFormat, Dest};
+use slopty_proto::transfer::{Dest, RepRef};
 
 use super::*;
 
@@ -37,11 +38,11 @@ impl Remote for Files {
         Ok(vec![file])
     }
 
-    fn clip_data(&self, _generation: u64, _format: ClipFormat, _wait: Duration) -> Option<Vec<u8>> {
-        None
+    fn clip_fetch(&self, _rep: &RepRef, _max: Option<u64>, _wait: Duration) -> Fetched {
+        Fetched::Gone
     }
 
-    fn send_clip(&self, _generation: u64, _format: ClipFormat, _bytes: Vec<u8>) {}
+    fn send_clip(&self, _rep: RepRef, _answer: Fetched, _urgent: bool) {}
 
     fn forward(&self, _port: u16) -> Option<u16> {
         None

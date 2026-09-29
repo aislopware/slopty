@@ -11,6 +11,7 @@ mod check;
 mod claude;
 mod claude_mod;
 mod deep;
+mod doctor;
 mod e2e;
 mod fixtures;
 mod fuzz;
@@ -23,6 +24,7 @@ mod nightly;
 mod prune;
 mod release;
 mod run;
+mod runner;
 mod setup;
 mod sign;
 mod soak;
@@ -52,6 +54,9 @@ enum Cmd {
         #[arg(long = "lane", value_enum)]
         lanes: Vec<gate::LaneId>,
     },
+    /// What on this Mac slows every build and only you can fix: whether `XProtect` scans each new
+    /// binary (the Developer Tools switch) and the free space the gate needs.
+    Doctor,
     /// List enabled macOS input sources, or select one by id (for input-method testing).
     Ime {
         /// Input source id to select (e.g. `com.apple.inputmethod.VietnameseSimpleTelex`).
@@ -93,11 +98,19 @@ enum Cmd {
         lanes: Vec<gate::LaneId>,
     },
     /// Delete the build units and incremental caches nothing has used for a while, in every
-    /// target dir under `target/` (also run, skipping busy dirs, after `check` and `gate`).
+    /// target dir under `target/`, then the least recently used until `target/` is within its
+    /// budget and its volume above the free-space floor (also run, skipping busy dirs, after
+    /// `check` and `gate`).
     Prune {
         /// Hours a unit may go unused before it goes.
         #[arg(long, default_value_t = prune::DEFAULT_IDLE_HOURS)]
         idle_hours: u64,
+        /// GB `target/` may hold (default `SLOPTY_TARGET_BUDGET_GB`, else 160).
+        #[arg(long)]
+        budget_gb: Option<u64>,
+        /// GB its volume keeps free (default `SLOPTY_DISK_FLOOR_GB`, else 50).
+        #[arg(long)]
+        floor_gb: Option<u64>,
         /// Show what would go without deleting it.
         #[arg(long)]
         dry_run: bool,
@@ -200,8 +213,18 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<linux::LinuxCmd>,
     },
-    /// Keep the gpui-fast, gpui-kit and libghostty-rs forks current with their upstreams and zed
-    /// (`check` the drift, `sync` them).
+    /// Cargo's target runner for test binaries (the gate and `check` set it): runs a `deps/`
+    /// binary through a hard link in `run/`, out of a directory of 100 000 entries.
+    #[command(hide = true)]
+    TestRunner {
+        /// The binary cargo or nextest runs.
+        binary: camino::Utf8PathBuf,
+        /// Its arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<std::ffi::OsString>,
+    },
+    /// Keep the gpui-fast, gpui-kit, ghostty and libghostty-rs forks current with their upstreams
+    /// and zed (`check` the drift, `sync` them, `watch` the upstreams).
     Upstream {
         #[command(subcommand)]
         cmd: upstream::UpstreamCmd,
@@ -214,6 +237,7 @@ fn main() -> Result<()> {
     sh.change_dir(tools::repo_root()?);
     match cli.cmd {
         Cmd::Setup { no_tools, lanes } => setup::run(&sh, no_tools, &lanes),
+        Cmd::Doctor => doctor::run(&sh),
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
         Cmd::Check { packages } => {
             let checked = check::run(&sh, &packages);
@@ -226,11 +250,21 @@ fn main() -> Result<()> {
             prune::auto();
             gated
         }
-        Cmd::Prune { idle_hours, dry_run } => prune::run(prune::Options {
-            idle: std::time::Duration::from_secs(idle_hours.saturating_mul(3600)),
-            wait: true,
-            dry_run,
-        }),
+        Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run } => {
+            let mut limits = prune::Limits::from_env()?;
+            if let Some(gb) = budget_gb {
+                limits.budget = gb.saturating_mul(1_000_000_000);
+            }
+            if let Some(gb) = floor_gb {
+                limits.floor = gb.saturating_mul(1_000_000_000);
+            }
+            prune::run(prune::Options {
+                idle: std::time::Duration::from_secs(idle_hours.saturating_mul(3600)),
+                limits,
+                wait: true,
+                dry_run,
+            })
+        }
         Cmd::Deep { cmd } => deep::run(&sh, &cmd),
         Cmd::Fuzz(opts) => fuzz::run(&sh, &opts),
         Cmd::Bench(opts) => bench::run(&sh, &opts),
@@ -265,5 +299,6 @@ fn main() -> Result<()> {
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
         Cmd::Linux { cmd } => linux::run(&sh, cmd.unwrap_or(linux::LinuxCmd::Build)),
         Cmd::Upstream { cmd } => upstream::run(&sh, &cmd),
+        Cmd::TestRunner { binary, args } => runner::exec(&binary, &args),
     }
 }

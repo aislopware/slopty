@@ -319,12 +319,12 @@ fn request(reader: &mut impl std::io::BufRead) -> Result<Option<(String, Vec<u8>
 }
 
 /// A canned Messages API: each request is answered by the scenario its first message names.
-struct FakeApi {
-    port: u16,
+pub struct FakeApi {
+    pub port: u16,
 }
 
 impl FakeApi {
-    fn start() -> Result<Self> {
+    pub fn start() -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         std::thread::spawn(move || {
@@ -392,16 +392,27 @@ fn answer(body: &Value) -> (Vec<Block>, &'static str) {
             },
         );
     let tools = body.get("tools").and_then(Value::as_array).is_some_and(|t| !t.is_empty());
+    let woken = messages.last().map(text_of).is_some_and(|t| t.contains("<task-notification>"));
     if !tools {
         // Claude Code's own side requests (a title, a summary).
         (vec![Block::Text(&["Fake", " title"])], "end_turn")
     } else if first.contains("SUBTASK") {
         (vec![Block::Text(&["Sub", "agent ", "found it."])], "end_turn")
+    } else if woken {
+        // A background task finished and woke the session.
+        (vec![Block::Text(&["It ", "finished."])], "end_turn")
     } else if tool_result {
         (vec![Block::Text(&["Done", ": the ", "command said hi."])], "end_turn")
     } else if first.contains("scenario:think") {
         let thinking = Block::Thinking(&["The person ", "wants a greeting."]);
         (vec![thinking, Block::Text(&["Hello", " there."])], "end_turn")
+    } else if first.contains("scenario:background") {
+        let input: &[&str] = &[
+            r#"{"command": "sleep 3; echo woke", "#,
+            r#""description": "Sleep then print a marker", "#,
+            r#""run_in_background": true}"#,
+        ];
+        (vec![Block::Tool { id: "toolu_fake3", name: "Bash", input }], "tool_use")
     } else if first.contains("scenario:agent") {
         let input: &[&str] = &[
             r#"{"description": "Look", "#,

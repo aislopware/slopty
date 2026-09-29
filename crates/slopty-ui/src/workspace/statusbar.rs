@@ -20,6 +20,7 @@
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, nor
 //! does a round trip nobody would read.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -33,7 +34,7 @@ use gpui::{
 };
 use slopty_client::layout::WorkerKey;
 use slopty_client::relay::RelayNotice;
-use slopty_core::SessionId;
+use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_theme::Theme;
 
@@ -43,6 +44,7 @@ use super::tile::repo_place;
 use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
+use crate::draw::Draw;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
 use crate::kit::{self, meta, separator, tabular};
 use crate::palette::section_heading;
@@ -88,7 +90,7 @@ impl std::fmt::Debug for HostActions {
 #[derive(Default)]
 pub(super) struct Bar {
     /// The frame time's readout, and when it was worked out.
-    frame_text: Option<(Instant, Option<SharedString>)>,
+    frame_text: RefCell<Option<(Instant, Option<SharedString>)>>,
     /// The hosts popover is up.
     hosts_open: bool,
     /// What the popover can do to each worker, as the app says.
@@ -96,7 +98,9 @@ pub(super) struct Bar {
     /// The popover's way to add a worker, as the app says.
     add: Option<MenuRun>,
     /// Draws the bar again when the frame time's readout is due, while the stats show.
-    tick: Option<Task<()>>,
+    tick: RefCell<Option<Task<()>>>,
+    /// The focused stream's painted rate, as the bar's clock last read it.
+    rate: Cell<Option<(ItemId, f32)>>,
     /// The pointer is over the bar, which then shows the link however quick it is.
     hovered: bool,
 }
@@ -147,17 +151,15 @@ impl WorkspaceView {
     /// Agents busy on their own, across every worker, as their tiles mark them, but for those
     /// whose tile is on screen: its header says so already, as the focused tile's upload is
     /// its header's to say.
-    pub(super) fn working_count(&self, cx: &App) -> usize {
+    pub(super) fn working_count(&self) -> usize {
         let sessions = self
             .agents
             .keys()
             .chain(self.server_agents.keys().filter(|s| !self.agents.contains_key(s)));
         let shown = |s: SessionId| {
-            self.tile_of_session(s).is_some_and(|t| self.on_screen.contains(&t.item))
+            self.tile_of_session(s).is_some_and(|t| self.drawn.on_screen.borrow().contains(&t.item))
         };
-        sessions
-            .filter(|s| !shown(**s) && self.agent_mark(**s, cx) == Some(Status::Working))
-            .count()
+        sessions.filter(|s| !shown(**s) && self.agent_mark(**s) == Some(Status::Working)).count()
     }
 
     /// Ports forwarded here, across every shell.
@@ -197,20 +199,40 @@ impl WorkspaceView {
 
     /// The frame time's readout, worked out at most once a [`FRAME_READOUT_EVERY`]; nothing
     /// before the app's probe has timed a frame.
-    fn frame_readout(&mut self, cx: &App) -> Option<SharedString> {
+    fn frame_readout(&self, cx: &App) -> Option<SharedString> {
         let now = Instant::now();
-        let fresh = self
-            .bar
-            .frame_text
+        let mut readout = self.bar.frame_text.borrow_mut();
+        let fresh = readout
             .as_ref()
             .is_some_and(|(at, _)| now.saturating_duration_since(*at) < FRAME_READOUT_EVERY);
         if !fresh {
             let text = crate::frames::stats(cx)
                 .filter(|s| s.frames > 0)
                 .map(|s| format!("Frame {:.1} ms", s.draw_p50.as_secs_f64() * 1e3).into());
-            self.bar.frame_text = Some((now, text));
+            *readout = Some((now, text));
         }
-        self.bar.frame_text.as_ref().and_then(|(_, text)| text.clone())
+        readout.as_ref().and_then(|(_, text)| text.clone())
+    }
+
+    /// The rate stream `id` is painted at, as the bar's clock last read it. Read from the
+    /// stream only when the clock has not read it yet: the bar would otherwise be built again
+    /// with every frame the stream paints, for a number it prints once a second.
+    fn stream_rate(&self, id: ItemId, cx: &App) -> Option<f32> {
+        if let Some((read, fps)) = self.bar.rate.get()
+            && read == id
+        {
+            return Some(fps);
+        }
+        let fps = self.screens.get(&id)?.read(cx).painted_fps();
+        self.bar.rate.set(Some((id, fps)));
+        Some(fps)
+    }
+
+    /// What the bar's clock reads before it draws the bar again: the focused stream's rate.
+    fn read_clock(&self, cx: &App) {
+        let focused = self.focused().map(|t| t.item);
+        let rate = focused.and_then(|id| Some((id, self.screens.get(&id)?.read(cx).painted_fps())));
+        self.bar.rate.set(rate);
     }
 
     /// What the bar says of the focused tile, by its kind: a file's language and caret, a
@@ -229,14 +251,14 @@ impl WorkspaceView {
                 Some(meta_line([file.coloured_as(), Some(caret.as_str())]))
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
-                let screen = self.screens.get(&item.id)?.read(cx);
-                let (w, h) = screen.size();
-                (screen.frames() > 0)
-                    .then(|| format!("{w}\u{d7}{h} \u{b7} {:.0} fps", screen.painted_fps()))
+                let stream = self.stream(item.id).filter(|s| s.drawn)?;
+                let (w, h) = stream.size;
+                let fps = self.stream_rate(item.id, cx)?;
+                Some(format!("{w}\u{d7}{h} \u{b7} {fps:.0} fps"))
             }
-            ItemKind::Terminal { session } if self.agent_state(*session).is_none() => {
-                self.running_for(*session, cx).map(|ran| format!("Running {}", kit::duration(ran)))
-            }
+            ItemKind::Terminal { session } if self.agent_state(*session).is_none() => self
+                .running_for(*session)
+                .map(|ran| format!("Running {}", super::navigator::turn_label(ran))),
             // A page's host is its header's place: said there, not twice.
             ItemKind::Terminal { .. }
             | ItemKind::Note { .. }
@@ -247,20 +269,20 @@ impl WorkspaceView {
 
     /// Whether what the bar says of the focused tile changes with the clock: a command's
     /// running time, a stream's rate.
-    fn focus_clocked(&self, cx: &App) -> bool {
+    fn focus_clocked(&self) -> bool {
         let Some(item) = self.focused().and_then(|t| self.item(t)) else { return false };
         match item.kind {
             ItemKind::Window { .. } | ItemKind::Display { .. } => true,
-            ItemKind::Terminal { session } => self.running_for(session, cx).is_some(),
+            ItemKind::Terminal { session } => self.running_for(session).is_some(),
             _ => false,
         }
     }
 
     /// The bar, or nothing before the first worker.
     pub(super) fn render_statusbar(
-        &mut self,
+        &self,
         window: &Window,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         if self.workers.is_empty() {
             return gpui::Empty.into_any_element();
@@ -270,12 +292,16 @@ impl WorkspaceView {
         let stats = self.show_stats && !phone;
         let frame = stats.then(|| self.frame_readout(cx)).flatten();
         // The frame time, a command's running time and a stream's rate change with the clock.
-        let clocked = stats || self.focus_clocked(cx);
-        self.bar.tick = clocked.then(|| {
-            let bar = self.chrome.statusbar.downgrade();
-            cx.spawn(async move |_this, cx| {
+        let clocked = stats || self.focus_clocked();
+        *self.bar.tick.borrow_mut() = clocked.then(|| {
+            let (bar, this) = (self.chrome.statusbar.entity_id(), cx.weak_entity());
+            cx.spawn(async move |cx| {
                 cx.background_executor().timer(FRAME_READOUT_EVERY).await;
-                let _gone = bar.update(cx, |_, cx| cx.notify());
+                cx.update(|cx| {
+                    let Some(this) = this.upgrade() else { return };
+                    this.read(cx).read_clock(cx);
+                    cx.notify(bar);
+                });
             })
         });
         let theme = &self.theme;
@@ -420,7 +446,7 @@ impl WorkspaceView {
         });
         let frame = frame.map(|text| tabular(readout("status-frame", text.clone())).child(text));
         let workers = (!phone).then(|| self.workers_button(cx)).flatten();
-        let working = self.working_count(cx);
+        let working = self.working_count();
         let agents = (working > 0).then(|| {
             let text: SharedString = agent_summary(working).into();
             readout("status-agents", text.clone())
@@ -562,7 +588,7 @@ impl WorkspaceView {
 
     /// "N workers" with a dot in the worst link's tone, only while any is not up (all up, the
     /// count says nothing worth the bar); opens the hosts, as the "…" menu's Workers does.
-    fn workers_button(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
+    fn workers_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let count = self.workers.len();
@@ -589,7 +615,7 @@ impl WorkspaceView {
 
     /// The hosts popover over the bar's right end: each worker with its link, and what can be
     /// done to it. A click anywhere else closes it.
-    fn render_hosts(&self, window: &Window, cx: &Context<Self>) -> gpui::AnyElement {
+    fn render_hosts(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
@@ -676,7 +702,7 @@ impl WorkspaceView {
 
     /// One worker in the hosts popover: its mark, its name, its round trip or what is wrong,
     /// and, under the pointer, what can be done to it. Clicked, it goes to the worker's tiles.
-    fn host_row(&self, key: WorkerKey, cx: &Context<Self>) -> gpui::AnyElement {
+    fn host_row(&self, key: WorkerKey, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;

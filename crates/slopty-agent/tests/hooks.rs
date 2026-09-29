@@ -11,15 +11,21 @@ mod hooks {
     use serde::Deserialize as _;
     use serde_json::{Value, json};
     use slopty_agent::permission::hook_output;
-    use slopty_agent::{HOOK_EVENTS, HOOK_JSON_BUDGET, Hook, HookEvent};
+    use slopty_agent::{AgentTable, HOOK_EVENTS, HOOK_JSON_BUDGET, Hook, HookEvent, roster};
+    use slopty_core::SessionId;
+    use slopty_proto::agent::{AgentStatus, BlockReason};
     use slopty_proto::ctl::Decision;
 
-    fn records(scenario: &str) -> Vec<Value> {
+    fn fixture(scenario: &str, file: &str) -> String {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/conversation")
             .join(scenario)
-            .join("hooks.jsonl");
-        let text = std::fs::read_to_string(path).expect("fixture");
+            .join(file);
+        std::fs::read_to_string(path).expect("fixture")
+    }
+
+    fn records(scenario: &str) -> Vec<Value> {
+        let text = fixture(scenario, "hooks.jsonl");
         text.lines().map(|line| serde_json::from_str(line).expect("json")).collect()
     }
 
@@ -41,7 +47,7 @@ mod hooks {
 
     #[test]
     fn every_captured_event_is_one_the_relay_registers() {
-        for scenario in ["edit", "tools", "interrupt", "compact", "permission"] {
+        for scenario in ["edit", "tools", "interrupt", "compact", "permission", "background"] {
             for record in records(scenario) {
                 let name = &record["input"]["hook_event_name"];
                 let event = HookEvent::deserialize(name).expect("event");
@@ -152,5 +158,67 @@ mod hooks {
             };
             assert_eq!(hook_output(&decision).as_ref(), Some(&record["output"]), "{command}");
         }
+    }
+
+    /// A turn that left a background command running is paused, not done: Claude Code's Stop
+    /// lists the command; the command's end wakes the session with its notification as the next
+    /// prompt, and the turn after it, with nothing out, is done.
+    #[test]
+    fn a_turn_with_a_command_out_pauses_until_the_command_wakes_it() {
+        let session = SessionId::new();
+        let mut table = AgentTable::default();
+        let said: Vec<_> = records("background")
+            .iter()
+            .filter_map(|r| table.apply(session, &forwarded(&r["input"])))
+            .map(|e| (e.status, e.attention))
+            .collect();
+        let stops: Vec<_> = said
+            .iter()
+            .filter(|(s, _)| matches!(s, AgentStatus::Waiting { .. } | AgentStatus::Done))
+            .collect();
+        assert_eq!(
+            stops,
+            [&(AgentStatus::Waiting { tasks: 1, crons: 0 }, false), &(AgentStatus::Done, true)],
+            "{said:?}"
+        );
+        let woke = inputs("background", "UserPromptSubmit");
+        let woke = forwarded(woke.last().expect("the wake"));
+        assert!(woke.prompt.is_some_and(|p| p.starts_with("<task-notification>")));
+    }
+
+    /// Claude Code's own helpers stop with an empty type and are not the person's subagents.
+    #[test]
+    fn claude_codes_own_helpers_stop_with_an_empty_type() {
+        let stops: Vec<Hook> = ["tools", "compact"]
+            .into_iter()
+            .flat_map(|scenario| inputs(scenario, "SubagentStop"))
+            .map(|input| forwarded(&input))
+            .collect();
+        assert!(stops.iter().any(Hook::is_internal_subagent), "compaction's helper");
+        assert!(
+            stops
+                .iter()
+                .any(|h| !h.is_internal_subagent()
+                    && h.agent_type.as_deref() == Some("general-purpose")),
+            "the person's subagent"
+        );
+    }
+
+    /// `claude agents --json`, as the recorded Claude Code printed it, reads back as a status.
+    #[test]
+    fn claude_codes_session_list_reads_as_a_status() {
+        let listed = roster::parse(&fixture("background", "agents.json")).expect("the list");
+        let [one] = listed.as_slice() else { panic!("{listed:?}") };
+        assert_eq!(one.pid, Some(4321));
+        assert_eq!(one.session_id.as_deref(), Some("00000000-0000-4000-8000-000000000001"));
+        assert_eq!(one.status(), Some(AgentStatus::Idle));
+        let blocked = roster::parse(
+            r#"[{"pid":1,"sessionId":"s","cwd":"/w","kind":"interactive","status":"waiting","waitingFor":"permission prompt"}]"#,
+        )
+        .expect("a waiting session");
+        assert!(matches!(
+            blocked.first().and_then(roster::Listed::status),
+            Some(AgentStatus::Blocked(BlockReason::Permission { .. }))
+        ));
     }
 }

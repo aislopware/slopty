@@ -47,6 +47,7 @@ pub mod hooks;
 pub mod live;
 pub mod permission;
 pub mod resume;
+pub mod roster;
 pub mod statusline;
 pub mod title;
 pub mod transcript;
@@ -57,7 +58,10 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
+use slopty_proto::agent::{
+    AgentBranch, AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, PullRequest,
+    Worktree,
+};
 
 use crate::detect::Program;
 use crate::title::TitleSignal;
@@ -291,6 +295,57 @@ pub struct Hook {
     /// `Statusline` (`slopty hook statusline`): the meters Claude Code's status line reads.
     #[serde(default)]
     pub meters: Option<statusline::Meters>,
+    /// `Stop`/`SubagentStop`: the background commands, subagents and monitors still out, which
+    /// wake the session when they finish. Absent when Claude Code could not reach its task
+    /// registry.
+    #[serde(default)]
+    pub background_tasks: Option<Vec<BackgroundTask>>,
+    /// `Stop`/`SubagentStop`: the prompts scheduled on the session (`/loop`, `CronCreate`).
+    #[serde(default)]
+    pub session_crons: Option<Vec<SessionCron>>,
+    /// `Statusline`: the open pull request the status line names.
+    #[serde(default)]
+    pub pr: Option<PullRequest>,
+    /// `Statusline`: the worktree the session runs in.
+    #[serde(default)]
+    pub worktree: Option<Worktree>,
+}
+
+/// Characters a forwarded hook keeps of a background task's description or a scheduled prompt.
+const PENDING_TEXT_MAX: usize = 200;
+
+/// One entry of a `Stop` hook's `background_tasks`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct BackgroundTask {
+    /// The task's id.
+    #[serde(default)]
+    pub id: String,
+    /// `shell`, `subagent`, `monitor`, `workflow`, …
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    /// `running`, as far as anyone has seen.
+    #[serde(default)]
+    pub status: String,
+    /// What it is doing, as the model described it.
+    #[serde(default)]
+    pub description: String,
+}
+
+/// One entry of a `Stop` hook's `session_crons`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SessionCron {
+    /// The schedule's id.
+    #[serde(default)]
+    pub id: String,
+    /// A cron expression.
+    #[serde(default)]
+    pub schedule: String,
+    /// It runs again after firing.
+    #[serde(default)]
+    pub recurring: bool,
+    /// The prompt it sends.
+    #[serde(default)]
+    pub prompt: String,
 }
 
 impl Hook {
@@ -321,7 +376,51 @@ impl Hook {
         {
             clip_str(text, HOOK_TEXT_MAX);
         }
+        let tasks = self.background_tasks.iter_mut().flatten().map(|t| &mut t.description);
+        let crons = self.session_crons.iter_mut().flatten().map(|c| &mut c.prompt);
+        for text in tasks.chain(crons) {
+            clip_str(text, PENDING_TEXT_MAX);
+        }
         self
+    }
+
+    /// The work still out when a `Stop` fired: background tasks and scheduled prompts, when
+    /// there is any.
+    fn pending_work(&self) -> Option<(u32, u32)> {
+        let count = |n: Option<usize>| u32::try_from(n.unwrap_or(0)).unwrap_or(u32::MAX);
+        let tasks = count(self.background_tasks.as_ref().map(Vec::len));
+        let crons = count(self.session_crons.as_ref().map(Vec::len));
+        (tasks > 0 || crons > 0).then_some((tasks, crons))
+    }
+
+    /// What a paused turn waits on, for the badge: the first task's description, else the
+    /// first scheduled prompt.
+    fn pending_detail(&self) -> Option<String> {
+        let task = self.background_tasks.iter().flatten().map(|t| t.description.as_str());
+        let cron = self.session_crons.iter().flatten().map(|c| c.prompt.as_str());
+        task.chain(cron).map(first_line).find(|line| !line.is_empty()).map(truncate)
+    }
+
+    /// Whether this is a `SubagentStart` or `SubagentStop` of one of Claude Code's own agents
+    /// (compaction, prompt suggestions, `/btw`) rather than one the model spawned. Claude Code
+    /// gives those the session's own agent name, empty when it runs without one; the model's
+    /// always have a type.
+    #[must_use]
+    pub fn is_internal_subagent(&self) -> bool {
+        matches!(self.event, HookEvent::SubagentStart | HookEvent::SubagentStop)
+            && self.agent_type.as_deref().is_some_and(str::is_empty)
+    }
+
+    /// The badge's line for a prompt: its first line, or for the turn a finished background
+    /// task starts (its prompt a `<task-notification>`), the notification's summary.
+    fn prompt_detail(&self) -> Option<String> {
+        let prompt = self.prompt.as_deref()?;
+        let summary = prompt
+            .trim_start()
+            .starts_with("<task-notification>")
+            .then(|| prompt.split_once("<summary>")?.1.split_once("</summary>").map(|(s, _)| s))
+            .flatten();
+        Some(truncate(first_line(summary.unwrap_or(prompt))))
     }
 
     /// One line describing the tool call ("Bash: cargo test", "Edit src/main.rs").
@@ -535,6 +634,7 @@ const fn phase(status: &AgentStatus) -> u8 {
         AgentStatus::Working | AgentStatus::Tool { .. } => 2,
         AgentStatus::Blocked(_) => 3,
         AgentStatus::Done => 4,
+        AgentStatus::Waiting { .. } => 5,
     }
 }
 
@@ -795,6 +895,36 @@ impl Tracker {
         })
     }
 
+    /// Take what Claude Code itself lists for the agent this tracker follows
+    /// ([`roster::Listed`]): its conversation, and when hooks will keep the status from here
+    /// on (`hooked`: the relay is in the user's settings, or its own command line carries it),
+    /// its status as a hook would have said it.
+    ///
+    /// Nothing once a hook has spoken since the worker started: that is newer.
+    fn recover(
+        &mut self,
+        session: SessionId,
+        listed: &roster::Listed,
+        hooked: bool,
+    ) -> Option<AgentEvent> {
+        if self.hooked || self.status == AgentStatus::None {
+            return None;
+        }
+        if listed.session_id.is_some() {
+            self.agent_session.clone_from(&listed.session_id);
+        }
+        let hooked = hooked || resume::invocation(detect::agent_args(&self.argv)).relay;
+        let status = listed.status().filter(|_| hooked)?;
+        self.hooked = true;
+        if status == self.status && self.source == AgentSource::Hook {
+            return None;
+        }
+        self.enter(status);
+        self.detail = None;
+        self.source = AgentSource::Hook;
+        Some(self.event(session))
+    }
+
     /// Replace the detail (something recovered after the hook, such as a transcript line).
     /// Returns whether it changed.
     pub fn set_detail(&mut self, detail: &str) -> bool {
@@ -862,9 +992,7 @@ impl Tracker {
         Some(match hook.event {
             HookEvent::SessionStart => (AgentStatus::Idle, None),
             HookEvent::SessionEnd => (AgentStatus::None, None),
-            HookEvent::UserPromptSubmit => {
-                (AgentStatus::Working, hook.prompt.as_deref().map(first_line).map(truncate))
-            }
+            HookEvent::UserPromptSubmit => (AgentStatus::Working, hook.prompt_detail()),
             HookEvent::PreToolUse if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
                 (AgentStatus::Blocked(BlockReason::Question), hook.question())
             }
@@ -899,6 +1027,11 @@ impl Tracker {
                         None,
                     ),
                 },
+                // Claude Code says its prompt has sat idle for a minute. A turn paused on
+                // background work sits at that prompt by design; it stays paused.
+                "idle_prompt" if matches!(self.status, AgentStatus::Waiting { .. }) => {
+                    return None;
+                }
                 "idle_prompt" => (AgentStatus::Blocked(BlockReason::IdlePrompt), None),
                 "agent_needs_input" => (AgentStatus::Blocked(BlockReason::Question), None),
                 "elicitation_dialog" | "elicitation_url_dialog" => {
@@ -907,9 +1040,17 @@ impl Tracker {
                 "elicitation_complete" | "elicitation_response" => (AgentStatus::Working, None),
                 _ => return None,
             },
+            // A turn that ended with work still out is paused until that work wakes it (a new
+            // turn, whose prompt is the task's notification): not done, and nothing announced.
+            HookEvent::Stop => match hook.pending_work() {
+                Some((tasks, crons)) => {
+                    (AgentStatus::Waiting { tasks, crons }, hook.pending_detail())
+                }
+                None => (AgentStatus::Done, hook.last_said()),
+            },
             // A turn that ended on an API error ends as surely as one that finished; the detail is
             // the error as shown.
-            HookEvent::Stop | HookEvent::StopFailure => (AgentStatus::Done, hook.last_said()),
+            HookEvent::StopFailure => (AgentStatus::Done, hook.last_said()),
             // Any program's own word (`slopty hook report`): a wrapper around another agent
             // gets the same pill, badge and attention as Claude Code's hooks buy it.
             HookEvent::Report => {
@@ -943,6 +1084,9 @@ pub struct AgentTable {
     /// Conversations whose `SessionEnd` did not come from the person ([`Self::resumable`]),
     /// with the probes since that saw something else in the foreground.
     parked: HashMap<SessionId, (resume::Resume, u8)>,
+    /// The pull request and worktree each session's status line last named, when it named
+    /// either.
+    branches: HashMap<SessionId, AgentBranch>,
 }
 
 impl AgentTable {
@@ -953,6 +1097,7 @@ impl AgentTable {
         let event = tracker.apply(session, hook);
         if tracker.status() == &AgentStatus::None {
             self.sessions.remove(&session);
+            self.branches.remove(&session);
             if hook.event == HookEvent::SessionEnd
                 && !resume::ended_by_the_person(hook.reason.as_deref())
                 && let resume::Resumable::Yes(conversation) = before
@@ -1007,8 +1152,50 @@ impl AgentTable {
         let event = tracker.observe(session, obs);
         if tracker.status() == &AgentStatus::None {
             self.sessions.remove(&session);
+            self.branches.remove(&session);
         }
         event
+    }
+
+    /// Take the pull request and worktree a status line named in `session`; what every client
+    /// is told when either changed. Anything but a `Statusline` hook is passed over, and so is
+    /// a session with no agent: the branch lives and goes with its agent, so apply the hook
+    /// first.
+    pub fn branch(&mut self, session: SessionId, hook: &Hook) -> Option<AgentBranch> {
+        if hook.event != HookEvent::Statusline || !self.sessions.contains_key(&session) {
+            return None;
+        }
+        let now = AgentBranch { session, pr: hook.pr.clone(), worktree: hook.worktree.clone() };
+        let empty = now.pr.is_none() && now.worktree.is_none();
+        if self.branches.get(&session).map_or(empty, |before| *before == now) {
+            return None;
+        }
+        if empty {
+            self.branches.remove(&session);
+        } else {
+            self.branches.insert(session, now.clone());
+        }
+        Some(now)
+    }
+
+    /// Every session's pull request and worktree, for a joining client.
+    #[must_use]
+    pub fn branches(&self) -> Vec<AgentBranch> {
+        self.branches.values().cloned().collect()
+    }
+
+    /// Fold in Claude Code's own list of its live sessions (`claude agents --json`), read once
+    /// after the worker started: each agent whose process it lists by pid gets its
+    /// conversation back, and when `hooked` (the relay is registered), the status the hooks it
+    /// sent before the restart had said. The events to broadcast, all quiet.
+    pub fn recover(&mut self, listed: &[roster::Listed], hooked: bool) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        for (session, tracker) in &mut self.sessions {
+            let Some((pid, _started)) = tracker.process else { continue };
+            let Some(entry) = listed.iter().find(|l| l.pid == Some(pid)) else { continue };
+            events.extend(tracker.recover(*session, entry, hooked));
+        }
+        events
     }
 
     /// Feed what a session's transcript says the turn is doing
@@ -1033,6 +1220,7 @@ impl AgentTable {
     pub fn retain(&mut self, live: &[SessionId]) -> Vec<AgentEvent> {
         let mut gone = Vec::new();
         self.parked.retain(|session, _conversation| live.contains(session));
+        self.branches.retain(|session, _branch| live.contains(session));
         self.sessions.retain(|session, _tracker| {
             if live.contains(session) {
                 return true;
@@ -1084,6 +1272,13 @@ impl AgentTable {
     pub fn forget(&mut self, session: SessionId) {
         self.sessions.remove(&session);
         self.parked.remove(&session);
+        self.branches.remove(&session);
+    }
+
+    /// The agent's process in `session`, once the worker has seen it in the foreground.
+    #[must_use]
+    pub fn pid(&self, session: SessionId) -> Option<i32> {
+        self.sessions.get(&session)?.process.map(|(pid, _started)| pid)
     }
 
     /// Where the session's conversation is written, once a hook has said.
@@ -2048,5 +2243,196 @@ mod tests {
         assert!(table.set_transcript_path(b, Path::new("/h/.claude/projects/p/bb-22.jsonl")));
         assert_eq!(resumed(&table, a), ("aa-11".into(), vec!["--effort".into(), "high".into()]));
         assert_eq!(resumed(&table, b), ("bb-22".into(), Vec::new()));
+    }
+
+    /// A turn that ends with a background command out is paused, not done: its own state, no
+    /// attention, the task's description on the badge. The task's notification starts the next
+    /// turn (named by its summary), and a turn that ends with nothing out is done, announced.
+    #[test]
+    fn a_stop_with_work_out_waits_and_the_last_one_is_done() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.apply(sid, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"build it"}"#));
+        let paused = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Stop","last_assistant_message":"Started it.",
+                    "background_tasks":[{"id":"b1","type":"shell","status":"running",
+                    "description":"Sleep then print a marker","command":"sleep 8"}],
+                    "session_crons":[]}"#,
+                ),
+            )
+            .expect("paused");
+        assert_eq!(paused.status, AgentStatus::Waiting { tasks: 1, crons: 0 });
+        assert_eq!(paused.detail.as_deref(), Some("Sleep then print a marker"));
+        assert!(!paused.attention, "no done notification for a paused turn");
+        let woke = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"UserPromptSubmit","prompt":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"Sleep\" completed (exit code 0)</summary>\n</task-notification>"}"#,
+                ),
+            )
+            .expect("woke");
+        assert_eq!(woke.status, AgentStatus::Working);
+        assert_eq!(
+            woke.detail.as_deref(),
+            Some(r#"Background command "Sleep" completed (exit code 0)"#)
+        );
+        let done = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Stop","last_assistant_message":"All done.","background_tasks":[],"session_crons":[]}"#,
+                ),
+            )
+            .expect("done");
+        assert_eq!(done.status, AgentStatus::Done);
+        assert!(done.attention);
+
+        let paused_again = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Stop","background_tasks":[{"id":"b2","type":"shell","status":"running","description":"cargo test"}]}"#,
+                ),
+            )
+            .expect("paused again");
+        assert_eq!(paused_again.status, AgentStatus::Waiting { tasks: 1, crons: 0 });
+        let idle = hook(
+            r#"{"hook_event_name":"Notification","notification_type":"idle_prompt","message":"Claude is waiting for your input"}"#,
+        );
+        assert_eq!(t.apply(sid, &idle), None, "a paused turn sits at its prompt by design");
+        assert_eq!(t.status(), &AgentStatus::Waiting { tasks: 1, crons: 0 });
+
+        let looped = t
+            .apply(
+                sid,
+                &hook(
+                    r#"{"hook_event_name":"Stop","session_crons":[{"id":"c1","schedule":"*/5 * * * *","recurring":true,"prompt":"check the build"}]}"#,
+                ),
+            )
+            .expect("a loop");
+        assert_eq!(looped.status, AgentStatus::Waiting { tasks: 0, crons: 1 });
+        assert_eq!(looped.detail.as_deref(), Some("check the build"));
+    }
+
+    /// A paused agent is not at rest: a nested `claude -p` its background command runs posts
+    /// hooks of another conversation, and they do not take the terminal over.
+    #[test]
+    fn a_paused_agent_keeps_its_conversation_against_a_nested_one() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.apply(sid, &hook(r#"{"session_id":"main","hook_event_name":"UserPromptSubmit"}"#));
+        t.apply(
+            sid,
+            &hook(
+                r#"{"session_id":"main","hook_event_name":"Stop","background_tasks":[{"id":"b1"}]}"#,
+            ),
+        );
+        let nested = hook(r#"{"session_id":"nested","hook_event_name":"Stop"}"#);
+        assert_eq!(t.apply(sid, &nested), None);
+        assert_eq!(t.status(), &AgentStatus::Waiting { tasks: 1, crons: 0 });
+    }
+
+    /// Claude Code's own agents (compaction, prompt suggestions) stop with an empty type; the
+    /// model's subagents, and payloads of builds that sent no type, are the model's.
+    #[test]
+    fn an_internal_subagent_is_told_by_its_empty_type() {
+        let internal = hook(r#"{"hook_event_name":"SubagentStop","agent_type":""}"#);
+        assert!(internal.is_internal_subagent());
+        let spawned = hook(r#"{"hook_event_name":"SubagentStop","agent_type":"Explore"}"#);
+        assert!(!spawned.is_internal_subagent());
+        assert!(!hook(r#"{"hook_event_name":"SubagentStart"}"#).is_internal_subagent());
+        assert!(!hook(r#"{"hook_event_name":"Stop","agent_type":""}"#).is_internal_subagent());
+    }
+
+    /// The relay keeps the count of work out, whatever it cuts of each entry's text.
+    #[test]
+    fn a_forwarded_stop_keeps_its_work_and_cuts_its_text() {
+        let long = "x".repeat(5_000);
+        let payload = serde_json::json!({
+            "hook_event_name": "Stop",
+            "background_tasks": [{ "id": "b1", "description": long }, { "id": "b2" }],
+            "session_crons": [{ "id": "c1", "prompt": long }],
+        });
+        let hook = hook(&payload.to_string()).trimmed();
+        assert_eq!(hook.pending_work(), Some((2, 1)));
+        let text = &hook.background_tasks.as_ref().expect("tasks")[0].description;
+        assert!(text.chars().count() <= PENDING_TEXT_MAX + 1 && text.ends_with('…'));
+    }
+
+    /// A status line's pull request and worktree are news when they change and only then, a
+    /// joining client gets them, and they go with the agent.
+    #[test]
+    fn the_branch_is_told_when_it_changes_and_goes_with_the_agent() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        let line = |pr: Option<u32>| Hook {
+            event: HookEvent::Statusline,
+            pr: pr.map(|number| PullRequest {
+                number,
+                url: format!("https://github.com/o/r/pull/{number}"),
+                review: None,
+                merge_request: false,
+            }),
+            ..Hook::default()
+        };
+        assert_eq!(table.branch(sid, &line(Some(6))), None, "no agent to go with");
+        table.observe(sid, &seen("claude", None));
+        assert_eq!(table.branch(sid, &line(None)), None, "nothing to say");
+        let opened = table.branch(sid, &line(Some(7))).expect("a pull request");
+        assert_eq!(opened.pr.as_ref().map(|pr| pr.number), Some(7));
+        assert_eq!(table.branch(sid, &line(Some(7))), None, "the same again");
+        assert_eq!(table.branches(), [opened]);
+        let closed = table.branch(sid, &line(None)).expect("merged");
+        assert_eq!((closed.pr, closed.worktree), (None, None));
+        assert!(table.branches().is_empty());
+        let stop = hook(r#"{"hook_event_name":"Stop"}"#);
+        assert_eq!(table.branch(sid, &stop), None, "only a status line names one");
+
+        assert!(table.branch(sid, &line(Some(8))).is_some());
+        table.apply(sid, &hook(r#"{"hook_event_name":"SessionEnd"}"#));
+        assert!(table.branches().is_empty(), "the agent went, its branch with it");
+    }
+
+    /// After a restart, Claude Code's own list puts back what only hooks had said (a
+    /// permission prompt) for the agent it names by pid, quietly; not over a hook heard since,
+    /// and not where no relay is registered to keep the status from there on.
+    #[test]
+    fn claude_codes_own_list_restores_what_the_hooks_had_said() {
+        let (a, b, c) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let mut table = AgentTable::default();
+        table.observe(a, &process("claude", None, 11));
+        table.observe(b, &process("claude", None, 22));
+        table.observe(c, &process("claude", None, 33));
+        table.apply(b, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#));
+        let listed = roster::parse(
+            r#"[{"pid":11,"sessionId":"s-a","status":"waiting","waitingFor":"permission prompt"},
+               {"pid":22,"sessionId":"s-b","status":"idle"},
+               {"pid":99,"sessionId":"s-x","status":"busy"}]"#,
+        )
+        .expect("json");
+        let events = table.recover(&listed, true);
+        assert_eq!(events.len(), 1, "{events:?}");
+        let event = &events[0];
+        assert_eq!(event.session, a);
+        assert_eq!(
+            event.status,
+            AgentStatus::Blocked(BlockReason::Permission { tool: String::new() })
+        );
+        assert_eq!((event.source, event.attention), (AgentSource::Hook, false));
+        assert_eq!(event.agent_session.as_deref(), Some("s-a"));
+        assert_eq!(
+            table.snapshot().iter().find(|e| e.session == b).map(|e| &e.status),
+            Some(&AgentStatus::Working)
+        );
+
+        let mut unhooked = AgentTable::default();
+        unhooked.observe(a, &process("claude", None, 11));
+        assert!(unhooked.recover(&listed, false).is_empty());
+        let kept = unhooked.snapshot();
+        assert_eq!(kept[0].status, AgentStatus::Idle, "the process's word stands");
+        assert_eq!(kept[0].agent_session.as_deref(), Some("s-a"), "the conversation is known");
     }
 }

@@ -144,6 +144,33 @@ mod actor {
         })
     }
 
+    /// The program hears the session's focus as a whole (DEC 1004): gained when the first
+    /// viewer focuses its tile, lost when the last lets go or leaves, and nothing for a second
+    /// viewer's focus in between.
+    #[tokio::test]
+    async fn focus_reaches_the_program_once_for_every_viewer() {
+        // Ready only once the terminal no longer echoes: a report that came before would be
+        // echoed by the tty as well as by `cat`.
+        let script = r"stty -icanon -echo; printf '\033[?1004hready\n'; exec cat -v";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let (a, b) = (ClientId::new(), ClientId::new());
+        let (tx_a, mut rx_a) = viewer(256);
+        let (tx_b, _rx_b) = viewer(256);
+        session.attach(a, size(40, 6), tx_a).unwrap();
+        session.attach(b, size(40, 6), tx_b).unwrap();
+        wait_for(&mut rx_a, |_, s| text(s).contains("ready")).await;
+        let focus = |focused| TermRequest::Focus { focused };
+        session.request(a, focus(true)).unwrap();
+        session.request(b, focus(true)).unwrap();
+        session.request(a, focus(false)).unwrap();
+        session.detach(b).unwrap();
+        session.request(a, focus(true)).unwrap();
+        let (_, screen) = wait_for(&mut rx_a, |_, s| text(s).contains("^[[I^[[O^[[I")).await;
+        assert_eq!(text(&screen).lines().nth(1).map(str::trim_end), Some("^[[I^[[O^[[I"));
+        let _killed = child.start_kill();
+        session.close();
+    }
+
     #[tokio::test]
     async fn attach_type_and_see_echo_with_input_ack() {
         let (session, mut child) = start(&["/bin/sh", "-c", "cat"]);
@@ -1569,8 +1596,8 @@ done"#
         // read, the median is a fraction of a millisecond, and it stays under half the pace on
         // a loaded machine where the tail does not.
         // The flood only has to be on: on a machine loaded by other work its own frames come
-        // slower than the pace, which says nothing about the echo.
-        assert!((5..=55).contains(&paced), "the flood is on and paced to 8 ms: {paced}");
+        // slower than the pace, which says nothing about the echo: a loaded gate saw 4 in 400 ms.
+        assert!((2..=55).contains(&paced), "the flood is on and paced to 8 ms: {paced}");
         assert!(p50 < 2.5, "an echo is not held for the pace: p50 {p50:.2} ms");
         session.close();
         let _killed = child.kill().await;
@@ -1659,7 +1686,8 @@ done"#
         tokio::spawn(async move {
             while let Some(tap) = taps.recv().await {
                 if let Tap::Checkpoint { state, .. } = tap {
-                    let _sent = checkpoints_tx.send((tokio::time::Instant::now(), state.len()));
+                    let whole = state.windows(b"filled".len()).any(|w| w == b"filled");
+                    let _sent = checkpoints_tx.send((state.len(), whole));
                 }
             }
         });
@@ -1678,11 +1706,20 @@ done"#
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let filled = filling.elapsed();
+        // The checkpoint holding the whole history can land before the screen shows it (the
+        // last 1 MiB one, or a quiet spell ending before the next poll), and none follows it.
+        let full = loop {
+            let (len, whole) = tokio::time::timeout_at(deadline, checkpoints.recv())
+                .await
+                .expect("the filled history checkpointed")
+                .unwrap();
+            if whole {
+                break len;
+            }
+        };
+        // One quiet spell for a checkpoint of output that followed the one taken.
+        tokio::time::sleep(Duration::from_millis(600)).await;
         while checkpoints.try_recv().is_ok() {}
-        let (_, full) = tokio::time::timeout_at(deadline, checkpoints.recv())
-            .await
-            .expect("the filled history checkpointed")
-            .unwrap();
         while tokio::time::timeout(Duration::from_millis(100), stamps.recv()).await.is_ok() {}
         let mut waits = Vec::new();
         let mut seq = 0_u64;

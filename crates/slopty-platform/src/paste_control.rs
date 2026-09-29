@@ -7,9 +7,13 @@
 //! the clipboard with no prompt. A hardware keyboard's ⌘V keeps the key path it has.
 //!
 //! The button is a subview of the GPUI view, placed by the UI in the view's points
-//! ([`PasteButton::show`]) like the browser tile's page. It is enabled only while the
-//! clipboard holds something clipboard sync carries ([`accepted_types`]). What a tap pastes comes
-//! back to the UI's callback on the main thread as one [`Pasted`].
+//! ([`PasteButton::show`]) like the browser tile's page. It is enabled while the clipboard holds
+//! anything ([`accepted_types`]), since clipboard sync carries every type between Apple ends.
+//! What a tap pastes comes back to the UI's callback on the main thread as one [`Pasted`]: every
+//! item, each with the representations that travel and are clipboard-sized. Video and audio are
+//! left out (a Photos video is gigabytes), an item's pictures are loaded once, in the first
+//! format it offers (every other is a conversion made on demand), and a representation past
+//! [`MAX_PASTED_REP`], or past [`MAX_PASTED`] for the whole paste, is dropped without being copied.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -19,7 +23,7 @@ use std::sync::Arc;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyClass, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
@@ -36,24 +40,63 @@ use slopty_proto::transfer::ClipFormat;
 use crate::pasteboard::{self, Memory};
 use crate::web::Frame;
 
-/// The types the button takes, richest first: what clipboard sync carries.
+/// The types the button takes: every format by name, then `public.item`, which every type
+/// conforms to, so any clipboard enables it.
 pub fn accepted_types() -> impl Iterator<Item = &'static str> {
-    ClipFormat::ALL.into_iter().map(pasteboard::uti_of)
+    ClipFormat::ALL.into_iter().map(pasteboard::uti_of).chain(std::iter::once("public.item"))
 }
 
-/// What one tap pasted: each representation the clipboard had of a type the button takes, by
-/// item, in the order the copying app ranked them (richest first).
+/// The largest representation a tap keeps.
+pub const MAX_PASTED_REP: u64 = 64 << 20;
+
+/// The most one tap keeps, over every representation of every item.
+pub const MAX_PASTED: u64 = 128 << 20;
+
+/// Whether a type a provider registered is loaded by a tap: one that travels in an offer.
+fn travels(uti: &str) -> bool {
+    pasteboard::format_of(uti).is_some() || pasteboard::carried(uti)
+}
+
+/// Whether `uti` is, or conforms to, `to` in the system's type tree; `false` for a type the
+/// system does not know.
+fn conforms(uti: &str, to: &str) -> bool {
+    let Some(class) = AnyClass::get(c"UTType") else { return false };
+    let named = |id: &str| -> Option<Retained<NSObject>> {
+        let id = NSString::from_str(id);
+        // SAFETY: UniformTypeIdentifiers rule (`UTType.h`): `+typeWithIdentifier:` takes any
+        // string and answers nil for one the system does not know, which `Option` covers.
+        unsafe { msg_send![class, typeWithIdentifier: &*id] }
+    };
+    let (Some(uti), Some(to)) = (named(uti), named(to)) else { return false };
+    // SAFETY: UniformTypeIdentifiers rule (`UTType.h`): `-conformsToType:` takes a non-nil
+    // type and answers a `BOOL`.
+    unsafe { msg_send![&*uti, conformsToType: &*to] }
+}
+
+/// The types of `provider` a tap loads, in its own order: those that travel, but no video or
+/// audio, and of its pictures only the first.
+fn loaded(provider: &NSItemProvider) -> Vec<String> {
+    let mut picture = false;
+    accepted(provider)
+        .into_iter()
+        .filter(|t| !conforms(t, "public.audiovisual-content"))
+        .filter(|t| !conforms(t, "public.image") || !std::mem::replace(&mut picture, true))
+        .collect()
+}
+
+/// What one tap pasted: every item, each with the representations that travel, in the order
+/// the copying app ranked them (richest first).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pasted {
-    /// `(type, bytes)` pairs.
-    pub items: Vec<(String, Vec<u8>)>,
+    /// Each item's `(type, bytes)` pairs.
+    pub items: Vec<Vec<(String, Vec<u8>)>>,
 }
 
 impl Pasted {
-    /// The bytes of the first representation of `uti`.
+    /// The bytes of the first item's representation of `uti`.
     #[must_use]
     pub fn data(&self, uti: &str) -> Option<&[u8]> {
-        self.items.iter().find(|(t, _)| t == uti).map(|(_, b)| b.as_slice())
+        self.items.first()?.iter().find(|(t, _)| t == uti).map(|(_, b)| b.as_slice())
     }
 
     /// The text pasted, when there is any.
@@ -67,9 +110,13 @@ impl Pasted {
     #[must_use]
     pub fn board(&self) -> Memory {
         let board = Memory::default();
-        let pairs: Vec<(&str, &[u8])> =
-            self.items.iter().map(|(t, b)| (t.as_str(), b.as_slice())).collect();
-        board.copy(&pairs);
+        let items: Vec<Vec<(&str, &[u8])>> = self
+            .items
+            .iter()
+            .map(|reps| reps.iter().map(|(t, b)| (t.as_str(), b.as_slice())).collect())
+            .collect();
+        let items: Vec<&[(&str, &[u8])]> = items.iter().map(Vec::as_slice).collect();
+        board.copy_items(&items);
         board
     }
 }
@@ -167,51 +214,80 @@ impl Target {
     }
 }
 
-/// The accepted types `provider` has, in its own order.
+/// The types `provider` has that travel, in its own order.
 fn accepted(provider: &NSItemProvider) -> Vec<String> {
     provider
         .registeredTypeIdentifiers()
         .iter()
         .map(|t| t.to_string())
-        .filter(|t| accepted_types().any(|a| a == t))
+        .filter(|t| travels(t))
         .collect()
 }
 
-/// A paste being loaded: one slot per representation, filled as each arrives.
+/// A paste being loaded: one slot per representation, with its item, filled as each arrives.
 #[derive(Debug)]
 struct Loading {
-    slots: Vec<Option<(String, Vec<u8>)>>,
+    slots: Vec<Option<(usize, String, Vec<u8>)>>,
+    items: usize,
     left: usize,
+    /// Bytes kept so far, against [`MAX_PASTED`].
+    kept: u64,
 }
 
-/// Load each accepted representation of `providers`, then deliver them to button `key`.
+impl Loading {
+    /// What arrived, item by item.
+    fn pasted(&mut self) -> Pasted {
+        let mut items = vec![Vec::new(); self.items];
+        for (item, uti, bytes) in self.slots.iter_mut().filter_map(Option::take) {
+            if let Some(reps) = items.get_mut(item) {
+                reps.push((uti, bytes));
+            }
+        }
+        items.retain(|reps: &Vec<(String, Vec<u8>)>| !reps.is_empty());
+        Pasted { items }
+    }
+}
+
+/// Load each representation of `providers` that travels, then deliver them to button `key`.
 fn load(key: usize, providers: &NSArray<NSItemProvider>) {
-    let wanted: Vec<(Retained<NSItemProvider>, String)> = providers
+    let wanted: Vec<(usize, Retained<NSItemProvider>, String)> = providers
         .iter()
-        .flat_map(|p| accepted(&p).into_iter().map(move |t| (Retained::clone(&p), t)))
+        .enumerate()
+        .flat_map(|(n, p)| loaded(&p).into_iter().map(move |t| (n, Retained::clone(&p), t)))
         .collect();
     if wanted.is_empty() {
         deliver(key, Pasted::default());
         return;
     }
-    let loading =
-        Arc::new(Mutex::new(Loading { slots: vec![None; wanted.len()], left: wanted.len() }));
-    for (slot, (provider, uti)) in wanted.into_iter().enumerate() {
+    let loading = Arc::new(Mutex::new(Loading {
+        slots: vec![None; wanted.len()],
+        items: providers.count(),
+        left: wanted.len(),
+        kept: 0,
+    }));
+    for (slot, (item, provider, uti)) in wanted.into_iter().enumerate() {
         let loading = Arc::clone(&loading);
         let name = uti.clone();
         let done = RcBlock::new(move |data: *mut NSData, _error: *mut NSError| {
             // SAFETY: Foundation rule: the data is nil or a valid `NSData` for the duration of
-            // the completion handler; its bytes are copied out here.
-            let bytes = unsafe { data.as_ref() }.map(NSData::to_vec);
+            // the completion handler; its bytes are copied out here, when they are kept.
+            let data = unsafe { data.as_ref() };
             let mut loading = loading.lock();
-            if let (Some(bytes), Some(place)) = (bytes, loading.slots.get_mut(slot)) {
-                *place = Some((name.clone(), bytes));
+            let size = data.map_or(0, |d| u64::try_from(d.length()).unwrap_or(u64::MAX));
+            let fits = size <= MAX_PASTED_REP && loading.kept.saturating_add(size) <= MAX_PASTED;
+            if let Some(data) = data.filter(|_| fits) {
+                loading.kept = loading.kept.saturating_add(size);
+                if let Some(place) = loading.slots.get_mut(slot) {
+                    *place = Some((item, name.clone(), data.to_vec()));
+                }
+            } else if data.is_some() {
+                tracing::debug!(uti = %name, size, "a pasted representation too big to keep");
             }
             loading.left = loading.left.saturating_sub(1);
             if loading.left == 0 {
-                let items = loading.slots.iter_mut().filter_map(Option::take).collect();
+                let pasted = loading.pasted();
                 drop(loading);
-                deliver(key, Pasted { items });
+                deliver(key, pasted);
             }
         });
         // SAFETY: Foundation rule: `loadDataRepresentationForTypeIdentifier:completionHandler:`

@@ -9,6 +9,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
+    use slopty_client::clip::Fetched;
     use slopty_client::{LinkEvent, WorkerLink};
     use slopty_core::{ClientId, SessionId, WallMs, WorkerId, XferId};
     use slopty_net::admission::Admission;
@@ -20,7 +21,8 @@ mod tests {
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::orchestration::Port;
     use slopty_proto::transfer::{
-        BulkHeader, ClipFormat, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, XferMsg,
+        BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Purpose, Rep,
+        XferMsg,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::mpsc;
@@ -319,32 +321,86 @@ mod tests {
         drop(stalled);
     }
 
+    /// A representation past the prefetch budget is fetched when something pastes it, whole and
+    /// ahead of background transfers, and arrives over a bulk stream.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_big_clipboard_representation_is_fetched_on_paste_over_a_bulk_stream() {
         let (mut client, link, _events) = pair().await;
-        let png: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 7) as u8).collect();
+        let size = slopty_client::clip::PREFETCH_MAX + (1 << 20);
+        let png: Vec<u8> = (0..size).map(|i| (i % 7) as u8).collect();
         let offer = Offer {
             origin: Peer::Worker(WorkerId::new()),
             generation: 9,
-            items: vec![ClipItem {
-                format: ClipFormat::Png,
-                size: png.len() as u64,
-                hash: *blake3::hash(&png).as_bytes(),
-                inline: None,
+            age_ms: 0,
+            concealed: false,
+            items: vec![ClipEntry {
+                reps: vec![Rep {
+                    kind: ClipType::Format(ClipFormat::Png),
+                    size: Some(size),
+                    hash: Some(*blake3::hash(&png).as_bytes()),
+                    inline: None,
+                }],
             }],
         };
+        let rep = offer.rep_ref(0, ClipType::Format(ClipFormat::Png));
         client.tx.send(&WorkerMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
         let remote = link.remote();
-        let paste = std::thread::spawn(move || remote.clip_data(9, ClipFormat::Png, WAIT));
-        let (generation, format) = expect(&mut client, |m| match m {
-            ClientMsg::Clip(ClipMsg::Fetch { generation, format }) => Some((generation, format)),
+        let asked = rep.clone();
+        let paste = std::thread::spawn(move || remote.clip_fetch(&asked, None, WAIT));
+        let fetch = expect(&mut client, |m| match m {
+            ClientMsg::Clip(ClipMsg::Fetch { rep, max, urgent }) => Some((rep, max, urgent)),
             _ => None,
         })
         .await;
-        assert_eq!((generation, format), (9, ClipFormat::Png));
+        assert_eq!(fetch, (rep.clone(), None, true), "past the budget: only the paste asks");
         let header = BulkHeader {
             xfer: XferId::new(),
-            purpose: Purpose::Clip { generation, format },
+            purpose: Purpose::Rep { rep },
+            name: String::new(),
+            size,
+            mtime_ms: WallMs::ZERO,
+            mode: 0o600,
+            offset: 0,
+        };
+        let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
+        send.write_all(&png).await.unwrap();
+        send.finish().unwrap();
+        let got = tokio::task::spawn_blocking(move || paste.join().unwrap()).await.unwrap();
+        assert!(got == Fetched::Data(png), "the paste gets the worker's bytes");
+    }
+
+    /// A representation within the prefetch budget is fetched as soon as the offer arrives, in
+    /// the background and whole, so the paste that comes later is answered from memory. Prints
+    /// what that paste took (`docs/MEASUREMENTS.md`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_small_picture_is_fetched_ahead_and_pastes_from_memory() {
+        let (mut client, link, _events) = pair().await;
+        let png: Vec<u8> = (0..300_000_u32).map(|i| (i % 11) as u8).collect();
+        let offer = Offer {
+            origin: Peer::Worker(WorkerId::new()),
+            generation: 2,
+            age_ms: 0,
+            concealed: false,
+            items: vec![ClipEntry {
+                reps: vec![Rep {
+                    kind: ClipType::Format(ClipFormat::Png),
+                    size: Some(png.len() as u64),
+                    hash: Some(*blake3::hash(&png).as_bytes()),
+                    inline: None,
+                }],
+            }],
+        };
+        let rep = offer.rep_ref(0, ClipType::Format(ClipFormat::Png));
+        client.tx.send(&WorkerMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
+        let fetch = expect(&mut client, |m| match m {
+            ClientMsg::Clip(ClipMsg::Fetch { rep, max, urgent }) => Some((rep, max, urgent)),
+            _ => None,
+        })
+        .await;
+        assert_eq!(fetch, (rep.clone(), None, false), "fetched ahead, in the background");
+        let header = BulkHeader {
+            xfer: XferId::new(),
+            purpose: Purpose::Rep { rep: rep.clone() },
             name: String::new(),
             size: png.len() as u64,
             mtime_ms: WallMs::ZERO,
@@ -354,8 +410,32 @@ mod tests {
         let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
         send.write_all(&png).await.unwrap();
         send.finish().unwrap();
-        let got = tokio::task::spawn_blocking(move || paste.join().unwrap()).await.unwrap();
-        assert!(got.as_deref() == Some(&*png), "the paste gets the worker's bytes");
+        let remote = link.remote();
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            if remote.clip_fetch(&rep, None, Duration::ZERO) == Fetched::Data(png.clone()) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the prefetch lands");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let mut took = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            let got = remote.clip_fetch(&rep, None, WAIT);
+            took.push(started.elapsed());
+            assert!(matches!(&got, Fetched::Data(bytes) if *bytes == png), "the picture, whole");
+        }
+        took.sort();
+        println!("prefetched paste of 300 kB, 20 pastes: p50 {:?} max {:?}", took[10], took[19]);
+        assert!(took[19] < Duration::from_millis(5), "from memory: {:?}", took[19]);
+        assert!(
+            !matches!(
+                tokio::time::timeout(Duration::from_millis(300), client.rx.recv()).await,
+                Ok(Ok(ClientMsg::Clip(ClipMsg::Fetch { .. })))
+            ),
+            "a paste of what is here asks nothing"
+        );
     }
 
     /// A free loopback port, released for the forward to take.

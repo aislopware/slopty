@@ -306,9 +306,20 @@ impl SettingsForm {
     /// are its own actions, which the dialog answers.
     #[must_use]
     pub fn typing(&self, window: &Window, cx: &App) -> bool {
-        std::iter::once(&self.search)
-            .chain(self.fields.iter().flatten())
-            .any(|field| field.read(cx).focus_handle(cx).is_focused(window))
+        self.fields_iter().any(|field| field.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Whether an input method holds uncommitted text in one of the form's fields (a Telex
+    /// word, kana before conversion): the keys it reads then (the arrows, Enter, Esc) are its
+    /// own.
+    #[must_use]
+    pub fn composing(&self, cx: &App) -> bool {
+        self.fields_iter().any(|field| field.read(cx).is_composing())
+    }
+
+    /// The search field and every field of the form.
+    fn fields_iter(&self) -> impl Iterator<Item = &Entity<InputState>> {
+        std::iter::once(&self.search).chain(self.fields.iter().flatten())
     }
 
     /// The height the form asks for; a short window gets less and the page scrolls.
@@ -685,8 +696,10 @@ impl SettingsForm {
             .gap(px(theme.spacing.xs))
             .px(px(crate::kit::FIELD_INSET))
             .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
-                this.step_from(None, true, window, cx);
-                cx.stop_propagation();
+                if !this.composing(cx) {
+                    this.step_from(None, true, window, cx);
+                    cx.stop_propagation();
+                }
             }))
             .child(crate::icons::icon(
                 theme,
@@ -1556,12 +1569,16 @@ impl SettingsForm {
             .gap(px(spacing.xs))
             .px(px(crate::kit::FIELD_INSET))
             .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| {
-                this.step_from(Some(ix), false, window, cx);
-                cx.stop_propagation();
+                if !this.composing(cx) {
+                    this.step_from(Some(ix), false, window, cx);
+                    cx.stop_propagation();
+                }
             }))
             .capture_action(cx.listener(move |this, _: &MoveDown, window, cx| {
-                this.step_from(Some(ix), true, window, cx);
-                cx.stop_propagation();
+                if !this.composing(cx) {
+                    this.step_from(Some(ix), true, window, cx);
+                    cx.stop_propagation();
+                }
             }))
             .children(swatch)
             .child(

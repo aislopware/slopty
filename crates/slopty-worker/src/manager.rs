@@ -29,6 +29,10 @@ pub const SCROLLBACK_LINES: u32 = 50_000;
 /// ones nobody comes back to. A day outlasts a night and a working day away from the machine.
 pub const EXITED_UNWATCHED: Duration = Duration::from_hours(24);
 
+/// The variable naming a session's presence file: while it exists, Claude Code sends no
+/// Remote Control push (<https://code.claude.com/docs/en/env-vars>).
+pub const PRESENCE_ENV: &str = "CLAUDE_CLIENT_PRESENCE_FILE";
+
 /// How long a starting worker waits for an older one to let go of a session: that worker is
 /// exiting, and ptyd takes the session back the moment its connection drops.
 const HANDOVER_WAIT: Duration = Duration::from_secs(30);
@@ -92,6 +96,8 @@ struct Inner {
     sessions: Mutex<HashMap<SessionId, Entry>>,
     /// Environment every session gets on top of the request's (`SLOPTY_WORKER_SOCKET`).
     session_env: Mutex<Vec<(String, String)>>,
+    /// Where each session's presence file goes (`CLAUDE_CLIENT_PRESENCE_FILE`), once set.
+    presence: Mutex<Option<PathBuf>>,
     /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
     port_hints: mpsc::UnboundedSender<SessionId>,
     /// Sessions whose place changed ([`SessionStart::moves`]).
@@ -161,6 +167,7 @@ impl Worker {
                 tap,
                 sessions: Mutex::new(HashMap::new()),
                 session_env: Mutex::new(Vec::new()),
+                presence: Mutex::new(None),
                 port_hints,
                 moves,
                 agents,
@@ -269,14 +276,32 @@ impl Worker {
         *self.inner.session_env.lock() = env;
     }
 
+    /// Tell every future session where its presence file goes: a file under `dir` named by
+    /// the session ([`crate::handoff::presence_file`]), which the daemon keeps while a client
+    /// is focused on it.
+    pub fn set_presence_dir(&self, dir: PathBuf) {
+        *self.inner.presence.lock() = Some(dir);
+    }
+
+    /// What session `id` is spawned with: every session's variables, then the request's
+    /// `extra`, then its own id and presence file.
+    fn env_for(&self, id: SessionId, extra: &[(String, String)]) -> Vec<(String, String)> {
+        let mut env = self.inner.session_env.lock().clone();
+        env.extend(extra.iter().cloned());
+        // Programs in the session (the `slopty hook` relay above all) learn which session they
+        // run in from the environment.
+        env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));
+        if let Some(dir) = self.inner.presence.lock().as_deref() {
+            let file = crate::handoff::presence_file(dir, id);
+            env.push((PRESENCE_ENV.to_owned(), file.to_string_lossy().into_owned()));
+        }
+        env
+    }
+
     /// Create a session.
     pub async fn open(&self, req: &OpenSession) -> Result<SessionHandle, WorkerError> {
         let id = SessionId::new();
-        // Programs in the session (the `slopty hook` relay above all) learn which session they
-        // run in from the environment.
-        let mut env = self.inner.session_env.lock().clone();
-        env.extend(req.env.iter().cloned());
-        env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));
+        let env = self.env_for(id, &req.env);
         let spec = SpawnSpec {
             command: req.command.clone(),
             // `~` is this worker's home: a client types it without knowing the path.
@@ -353,9 +378,7 @@ impl Worker {
     ) -> Result<SessionHandle, WorkerError> {
         let plan = recipe.reopen(id, shells, &slopty_platform::dirs::home(), launch);
         let screen = self.inner.keeper.screen(id).await;
-        let mut env = self.inner.session_env.lock().clone();
-        env.extend(recipe.env.iter().cloned());
-        env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));
+        let env = self.env_for(id, &recipe.env);
         let spec = SpawnSpec {
             command: plan.command.clone(),
             cwd: plan.cwd.clone(),

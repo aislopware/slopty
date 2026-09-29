@@ -334,7 +334,10 @@ fn the_strip_thumb_shows_only_while_the_strip_moves(cx: &mut TestAppContext) {
     for n in 1..=4 {
         let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, n);
     }
-    assert!(!view.read_with(cx, |v, _| marks::all_in_view(&v.drawn_strip)), "past the view");
+    assert!(
+        !view.read_with(cx, |v, _| marks::all_in_view(&v.drawn.strip.borrow())),
+        "past the view"
+    );
     assert!(cx.debug_bounds("indicator").is_none(), "nothing in the title bar");
     let strip = cx.debug_bounds("strip").expect("the strip");
     let track = cx.debug_bounds("strip-marks").expect("the strip moved to the new column");
@@ -489,13 +492,13 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
 /// How many times the workspace draws in one second of a 120 Hz display: each tick delivers
 /// whatever frame was asked for, then runs what is due.
 fn frames_in_a_second(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> u64 {
-    let before = view.read_with(cx, |v, _| v.frames_drawn);
+    let before = view.read_with(cx, |v, _| v.drawn.builds.get());
     for _ in 0..120 {
         cx.executor().advance_clock(Duration::from_nanos(8_333_333));
         cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
     }
-    view.read_with(cx, |v, _| v.frames_drawn).wrapping_sub(before)
+    view.read_with(cx, |v, _| v.drawn.builds.get()).wrapping_sub(before)
 }
 
 /// A working agent in view turns its mark twelve steps a second, and the workspace draws
@@ -648,7 +651,8 @@ fn narrowing_the_window_never_lays_the_strip_out_as_a_phone(cx: &mut TestAppCont
     let [(_, first), ..] = three_shells(&view, cx, &fake);
     click(cx, selector("nav-tile", first.item));
     let before = cx.debug_bounds(selector("item", first.item)).expect("drawn");
-    let strip_left = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.viewport.left());
+    let strip_left =
+        |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.drawn.viewport.get().left());
     assert_eq!(before.left(), strip_left(cx), "the first column starts the strip");
 
     cx.simulate_resize(size(px(900.0), px(600.0)));

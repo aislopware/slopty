@@ -17,6 +17,7 @@ pub mod clip;
 pub mod conversation;
 pub mod file;
 pub mod find;
+pub mod handoff;
 pub mod items;
 pub mod listing;
 pub mod manager;

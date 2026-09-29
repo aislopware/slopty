@@ -36,6 +36,7 @@ use gpui::{
     Subscription, Task, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+pub use parts::HeaderChips;
 pub use review::Scope;
 use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
@@ -544,7 +545,10 @@ impl ConversationView {
         self.agent.as_ref().is_some_and(|a| match &a.status {
             AgentStatus::Working | AgentStatus::Tool { .. } => true,
             AgentStatus::Blocked(why) => *why != BlockReason::IdlePrompt,
-            AgentStatus::None | AgentStatus::Idle | AgentStatus::Done => false,
+            AgentStatus::None
+            | AgentStatus::Idle
+            | AgentStatus::Done
+            | AgentStatus::Waiting { .. } => false,
         })
     }
 
@@ -1521,8 +1525,11 @@ impl Render for ConversationView {
             .on_action(cx.listener(|this, _: &crate::terminal::FindNext, _w, cx| this.step_find(1, cx)))
             .on_action(cx.listener(|this, _: &crate::terminal::FindPrev, _w, cx| this.step_find(-1, cx)))
             // Esc in the composer stops the agent's turn while it has one; otherwise it is the
-            // field's own.
+            // field's own. While an input method composes, these keys are all its own.
             .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
+                if this.composing(cx) {
+                    return;
+                }
                 if this.viewing.is_some() {
                     this.view_picture(None, cx);
                     cx.stop_propagation();
@@ -1540,16 +1547,24 @@ impl Render for ConversationView {
             }))
             // The composer's menu, prompt recall and a question's options take the arrows,
             // Enter and Tab before the field does.
-            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveUp, window, cx| this.arrow(-1, window, cx)))
-            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveDown, window, cx| this.arrow(1, window, cx)))
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                if !this.composing(cx) {
+                    this.arrow(-1, window, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveDown, window, cx| {
+                if !this.composing(cx) {
+                    this.arrow(1, window, cx);
+                }
+            }))
             .capture_action(cx.listener(|this, enter: &gpui_kit::component::input::Enter, window, cx| {
                 // With the worker away, Enter leaves the draft as it is: nothing goes.
-                if !enter.shift && !enter.secondary && this.composer_focused(window, cx) && (this.away.is_some() || this.menu_enter(window, cx)) {
+                if !enter.shift && !enter.secondary && !this.composing(cx) && this.composer_focused(window, cx) && (this.away.is_some() || this.menu_enter(window, cx)) {
                     cx.stop_propagation();
                 }
             }))
             .capture_action(cx.listener(|this, _: &gpui_kit::component::input::IndentInline, window, cx| {
-                if this.composer_focused(window, cx) && this.menu_enter(window, cx) {
+                if !this.composing(cx) && this.composer_focused(window, cx) && this.menu_enter(window, cx) {
                     cx.stop_propagation();
                 }
             }))

@@ -4,6 +4,23 @@
 //! `--rcfile` for bash, a vendor snippet on `XDG_DATA_DIRS` for fish; every bootstrap hands
 //! control straight back to the user's own files. The daemon writes the scripts under its data
 //! dir on every start so a running install never depends on the source tree.
+//!
+//! **Web pages and editors go to the client** ([`ShellIntegration::handoff_env`]). Every session,
+//! shell or not, gets `BROWSER` and `EDITOR` naming Slopty's handoff commands, and a directory
+//! ([`BIN`]) first on its `PATH` that holds them and an `open` (`xdg-open` on Linux) that
+//! forwards web addresses and hands anything else to the system's. All of them are the `slopty`
+//! CLI under another name, which it reads from `argv[0]`.
+//!
+//! Both variables are defaults. `VISUAL` is never set, since git, `crontab`, `less` and Claude
+//! Code read it ahead of `EDITOR`, and it would beat an `EDITOR` the user's shell files export.
+//! Neither is set when the daemon's own environment already names a browser or an editor.
+//! Each value is the command's absolute path, one word with no space in it: Claude Code runs
+//! `$BROWSER <url>` as a single program, `git` hands `$EDITOR` to `sh -c`, and a program run
+//! with a `PATH` of its own (`env PATH=/usr/bin:/bin git commit`) still finds it. When the
+//! scripts' directory has a space in it (macOS's Application Support), the commands live in a
+//! private directory under the user's temporary directory instead ([`bin_dir`]). Before each
+//! prompt the scripts put [`BIN`] back in front of the path, where macOS's `path_helper` and
+//! the user's files may have moved it.
 
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -21,6 +38,20 @@ pub const FISH_INTEGRATION: &str =
 pub const OPT_OUT: &str = "SLOPTY_NO_SHELL_INTEGRATION";
 /// The `slopty` CLI, which the hooks' `ssh` runs as `slopty ssh` ([`crate::ssh`]).
 pub const CLI: &str = "SLOPTY_CLI";
+/// The directory of Slopty's `open`, `BROWSER` and `EDITOR`, first on every session's `PATH`.
+pub const BIN: &str = "SLOPTY_BIN";
+/// Every session's `BROWSER`: the CLI opening a web page on the client (`slopty browse`).
+pub const BROWSER_SHIM: &str = "slopty-browser";
+/// Every session's `EDITOR`: the CLI editing a file on the client and waiting for the person
+/// (`slopty edit --wait`).
+pub const EDITOR_SHIM: &str = "slopty-editor";
+/// The system's opener that [`BIN`] shadows: web addresses go to the client, anything else to
+/// the system's own.
+#[cfg(target_os = "macos")]
+pub const OPENER: &str = "open";
+/// The system's opener that [`BIN`] shadows.
+#[cfg(not(target_os = "macos"))]
+pub const OPENER: &str = "xdg-open";
 /// Where the zsh bootstrap finds the user's original `ZDOTDIR`, when there was one.
 const ZSH_ORIGINAL_ZDOTDIR: &str = "SLOPTY_ZSH_ZDOTDIR";
 /// Tells the bash bootstrap the shell was asked to be a login shell (bash ignores `--rcfile`
@@ -52,6 +83,14 @@ pub struct ShellIntegration {
     /// The `slopty` CLI beside the daemon, handed to the shell as [`CLI`]; without it `ssh`
     /// stays the plain one.
     pub cli: Option<PathBuf>,
+    /// The directory of the handoff commands ([`BIN`]), when the CLI is there to be them.
+    pub bin: Option<PathBuf>,
+    /// The daemon's own environment names a browser (`BROWSER`) that is not Slopty's: the
+    /// sessions keep it.
+    pub own_browser: bool,
+    /// The daemon's own environment names an editor (`EDITOR` or `VISUAL`) that is not
+    /// Slopty's: the sessions keep it.
+    pub own_editor: bool,
 }
 
 /// What to change about a spawn for the integration to load.
@@ -80,6 +119,14 @@ pub fn install(dir: &Path) -> io::Result<ShellIntegration> {
     fs::create_dir_all(&vendor)?;
     write_if_changed(&vendor.join("slopty.fish"), FISH_INTEGRATION)?;
     let var = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
+    let cli = sibling_cli();
+    let bin = cli.as_deref().and_then(|cli| {
+        let bin = bin_dir(dir);
+        link_shims(&bin, cli)
+            .map_err(|e| tracing::warn!(error = %e, "handoff commands not linked"))
+            .ok()?;
+        Some(bin)
+    });
     Ok(ShellIntegration {
         zdotdir: zsh,
         bash_rcfile,
@@ -87,8 +134,87 @@ pub fn install(dir: &Path) -> io::Result<ShellIntegration> {
         original_zdotdir: var("ZDOTDIR"),
         original_xdg_data_dirs: var("XDG_DATA_DIRS"),
         enabled: !std::env::var(OPT_OUT).is_ok_and(|v| opted_out(&v)),
-        cli: sibling_cli(),
+        cli,
+        bin,
+        own_browser: names_own("BROWSER"),
+        own_editor: names_own("EDITOR") || names_own("VISUAL"),
     })
+}
+
+/// Whether the daemon's environment names `var` as something other than Slopty's own command.
+fn names_own(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| !v.is_empty() && !is_handoff_command(&v))
+}
+
+/// Link the handoff commands in `bin` to `cli`, replacing links to anything else.
+pub fn link_shims(bin: &Path, cli: &Path) -> io::Result<()> {
+    fs::create_dir_all(bin)?;
+    for name in [OPENER, BROWSER_SHIM, EDITOR_SHIM] {
+        let link = bin.join(name);
+        if fs::read_link(&link).is_ok_and(|to| to == cli) {
+            continue;
+        }
+        match fs::remove_file(&link) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        std::os::unix::fs::symlink(cli, &link)?;
+    }
+    Ok(())
+}
+
+/// Where the handoff commands go for scripts under `dir`.
+///
+/// That is `dir/bin` when its path holds only letters, digits and `/._-`, else `slopty-<uid>/bin`
+/// under the user's temporary directory (per user on macOS), made private to the user; `dir/bin`
+/// again when that cannot be made safely, and the commands then go by bare name, found on `PATH`.
+#[must_use]
+pub fn bin_dir(dir: &Path) -> PathBuf {
+    let own = dir.join("bin");
+    if plain(&own) {
+        return own;
+    }
+    let uid = rustix::process::getuid().as_raw();
+    let private = std::env::temp_dir().join(format!("slopty-{uid}"));
+    match make_private(&private, uid) {
+        Ok(()) if plain(&private) => private.join("bin"),
+        Ok(()) => own,
+        Err(e) => {
+            tracing::warn!(dir = %private.display(), error = %e, "no private place for the handoff commands");
+            own
+        }
+    }
+}
+
+/// Make `dir` a directory only `uid` can reach, or check that it is one: not a link, owned by
+/// `uid`, with no access for group or others. `/tmp` is everyone's, so what is found there may
+/// have been planted.
+fn make_private(dir: &Path, uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return Err(io::Error::other("not a directory private to this user"));
+    }
+    Ok(())
+}
+
+/// Whether `path` can stand as a command word in any shell or `PATH` unquoted: letters, digits
+/// and `/._-` only.
+fn plain(path: &Path) -> bool {
+    path.to_str().is_some_and(|p| {
+        p.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+    })
+}
+
+/// Whether `value` (a `BROWSER`, `EDITOR` or `VISUAL`) names one of Slopty's handoff commands:
+/// one a daemon started from a Slopty session inherited, which is no choice of the user's.
+#[must_use]
+pub fn is_handoff_command(value: &str) -> bool {
+    Path::new(value).file_name().is_some_and(|n| n == BROWSER_SHIM || n == EDITOR_SHIM)
 }
 
 /// `slopty` beside this binary: an installed worker's bin dir carries all three
@@ -159,6 +285,52 @@ impl ShellIntegration {
             injection.env.push((CLI.to_owned(), lossy(cli)));
         }
         injection
+    }
+
+    /// What every session is spawned with so its web pages and editors go to the client:
+    /// [`BIN`], and `BROWSER` and `EDITOR` as the commands' absolute paths (bare names when
+    /// [`BIN`] is not plain). `BROWSER` is left out when the daemon's environment
+    /// ([`Self::own_browser`]) or `extra` (the session's own variables) names a browser, and
+    /// `EDITOR` when either names an `EDITOR` or a `VISUAL`. Nothing without the handoff
+    /// commands, when the daemon opted out, or when `extra` carries [`OPT_OUT`]. `PATH` is
+    /// [`Self::handoff_path`]'s.
+    #[must_use]
+    pub fn handoff_env(&self, extra: &[(String, String)]) -> Vec<(String, String)> {
+        let Some(bin) = self.handoff_bin(extra) else { return Vec::new() };
+        let named = |name: &str| extra.iter().any(|(k, v)| k == name && !v.is_empty());
+        let command =
+            |name: &str| if plain(bin) { lossy(&bin.join(name)) } else { name.to_owned() };
+        let mut env = vec![(BIN.to_owned(), lossy(bin))];
+        if !self.own_browser && !named("BROWSER") {
+            env.push(("BROWSER".to_owned(), command(BROWSER_SHIM)));
+        }
+        if !self.own_editor && !named("EDITOR") && !named("VISUAL") {
+            env.push(("EDITOR".to_owned(), command(EDITOR_SHIM)));
+        }
+        env
+    }
+
+    /// The session's `PATH` with [`BIN`] in front: `extra`'s `PATH`, else `inherited` (the
+    /// daemon's own). `None` when [`Self::handoff_env`] gives nothing.
+    #[must_use]
+    pub fn handoff_path(
+        &self,
+        extra: &[(String, String)],
+        inherited: Option<&str>,
+    ) -> Option<String> {
+        let bin = lossy(self.handoff_bin(extra)?);
+        let path =
+            extra.iter().rev().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_str()).or(inherited);
+        let rest = path
+            .into_iter()
+            .flat_map(|p| p.split(':'))
+            .filter(|dir| !dir.is_empty() && *dir != bin);
+        Some(std::iter::once(bin.as_str()).chain(rest).collect::<Vec<_>>().join(":"))
+    }
+
+    fn handoff_bin(&self, extra: &[(String, String)]) -> Option<&Path> {
+        let opted = extra.iter().any(|(k, v)| k == OPT_OUT && opted_out(v));
+        self.bin.as_deref().filter(|_| self.enabled && !opted)
     }
 
     /// The bash rewrite: `--rcfile` replaces the user's `~/.bashrc` for interactive shells
@@ -233,6 +405,9 @@ mod tests {
             original_xdg_data_dirs: None,
             enabled: true,
             cli: None,
+            bin: None,
+            own_browser: false,
+            own_editor: false,
         }
     }
 
@@ -397,6 +572,7 @@ mod tests {
     }
 
     /// A shell to start: the program, its arguments and its `argv[0]`.
+    #[derive(Clone, Copy)]
     struct Shell<'a> {
         program: &'a str,
         args: &'a [&'a str],
@@ -411,6 +587,18 @@ mod tests {
         extra: &[(&str, &str)],
         input: &str,
     ) -> String {
+        run_shell_in(tag, shell, rc_files, extra, input, None).await
+    }
+
+    /// [`run_shell_with`], with the handoff commands in `bin`.
+    async fn run_shell_in(
+        tag: &str,
+        shell: Shell<'_>,
+        rc_files: &[(&str, &str)],
+        extra: &[(&str, &str)],
+        input: &str,
+        bin: Option<&Path>,
+    ) -> String {
         let Shell { program, args, arg0 } = shell;
         let tmp = std::env::temp_dir().join(format!("slopty-shell-{tag}-{}", std::process::id()));
         let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
@@ -420,6 +608,9 @@ mod tests {
             original_xdg_data_dirs: None,
             enabled: true,
             cli: None,
+            bin: bin.map(Path::to_path_buf),
+            own_browser: false,
+            own_editor: false,
             ..si
         };
         let home = tmp.join("home");
@@ -718,6 +909,167 @@ mod tests {
                     .await;
             assert!(own.contains("mine -p 2222 a b -t htop"), "{shell}, the user's alias: {own:?}");
             assert!(!own.contains("cli["), "{shell}: {own:?}");
+        }
+    }
+
+    /// Every session, shell or not, gets the handoff commands as its browser and editor and
+    /// their directory first on its path, once; its own variables win, and opting out leaves
+    /// everything alone.
+    #[test]
+    fn every_session_gets_the_handoff_commands() {
+        let si = ShellIntegration { bin: Some(PathBuf::from("/d/bin")), ..integration() };
+        assert_eq!(
+            si.handoff_env(&[]),
+            vec![
+                pair(BIN, "/d/bin"),
+                pair("BROWSER", "/d/bin/slopty-browser"),
+                pair("EDITOR", "/d/bin/slopty-editor"),
+            ],
+            "absolute, and no VISUAL"
+        );
+        let names =
+            |env: Vec<(String, String)>| env.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+        let editor = ShellIntegration { own_editor: true, ..si.clone() };
+        assert_eq!(names(editor.handoff_env(&[])), [BIN, "BROWSER"], "the daemon's editor");
+        let browser = ShellIntegration { own_browser: true, ..si.clone() };
+        assert_eq!(names(browser.handoff_env(&[])), [BIN, "EDITOR"], "the daemon's browser");
+        assert_eq!(
+            names(si.handoff_env(&[pair("VISUAL", "code -w")])),
+            [BIN, "BROWSER"],
+            "the session's own"
+        );
+        assert!(is_handoff_command("/x/bin/slopty-editor") && is_handoff_command("slopty-browser"));
+        assert!(!is_handoff_command("nvim"));
+        let spaced = ShellIntegration { bin: Some(PathBuf::from("/A S/bin")), ..integration() };
+        assert_eq!(
+            spaced.handoff_env(&[]).get(2),
+            Some(&pair("EDITOR", EDITOR_SHIM)),
+            "a bare name rather than a path the shell would split"
+        );
+        assert_eq!(
+            si.handoff_path(&[], Some("/usr/bin:/d/bin:/bin")).as_deref(),
+            Some("/d/bin:/usr/bin:/bin")
+        );
+        let own = [pair("PATH", "/opt/x/bin")];
+        assert_eq!(si.handoff_path(&own, Some("/usr/bin")).as_deref(), Some("/d/bin:/opt/x/bin"));
+        assert_eq!(si.handoff_path(&[], None).as_deref(), Some("/d/bin"));
+        assert!(si.handoff_env(&[pair(OPT_OUT, "1")]).is_empty());
+        assert_eq!(si.handoff_path(&[pair(OPT_OUT, "1")], Some("/usr/bin")), None);
+        assert!(ShellIntegration { enabled: false, ..si }.handoff_env(&[]).is_empty());
+        assert!(integration().handoff_env(&[]).is_empty(), "no CLI, no commands");
+    }
+
+    /// The commands live where their path needs no quoting: beside the scripts when that is
+    /// plain, else in a directory private to the user under the temporary directory.
+    #[test]
+    fn the_handoff_commands_live_where_no_space_splits_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain_dir = tmp.path().join("shell");
+        assert_eq!(bin_dir(&plain_dir), plain_dir.join("bin"));
+        let spaced = tmp.path().join("Application Support").join("shell");
+        let bin = bin_dir(&spaced);
+        assert!(plain(&bin), "{}", bin.display());
+        let uid = rustix::process::getuid().as_raw();
+        assert!(bin.ends_with(format!("slopty-{uid}/bin")), "{}", bin.display());
+        let private = bin.parent().unwrap();
+        let mode = std::os::unix::fs::MetadataExt::mode(&fs::metadata(private).unwrap());
+        assert_eq!(mode & 0o077, 0, "only the user reaches it");
+
+        let planted = tmp.path().join("planted");
+        fs::create_dir_all(&planted).unwrap();
+        fs::set_permissions(&planted, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+        assert!(make_private(&planted, uid).is_err(), "a directory others can write is refused");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(private, &link).unwrap();
+        assert!(make_private(&link, uid).is_err(), "and so is a link");
+    }
+
+    /// The commands are links to the CLI, made once and remade when they point elsewhere.
+    #[test]
+    fn the_handoff_commands_link_to_the_cli() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cli, other, bin) =
+            (tmp.path().join("slopty"), tmp.path().join("old"), tmp.path().join("bin"));
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(&other, bin.join(OPENER)).unwrap();
+        link_shims(&bin, &cli).unwrap();
+        link_shims(&bin, &cli).unwrap();
+        for name in [OPENER, BROWSER_SHIM, EDITOR_SHIM] {
+            assert_eq!(fs::read_link(bin.join(name)).unwrap(), cli, "{name}");
+        }
+    }
+
+    /// A shell whose files put the system's directories first (macOS's `path_helper` does, and
+    /// many `.zshrc` files) finds the handoff `open` first again by its prompt, in zsh, bash
+    /// and fish. The session's browser and editor are the handoff commands by absolute path,
+    /// `VISUAL` is not set, and an `EDITOR` or a `VISUAL` the user's files export is the one
+    /// every program reads (`${VISUAL:-$EDITOR}`, as git and crontab do).
+    #[tokio::test]
+    async fn the_handoff_commands_come_first_and_yield_to_the_users_editor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        link_shims(&bin, Path::new("/bin/echo")).unwrap();
+        let at = |name: &str| bin.join(name).to_string_lossy().into_owned();
+        let posix =
+            "command -v open; echo \"e=${VISUAL:-$EDITOR} b=$BROWSER v=${VISUAL-}\"\nexit\n";
+        let fish_input = "command -v open; if set -q VISUAL; echo \"e=$VISUAL b=$BROWSER v=$VISUAL\"; else; echo \"e=$EDITOR b=$BROWSER v=\"; end\nexit\n";
+        let mut shells: Vec<(&str, &str, &str, &str)> =
+            vec![("/bin/zsh", ".zshrc", "export", posix)];
+        shells.extend(bashes().into_iter().map(|b| (b, ".bashrc", "export", posix)));
+        if let Some(fish) = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+        {
+            shells.push((fish, ".config/fish/config.fish", "set -gx", fish_input));
+        } else {
+            eprintln!("SKIP fish: not installed (brew install fish)");
+        }
+        for (n, (shell, rc, set, input)) in shells.into_iter().enumerate() {
+            let (assign, path) = if set == "export" {
+                ("export {}={}", "export PATH=/usr/bin:/bin")
+            } else {
+                ("set -gx {} {}", "set -gx PATH /usr/bin /bin")
+            };
+            let exported = |name: &str| assign.replacen("{}", name, 1).replacen("{}", "nvim", 1);
+            for (case, line, want) in [
+                ("none", String::new(), format!("e={} b={} v=", at(EDITOR_SHIM), at(BROWSER_SHIM))),
+                ("editor", exported("EDITOR"), format!("e=nvim b={} v=", at(BROWSER_SHIM))),
+                ("visual", exported("VISUAL"), format!("e=nvim b={} v=nvim", at(BROWSER_SHIM))),
+            ] {
+                let rc_text = format!("{path}\n{line}\necho rc-ran\n");
+                let rc_files = [(rc, rc_text.as_str())];
+                let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+                let tag = format!("bin-{n}-{case}");
+                let text = run_shell_in(&tag, interactive, &rc_files, &[], input, Some(&bin)).await;
+                assert!(text.contains("rc-ran"), "{shell} {case}: {text:?}");
+                assert!(text.contains(&at(OPENER)), "{shell} {case}: open first: {text:?}");
+                assert!(text.contains(&want), "{shell} {case}: want {want:?} in {text:?}");
+            }
+        }
+    }
+
+    /// A shell in a tmux pane drops the presence file it inherited, since the tmux server may
+    /// have started in another session; outside tmux it keeps it.
+    #[tokio::test]
+    async fn a_tmux_pane_drops_the_inherited_presence_file() {
+        let presence = ("CLAUDE_CLIENT_PRESENCE_FILE", "/p/session");
+        let input = "echo \"p=[$CLAUDE_CLIENT_PRESENCE_FILE]\"\nexit\n";
+        let mut shells: Vec<&str> = vec!["/bin/zsh"];
+        shells.extend(bashes());
+        if let Some(fish) = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+        {
+            shells.push(fish);
+        }
+        for (n, shell) in shells.into_iter().enumerate() {
+            let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+            let tmux = [presence, ("TMUX", "/tmp/tmux-501/default,1,0")];
+            let text = run_shell_with(&format!("tmux-{n}"), interactive, &[], &tmux, input).await;
+            assert!(text.contains("p=[]"), "{shell} in tmux: {text:?}");
+            let text =
+                run_shell_with(&format!("tile-{n}"), interactive, &[], &[presence], input).await;
+            assert!(text.contains("p=[/p/session]"), "{shell} in a tile: {text:?}");
         }
     }
 }

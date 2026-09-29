@@ -843,7 +843,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   project: the app calls `warm_up_decoder` at launch, so half a minute of blank first window. It is
   not in this code. The same test binary takes 118 s from the repo's external volume and 0.56 s
   from `/tmp`, unmodified, and 0.50 s from a disk image on that same external disk attached with
-  `-owners on` — see the `testing.md` entry for the isolation and the one-command fix. Nothing in `slopty-codec` or `slopty-client` is owed a change, and the daemons
+  `-owners on`. That comparison also moved the binary to a small directory, and the directory size
+  is the real cause (`tooling.md`, "A test binary's directory, not the volume", 2026-09-30). Nothing in `slopty-codec` or `slopty-client` is owed a change, and the daemons
   never showed it because `bench screen` runs the installed host off the boot volume.
 
   What the ladder's harness keeps from the episode: it waits for `slopty_codec::warm_up` before the

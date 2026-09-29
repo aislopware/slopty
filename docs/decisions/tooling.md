@@ -356,6 +356,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - Not done: taking only up to what longbridge imported. The fork follows zed's `main`, as the zed
   fork did.
 
+**Slopty draws under gpui-fast's view retention, pinned at `6d80f2d` with gpui-kit
+`d24129e4`.** ✅ 2026-09-29
+- Why the fork. It draws a view again only when the view was told of a change or something it
+  read changed, and replays every other view from the last frame. Slopty's frames are mostly
+  that case: a strip of tiles where one shell echoes, one stream shows a frame or one spring
+  moves. It also composes native views and layers into the frame (a web view, a video layer,
+  ordered and clipped with what GPUI paints around them), which the browser tile now does by
+  hand with a web view over the Metal view; adopting it is later work.
+- What it asks of Slopty. A view that shows a state must hear of it, and must not read what
+  changes more often than it does. The strip and the chrome became views that build from a read
+  of the workspace and read copied facts rather than the bodies (`docs/decisions/ui.md`, "The
+  strip and the chrome read facts, never a tile's body"), and a value measured while drawing is
+  sent as a notify after the frame. The switch audit's findings each have that fix.
+- Evidence. On the same binary with retention turned off (`GPUI_VIEW_RETENTION=0`), the strip's
+  p95 draw is 3.1 ms against 2.1 and its p99 5.6 against 2.3; against the zed fork before the
+  switch, an echo's p50 is 0.3–0.4 ms against 1.6 (MEASUREMENTS, "UI frames on gpui-fast,
+  retention on and off").
+- How it is kept honest. `retained::stale` draws the same state from scratch and diffs the
+  painted quads and sprites against the frame shown; the headless steps and every e2e dump run
+  it, and the e2e harness draws only through notifies, so a golden is the frame the app draws
+  (TESTING.md, "Retained frames").
+- Left open: the fork has no per-draw hook, so the frame probe is a root view that reads a marker
+  its own paint writes, and is built in every frame for that alone. gpui-kit's text input
+  writes its state in every render, which counts as news for every view that reads that state.
+
 - ✅ **A golden holding a `serde_json::Value` puts its keys in order** (2026-09-29).
   `golden__ctl__ctl_reply_permission_answer` passed in the workspace and failed under
   `cargo test -p slopty-proto`: whether a `Value` keeps the order its keys were written in is
@@ -401,3 +426,167 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     first run, `shell_round_trip_over_quic` took a `Caps` before `SessionOpened` (fixed in
     79734c2a) and `viewers_joining_a_busy_session_never_make_the_others_resync` missed its 10 s
     deadline under the five lanes' load; it passed in the second run.
+
+- ✅ **target/ stays under a byte budget and its volume above a free-space floor, in both of
+  cargo's layouts** (2026-09-30). On 2026-09-29 `target/` reached 310 GB and the Lacie volume
+  was 98 % full: `debug/incremental` alone held 161 GB in 3 887 caches and `debug/deps` 95 GB.
+  The one-day idle sweep above could not keep up with several agents and five gate lanes
+  building all day, and `cargo xtask prune --idle-hours 6` freed 274 GB by hand. `xtask prune`
+  now does five things, still under cargo's locks:
+  - **The budget and the floor.** After the idle sweep, when `target/` holds more than the
+    budget (160 GB, `SLOPTY_TARGET_BUDGET_GB`) or its volume has less than the floor free
+    (50 GB, `SLOPTY_DISK_FLOOR_GB`), it deletes units and incremental caches least recently used
+    first, until both hold with a tenth to spare. Nothing used in the last hour goes, since that
+    is the build that just ran and the tests about to run from it; what that leaves short is
+    reported. Why these numbers: units and caches used in the last 24 hours came to 129 GB
+    (37 GB in the last hour, 103 GB in the last six) and the gate's lanes to 36 GB of it, so 160
+    GB keeps a day's work with room for one toolchain or fork bump. A cold full gate writes
+    about 36 GB, so a gate that starts above 50 GB free finishes. Numbers: MEASUREMENTS
+    "target/ under a budget".
+  - **The gate refuses to start under the floor.** It first runs the budget pass (skipping busy
+    directories); if the volume is still under the floor, it stops and prints the free space,
+    the floor and the largest entries under `target/`, with what to delete. A full disk would
+    otherwise fail a lane halfway.
+  - **The evidence is a ledger.** Each pass records every unit's last use in `.xtask-prune`
+    and sets the fingerprint files' access times back to the epoch, so the next read stamps them
+    again (APFS stamps an access time only while it is older than the modification time; a test
+    checks that on this Mac). The old code reset them once a day, which gave one timestamp per
+    unit per day, too coarse to rank for a budget. A directory with no ledger yet deletes no unit
+    for idleness, and starts every unit's clock at that pass.
+  - **The object files of earlier compiles.** On macOS a test or binary keeps its debug info in
+    `<stem>.<cgu>.<invocation>.rcgu.o` files beside it, and every compile writes a new
+    invocation's set without deleting the last one. They were 99 782 of the 102 568 entries of the
+    tests lane's `deps/` and 132 805 of `debug/deps`. The invocation holding a unit's newest file
+    is the one the binary links (checked against the binary's `N_OSO` entries with `nm -ap`); the
+    others go. A tie keeps both, since an object reused from the incremental cache keeps its old
+    time. Only a unit compiled since the last pass is looked at. The first pass deleted 134 510
+    files (19.7 GB).
+  - **Cargo 1.100's layout.** Cargo 1.100 (2026-11-12) "now uses a new directory layout for
+    intermediate build artifacts", and the build-cache page says "The build-dir layout was
+    changed in Cargo 1.100.0" (https://doc.rust-lang.org/nightly/cargo/CHANGELOG.html,
+    cargo#17354; https://doc.rust-lang.org/nightly/cargo/reference/build-cache.html). A build
+    with nightly 1.101 on 2026-09-30 shows it: each unit is `<profile>/build/<package>/<hash>/`
+    with `fingerprint/`, `out/` and, for a build script's run, `run/`. There is no `.fingerprint`
+    or `deps/`, and `incremental/` is where it was. `target/deep/realtime` already has this
+    layout, since that lane builds on nightly. Prune reads both, finds profile directories by
+    `.cargo-lock` rather than `.fingerprint`, and stops with an error on a directory that is in
+    neither layout, rather than pruning nothing. Since cargo 1.96 a build holds `.cargo-lock`
+    shared and `.cargo-build-lock` exclusive ("Split build-dir concurrency file lock into a
+    dedicated lock while keeping a shared lock on `.cargo-lock`", cargo#16708). Prune takes both
+    exclusively, and when it waits it waits on one at a time while holding none, so it cannot
+    deadlock against either order. The repository sets no `build.build-dir`, so every build
+    directory is under `target/`.
+  - Tests: `xtask/src/prune/tests.rs` builds fixture profile directories in both layouts with
+    staged times. It covers the idle sweep, the first pass, the objects, the budget's order and
+    its one-hour guard, the floor and the gate's refusal, a held lock of either kind, a dry run
+    and an unknown layout. No test runs cargo.
+  - Not done: moving the gate's lanes to the internal disk (next entry).
+
+- ✅ **A test binary's directory, not the volume, is what slowed `VideoToolbox`; the gate's lanes
+  stay on the repo volume** (2026-09-30). This supersedes the cause in `testing.md`'s 2026-09-15
+  entry ("The repo's volume must be mounted with ownership on"). The plan was to move the gate's
+  lanes to the internal disk, which would also have taken 36 GB off the full volume. Measured
+  first, one variable at a time, on `hevc_encode_then_decode`:
+  - The gate's own binary, run in place from `target/gate/tests/debug/deps`, took 2.6–6.5 s. A
+    copy on the internal disk took 0.43–0.69 s. But a copy in a small directory on the same
+    external volume took 0.37–0.50 s, and so did a hard link of the same inode (0.40 s).
+  - A copy on the internal disk, in a directory holding 100 000 empty files, took 2.0–6.2 s.
+  - The codec's whole suite under nextest took 2.7–3.3 s from a `deps/` of 1 092 entries on
+    either volume and 25–36 s with 100 000 extra entries, on either volume (11 092 entries:
+    3.6 s; 31 092: 6.3 s).
+
+  So a process that opens `VideoToolbox` or `CoreAudio` pays for the size of its executable's
+  directory. The mount flag and the disk do not matter. The 2026-09-15 comparisons each moved
+  the binary into a small directory as well (`/tmp`, a fresh disk image), which is the variable
+  that counted. `deps/` holds every test binary beside every artifact and every compile's object
+  files. The gate therefore stays on the Lacie volume, and the fix goes where the cost is:
+  - `cargo xtask test-runner` is cargo's target runner in the gate's tests lane and in `xtask
+    check` (`CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER`, set only for nextest). It runs a `deps/`
+    binary through a hard link in `<profile>/run/`, the same file in a directory of one entry per
+    test binary. `current_exe()` stays one level below the profile directory, which
+    `ptyd_link.rs` relies on, and the debug info still points into `deps/`. The runner itself is
+    a hard link of the xtask binary beside it, swapped in atomically, so another session
+    rebuilding xtask mid-run cannot leave nextest without it. The codec suite with 101 092
+    entries: 4.8–5.4 s through the runner, 33.2 s without.
+  - Prune deletes the objects of earlier compiles (entry above), which took the tests lane's
+    `deps/` from 102 568 entries to 62 296. That alone still leaves the binary at 3.4–5.5 s,
+    which is why the runner exists.
+  - From Cargo 1.100 each test binary sits in its own unit directory and the runner leaves it
+    where it is.
+  - `sudo diskutil enableOwnership` is no longer the advice: it would not have helped.
+
+- ✅ **`XProtect`: `cargo xtask doctor` measures the first-launch scan, and only the user can
+  switch it off** (2026-09-30). macOS scans each new executable on its first launch, and
+  `XprotectService` runs "in a single thread, so if you try to launch 10 new binaries at once,
+  the slowdown will be more than a second" (cargo#15908, "Enabled | ~180ms" against "Disabled |
+  ~9ms"). nextest's install page says "For optimal performance, add your terminal to Developer
+  Tools", and adds that a multiplexer must be listed itself
+  (https://nexte.st/docs/installation/macos/). A full tests lane launches about 100 new test
+  binaries, and a build script is new after every `cargo update`.
+  - `cargo xtask doctor` (and `setup` at its end) compiles three binaries with constants no
+    binary had before and times each first launch against its second. It names what to list:
+    the outermost app among its ancestors, or else the outermost process, such as a multiplexer
+    server that launchd started. It prints the exact path in System Settings. Here, from
+    herdr, the median was 261 ms a binary; the switch was not on.
+  - It changes no setting. Developer Tools is the user's to switch on for the app it names.
+
+- ✅ **`RealtimeSanitizer` on the audio render callback, in the nightly lane** (2026-09-30).
+  `render` in `slopty-codec/src/audio.rs` is promised to be wait-free: no lock, no allocation,
+  no system call. No functional test can see a break of that promise, which is heard as a
+  crackle. Nightly's `-Zsanitizer=realtime` aborts on any of them in a function marked
+  `#[sanitize(realtime = "nonblocking")]` ("Functions marked with the
+  `#[sanitize(realtime = "nonblocking")]` attribute are considered real-time functions",
+  https://doc.rust-lang.org/nightly/unstable-book/compiler-flags/sanitizer.html). It works on
+  aarch64-apple-darwin without `-Zbuild-std`, since its runtime intercepts `malloc` and the rest
+  whatever calls them.
+  - `cargo xtask deep sanitize realtime` (and the nightly run's `sanitize-realtime`) builds the
+    codec with `--cfg slopty_rtsan`, which marks `render` and turns on
+    `#![feature(sanitize)]`. Stable never sees either (`cfg(slopty_rtsan)` is declared in the
+    workspace's `check-cfg`).
+  - The proof it watches the callback: under the cfg, a test arms a probe that makes the next
+    render allocate and runs it in a child process. The child must die of RealtimeSanitizer's
+    `malloc` report naming `render` ("Intercepted call to real-time unsafe function `malloc` in
+    real-time context! … slopty_codec5audio6render audio.rs:1310"). The real callback passes
+    under it: the ring's tests render through it, and so does `player_starts_and_drains` on the
+    device's I/O thread.
+
+- ✅ **ghostty is a synced fork: `upstream sync` rebases it, re-pins the binding and moves
+  `vendor/ghostty`** (user, 2026-09-30). `vendor/ghostty` now follows `aislopware/ghostty`,
+  whose `main` carries our five alternate-screen commits on ghostty-org `main` `0538f7535`, and
+  libghostty-rs fetches the same fork at `GHOSTTY_COMMIT`. A bump used to be by hand: move the
+  submodule, edit the pin, run `gen-bindings`, commit, push, then `sync --only libghostty-rs`.
+  The user wants every upstream taken continuously and read before it lands, and ghostty-org
+  lands about 14 commits a day (1691 on `main` from 2026-06-01 to 2026-09-29).
+  - `[ghostty]` in `xtask/upstream.toml` makes it a fifth source (strategy `rebase`), and
+    `--only ghostty` brings libghostty-rs, which pins it. The rebase runs in a linked worktree,
+    `.research/ghostty`, never in `vendor/ghostty`: that is `GHOSTTY_SOURCE_DIR` for every build
+    in the checkout, and a conflict there would leave markers in all of them. A conflict stops
+    the sync with the file list, and nothing has been pushed or moved yet.
+  - Every step is checked on this machine before anything leaves it (`plan` in
+    `xtask/src/upstream.rs`, with a unit test of the order). libghostty-rs is rebased, its pin
+    rewritten (the build script must fetch from the fork, and the id must be a full one), the
+    bindings regenerated from the rebased tree and committed. Then `cargo check` and
+    `cargo test -p libghostty-vt` run with `GHOSTTY_SOURCE_DIR` on that tree. After that it
+    publishes in the order the pins need, confirming each step: the ghostty fork's push (read
+    back with `ls-remote`), `vendor/ghostty` moved detached to that head, libghostty-rs pushed,
+    `Cargo.lock` moved and read back. A pin never names a commit its repository lacks.
+    `--no-push` stops before publishing and leaves `vendor/ghostty` and the lock alone.
+  - `paths` sets how often it asks. It names what libghostty-vt builds from: `src/terminal/`,
+    `src/lib_vt.zig`, `include/ghostty/` (the bindings' input), `src/simd/` and
+    `src/unicode/` (the parser's and grid's hot helpers), `src/input/` (the key and mouse
+    encoders Slopty calls), `src/build/GhosttyLibVt.zig` and `build.zig.zon` (the Zig version
+    and dependency pins). A third of upstream's commits touch these paths: 567 of the 1691, on
+    93 of 121 days. The rest are the macOS and GTK apps, the renderer, fonts and config.
+  - The gate asks once a day (`check_every_days = 1`). When the head moved, it reads GitHub's
+    compare and warns only if a changed file falls under `paths`. A bump is a Zig rebuild plus
+    a read of what moved and the terminal benches, so a day's batch (about three commits in
+    September) is the unit worth one review. At every gate it would ask for a sync after each
+    commit; at a week, a batch would be too big to read. `watch` coalesces moves by its interval and
+    prints a ghostty head move only when the commits since its last look touch `paths`. The
+    line names the files. A pull request is printed only when its files do. A file list that
+    reaches GitHub's cap (300 for compare, 100 for `gh pr list`) counts as touching, since the
+    files past the cap are unknown, and so does a compare GitHub does not answer.
+  - `check` lists the upstream commits since the base that touch `paths`, one line each, and
+    says where `vendor/ghostty` stands against the fork head and the commit this repository
+    records. The review starts there. A commit in `src/terminal/` or `src/simd/` is measured
+    with `cargo xtask bench --filter engine` before its bump lands.

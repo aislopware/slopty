@@ -17,9 +17,10 @@ use gpui::{Font, FontStyle, FontWeight, HighlightStyle, Hsla, TextRun};
 use gpui_kit::base::text::CodeBlock;
 use slopty_theme::Theme;
 use syntect::highlighting::{
-    Color, FontStyle as SyntectStyle, ScopeSelectors, StyleModifier, Theme as ScopeTheme, ThemeItem,
+    Color, FontStyle as SyntectStyle, HighlightIterator, HighlightState, Highlighter,
+    ScopeSelectors, StyleModifier, Theme as ScopeTheme, ThemeItem,
 };
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 use crate::colors::hsla;
 
@@ -253,54 +254,94 @@ fn scope_theme() -> &'static ScopeTheme {
 /// from line to line (a block comment stays a comment), so the text must be whole.
 #[must_use]
 pub fn spans(text: &str, syntax: Syntax) -> Vec<Vec<Span>> {
-    let set = syntaxes();
-    let mut highlighter = syntect::easy::HighlightLines::new(syntax.0, scope_theme());
-    let plain = |len: usize| vec![Span { len, token: Token::Plain, italic: false, bold: false }];
-    let mut out: Vec<Vec<Span>> = text
-        .split_inclusive('\n')
-        .map(|line| {
-            let body = line.strip_suffix('\n').unwrap_or(line);
-            if body.len() > LINE_MAX {
-                return plain(body.len());
-            }
-            let Ok(ranges) = highlighter.highlight_line(line, set) else {
-                return plain(body.len());
-            };
-            let mut spans: Vec<Span> = Vec::with_capacity(ranges.len());
-            let mut seen = 0_usize;
-            for (style, piece) in ranges {
-                // The last range carries the newline; keep the line's own bytes.
-                let len = piece.len().min(body.len().saturating_sub(seen));
-                if len == 0 {
-                    continue;
-                }
-                seen = seen.saturating_add(len);
-                let span = Span {
-                    len,
-                    token: Token::from_color(style.foreground),
-                    italic: style.font_style.contains(SyntectStyle::ITALIC),
-                    bold: style.font_style.contains(SyntectStyle::BOLD),
-                };
-                match spans.last_mut() {
-                    Some(last)
-                        if last.token == span.token
-                            && last.italic == span.italic
-                            && last.bold == span.bold =>
-                    {
-                        last.len = last.len.saturating_add(len);
-                    }
-                    _ => spans.push(span),
-                }
-            }
-            spans
-        })
-        .collect();
+    let parser = LineParser::new(syntax);
+    let mut state = parser.start();
+    let mut out: Vec<Vec<Span>> =
+        text.split_inclusive('\n').map(|line| parser.line(line, &mut state)).collect();
     // `split('\n')` has one more line than `split_inclusive` when the text ends with a
     // newline (and one line for an empty text).
     if text.is_empty() || text.ends_with('\n') {
         out.push(Vec::new());
     }
     out
+}
+
+/// Where the parser stands where a line starts: what the lines above it left open.
+///
+/// A block comment or a string, say. A line that starts in the state it started in before is
+/// coloured as it was, so an edit is parsed again only down to where the states agree again.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LineState {
+    parse: ParseState,
+    highlight: HighlightState,
+}
+
+/// Colours a text one line at a time, from the [`LineState`] each line starts in.
+#[expect(missing_debug_implementations, reason = "syntect's highlighter has no Debug")]
+pub struct LineParser {
+    syntax: Syntax,
+    highlighter: Highlighter<'static>,
+}
+
+impl LineParser {
+    /// A parser for `syntax`, in the module's scope theme.
+    #[must_use]
+    pub fn new(syntax: Syntax) -> Self {
+        Self { syntax, highlighter: Highlighter::new(scope_theme()) }
+    }
+
+    /// The state the first line starts in.
+    #[must_use]
+    pub fn start(&self) -> LineState {
+        LineState {
+            parse: ParseState::new(self.syntax.0),
+            highlight: HighlightState::new(&self.highlighter, ScopeStack::new()),
+        }
+    }
+
+    /// `line`'s spans (the line holds its newline when it has one, as the grammars expect),
+    /// parsed from `state`, which moves on to the state the next line starts in. A line past
+    /// [`LINE_MAX`] bytes is one plain span and leaves the state as it was.
+    #[must_use]
+    pub fn line(&self, line: &str, state: &mut LineState) -> Vec<Span> {
+        let plain =
+            |len: usize| vec![Span { len, token: Token::Plain, italic: false, bold: false }];
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        if body.len() > LINE_MAX {
+            return plain(body.len());
+        }
+        let Ok(ops) = state.parse.parse_line(line, syntaxes()) else {
+            return plain(body.len());
+        };
+        let ranges = HighlightIterator::new(&mut state.highlight, &ops, line, &self.highlighter);
+        let mut spans: Vec<Span> = Vec::new();
+        let mut seen = 0_usize;
+        for (style, piece) in ranges {
+            // The last range carries the newline; keep the line's own bytes.
+            let len = piece.len().min(body.len().saturating_sub(seen));
+            if len == 0 {
+                continue;
+            }
+            seen = seen.saturating_add(len);
+            let span = Span {
+                len,
+                token: Token::from_color(style.foreground),
+                italic: style.font_style.contains(SyntectStyle::ITALIC),
+                bold: style.font_style.contains(SyntectStyle::BOLD),
+            };
+            match spans.last_mut() {
+                Some(last)
+                    if last.token == span.token
+                        && last.italic == span.italic
+                        && last.bold == span.bold =>
+                {
+                    last.len = last.len.saturating_add(len);
+                }
+                _ => spans.push(span),
+            }
+        }
+        spans
+    }
 }
 
 /// GPUI runs for one line's spans: the theme's colour per token, `font` in the italic or

@@ -8,10 +8,16 @@
 #   133;D;<status>  command ended (precmd, before the next prompt)
 #   OSC 7  the working directory (precmd), so the client can name where a shell is
 #
+# Before each prompt SLOPTY_BIN goes back to the front of the path: its `open` hands web pages to
+# the client, and the system's `/usr/bin/open` must not be found first.
+#
 # Sourced by the bootstrap .zshenv for interactive shells; safe to source twice.
 
 [[ -n "${_slopty_integrated+set}" ]] && return 0
 'builtin' 'typeset' -g _slopty_integrated=1
+# A tmux pane is no Slopty tile: its server may have started in another session, whose
+# presence file (held while a client looks at that tile) would silence this pane's agents.
+[[ -n "${TMUX-}" ]] && 'builtin' 'unset' CLAUDE_CLIENT_PRESENCE_FILE
 # 1 while a command runs (a C mark is open and needs its D).
 'builtin' 'typeset' -gi _slopty_running=0
 
@@ -20,6 +26,11 @@ _slopty_precmd() {
     if (( _slopty_running )); then
         'builtin' 'print' -n -- $'\e]133;D;'"$_slopty_last"$'\a'
         _slopty_running=0
+    fi
+    # Slopty's `open`, BROWSER and EDITOR first on the path (SLOPTY_BIN): /etc/zprofile's
+    # path_helper and the user's files may have put the system's `open` ahead of it.
+    if [[ -n "${SLOPTY_BIN-}" && "${path[1]-}" != "$SLOPTY_BIN" ]]; then
+        path=("$SLOPTY_BIN" "${(@)path:#$SLOPTY_BIN}")
     fi
     'builtin' 'local' _slopty_dir=${PWD//\%/%25}
     'builtin' 'print' -n -- $'\e]7;file://'"${HOST}${_slopty_dir// /%20}"$'\a'

@@ -189,7 +189,7 @@ fn a_frame_of_motion_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
     let _sessions = crowd(&view, cx, &studio, 8, 4);
     view.update(cx, |v, _| v.set_animation(true));
     let (drawn, chrome, counts) =
-        view.read_with(cx, |v, cx| (v.frames_drawn, v.chrome_renders(cx), v.counts));
+        view.read_with(cx, |v, cx| (v.drawn.builds.get(), v.chrome_renders(cx), v.counts));
     view.update(cx, |v, cx| {
         v.tick();
         v.layout.set_overview(true);
@@ -202,7 +202,7 @@ fn a_frame_of_motion_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
         cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
     }
-    let drew = view.read_with(cx, |v, _| v.frames_drawn.wrapping_sub(drawn));
+    let drew = view.read_with(cx, |v, _| v.drawn.builds.get().wrapping_sub(drawn));
     let (after, took) = view.read_with(cx, |v, cx| (v.chrome_renders(cx), v.counts));
     assert!(drew > FRAMES, "the change and every frame of motion drawn: {drew}");
     let once = (counts.0.saturating_add(1), counts.1.saturating_add(1));
@@ -219,21 +219,30 @@ fn a_frame_of_motion_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
 }
 
 /// What a frame of motion costs beside the chrome: the overview opening and closing over 60
-/// shells and 60 notes with the navigator docked, each frame of the moves timed. Run by hand
-/// (it prints, it does not judge); `docs/MEASUREMENTS.md` has the numbers and the command.
+/// shells and 60 notes with the navigator docked, each frame of the moves timed. The springs
+/// run on the workspace's clock, held and moved on a 60 Hz frame at a time, so every run draws
+/// the same frames however slowly it draws them. Run by hand (it prints, it does not judge);
+/// `docs/MEASUREMENTS.md` has the numbers and the command.
 #[gpui::test]
 #[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
 fn measure_a_frame_of_motion_beside_the_chrome(cx: &mut TestAppContext) {
     const FRAMES: usize = 400;
+    const PERIOD: Duration = Duration::from_micros(16_667);
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _sessions = crowd(&view, cx, &studio, 60, 60);
     assert!(cx.debug_bounds("navigator").is_some());
-    view.update(cx, |v, _| v.set_animation(true));
+    let mut clock = Duration::ZERO;
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(clock));
+    });
     let before = renders(&view, cx);
     let mut took = Vec::with_capacity(FRAMES);
     let mut moves = 0_u32;
     while took.len() < FRAMES {
+        clock = clock.saturating_add(PERIOD);
+        view.update(cx, |v, _| v.hold_clock(Some(clock)));
         if !view.read_with(cx, |v, _| v.layout.frame().animating) {
             view.update(cx, |v, cx| {
                 v.tick();

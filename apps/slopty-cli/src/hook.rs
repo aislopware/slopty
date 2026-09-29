@@ -185,7 +185,7 @@ async fn decide(socket: &Path, ask: PermissionAsk, wait: Duration) -> Decision {
 
 /// One line out, one line back, on the control socket. The sending half stays open until the
 /// reply is in: the worker reads its closing as Claude Code having given up on the hook.
-async fn exchange(socket: &Path, request: &CtlRequest) -> Result<CtlReply> {
+pub async fn exchange(socket: &Path, request: &CtlRequest) -> Result<CtlReply> {
     let stream = UnixStream::connect(socket).await?;
     let (rd, mut wr) = stream.into_split();
     let mut line = serde_json::to_vec(request)?;

@@ -9,11 +9,11 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
 use slopty_net::{ClientMsg, Connection};
-use slopty_proto::transfer::{BulkHeader, ClipFormat, ClipMsg, Dest, Purpose, XferMsg};
+use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, RepRef, XferMsg};
 use tokio::sync::mpsc;
 
 use crate::LinkEvent;
-use crate::clip::{ClipCache, fits_inline};
+use crate::clip::{ClipCache, Fetched, fits_inline};
 use crate::tunnel::Forwards;
 use crate::xfer::{self, Uplink, XferError};
 
@@ -31,13 +31,13 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// `into`, blocking until every file has landed. Never call it on the main thread.
     fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError>;
 
-    /// The bytes in `format` of the worker's clipboard offer `generation`, waiting at most
-    /// `wait` for them. Blocks: this is what a pasteboard's data provider calls.
-    fn clip_data(&self, generation: u64, format: ClipFormat, wait: Duration) -> Option<Vec<u8>>;
+    /// Representation `rep` of the worker's clipboard offer, capped at `max`, waiting at most
+    /// `wait` for it. Blocks: this is what a pasteboard's data provider calls.
+    fn clip_fetch(&self, rep: &RepRef, max: Option<u64>, wait: Duration) -> Fetched;
 
-    /// Answer the worker's fetch of this client's offer `generation`: inline when it fits,
-    /// else on a bulk stream.
-    fn send_clip(&self, generation: u64, format: ClipFormat, bytes: Vec<u8>);
+    /// Answer the worker's fetch of `rep`: bytes inline when they fit, else on a bulk stream,
+    /// ahead of background transfers when a paste on the worker waits on it (`urgent`).
+    fn send_clip(&self, rep: RepRef, answer: Fetched, urgent: bool);
 
     /// Serve the worker's loopback `port` on this machine, until the link goes, and say
     /// where: the same port when it is free here, else the next free one. `None` on a link
@@ -105,23 +105,31 @@ impl Remote for LinkRemote {
         })
     }
 
-    fn clip_data(&self, generation: u64, format: ClipFormat, wait: Duration) -> Option<Vec<u8>> {
-        self.clips.wait(generation, format, wait)
+    fn clip_fetch(&self, rep: &RepRef, max: Option<u64>, wait: Duration) -> Fetched {
+        self.clips.fetch(rep, max, wait)
     }
 
-    fn send_clip(&self, generation: u64, format: ClipFormat, bytes: Vec<u8>) {
-        if fits_inline(bytes.len()) {
-            let data = ClientMsg::Clip(ClipMsg::Data { generation, format, bytes });
-            if let Err(e) = self.up.out.try_send(data) {
-                tracing::debug!(error = %e, "clipboard data not sent");
+    fn send_clip(&self, rep: RepRef, answer: Fetched, urgent: bool) {
+        let bytes = match answer {
+            Fetched::Data(bytes) if !fits_inline(bytes.len()) => bytes,
+            answer => {
+                let msg = match answer {
+                    Fetched::Data(bytes) => ClipMsg::Data { rep, bytes },
+                    Fetched::TooBig(size) => ClipMsg::TooBig { rep, size },
+                    Fetched::Gone => ClipMsg::Unavailable { source: rep.source },
+                };
+                if let Err(e) = self.up.out.try_send(ClientMsg::Clip(msg)) {
+                    tracing::debug!(error = %e, "clipboard answer not sent");
+                }
+                return;
             }
-            return;
-        }
+        };
         let conn = self.conn().clone();
         self.runtime.spawn(async move {
+            let item = rep.item;
             let header = BulkHeader {
                 xfer: XferId::new(),
-                purpose: Purpose::Clip { generation, format },
+                purpose: Purpose::Rep { rep },
                 name: String::new(),
                 size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                 mtime_ms: WallMs::ZERO,
@@ -132,11 +140,16 @@ impl Remote for LinkRemote {
                 let mut send = slopty_net::streams::open_bulk(&conn, header)
                     .await
                     .map_err(|e| e.to_string())?;
+                if urgent {
+                    // A paste waits on it: level with the tunnels, ahead of files.
+                    send.set_priority(slopty_net::streams::TUNNEL_PRIORITY)
+                        .map_err(|e| e.to_string())?;
+                }
                 send.write_all(&bytes).await.map_err(|e| e.to_string())?;
                 send.finish().map_err(|e| e.to_string())
             };
             if let Err(e) = sent.await {
-                tracing::debug!(generation, error = %e, "clipboard bulk");
+                tracing::debug!(item, error = %e, "clipboard bulk");
             }
         });
     }

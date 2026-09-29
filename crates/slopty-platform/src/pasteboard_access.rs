@@ -70,9 +70,10 @@ pub fn general() -> Access {
     }
 }
 
-/// How reading `board` goes for this process.
+/// How reading `board` goes for this process. Reads no contents and never raises the alert.
 #[cfg(target_os = "macos")]
-fn of(board: &objc2_app_kit::NSPasteboard) -> Access {
+#[must_use]
+pub fn of(board: &objc2_app_kit::NSPasteboard) -> Access {
     use objc2_app_kit::NSPasteboardAccessBehavior as Behavior;
     match board.accessBehavior() {
         Behavior::AlwaysAllow => Access::Allowed,

@@ -4,10 +4,7 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use noq::{
-    AckFrequencyConfig, Connection, Endpoint, IdleTimeout, MtuDiscoveryConfig, PathId,
-    TransportConfig, VarInt,
-};
+use noq::{AckFrequencyConfig, Connection, Endpoint, IdleTimeout, PathId, TransportConfig, VarInt};
 
 use crate::NetError;
 
@@ -56,10 +53,24 @@ const MAX_ACK_DELAY: Duration = Duration::from_millis(2);
 /// on the open Internet, and it sets the handshake's first retransmission timer. Every Slopty
 /// path is a LAN or a mesh a few milliseconds long.
 const INITIAL_RTT: Duration = Duration::from_millis(5);
-/// Largest UDP payload MTU discovery climbs to: Tailscale's TUN MTU is 1280, less 28 bytes of
-/// IPv4 and UDP header. Probing past it only loses probes; on a LAN it costs ~4% of payload
-/// against 1452.
-const MTU_UPPER_BOUND: u16 = 1252;
+/// Every packet's UDP payload, from the first: 1280 bytes, the least any IPv6 link carries and
+/// Tailscale's TUN MTU, less 48 bytes of IPv6 and UDP header.
+///
+/// A tailnet, a LAN and most VPNs carry it on both families, and there is nothing to discover:
+/// the ceiling was 1252 (IPv4 inside a 1280 tunnel), and its probes were lost on every IPv6
+/// tailnet path. A media datagram is at most `slopty_proto::media::MAX_DATAGRAM`, 1200 bytes,
+/// which 1232 carries from the first packet where noq's 1200 did not. A narrower path (an L2TP
+/// or IP security VPN, some cellular links) carries the handshake, which is padded to 1200 only,
+/// and then loses every full packet: black-hole detection sees those losses and falls back to
+/// [`MIN_MTU`] (docs/decisions/transport.md, "Every packet is 1232 bytes").
+pub const PATH_MTU: u16 = 1232;
+/// The UDP payload every QUIC path must carry (RFC 9000 §14), where black-hole detection
+/// falls back to when full [`PATH_MTU`] packets are lost in bursts.
+pub const MIN_MTU: u16 = 1200;
+/// The socket's receive buffer. macOS gives a UDP socket 786 896 bytes
+/// (`net.inet.udp.recvspace`), which a 5K keyframe at 4:4:4 passes when it lands at once while the
+/// endpoint's task is late; `kern.ipc.maxsockbuf` allows 8 MiB.
+const RECEIVE_BUFFER: usize = 4 << 20;
 
 /// Environment override for the congestion controller: `cubic`, `bbr3` or `newreno`.
 ///
@@ -77,6 +88,12 @@ pub const DATAGRAMS_FIRST_ENV: &str = "SLOPTY_DATAGRAMS_FIRST";
 pub const STREAM_WINDOW_ENV: &str = "SLOPTY_STREAM_WINDOW";
 /// Environment override for the initial congestion window, in packets (diagnostics).
 pub const INITIAL_WINDOW_ENV: &str = "SLOPTY_QUIC_IW";
+/// Set to `0`, a macOS endpoint sends and receives one datagram a call instead of through
+/// Apple's batched `sendmsg_x` and `recvmsg_x` (diagnostics: measuring against the plain path).
+pub const BATCHED_UDP_ENV: &str = "SLOPTY_BATCHED_UDP";
+/// Environment override for the socket's receive buffer, in bytes; `0` leaves the OS's
+/// (diagnostics).
+pub const RECEIVE_BUFFER_ENV: &str = "SLOPTY_UDP_RCVBUF";
 /// Initial congestion window, in packets of the initial 1200-byte datagram size.
 ///
 /// RFC 9002's 10 packets (noq's default) is sized for an unknown peer on the open Internet;
@@ -111,14 +128,14 @@ pub fn transport_config() -> TransportConfig {
 fn seeded_transport_config(seed: Option<u64>) -> TransportConfig {
     let mut acks = AckFrequencyConfig::default();
     acks.max_ack_delay(Some(MAX_ACK_DELAY));
-    let mut mtu = MtuDiscoveryConfig::default();
-    mtu.upper_bound(MTU_UPPER_BOUND);
     let mut config = TransportConfig::default();
     config
         .congestion_controller_factory(congestion_controller(seed))
         .ack_frequency_config(Some(acks))
         .initial_rtt(INITIAL_RTT)
-        .mtu_discovery_config(Some(mtu))
+        .initial_mtu(PATH_MTU)
+        .min_mtu(MIN_MTU)
+        .mtu_discovery_config(None)
         .max_idle_timeout(IdleTimeout::try_from(IDLE_TIMEOUT).ok())
         .keep_alive_interval(Some(KEEP_ALIVE))
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
@@ -159,6 +176,10 @@ pub struct Tuning {
     pub echo_copies: Option<crate::echo::Copies>,
     /// The path trace's period; `None` is off ([`PATH_TRACE_ENV`]).
     pub path_trace: Option<Duration>,
+    /// Whether a macOS socket sends and receives in batches ([`BATCHED_UDP_ENV`]).
+    pub batched_udp: bool,
+    /// The socket's receive buffer in bytes; `None` leaves the OS's ([`RECEIVE_BUFFER_ENV`]).
+    pub receive_buffer: Option<usize>,
 }
 
 /// A congestion controller noq ships.
@@ -207,6 +228,10 @@ impl Tuning {
             datagrams_first: var(DATAGRAMS_FIRST_ENV).is_some_and(|v| v == "1"),
             echo_copies: crate::echo::Copies::parse(var(crate::echo::ECHO_COPY_ENV).as_deref()),
             path_trace: var(PATH_TRACE_ENV).as_deref().and_then(parse_trace_period),
+            batched_udp: var(BATCHED_UDP_ENV).is_none_or(|v| v != "0"),
+            receive_buffer: var(RECEIVE_BUFFER_ENV)
+                .and_then(|v| v.parse::<usize>().ok())
+                .map_or(Some(RECEIVE_BUFFER), |bytes| (bytes > 0).then_some(bytes)),
         }
     }
 
@@ -311,8 +336,7 @@ fn bind_with(
 ) -> Result<Endpoint, NetError> {
     let bind_err = |source| NetError::Bind { addr: local.to_string(), source };
     let socket = bind_udp(local).map_err(bind_err)?;
-    let socket =
-        noq::Runtime::wrap_udp_socket(&noq::TokioRuntime, socket.into()).map_err(bind_err)?;
+    let socket = crate::udp::wrap(socket.into(), tuning().batched_udp).map_err(bind_err)?;
     endpoint_with(socket, server, transport, crate::crypto::endpoint_config()).map_err(bind_err)
 }
 
@@ -361,6 +385,14 @@ fn bind_socket(local: SocketAddr) -> std::io::Result<socket2::Socket> {
     )?;
     if local.is_ipv6() {
         socket.set_only_v6(false)?;
+    }
+    if let Some(bytes) = tuning().receive_buffer {
+        socket.set_recv_buffer_size(bytes)?;
+        // The OS clamps what it grants (`kern.ipc.maxsockbuf` on macOS) and says nothing.
+        let granted = socket.recv_buffer_size()?;
+        if granted < bytes {
+            tracing::warn!(asked = bytes, granted, "UDP receive buffer smaller than asked");
+        }
     }
     socket.bind(&local.into())?;
     Ok(socket)
@@ -474,12 +506,18 @@ pub const fn canonical(addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(addr.ip().to_canonical(), addr.port())
 }
 
-/// The path in one line, for diagnostics.
+/// The path in one line, for diagnostics: where the peer is, the round trip, and how many of
+/// this end's packets were lost.
+///
+/// The losses are this end's own, which the peer never counts: over the mesh a key lost on its
+/// way to the worker showed only as a slow echo, since the worker's counters see its own
+/// packets (docs/decisions/transport.md, "One key in eight over 50 ms").
 #[must_use]
 pub fn describe_path(conn: &Connection) -> String {
     let rtt = rtt(conn).map_or_else(|| "?".to_owned(), |r| format!("{r:.1?}"));
     let remote = remote(conn).map_or_else(|| "gone".to_owned(), |r| r.to_string());
-    format!("{remote} rtt {rtt}")
+    let stats = conn.stats();
+    format!("{remote} rtt {rtt} lost {} of {} sent", stats.lost_packets, stats.udp_tx.datagrams)
 }
 
 /// The path's congestion picture plus the datagram send buffer headroom, for logs.
@@ -585,6 +623,8 @@ mod tests {
         assert!(!shipped.datagrams_first);
         assert!(shipped.echo_copies.is_some(), "copies are on");
         assert_eq!(shipped.path_trace, None);
+        assert!(shipped.batched_udp);
+        assert_eq!(shipped.receive_buffer, Some(RECEIVE_BUFFER));
         assert_eq!(tuning_of(&[(CC_ENV, "no-such")]), shipped, "an unknown controller is BBR3");
     }
 
@@ -596,6 +636,8 @@ mod tests {
             (DATAGRAMS_FIRST_ENV, "1"),
             (crate::echo::ECHO_COPY_ENV, "off"),
             (PATH_TRACE_ENV, "50"),
+            (BATCHED_UDP_ENV, "0"),
+            (RECEIVE_BUFFER_ENV, "0"),
         ]);
         assert_eq!(set.controller, Controller::Cubic);
         assert!(!set.bounded);
@@ -603,6 +645,9 @@ mod tests {
         assert!(set.datagrams_first);
         assert_eq!(set.echo_copies, None);
         assert_eq!(set.path_trace, Some(Duration::from_millis(50)));
+        assert!(!set.batched_udp);
+        assert_eq!(set.receive_buffer, None, "0 leaves the OS's");
+        assert_eq!(tuning_of(&[(RECEIVE_BUFFER_ENV, "65536")]).receive_buffer, Some(65_536));
         assert_eq!(tuning_of(&[(CC_ENV, "newreno")]).controller, Controller::NewReno);
         assert_eq!(tuning_of(&[(STREAM_WINDOW_ENV, "0")]).stream_window, None);
     }
@@ -622,6 +667,59 @@ mod tests {
         assert_eq!(canonical(mapped), "100.64.0.3:45550".parse().unwrap());
         let v6: SocketAddr = "[fd7a:115c:a1e0::1]:45550".parse().unwrap();
         assert_eq!(canonical(v6), v6);
+    }
+
+    /// A 5K keyframe at 4:4:4, 1.5 MB of full datagrams, sent while the endpoint reads nothing
+    /// (its task late, the machine busy) waits whole in the socket: what arrived, of what was
+    /// sent. `SLOPTY_UDP_RCVBUF=0` measures the OS's default beside it (docs/MEASUREMENTS.md,
+    /// "The receive buffer").
+    fn a_keyframe_sent_while_nobody_reads() -> (usize, usize) {
+        const DATAGRAM: usize = PATH_MTU as usize;
+        let receiver = bind_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let to = receiver.local_addr().unwrap();
+        let sender = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let datagram = [7_u8; DATAGRAM];
+        let count = const { 1_500_000 / DATAGRAM };
+        for _ in 0..count {
+            // A full buffer drops the datagram and still reports it sent.
+            sender.send_to(&datagram, to.as_socket().unwrap()).unwrap();
+        }
+        receiver.set_nonblocking(true).unwrap();
+        let mut buf = [std::mem::MaybeUninit::new(0_u8); 2048];
+        let arrived = std::iter::from_fn(|| receiver.recv(&mut buf).ok()).count();
+        (arrived, count)
+    }
+
+    #[test]
+    fn the_socket_holds_a_large_keyframe_while_nobody_reads() {
+        let socket = bind_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        assert!(socket.recv_buffer_size().unwrap() >= RECEIVE_BUFFER);
+        let (arrived, sent) = a_keyframe_sent_while_nobody_reads();
+        assert_eq!(arrived, sent, "the socket held {arrived} of {sent}");
+    }
+
+    #[test]
+    #[ignore = "diagnostic: SLOPTY_UDP_RCVBUF=0 cargo test -p slopty-net --lib keyframe_report -- --ignored --nocapture"]
+    fn keyframe_report() {
+        let (arrived, sent) = a_keyframe_sent_while_nobody_reads();
+        let buffer =
+            bind_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap().recv_buffer_size().unwrap();
+        println!("SO_RCVBUF {buffer}: {arrived} of {sent} datagrams of {PATH_MTU} B held");
+    }
+
+    /// A media datagram of the largest size the worker cuts fits a packet from the first.
+    #[tokio::test]
+    async fn a_full_media_datagram_fits_from_the_first_packet() {
+        let server = bind(SocketAddr::from(([127, 0, 0, 1], 0)), true).unwrap();
+        let client = bind(SocketAddr::from(([127, 0, 0, 1], 0)), false).unwrap();
+        let to = server.local_addr().unwrap();
+        let accepted = tokio::spawn(async move { server.accept().await.unwrap().await.unwrap() });
+        let conn = client.connect(to, "localhost").unwrap().await.unwrap();
+        let _server_side = accepted.await.unwrap();
+        let max = conn.max_datagram_size().unwrap();
+        assert!(max >= slopty_proto::media::MAX_DATAGRAM, "{max} bytes");
+        let stats = conn.path_stats(PathId::ZERO).unwrap();
+        assert_eq!(stats.current_mtu, PATH_MTU);
     }
 
     #[tokio::test]

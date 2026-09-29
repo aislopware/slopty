@@ -34,7 +34,7 @@ pub mod tools;
 pub mod view;
 
 pub use actions::{CycleDensity, Interrupt};
-pub use view::{Attach, ConversationView, FaceEvent};
+pub use view::{Attach, ConversationView, FaceEvent, HeaderChips};
 
 /// The key context the face binds in.
 pub const CTX: &str = "Conversation";

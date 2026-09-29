@@ -346,6 +346,9 @@ pub struct Snapshot {
     pub min_rtt: Option<Duration>,
     /// BBR3's own `BBR.min_rtt`, which sizes its window: `None` under another controller.
     pub model_min_rtt: Option<Duration>,
+    /// BBR3's state by the draft's name (`Startup`, `ProbeBW_UP`, `ProbeRTT`, …): `None` under
+    /// another controller.
+    pub model_state: Option<&'static str>,
 }
 
 /// The controller's picture of `conn`'s path, `None` once the path is gone.
@@ -359,7 +362,9 @@ pub fn snapshot(conn: &Connection) -> Option<Snapshot> {
     let Bounded { inner, in_flight, delivery, min_rtt, .. } = *bounded;
     let (cwnd, inner_cwnd) = (bounded_window, inner.window());
     let pacing_rate = inner.metrics().pacing_rate;
-    let model_min_rtt = inner.into_any().downcast::<Bbr3>().ok().map(|bbr| bbr.min_rtt());
+    let model = inner.into_any().downcast::<Bbr3>().ok();
+    let model_min_rtt = model.as_ref().map(|bbr| bbr.min_rtt());
+    let model_state = model.as_ref().map(|bbr| bbr.state_name());
     Some(Snapshot {
         cwnd,
         inner_cwnd,
@@ -368,6 +373,7 @@ pub fn snapshot(conn: &Connection) -> Option<Snapshot> {
         delivery_rate: delivery.max.get(),
         min_rtt: min_rtt.get(),
         model_min_rtt,
+        model_state,
     })
 }
 

@@ -775,7 +775,9 @@ mod frame_time {
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn the_face_draws_a_streaming_answer_within_a_frame() {
         let run = std::time::Duration::from_secs(5);
-        let mut stack = Stack::launch("e2e-worker").await.unwrap();
+        // The face keeps GPUI's motion, which the self-test otherwise holds still.
+        let mut stack =
+            Stack::launch_with("e2e-worker", &[("SLOPTY_E2E_MOTION", "1")]).await.unwrap();
         stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         let dump = first_shell(&mut stack.driver).await;
         let session = dump.terminals[0].session.clone();

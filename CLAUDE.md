@@ -49,10 +49,20 @@ in it until checked here.
   comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/kit.rs` enforce
   it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the palette, not on
   buttons.
+- **Autonomy.** The user hands over whole goals and reviews only the results. Work
+  continuously without asking. Research, measure and improve everything from the foundation to
+  the UI, and keep looking for new ideas. A session resumes from the memory's progress notes.
 - **Start of a session: bring the ground up to date.** Run `cargo xtask upstream check` and
-  `sync` what is behind (the zed and gpui-kit forks, libghostty-rs and `vendor/ghostty`), then
-  `rustup update`, `cargo update`, and any gate tool that is behind. Read what changed upstream
-  and adopt what helps; do not just move pins (`docs/DEV.md` "Dev loop").
+  `sync` what is behind (the gpui-fast and gpui-kit forks, libghostty-rs and `vendor/ghostty`),
+  then `rustup update`, `cargo update`, and any gate tool that is behind (`docs/DEV.md` "Dev
+  loop").
+- **Upstream, continuously and never blindly.** gpui-fast lands commits every few minutes, so
+  keep a watch on the forked and vendored upstreams (gpui-fast, gpui-kit, libghostty-rs, noq)
+  and sync as they move. Check their open pull requests before building anything in them, so no
+  work is duplicated. Judge every change taken, and every library on a hot path, on whether it
+  and our use of it are optimal: measure, and improve at the root when they are not. Never wait
+  on upstream. Finish a good unfinished idea (an open pull request) in our fork now, and
+  reconcile when upstream lands it.
 - **The gate checks the index, in the background.** Stage exactly what you mean to land
   (`git add <paths>`). Then launch
   `cargo gate > target/logs/gate.log 2>&1; echo GATE_EXIT=$? >> target/logs/gate.log`. Keep

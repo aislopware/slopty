@@ -209,7 +209,9 @@ impl Status {
     pub const fn of_agent(agent: &AgentEvent) -> Option<Self> {
         Some(match &agent.status {
             AgentStatus::None => return None,
-            AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => Self::Idle,
+            AgentStatus::Idle
+            | AgentStatus::Blocked(BlockReason::IdlePrompt)
+            | AgentStatus::Waiting { .. } => Self::Idle,
             AgentStatus::Working | AgentStatus::Tool { .. } => Self::Working,
             AgentStatus::Blocked(_) => Self::NeedsYou,
             AgentStatus::Done => Self::Done,
@@ -496,6 +498,11 @@ pub fn release_steps(cx: &mut App) {
         clock.timers = clock.timers.wrapping_add(1);
         SpinClock::wake(cx);
     }
+}
+
+/// The system's Reduce Motion setting changed: the marks step as it now says.
+pub fn motion_setting_changed(cx: &mut App) {
+    SpinClock::get(cx).reduce_motion = system_reduce_motion();
 }
 
 /// Whether the system asks for motion to be reduced. Always false under test, so a test that

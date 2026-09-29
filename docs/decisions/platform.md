@@ -90,8 +90,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       daemon's desktop start-up and input release (`desktop`, `let_go`) and the doctor's grant
       checks are macOS-only.
     - The clipboard is `slopty_input::pasteboard::Unsupported`: it never changes and refuses
-      every write. Off macOS, `Rep::uti` spells the UTIs the wire carries; a Mac test holds the
-      spelling to AppKit's statics.
+      every write. Off macOS, `board_type` spells each format as its MIME type; a Mac test holds
+      the macOS spelling to AppKit's statics.
   - **Also on Linux, from `/proc`.** A session's listening ports: children from each thread's
     `task/*/children` (every `stat`'s parent where the kernel keeps no such list), socket inodes
     from `fd/*`, listeners in state `0A` from `net/tcp` and `net/tcp6`.
@@ -350,8 +350,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `Rtf`, `Html` or `Text`, each with a MIME type (`ClipFormat::mime`). It replaced the Apple
     UTI strings in `ClipItem`, `ClipMsg::Fetch`/`Data` and `Purpose::Clip`. The pasteboard seam
     maps it: `slopty_input::board_type` gives the AppKit type on a Mac and the MIME type
-    elsewhere, and `format_of` reads a board's type back. There is no `Other(String)`, because
-    the sync offers only formats it knows how to write, so an unknown one has nowhere to go.
+    elsewhere, and `format_of` reads a board's type back.
+  - **Amended 2026-09-30: Apple types travel as UTIs.** The first version had no
+    `Other(String)`, on the grounds that an unknown format has nowhere to go. Between two Apple
+    ends, the common case here, it has: both pasteboards take any UTI as it is. So a
+    representation is a `ClipType`, one of the formats above or `Apple(String)`, a UTI that only
+    an Apple end writes and a Linux end ignores (`type_on_board` answers `None`). The sender
+    drops what means nothing elsewhere (`transfer::carried`). See Audio, **Clipboard v2**.
   - **A display is a `DisplayId`**, a newtype in `slopty-core`, not a bare `u32` that happened
     to be a CoreGraphics id. `server::DisplayCap` duplicated `screen::DisplayInfo` and is gone,
     so `WorkerCaps.displays` carries `DisplayInfo`.

@@ -38,6 +38,7 @@ pub mod ctl;
 pub mod datagram;
 pub mod file;
 pub mod folder;
+pub mod handoff;
 pub mod handshake;
 pub mod input;
 pub mod items;
@@ -144,6 +145,12 @@ pub enum ClientMsg {
     /// Start or stop a text search in the files under a directory; answered with
     /// `WorkerMsg::Search` pages as the worker finds matches.
     Search(search::SearchRequest),
+    /// The answer to a `WorkerMsg::Handoff`: taken, offered, refused, or the person done with
+    /// an edit.
+    Handoff(handoff::HandoffReply),
+    /// Which handoffs this client takes: sent right after the hello, ahead of anything the
+    /// worker could hand it, and again when that changes (the app's last window closed).
+    HandoffCaps(handoff::HandoffCaps),
 }
 
 impl ClientMsg {
@@ -168,6 +175,8 @@ impl ClientMsg {
             Self::Conversation(_) => "Conversation",
             Self::ListFolder { .. } => "ListFolder",
             Self::Search(_) => "Search",
+            Self::Handoff(_) => "Handoff",
+            Self::HandoffCaps(_) => "HandoffCaps",
         }
     }
 }
@@ -282,6 +291,12 @@ pub enum WorkerMsg {
     Load(f32),
     /// A page of a text search this client started, or how it ended.
     Search(search::SearchEvent),
+    /// A program in a shell asks this client to open a web page or edit a file, or gives an
+    /// edit up; answered with `ClientMsg::Handoff`.
+    Handoff(handoff::HandoffEvent),
+    /// The pull request and worktree an agent's status line names, the whole of it each time
+    /// it changes; both `None` once the agent has neither or is gone.
+    AgentBranch(agent::AgentBranch),
 }
 
 impl WorkerMsg {
@@ -312,6 +327,8 @@ impl WorkerMsg {
             Self::Failed { .. } => "Failed",
             Self::Load(_) => "Load",
             Self::Search(_) => "Search",
+            Self::Handoff(_) => "Handoff",
+            Self::AgentBranch(_) => "AgentBranch",
         }
     }
 }

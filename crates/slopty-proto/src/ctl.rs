@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slopty_core::{SessionId, WorkerId};
 
+use crate::handoff::{EditOutcome, OfferReason};
 use crate::screen::CaptureTarget;
 use crate::server::WorkerCaps;
 use crate::tailnet::BackendState;
@@ -49,6 +50,107 @@ pub enum CtlRequest {
     /// of a [`Self::Hook`], never beside one, and keeps its end open while it waits; closing it
     /// withdraws the question.
     Permission(PermissionAsk),
+    /// Open a web page for a program in a session (`BROWSER`, the `open` shim) in the browser
+    /// of the client in front of that session; answered with [`CtlReply::Handoff`] (`Taken`,
+    /// `Offered` or `Nobody`), or an error for an address that is not
+    /// [`crate::handoff::is_openable`].
+    Open {
+        /// The session the program runs in (`SLOPTY_SESSION`), when it runs in one.
+        session: Option<SessionId>,
+        /// The address.
+        url: String,
+    },
+    /// Show a file in a file tile of the client in front of the session (`EDITOR`, `slopty
+    /// edit`), and with `wait`, answer only once the person is done with it. The CLI keeps its
+    /// end open while it waits; closing it gives the edit up. Answered with
+    /// [`CtlReply::Handoff`]: `Taken` (not waiting), `Edited`, `Lost`, or `Nobody` when no
+    /// client could show it.
+    Edit(EditAsk),
+    /// What keeps the machine awake now.
+    Wake,
+}
+
+/// A program's ask to edit a file ([`CtlRequest::Edit`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct EditAsk {
+    /// The session the program runs in (`SLOPTY_SESSION`), when it runs in one.
+    pub session: Option<SessionId>,
+    /// The file, as an absolute path.
+    pub path: String,
+    /// The line to start on, from 1.
+    pub line: Option<u32>,
+    /// Answer only once the person is done with it.
+    pub wait: bool,
+}
+
+/// How a handoff went ([`CtlRequest::Open`], [`CtlRequest::Edit`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "handed", rename_all = "snake_case")]
+pub enum Handed {
+    /// A client took it: the page is open there, or the file shows there.
+    Taken {
+        /// The client's name.
+        client: String,
+    },
+    /// A client shows the page in a notice, for the person to open or not.
+    Offered {
+        /// The client's name.
+        client: String,
+        /// Why it was offered rather than opened.
+        why: OfferReason,
+    },
+    /// No client took it; the program falls back to this machine (the system's opener, `vi`).
+    Nobody {
+        /// Why.
+        why: NoClient,
+    },
+    /// The person is done with the waiting edit.
+    Edited {
+        /// How it ended.
+        outcome: EditOutcome,
+    },
+    /// The client showing the waiting edit went away and did not come back.
+    Lost,
+}
+
+/// Why no client took a handoff.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoClient {
+    /// No client is connected to the worker.
+    NoneConnected,
+    /// Clients are connected, and none takes this kind of handoff.
+    NoneCapable,
+    /// Every client that takes it refused it.
+    Refused,
+    /// No client that takes it answered in time.
+    TimedOut,
+}
+
+impl std::fmt::Display for NoClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoneConnected => "no client is connected",
+            Self::NoneCapable => "no connected client takes it",
+            Self::Refused => "every client that takes it refused",
+            Self::TimedOut => "no client answered in time",
+        })
+    }
+}
+
+/// What keeps the machine awake ([`CtlRequest::Wake`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Awake {
+    /// Clients connected.
+    pub clients: usize,
+    /// Window and display streams live.
+    pub streams: usize,
+    /// Agents working or running a tool, whose terminals printed within the silence cap.
+    pub agents: usize,
+    /// The machine is held out of idle sleep.
+    pub system: bool,
+    /// The display is held on.
+    pub display: bool,
 }
 
 /// What `slopty worker doctor` shows: the daemon's own view of its permissions and links.
@@ -144,6 +246,10 @@ pub enum CtlReply {
     },
     /// The decision on a [`CtlRequest::Permission`].
     Permission(PermissionAnswer),
+    /// How a [`CtlRequest::Open`] or [`CtlRequest::Edit`] went.
+    Handoff(Handed),
+    /// The answer to [`CtlRequest::Wake`].
+    Wake(Awake),
     /// Done.
     Ok {
         /// Whether anything changed.

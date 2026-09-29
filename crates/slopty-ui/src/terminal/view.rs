@@ -1,6 +1,8 @@
 //! `TerminalView`: one attached session on screen.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -283,7 +285,7 @@ pub enum ClipPaste {
 }
 
 /// Asked by ⌘V and ⌃V before they go on: what the clipboard holds.
-pub type ClipHook = std::rc::Rc<dyn Fn() -> ClipPaste>;
+pub type ClipHook = Rc<dyn Fn() -> ClipPaste>;
 
 /// Whether `keystroke` is ⌃V, the key Claude Code pastes a picture on.
 fn is_control_v(keystroke: &Keystroke) -> bool {
@@ -344,8 +346,10 @@ pub struct TerminalView {
     #[cfg(test)]
     renders: u32,
     predictor: Predictor,
-    /// Keystroke → paint, predicted and echoed (see [`latency`]).
-    latency: latency::KeyLatency,
+    /// Keystroke → paint, predicted and echoed (see [`latency`]). Shared with the element,
+    /// which times a key when its frame reaches the display: after the frame, where an update
+    /// of the view would count as a change to it and build it again with its tile's next frame.
+    latency: Rc<RefCell<latency::KeyLatency>>,
     /// Text an input method is composing at the cursor (Telex, kana, …), not yet sent.
     marked: Option<String>,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
@@ -545,7 +549,7 @@ impl TerminalView {
             #[cfg(test)]
             renders: 0,
             predictor: predictor(),
-            latency: latency::KeyLatency::default(),
+            latency: Rc::default(),
             marked: None,
             sticky_control: false,
             pointer_hidden: false,
@@ -2024,9 +2028,21 @@ impl TerminalView {
         self.font_family.clone()
     }
 
-    /// Record the resolved family.
-    pub fn set_font_family(&mut self, family: SharedString) {
-        self.font_family = Some(family);
+    /// Record the resolved family. The element resolves it while the window draws, after the
+    /// view built what it measures by the family (the block header, the hovered block's chip):
+    /// the next frame builds them again with it.
+    pub fn set_font_family(&mut self, family: SharedString, cx: &mut Context<Self>) {
+        if self.font_family.as_ref() != Some(&family) {
+            self.font_family = Some(family);
+            Self::drawn_again(cx);
+        }
+    }
+
+    /// Build the view again in a frame of its own, once the window has drawn this one: what the
+    /// element measured while drawing it is news for what the view built before.
+    fn drawn_again(cx: &mut Context<Self>) {
+        let view = cx.entity_id();
+        cx.defer(move |cx| cx.notify(view));
     }
 
     /// The rows the element built last frame, lent to it while it builds the next.
@@ -2089,20 +2105,20 @@ impl TerminalView {
     /// presents only then.
     #[must_use]
     pub fn latency_waiting(&self) -> bool {
-        self.latency.waiting()
+        self.latency.borrow().waiting()
     }
 
-    /// A frame reached the display (`frame` says when it was painted, submitted and shown):
-    /// its guesses showed the keys in `guessed` (their sequence numbers) and its grid the
-    /// worker's state after key `input_ack`.
-    pub fn presented(&mut self, frame: crate::shown::Shown, guessed: &[u64], input_ack: u64) {
-        self.latency.presented(frame, guessed, input_ack);
+    /// Where the element records when the frames it painted reached the display
+    /// ([`latency::KeyLatency::presented`]).
+    #[must_use]
+    pub fn latency_record(&self) -> Rc<RefCell<latency::KeyLatency>> {
+        Rc::clone(&self.latency)
     }
 
     /// Keystroke → paint percentiles (see [`latency`]).
     #[must_use]
     pub fn latency(&self) -> latency::LatencyStats {
-        self.latency.stats()
+        self.latency.borrow().stats()
     }
 
     /// Arm or disarm Control for the next key; a soft keyboard has no Control key of its own.
@@ -2194,7 +2210,7 @@ impl TerminalView {
             now,
         );
         let shows = self.predictor.visible(now);
-        self.latency.pressed(self.key_seq, now, guess.is_some() && shows);
+        self.latency.borrow_mut().pressed(self.key_seq, now, guess.is_some() && shows);
         // ⌃V with a picture on the clipboard: Claude Code reads it off the worker's pasteboard
         // on this key, so the picture goes there first.
         if is_control_v(&keystroke)
@@ -2222,6 +2238,13 @@ impl TerminalView {
     #[must_use]
     pub fn title(&self) -> Option<&str> {
         self.state.title()
+    }
+
+    /// When this view saw the command the shell runs start; `None` at a prompt, or for a
+    /// command that was running when it attached.
+    #[must_use]
+    pub fn command_started(&self) -> Option<Instant> {
+        self.command_started.filter(|_| self.state.command_running())
     }
 
     /// How long the command the shell runs has run, timed from when this view saw it start;
@@ -2311,7 +2334,7 @@ impl TerminalView {
         if reconcile {
             let now = Instant::now();
             let arrived = cx.try_global::<LinkArrival>().map_or(now, |a| a.0);
-            self.latency.applied(self.state.input_ack(), arrived, now);
+            self.latency.borrow_mut().applied(self.state.input_ack(), arrived, now);
             let outcome = self.predictor.on_frame(
                 self.state.screen(),
                 self.state.input_ack(),
@@ -2418,7 +2441,7 @@ impl TerminalView {
             cx.notify();
             return false;
         }
-        if self.sweep_drawn && !self.latency.waiting() {
+        if self.sweep_drawn && !self.latency.borrow().waiting() {
             self.sweep_drawn = false;
             cx.notify();
         }
@@ -2689,10 +2712,14 @@ impl TerminalView {
         self.textures.len()
     }
 
-    /// The element measured the grid: `cols × rows` fit, with these metrics.
+    /// The element measured the grid: `cols × rows` fit, with these metrics. Measured while
+    /// the window draws: a change is drawn in the next frame.
     pub fn fitted(&mut self, size: TermSize, metrics: CellMetrics, cx: &mut Context<Self>) {
-        self.metrics = Some(metrics);
+        let remeasured = self.metrics.replace(metrics) != Some(metrics);
         if self.state.size() == size || self.pending_size == Some(size) {
+            if remeasured {
+                Self::drawn_again(cx);
+            }
             return;
         }
         self.pending_size = Some(size);
@@ -2701,7 +2728,7 @@ impl TerminalView {
                 self.send(req, cx);
             }
         }
-        cx.notify();
+        Self::drawn_again(cx);
     }
 
     /// The blink clock's phase: true while a blinking cursor or SGR 5 text shows.
@@ -4913,20 +4940,24 @@ mod tests {
         use slopty_proto::transfer::ClipMsg;
 
         let (view, mut rx, cx) = terminal(cx);
-        let board = std::rc::Rc::new(Memory::default());
-        let shared: std::rc::Rc<dyn Pasteboard> = std::rc::Rc::<Memory>::clone(&board);
-        let sync =
-            std::rc::Rc::new(std::cell::RefCell::new(crate::clipboard::ClipSync::new(shared)));
+        let board = Rc::new(Memory::default());
+        let shared: Rc<dyn Pasteboard> = Rc::<Memory>::clone(&board);
+        let sync = Rc::new(RefCell::new(crate::clipboard::ClipSync::new(shared)));
         let (me, worker) = (slopty_core::ClientId::new(), slopty_client::layout::WorkerKey::new(1));
         view.update(cx, |view, _cx| {
-            view.set_clip_hook(std::rc::Rc::new(move || sync.borrow_mut().shell_paste(worker, me)));
+            view.set_clip_hook(Rc::new(move || {
+                crate::clipboard::shell_paste(&mut sync.borrow_mut(), worker, me)
+            }));
         });
         let sent = |rx: &mut mpsc::Receiver<ClientMsg>| {
             std::iter::from_fn(|| rx.try_recv().ok())
                 .map(|msg| match msg {
                     ClientMsg::Clip(ClipMsg::Offer(offer)) => {
-                        let formats: Vec<&str> =
-                            offer.items.iter().map(|i| i.format.mime()).collect();
+                        let formats: Vec<&str> = offer
+                            .reps()
+                            .filter_map(|(_, r)| r.kind.format())
+                            .map(slopty_proto::transfer::ClipFormat::mime)
+                            .collect();
                         format!("offer {}", formats.join(","))
                     }
                     ClientMsg::Term {
@@ -4976,9 +5007,9 @@ mod tests {
     #[gpui::test]
     fn closing_a_busy_shell_asks_first(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
-        let confirmed = std::rc::Rc::new(std::cell::Cell::new(0_u32));
+        let confirmed = Rc::new(std::cell::Cell::new(0_u32));
         cx.update(|_window, cx| {
-            let confirmed = std::rc::Rc::clone(&confirmed);
+            let confirmed = Rc::clone(&confirmed);
             cx.subscribe(&view, move |_view, event, _cx| {
                 if matches!(event, TerminalViewEvent::CloseConfirmed) {
                     confirmed.set(confirmed.get().saturating_add(1));
@@ -5237,6 +5268,77 @@ mod tests {
         assert!(!in_view(cx), "scrolled above it: only the header can say so");
     }
 
+    /// Dotted and dashed underlines are drawn in pieces on the device's pixels, in the
+    /// underline's own colour: round dots as wide as the stroke is thick with gaps between,
+    /// and a dash at each end of each cell, never one solid line under the run.
+    #[gpui::test]
+    fn dotted_and_dashed_underlines_are_drawn_in_pieces(cx: &mut TestAppContext) {
+        use slopty_grid::{Color, Underline};
+        let (view, _rx, cx) = terminal(cx);
+        let styled = |underline| Style {
+            underline,
+            underline_color: Color::Rgb(255, 0, 255),
+            ..Style::DEFAULT
+        };
+        let mut line = Line::from_text("dotted dashed", 20, Style::DEFAULT);
+        for (col, cell) in line.cells.iter_mut().enumerate() {
+            cell.style = match col {
+                0..=5 => styled(Underline::Dotted),
+                7..=12 => styled(Underline::Dashed),
+                _ => Style::DEFAULT,
+            };
+        }
+        view.update_in(cx, |view, _window, cx| {
+            let TermEvent::Frame(mut frame) = screen_of(1, 20, &[String::new()]) else {
+                panic!("a frame")
+            };
+            frame.updates = vec![RowUpdate { row: 0, line: line.into() }];
+            view.apply(TermEvent::Frame(frame), cx);
+        });
+        cx.run_until_parked();
+        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let pieces: Vec<(f32, f32, f32, f32, f32)> = quads
+            .iter()
+            .filter(|q| {
+                q.background
+                    .as_solid()
+                    .is_some_and(|c| (c.h - 5.0 / 6.0).abs() < 0.01 && c.s > 0.9 && c.a > 0.9)
+            })
+            .map(|q| {
+                let cell = f32::from(metrics.cell_width) * scale;
+                let x = f32::from(metrics.origin.x).mul_add(-scale, q.bounds.origin.x.0);
+                (
+                    x / cell,
+                    q.bounds.origin.x.0,
+                    q.bounds.size.width.0,
+                    q.bounds.size.height.0,
+                    q.corner_radii.top_left.0,
+                )
+            })
+            .collect();
+        let cell = f32::from(metrics.cell_width) * scale;
+        assert!(pieces.iter().all(|p| p.2 < cell), "no piece spans a cell: {pieces:?}");
+        for p in &pieces {
+            assert!(p.1.fract().abs() < f32::EPSILON, "on the device's pixels: {p:?}");
+        }
+        let dots: Vec<_> = pieces.iter().filter(|p| p.0 < 6.0).collect();
+        let dashes: Vec<_> = pieces.iter().filter(|p| p.0 >= 7.0 && p.0 < 13.0).collect();
+        assert!(dots.len() >= 12, "at least two dots a cell: {dots:?}");
+        assert!(dots.iter().all(|d| (d.2 - d.3).abs() < 0.01 && d.4 > 0.0), "round dots: {dots:?}");
+        assert!(
+            dots.windows(2).all(|w| w[1].1 - (w[0].1 + w[0].2) > 0.5),
+            "gaps between: {dots:?}"
+        );
+        assert_eq!(dashes.len(), 12, "two dashes a cell: {dashes:?}");
+        assert!(dashes.iter().all(|d| d.2 > d.3), "dashes are longer than thick: {dashes:?}");
+        assert_eq!(
+            pieces.len(),
+            dots.len().saturating_add(dashes.len()),
+            "nothing under the space: {pieces:?}"
+        );
+    }
+
     /// Unfocused, the cursor is a hollow block in the muted text tone, not the cursor colour:
     /// a background pane's caret is a place marker and does not draw the eye.
     #[gpui::test]
@@ -5335,8 +5437,8 @@ mod tests {
         view.update(cx, |view, cx| view.paste("seq 3".to_owned(), cx));
         assert_eq!(drain_input(&mut rx), ["paste:seq 3"], "typed, not run");
 
-        let notes = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&notes);
+        let notes = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&notes);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
                 if let TerminalViewEvent::NoteBlock(text) = event {
@@ -5475,8 +5577,8 @@ mod tests {
         assert_eq!(text.as_deref(), Some("second"));
 
         // The selection, fenced, is what the note keeps.
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&events);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&events);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
                 if let TerminalViewEvent::NoteBlock(text) = event {
@@ -6707,8 +6809,8 @@ mod tests {
     #[gpui::test]
     fn cmd_drag_on_a_path_drags_the_file_out(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
-        let dragged = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&dragged);
+        let dragged = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&dragged);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
                 if let TerminalViewEvent::DragOut { path } = event {
@@ -6817,8 +6919,8 @@ mod tests {
     #[gpui::test]
     fn cmd_click_on_a_directory_views_it_instead_of_typing(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
-        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&viewed);
+        let viewed = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&viewed);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
                 if let TerminalViewEvent::ViewFile { path, line } = event {
@@ -6869,8 +6971,8 @@ mod tests {
     #[gpui::test]
     fn cmd_click_on_a_path_while_a_command_runs_views_it(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
-        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&viewed);
+        let viewed = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&viewed);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
                 if let TerminalViewEvent::ViewFile { path, line } = event {
@@ -6992,8 +7094,8 @@ mod tests {
     #[gpui::test]
     fn sticky_command_views_the_path_under_the_next_tap(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
-        let viewed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let seen = std::rc::Rc::clone(&viewed);
+        let viewed = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&viewed);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
                 if let TerminalViewEvent::ViewFile { path, line } = event {
@@ -7180,7 +7282,7 @@ mod tests {
         view.read_with(cx, |view, _| {
             assert_eq!(view.state.view_offset(), 0, "back at the bottom");
             assert_eq!(view.predictor.pending().len(), 1, "guessed");
-            assert!(view.latency.waiting(), "timed");
+            assert!(view.latency.borrow().waiting(), "timed");
         });
         assert_eq!(drain_words(&mut rx), ["key"], "and sent");
     }
@@ -8022,7 +8124,10 @@ mod tests {
         // and the echo's frame draws the sweep where it has got to.
         cx.simulate_keystrokes("a");
         cx.run_until_parked();
-        assert!(view.read_with(cx, |v, _| v.latency.waiting()), "the key waits for its echo");
+        assert!(
+            view.read_with(cx, |v, _| v.latency.borrow().waiting()),
+            "the key waits for its echo"
+        );
         let before = renders(cx);
         cx.background_executor.advance_clock(crate::icons::SPIN_STEP.saturating_mul(3));
         cx.run_until_parked();

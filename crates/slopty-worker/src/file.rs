@@ -83,14 +83,31 @@ pub fn announce(read: FileRead) -> (FileRead, Option<(XferId, String)>) {
     }
 }
 
-/// Save a file tile: replace `path` with `text` unless the file changed on disk since
-/// `base_modified_ms`, the modification time of the version the edit started from.
+/// How a save lands on disk.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Rewrite {
+    /// A new file renamed over the old one, so no reader ever sees half a save.
+    Replace,
+    /// Into the same file (same inode), for a file a waiting program holds open: `crontab -e`
+    /// and `visudo` read the edited file back through the descriptor they opened before the
+    /// editor ran, which a rename would leave on the old contents. The mode, owner and extended
+    /// attributes stay, being the file's own.
+    InPlace,
+}
+
+/// Save a file tile: rewrite `path` with `text` as `how` says, unless the file changed on disk
+/// since `base_modified_ms`, the modification time of the version the edit started from.
 ///
 /// A file whose time is newer than the base is a `Conflict` and is left alone; no base writes
 /// regardless. Anything but a regular file, and a text past [`FILE_BYTES`], is `Failed` before
 /// anything is touched.
 #[must_use]
-pub fn write(path: &Path, text: &[u8], base_modified_ms: Option<WallMs>) -> WriteResult {
+pub fn write(
+    path: &Path,
+    text: &[u8],
+    base_modified_ms: Option<WallMs>,
+    how: Rewrite,
+) -> WriteResult {
     let path = expand_home(path);
     let failed = |error: String| WriteResult::Failed { error };
     if text.len() as u64 > FILE_BYTES {
@@ -107,10 +124,24 @@ pub fn write(path: &Path, text: &[u8], base_modified_ms: Option<WallMs>) -> Writ
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return failed(os_word(&e)),
     }
-    match slopty_platform::fs::replace(&path, text).and_then(|()| std::fs::metadata(&path)) {
+    let written = match how {
+        Rewrite::Replace => slopty_platform::fs::replace(&path, text),
+        Rewrite::InPlace => rewrite_in_place(&path, text),
+    };
+    match written.and_then(|()| std::fs::metadata(&path)) {
         Ok(meta) => WriteResult::Saved { size: meta.len(), modified_ms: modified_ms(&meta) },
         Err(e) => failed(os_word(&e)),
     }
+}
+
+/// Write `text` over `path`'s own contents: from the start, then cut to its length, then to
+/// disk before returning. Never empty in between, for a reader that looks early.
+fn rewrite_in_place(path: &Path, text: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt as _;
+    let file = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+    file.write_all_at(text, 0)?;
+    file.set_len(text.len() as u64)?;
+    file.sync_all()
 }
 
 /// What a watcher compares between two looks at a file.
@@ -300,7 +331,7 @@ mod tests {
         std::fs::write(&path, "echo one\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
         let FileRead::Text { modified_ms: base, .. } = read(&path) else { panic!("text") };
-        let first = saved(&write(&path, b"echo two\n", Some(base)));
+        let first = saved(&write(&path, b"echo two\n", Some(base), Rewrite::Replace));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo two\n");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o750, "the mode is kept");
@@ -309,13 +340,54 @@ mod tests {
 
         let stale = WallMs::from_millis(first.as_millis().saturating_sub(1));
         assert_eq!(
-            write(&path, b"echo three\n", Some(stale)),
+            write(&path, b"echo three\n", Some(stale), Rewrite::Replace),
             WriteResult::Conflict { modified_ms: first }
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo two\n", "nothing written");
-        saved(&write(&path, b"echo four\n", None));
+        saved(&write(&path, b"echo four\n", None, Rewrite::Replace));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "echo four\n", "no base forces it");
-        saved(&write(&dir.path().join("new.txt"), b"fresh", Some(base)));
+        saved(&write(&dir.path().join("new.txt"), b"fresh", Some(base), Rewrite::Replace));
+    }
+
+    /// A save in place lands in the file a program holds open, as `crontab -e` reads it back
+    /// through the descriptor it opened before the editor ran; a replacing save would leave
+    /// that descriptor on the old contents. The file keeps its inode, mode and extended
+    /// attributes, and a shorter text leaves nothing of the longer one behind.
+    #[test]
+    fn a_save_in_place_reaches_a_descriptor_held_open() {
+        use std::io::Seek as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crontab.tmp");
+        std::fs::write(&path, "0 * * * * old-and-long-line\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let tagged = std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "dev.slopty.test", "kept"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|s| s.success());
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let mut held = std::fs::File::open(&path).unwrap();
+
+        saved(&write(&path, b"5 * * * * new\n", None, Rewrite::InPlace));
+        held.rewind().unwrap();
+        let seen = std::io::read_to_string(&mut held).unwrap();
+        assert_eq!(seen, "5 * * * * new\n", "the held descriptor reads the save");
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!((meta.ino(), meta.mode() & 0o7777), (inode, 0o600));
+        if tagged {
+            let read = std::process::Command::new("/usr/bin/xattr")
+                .args(["-p", "dev.slopty.test"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), "kept");
+        }
+
+        saved(&write(&path, b"6 * * * * again\n", None, Rewrite::Replace));
+        held.rewind().unwrap();
+        let seen = std::io::read_to_string(&mut held).unwrap();
+        assert_eq!(seen, "5 * * * * new\n", "a replacing save is not seen through it");
     }
 
     /// A save through a symbolic link replaces the file it names and keeps the link.
@@ -326,7 +398,7 @@ mod tests {
         let link = dir.path().join("link.txt");
         std::fs::write(&target, "old").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        saved(&write(&link, b"new", None));
+        saved(&write(&link, b"new", None, Rewrite::Replace));
         assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
     }
@@ -341,14 +413,14 @@ mod tests {
         let made = std::process::Command::new("mkfifo").arg(&fifo).status();
         assert!(made.is_ok_and(|s| s.success()), "mkfifo");
         let refused = |error: &str| WriteResult::Failed { error: error.to_owned() };
-        assert_eq!(write(&fifo, b"x", None), refused("Not a regular file"));
-        assert_eq!(write(dir.path(), b"x", None), refused("Is a directory"));
+        assert_eq!(write(&fifo, b"x", None, Rewrite::Replace), refused("Not a regular file"));
+        assert_eq!(write(dir.path(), b"x", None, Rewrite::Replace), refused("Is a directory"));
         let big = dir.path().join("big.txt");
         let text = vec![b'x'; usize::try_from(FILE_BYTES).unwrap() + 1];
-        assert!(matches!(write(&big, &text, None), WriteResult::Failed { .. }));
+        assert!(matches!(write(&big, &text, None, Rewrite::Replace), WriteResult::Failed { .. }));
         assert!(!big.exists(), "nothing written");
         std::fs::write(&big, &text).unwrap();
-        saved(&write(&big, b"short", None));
+        saved(&write(&big, b"short", None, Rewrite::Replace));
         assert_eq!(std::fs::read_to_string(&big).unwrap(), "short");
     }
 }

@@ -309,6 +309,21 @@ machine gets the full capability set without anyone installing ghostty. The inst
 idempotent, nothing waits for it (`TERM` is read per spawn), and `$SLOPTY_TERMINFO_DIR`
 redirects the database for tests.
 
+**A shell's browser and editor.** The shell integration also links the `slopty` CLI as `open`
+(`xdg-open` on Linux), `slopty-browser` and `slopty-editor`, in a directory whose path has no
+space in it. It puts that directory first on `PATH`, again at every prompt, and sets `BROWSER`
+and `EDITOR` to the last two by absolute path, as defaults the user's rc overrides. `VISUAL`
+is never set. A web page or a file a program hands them goes up the control socket
+(`CtlRequest::Open`, `CtlRequest::Edit`) to the daemon's `handoff` module. The daemon offers it
+as `WorkerMsg::Handoff`, one after another, to the clients that declared they take it
+(`ClientMsg::HandoffCaps`), starting with the client focused on the session. A page opens
+without asking only on the client that just typed into the session. Otherwise, and always for
+a local or deceptive address, it is offered in a notice. The client answers
+`ClientMsg::Handoff`, and `slopty_client::handoff` decides what to do. An editor waits on the
+socket until the person is done with the file tile, whose saves then go into the file in
+place. With no client that takes it, the program falls back at once to this machine's opener
+or `vi` (decisions, "A shell's browser and editor are the client's").
+
 **Deployment.** `slopty worker install` writes two LaunchAgents (`dev.aislopware.slopty.ptyd`,
 `dev.aislopware.slopty.worker`; `KeepAlive`, `RunAtLoad`, `ProcessType Interactive`) with the
 sockets under `<data dir>/run/` and logs in `~/Library/Logs/Slopty`, bootstraps them, and
@@ -527,33 +542,56 @@ sent at priority −2, so a file never queues ahead of a keystroke's echo or a v
 forwarded TCP connection is a client-opened bidirectional stream that opens with `TunnelOpen`,
 sent at −1: above files, below video.
 
-- **Clipboard: announce, then fetch.** The worker reads `NSPasteboard.changeCount` every 200 ms,
-  but only while some connection has sent `Watch(true)`. A client sends that while a remote
-  tile has focus and the app is frontmost. A change goes out as an `Offer`: every
-  representation (text, PNG, TIFF, RTF, HTML, file URLs) with its size and BLAKE3 digest. The
-  wire names each by a `ClipFormat`, which the `Board` seam maps to a pasteboard type.
-  Plain text of 64 KiB or less rides inline. Concealed and transient contents are never
-  offered.
-  - The macOS client puts promises on the general pasteboard (`NSPasteboardItem` data
-    providers). A paste fetches the representation, inline or over a bulk stream.
-  - The worker writes a client's offer to its pasteboard when that client's ⌘V reaches a window.
-    The window's input is held in order until any fetch lands, for up to 3 s.
+- **Clipboard: announce, then fetch, lazily.** The worker reads `NSPasteboard.changeCount`
+  every 50 ms while some connection has sent `Watch(true)`, and the count alone every 250 ms
+  while clients are linked but none watches, to stamp its own copies with when they were made.
+  A client sends `Watch(true)` while a remote tile has focus and the app is frontmost. A change
+  goes out as an `Offer`: its items, each with its representations, named by `ClipType` (one of
+  six formats, or an Apple UTI that only an Apple end writes), plus `age_ms`, the time since
+  the copy. A poll reads only the types, the markers, and text or file URLs that fit 64 KiB
+  inline. Everything else is listed with no size and read when fetched, while the change count
+  still says the same contents (else `Unavailable`). A fetch names one representation by
+  `RepRef` and may carry a `max`, answered `TooBig { size }` past it.
+  - **Mirror, latest copy wins.** The worker places a client's offer at arrival − `age_ms` on
+    its own clock. When that is newer than its own last copy, it writes the offer to its
+    pasteboard at once as promises (`NSPasteboardItemDataProvider`), so any app's paste there,
+    ⌘V or `pbpaste`, reads the focused client's clipboard. A promise's read sends an urgent
+    `Fetch` to the client and waits at most 5 s. ⌘V to a window still holds that client's
+    window input in order until any fetch lands (up to 3 s): it fences the offer overtaking the
+    chord, and re-writes the paster's own offer when two clients share a worker.
+  - **Relay.** The client re-offers a worker's offer to every other worker, origin kept, and
+    answers their fetches by fetching from the origin (`slopty_client::clip::relay`, off the
+    main thread). A copy on worker A pastes on worker B.
+  - **Prefetch.** After an offer the client fetches in the background every representation of
+    known size within `min(8 MiB, cwnd ÷ rtt × 250 ms)`. A representation of unknown size is
+    never fetched ahead, so a big copy costs a types list until it is pasted. A paste of the
+    prefetched ones reads memory. A fetch a paste waits on is
+    urgent and its bulk stream goes at −1, ahead of uploads.
+  - The macOS client puts promises on the general pasteboard, one data provider per item. A
+    paste fetches what prefetch left, inline or over a bulk stream.
+  - **Secrets.** Concealed or transient contents are offered by type only (`concealed: true`),
+    never prefetched or mirrored. A paste chord fetches them; the worker writes them marked
+    concealed and transient and clears them after 60 s or when that client's clipboard moves on.
   - A shell's ⌘V or ⌃V with a picture copied here and no text sends the offer, when the worker
     has not heard it, and then `TermRequest::PastePicture` on the same ordered stream. The worker
-    holds that session's input behind it the way it holds a window's, writes the offer, then
-    applies the chord: ⌃V as the key, ⌘V as an empty paste. Claude Code reads the picture off
-    the worker's pasteboard on either. The request has no datagram copy, which could overtake
-    the offer.
+    holds that session's input behind it the way it holds a window's, fetches the picture and
+    writes it, then applies the chord: ⌃V as the key, ⌘V as an empty paste. Claude Code reads
+    the picture off the worker's pasteboard on either. The request has no datagram copy, which
+    could overtake the offer.
   - Every Slopty write carries `com.aislopware.slopty.origin` (`transfer::origin_bytes`).
     Together with the `changeCount` of our own write and a same-digest backstop, this stops
-    echoes, also when client and worker share a Mac.
-  - The pasteboard sits behind `slopty_input::pasteboard::Board`, and tests use named
-    pasteboards (`--pasteboard`), never the user's.
-  - On iOS (`slopty_platform::pasteboard::IosPasteboard`) writing is free: an offer becomes
-    one local-only `NSItemProvider`, inline text at once and the rest loaded on paste. Reading
-    another app's contents can prompt, so the client reads only for a paste into a remote tile
-    (`Pasteboard::reads_ask`), never when a tile takes focus. The change count, which never
-    prompts, decides whether a paste reads again.
+    echoes, also when client and worker share a Mac. Writes on both ends are for this Mac only
+    (`CurrentHostOnly`), so Universal Clipboard does not pull every promise.
+  - The worker's clipboard logic is `slopty_worker::clip`, over the `Board` seam
+    (`slopty_input::pasteboard::Board`); the client's is `slopty_client::clip` (`ClipCache` per
+    link, `ClipSync` for this device's pasteboard). Tests use named pasteboards
+    (`--pasteboard`), never the user's.
+  - Reading another app's contents can ask the person: on iOS always, on macOS when
+    `accessBehavior` says so (`Pasteboard::reads_ask`). Then the client reads only for a paste
+    into a remote tile, never when a tile takes focus, and the worker reads nothing. The change
+    count, which never asks, decides whether a paste reads again. On iOS
+    (`slopty_platform::pasteboard::IosPasteboard`) writing is free: an offer becomes one
+    local-only `NSItemProvider` per item, inline text at once and the rest loaded on paste.
 - **Files.** A drop on a terminal tile uploads with `Begin { dest: SessionCwd }`, one bulk
   stream per file.
   - The worker writes `name.partial`, fsyncs, renames, then fsyncs the directory, and sends `Done`
@@ -568,7 +606,7 @@ sent at −1: above files, below video.
     up with `Dest::Attachment` to a fresh `~/.slopty/drop/<xfer>/`, with nothing put on the
     pasteboard. A chip in the composer shows it until it lands, and then its path is typed at
     the composer's cursor, where Claude Code reads it as an attached file.
-  - Copied files paste the way a drop lands (`slopty_ui::clipboard::ClipFiles`). ⌘V in a
+  - Copied files paste the way a drop lands (`slopty_client::clip::ClipFiles`). ⌘V in a
     terminal with files copied here uploads them to the shell's directory and types their
     paths. ⌘V in a streamed window stages them, and the window's input, the chord first, waits
     on the client until the staging is done (`ScreenView::release_paste`). The offer for copied
@@ -891,7 +929,8 @@ typed entries with tool calls paired to their results, one thread per subagent),
 that types into the same PTY, and approval cards answered through the blocking
 `PermissionRequest` hook (`slopty_agent::permission`). A status-line wrapper
 (`slopty hook statusline`) forwards the context, cost and rate-limit meters and still prints
-the person's own line. The entry types are wire types (`slopty_proto::conversation`), which
+the person's own line, and the pull request and worktree that line is given
+(`WorkerMsg::AgentBranch`). The entry types are wire types (`slopty_proto::conversation`), which
 the decoder builds directly. A client follows a session (`ConversationRequest::Follow`); the
 worker then opens a conversation stream for it (`UniHead::Conversation`, at
 `CONVERSATION_PRIORITY`, below the terminals and video) and a task per follow
@@ -1012,10 +1051,12 @@ environment, never by typing into the shell under test.
 
 ## 6. UI
 
-GPUI (fork: `aislopware/zed` branch `slopty`, our iOS commits rebased onto upstream main; the
-base commit and date live in `xtask/upstream.toml`) plus gpui-kit (fork: `aislopware/gpui-kit`,
-upstream main plus one commit re-pointing deps at the zed fork). `cargo xtask upstream check`
-shows the drift, `cargo xtask upstream sync` rebases, pushes and moves the `Cargo.lock` pins. The iOS backend is zed PR
+GPUI (fork: `aislopware/gpui-fast`, GPUI imported flat out of zed with longbridge's Retained
+Mode, with our iOS commits and the zed imports merged in; the bases live in
+`xtask/upstream.toml`) plus gpui-kit (fork: `aislopware/gpui-kit`, upstream main plus one commit
+re-pointing deps at gpui-fast). `cargo xtask upstream check` shows the drift, `cargo xtask
+upstream sync` merges or rebases, pushes and moves the `Cargo.lock` pins. The iOS backend is zed PR
+
 #63068's `gpui_ios` on top of the pin, extended in the fork for the surface element (zero-copy
 video), `Window::insets()` (safe area, keyboard), a native pinch recognizer, hardware keyboards and
 pointers, a VoiceOver bridge (`gpui_ios/src/ios/a11y.rs`: GPUI's accesskit tree mirrored as
@@ -1051,6 +1092,41 @@ only) runs the view's own delivery from that description, so `tests/ios_uikit.rs
 phone's input path (modifiers, key repeat, the text-system hand-off, gpui core's touch
 recognizer, the pinch) and not just GPUI's dispatch; the pure mappings (HID usage → key,
 `UITouchPhase` → phase, the US layout stand-in) are unit-tested on the host in the fork.
+**Drawing under retention.** gpui-fast builds a view again only when it was notified or when
+something it read in its last build changed: an entity updated and notified, a global written,
+a list's or a scroll handle's state moved. Every other view is replayed from the last frame, so
+a view must hear of everything it shows and must not read what changes more often than it
+does. The window's root is `frames::Framed` around the app's root, built again in every frame
+for the frame-time probe and for nothing else. The workspace draws its modal layers and hosts
+two views of its own state, `ChromeView` (title bar, navigator, status bar) and `StripHost` (the
+strip). Both build from a read of the workspace through `draw::Draw`, which stands in for the
+workspace's `Context`: it hands out listeners bound to the workspace and holds back any write
+to another entity until the read is over (`draw::build`), since an update while drawing counts
+as a write and rebuilds whatever read that entity. What the strip lays out each frame (where
+each tile went, the zoom, the tiles on screen, the thumb) lives in cells on `strip::Drawn`,
+which the strip owns, so a frame of motion builds the strip alone. The strip and the chrome
+never read a tile's body, because a terminal changes with every line of output, a stream with
+every frame and a face with every streamed word. They read `workspace::facts` instead: a copy
+of what they show of each body (a shell's title and command, a stream's first frame and header,
+a face's turn, approval and header chips), taken in the body's observer and passed on only to
+the views that show what changed. The strip hands a body its zoom and size through
+`hand_over`, which compares with what it handed the frame before (`Handed`) rather than reading
+the body. A value measured while drawing (the strip's width inset, a terminal's fitted grid, a
+stream's painted bounds) is compared in prepaint and, when it moved, sent as a notify after the
+frame (`cx.defer`, or `Window::on_next_frame` on a weak handle), because a notify raised in the
+middle of a draw only marks the view. For the same reason what a view shows is a function of
+what it holds, never of the clock read while building: a loading grace is a mark its timer
+sets (`screen::past_grace`), and the transcript's top fade is judged in prepaint, after the
+list has followed its tail (`kit::painted_while`). What a view keeps but does not show is not
+written through the view after a frame: a typed key is timed when its frame reaches the display,
+into a record the terminal shares with its element (`TerminalView::latency_record`), since an
+update of the view there would count as a change and build it again with the strip's next
+frame. Reduce Motion is read again with the settings poll, and a change reaches the workspace,
+the icons' spinners, GPUI's own flag (which gpui-kit's animations follow) and every window. A
+view the strip moves (a spring, a scroll) is built again in its new place: the fork replays a
+view only where it was drawn.
+`retained::stale` checks all of it: it draws the same state from scratch and diffs the painted
+quads and sprites against the frame the window showed (TESTING.md, "Retained frames").
 **Design system.** Every chrome surface draws from `slopty-theme` and nothing else (ruling
 "Design tokens" in DECISIONS): a four-step neutral ladder (`canvas`, `panel`, `raised`,
 `overlay`), one hairline (`border`), three text levels, one accent with its fill and the

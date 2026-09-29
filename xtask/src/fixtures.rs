@@ -74,6 +74,15 @@ struct Scenario {
     /// Files the run must leave in the scratch directory, and files it must not.
     expect: &'static [&'static str],
     absent: &'static [&'static str],
+    /// After the first turn's `result`, record `claude agents --json` for the scratch directory
+    /// (`agents.json`): the session is alive, its background work still out.
+    roster: bool,
+    /// Turns the session starts on its own after the last prompt's (a finished background task
+    /// wakes it), whose `result` is waited for too.
+    wakes: usize,
+    /// Answered by the canned Messages API (`claude_mod::FakeApi`) in a scratch home, not by a
+    /// model: no account involved, and the model's part is scripted.
+    canned: bool,
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -88,6 +97,9 @@ const SCENARIOS: &[Scenario] = &[
         interrupt_on: None,
         expect: &["notes.txt"],
         absent: &[],
+        roster: false,
+        wakes: 0,
+        canned: false,
     },
     Scenario {
         name: "tools",
@@ -108,6 +120,9 @@ const SCENARIOS: &[Scenario] = &[
         interrupt_on: None,
         expect: &["notes.md"],
         absent: &[],
+        roster: false,
+        wakes: 0,
+        canned: false,
     },
     Scenario {
         name: "interrupt",
@@ -119,6 +134,9 @@ const SCENARIOS: &[Scenario] = &[
         interrupt_on: Some("Bash"),
         expect: &[],
         absent: &[],
+        roster: false,
+        wakes: 0,
+        canned: false,
     },
     Scenario {
         name: "compact",
@@ -131,6 +149,9 @@ const SCENARIOS: &[Scenario] = &[
         interrupt_on: None,
         expect: &[],
         absent: &[],
+        roster: false,
+        wakes: 0,
+        canned: false,
     },
     Scenario {
         name: "permission",
@@ -142,6 +163,23 @@ const SCENARIOS: &[Scenario] = &[
         interrupt_on: None,
         expect: &["allowed.txt", "always.txt"],
         absent: &["refused.txt"],
+        roster: false,
+        wakes: 0,
+        canned: false,
+    },
+    // A turn that ends with a background command still out (`Stop` with `background_tasks`),
+    // the turn its notification starts, and the `Stop` with nothing out that ends that one.
+    Scenario {
+        name: "background",
+        files: &[],
+        turns: &["scenario:background start a background command"],
+        allowed: "Bash",
+        interrupt_on: None,
+        expect: &[],
+        absent: &[],
+        roster: true,
+        wakes: 1,
+        canned: true,
     },
 ];
 
@@ -188,6 +226,8 @@ fn capture_all(only: Option<&str>) -> Result<()> {
 struct Captured {
     /// Transcript records by the file Claude Code wrote them to, in order.
     files: Vec<(String, Vec<Value>)>,
+    /// What `claude agents --json` listed mid-run ([`Scenario::roster`]).
+    roster: Option<Value>,
 }
 
 impl Captured {
@@ -223,7 +263,36 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         "showThinkingSummaries": true,
         "hooks": SINK_EVENTS.iter().map(|e| ((*e).to_owned(), hook.clone())).collect::<Map<_, _>>(),
     });
-    let mut child = Command::new(claude)
+    // A canned run gets a scratch home and the fake API, nothing of the person's.
+    let canned = if scenario.canned {
+        let home = PathBuf::from(format!("/tmp/slopty-fixture-{}-home", scenario.name));
+        if home.exists() {
+            std::fs::remove_dir_all(&home)?;
+        }
+        std::fs::create_dir_all(&home)?;
+        Some((home, crate::claude_mod::FakeApi::start()?))
+    } else {
+        None
+    };
+    let place = |command: &mut Command| {
+        if let Some((home, api)) = &canned {
+            command
+                .env_clear()
+                .envs([
+                    ("PATH", "/usr/bin:/bin"),
+                    ("TMPDIR", "/tmp"),
+                    ("ANTHROPIC_API_KEY", "sk-ant-fixture"),
+                    ("DISABLE_TELEMETRY", "1"),
+                    ("DISABLE_ERROR_REPORTING", "1"),
+                    ("DISABLE_AUTOUPDATER", "1"),
+                ])
+                .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{}", api.port))
+                .env("HOME", home);
+        }
+    };
+    let mut command = Command::new(claude);
+    place(&mut command);
+    let mut child = command
         .args(["-p", "--model", "haiku", "--output-format", "stream-json", "--verbose"])
         .args(["--input-format", "stream-json", "--session-mirror", "--include-hook-events"])
         .args(["--setting-sources", "", "--strict-mcp-config", "--permission-prompts", "none"])
@@ -234,7 +303,12 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         .stderr(Stdio::inherit())
         .spawn()
         .context("spawn claude")?;
-    let captured = drive(scenario, &mut child);
+    let roster = |work: &Path| {
+        let mut command = Command::new(claude);
+        place(&mut command);
+        roster(&mut command, work)
+    };
+    let captured = drive(scenario, &roster, &work, &mut child);
     let _killed = child.kill();
     let status = child.wait()?;
     let captured = captured?;
@@ -246,14 +320,26 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         ensure!(!work.join(name).exists(), "the run left {name}");
     }
     let hooks = sink_payloads(&sink)?;
-    write_fixture(scenario, [&sink, &work, &exe], captured, hooks, out)?;
+    let home = match &canned {
+        Some((home, _api)) => home.to_string_lossy().into_owned(),
+        None => std::env::var("HOME").context("HOME")?,
+    };
+    write_fixture(scenario, [&sink, &work, &exe], &home, captured, hooks, out)?;
+    if let Some((home, _api)) = &canned {
+        std::fs::remove_dir_all(home)?;
+    }
     std::fs::remove_dir_all(&work)?;
     std::fs::remove_dir_all(&sink)?;
     Ok(())
 }
 
 /// Feed the turns and collect the mirrored records until `claude` exits.
-fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
+fn drive(
+    scenario: &Scenario,
+    roster: &dyn Fn(&Path) -> Result<Value>,
+    work: &Path,
+    child: &mut Child,
+) -> Result<Captured> {
     let stdout = child.stdout.take().context("stdout")?;
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
@@ -271,6 +357,7 @@ fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
     let deadline = Instant::now().checked_add(SCENARIO_TIMEOUT).context("deadline")?;
     let mut captured = Captured::default();
     let mut interrupted = false;
+    let mut wakes = scenario.wakes;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let line = match rx.recv_timeout(left) {
@@ -298,14 +385,34 @@ fn drive(scenario: &Scenario, child: &mut Child) -> Result<Captured> {
                 interrupted = true;
             }
             Some("control_request") => bail!("claude asked the host: {line}"),
-            Some("result") => match (stdin.as_mut(), turns.next()) {
-                (Some(input), Some(turn)) => send_prompt(input, turn)?,
-                _ => drop(stdin.take()),
-            },
+            Some("result") => {
+                if scenario.roster && captured.roster.is_none() {
+                    captured.roster = Some(roster(work)?);
+                }
+                match (stdin.as_mut(), turns.next()) {
+                    (Some(input), Some(turn)) => send_prompt(input, turn)?,
+                    // A turn the session starts on its own is still to come: keep it open.
+                    (Some(_), None) if wakes > 0 => wakes = wakes.saturating_sub(1),
+                    _ => drop(stdin.take()),
+                }
+            }
             _ => {}
         }
     }
     Ok(captured)
+}
+
+/// `claude agents --json` (as `command` runs `claude`) for the sessions started under `work`.
+fn roster(command: &mut Command, work: &Path) -> Result<Value> {
+    let out = command
+        .args(["agents", "--json", "--cwd"])
+        .arg(work)
+        .stdin(Stdio::null())
+        .stderr(Stdio::inherit())
+        .output()
+        .context("run claude agents --json")?;
+    ensure!(out.status.success(), "claude agents --json exited {}", out.status);
+    serde_json::from_slice(&out.stdout).context("claude agents --json printed no JSON")
 }
 
 /// Whether an assistant frame calls `tool`.
@@ -369,11 +476,12 @@ fn sink_payloads(dir: &Path) -> Result<Vec<Value>> {
 fn write_fixture(
     scenario: &Scenario,
     paths: [&Path; 3],
+    home: &str,
     captured: Captured,
     hooks: Vec<Value>,
     out: &Path,
 ) -> Result<()> {
-    let mut scrub = Scrub::new(paths)?;
+    let mut scrub = Scrub::new(paths, home)?;
     let (subagents, main): (Vec<_>, Vec<_>) =
         captured.files.into_iter().partition(|(path, _)| path.contains("/subagents/"));
     ensure!(main.len() == 1, "expected one main transcript, got {}", main.len());
@@ -400,6 +508,29 @@ fn write_fixture(
         let lines: Vec<String> = records.into_iter().map(|r| scrub.record(r).to_string()).collect();
         std::fs::write(dir.join(name), format!("{}\n", lines.join("\n")))?;
     }
+    if let Some(Value::Array(sessions)) = captured.roster {
+        // The process, the clock and the generated name differ each run: fixed, so the file
+        // only moves with Claude Code's shape.
+        let fixed = [
+            ("pid", json!(4321)),
+            ("startedAt", json!(1_790_000_000_000_u64)),
+            ("name", json!(scenario.name)),
+        ];
+        let sessions: Vec<Value> = sessions
+            .into_iter()
+            .map(|mut session| {
+                if let Some(entry) = session.as_object_mut() {
+                    for (key, value) in &fixed {
+                        if entry.contains_key(*key) {
+                            entry.insert((*key).to_owned(), value.clone());
+                        }
+                    }
+                }
+                scrub.value(session, "")
+            })
+            .collect();
+        std::fs::write(dir.join("agents.json"), format!("{}\n", Value::Array(sessions)))?;
+    }
     let hooks: Vec<String> = hooks.into_iter().map(|h| scrub.value(h, "").to_string()).collect();
     std::fs::write(dir.join("hooks.jsonl"), format!("{}\n", hooks.join("\n")))?;
     if std::fs::read_dir(dir.join("subagents"))?.next().is_none() {
@@ -419,14 +550,14 @@ pub struct Scrub {
 }
 
 impl Scrub {
-    fn new([sink, work, exe]: [&Path; 3]) -> Result<Self> {
+    fn new([sink, work, exe]: [&Path; 3], home: &str) -> Result<Self> {
         // Longest first: the sink's path begins with the scratch directory's.
         let first = vec![
             (exe.to_string_lossy().into_owned(), "/xtask".to_owned()),
             (format!("/private{}", sink.display()), "/hooks".to_owned()),
             (sink.to_string_lossy().into_owned(), "/hooks".to_owned()),
         ];
-        Self::with_places(first, work, &std::env::var("HOME").context("HOME")?)
+        Self::with_places(first, work, home)
     }
 
     /// `first` replaced before anything else, then the scratch directory `work` (as `/work`),

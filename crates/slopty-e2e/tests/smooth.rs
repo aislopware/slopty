@@ -22,6 +22,9 @@ mod tests {
 
     /// How long a worker round trip (open twenty shells, first output) may take.
     const STEP: Duration = Duration::from_secs(30);
+    /// The app keeps GPUI's motion, which the self-test otherwise holds still: these runs
+    /// measure what moving costs.
+    const MOVING: (&str, &str) = ("SLOPTY_E2E_MOTION", "1");
     /// Each scenario's measured span.
     const RUN: Duration = Duration::from_secs(5);
     /// Window size for the Mac scenarios: a laptop-sized viewport shows two of the twenty
@@ -215,6 +218,31 @@ mod tests {
         term.latency
     }
 
+    /// The frames drawn while [`TYPED`] letters are typed at [`TYPING_CPS`] into the focused
+    /// shell, once every letter shows in its rows. Unlike [`typing`], nothing here waits on a
+    /// presentation report, which a covered window never gets: this is what an echo costs to
+    /// draw, not when it reaches the glass.
+    async fn typing_frames(drv: &mut Driver) -> FrameInfo {
+        let period = Duration::from_millis(1000 / TYPING_CPS);
+        let typed: String = (0..TYPED)
+            .map(|i| char::from(b'a'.saturating_add(u8::try_from(i % 26).unwrap())))
+            .collect();
+        drv.frames_reset().await.unwrap();
+        for ch in typed.chars() {
+            let at = Instant::now();
+            drv.type_text(&ch.to_string()).await.unwrap();
+            tokio::time::sleep(period.saturating_sub(at.elapsed())).await;
+        }
+        let dump = drv
+            .wait_for("every letter echoed", STEP, |d| {
+                d.terminals.iter().any(|t| t.rows.iter().any(|r| r.contains(&typed)))
+            })
+            .await
+            .unwrap();
+        drv.keys("ctrl-u").await.unwrap();
+        dump.frames
+    }
+
     /// Focus the first column's shell (⌘1).
     async fn focus_first_shell(drv: &mut Driver) {
         drv.keys("cmd-1").await.unwrap();
@@ -245,7 +273,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn twenty_streaming_shells_scroll_the_strip_within_budget_on_the_mac() {
-        let mut stack = Stack::launch("e2e-smooth").await.unwrap();
+        let mut stack = Stack::launch_with("e2e-smooth", &[MOVING]).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         let shells = shells();
@@ -259,6 +287,22 @@ mod tests {
             "strip p95 draw {p95:?} over the {PAN_P95_LIMIT:?} limit ({})",
             panned.row()
         );
+    }
+
+    /// Scenario (j): one shell, typed into, with nothing else on the screen changing: what a
+    /// keystroke's echo costs the UI to draw. Every frame here is the terminal's.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
+    async fn typing_draws_only_the_echo_on_the_mac() {
+        let mut stack = Stack::launch_with("e2e-smooth-echo", &[MOVING]).await.unwrap();
+        let drv = &mut stack.driver;
+        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        ready(drv).await;
+        focus_first_shell(drv).await;
+        let frames = typing_frames(drv).await;
+        measure("(j) mac: typing into one shell, its echo drawn", &frames);
+        stack.shutdown().await;
+        assert!(frames.frames >= TYPED_MIN, "fewer frames than echoes: {frames:?}");
     }
 
     /// Lines in the file scenario's tile (`SLOPTY_SMOOTH_FILE_LINES` overrides it, for the
@@ -324,7 +368,7 @@ mod tests {
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn a_large_file_tile_beside_five_shells_scrolls_and_types_on_the_mac() {
         let lines = file_lines();
-        let mut stack = Stack::launch("e2e-smooth-file").await.unwrap();
+        let mut stack = Stack::launch_with("e2e-smooth-file", &[MOVING]).await.unwrap();
         // `SLOPTY_SMOOTH_FILE_NAME=big.txt` measures the same text uncoloured.
         let name = std::env::var("SLOPTY_SMOOTH_FILE_NAME").unwrap_or_else(|_| "big.rs".to_owned());
         let file = stack.dir.path().join(name);
@@ -371,7 +415,7 @@ mod tests {
         #[tokio::test]
         #[ignore = "live: cargo xtask e2e smooth --screen-recording"]
         async fn a_display_stream_beside_five_shells_pans_on_the_mac() {
-            let mut stack = Stack::launch("e2e-smooth-display").await.unwrap();
+            let mut stack = Stack::launch_with("e2e-smooth-display", &[MOVING]).await.unwrap();
             let drv = &mut stack.driver;
             drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
             ready(drv).await;
@@ -415,7 +459,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn six_streaming_shells_in_view_on_the_mac() {
-        let mut stack = Stack::launch("e2e-smooth-busy").await.unwrap();
+        let mut stack = Stack::launch_with("e2e-smooth-busy", &[MOVING]).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         ready(drv).await;
@@ -434,7 +478,7 @@ mod tests {
         assert!(after.frames.frames >= 100, "too few frames to judge: {:?}", after.frames);
         assert!(latency.echoed >= TYPED_MIN, "{latency:?}");
 
-        let mut stack = Stack::launch("e2e-smooth-still").await.unwrap();
+        let mut stack = Stack::launch_with("e2e-smooth-still", &[MOVING]).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         ready(drv).await;
@@ -508,7 +552,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn twenty_mixed_tiles_open_hold_and_close_the_overview_on_the_mac() {
-        let mut stack = Stack::launch("e2e-smooth-mixed").await.unwrap();
+        let mut stack = Stack::launch_with("e2e-smooth-mixed", &[MOVING]).await.unwrap();
         let files: Vec<String> = (0..MIXED_FILES)
             .map(|n| {
                 let path = stack.dir.path().join(format!("mixed_{n}.rs"));
@@ -588,7 +632,7 @@ mod tests {
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn typing_is_timed_with_and_without_the_local_echo_on_the_mac() {
         for policy in ["never", "always"] {
-            let env = [("SLOPTY_PREDICT", policy)];
+            let env = [("SLOPTY_PREDICT", policy), MOVING];
             let mut stack = Stack::launch_with("e2e-smooth-typing", &env).await.unwrap();
             let drv = &mut stack.driver;
             drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -626,7 +670,7 @@ mod tests {
         for rtt in SHAPED_RTTS {
             let link = slopty_shape::Link { delay: rtt / 2, ..slopty_shape::Link::CLEAR };
             for policy in ["never", "always", "adaptive"] {
-                let env = [("SLOPTY_PREDICT", policy)];
+                let env = [("SLOPTY_PREDICT", policy), MOVING];
                 let (mut stack, _relay) =
                     Stack::launch_shaped("e2e-smooth-shaped", &env, link).await.unwrap();
                 let drv = &mut stack.driver;
@@ -665,7 +709,7 @@ mod tests {
         let mut stack = Stack::launch_on_simulator_with(
             "e2e-smooth-ios",
             simulator.clone(),
-            &[("SLOPTY_FRAME_HZ", "60")],
+            &[("SLOPTY_FRAME_HZ", "60"), MOVING],
         )
         .await
         .unwrap();
@@ -678,7 +722,7 @@ mod tests {
             let mut stack = Stack::launch_on_simulator_with(
                 "e2e-smooth-ios-typing",
                 simulator.clone(),
-                &[("SLOPTY_FRAME_HZ", "60"), ("SLOPTY_PREDICT", policy)],
+                &[("SLOPTY_FRAME_HZ", "60"), ("SLOPTY_PREDICT", policy), MOVING],
             )
             .await
             .unwrap();

@@ -1,21 +1,32 @@
 //! UI frame-time probe: how long each frame takes to draw and how evenly frames arrive.
 //!
-//! The root view calls [`begin`] first thing in its `render`; a zero-size [`probe`] element,
-//! the last child of the root, calls [`end`] from its paint. The span between them is the
-//! frame's draw: every `render`, layout, prepaint (terminal shaping) and paint the window did.
-//! Consecutive `begin`s give the frame interval. A draw that runs past the display period
-//! costs the slots it ran through: that is the dropped-frame count (intervals cannot tell a
-//! drop from an app idling between keystrokes, so they are reported, not judged). Nothing
-//! here touches a clock: the callers pass `now`, so the ring and the percentiles are checked
-//! with hand-made instants.
+//! The window's root is a [`Framed`] view: it calls [`FrameProbe::begin`] first thing in its
+//! `render`, and its last child, a zero-size probe element, calls [`FrameProbe::end`] from its
+//! paint. The span between them is the frame's draw: every `render`, layout, prepaint (terminal
+//! shaping) and paint the window did. Consecutive `begin`s give the frame interval. A draw that
+//! runs past the display period costs the slots it ran through: that is the dropped-frame count
+//! (intervals cannot tell a drop from an app idling between keystrokes, so they are reported,
+//! not judged). Nothing here touches a clock: the callers pass `now`, so the ring and the
+//! percentiles are checked with hand-made instants.
+//!
+//! GPUI draws a view again only when something it read changed, so a frame that builds one
+//! terminal leaves the root as it was. [`Framed`] reads a marker global that its probe element
+//! writes in every paint: whatever else a frame draws, it builds [`Framed`] again, and only
+//! [`Framed`], whose render is a few elements. The numbers themselves live in a global the
+//! probe mutates through a cell, never written as a global, so reading them (the status bar,
+//! the stream's overlay) is no reason to draw anything again.
 //!
 //! The probe lives on the [`App`] as a global (one window per app), so the stats overlay and
 //! the self-test `dump` read the same numbers.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use gpui::{App, IntoElement as _, Styled as _, canvas};
+use gpui::{
+    AnyView, App, Context, IntoElement, ParentElement as _, Render, Styled as _, Window, canvas,
+    div,
+};
 use slopty_client::pacing::percentile;
 
 /// Frames kept for the percentiles: sixteen seconds at 60 Hz, eight at 120 Hz.
@@ -173,55 +184,95 @@ impl FrameProbe {
     }
 }
 
-/// The app's probe.
-struct Probe(FrameProbe);
+/// The app's probe. Mutated through the cell: a write to a global would draw every view that
+/// reads it again.
+struct Probe(RefCell<FrameProbe>);
 
 impl gpui::Global for Probe {}
 
+/// Written by the probe element in every paint and read by [`Framed`] as it renders: the one
+/// dependency that changes with every frame drawn, so the root's probe runs in each.
+struct Drawn(u64);
+
+impl gpui::Global for Drawn {}
+
 /// Put a probe on the app, measured against `nominal`. Call once, before the window opens.
 pub fn install(cx: &mut App, nominal: Duration) {
-    cx.set_global(Probe(FrameProbe::new(nominal)));
+    cx.set_global(Probe(RefCell::new(FrameProbe::new(nominal))));
 }
 
 /// The index of the frame being drawn, when the probe is installed: work that must happen
 /// once per frame (a cache sweep) compares it with the last one it saw.
 #[must_use]
 pub fn index(cx: &App) -> Option<u64> {
-    cx.try_global::<Probe>().map(|probe| probe.0.index())
+    cx.try_global::<Probe>().map(|probe| probe.0.borrow().index())
 }
 
-/// First line of the root view's `render`.
-pub fn begin(cx: &mut App) {
-    if cx.has_global::<Probe>() {
-        let now = Instant::now();
-        cx.global_mut::<Probe>().0.begin(now);
+/// The frame starts drawing: [`Framed`]'s `render`.
+fn begin(cx: &App) {
+    if let Some(probe) = cx.try_global::<Probe>() {
+        probe.0.borrow_mut().begin(Instant::now());
     }
 }
 
-/// What the [`probe`] element calls from its paint.
-pub fn end(cx: &mut App) {
-    if cx.has_global::<Probe>() {
-        let now = Instant::now();
-        cx.global_mut::<Probe>().0.end(now);
-    }
+/// The frame has been painted: the probe element's paint.
+fn end(cx: &mut App) {
+    let Some(probe) = cx.try_global::<Probe>() else { return };
+    let mut probe = probe.0.borrow_mut();
+    probe.end(Instant::now());
+    let drawn = probe.index();
+    drop(probe);
+    cx.set_global(Drawn(drawn));
 }
 
 /// The current numbers, when a probe is installed.
 #[must_use]
 pub fn stats(cx: &App) -> Option<FrameStats> {
-    cx.try_global::<Probe>().map(|p| p.0.stats())
+    cx.try_global::<Probe>().map(|p| p.0.borrow().stats())
 }
 
 /// Start a fresh measurement window.
-pub fn reset(cx: &mut App) {
-    if cx.has_global::<Probe>() {
-        cx.global_mut::<Probe>().0.reset();
+pub fn reset(cx: &App) {
+    if let Some(probe) = cx.try_global::<Probe>() {
+        probe.0.borrow_mut().reset();
     }
 }
 
-/// The zero-size element that closes each frame's measurement: make it the root's last child.
-#[must_use]
-pub fn probe() -> gpui::AnyElement {
+/// The window's root: `inner`, timed. Built again in every frame the window draws (see the
+/// module's docs), and nothing else is on its account.
+#[derive(Debug)]
+pub struct Framed {
+    inner: AnyView,
+    /// Times it was built, for the tests.
+    #[cfg(test)]
+    builds: usize,
+}
+
+impl Framed {
+    /// `inner`, timed as the window's root.
+    pub fn new(inner: impl Into<AnyView>) -> Self {
+        Self {
+            inner: inner.into(),
+            #[cfg(test)]
+            builds: 0,
+        }
+    }
+}
+
+impl Render for Framed {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.builds = self.builds.saturating_add(1);
+        }
+        let _drawn = cx.try_global::<Drawn>().map(|drawn| drawn.0);
+        begin(cx);
+        div().size_full().child(self.inner.clone()).child(probe())
+    }
+}
+
+/// The zero-size element that closes each frame's measurement: [`Framed`]'s last child.
+fn probe() -> gpui::AnyElement {
     canvas(|_bounds, _window, _cx| (), |_bounds, (), _window, cx| end(cx))
         .absolute()
         .size_0()

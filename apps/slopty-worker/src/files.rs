@@ -9,7 +9,11 @@ use slopty_core::{ClientId, WallMs};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::transfer::{BulkHeader, Purpose};
+use slopty_worker::file::Rewrite;
 use tokio::sync::{mpsc, watch};
+
+/// The daemon's handoffs, which say whether a save goes in place.
+type Handoffs = std::sync::Arc<parking_lot::Mutex<slopty_worker::handoff::Handoffs>>;
 
 /// Paths the palette's quick open is answered with at most.
 const FILES_LISTED: usize = 8;
@@ -73,8 +77,10 @@ pub async fn send_file(
 }
 
 /// Save a file tile and answer how it went. Every watcher of the file, the writer's own
-/// included, then hears the new contents from its next look ([`watch`]).
+/// included, then hears the new contents from its next look ([`watch`]). A file a waiting edit
+/// shows is written in place, since the program waiting on it may hold it open.
 pub async fn write(
+    handoffs: &Handoffs,
     client: ClientId,
     out: &mpsc::Sender<WorkerMsg>,
     path: String,
@@ -83,8 +89,9 @@ pub async fn write(
 ) {
     let target = path.clone();
     let bytes = text.len();
+    let how = if handoffs.lock().editing(&path) { Rewrite::InPlace } else { Rewrite::Replace };
     let result = tokio::task::spawn_blocking(move || {
-        slopty_worker::file::write(std::path::Path::new(&target), &text, base_modified_ms)
+        slopty_worker::file::write(std::path::Path::new(&target), &text, base_modified_ms, how)
     })
     .await
     .unwrap_or_else(|_| WriteResult::Failed { error: "write failed".to_owned() });
@@ -95,6 +102,41 @@ pub async fn write(
     };
     tracing::info!(%client, %path, bytes, outcome, "write file");
     let _sent = out.send(WorkerMsg::Written { path, result }).await;
+}
+
+/// A save, or the end of a waiting edit, in the order its client sent them.
+#[derive(Debug)]
+pub enum Save {
+    /// A file tile's save ([`write`]).
+    File {
+        /// Absolute path on the worker.
+        path: String,
+        /// The whole new text.
+        text: Vec<u8>,
+        /// The version the edit started from.
+        base_modified_ms: Option<WallMs>,
+    },
+    /// The person is done with a waiting edit: heard only once the saves before it are on disk,
+    /// so the program that waited reads what was saved.
+    Edited(slopty_proto::handoff::HandoffReply),
+}
+
+/// Take one client's saves and edit ends in order until the connection goes and the last one
+/// sent is taken. One at a time: a second save of a file never overtakes the first.
+pub async fn save_in_order(
+    handoffs: Handoffs,
+    client: ClientId,
+    out: mpsc::Sender<WorkerMsg>,
+    mut saves: mpsc::UnboundedReceiver<Save>,
+) {
+    while let Some(save) = saves.recv().await {
+        match save {
+            Save::File { path, text, base_modified_ms } => {
+                write(&handoffs, client, &out, path, text, base_modified_ms).await;
+            }
+            Save::Edited(reply) => handoffs.lock().replied(client, reply),
+        }
+    }
 }
 
 /// Answer a quick-open query under `root`.

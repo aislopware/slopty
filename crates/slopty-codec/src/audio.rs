@@ -1278,6 +1278,10 @@ unsafe impl Send for Player {}
 ///
 /// Wait-free: no lock, no allocation, no system call. It never waits on the thread that decodes
 /// packets, whatever that thread is doing (see [`Ring`]).
+///
+/// `cargo xtask deep sanitize-realtime` builds it under `RealtimeSanitizer`, which aborts on any
+/// allocation, lock or blocking call reached from here.
+#[cfg_attr(slopty_rtsan, sanitize(realtime = "nonblocking"))]
 unsafe extern "C-unwind" fn render(
     user: NonNull<c_void>,
     _flags: NonNull<AudioUnitRenderActionFlags>,
@@ -1302,6 +1306,8 @@ unsafe extern "C-unwind" fn render(
     // SAFETY: the buffer holds `mDataByteSize` bytes of f32 samples, and `want` is within them.
     let out = unsafe { std::slice::from_raw_parts_mut(samples.as_ptr(), want) };
     ring.pull(out);
+    #[cfg(slopty_rtsan)]
+    rtsan_probe::allocate_if_armed();
     buffer.mDataByteSize = u32_of(want.saturating_mul(SAMPLE_BYTES));
     0
 }
@@ -1651,6 +1657,21 @@ mod conceal_tests {
         assert!(out.is_empty());
         c.fill(MAX_CONCEALED, &mut out);
         assert_eq!(out.len(), 2 * MAX_CONCEALED as usize);
+    }
+}
+
+/// The deep lane's proof that `RealtimeSanitizer` watches [`render`]: once a test arms it, the next
+/// render allocates, and the sanitizer must abort the process.
+#[cfg(slopty_rtsan)]
+mod rtsan_probe {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub(super) static ARMED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn allocate_if_armed() {
+        if ARMED.load(Ordering::Relaxed) {
+            std::hint::black_box(Vec::<f32>::with_capacity(64));
+        }
     }
 }
 
@@ -2146,6 +2167,37 @@ mod latency_tests {
         let first = next[0] * fade_in_weight(0);
         assert!((out[0] - first).abs() < 1e-6, "{} against {first}", out[0]);
         assert_eq!(playout.stats().underruns, 0);
+    }
+
+    /// Under `RealtimeSanitizer`, an allocation in [`render`] aborts: a child process runs
+    /// [`rtsan_probe_allocates`] and must die of it.
+    #[cfg(slopty_rtsan)]
+    #[test]
+    fn realtime_sanitizer_catches_an_allocation_in_render() {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args(["--exact", "audio::latency_tests::rtsan_probe_allocates", "--ignored"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "the allocation went unnoticed: {stderr}");
+        assert!(
+            stderr.contains("RealtimeSanitizer") && stderr.contains("malloc"),
+            "not RealtimeSanitizer's report: {stderr}"
+        );
+        assert!(stderr.contains("render"), "the report names the callback: {stderr}");
+    }
+
+    /// Arms the probe and renders once: aborts under `RealtimeSanitizer`, by design.
+    #[cfg(slopty_rtsan)]
+    #[test]
+    #[ignore = "aborts the process; realtime_sanitizer_catches_an_allocation_in_render runs it"]
+    fn rtsan_probe_allocates() {
+        let ring = Ring::new();
+        let user = NonNull::from(&ring).cast::<c_void>();
+        let mut buffer = vec![0.0_f32; DEVICE_FRAMES * CHANNELS as usize];
+        rtsan_probe::ARMED.store(true, Ordering::Relaxed);
+        render_once(user, &mut buffer);
     }
 
     /// One call of the render callback on a 512-frame buffer.

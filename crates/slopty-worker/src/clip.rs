@@ -1,36 +1,55 @@
-//! Clipboard sync, the worker's half: announce a change, never push it.
+//! Clipboard sync, the worker's half: announce a change, never push it, and mirror the focused
+//! client's clipboard.
 //!
-//! - **Watch only while wanted.** The pasteboard is read only while some client said it wants the
-//!   worker's changes ([`Clipboard::watch`]); [`Clipboard::watched`] wakes the poller. A change
-//!   made while nobody watched is not announced when someone starts to: it was made on the worker,
-//!   not by anyone at a client.
+//! - **Watch only while wanted.** The pasteboard's contents are read only while some client said it
+//!   wants the worker's changes ([`Clipboard::watch`]); [`Clipboard::interest`] tells the poller
+//!   how often to look. A change made while nobody watched is not announced when someone starts to:
+//!   it was made on the worker, not by anyone at a client. While a client is only linked, the
+//!   poller reads the change count alone ([`Clipboard::observe`]), which never asks the person, so
+//!   the worker still knows when its own contents changed.
 //! - **Read only when reads are free.** macOS asks the person before a program reads the general
 //!   pasteboard unless they allowed it ([`Access`]), and a poll is no paste of theirs, so while
 //!   reads are not free nothing is read or announced (`docs/decisions/platform.md`, "The worker's
-//!   pasteboard alert"). A paste from a client still writes: writing never asks.
-//! - **Announce.** [`Clipboard::poll`] turns a change into an [`Offer`]: plain text of at most
-//!   [`INLINE_CLIP_BYTES`] inline, every other representation listed with its size and digest and
-//!   kept here for [`Clipboard::fetch`]. Concealed and transient contents are skipped.
-//! - **Paste.** A client's offer is only recorded ([`Clipboard::offered`]). It reaches the
-//!   pasteboard when that client's paste chord arrives ([`Clipboard::paste`]): inline text at once,
-//!   anything else once fetched ([`Clipboard::supply`], [`Clipboard::write_incoming`]).
+//!   pasteboard alert"). Writing never asks.
+//! - **Announce lazily.** [`Clipboard::poll`] turns a change into an [`Offer`]: every item, every
+//!   type it holds. Only the change count, the types, the origin stamp and small text and file URLs
+//!   (inline, up to [`INLINE_CLIP_BYTES`] together) are read; everything else is listed by type and
+//!   read off the pasteboard when a client fetches it ([`Clipboard::fetch`]), after checking the
+//!   count has not moved. A 200 MB copy costs nothing until pasted. A secret (concealed or
+//!   transient) is offered with nothing inline.
+//! - **Mirror the focused client.** A client sends its offer when a tile of this worker takes the
+//!   keyboard. [`Clipboard::offered`] puts it on the pasteboard at once as promises
+//!   ([`Clipboard::mirror`]), so a menu paste, `pbpaste` or a program reading the pasteboard sees
+//!   it, not only ⌘V, unless the worker's own contents are newer. "Newer" is on the worker's clock:
+//!   a change of its own is stamped when first seen, a client's copy is placed at arrival minus the
+//!   offer's `age_ms`. A promise read here fetches from the client and waits for it
+//!   ([`PROVIDE_WAIT`]).
+//! - **Paste.** A paste chord ([`Clipboard::paste`]) makes sure the paster's clipboard is what the
+//!   pasteboard holds, unless the worker's own copy is newer: each of two clients sharing the
+//!   worker pastes its own. A shell's paste of a picture fetches the picture first, since the
+//!   program reading it may not wait. A secret is fetched only here, written marked concealed and
+//!   transient, and cleared [`CONCEALED_FOR`] later or once that client's clipboard moves on.
 //! - **Break echoes.** Every write carries [`ORIGIN_TYPE`], naming who the contents came from; the
 //!   `changeCount` a write leaves is remembered and never announced, contents whose origin is this
-//!   worker are never announced, and contents whose digest matches what was last written or
+//!   worker are never announced, and contents whose inline digests match what was last written or
 //!   announced are not announced again (the backstop for a peer that drops the origin, as Universal
 //!   Clipboard does).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use slopty_input::pasteboard::{
-    Board, CONCEALED_TYPE, Item, ORIGIN_TYPE, TRANSIENT_TYPE, board_type,
+    Board, CONCEALED_TYPE, Capped, Item, ORIGIN_TYPE, Provide, TRANSIENT_TYPE, board_type, carried,
+    clip_type, format_of, serve_main_run_loop, type_on_board,
 };
 use slopty_platform::pasteboard_access::Access as ReadAccess;
 use slopty_proto::transfer::{
-    ClipFormat, ClipItem, Hash, INLINE_CLIP_BYTES, Offer, Peer, origin_bytes, parse_origin,
+    ClipEntry, ClipFormat, ClipMsg, ClipType, Hash, INLINE_CLIP_BYTES, MAX_CLIP_ITEMS, Offer, Peer,
+    Rep, RepRef, Source, origin_bytes, parse_origin,
 };
 use tokio::sync::watch;
 
@@ -38,9 +57,31 @@ use tokio::sync::watch;
 /// old one ending must not take the new one's watch with it.
 pub type Link = usize;
 
-/// Largest representation read off the pasteboard or fetched for it: a Retina screenshot as
-/// TIFF is tens of megabytes; anything past this is a file, not a paste.
-pub const MAX_REP_BYTES: u64 = 64 << 20;
+/// Largest representation read off the pasteboard or fetched for it, as large as a client takes
+/// (`slopty_client::clip::MAX_CLIP_BYTES`); anything past it is a file, not a paste.
+pub const MAX_REP_BYTES: u64 = 256 << 20;
+
+/// How long a promise on the worker's pasteboard waits for the client's bytes to start, or to
+/// go on arriving: a big representation on a slow link keeps it waiting for as long as its
+/// stream moves.
+pub const PROVIDE_WAIT: Duration = Duration::from_secs(5);
+
+/// The largest representation a fetch keeps for the offer once read: a bigger one is read
+/// again if fetched again, rather than held until the next copy.
+const KEPT_MAX: u64 = 8 << 20;
+
+/// Marks contents an app put on the pasteboard without the person copying them there.
+///
+/// That is nspasteboard.org's convention: a client's copy mirrored here is in that client's
+/// history already, so the worker's clipboard managers leave it out, and do not pull its
+/// promises across.
+pub const AUTO_GENERATED_TYPE: &str = "org.nspasteboard.AutoGeneratedType";
+
+/// How long a secret a client pasted stays on the worker's pasteboard.
+pub const CONCEALED_FOR: Duration = Duration::from_secs(60);
+
+/// Where a message for one client goes: its control stream, without waiting.
+pub type Sink = Arc<dyn Fn(ClipMsg) + Send + Sync>;
 
 /// The digest clipboard sync names contents by.
 #[must_use]
@@ -48,7 +89,19 @@ pub fn digest(bytes: &[u8]) -> Hash {
     blake3::hash(bytes).into()
 }
 
-/// `path` as a `file://` URL, the bytes of a [`ClipFormat::FileUrls`] item.
+/// Where one clipboard's offer generations start. A restarted worker keeps its id, so its first
+/// offer must not reuse a generation its clients may still hold from its last run: the wall
+/// clock in microseconds, with a count for two clipboards made within one.
+fn first_generation() -> u64 {
+    static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+    let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    micros.wrapping_shl(12).wrapping_add(made & 0xfff)
+}
+
+/// `path` as a `file://` URL, the bytes of a [`ClipFormat::FileUrls`] representation.
 #[must_use]
 fn file_url(path: &Path) -> String {
     use std::fmt::Write as _;
@@ -89,20 +142,46 @@ impl Access for slopty_input::pasteboard::Unsupported {
     }
 }
 
+/// What the poller does now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Interest {
+    /// No client: nothing to look at.
+    Idle,
+    /// Clients, none watching: read the change count alone, to know when the worker's own
+    /// contents changed, and let a pasted secret expire.
+    Linked,
+    /// Some client watches: read changes and announce them.
+    Watched,
+}
+
+/// What kind of paste a chord is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PasteKind {
+    /// ⌘V to a window: the app reads what it wants, promises answer it.
+    Window,
+    /// A shell's paste of a picture: the program reading it (Claude Code) may not wait for a
+    /// promise, so the picture is fetched before the chord goes on.
+    Picture,
+}
+
 /// What a client's paste chord needs before it can go to the window.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Paste {
-    /// The pasteboard holds what the client copied (or it never offered anything): send the
-    /// chord.
+    /// The pasteboard holds what the paste should find: send the chord.
     Ready,
-    /// Fetch these representations of offer `generation` from the client first, then
-    /// [`Clipboard::write_incoming`].
-    Fetch {
-        /// The client's offer.
-        generation: u64,
-        /// Representations to fetch.
-        formats: Vec<ClipFormat>,
-    },
+    /// Fetch these representations from the client first, then [`Clipboard::write_incoming`].
+    Fetch(Vec<RepRef>),
+}
+
+/// The answer to a fetch of the worker's offer.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Fetched {
+    /// The bytes.
+    Data(Bytes),
+    /// Past the fetch's `max` (or [`MAX_REP_BYTES`]), with its size.
+    TooBig(u64),
+    /// The offer is gone, or never listed it.
+    Unavailable,
 }
 
 /// The worker's clipboard state over pasteboard `B`.
@@ -111,43 +190,211 @@ pub struct Clipboard<B> {
     board: B,
     /// This worker, the origin of what it announces.
     me: Peer,
-    state: Mutex<State>,
-    watched: watch::Sender<bool>,
+    shared: Arc<Shared>,
+    interest: watch::Sender<Interest>,
+    /// When it was made: a client's copy older than this machine's clock reaches is placed here,
+    /// before anything this worker could have seen copied.
+    born: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
+struct Shared {
+    state: Mutex<State>,
+    /// Rung when a client's bytes arrive or its offer goes: a promise waiting on them looks again.
+    arrived: Condvar,
+    /// How long a promise waits for bytes to start or go on arriving ([`PROVIDE_WAIT`]).
+    wait: Duration,
+}
+
+/// A representation's key within one offer.
+type Key = (u16, ClipType);
+
+#[derive(Default)]
 struct State {
     /// Links that want the worker's changes now.
     watchers: HashSet<Link>,
-    /// The `changeCount` last handled: polled, written, or current when watching began.
-    seen: isize,
+    /// Every linked client's control stream.
+    sinks: HashMap<Link, Sink>,
+    /// The `changeCount` last handled: polled, observed, written, or current when first looked
+    /// at; `None` before this process looked.
+    seen: Option<isize>,
+    /// When the last client left: a change found when one comes back was made no later than
+    /// that, as far as anyone can tell.
+    idle_since: Option<Instant>,
+    /// A write of this process is under way: what a poll finds is that write, not a copy.
+    writing: bool,
+    /// Writes of this process so far: a poll that began before one ended announces nothing.
+    writes: u64,
+    /// Whose contents the pasteboard holds.
+    holds: Holds,
+    /// When they were copied, on this worker's clock; `None` before any change was seen, which is
+    /// older than any copy.
+    copied: Option<Instant>,
     /// The last announced offer's generation.
     generation: u64,
     /// What the last offer announced, for fetches.
-    offered: Option<(u64, Vec<(ClipFormat, Bytes)>)>,
+    announced: Option<Announced>,
     /// Digests of what was last announced or written: contents among them are an echo.
     last: HashSet<Hash>,
     /// Each link's last offer.
     incoming: HashMap<Link, Incoming>,
 }
 
+impl std::fmt::Debug for State {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("State")
+            .field("watchers", &self.watchers)
+            .field("seen", &self.seen)
+            .field("holds", &self.holds)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Whose contents the pasteboard holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Holds {
+    /// The worker's own: copied here, or files staged for a paste.
+    #[default]
+    Native,
+    /// Client `link`'s offer `source`, written by the mirror or a paste.
+    Mirror { link: Link, source: Source },
+    /// Client `link`'s secret, written by a paste at change `count`, cleared at `until`.
+    Secret { link: Link, source: Source, count: isize, until: Instant },
+}
+
+impl Holds {
+    /// The client offer the pasteboard holds, whoever sent it.
+    const fn source(self) -> Option<Source> {
+        match self {
+            Self::Mirror { source, .. } | Self::Secret { source, .. } => Some(source),
+            Self::Native => None,
+        }
+    }
+
+    const fn offer_of(self, link: Link) -> Option<Source> {
+        match self {
+            Self::Mirror { link: l, source } | Self::Secret { link: l, source, .. }
+                if l == link =>
+            {
+                Some(source)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Announced {
+    generation: u64,
+    /// The change count the offer was read at: a fetch after it moved is refused.
+    count: isize,
+    /// The bytes read so far, at the poll or by a fetch.
+    read: HashMap<Key, Bytes>,
+}
+
 #[derive(Debug)]
 struct Incoming {
     offer: Offer,
-    fetched: HashMap<ClipFormat, Vec<u8>>,
-    written: bool,
+    /// When the copy was made, on this worker's clock.
+    copied: Option<Instant>,
+    fetched: HashMap<Key, Vec<u8>>,
+    /// Fetches sent, so a promise asks once.
+    asked: HashSet<Key>,
+    /// Representations the client would not send (too big for it, or gone).
+    refused: HashSet<Key>,
+    /// What a held paste waits for.
+    waiting: Vec<Key>,
+    /// The client said the offer is gone.
+    gone: bool,
+    /// When bytes of it last arrived: a promise waits on while they keep coming.
+    heard: Option<Instant>,
 }
 
 impl Incoming {
-    /// Representations the paste still waits for.
-    fn missing(&self) -> Vec<ClipFormat> {
+    fn new(offer: Offer, copied: Option<Instant>) -> Self {
+        Self {
+            offer,
+            copied,
+            fetched: HashMap::new(),
+            asked: HashSet::new(),
+            refused: HashSet::new(),
+            waiting: Vec::new(),
+            gone: false,
+            heard: None,
+        }
+    }
+
+    /// Whether the held paste has all that is coming.
+    fn whole(&self) -> bool {
+        self.gone
+            || self.waiting.iter().all(|k| self.fetched.contains_key(k) || self.refused.contains(k))
+    }
+
+    /// The representations `wanted` picks that are not here yet.
+    fn missing(&self, wanted: impl Fn(&ClipType) -> bool) -> Vec<Key> {
         self.offer
-            .items
-            .iter()
-            .filter(|i| writable(i.format) && i.inline.is_none() && i.size <= MAX_REP_BYTES)
-            .filter(|i| !self.fetched.contains_key(&i.format))
-            .map(|i| i.format)
+            .reps()
+            .filter(|(_, rep)| {
+                writable(&rep.kind, None) && wanted(&rep.kind) && rep.inline.is_none()
+            })
+            .filter(|(_, rep)| rep.size.is_none_or(|s| s <= MAX_REP_BYTES))
+            .map(|(n, rep)| (n, rep.kind.clone()))
+            .filter(|key| !self.fetched.contains_key(key))
             .collect()
+    }
+
+    /// The offer as pasteboard items: what is here as bytes, the rest promised. The board
+    /// item each written item is, as the offer's item index; `None` when nothing of it can be
+    /// written.
+    fn items(&self, promise: bool) -> Option<(Vec<Item>, Vec<u16>, HashSet<Hash>)> {
+        let mut items = Vec::new();
+        let mut map = Vec::new();
+        let mut hashes = HashSet::new();
+        for (entry, n) in self.offer.items.iter().zip(0_u16..) {
+            let mut item = Item::default();
+            for rep in &entry.reps {
+                let Some(kind) = type_on_board(&rep.kind) else { continue };
+                let here = rep
+                    .inline
+                    .clone()
+                    .or_else(|| self.fetched.get(&(n, rep.kind.clone())).cloned());
+                if !writable(&rep.kind, here.as_deref()) {
+                    continue;
+                }
+                match here {
+                    Some(bytes) => {
+                        hashes.insert(digest(&bytes));
+                        item.data.push((kind, bytes));
+                    }
+                    None if promise => item.promised.push(kind),
+                    None => {}
+                }
+            }
+            if !item.data.is_empty() || !item.promised.is_empty() {
+                items.push(item);
+                map.push(n);
+            }
+        }
+        let first = items.first_mut()?;
+        first
+            .data
+            .push((ORIGIN_TYPE.to_owned(), origin_bytes(self.offer.origin, self.offer.generation)));
+        first.data.push((AUTO_GENERATED_TYPE.to_owned(), Vec::new()));
+        if self.offer.concealed {
+            first.data.push((CONCEALED_TYPE.to_owned(), Vec::new()));
+            first.data.push((TRANSIENT_TYPE.to_owned(), Vec::new()));
+        }
+        Some((items, map, hashes))
+    }
+}
+
+/// Whether `copied` is later than `than`; an unknown time is older than any known one.
+fn newer(copied: Option<Instant>, than: Option<Instant>) -> bool {
+    match (copied, than) {
+        (Some(copied), Some(than)) => copied > than,
+        (Some(_), None) => true,
+        (None, _) => false,
     }
 }
 
@@ -163,107 +410,84 @@ impl State {
         (was, !self.watchers.is_empty())
     }
 
-    /// Whether `count` is a change to look at.
-    fn unseen(&self, count: isize) -> bool {
-        !self.watchers.is_empty() && self.seen != count
+    fn interest(&self) -> Interest {
+        if !self.watchers.is_empty() {
+            Interest::Watched
+        } else if self.sinks.is_empty() && !matches!(self.holds, Holds::Secret { .. }) {
+            Interest::Idle
+        } else {
+            Interest::Linked
+        }
     }
 
-    /// Announce `reps` as the next offer from `me`, unless they are what was last announced or
-    /// written.
-    fn announce(&mut self, me: Peer, reps: Vec<(ClipFormat, Bytes)>) -> Option<Offer> {
-        let (_format, key) = reps.first()?;
-        if self.last.contains(&digest(key)) {
-            return None;
-        }
-        self.generation = self.generation.wrapping_add(1);
-        let items = reps
-            .iter()
-            .map(|(format, bytes)| ClipItem {
-                format: *format,
-                size: bytes.len() as u64,
-                hash: digest(bytes),
-                inline: (*format == ClipFormat::Text && bytes.len() <= INLINE_CLIP_BYTES)
-                    .then(|| bytes.to_vec()),
-            })
-            .collect::<Vec<_>>();
-        self.last = items.iter().map(|i| i.hash).collect();
-        self.offered = Some((self.generation, reps));
-        Some(Offer { origin: me, generation: self.generation, items })
-    }
-
-    fn fetch(&self, generation: u64, format: ClipFormat) -> Option<Bytes> {
-        let (current, reps) = self.offered.as_ref()?;
-        if *current != generation {
-            return None;
-        }
-        reps.iter().find(|(f, _b)| *f == format).map(|(_f, b)| b.clone())
-    }
-
-    /// What `client`'s paste needs; `None` when its offer is whole and still to be written.
-    fn paste(&mut self, client: Link) -> Option<Paste> {
-        let Some(inc) = self.incoming.get_mut(&client) else { return Some(Paste::Ready) };
-        if inc.written {
-            return Some(Paste::Ready);
-        }
-        // The same contents are there already (an echo of the worker's own offer).
-        if inc.offer.items.first().is_some_and(|i| self.last.contains(&i.hash)) {
-            inc.written = true;
-            return Some(Paste::Ready);
-        }
-        let formats = inc.missing();
-        (!formats.is_empty()).then_some(Paste::Fetch { generation: inc.offer.generation, formats })
-    }
-
-    fn supply(
-        &mut self,
-        client: Link,
-        generation: u64,
-        format: ClipFormat,
-        bytes: Vec<u8>,
-    ) -> bool {
-        let Some(inc) = self.incoming.get_mut(&client) else { return false };
-        if inc.offer.generation != generation {
+    /// A look at the pasteboard found it at `count`, `now`: whether that is a change since the
+    /// last look, which is someone's copy on the worker.
+    ///
+    /// The first look of this process knows nothing of when the contents were copied, so they
+    /// count as older than any client's copy. A change found by the first look after the last
+    /// client left and one came back was made no later than when it left.
+    fn saw(&mut self, count: isize, now: Instant) -> bool {
+        let blind = self.idle_since.take();
+        let first = self.seen.is_none();
+        if self.seen == Some(count) {
             return false;
         }
-        let listed = inc.offer.items.iter().find(|i| i.format == format);
-        if listed.is_none_or(|i| i.hash != digest(&bytes)) {
-            tracing::debug!(%client, ?format, "clipboard data that does not match its offer; dropped");
-        } else {
-            inc.fetched.insert(format, bytes);
-        }
-        inc.missing().is_empty()
+        self.seen = Some(count);
+        self.holds = Holds::Native;
+        self.copied = if first { None } else { Some(blind.map_or(now, |left| left.min(now))) };
+        !first
     }
 
-    /// `client`'s offer as one pasteboard item stamped with its origin, and the digests of what
-    /// it holds; `None` when it was written already or nothing of it is here.
-    fn take_incoming(&mut self, client: Link) -> Option<(Item, HashSet<Hash>)> {
-        let inc = self.incoming.get_mut(&client)?;
-        if std::mem::replace(&mut inc.written, true) {
-            return None;
+    fn fetch(&self, rep: &RepRef, me: Peer) -> Result<Option<Bytes>, Fetched> {
+        let announced = self.announced.as_ref().ok_or(Fetched::Unavailable)?;
+        if rep.source != (Source::Offer { origin: me, generation: announced.generation }) {
+            return Err(Fetched::Unavailable);
         }
-        let mut reps: Item = Vec::new();
-        let mut hashes = HashSet::new();
-        for item in &inc.offer.items {
-            if !writable(item.format) {
-                continue;
+        Ok(announced.read.get(&(rep.item, rep.kind.clone())).cloned())
+    }
+
+    /// What `link`'s paste of `kind` needs; `None` when its offer is to be written now.
+    fn paste(&mut self, link: Link, kind: PasteKind) -> Option<Paste> {
+        let Some(inc) = self.incoming.get(&link) else { return Some(Paste::Ready) };
+        if inc.gone {
+            return Some(Paste::Ready);
+        }
+        let current = self.holds.offer_of(link) == Some(inc.offer.source());
+        let wanted: Vec<Key> = match (inc.offer.concealed, kind) {
+            (true, _) => inc.missing(|_| true),
+            (false, PasteKind::Picture) => inc.missing(ClipType::is_picture),
+            (false, PasteKind::Window) => {
+                // The worker's own copy after the client's wins, as on one machine.
+                let native_newer = self.holds == Holds::Native && newer(self.copied, inc.copied);
+                if current || native_newer {
+                    return Some(Paste::Ready);
+                }
+                Vec::new()
             }
-            if let Some(bytes) = item.inline.clone().or_else(|| inc.fetched.remove(&item.format)) {
-                hashes.insert(item.hash);
-                reps.push((board_type(item.format), bytes));
-            }
+        };
+        if wanted.is_empty() {
+            return current.then_some(Paste::Ready);
         }
-        if reps.is_empty() {
-            return None;
-        }
-        reps.push((ORIGIN_TYPE.to_owned(), origin_bytes(inc.offer.origin, inc.offer.generation)));
-        Some((reps, hashes))
+        let inc = self.incoming.get_mut(&link)?;
+        inc.waiting.clone_from(&wanted);
+        inc.asked.extend(wanted.iter().cloned());
+        let refs = wanted.into_iter().map(|(n, k)| inc.offer.rep_ref(n, k)).collect();
+        Some(Paste::Fetch(refs))
     }
 }
 
 impl<B: Board + Access> Clipboard<B> {
     /// Sync over `board` on behalf of `me`.
     pub fn new(board: B, me: Peer) -> Self {
-        Self { board, me, state: Mutex::default(), watched: watch::Sender::new(false) }
+        Self::waiting(board, me, PROVIDE_WAIT)
+    }
+
+    /// Sync over `board` on behalf of `me`, a promise waiting `wait` for bytes to start or go on.
+    pub fn waiting(board: B, me: Peer, wait: Duration) -> Self {
+        let state = State { generation: first_generation(), ..State::default() };
+        let shared = Arc::new(Shared { state: Mutex::new(state), arrived: Condvar::new(), wait });
+        let born = Instant::now();
+        Self { board, me, shared, interest: watch::Sender::new(Interest::Idle), born }
     }
 
     /// The pasteboard.
@@ -271,33 +495,58 @@ impl<B: Board + Access> Clipboard<B> {
         &self.board
     }
 
-    /// Whether any client watches, now and on every change.
+    /// What the poller should do, now and on every change.
     #[must_use]
-    pub fn watched(&self) -> watch::Receiver<bool> {
-        self.watched.subscribe()
+    pub fn interest(&self) -> watch::Receiver<Interest> {
+        self.interest.subscribe()
+    }
+
+    fn tell_interest(&self) {
+        let now = self.shared.state.lock().interest();
+        self.interest.send_if_modified(|i| std::mem::replace(i, now) != now);
+    }
+
+    /// Client `link` is here, reached through `sink`.
+    pub fn attach(&self, link: Link, sink: Sink) {
+        self.shared.state.lock().sinks.insert(link, sink);
+        self.tell_interest();
     }
 
     /// Whether `client` wants the worker's changes.
     #[must_use]
     pub fn is_watching(&self, client: Link) -> bool {
-        self.state.lock().watchers.contains(&client)
+        self.shared.state.lock().watchers.contains(&client)
     }
 
     /// `client` wants the worker's changes (`on`), or no longer does. Watching starts from the
     /// pasteboard as it is.
     pub fn watch(&self, client: Link, on: bool) {
-        let (was, now) = self.state.lock().set_watch(client, on);
+        let (was, now) = self.shared.state.lock().set_watch(client, on);
         if now && !was {
+            // A change nobody watched is the worker's own: noted, not announced.
             let count = self.board.change_count();
-            self.state.lock().seen = count;
+            let _changed = self.shared.state.lock().saw(count, Instant::now());
         }
-        self.watched.send_if_modified(|w| std::mem::replace(w, now) != now);
+        self.tell_interest();
     }
 
-    /// `client` is gone: it watches nothing and its offer is void.
+    /// `client` is gone: it watches nothing, its offer is void and a secret it pasted goes.
     pub fn forget(&self, client: Link) {
-        self.watch(client, false);
-        self.state.lock().incoming.remove(&client);
+        let secret = {
+            let mut state = self.shared.state.lock();
+            state.set_watch(client, false);
+            state.sinks.remove(&client);
+            state.incoming.remove(&client);
+            if state.sinks.is_empty() {
+                state.idle_since = Some(Instant::now());
+            }
+            matches!(state.holds, Holds::Secret { link, .. } if link == client)
+        };
+        self.shared.arrived.notify_all();
+        if secret {
+            self.clear();
+        }
+        self.tell_interest();
     }
 
     /// How reading the pasteboard goes now, for the doctor.
@@ -305,495 +554,464 @@ impl<B: Board + Access> Clipboard<B> {
         self.board.access()
     }
 
+    /// Read the change count alone, which never asks the person: a change is the worker's own,
+    /// stamped `now`. For while clients are linked but none watches.
+    pub fn observe(&self, now: Instant) {
+        let count = self.board.change_count();
+        let _changed = self.shared.state.lock().saw(count, now);
+    }
+
     /// The pasteboard's change since the last poll or write, as an offer to announce; `None`
     /// when nobody watches, reads would ask the person, nothing changed, or the change is not
     /// to be announced.
-    pub fn poll(&self) -> Option<Offer> {
-        if self.state.lock().watchers.is_empty() || !self.board.access().reads_freely() {
+    pub fn poll(&self, now: Instant) -> Option<Offer> {
+        let writes = {
+            let state = self.shared.state.lock();
+            if state.watchers.is_empty() {
+                return None;
+            }
+            state.writes
+        };
+        if !self.board.access().reads_freely() {
+            self.observe(now);
             return None;
         }
         let count = self.board.change_count();
-        if !self.state.lock().unseen(count) {
+        if self.shared.state.lock().seen == Some(count) {
             return None;
         }
-        let types = self.board.types();
+        let items = self.board.items();
         // A copy clears the pasteboard, which moves the count, and puts the new contents on
         // after, under that same count. An empty board may be a copy half done, so its count
         // is left unseen and read again on the next poll.
-        if types.is_empty() {
+        if items.is_empty() {
             return None;
         }
-        self.state.lock().seen = count;
-        if types.iter().any(|t| t == CONCEALED_TYPE || t == TRANSIENT_TYPE) {
-            return None;
-        }
-        if types.iter().any(|t| t == ORIGIN_TYPE)
-            && self
-                .board
-                .data(ORIGIN_TYPE)
-                .and_then(|b| parse_origin(&b))
-                .is_some_and(|(peer, _)| peer == self.me)
         {
-            return None;
-        }
-        let reps = self.read(&types);
-        self.state.lock().announce(self.me, reps)
-    }
-
-    /// The representations of the pasteboard's first item clipboard sync carries, richest
-    /// first; file URLs are every item's, one per line.
-    fn read(&self, types: &[String]) -> Vec<(ClipFormat, Bytes)> {
-        let mut reps = Vec::new();
-        for format in ClipFormat::ALL {
-            let kind = board_type(format);
-            let bytes = if format == ClipFormat::FileUrls {
-                let urls = self.board.file_urls();
-                if urls.is_empty() {
-                    continue;
-                }
-                urls.join("\n").into_bytes()
-            } else if types.contains(&kind) {
-                let Some(bytes) = self.board.data(&kind) else { continue };
-                bytes
-            } else {
-                continue;
-            };
-            if bytes.len() as u64 <= MAX_REP_BYTES {
-                reps.push((format, Bytes::from(bytes)));
+            let mut state = self.shared.state.lock();
+            // This process wrote meanwhile, or is writing: what was read may be that write, and
+            // the next poll sees it under the count the write left.
+            if state.writing || state.writes != writes || !state.saw(count, now) {
+                return None;
             }
         }
-        reps
+        let has = |kind: &str| items.iter().position(|types| types.iter().any(|t| t == kind));
+        if let Some(n) = has(ORIGIN_TYPE)
+            && let Some((peer, generation)) =
+                self.board.data(n, ORIGIN_TYPE).and_then(|b| parse_origin(&b))
+        {
+            let written = Source::Offer { origin: peer, generation };
+            let holds = self.shared.state.lock().holds;
+            if peer == self.me || holds.source() == Some(written) {
+                // Contents this worker announced, put back, or its own write of a client's.
+                return None;
+            }
+        }
+        let concealed = has(CONCEALED_TYPE).is_some() || has(TRANSIENT_TYPE).is_some();
+        let (entries, read) = self.read(&items, concealed);
+        self.announce(count, concealed, entries, read)
     }
 
-    /// Representation `format` of the worker's offer `generation`; `None` when that offer is not
-    /// the current one (the pasteboard changed again) or never listed it.
+    /// Every item's types as representations, with what is read at a poll: text and file URLs,
+    /// inline while they fit [`INLINE_CLIP_BYTES`] together, never a secret's.
+    fn read(
+        &self,
+        items: &[Vec<String>],
+        concealed: bool,
+    ) -> (Vec<ClipEntry>, HashMap<Key, Bytes>) {
+        let mut budget = if concealed { 0 } else { INLINE_CLIP_BYTES };
+        let mut read = HashMap::new();
+        let mut entries = Vec::new();
+        for (types, n) in items.iter().take(MAX_CLIP_ITEMS).zip(0_u16..) {
+            let mut reps = Vec::new();
+            for kind in types.iter().filter(|t| format_of(t).is_some() || carried(t)) {
+                let wire = clip_type(kind);
+                let small = wire.is(ClipFormat::Text) || wire.is(ClipFormat::FileUrls);
+                let cap = u64::try_from(budget).unwrap_or(u64::MAX);
+                let bytes = (small && budget > 0)
+                    .then(|| self.board.data_within(usize::from(n), kind, cap))
+                    .flatten();
+                let rep = match bytes {
+                    Some(Capped::Data(bytes)) => {
+                        budget = budget.saturating_sub(bytes.len());
+                        let rep = Rep {
+                            kind: wire.clone(),
+                            size: Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX)),
+                            hash: Some(digest(&bytes)),
+                            inline: Some(bytes.clone()),
+                        };
+                        read.insert((n, wire), Bytes::from(bytes));
+                        rep
+                    }
+                    // Past what is left inline: its size is known, its bytes are read again
+                    // when fetched, and nothing more is read at this poll.
+                    Some(Capped::TooBig(size)) => {
+                        budget = 0;
+                        Rep { kind: wire, size: Some(size), hash: None, inline: None }
+                    }
+                    None => Rep { kind: wire, size: None, hash: None, inline: None },
+                };
+                reps.push(rep);
+            }
+            entries.push(ClipEntry { reps });
+        }
+        (entries, read)
+    }
+
+    /// Announce `entries` as the next offer from `me`, unless their inline bytes are what was
+    /// last announced or written.
+    fn announce(
+        &self,
+        count: isize,
+        concealed: bool,
+        items: Vec<ClipEntry>,
+        read: HashMap<Key, Bytes>,
+    ) -> Option<Offer> {
+        if items.iter().all(|i| i.reps.is_empty()) {
+            return None;
+        }
+        let keys: HashSet<Hash> =
+            items.iter().flat_map(|i| &i.reps).filter_map(|r| r.hash).collect();
+        let mut state = self.shared.state.lock();
+        if !keys.is_empty() && keys.is_subset(&state.last) {
+            return None;
+        }
+        state.generation = state.generation.wrapping_add(1);
+        state.last = keys;
+        let generation = state.generation;
+        state.announced = Some(Announced { generation, count, read });
+        drop(state);
+        Some(Offer { origin: self.me, generation, age_ms: 0, concealed, items })
+    }
+
+    /// Representation `rep` of the worker's offer, answering [`Fetched::TooBig`] past `max`. Read
+    /// off the pasteboard now unless the poll read it, and only while the pasteboard still holds
+    /// what was announced. Blocks on the pasteboard server: never on the runtime.
     #[must_use]
-    pub fn fetch(&self, generation: u64, format: ClipFormat) -> Option<Bytes> {
-        self.state.lock().fetch(generation, format)
+    pub fn fetch(&self, rep: &RepRef, max: Option<u64>) -> Fetched {
+        let cap = max.map_or(MAX_REP_BYTES, |m| m.min(MAX_REP_BYTES));
+        let sized = |bytes: Bytes| {
+            let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            if size > cap { Fetched::TooBig(size) } else { Fetched::Data(bytes) }
+        };
+        let (cached, count) = {
+            let state = self.shared.state.lock();
+            match state.fetch(rep, self.me) {
+                Ok(cached) => (cached, state.announced.as_ref().map_or(0, |a| a.count)),
+                Err(answer) => return answer,
+            }
+        };
+        if let Some(bytes) = cached {
+            return sized(bytes);
+        }
+        let Some(kind) = type_on_board(&rep.kind) else { return Fetched::Unavailable };
+        if self.board.change_count() != count {
+            return Fetched::Unavailable;
+        }
+        let read = self.board.data_within(usize::from(rep.item), &kind, cap);
+        // Someone may have copied while it was read: bytes read under another count are not
+        // this offer's.
+        if self.board.change_count() != count {
+            return Fetched::Unavailable;
+        }
+        let bytes = match read {
+            None => return Fetched::Unavailable,
+            Some(Capped::TooBig(size)) => return Fetched::TooBig(size),
+            Some(Capped::Data(bytes)) => Bytes::from(bytes),
+        };
+        if u64::try_from(bytes.len()).is_ok_and(|len| len <= KEPT_MAX) {
+            let mut state = self.shared.state.lock();
+            if let Some(announced) = state.announced.as_mut().filter(|a| a.count == count) {
+                announced.read.insert((rep.item, rep.kind.clone()), bytes.clone());
+            }
+        }
+        Fetched::Data(bytes)
     }
 
-    /// `client`'s clipboard changed to `offer`; it reaches the pasteboard on that client's
-    /// next paste.
-    pub fn offered(&self, client: Link, offer: Offer) {
-        let incoming = Incoming { offer, fetched: HashMap::new(), written: false };
-        self.state.lock().incoming.insert(client, incoming);
+    /// `client`'s clipboard is `offer`, arriving `now`: remembered for its pastes. Whether it
+    /// is to be mirrored onto the pasteboard ([`Clipboard::mirror`]), being newer than what the
+    /// pasteboard holds; a secret never is. The client's secret, if the pasteboard holds one,
+    /// is cleared: its clipboard moved on.
+    pub fn offered(&self, client: Link, offer: Offer, now: Instant) -> bool {
+        let copied =
+            Some(now.checked_sub(Duration::from_millis(offer.age_ms)).unwrap_or(self.born));
+        let mut state = self.shared.state.lock();
+        let concealed = offer.concealed;
+        let same = state.holds.offer_of(client) == Some(offer.source());
+        let secret = matches!(state.holds, Holds::Secret { link, .. } if link == client);
+        let mirror = !concealed && !same && newer(copied, state.copied);
+        state.incoming.insert(client, Incoming::new(offer, copied));
+        drop(state);
+        self.shared.arrived.notify_all();
+        if secret && !same {
+            self.clear();
+        }
+        mirror
     }
 
-    /// `client` pressed its paste chord: what must happen before the chord goes on. When the
-    /// offer is whole already it is written here.
-    pub fn paste(&self, client: Link) -> Paste {
-        let plan = self.state.lock().paste(client);
+    /// Put `client`'s offer on the pasteboard as it is, the bytes it has here and promises for
+    /// the rest, unless the pasteboard holds it already. `false` when nothing was written.
+    pub fn mirror(&self, client: Link) -> bool {
+        let state = self.shared.state.lock();
+        let Some(inc) = state.incoming.get(&client) else { return false };
+        if inc.offer.concealed || state.holds.offer_of(client) == Some(inc.offer.source()) {
+            return false;
+        }
+        let Some((items, map, hashes)) = inc.items(true) else { return false };
+        let (source, copied) = (inc.offer.source(), inc.copied);
+        drop(state);
+        let provide = self.provider(client, source, map);
+        self.commit(&items, Some(provide), hashes, Holds::Mirror { link: client, source }, copied)
+    }
+
+    /// What answers the mirror's promises: the bytes of `client`'s offer `source`, from here or
+    /// fetched from the client, waiting at most [`PROVIDE_WAIT`].
+    fn provider(&self, client: Link, source: Source, map: Vec<u16>) -> Provide {
+        let shared = Arc::downgrade(&self.shared);
+        Arc::new(move |item: usize, kind: &str| {
+            let item = *map.get(item)?;
+            let key = (item, clip_type(kind));
+            let bytes = provide(&shared, client, source, &key)?;
+            // A link promised without its bytes may turn out to name a file.
+            writable(&key.1, Some(&bytes)).then_some(bytes)
+        })
+    }
+
+    /// `client` pressed its paste chord, of `kind`: what must happen before the chord goes on.
+    /// When nothing needs fetching, the offer is written here if the paste needs it.
+    pub fn paste(&self, client: Link, kind: PasteKind) -> Paste {
+        let plan = self.shared.state.lock().paste(client, kind);
         plan.unwrap_or_else(|| {
-            let _written = self.write_incoming(client);
+            let _written = self.write_incoming(client, Instant::now());
             Paste::Ready
         })
     }
 
-    /// Bytes of representation `format` of `client`'s offer `generation` arrived. `true` once
-    /// every representation the paste waits for is here.
-    pub fn supply(
-        &self,
-        client: Link,
-        generation: u64,
-        format: ClipFormat,
-        bytes: Vec<u8>,
-    ) -> bool {
-        self.state.lock().supply(client, generation, format, bytes)
+    /// Bytes of representation `rep` of `client`'s offer arrived. `true` once a held paste has
+    /// everything it waits for.
+    pub fn supply(&self, client: Link, rep: &RepRef, bytes: Vec<u8>) -> bool {
+        let mut state = self.shared.state.lock();
+        let Some(inc) = state.incoming.get_mut(&client) else { return false };
+        let Some(listed) = inc.offer.rep(rep) else { return false };
+        if listed.hash.is_some_and(|h| h != digest(&bytes)) {
+            tracing::debug!(%client, item = rep.item, "clipboard data that does not match its offer; dropped");
+            inc.refused.insert((rep.item, rep.kind.clone()));
+        } else {
+            inc.fetched.insert((rep.item, rep.kind.clone()), bytes);
+        }
+        let whole = !inc.waiting.is_empty() && inc.whole();
+        drop(state);
+        self.shared.arrived.notify_all();
+        whole
     }
 
-    /// Put `client`'s offer on the pasteboard, with what of it is here (inline text and what was
-    /// fetched). `false` when there was nothing to write or the write failed.
-    pub fn write_incoming(&self, client: Link) -> bool {
-        let taken = self.state.lock().take_incoming(client);
-        let Some((reps, hashes)) = taken else { return false };
-        self.commit(&[reps], hashes)
+    /// The client will not send representation `rep` (too big for it). `true` once a held paste
+    /// has everything that is coming.
+    pub fn refused(&self, client: Link, rep: &RepRef) -> bool {
+        let mut state = self.shared.state.lock();
+        let Some(inc) = state.incoming.get_mut(&client).filter(|i| i.offer.source() == rep.source)
+        else {
+            return false;
+        };
+        inc.refused.insert((rep.item, rep.kind.clone()));
+        let whole = !inc.waiting.is_empty() && inc.whole();
+        drop(state);
+        self.shared.arrived.notify_all();
+        whole
+    }
+
+    /// Bytes of representation `rep` are arriving from its client: a promise waiting on the offer
+    /// waits on while they keep coming.
+    pub fn receiving(&self, rep: &RepRef) {
+        let mut state = self.shared.state.lock();
+        let now = Instant::now();
+        for inc in state.incoming.values_mut().filter(|i| i.offer.source() == rep.source) {
+            inc.heard = Some(now);
+        }
+        drop(state);
+        self.shared.arrived.notify_all();
+    }
+
+    /// The client's offer `source` is gone: nothing more of it is coming.
+    pub fn unavailable(&self, client: Link, source: Source) {
+        let mut state = self.shared.state.lock();
+        if let Some(inc) = state.incoming.get_mut(&client).filter(|i| i.offer.source() == source) {
+            inc.gone = true;
+        }
+        drop(state);
+        self.shared.arrived.notify_all();
+    }
+
+    /// Put `client`'s offer on the pasteboard with what of it is here, promising the rest unless
+    /// it is a secret, which is written whole or not at all and cleared [`CONCEALED_FOR`] after
+    /// `now`. `false` when there was nothing to write or the write failed.
+    pub fn write_incoming(&self, client: Link, now: Instant) -> bool {
+        let state = self.shared.state.lock();
+        let Some(inc) = state.incoming.get(&client) else { return false };
+        let concealed = inc.offer.concealed;
+        let Some((items, map, hashes)) = inc.items(!concealed) else { return false };
+        let (source, copied) = (inc.offer.source(), inc.copied);
+        drop(state);
+        if concealed {
+            let until = now.checked_add(CONCEALED_FOR).unwrap_or(now);
+            let holds = Holds::Secret { link: client, source, count: 0, until };
+            return self.commit(&items, None, HashSet::new(), holds, copied);
+        }
+        let provide = self.provider(client, source, map);
+        self.commit(&items, Some(provide), hashes, Holds::Mirror { link: client, source }, copied)
+    }
+
+    /// Clear a secret a client pasted once its time is up (`now`), unless the pasteboard moved on
+    /// since.
+    pub fn expire(&self, now: Instant) {
+        let due =
+            matches!(self.shared.state.lock().holds, Holds::Secret { until, .. } if until <= now);
+        if due {
+            self.clear();
+        }
+    }
+
+    /// Clear the pasteboard of a secret a client pasted, if it still holds it: checked and
+    /// cleared in one turn on the pasteboard, so a copy made since is left alone.
+    fn clear(&self) {
+        let Holds::Secret { count, .. } = self.shared.state.lock().holds else { return };
+        let cleared = self.board.clear_if(count);
+        let mut state = self.shared.state.lock();
+        state.holds = Holds::Native;
+        if let Some(cleared) = cleared {
+            state.seen = Some(cleared);
+        }
+        drop(state);
+        self.tell_interest();
     }
 
     /// Put `paths` on the pasteboard as file URLs, one item each, so ⌘V in Finder or an app
-    /// pastes the files. Not announced: they are the clients' own files.
-    pub fn write_files(&self, paths: &[impl AsRef<Path>]) -> bool {
+    /// pastes the files, as the newest copy (`now`). Not announced: they are the clients' own
+    /// files.
+    pub fn write_files(&self, paths: &[impl AsRef<Path>], now: Instant) -> bool {
         let url = board_type(ClipFormat::FileUrls);
-        let generation = self.state.lock().generation;
-        let mut items: Vec<Item> =
-            paths.iter().map(|p| vec![(url.clone(), file_url(p.as_ref()).into_bytes())]).collect();
+        let generation = self.shared.state.lock().generation;
+        let mut items: Vec<Item> = paths
+            .iter()
+            .map(|p| Item::data(vec![(url.clone(), file_url(p.as_ref()).into_bytes())]))
+            .collect();
         let Some(first) = items.first_mut() else { return false };
-        first.push((ORIGIN_TYPE.to_owned(), origin_bytes(self.me, generation)));
-        self.commit(&items, HashSet::new())
+        first.data.push((ORIGIN_TYPE.to_owned(), origin_bytes(self.me, generation)));
+        self.commit(&items, None, HashSet::new(), Holds::Native, Some(now))
     }
 
-    fn commit(&self, items: &[Item], hashes: HashSet<Hash>) -> bool {
+    fn commit(
+        &self,
+        items: &[Item],
+        provide: Option<Provide>,
+        hashes: HashSet<Hash>,
+        holds: Holds,
+        copied: Option<Instant>,
+    ) -> bool {
         // Known before the write lands: a poll that reads the new contents before `write`
         // returns must take them for this write, not a copy to announce back.
-        let before = std::mem::replace(&mut self.state.lock().last, hashes);
-        let Some(count) = self.board.write(items) else {
+        let before = {
+            let mut state = self.shared.state.lock();
+            state.writing = true;
+            std::mem::replace(&mut state.last, hashes)
+        };
+        let wrote = self.board.write(items, provide);
+        let mut state = self.shared.state.lock();
+        state.writing = false;
+        state.writes = state.writes.wrapping_add(1);
+        let Some(count) = wrote else {
+            state.last = before;
+            drop(state);
             tracing::warn!("pasteboard write failed");
-            self.state.lock().last = before;
             return false;
         };
-        self.state.lock().seen = count;
+        state.seen = Some(count);
+        state.copied = copied;
+        state.holds = match holds {
+            Holds::Secret { link, source, until, .. } => {
+                Holds::Secret { link, source, count, until }
+            }
+            other => other,
+        };
+        drop(state);
+        self.tell_interest();
         true
     }
 }
 
-/// Whether a representation a client offers can go on the worker's pasteboard as it is: a
-/// client's file URLs name files on the client, which travel as a transfer instead.
-fn writable(format: ClipFormat) -> bool {
-    format != ClipFormat::FileUrls
+/// Answer a promise of `client`'s offer `source`: the bytes of `key`, from what arrived or
+/// fetched now, waiting at most [`PROVIDE_WAIT`]. `None` when the offer moved on, the client is
+/// gone or does not answer in time. Blocks the thread AppKit asked on.
+#[expect(
+    clippy::significant_drop_tightening,
+    reason = "the guard is the condition variable's, held across every look and wait"
+)]
+fn provide(shared: &Weak<Shared>, client: Link, source: Source, key: &Key) -> Option<Vec<u8>> {
+    let shared = shared.upgrade()?;
+    let asked = Instant::now();
+    let mut on_main = true;
+    let mut state = shared.state.lock();
+    loop {
+        let inc = state.incoming.get(&client).filter(|i| i.offer.source() == source)?;
+        if let Some(bytes) = inc.fetched.get(key) {
+            return Some(bytes.clone());
+        }
+        let rep = inc.offer.rep(&inc.offer.rep_ref(key.0, key.1.clone()))?;
+        if let Some(bytes) = &rep.inline {
+            return Some(bytes.clone());
+        }
+        if inc.gone || inc.refused.contains(key) {
+            return None;
+        }
+        if !inc.asked.contains(key) {
+            let rep = inc.offer.rep_ref(key.0, key.1.clone());
+            let sink = Arc::clone(state.sinks.get(&client)?);
+            if let Some(inc) = state.incoming.get_mut(&client) {
+                inc.asked.insert(key.clone());
+            }
+            tracing::debug!(%client, item = rep.item, "a promise asks the client");
+            sink(ClipMsg::Fetch { rep, max: None, urgent: true });
+        }
+        let deadline = inc_heard(&state, client, asked).checked_add(shared.wait)?;
+        let now = Instant::now();
+        if now >= deadline {
+            tracing::debug!(%client, "a promise went unanswered");
+            return None;
+        }
+        let until = if on_main { deadline.min(now.checked_add(MAIN_SLICE)?) } else { deadline };
+        let _woken = shared.arrived.wait_until(&mut state, until);
+        if on_main {
+            on_main = parking_lot::MutexGuard::unlocked(&mut state, serve_main_run_loop);
+        }
+    }
+}
+
+/// How long a promise asked on the main thread waits between runs of the main run loop.
+const MAIN_SLICE: Duration = Duration::from_millis(10);
+
+/// When `client`'s offer last moved: bytes of it heard, else the promise's ask at `asked`.
+fn inc_heard(state: &State, client: Link, asked: Instant) -> Instant {
+    state.incoming.get(&client).and_then(|i| i.heard).map_or(asked, |heard| heard.max(asked))
+}
+
+/// Whether a representation a client offers can go on the worker's pasteboard as it is, with
+/// its `bytes` when they are here: a type that travels, however it was spelled, that names no
+/// file. A client's file names mean files on the client, which travel as a transfer instead.
+fn writable(kind: &ClipType, bytes: Option<&[u8]>) -> bool {
+    if kind.is(ClipFormat::FileUrls) {
+        return false;
+    }
+    let Some(board_type) = type_on_board(kind) else { return false };
+    #[cfg(target_vendor = "apple")]
+    {
+        slopty_platform::pasteboard::writable(&board_type, bytes)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _: Option<&[u8]> = bytes;
+        format_of(&board_type).is_some() || carried(&board_type)
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicIsize, Ordering};
-
-    use slopty_core::{ClientId, WorkerId};
-
-    use super::*;
-
-    /// A pasteboard in memory: one item, or several file URLs.
-    #[derive(Default)]
-    struct Fake {
-        count: AtomicIsize,
-        items: Mutex<Vec<Item>>,
-        /// Run once inside the next `write`, after the contents land and before it returns.
-        during_write: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-        /// Reading asks the person first, as the general pasteboard does until they allow it.
-        asks: std::sync::atomic::AtomicBool,
-        /// Reads of the contents so far.
-        reads: std::sync::atomic::AtomicUsize,
-    }
-
-    impl Access for Fake {
-        fn access(&self) -> ReadAccess {
-            if self.asks.load(Ordering::SeqCst) {
-                ReadAccess::NotAskedYet
-            } else {
-                ReadAccess::Allowed
-            }
-        }
-    }
-
-    impl Fake {
-        /// Another app copied `reps`: it cleared the pasteboard, then put them on.
-        fn copy(&self, reps: &[(&str, &[u8])]) {
-            self.clear();
-            self.put(reps);
-        }
-
-        /// `clearContents`: the board is empty and its count moves.
-        fn clear(&self) {
-            self.items.lock().clear();
-            self.count.fetch_add(1, Ordering::SeqCst);
-        }
-
-        /// `writeObjects:` after a clear: the contents land under the count the clear left.
-        fn put(&self, reps: &[(&str, &[u8])]) {
-            let item = reps.iter().map(|(t, b)| ((*t).to_owned(), b.to_vec())).collect();
-            *self.items.lock() = vec![item];
-        }
-    }
-
-    impl Board for Fake {
-        fn change_count(&self) -> isize {
-            self.count.load(Ordering::SeqCst)
-        }
-
-        fn types(&self) -> Vec<String> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            let items = self.items.lock();
-            items.first().map(|i| i.iter().map(|(t, _b)| t.clone()).collect()).unwrap_or_default()
-        }
-
-        fn data(&self, kind: &str) -> Option<Vec<u8>> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            let items = self.items.lock();
-            items.first()?.iter().find(|(t, _b)| t == kind).map(|(_t, b)| b.clone())
-        }
-
-        fn file_urls(&self) -> Vec<String> {
-            let url = board_type(ClipFormat::FileUrls);
-            let urls = |items: &[Item]| -> Vec<String> {
-                let found = items.iter().filter_map(|i| i.iter().find(|(t, _b)| *t == url));
-                found.map(|(_t, b)| String::from_utf8_lossy(b).into_owned()).collect()
-            };
-            urls(&self.items.lock())
-        }
-
-        fn write(&self, items: &[Item]) -> Option<isize> {
-            *self.items.lock() = items.to_vec();
-            let count = self.count.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
-            let hook = self.during_write.lock().take();
-            if let Some(hook) = hook {
-                hook();
-            }
-            Some(count)
-        }
-    }
-
-    fn next_link() -> Link {
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn clip() -> Clipboard<Fake> {
-        Clipboard::new(Fake::default(), Peer::Worker(WorkerId::new()))
-    }
-
-    fn text() -> String {
-        board_type(ClipFormat::Text)
-    }
-
-    #[test]
-    fn nothing_is_read_or_announced_while_nobody_watches() {
-        let c = clip();
-        let a = next_link();
-        c.board().copy(&[(&text(), b"one")]);
-        assert_eq!(c.poll(), None, "nobody watches");
-        let mut watched = c.watched();
-        assert!(!*watched.borrow_and_update());
-        c.watch(a, true);
-        assert!(watched.has_changed().unwrap() && *watched.borrow_and_update());
-        assert_eq!(c.poll(), None, "a change made while unwatched is not announced");
-        c.board().copy(&[(&text(), b"two")]);
-        let offer = c.poll().expect("a change while watched");
-        assert_eq!(offer.items[0].inline.as_deref(), Some(&b"two"[..]));
-        assert_eq!(c.poll(), None, "announced once");
-        c.forget(a);
-        assert!(!*watched.borrow_and_update());
-        c.board().copy(&[(&text(), b"three")]);
-        assert_eq!(c.poll(), None);
-    }
-
-    /// While reading the pasteboard would raise macOS's paste alert, a change is neither read
-    /// nor announced, and a client's paste is still written; once reads are allowed the
-    /// clipboard is announced again.
-    #[test]
-    fn nothing_is_read_while_reads_would_ask_the_person() {
-        let c = clip();
-        let a = next_link();
-        c.watch(a, true);
-        c.board().asks.store(true, Ordering::SeqCst);
-        assert_eq!(c.access(), ReadAccess::NotAskedYet);
-        c.board().copy(&[(&text(), b"secret")]);
-        let before = c.board().reads.load(Ordering::SeqCst);
-        assert_eq!(c.poll(), None);
-        assert_eq!(c.board().reads.load(Ordering::SeqCst), before, "the contents were not read");
-        let offer = Offer {
-            origin: Peer::Client(ClientId::nil()),
-            generation: 1,
-            items: vec![ClipItem {
-                format: ClipFormat::Text,
-                size: 5,
-                hash: digest(b"typed"),
-                inline: Some(b"typed".to_vec()),
-            }],
-        };
-        c.offered(a, offer);
-        assert_eq!(c.paste(a), Paste::Ready);
-        assert_eq!(c.board().data(&text()).unwrap(), b"typed", "a paste still writes");
-        c.board().asks.store(false, Ordering::SeqCst);
-        c.board().copy(&[(&text(), b"allowed now")]);
-        let offer = c.poll().expect("reads are free again");
-        assert_eq!(offer.items[0].inline.as_deref(), Some(&b"allowed now"[..]));
-    }
-
-    /// Another process's copy clears the pasteboard, which moves its count, and puts the new
-    /// contents on after, under that same count. A poll that lands in between finds the board
-    /// empty; the contents are still announced once they are there.
-    #[test]
-    fn contents_put_on_after_a_poll_saw_the_board_cleared_are_announced() {
-        let c = clip();
-        c.watch(next_link(), true);
-        c.board().clear();
-        assert_eq!(c.poll(), None, "nothing on the board yet");
-        c.board().put(&[(&text(), b"landed")]);
-        let offer = c.poll().expect("the contents that landed under the clear's count");
-        assert_eq!(offer.items[0].inline.as_deref(), Some(&b"landed"[..]));
-        assert_eq!(c.poll(), None, "announced once");
-    }
-
-    #[test]
-    fn an_offer_inlines_small_text_and_lists_the_rest_for_fetching() {
-        let c = clip();
-        c.watch(next_link(), true);
-        let big = vec![b'x'; INLINE_CLIP_BYTES + 1];
-        let png = board_type(ClipFormat::Png);
-        c.board().copy(&[(&text(), &big), (&png, b"\x89PNG"), ("com.example.private", b"p")]);
-        let offer = c.poll().unwrap();
-        let formats: Vec<ClipFormat> = offer.items.iter().map(|i| i.format).collect();
-        assert_eq!(formats, [ClipFormat::Png, ClipFormat::Text], "richest first, unknown left out");
-        assert!(offer.items.iter().all(|i| i.inline.is_none()), "text over the cap is fetched");
-        assert_eq!(offer.items[1].size, big.len() as u64);
-        assert_eq!(offer.items[1].hash, digest(&big));
-        assert_eq!(c.fetch(offer.generation, ClipFormat::Png).unwrap(), &b"\x89PNG"[..]);
-        assert_eq!(c.fetch(offer.generation, ClipFormat::Rtf), None, "never listed");
-        c.board().copy(&[(&text(), b"newer")]);
-        let newer = c.poll().unwrap();
-        assert!(newer.generation > offer.generation);
-        assert_eq!(c.fetch(offer.generation, ClipFormat::Png), None, "the old offer is gone");
-    }
-
-    #[test]
-    fn secrets_and_transient_contents_are_skipped() {
-        let c = clip();
-        c.watch(next_link(), true);
-        c.board().copy(&[(&text(), b"hunter2"), (CONCEALED_TYPE, b"")]);
-        assert_eq!(c.poll(), None);
-        c.board().copy(&[(&text(), b"soon gone"), (TRANSIENT_TYPE, b"")]);
-        assert_eq!(c.poll(), None);
-    }
-
-    /// The worker's own write is not announced back: not the change it made, not contents that
-    /// name this worker as their origin, not contents it just wrote under another count.
-    #[test]
-    fn echoes_are_broken_three_ways() {
-        let c = clip();
-        let a = next_link();
-        c.watch(a, true);
-        let offer = |generation, body: &[u8]| Offer {
-            origin: Peer::Client(ClientId::nil()),
-            generation,
-            items: vec![ClipItem {
-                format: ClipFormat::Text,
-                size: body.len() as u64,
-                hash: digest(body),
-                inline: Some(body.to_vec()),
-            }],
-        };
-        c.offered(a, offer(1, b"from the client"));
-        assert_eq!(c.paste(a), Paste::Ready);
-        assert_eq!(c.board().data(&text()).unwrap(), b"from the client");
-        assert_eq!(c.poll(), None, "the write's own change count");
-
-        // A client on this very Mac puts the worker's announced contents back, stamped with the
-        // worker as their origin.
-        c.board().copy(&[(&text(), b"worker text")]);
-        let announced = c.poll().unwrap();
-        let origin = origin_bytes(announced.origin, announced.generation);
-        c.board().copy(&[(&text(), b"worker text"), (ORIGIN_TYPE, &origin)]);
-        assert_eq!(c.poll(), None, "origin names this worker");
-
-        // Universal Clipboard delivers the same text again with no origin.
-        c.board().copy(&[(&text(), b"worker text")]);
-        assert_eq!(c.poll(), None, "same digest as announced");
-        c.board().copy(&[(&text(), b"something else")]);
-        assert!(c.poll().is_some());
-    }
-
-    #[test]
-    fn a_paste_fetches_what_was_not_inline_then_writes_it_once() {
-        let c = clip();
-        let a = next_link();
-        let png = board_type(ClipFormat::Png);
-        let picture = b"\x89PNG picture".to_vec();
-        c.offered(
-            a,
-            Offer {
-                origin: Peer::Client(ClientId::nil()),
-                generation: 7,
-                items: vec![
-                    ClipItem {
-                        format: ClipFormat::FileUrls,
-                        size: 9,
-                        hash: digest(b"file:///x"),
-                        inline: None,
-                    },
-                    ClipItem {
-                        format: ClipFormat::Png,
-                        size: picture.len() as u64,
-                        hash: digest(&picture),
-                        inline: None,
-                    },
-                    ClipItem {
-                        format: ClipFormat::Text,
-                        size: 2,
-                        hash: digest(b"hi"),
-                        inline: Some(b"hi".to_vec()),
-                    },
-                ],
-            },
-        );
-        let Paste::Fetch { generation, formats } = c.paste(a) else { panic!("a fetch first") };
-        assert_eq!((generation, formats), (7, vec![ClipFormat::Png]), "a file URL is not pasted");
-        let png_format = ClipFormat::Png;
-        assert!(!c.supply(a, 7, png_format, b"tampered".to_vec()), "a digest mismatch is dropped");
-        assert!(!c.supply(a, 6, png_format, picture.clone()), "another offer's data");
-        assert!(c.supply(a, 7, png_format, picture.clone()));
-        assert!(c.write_incoming(a));
-        assert_eq!(c.board().data(&png).unwrap(), picture);
-        assert_eq!(c.board().data(&text()).unwrap(), b"hi");
-        let (peer, generation) = parse_origin(&c.board().data(ORIGIN_TYPE).unwrap()).unwrap();
-        assert_eq!(
-            (peer, generation),
-            (Peer::Client(ClientId::nil()), 7),
-            "stamped with its origin"
-        );
-        assert_eq!(c.paste(a), Paste::Ready, "written once");
-        assert!(!c.write_incoming(a));
-        assert_eq!(c.paste(next_link()), Paste::Ready, "a client that offered nothing");
-    }
-
-    /// A poll that reads the worker's own write before `write` has returned takes it for that
-    /// write, not for a copy to announce back to the clients.
-    #[test]
-    fn a_poll_inside_the_workers_own_write_announces_nothing() {
-        let c = std::sync::Arc::new(clip());
-        let (a, watcher) = (next_link(), next_link());
-        c.watch(watcher, true);
-        c.offered(
-            a,
-            Offer {
-                origin: Peer::Client(ClientId::nil()),
-                generation: 3,
-                items: vec![ClipItem {
-                    format: ClipFormat::Text,
-                    size: 4,
-                    hash: digest(b"mine"),
-                    inline: Some(b"mine".to_vec()),
-                }],
-            },
-        );
-        let polled = std::sync::Arc::new(Mutex::new(None));
-        let hook = {
-            let (weak, polled) = (std::sync::Arc::downgrade(&c), std::sync::Arc::clone(&polled));
-            move || *polled.lock() = weak.upgrade().map(|c| c.poll())
-        };
-        *c.board().during_write.lock() = Some(Box::new(hook));
-        assert!(c.write_incoming(a));
-        assert_eq!(*polled.lock(), Some(None), "polled mid-write, and nothing announced");
-        assert_eq!(c.poll(), None, "nor after");
-    }
-
-    /// A client that copied files offers only their URLs. That offer takes the place of its
-    /// earlier one, whose text a paste would otherwise write over the staged files, and it
-    /// writes nothing itself: the files come as a transfer.
-    #[test]
-    fn a_clients_copied_files_replace_its_offer_and_write_nothing() {
-        let c = clip();
-        let a = next_link();
-        let offer = |generation, format, body: &[u8], inline: bool| Offer {
-            origin: Peer::Client(ClientId::nil()),
-            generation,
-            items: vec![ClipItem {
-                format,
-                size: body.len() as u64,
-                hash: digest(body),
-                inline: inline.then(|| body.to_vec()),
-            }],
-        };
-        c.offered(a, offer(1, ClipFormat::Text, b"older text", true));
-        assert!(c.write_files(&["/tmp/staged.txt"]));
-        c.offered(a, offer(2, ClipFormat::FileUrls, b"file:///Users/me/a.txt", false));
-        assert_eq!(c.paste(a), Paste::Ready, "nothing to fetch");
-        assert_eq!(c.board().file_urls(), ["file:///tmp/staged.txt"], "the staged files stay");
-        assert_eq!(c.board().data(&text()), None);
-    }
-
-    #[test]
-    fn staged_files_go_on_as_file_urls() {
-        let c = clip();
-        c.watch(next_link(), true);
-        assert!(c.write_files(&["/tmp/a b.txt", "/tmp/ü"]));
-        assert_eq!(c.board().file_urls(), ["file:///tmp/a%20b.txt", "file:///tmp/%C3%BC"]);
-        assert_eq!(c.poll(), None, "the worker's own write");
-    }
-}
+mod tests;

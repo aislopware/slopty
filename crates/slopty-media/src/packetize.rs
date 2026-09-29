@@ -172,9 +172,10 @@ impl Packetizer {
         self.parity_permille
     }
 
-    /// Cap datagrams at `bytes` (header included) because the path cannot carry
-    /// [`MAX_DATAGRAM`](slopty_proto::media::MAX_DATAGRAM) yet; QUIC starts at a 1200-byte MTU
-    /// and its datagram budget grows with path MTU discovery.
+    /// Cap datagrams at `bytes` (header included) when the path cannot carry
+    /// [`MAX_DATAGRAM`](slopty_proto::media::MAX_DATAGRAM): the link's MTU is fixed at 1232, and
+    /// falls back to QUIC's 1200 on a path that black-holes it, where about 1178 bytes fit. The
+    /// worker reads the connection's budget before every frame.
     pub const fn set_max_datagram(&mut self, bytes: usize) {
         self.max_payload = bytes.saturating_sub(HEADER_BYTES);
     }

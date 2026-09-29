@@ -9,14 +9,15 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Styled as _, div, px, relative,
+    Animation, AnimationExt as _, App, Context, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, Styled as _, WeakEntity, div, px, relative,
 };
 use slopty_client::layout::Strip;
 use slopty_theme::alpha;
 
 use super::WorkspaceView;
 use crate::colors::{hsla, hsla_alpha};
+use crate::draw::Draw;
 use crate::kit;
 
 /// How long the thumb stays once the strip is still and the pointer has left the edge.
@@ -64,70 +65,79 @@ impl WorkspaceView {
     /// Whether the thumb is drawn now.
     #[must_use]
     pub(super) fn marks_shown(&self) -> bool {
-        self.marks != Marks::Hidden
+        self.drawn.marks.get() != Marks::Hidden
     }
 
     /// The strip moved under the view, in the frame being drawn: the thumb shows in it, and
     /// goes a while after the strip stops.
-    pub(super) fn strip_scrolled(&mut self, cx: &Context<Self>) {
-        self.marks = Marks::Shown;
-        if !self.marks_near {
-            self.hold_marks(cx);
+    pub(super) fn strip_scrolled(&self, cx: &Draw<'_, Self>) {
+        self.drawn.marks.set(Marks::Shown);
+        if !self.drawn.marks_near.get() {
+            self.hold_marks(cx.weak_entity(), cx);
         }
     }
 
     /// The pointer moved over the strip to `y` points from its top, of `height`: near the
     /// bottom edge the thumb shows and stays; leaving the edge, it goes a while after.
-    pub(super) fn pointer_over_strip(&mut self, y: f32, height: f32, cx: &mut Context<Self>) {
-        let near = height - y <= NEAR_EDGE && thumb(&self.drawn_strip).is_some();
-        if near == self.marks_near {
+    pub(super) fn pointer_over_strip(&self, y: f32, height: f32, cx: &mut Context<Self>) {
+        let near = height - y <= NEAR_EDGE && thumb(&self.drawn.strip.borrow()).is_some();
+        if near == self.drawn.marks_near.get() {
             return;
         }
-        self.marks_near = near;
+        self.drawn.marks_near.set(near);
         if near {
-            self.marks_timer = None;
+            self.drawn.marks_timer.replace(None);
             self.show_marks(cx);
         } else if self.marks_shown() {
-            self.hold_marks(cx);
+            self.hold_marks(cx.weak_entity(), cx);
         }
     }
 
-    fn show_marks(&mut self, cx: &mut Context<Self>) {
-        if self.marks != Marks::Shown {
-            self.marks = Marks::Shown;
+    fn show_marks(&self, cx: &mut App) {
+        if self.drawn.marks.get() != Marks::Shown {
+            self.drawn.marks.set(Marks::Shown);
             self.redraw_strip(cx);
         }
     }
 
     /// Draw the strip again, and only the strip: the thumb is no news for the chrome.
-    fn redraw_strip(&self, cx: &mut gpui::App) {
+    fn redraw_strip(&self, cx: &mut App) {
         cx.notify(self.strip_host.entity_id());
     }
 
     /// After [`MARKS_HOLD`] still, fade the thumb out; under Reduce Motion it goes at once.
-    fn hold_marks(&mut self, cx: &Context<Self>) {
-        self.marks_timer = Some(cx.spawn(async move |this, cx| {
+    /// The thumb's state is the strip's, so the workspace is read, never updated, on the way.
+    fn hold_marks(&self, this: WeakEntity<Self>, cx: &App) {
+        let timer = cx.spawn(async move |cx| {
             cx.background_executor().timer(MARKS_HOLD).await;
-            let fading = this.update(cx, |this, cx| {
-                if this.chrome_moves(cx) {
-                    this.marks_gen = this.marks_gen.wrapping_add(1);
-                    this.marks = Marks::Fading(this.marks_gen);
+            let fading = cx.update(|cx| {
+                let this = this.upgrade()?;
+                let view = this.read(cx);
+                if view.chrome_moves(cx) {
+                    let generation = view.drawn.marks_gen.get().wrapping_add(1);
+                    view.drawn.marks_gen.set(generation);
+                    view.drawn.marks.set(Marks::Fading(generation));
                 } else {
-                    this.marks = Marks::Hidden;
+                    view.drawn.marks.set(Marks::Hidden);
                 }
-                this.redraw_strip(cx);
-                this.marks != Marks::Hidden
+                let fading = view.drawn.marks.get() != Marks::Hidden;
+                let host = view.strip_host.entity_id();
+                cx.notify(host);
+                Some(fading)
             });
-            if !matches!(fading, Ok(true)) {
+            if fading != Some(true) {
                 return;
             }
             cx.background_executor().timer(kit::Pace::Fade.duration()).await;
-            let _gone = this.update(cx, |this, cx| {
-                this.marks = Marks::Hidden;
-                this.marks_timer = None;
-                this.redraw_strip(cx);
+            cx.update(|cx| {
+                let Some(this) = this.upgrade() else { return };
+                let view = this.read(cx);
+                view.drawn.marks.set(Marks::Hidden);
+                let host = view.strip_host.entity_id();
+                cx.notify(host);
             });
-        }));
+        });
+        self.drawn.marks_timer.replace(Some(timer));
     }
 
     /// The thumb over the strip's bottom edge, while it shows: a faint track across the strip
@@ -136,7 +146,7 @@ impl WorkspaceView {
         if !self.marks_shown() {
             return None;
         }
-        let (start, length) = thumb(&self.drawn_strip)?;
+        let (start, length) = thumb(&self.drawn.strip.borrow())?;
         let theme = &self.theme;
         let s = theme.surfaces;
         let radius = px(theme.radii.xs);
@@ -162,7 +172,7 @@ impl WorkspaceView {
                     .rounded(radius)
                     .bg(hsla(s.text_muted)),
             );
-        Some(match self.marks {
+        Some(match self.drawn.marks.get() {
             Marks::Fading(generation) => track
                 .with_animation(
                     ("strip-marks-fade", generation),

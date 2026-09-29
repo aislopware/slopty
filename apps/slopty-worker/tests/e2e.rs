@@ -19,6 +19,9 @@ mod tests {
     use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
+    use slopty_proto::transfer::{
+        ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Purpose, Rep,
+    };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
 
@@ -3713,16 +3716,37 @@ mod tests {
         blake3::hash(bytes).into()
     }
 
-    /// Worker → client: a change is announced while watched, small text inline and a picture
-    /// fetched over a bulk stream. Client → worker: the offer waits for the paste chord, the
-    /// picture is fetched from the client, and what lands is not announced back. Unwatched, a
-    /// change is not announced. All on a named pasteboard, never the user's.
+    /// A client's offer of `reps`, one item, copied `age_ms` ago.
+    fn client_offer(generation: u64, age_ms: u64, reps: Vec<Rep>) -> Offer {
+        Offer {
+            origin: Peer::Client(ClientId::new()),
+            generation,
+            age_ms,
+            concealed: false,
+            items: vec![ClipEntry { reps }],
+        }
+    }
+
+    fn listed(format: ClipFormat, bytes: &[u8]) -> Rep {
+        Rep {
+            kind: ClipType::Format(format),
+            size: Some(bytes.len() as u64),
+            hash: Some(digest(bytes)),
+            inline: None,
+        }
+    }
+
+    fn inline(format: ClipFormat, bytes: &[u8]) -> Rep {
+        Rep { inline: Some(bytes.to_vec()), ..listed(format, bytes) }
+    }
+
+    /// Worker → client: a change is announced while watched, every type by name, small text
+    /// inline and the picture left on the pasteboard until fetched, then sent whole over a bulk
+    /// stream or turned away past a fetch's cap. Unwatched, a change is not announced. All on
+    /// a named pasteboard, never the user's.
     #[tokio::test]
-    async fn the_clipboard_is_announced_fetched_and_pasted_both_ways() {
-        use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, board_type};
-        use slopty_proto::input::{KeyAction, KeyCode, Mods};
-        use slopty_proto::screen::ScreenInput;
-        use slopty_proto::transfer::{ClipFormat, ClipItem, ClipMsg, Offer, Peer, Purpose};
+    async fn the_workers_copy_is_announced_lazily_and_fetched() {
+        use slopty_input::pasteboard::{Board as _, Item, board_type};
 
         let dir = tempfile::tempdir().unwrap();
         let board = TestBoard(slopty_input::MacBoard::named(&pasteboard_name(dir.path())));
@@ -3736,94 +3760,123 @@ mod tests {
         worker.tx.send(&ClientMsg::Clip(ClipMsg::Watch(true))).await.unwrap();
         settled(&mut worker).await;
         let picture: Vec<u8> = (0..200_000_u32).map(|i| (i % 253) as u8).collect();
-        let copied =
-            vec![(png.clone(), picture.clone()), (text.clone(), b"copied on the worker".to_vec())];
-        board.0.write(&[copied]).unwrap();
+        let copied = Item::data(vec![
+            (png.clone(), picture.clone()),
+            (text.clone(), b"copied on the worker".to_vec()),
+            ("com.example.private".to_owned(), b"an app's own".to_vec()),
+        ]);
+        board.0.write(&[copied], None).unwrap();
         let offer = next_msg(&mut worker, offered).await;
         assert_eq!(offer.origin, Peer::Worker(worker.ack.worker));
-        let formats: Vec<ClipFormat> = offer.items.iter().map(|i| i.format).collect();
-        assert_eq!(formats, [ClipFormat::Png, ClipFormat::Text], "richest first");
-        assert_eq!(offer.items[0].inline, None, "a picture is listed, not pushed");
+        let reps = &offer.items[0].reps;
+        let kinds: Vec<&ClipType> = reps.iter().map(|r| &r.kind).collect();
         assert_eq!(
-            (offer.items[0].size, offer.items[0].hash),
-            (picture.len() as u64, digest(&picture))
+            kinds,
+            [
+                &ClipType::Format(ClipFormat::Png),
+                &ClipType::Format(ClipFormat::Text),
+                &ClipType::Apple("com.example.private".to_owned()),
+            ],
+            "every type, in the copying app's order"
         );
-        assert_eq!(offer.items[1].inline.as_deref(), Some(&b"copied on the worker"[..]));
+        assert_eq!((reps[0].size, reps[0].inline.as_ref()), (None, None), "a picture is lazy");
+        assert_eq!(reps[1].inline.as_deref(), Some(&b"copied on the worker"[..]));
 
-        let generation = offer.generation;
-        let fetch = ClipMsg::Fetch { generation, format: ClipFormat::Png };
+        let rep = offer.rep_ref(0, ClipType::Format(ClipFormat::Png));
+        let capped = ClipMsg::Fetch { rep: rep.clone(), max: Some(1_000), urgent: false };
+        worker.tx.send(&ClientMsg::Clip(capped)).await.unwrap();
+        let too_big = next_msg(&mut worker, |m| match m {
+            WorkerMsg::Clip(ClipMsg::TooBig { rep, size }) => Some((rep, size)),
+            _ => None,
+        })
+        .await;
+        assert_eq!(too_big, (rep.clone(), picture.len() as u64), "past the cap");
+        let fetch = ClipMsg::Fetch { rep: rep.clone(), max: None, urgent: true };
         worker.tx.send(&ClientMsg::Clip(fetch)).await.unwrap();
         let Uni::Bulk { header, mut rx } =
             tokio::time::timeout(STEP, streams::accept_uni(&worker.conn)).await.unwrap().unwrap()
         else {
             panic!("the picture comes as a bulk stream");
         };
-        assert_eq!(header.purpose, Purpose::Clip { generation, format: ClipFormat::Png });
+        assert_eq!(header.purpose, Purpose::Rep { rep });
         assert!(drain(&mut rx).await == picture, "the picture arrives whole");
-        worker
-            .tx
-            .send(&ClientMsg::Clip(ClipMsg::Fetch { generation, format: ClipFormat::Text }))
-            .await
-            .unwrap();
+        let private = offer.rep_ref(0, ClipType::Apple("com.example.private".to_owned()));
+        let fetch = ClipMsg::Fetch { rep: private, max: None, urgent: false };
+        worker.tx.send(&ClientMsg::Clip(fetch)).await.unwrap();
         let data = next_msg(&mut worker, |m| match m {
             WorkerMsg::Clip(ClipMsg::Data { bytes, .. }) => Some(bytes),
             _ => None,
         })
         .await;
-        assert_eq!(data, b"copied on the worker");
+        assert_eq!(data, b"an app's own");
 
-        // The client copies a picture and some text.
-        let theirs: Vec<u8> = (0..100_000_u32).map(|i| (i % 7) as u8).collect();
-        let offer = Offer {
-            origin: Peer::Client(ClientId::new()),
-            generation: 1,
-            items: vec![
-                ClipItem {
-                    format: ClipFormat::Png,
-                    size: theirs.len() as u64,
-                    hash: digest(&theirs),
-                    inline: None,
-                },
-                ClipItem {
-                    format: ClipFormat::Text,
-                    size: 15,
-                    hash: digest(b"from the client"),
-                    inline: Some(b"from the client".to_vec()),
-                },
-            ],
-        };
-        worker.tx.send(&ClientMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
+        worker.tx.send(&ClientMsg::Clip(ClipMsg::Watch(false))).await.unwrap();
         settled(&mut worker).await;
-        assert_eq!(board.0.data(&text).unwrap(), b"copied on the worker", "announced, not pushed");
-        // ⌘V aimed at a stream that does not exist: no event is posted anywhere.
-        let chord =
-            ScreenInput::Key { code: KeyCode::V, action: KeyAction::Press, mods: Mods::SUPER };
-        let input = ScreenRequest::Input { stream: slopty_core::StreamId(77), input: chord };
-        worker.tx.send(&ClientMsg::Screen(input)).await.unwrap();
-        let (generation, format) = next_msg(&mut worker, |m| match m {
-            WorkerMsg::Clip(ClipMsg::Fetch { generation, format }) => Some((generation, format)),
+        board.0.write(&[Item::data(vec![(text, b"nobody watches".to_vec())])], None).unwrap();
+        assert!(!arrives(&mut worker, Duration::from_millis(800), offered).await, "unwatched");
+    }
+
+    /// Client → worker: the focused client's copy goes onto the worker's pasteboard as soon as
+    /// its offer arrives, so any program on the worker reads it, not only a paste chord: here a
+    /// process of its own reading the pasteboard, as `pbpaste` would. Text is there at once; the
+    /// picture is a promise that fetches from the client, urgently, when read. What landed is
+    /// not announced back. The worker's pasteboard holds a copy made before the worker started,
+    /// and the client's copy is half a minute old, as a clipboard usually is when a tile takes
+    /// the keyboard: the client's still wins, since nobody knows when the other was made.
+    #[tokio::test]
+    async fn pbpaste_on_the_worker_sees_the_focused_clients_copy() {
+        use slopty_input::pasteboard::{Board as _, Item, ORIGIN_TYPE, board_type};
+
+        let dir = tempfile::tempdir().unwrap();
+        let name = pasteboard_name(dir.path());
+        let board = TestBoard(slopty_input::MacBoard::named(&name));
+        let (text, png) = (board_type(ClipFormat::Text), board_type(ClipFormat::Png));
+        let before = Item::data(vec![(text.clone(), b"copied before the worker started".to_vec())]);
+        board.0.write(&[before], None).unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        worker.tx.send(&ClientMsg::Clip(ClipMsg::Watch(true))).await.unwrap();
+        settled(&mut worker).await;
+
+        let theirs: Vec<u8> = (0..100_000_u32).map(|i| (i % 7) as u8).collect();
+        let offer = client_offer(
+            1,
+            30_000,
+            vec![listed(ClipFormat::Png, &theirs), inline(ClipFormat::Text, b"from the client")],
+        );
+        let rep = offer.rep_ref(0, ClipType::Format(ClipFormat::Png));
+        worker.tx.send(&ClientMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        while board.0.data(0, &text).as_deref() != Some(&b"from the client"[..]) {
+            assert!(tokio::time::Instant::now() < deadline, "mirrored without a paste chord");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(board.0.items()[0].iter().any(|t| t == ORIGIN_TYPE), "stamped with its origin");
+
+        let reader = name.clone();
+        let started = std::time::Instant::now();
+        let read = tokio::task::spawn_blocking(move || {
+            let read = slopty_input::MacBoard::named(&reader).data(0, &png);
+            (read, started.elapsed())
+        });
+        let fetch = next_msg(&mut worker, |m| match m {
+            WorkerMsg::Clip(ClipMsg::Fetch { rep, max, urgent }) => Some((rep, max, urgent)),
             _ => None,
         })
         .await;
-        assert_eq!((generation, format), (1, ClipFormat::Png), "only what was not inline");
-        let data = ClipMsg::Data { generation, format, bytes: theirs.clone() };
-        worker.tx.send(&ClientMsg::Clip(data)).await.unwrap();
-        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
-        while board.0.data(&png).as_deref() != Some(theirs.as_slice()) {
-            assert!(tokio::time::Instant::now() < deadline, "the picture reaches the pasteboard");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert_eq!(board.0.data(&text).unwrap(), b"from the client");
-        assert!(board.0.types().iter().any(|t| t == ORIGIN_TYPE), "stamped with its origin");
+        assert_eq!(fetch, (rep.clone(), None, true), "the promise asks the client, urgently");
+        worker
+            .tx
+            .send(&ClientMsg::Clip(ClipMsg::Data { rep, bytes: theirs.clone() }))
+            .await
+            .unwrap();
+        let (read, took) = read.await.unwrap();
+        assert!(read.as_deref() == Some(theirs.as_slice()), "the reader gets the client's picture");
+        println!("lazy paste on the worker, 100 kB over loopback: {took:?}");
+        let offered = |m| matches!(m, WorkerMsg::Clip(ClipMsg::Offer(_))).then_some(());
         assert!(
             !arrives(&mut worker, Duration::from_millis(800), offered).await,
             "not announced back"
         );
-
-        worker.tx.send(&ClientMsg::Clip(ClipMsg::Watch(false))).await.unwrap();
-        settled(&mut worker).await;
-        board.0.write(&[vec![(text.clone(), b"nobody watches".to_vec())]]).unwrap();
-        assert!(!arrives(&mut worker, Duration::from_millis(800), offered).await, "unwatched");
     }
 
     /// A shell's paste of a picture: the client's offer, sent ahead, is fetched and put on the
@@ -3834,56 +3887,99 @@ mod tests {
     async fn a_shells_picture_paste_sets_the_pasteboard_before_the_chord_goes_on() {
         use slopty_input::pasteboard::{Board as _, ORIGIN_TYPE, board_type};
         use slopty_proto::terminal::PasteChord;
-        use slopty_proto::transfer::{ClipFormat, ClipItem, ClipMsg, Offer, Peer};
 
         let dir = tempfile::tempdir().unwrap();
         let board = TestBoard(slopty_input::MacBoard::named(&pasteboard_name(dir.path())));
         let png = board_type(ClipFormat::Png);
         // A fresh pasteboard's first read can take seconds, longer than the worker holds a
         // paste: pay for it here, not inside the hold the test times.
-        assert_eq!(board.0.data(&png), None);
+        assert_eq!(board.0.data(0, &png), None);
         let (_guard, mut worker) = connect(dir.path()).await;
         let (session, mut events) = open_shell_and_see(&mut worker, "picture-shell-ready").await;
 
         let picture: Vec<u8> = (0..40_000_u32).map(|i| (i % 251) as u8).collect();
-        let offer = Offer {
-            origin: Peer::Client(ClientId::new()),
-            generation: 4,
-            items: vec![ClipItem {
-                format: ClipFormat::Png,
-                size: picture.len() as u64,
-                hash: digest(&picture),
-                inline: None,
-            }],
-        };
+        let offer = client_offer(4, 0, vec![listed(ClipFormat::Png, &picture)]);
+        let rep = offer.rep_ref(0, ClipType::Format(ClipFormat::Png));
         worker.tx.send(&ClientMsg::Clip(ClipMsg::Offer(offer))).await.unwrap();
         let chord = TermRequest::PastePicture(PasteChord::Command);
         worker.tx.send(&ClientMsg::Term { session, req: chord }).await.unwrap();
         let typed = TermRequest::Raw(b"echo after-'the-picture'\n".to_vec());
         worker.tx.send(&ClientMsg::Term { session, req: typed }).await.unwrap();
 
-        let (generation, format) = next_msg(&mut worker, |m| match m {
-            WorkerMsg::Clip(ClipMsg::Fetch { generation, format }) => Some((generation, format)),
+        let fetch = next_msg(&mut worker, |m| match m {
+            WorkerMsg::Clip(ClipMsg::Fetch { rep, max, urgent }) => Some((rep, max, urgent)),
             _ => None,
         })
         .await;
-        assert_eq!((generation, format), (4, ClipFormat::Png));
+        assert_eq!(fetch, (rep.clone(), None, true));
         let early = tokio::time::timeout(
             Duration::from_millis(400),
             wait_for_text(&mut events, "after-the-picture"),
         )
         .await;
         assert!(early.is_err(), "the line typed after the paste waits for the picture");
-        assert_ne!(board.0.data(&png).as_deref(), Some(picture.as_slice()));
 
-        let data = ClipMsg::Data { generation, format, bytes: picture.clone() };
-        worker.tx.send(&ClientMsg::Clip(data)).await.unwrap();
+        worker
+            .tx
+            .send(&ClientMsg::Clip(ClipMsg::Data { rep, bytes: picture.clone() }))
+            .await
+            .unwrap();
         wait_for_text(&mut events, "after-the-picture").await;
         assert!(
-            board.0.data(&png).as_deref() == Some(picture.as_slice()),
+            board.0.data(0, &png).as_deref() == Some(picture.as_slice()),
             "the picture was on the pasteboard when the held input went on"
         );
-        assert!(board.0.types().iter().any(|t| t == ORIGIN_TYPE), "stamped with its origin");
+        assert!(board.0.items()[0].iter().any(|t| t == ORIGIN_TYPE), "stamped with its origin");
+    }
+
+    /// How long a copy on the worker takes to reach a watching client as an offer, over
+    /// loopback QUIC: the pasteboard written by this process, the offer's arrival stamped here.
+    /// The poll runs every 50 ms, so the wait is half that on average. Numbers in
+    /// `docs/MEASUREMENTS.md`.
+    #[tokio::test]
+    async fn a_copy_reaches_a_watching_client_within_a_poll() {
+        use slopty_input::pasteboard::{Board as _, Item, board_type};
+
+        let dir = tempfile::tempdir().unwrap();
+        let board = TestBoard(slopty_input::MacBoard::named(&pasteboard_name(dir.path())));
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let text = board_type(ClipFormat::Text);
+        // A fresh pasteboard's first use can take a second on either end: pay for it before
+        // the samples.
+        board.0.write(&[Item::data(vec![(text.clone(), b"warm".to_vec())])], None).unwrap();
+        worker.tx.send(&ClientMsg::Clip(ClipMsg::Watch(true))).await.unwrap();
+        settled(&mut worker).await;
+        board.0.write(&[Item::data(vec![(text.clone(), b"warm again".to_vec())])], None).unwrap();
+        let _warm = next_msg(&mut worker, |m| match m {
+            WorkerMsg::Clip(ClipMsg::Offer(offer)) => Some(offer),
+            _ => None,
+        })
+        .await;
+        let mut took = Vec::new();
+        for n in 0..40_u32 {
+            let body = format!("copy {n}").into_bytes();
+            let started = std::time::Instant::now();
+            board.0.write(&[Item::data(vec![(text.clone(), body.clone())])], None).unwrap();
+            let offer = next_msg(&mut worker, |m| match m {
+                WorkerMsg::Clip(ClipMsg::Offer(offer)) => Some(offer),
+                _ => None,
+            })
+            .await;
+            took.push(started.elapsed());
+            assert_eq!(offer.items[0].reps[0].inline.as_deref(), Some(body.as_slice()));
+            // Land the next copy at a different point of the poll's period.
+            tokio::time::sleep(Duration::from_millis(u64::from(n % 7) * 7)).await;
+        }
+        took.sort();
+        let at = |q: usize| took[(took.len() - 1) * q / 100];
+        println!(
+            "copy -> offer over loopback, {} copies: p50 {:?} p95 {:?} max {:?}",
+            took.len(),
+            at(50),
+            at(95),
+            at(100)
+        );
+        assert!(at(95) < Duration::from_millis(150), "p95 {:?}", at(95));
     }
 
     /// Two files dropped on a terminal land in its shell's directory; one is cut halfway,

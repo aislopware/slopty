@@ -72,6 +72,12 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId]) -> Result<()> {
         step("brew install xcodegen", &cmd!(sh, "brew install xcodegen"))?;
     }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
+    if lanes.is_empty() {
+        // What only the user can fix; a probe that cannot run is not a failed setup.
+        if let Err(error) = crate::doctor::run(sh) {
+            println!("  doctor skipped: {error:#}");
+        }
+    }
     Ok(())
 }
 

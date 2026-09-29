@@ -195,25 +195,108 @@ impl DecodePng for PngDecoder {
                 | png::Transformations::STRIP_16,
         );
         let mut reader = decoder.read_info().ok()?;
-        let mut buf = vec![0; reader.output_buffer_size()?];
-        let info = reader.next_frame(&mut buf).ok()?;
-        let format = match info.color_type {
-            png::ColorType::Rgba => ImageFormat::Rgba,
-            png::ColorType::Rgb => ImageFormat::Rgb,
-            png::ColorType::GrayscaleAlpha => ImageFormat::GrayAlpha,
-            png::ColorType::Grayscale => ImageFormat::Gray,
+        let (width, height) = (reader.info().width, reader.info().height);
+        let pixels = usize::try_from(width).ok()?.checked_mul(usize::try_from(height).ok()?)?;
+        // Decoded straight into the buffer libghostty keeps, then widened to RGBA in place:
+        // no copy of the image. The transformations leave at most four 8-bit samples a pixel.
+        let mut rgba = Bytes::new_with_alloc(alloc, pixels.checked_mul(4)?).ok()?;
+        let info = reader.next_frame(rgba.get_mut(..reader.output_buffer_size()?)?).ok()?;
+        match info.color_type {
+            png::ColorType::Rgba => {}
+            png::ColorType::Rgb => widen::<3>(&mut rgba, |[r, g, b]| [r, g, b, 255]),
+            png::ColorType::GrayscaleAlpha => widen::<2>(&mut rgba, |[g, a]| [g, g, g, a]),
+            png::ColorType::Grayscale => widen::<1>(&mut rgba, |[g]| [g, g, g, 255]),
             png::ColorType::Indexed => return None,
+        }
+        Some(DecodedImage { width, height, data: rgba })
+    }
+}
+
+/// Widen `N`-sample pixels packed at the front of `buf` to the four samples each that fill
+/// it, in place. Back to front: pixel `i` moves from `N·i` to `4·i`, which is never before
+/// the samples of a pixel still to move.
+fn widen<const N: usize>(buf: &mut [u8], pixel: impl Fn([u8; N]) -> [u8; 4]) {
+    let pixels = buf.len() / 4;
+    for i in (0..pixels).rev() {
+        let from = i.saturating_mul(N);
+        let Some(&samples) = buf.get(from..from.saturating_add(N)).and_then(|s| s.first_chunk())
+        else {
+            return;
         };
-        let rgba = to_rgba(format, info.width, info.height, buf.get(..info.buffer_size())?)?;
-        let mut bytes = Bytes::new_with_alloc(alloc, rgba.len()).ok()?;
-        bytes.copy_from_slice(&rgba);
-        Some(DecodedImage { width: info.width, height: info.height, data: bytes })
+        let to = i.saturating_mul(4);
+        if let Some(out) = buf.get_mut(to..to.saturating_add(4)) {
+            out.copy_from_slice(&pixel(samples));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `n` samples that differ from their neighbours.
+    fn samples(n: usize) -> Vec<u8> {
+        (0..=250_u8).cycle().take(n).collect()
+    }
+
+    /// The samples of `width` × `height` pixels in `color`, 8 bits a channel.
+    fn samples_of(color: png::ColorType, width: u32, height: u32) -> Vec<u8> {
+        let pixels = usize::try_from(width.saturating_mul(height)).unwrap();
+        samples(pixels.saturating_mul(color.samples()))
+    }
+
+    /// A PNG of `width` × `height` in `color` holding [`samples_of`] it.
+    fn png_of(color: png::ColorType, width: u32, height: u32) -> Vec<u8> {
+        let data = samples_of(color, width, height);
+        let mut out = Vec::new();
+        let mut encoder = png::Encoder::new(&mut out, width, height);
+        encoder.set_color(color);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&data).unwrap();
+        writer.finish().unwrap();
+        out
+    }
+
+    /// Every 8-bit colour type decodes to the RGBA `to_rgba` makes of its samples.
+    #[test]
+    fn every_png_colour_type_decodes_to_rgba() {
+        let cases = [
+            (png::ColorType::Rgba, ImageFormat::Rgba),
+            (png::ColorType::Rgb, ImageFormat::Rgb),
+            (png::ColorType::GrayscaleAlpha, ImageFormat::GrayAlpha),
+            (png::ColorType::Grayscale, ImageFormat::Gray),
+        ];
+        for (color, format) in cases {
+            let (width, height) = (5, 3);
+            let samples = samples_of(color, width, height);
+            let image = PngDecoder
+                .decode_png(&Allocator::GLOBAL, &png_of(color, width, height))
+                .unwrap_or_else(|| panic!("{color:?}"));
+            assert_eq!((image.width, image.height), (width, height));
+            assert_eq!(Some(&*image.data), to_rgba(format, width, height, &samples).as_deref());
+        }
+        assert!(PngDecoder.decode_png(&Allocator::GLOBAL, b"\x89PNG\r\n").is_none(), "cut short");
+    }
+
+    /// What decoding a kitty `f=100` PNG costs per image: a 1024 × 768 RGB image (a
+    /// screenshot) and an RGBA one. `cargo xtask bench --filter png_decode_cost` runs it.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn png_decode_cost() {
+        let bench = slopty_testkit::bench::Bench::new("engine.png_decode_cost");
+        let (width, height) = (1024, 768);
+        for (color, name) in [(png::ColorType::Rgb, "rgb"), (png::ColorType::Rgba, "rgba")] {
+            let png = png_of(color, width, height);
+            let mut decode = bench.series(&format!("{name}_{width}x{height}"));
+            for _ in 0..20 {
+                let image = decode
+                    .time(|| PngDecoder.decode_png(&Allocator::GLOBAL, std::hint::black_box(&png)));
+                assert!(image.is_some());
+            }
+            decode.report().unwrap();
+        }
+    }
 
     #[test]
     fn every_stored_format_becomes_rgba() {

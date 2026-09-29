@@ -340,11 +340,89 @@ struct Decoration {
     /// Distance from the top of the row to the top of the stroke.
     y: Pixels,
     thickness: Pixels,
-    /// A curly underline: GPUI draws the wave, at this position and thickness.
-    wavy: bool,
+    /// How the stroke runs along the cells.
+    pattern: Pattern,
     /// Painted over the glyphs (a strikethrough) rather than under them (an underline, so
     /// a descender crosses it instead of being cut by it).
     over: bool,
+}
+
+/// How a stroke runs along its cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pattern {
+    /// One line: a single or double underline, a strikethrough.
+    Solid,
+    /// A curly underline: GPUI draws the wave, at the stroke's position and thickness.
+    Wavy,
+    /// Round dots as wide as the stroke is thick, spaced evenly in each cell.
+    Dotted,
+    /// A dash at each end of each cell with a gap between, so neighbours join their end
+    /// dashes into one, as ghostty draws it.
+    Dashed,
+}
+
+impl Pattern {
+    /// The pattern an underline style is drawn in.
+    const fn of(underline: Underline) -> Self {
+        match underline {
+            Underline::Curly => Self::Wavy,
+            Underline::Dotted => Self::Dotted,
+            Underline::Dashed => Self::Dashed,
+            _ => Self::Solid,
+        }
+    }
+}
+
+/// The pieces a dotted or dashed stroke is drawn in, over cells `cells` of a row whose first
+/// cell starts at `x0`, its top at `y`: each piece snapped to the device's pixels at `scale`,
+/// so every cell of a run draws the same pattern however its edge falls. Nothing for a solid
+/// or wavy stroke, which is drawn whole.
+fn pattern_pieces(
+    pattern: Pattern,
+    x0: Pixels,
+    cell_width: Pixels,
+    cells: std::ops::Range<u16>,
+    (y, thickness): (Pixels, Pixels),
+    scale: f32,
+) -> Vec<Bounds<Pixels>> {
+    let device = |p: Pixels| (f32::from(p) * scale).round();
+    let point_of = |d: f32| px(d / scale);
+    let thick = device(thickness).max(1.0);
+    let top = device(y);
+    let mut out = Vec::new();
+    for col in cells {
+        let left = device(x0 + cell_width * f32::from(col));
+        let width = device(x0 + cell_width * f32::from(col.saturating_add(1))) - left;
+        let mut piece = |from: f32, to: f32| {
+            let (from, to) = (from.round().max(0.0), to.round().min(width));
+            if to > from {
+                let origin = point(point_of(left + from), point_of(top));
+                out.push(Bounds::new(origin, size(point_of(to - from), point_of(thick))));
+            }
+        };
+        match pattern {
+            Pattern::Dotted => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "a cell's width in device pixels over twice a stroke, at least 1"
+                )]
+                let dots = (width / (thick * 2.0)).floor().max(1.0) as u16;
+                let slot = width / f32::from(dots);
+                for dot in 0..dots {
+                    let from = f32::from(dot).mul_add(slot, (slot - thick) / 2.0);
+                    piece(from, from + thick);
+                }
+            }
+            Pattern::Dashed => {
+                let dash = (width / 3.0).floor() + 1.0;
+                piece(0.0, dash);
+                piece(width - dash, width);
+            }
+            Pattern::Solid | Pattern::Wavy => {}
+        }
+    }
+    out
 }
 
 /// Where a stroke sits relative to the glyphs.
@@ -365,7 +443,7 @@ fn stroke(
     col: u16,
     color: Hsla,
     line: metrics::Line,
-    wavy: bool,
+    pattern: Pattern,
     layer: Layer,
 ) {
     let over = layer == Layer::Over;
@@ -374,7 +452,7 @@ fn stroke(
             && d.color == color
             && d.y == line.y
             && d.thickness == line.thickness
-            && d.wavy == wavy
+            && d.pattern == pattern
             && d.over == over
     };
     if let Some(run) = out.iter_mut().rev().take(3).find(joins) {
@@ -387,7 +465,7 @@ fn stroke(
         color,
         y: line.y,
         thickness: line.thickness,
-        wavy,
+        pattern,
         over,
     });
 }
@@ -1314,7 +1392,7 @@ impl Element for TerminalElement {
             if cx.global::<ShapeCache>().families.len() > listed {
                 cx.global_mut::<Probe>().picks = cx.global::<Probe>().picks.saturating_add(1);
             }
-            self.view.update(cx, |view, _cx| view.set_font_family(picked.clone()));
+            self.view.update(cx, |view, cx| view.set_font_family(picked.clone(), cx));
             picked
         });
         let zoom = if self.zoom.is_finite() && self.zoom > 0.0 { self.zoom } else { 1.0 };
@@ -1611,13 +1689,12 @@ impl Element for TerminalElement {
                         // would put them; a curly underline is GPUI's wave at that position.
                         if cell.style.underline != Underline::None {
                             let color = underline_color(&cell.style, palette, text);
-                            let wavy = cell.style.underline == Underline::Curly;
                             stroke(
                                 &mut decorations,
                                 col,
                                 color,
                                 grid.underline,
-                                wavy,
+                                Pattern::of(cell.style.underline),
                                 Layer::Under,
                             );
                             if cell.style.underline == Underline::Double {
@@ -1626,7 +1703,8 @@ impl Element for TerminalElement {
                                     y: grid.underline.y - grid.underline.thickness * 2.0,
                                     thickness: grid.underline.thickness,
                                 };
-                                stroke(&mut decorations, col, color, above, false, Layer::Under);
+                                let solid = Pattern::Solid;
+                                stroke(&mut decorations, col, color, above, solid, Layer::Under);
                             }
                         }
                         if struck {
@@ -1635,7 +1713,7 @@ impl Element for TerminalElement {
                                 col,
                                 text,
                                 grid.strikethrough,
-                                false,
+                                Pattern::Solid,
                                 Layer::Over,
                             );
                         }
@@ -2111,9 +2189,9 @@ impl Element for TerminalElement {
         if self.view.read(cx).latency_waiting() {
             let shown = std::mem::take(&mut prepared.shown);
             let ack = self.view.read(cx).state().input_ack();
-            let view = self.view.clone();
-            crate::shown::after_paint(window, cx, move |frame, cx| {
-                view.update(cx, |view, _cx| view.presented(frame, &shown, ack));
+            let latency = self.view.read(cx).latency_record();
+            crate::shown::after_paint(window, cx, move |frame, _cx| {
+                latency.borrow_mut().presented(frame, &shown, ack);
             });
         }
     }
@@ -2243,16 +2321,34 @@ fn paint_sprite(
 /// Paint one row's decorations on `layer`, where the font's metrics put them.
 fn paint_decorations(window: &mut Window, m: &CellMetrics, row: &PreparedRow, layer: Layer) {
     let over = layer == Layer::Over;
+    let scale = window.scale_factor();
     for deco in row.parts.decorations.iter().filter(|d| d.over == over) {
         let x = m.origin.x + m.cell_width * f32::from(deco.start);
         let w = m.cell_width * f32::from(deco.end.saturating_sub(deco.start));
-        if deco.wavy {
-            let style =
-                UnderlineStyle { thickness: deco.thickness, color: Some(deco.color), wavy: true };
-            window.paint_underline(point(x, row.y + deco.y), w, &style);
-        } else {
-            let bounds = Bounds::new(point(x, row.y + deco.y), size(w, deco.thickness));
-            window.paint_quad(fill(bounds, deco.color));
+        match deco.pattern {
+            Pattern::Wavy => {
+                let style = UnderlineStyle {
+                    thickness: deco.thickness,
+                    color: Some(deco.color),
+                    wavy: true,
+                };
+                window.paint_underline(point(x, row.y + deco.y), w, &style);
+            }
+            Pattern::Solid => {
+                let bounds = Bounds::new(point(x, row.y + deco.y), size(w, deco.thickness));
+                window.paint_quad(fill(bounds, deco.color));
+            }
+            Pattern::Dotted | Pattern::Dashed => {
+                let line = (row.y + deco.y, deco.thickness);
+                let cells = deco.start..deco.end;
+                let round = deco.pattern == Pattern::Dotted;
+                for piece in
+                    pattern_pieces(deco.pattern, m.origin.x, m.cell_width, cells, line, scale)
+                {
+                    let radius = if round { piece.size.height / 2.0 } else { px(0.0) };
+                    window.paint_quad(fill(piece, deco.color).corner_radii(radius));
+                }
+            }
         }
     }
 }
@@ -2600,9 +2696,9 @@ mod tests {
         let line = metrics::Line { y: px(10.0), thickness: px(1.0) };
         let color = Hsla::default();
         let mut out = Vec::new();
-        stroke(&mut out, 0, color, line, false, Layer::Under);
-        stroke(&mut out, 1, color, line, false, Layer::Over);
-        stroke(&mut out, 1, color, line, false, Layer::Under);
+        stroke(&mut out, 0, color, line, Pattern::Solid, Layer::Under);
+        stroke(&mut out, 1, color, line, Pattern::Solid, Layer::Over);
+        stroke(&mut out, 1, color, line, Pattern::Solid, Layer::Under);
         assert_eq!(out.len(), 2, "each layer joins its own run");
         assert_eq!((out[0].start, out[0].end, out[0].over), (0, 2, false));
         assert_eq!((out[1].start, out[1].end, out[1].over), (1, 2, true));

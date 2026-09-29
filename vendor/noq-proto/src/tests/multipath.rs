@@ -2083,37 +2083,37 @@ fn path_open_challenge_lost() -> TestResult {
     info!("dropping client's packet");
     pair.server.inbound.clear();
 
-    // Drop the 2nd PATH_CHALLENGE
-    pair.time = pair
-        .client
-        .next_wakeup()
-        .expect("couldn't drive client forward");
-    info!("advancing to {:?} for client", pair.time - pair.epoch);
-    let second_challenge = pair.time;
-    pair.drive_client();
-    let client_stats = pair.path_stats(Client, path_id).unwrap();
-    assert_eq!(client_stats.frame_tx.path_challenge, 2);
+    // Drop the 2nd PATH_CHALLENGE. The client may wake for other timers (a PTO for the packet it
+    // lost on the new path) before the challenge is due again; those packets are lost too.
+    let challenge_at = |pair: &mut ConnPair, count: u64| {
+        loop {
+            pair.time = pair
+                .client
+                .next_wakeup()
+                .expect("couldn't drive client forward");
+            info!("advancing to {:?} for client", pair.time - pair.epoch);
+            pair.drive_client();
+            let client_stats = pair.path_stats(Client, path_id).unwrap();
+            if client_stats.frame_tx.path_challenge == count {
+                return pair.time;
+            }
+            pair.server.inbound.clear();
+        }
+    };
+    let second_challenge = challenge_at(&mut pair, 2);
     assert!(pair.path_stats(Server, path_id).is_none());
     info!("dropping client's packet");
     pair.server.inbound.clear();
 
     // Send the 3rd PATH_CHALLENGE
-    pair.time = pair
-        .client
-        .next_wakeup()
-        .expect("couldn't drive client forward");
-    info!("advancing to {:?} for client", pair.time - pair.epoch);
-    let third_challenge = pair.time;
-    pair.drive_client();
-    let client_stats = pair.path_stats(Client, path_id).unwrap();
-    assert_eq!(client_stats.frame_tx.path_challenge, 3);
+    let third_challenge = challenge_at(&mut pair, 3);
     assert!(pair.path_stats(Server, path_id).is_none());
 
     let first_delay = second_challenge - first_challenge;
     let second_delay = third_challenge - second_challenge;
     assert!(
         first_delay < second_delay,
-        "delays must monotonically increase"
+        "delays must monotonically increase: {first_delay:?} then {second_delay:?}"
     );
 
     // Open path, drive to completion

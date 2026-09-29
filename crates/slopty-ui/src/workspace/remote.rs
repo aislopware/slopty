@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Entity, WeakEntity, Window};
+use slopty_client::clip::{Answer, Fetched, relay};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
@@ -17,11 +18,11 @@ use slopty_platform::pasteboard::Pasteboard;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
-use slopty_proto::transfer::{ClipFormat, ClipMsg, Dest, XferMsg};
+use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
 
 use super::actions::{ListPorts, SaveCopy};
 use super::{KeyTarget, WorkspaceView};
-use crate::clipboard::{ClipFiles, ClipSync, file_url_paths, provider};
+use crate::clipboard::{ClipFiles, ClipSync, provider, shell_paste, worker_file_paths};
 use crate::conversation::{Attach, ConversationView};
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::screen::{PasteAhead, ScreenView};
@@ -179,7 +180,8 @@ impl WorkspaceView {
     }
 
     /// Tell each worker whether its clipboard is wanted, and give the one that just became
-    /// wanted this client's clipboard. Runs every frame; sends only changes.
+    /// wanted this client's clipboard, and again whenever it changes while wanted, so the
+    /// worker mirrors it. Runs every frame; sends only changes.
     pub(super) fn sync_clipboard_watch(&mut self) {
         let wanted = self.clipboard_worker();
         let stale: Vec<WorkerKey> =
@@ -188,23 +190,27 @@ impl WorkspaceView {
             self.watching.remove(&key);
             self.send(key, ClientMsg::Clip(ClipMsg::Watch(false)));
         }
+        let moved = self
+            .clip
+            .as_ref()
+            .is_some_and(|clip| clip.borrow_mut().tick(std::time::Instant::now()));
         let Some(key) = wanted else { return };
-        if !self.watching.insert(key) {
+        let fresh = self.watching.insert(key);
+        if fresh {
+            self.send(key, ClientMsg::Clip(ClipMsg::Watch(true)));
+        }
+        if !fresh && !moved {
             return;
         }
-        self.send(key, ClientMsg::Clip(ClipMsg::Watch(true)));
-        // Where reading asks the person first (iOS), their clipboard waits for their paste.
-        if self.clip.as_ref().is_some_and(|clip| clip.borrow().board().reads_ask()) {
-            return;
-        }
-        if let Some(offer) = self.offer_for(key) {
+        // Where reading asks the person first, their clipboard waits for their paste.
+        if let Some(offer) = self.focus_offer(key) {
             self.send(key, ClientMsg::Clip(ClipMsg::Offer(offer)));
         }
     }
 
-    fn offer_for(&self, key: WorkerKey) -> Option<slopty_proto::transfer::Offer> {
+    fn focus_offer(&self, key: WorkerKey) -> Option<slopty_proto::transfer::Offer> {
         let me = self.me(key)?;
-        self.clip.as_ref()?.borrow_mut().offer_for(key, me)
+        self.clip.as_ref()?.borrow_mut().focus_offer(key, me)
     }
 
     /// What a remote window of `key` needs ahead of a paste chord: this client's offer, and the
@@ -214,7 +220,7 @@ impl WorkspaceView {
         let clip = Rc::clone(self.clip.as_ref()?);
         Some(Rc::new(move || {
             let mut clip = clip.borrow_mut();
-            let offer = clip.offer_for(key, me).map(|o| ClientMsg::Clip(ClipMsg::Offer(o)));
+            let offer = clip.paste_offer(key, me).map(|o| ClientMsg::Clip(ClipMsg::Offer(o)));
             PasteAhead { offer, files: clip.files() }
         }))
     }
@@ -226,7 +232,7 @@ impl WorkspaceView {
     pub(super) fn clip_hook(&self, key: WorkerKey) -> Option<ClipHook> {
         let me = self.me(key)?;
         let clip = Rc::clone(self.clip.as_ref()?);
-        Some(Rc::new(move || clip.borrow_mut().shell_paste(key, me)))
+        Some(Rc::new(move || shell_paste(&mut clip.borrow_mut(), key, me)))
     }
 
     fn remote(&self, key: WorkerKey) -> Option<Arc<dyn Remote>> {
@@ -247,13 +253,11 @@ impl WorkspaceView {
             ClipFiles::Here(paths) => {
                 let _started = self.upload(tile, &paths, Upload::to_shell(tile, session), cx);
             }
-            ClipFiles::Worker { worker, generation } if worker == tile.worker => {
+            ClipFiles::Worker { worker, urls } if worker == tile.worker => {
                 let Some(remote) = self.remote(worker) else { return };
-                let task = cx.background_executor().spawn(async move {
-                    remote
-                        .clip_data(generation, ClipFormat::FileUrls, CLIP_WAIT)
-                        .map(|b| file_url_paths(&b))
-                });
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { worker_file_paths(&remote, &urls, CLIP_WAIT) });
                 cx.spawn(async move |this, cx| {
                     let paths = task.await;
                     let _gone = this.update(cx, |this, cx| match paths {
@@ -269,8 +273,8 @@ impl WorkspaceView {
                 })
                 .detach();
             }
-            ClipFiles::Worker { worker, generation } => {
-                self.bring_over(worker, generation, Upload::to_shell(tile, session), cx);
+            ClipFiles::Worker { worker, urls } => {
+                self.bring_over(worker, urls, Upload::to_shell(tile, session), cx);
             }
         }
     }
@@ -293,16 +297,22 @@ impl WorkspaceView {
             ClipFiles::Worker { worker, .. } if worker == tile.worker => {
                 Self::upload_ended(upload, cx);
             }
-            ClipFiles::Worker { worker, generation } => {
-                self.bring_over(worker, generation, upload, cx);
+            ClipFiles::Worker { worker, urls } => {
+                self.bring_over(worker, urls, upload, cx);
             }
         }
     }
 
-    /// Bring worker `from`'s copied files (its offer `generation`) down into a directory of
+    /// Bring worker `from`'s copied files (their `urls` in its offer) down into a directory of
     /// their own here, then send them up as `upload` says. A failure is a notice, and a paste
     /// waiting on them goes on.
-    fn bring_over(&self, from: WorkerKey, generation: u64, upload: Upload, cx: &mut Context<Self>) {
+    fn bring_over(
+        &self,
+        from: WorkerKey,
+        urls: Vec<RepRef>,
+        upload: Upload,
+        cx: &mut Context<Self>,
+    ) {
         let Some(remote) = self.remote(from) else {
             Self::upload_ended(upload, cx);
             return;
@@ -310,11 +320,10 @@ impl WorkspaceView {
         let scratch = std::env::temp_dir().join(format!("slopty-paste-{}", XferId::new()));
         let into = scratch.clone();
         let task = cx.background_executor().spawn(async move {
-            let bytes = remote
-                .clip_data(generation, ClipFormat::FileUrls, CLIP_WAIT)
+            let paths = worker_file_paths(&remote, &urls, CLIP_WAIT)
                 .ok_or_else(|| "the copied files are gone".to_owned())?;
             let mut landed = Vec::new();
-            for (n, path) in file_url_paths(&bytes).into_iter().enumerate() {
+            for (n, path) in paths.into_iter().enumerate() {
                 let name = path.file_name().ok_or_else(|| "a file with no name".to_owned())?;
                 let dir = into.join(n.to_string());
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -363,8 +372,9 @@ impl WorkspaceView {
         }
     }
 
-    /// A clipboard message from `key`.
-    pub fn clip_message(&self, key: WorkerKey, msg: ClipMsg) {
+    /// A clipboard message from `key`. Its fetch of another worker's offer, which this client
+    /// relayed, is answered by fetching from that worker, off the main thread.
+    pub fn clip_message(&self, key: WorkerKey, msg: ClipMsg, cx: &Context<Self>) {
         let Some(clip) = self.clip.clone() else { return };
         match msg {
             ClipMsg::Offer(offer) => {
@@ -372,15 +382,32 @@ impl WorkspaceView {
                 let provide = provider(clip.link(key), &offer, CLIP_WAIT);
                 clip.receive(key, &offer, provide);
             }
-            ClipMsg::Fetch { generation, format } => {
-                let bytes = clip.borrow().answer(generation, format);
-                let remote = self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone());
-                match (bytes, remote) {
-                    (Some(bytes), Some(remote)) => remote.send_clip(generation, format, bytes),
-                    _ => self.send(key, ClientMsg::Clip(ClipMsg::Unavailable { generation })),
+            ClipMsg::Fetch { rep, max, urgent } => {
+                let answer = clip.borrow().answer(&rep, max);
+                let (Some(to), answer) = (self.remote(key), answer) else {
+                    let source = rep.source;
+                    self.send(key, ClientMsg::Clip(ClipMsg::Unavailable { source }));
+                    return;
+                };
+                match answer {
+                    Answer::Here(fetched) => to.send_clip(rep, fetched, urgent),
+                    Answer::From(from) => {
+                        let Some(from) = self.remote(from) else {
+                            to.send_clip(rep, Fetched::Gone, urgent);
+                            return;
+                        };
+                        cx.background_executor()
+                            .spawn(async move {
+                                relay(&*from, &*to, rep, max, urgent, CLIP_WAIT);
+                            })
+                            .detach();
+                    }
                 }
             }
-            ClipMsg::Watch(_) | ClipMsg::Data { .. } | ClipMsg::Unavailable { .. } => {}
+            ClipMsg::Watch(_)
+            | ClipMsg::Data { .. }
+            | ClipMsg::TooBig { .. }
+            | ClipMsg::Unavailable { .. } => {}
         }
     }
 
@@ -720,7 +747,7 @@ impl WorkspaceView {
             .ports
             .iter()
             .flat_map(|(session, forwards)| {
-                let shell = self.terminal_title(*session, cx);
+                let shell = self.terminal_title(*session);
                 forwards
                     .iter()
                     .filter_map(move |f| {

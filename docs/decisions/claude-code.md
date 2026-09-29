@@ -1806,3 +1806,120 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `follow::show_held` now queues them under the lock, and a new prompt goes on the broadcast
     under it too; a prompt is settled only under that lock, once out of the holds, so its
     `Asked` is always ahead. Test: `a_prompt_shown_to_a_new_approver_goes_out_ahead_of_its_settling`.
+
+- ✅ **A turn that leaves work running is paused, not done** (2026-09-30; wire change). Since
+  2.1.145 Claude Code's `Stop` lists what the turn left behind:
+  - `background_tasks`, each `{id, type, status, description, command?}`;
+  - `session_crons`, each `{id, schedule, recurring, prompt}`.
+
+  A turn that started `cargo build` in the background and said "I'll check when it's done"
+  used to read as `Done`, so the person was told it had finished. When the task ends, Claude
+  Code wakes the session with a new `UserPromptSubmit` whose `prompt` is a
+  `<task-notification>` block with a `<summary>`.
+  - **The state.** A `Stop` with any task or cron is `AgentStatus::Waiting { tasks, crons }`.
+    It raises no attention and sends no done notification. Its detail is the first task's
+    description, else the first cron's prompt, clipped to 200 characters (`PENDING_TEXT_MAX`).
+    The wake's prompt starts the next turn as `Working`, with the notification's summary as its
+    detail. A `Stop` with both lists empty is `Done` and announced, and so is a `StopFailure`.
+    A paused agent is not at rest, so a nested agent's hooks cannot take its conversation
+    over (`owns`). A paused agent also ignores `idle_prompt`. In 2.1.281 the idle notifier fires
+    after the threshold whenever the session is not loading, no dialog is open, and no loop
+    wakeup or quota resume is armed; running background tasks do not stop it. So a paused
+    turn sitting at its prompt would otherwise turn into `Blocked(IdlePrompt)` after a minute
+    and lose both its state and its hold on the host. No fixture was recorded for this: the
+    notifier lives in the interactive UI, and the recorder drives headless `-p`. A paused turn with tasks out keeps the host awake (workers.md, sleep policy,
+    amended the same day).
+  - **Evidence.** `cargo xtask fixtures claude --only background` records the pinned 2.1.283
+    official build against the canned API (`claude_mod::FakeApi`). A scratch home is used, so
+    no account is involved: the real one had hit its weekly limit. The scripted model starts
+    `sleep 3; echo woke` with `run_in_background`, answers the wake, and stops. The recording
+    (`tests/fixtures/conversation/background`) holds the paused `Stop` with the running task,
+    the `<task-notification>` prompt, and the final `Stop` with empty lists.
+  - **Claude Code's own subagents are not the person's.** A `SubagentStop` with an empty
+    `agent_type` comes from Claude Code's own helpers (the compaction fixture has one).
+    `Hook::is_internal_subagent` says so, and the conversation face does not open a subagent
+    transcript for it.
+  - Tests:
+    - `slopty-agent`: `a_stop_with_work_out_waits_and_the_last_one_is_done` (including
+      `idle_prompt` while paused),
+      `a_paused_agent_keeps_its_conversation_against_a_nested_one`,
+      `an_internal_subagent_is_told_by_its_empty_type` and
+      `a_forwarded_stop_keeps_its_work_and_cuts_its_text`.
+    - `slopty-agent`, `tests/hooks.rs`, on the recordings:
+      `a_turn_with_a_command_out_pauses_until_the_command_wakes_it` and
+      `claude_codes_own_helpers_stop_with_an_empty_type`.
+    - `slopty-workerd`, `handoff`: `a_paused_turn_raises_no_done` sends the recorded `Stop`s
+      to the control socket.
+    - Golden: `worker_agent_waiting`.
+    - `slopty-tools` reports the state as "paused".
+
+- ✅ **The pull request and worktree a status line names reach every client** (2026-09-30;
+  wire change). Claude Code gives its status line command `pr: {number, url, review_state?,
+  kind?}` (`review_state` is `approved`, `pending`, `changes_requested` or `draft`; `kind` is
+  `mr` for a GitLab merge request) and `worktree: {name, path, branch?, original_cwd,
+  original_branch?}`. No hook carries either. Slopty's status line wrapper already forwards
+  that input as a `Statusline` hook, and `statusline::hook` now reads both.
+  - `AgentTable::branch` keeps them per session, and the worker broadcasts
+    `WorkerMsg::AgentBranch { session, pr, worktree }` when either changes. It is also in the
+    greeting and in a resync.
+  - The branch lives with its agent. A status line in a session with no agent is passed over,
+    and the entry goes wherever the agent's tracker goes. A client hides the chip whenever
+    the agent's status is `None`, and no message clears it separately.
+  - Tests:
+    - `the_pull_request_and_worktree_are_read_from_the_status_line_input`.
+    - `the_branch_is_told_when_it_changes_and_goes_with_the_agent`.
+    - `slopty-workerd` `a_status_lines_pull_request_reaches_every_client`, where a later
+      client gets it in its greeting.
+    - Golden: `worker_agent_branch`.
+
+- ✅ **Claude Code's phone pushes are held while a client is focused on the agent**
+  (2026-09-30). Since 2.1.181, Claude Code skips its Remote Control push notifications while
+  the file named by `CLAUDE_CLIENT_PRESENCE_FILE` exists. Without that, a person watching the
+  turn in Slopty also had their phone buzz for it.
+  - Every session gets `CLAUDE_CLIENT_PRESENCE_FILE=<data dir>/presence/<session>`, and the
+    worker keeps that file only while some client is focused on the session's tile. Focus is
+    the terminal focus report the clients already send (terminal.md, "A shell's browser and
+    editor are the client's").
+  - A client that disconnects takes its focus with it, and one that reconnects starts
+    focused on nothing. A session that ends or exits takes its file with it.
+  - Claude Code only `stat`s the file (2.1.281: `await stat(file)` in the presence pulse), so
+    a file left behind would hold its pushes for good. Nothing else can be read from it: no
+    time and no pid. So the worker removes the directory on SIGTERM or SIGINT, empties it when
+    it starts, and a crash is covered by launchd restarting the worker.
+  - A tmux pane drops the inherited variable (zsh, bash and fish scripts). A tmux server
+    started in one session hands that session's variables to panes attached from any other,
+    so the file could stand for a tile nobody is looking at.
+  - The files are made and removed in order, off the runtime.
+  - Tests: `presence_is_there_while_any_client_is_focused`,
+    `an_old_connection_ending_does_not_drop_the_new_one`, `a_presence_file_comes_and_goes`,
+    `a_gone_session_is_forgotten`, `slopty-pty` `a_tmux_pane_drops_the_inherited_presence_file`,
+    and `slopty-workerd` `the_presence_file_follows_focus`. In that last test, a real shell
+    prints the variable, and the file follows a real client's focus, disconnect and
+    reconnect, then goes when the worker is sent SIGTERM.
+
+- ✅ **After a worker restart, Claude Code's own list puts the agents back** (2026-09-30). A
+  restarted worker finds its agents again by process, but it loses what only hooks had said: a
+  permission prompt, a question, the conversation id. Those came back only with the next hook.
+  `claude agents --json` lists every live session with `pid`, `sessionId`, `cwd`,
+  `kind` and `status`:
+  - `busy`, `idle`, or `waiting`;
+  - while waiting, `waitingFor`: a permission prompt, input needed, a sandbox request, a
+    worker request, or an open dialog.
+
+  How it is read:
+  - The worker runs it once, on the second agents tick after starting, and only when agents
+    were found. It waits 10 s for the answer, and runs it through the login shell when
+    `claude` is not on its own `PATH`.
+  - Each tracker is matched by pid and gets its conversation id back.
+  - It gets its status back only when hooks will keep that status current: the relay is
+    registered in `~/.claude/settings.json`, or the agent's own command line carries it.
+    Otherwise a restored `Blocked` would never be cleared.
+  - Nothing is restored over a hook heard since the start, and a restored status raises no
+    attention.
+  - `roster::Listed::status` maps `busy` to `Working` and `idle` to `Idle`. A permission
+    prompt or sandbox request maps to `Blocked(Permission)`, and any other wait to
+    `Blocked(Question)`.
+  - Tests: `statuses_read_as_the_hooks_would_say_them`,
+    `claude_codes_own_list_restores_what_the_hooks_had_said`, and
+    `claude_codes_session_list_reads_as_a_status` on the recorded `agents.json`. The xtask
+    background capture records it with `pid`, `startedAt` and `name` fixed.

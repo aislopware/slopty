@@ -19,8 +19,8 @@ mod golden {
         TermRequest,
     };
     use slopty_proto::transfer::{
-        BulkHeader, ClipFormat, ClipItem, ClipMsg, Dest, Offer, Peer, Purpose, TunnelOpen, UniHead,
-        XferMsg,
+        BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Purpose, Rep,
+        RepRef, Source, TunnelOpen, UniHead, XferMsg,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
     use uuid::Uuid;
@@ -277,6 +277,91 @@ mod golden {
                 ok: true,
                 message: "hooks installed in /Users/x/.claude/settings.json".to_owned(),
             },
+        );
+    }
+
+    /// A turn paused on background work, and the pull request and worktree its status line
+    /// names.
+    #[test]
+    fn agent_waiting_and_branch() {
+        use slopty_proto::agent::{
+            AgentBranch, AgentEvent, AgentKind, AgentSource, AgentStatus, PullRequest, Review,
+            Worktree,
+        };
+        snap(
+            "worker_agent_waiting",
+            &WorkerMsg::Agent(AgentEvent {
+                session: session(),
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Waiting { tasks: 2, crons: 1 },
+                agent_session: Some("6f1b".to_owned()),
+                detail: Some("Sleep then print a marker".to_owned()),
+                attention: false,
+                source: AgentSource::Hook,
+                since_ms: WallMs::from_millis(1_790_000_060_000),
+            }),
+        );
+        snap(
+            "worker_agent_branch",
+            &WorkerMsg::AgentBranch(AgentBranch {
+                session: session(),
+                pr: Some(PullRequest {
+                    number: 1234,
+                    url: "https://github.com/o/r/pull/1234".to_owned(),
+                    review: Some(Review::ChangesRequested),
+                    merge_request: false,
+                }),
+                worktree: Some(Worktree {
+                    name: "fix-login".to_owned(),
+                    path: "/r/.claude/worktrees/fix-login".to_owned(),
+                    branch: Some("worktree-fix-login".to_owned()),
+                    original_cwd: "/r".to_owned(),
+                    original_branch: Some("main".to_owned()),
+                }),
+            }),
+        );
+    }
+
+    /// A page and a file a program in a shell hands the client, and what the client answers.
+    #[test]
+    fn handoff() {
+        use slopty_proto::handoff::{
+            EditFile, EditOutcome, HandoffCaps, HandoffEvent, HandoffReply, OfferReason, OpenUrl,
+        };
+        snap(
+            "worker_handoff_open",
+            &WorkerMsg::Handoff(HandoffEvent::Open(OpenUrl {
+                id: 3,
+                session: Some(session()),
+                url: "https://github.com/login/device".to_owned(),
+                asked_ms: WallMs::from_millis(1_790_000_060_000),
+                offer: Some(OfferReason::NotTyped),
+            })),
+        );
+        snap(
+            "worker_handoff_edit",
+            &WorkerMsg::Handoff(HandoffEvent::Edit(EditFile {
+                id: 4,
+                session: Some(session()),
+                path: "/r/.git/COMMIT_EDITMSG".to_owned(),
+                line: Some(12),
+                wait: true,
+            })),
+        );
+        snap("worker_handoff_withdrawn", &WorkerMsg::Handoff(HandoffEvent::Withdrawn { id: 4 }));
+        snap("client_handoff_taken", &ClientMsg::Handoff(HandoffReply::Taken { id: 3 }));
+        snap("client_handoff_refused", &ClientMsg::Handoff(HandoffReply::Refused { id: 3 }));
+        snap(
+            "client_handoff_offered",
+            &ClientMsg::Handoff(HandoffReply::Offered { id: 3, why: OfferReason::Late }),
+        );
+        snap(
+            "client_handoff_caps",
+            &ClientMsg::HandoffCaps(HandoffCaps { open: true, edit: false }),
+        );
+        snap(
+            "client_handoff_edited",
+            &ClientMsg::Handoff(HandoffReply::Edited { id: 4, outcome: EditOutcome::Cancelled }),
         );
     }
 
@@ -989,38 +1074,81 @@ mod golden {
     #[test]
     fn clipboard() {
         let origin = Peer::Client(ClientId::from_uuid(Uuid::from_u128(7)));
+        let text = |bytes: &[u8]| Rep {
+            kind: ClipType::Format(ClipFormat::Text),
+            size: Some(bytes.len() as u64),
+            hash: Some([1; 32]),
+            inline: Some(bytes.to_vec()),
+        };
+        let lazy = |kind: ClipType| Rep { kind, size: None, hash: None, inline: None };
         snap(
             "client_clip_offer",
             &ClientMsg::Clip(ClipMsg::Offer(Offer {
                 origin,
                 generation: 3,
+                age_ms: 1_200,
+                concealed: false,
+                items: vec![ClipEntry {
+                    reps: vec![lazy(ClipType::Format(ClipFormat::Png)), text(b"fox")],
+                }],
+            })),
+        );
+        snap(
+            "client_clip_offer_items",
+            &ClientMsg::Clip(ClipMsg::Offer(Offer {
+                origin: Peer::Worker(slopty_core::WorkerId::from_uuid(Uuid::from_u128(9))),
+                generation: 4,
+                age_ms: 0,
+                concealed: true,
                 items: vec![
-                    ClipItem {
-                        format: ClipFormat::Text,
-                        size: 3,
-                        hash: [1; 32],
-                        inline: Some(b"fox".to_vec()),
-                    },
-                    ClipItem {
-                        format: ClipFormat::Png,
-                        size: 1 << 20,
-                        hash: [2; 32],
-                        inline: None,
-                    },
+                    ClipEntry { reps: vec![lazy(ClipType::Apple("com.apple.webarchive".into()))] },
+                    ClipEntry { reps: vec![lazy(ClipType::Format(ClipFormat::FileUrls))] },
                 ],
             })),
         );
         snap("client_clip_watch", &ClientMsg::Clip(ClipMsg::Watch(true)));
+        let rep = RepRef {
+            source: Source::Offer { origin, generation: 3 },
+            item: 1,
+            kind: ClipType::Format(ClipFormat::Png),
+        };
         snap(
             "worker_clip_fetch",
-            &WorkerMsg::Clip(ClipMsg::Fetch { generation: 3, format: ClipFormat::Png }),
+            &WorkerMsg::Clip(ClipMsg::Fetch { rep: rep.clone(), max: None, urgent: true }),
+        );
+        snap(
+            "client_clip_fetch_max",
+            &ClientMsg::Clip(ClipMsg::Fetch {
+                rep: rep.clone(),
+                max: Some(8 << 20),
+                urgent: false,
+            }),
+        );
+        snap(
+            "worker_clip_too_big",
+            &WorkerMsg::Clip(ClipMsg::TooBig { rep: rep.clone(), size: 60 << 20 }),
         );
         snap(
             "worker_clip_data",
             &WorkerMsg::Clip(ClipMsg::Data {
-                generation: 3,
-                format: ClipFormat::Html,
+                rep: RepRef { kind: ClipType::Format(ClipFormat::Html), ..rep },
                 bytes: b"<b>fox</b>".to_vec(),
+            }),
+        );
+        snap(
+            "worker_clip_unavailable",
+            &WorkerMsg::Clip(ClipMsg::Unavailable { source: rep.source }),
+        );
+        snap(
+            "uni_bulk_rep",
+            &UniHead::Bulk(BulkHeader {
+                xfer: XferId::from_uuid(Uuid::from_u128(5)),
+                purpose: Purpose::Rep { rep },
+                name: String::new(),
+                size: 60 << 20,
+                mtime_ms: WallMs::ZERO,
+                mode: 0,
+                offset: 0,
             }),
         );
         snap("worker_term_clipboard_write", &TermEvent::ClipboardWrite { text: "fox".to_owned() });
@@ -2586,6 +2714,53 @@ mod ctl {
         snap(
             "ctl_reply_permission_deny",
             &reply(Decision::Deny { message: "Not now.".to_owned(), interrupt: true }),
+        );
+    }
+
+    /// A program's page and file for the client, how each went, and what keeps the machine
+    /// awake.
+    #[test]
+    fn handoffs_and_wake() {
+        use slopty_proto::ctl::{Awake, EditAsk, Handed, NoClient};
+        use slopty_proto::handoff::{EditOutcome, OfferReason, Wary};
+        snap(
+            "ctl_request_open",
+            &CtlRequest::Open {
+                session: Some(session()),
+                url: "https://github.com/login/device".to_owned(),
+            },
+        );
+        snap(
+            "ctl_request_edit",
+            &CtlRequest::Edit(EditAsk {
+                session: Some(session()),
+                path: "/r/.git/COMMIT_EDITMSG".to_owned(),
+                line: None,
+                wait: true,
+            }),
+        );
+        snap("ctl_request_wake", &CtlRequest::Wake);
+        let handed = [
+            Handed::Taken { client: "Studio".to_owned() },
+            Handed::Offered { client: "Studio".to_owned(), why: OfferReason::NotTyped },
+            Handed::Offered { client: "Studio".to_owned(), why: OfferReason::Wary(Wary::UserInfo) },
+            Handed::Nobody { why: NoClient::NoneConnected },
+            Handed::Nobody { why: NoClient::NoneCapable },
+            Handed::Nobody { why: NoClient::Refused },
+            Handed::Nobody { why: NoClient::TimedOut },
+            Handed::Edited { outcome: EditOutcome::Done },
+            Handed::Lost,
+        ];
+        snap("ctl_reply_handoff", &handed.map(CtlReply::Handoff).to_vec());
+        snap(
+            "ctl_reply_wake",
+            &CtlReply::Wake(Awake {
+                clients: 0,
+                streams: 0,
+                agents: 1,
+                system: true,
+                display: false,
+            }),
         );
     }
 

@@ -131,7 +131,7 @@ pub fn placement(body: Option<Rect>, strip: Rect, alpha: f32, cover: Cover) -> P
     Placement::Shown { clip, frame, alpha: alpha.min(1.0) }
 }
 
-/// Where a tile's body was drawn, and in which of the workspace's frames.
+/// Where something in the strip was drawn, and in which of the strip's builds.
 pub(crate) type Drawn = Rc<Cell<Option<(u64, Bounds<Pixels>)>>>;
 
 /// What a browser tile tells the workspace.
@@ -249,12 +249,9 @@ pub struct BrowserView {
     /// The address the open page was last given.
     loaded: Option<String>,
     page: PageState,
-    /// Where the body was drawn, and in which frame of the workspace's.
-    drawn: Drawn,
-    /// The tile's opacity this frame.
-    alpha: f32,
-    /// The workspace's frame drawing it: a body measured in an older one was not drawn in this.
-    frame: u64,
+    /// Where the page's area was last laid out. A view drawn again from the last frame is
+    /// where it was, so this holds for every frame the tile is drawn in.
+    page_area: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The page's last picture, shown while the page is hidden.
     snapshot: Option<Arc<RenderImage>>,
     theme: Theme,
@@ -294,9 +291,7 @@ impl BrowserView {
             local: None,
             loaded: None,
             page: PageState { url: url.to_owned(), loading: true, ..PageState::default() },
-            drawn: Rc::default(),
-            alpha: 1.0,
-            frame: 0,
+            page_area: Rc::default(),
             snapshot: None,
             theme,
             native: native::Native::default(),
@@ -407,22 +402,11 @@ impl BrowserView {
         self.snapshot.is_some()
     }
 
-    /// Where the body was drawn in `frame` of the workspace's, if it was.
+    /// Where the page's area was last laid out, in window coordinates: where the page goes
+    /// whenever its tile is drawn.
     #[must_use]
-    pub fn drawn_in(&self, frame: u64) -> Option<Bounds<Pixels>> {
-        self.drawn.get().filter(|(f, _)| *f == frame).map(|(_, b)| b)
-    }
-
-    /// The tile's opacity in the workspace's frame `frame`, which is about to draw it.
-    pub const fn set_drawn(&mut self, alpha: f32, frame: u64) {
-        self.alpha = alpha;
-        self.frame = frame;
-    }
-
-    /// The tile's opacity as last set.
-    #[must_use]
-    pub const fn alpha(&self) -> f32 {
-        self.alpha
+    pub fn page_area(&self) -> Option<Bounds<Pixels>> {
+        self.page_area.get()
     }
 
     /// Draw by another theme.
@@ -433,17 +417,18 @@ impl BrowserView {
         }
     }
 
-    /// Put the page where [`placement`] says, opening it the first time it is shown. A
-    /// failed page stays hidden, so its reason shows instead of a blank page.
-    pub fn apply(&mut self, placement: Placement, window: &Window, cx: &mut Context<Self>) {
+    /// Put the page where [`placement`] says. A failed page stays hidden, so its reason shows
+    /// instead of a blank page. `false` when the page is to show and has not been opened yet,
+    /// which is [`Self::open_at`]'s: the view is only read here.
+    #[must_use]
+    pub fn place(&self, placement: Placement) -> bool {
         match placement {
             // A dialog is drawn on the page's picture: the page waits under it.
             Placement::Shown { clip, frame, alpha }
                 if self.page.failed.is_none() && self.dialog.is_none() =>
             {
                 if !self.native.open() {
-                    let Some(address) = self.local.clone() else { return };
-                    self.open(&address, window, cx);
+                    return self.local.is_none();
                 }
                 self.native.place(clip, frame, alpha);
             }
@@ -455,6 +440,15 @@ impl BrowserView {
                 }
             }
         }
+        true
+    }
+
+    /// Open the page the first time it is shown, where [`placement`] says.
+    pub fn open_at(&mut self, placement: Placement, window: &Window, cx: &mut Context<Self>) {
+        if let Some(address) = self.local.clone() {
+            self.open(&address, window, cx);
+        }
+        let _placed = self.place(placement);
     }
 
     fn open(&mut self, address: &str, window: &Window, cx: &mut Context<Self>) {
@@ -464,7 +458,10 @@ impl BrowserView {
         });
         if !self.native.create(window, address, sink) {
             self.page.failed = Some("This device has no web view".to_owned());
-            cx.notify();
+            // Opened as the window draws, where a notify would only reach the next frame the
+            // window happens to draw: this one asks for it.
+            let view = cx.entity_id();
+            cx.defer(move |cx| cx.notify(view));
             return;
         }
         self.loaded = Some(address.to_owned());
@@ -768,6 +765,17 @@ impl BrowserView {
         self.dialog.as_ref().map(|d| &d.dialog)
     }
 
+    /// Whether a script's dialog holds the keyboard: the sheet, or a prompt's field.
+    #[must_use]
+    pub fn dialog_has_keyboard(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.dialog.as_ref().is_some_and(|d| {
+            d.focus.is_focused(window)
+                || d.input.as_ref().is_some_and(|i| {
+                    gpui::Focusable::focus_handle(i.read(cx), cx).is_focused(window)
+                })
+        })
+    }
+
     /// OK (with a prompt's text) or Cancel: the page goes on, and the keyboard goes back to
     /// the workspace.
     pub fn answer_dialog(&mut self, ok: bool, cx: &mut Context<Self>) {
@@ -1052,10 +1060,9 @@ impl Render for BrowserView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let id = *self.id.as_uuid();
-        let drawn = Rc::clone(&self.drawn);
-        let frame = self.frame;
+        let page_area = Rc::clone(&self.page_area);
         let measure = canvas(
-            move |bounds, _window, _cx| drawn.set(Some((frame, bounds))),
+            move |bounds, _window, _cx| page_area.set(Some(bounds)),
             |_bounds, (), _window, _cx| {},
         )
         .absolute()

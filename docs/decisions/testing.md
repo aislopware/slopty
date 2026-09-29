@@ -208,7 +208,13 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
 
 
 
-- ✅ **The repo's volume must be mounted with ownership on, or every VideoToolbox session costs
+- ❌ **Superseded 2026-09-30 by `tooling.md`, "A test binary's directory, not the volume".** The
+  isolation below moved two variables, the mount flag and the binary's directory, and credited the
+  flag. The cost follows the number of entries in the executable's directory, so
+  `enableOwnership` would not help. The xtask test runner's hard links fix it. The record of the
+  original entry follows.
+
+  **The repo's volume must be mounted with ownership on, or every VideoToolbox session costs
   ~29 s** (2026-09-15). `slopty-codec`'s `hevc_encode_then_decode` takes **108, 116 and 118 s** run
   from `/Volumes/Lacie/...`, at 9 % CPU throughout — waiting, not working — and **0.53 s** run from
   `/tmp`. The binary is 1.28 MB and reads at 1.2 GB/s, so it is neither size nor throughput.
@@ -509,8 +515,9 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     tile header's health word follows the last second's pacing, which the machine's load
     moves, so it is masked too and asserted through the accessibility tree.
   - The harness runs the binaries from a copy in the temporary directory (`harness::bin_dir`).
-    The repository's volume is mounted without ownership, and every VideoToolbox session a
-    process opens there waits on an uncached signature check: the drawn-stream unit tests timed
+    A process whose executable sits in a directory of ~100k entries (`target/…/deps`) pays for
+    it in every VideoToolbox session it opens (`tooling.md`, "A test binary's directory, not the
+    volume"): the drawn-stream unit tests timed
     out at 120 s from `target/`, and passed in 0.54 s copied to `/tmp`. The measurement
     client is a binary (`slopty-glass`) for the same reason: a test binary is not copied.
   - What the app cannot show here: presentation. Under a remote session to this Mac the app's

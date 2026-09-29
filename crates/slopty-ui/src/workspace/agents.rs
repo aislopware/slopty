@@ -21,6 +21,7 @@ use super::{Finished, WorkspaceEvent, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::chrome_text::ChromeText;
 use crate::colors::{hsla, hsla_alpha};
+use crate::draw::Draw;
 use crate::icons::Status;
 
 /// An agent waiting on the human: where, and the tile that shows it, if one does.
@@ -81,6 +82,7 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
         AgentStatus::Done => {
             detail.map_or_else(|| "Turn finished".to_owned(), |d| format!("Done: {d}"))
         }
+        AgentStatus::Waiting { .. } => "Waiting on its tasks".to_owned(),
     }
 }
 
@@ -100,6 +102,7 @@ pub(super) fn agent_status_word(agent: &AgentEvent) -> String {
         AgentStatus::Blocked(BlockReason::Question) => "Has a question".to_owned(),
         AgentStatus::Blocked(BlockReason::Elicitation) => "Needs input".to_owned(),
         AgentStatus::Done => "Turn finished".to_owned(),
+        AgentStatus::Waiting { .. } => "Waiting".to_owned(),
     }
 }
 
@@ -234,6 +237,7 @@ impl WorkspaceView {
             }
         }
         self.update_awake(cx);
+        self.keep_time(cx);
         self.count_needs_you(cx);
         self.update_run_targets(cx);
         cx.notify();
@@ -278,6 +282,7 @@ impl WorkspaceView {
         }
         if seeded {
             self.update_awake(cx);
+            self.keep_time(cx);
             self.count_needs_you(cx);
             self.update_run_targets(cx);
         }
@@ -340,8 +345,8 @@ impl WorkspaceView {
     /// Sessions whose agent is at its turn, in the order of [`Self::needs_you`]: those with a
     /// tile in reading order, then those only the server reported. At its turn as its tile
     /// marks it ([`Self::agent_mark`]), so a face mid-call lists it though the hook lags.
-    pub(super) fn working(&self, cx: &gpui::App) -> Vec<Waiting> {
-        let at_work = |session: SessionId| self.agent_mark(session, cx) == Some(Status::Working);
+    pub(super) fn working(&self) -> Vec<Waiting> {
+        let at_work = |session: SessionId| self.agent_mark(session) == Some(Status::Working);
         let mut shown: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
             .items()
             .filter_map(|(worker, i)| match i.kind {
@@ -540,7 +545,7 @@ impl WorkspaceView {
         session: SessionId,
         agent: &AgentEvent,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let k = chrome.k;
@@ -615,7 +620,7 @@ impl WorkspaceView {
         session: SessionId,
         done: &Finished,
         chrome: Chrome,
-        cx: &Context<Self>,
+        cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let k = chrome.k;

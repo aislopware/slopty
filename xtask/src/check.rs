@@ -58,7 +58,12 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
         quiet_step("clippy ios + ios-sim", cmd!(sh, "cargo clippy {a...} {i...} -- -D warnings"))?;
     }
     lint_linux(sh, &names().collect::<Vec<_>>())?;
-    quiet_step("nextest", cmd!(sh, "cargo nextest run {b...} --no-tests=pass"))?;
+    // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
+    let runner = crate::runner::command()?;
+    quiet_step(
+        "nextest",
+        cmd!(sh, "cargo nextest run {b...} --no-tests=pass").env(crate::runner::RUNNER_VAR, runner),
+    )?;
     let libs: Vec<&str> = owned.iter().filter(|p| p.lib).map(|p| p.name.as_str()).collect();
     if !libs.is_empty() {
         let l = selected(libs.into_iter().chain([WORKSPACE_HACK]));

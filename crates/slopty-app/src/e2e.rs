@@ -55,6 +55,13 @@ pub(crate) fn serve(
     runtime.spawn(listen(socket, tx));
     let handle = runtime.clone();
     cx.spawn(async move |cx| {
+        // GPUI's fades run on the wall clock, so a frame and the same state drawn from scratch a
+        // few milliseconds later differ while one runs: under Reduce Motion they land at once,
+        // and every dump's frame can be judged (`Dump::stale`). The frame-time measurements
+        // keep the motion they measure.
+        if std::env::var_os("SLOPTY_E2E_MOTION").is_none() {
+            cx.update(|cx| cx.set_reduce_motion(true));
+        }
         #[cfg(target_os = "macos")]
         let dragged = park_drags(&workspace, cx);
         while let Some((command, reply)) = rx.recv().await {
@@ -84,15 +91,15 @@ pub(crate) fn serve(
                     }
                 }
                 Command::Render { path } => {
-                    // The frame must be laid out with everything dispatched so far; render
-                    // on the next frame so `Dump` and `Render` agree.
+                    // The frame the app draws with everything dispatched so far, as it draws
+                    // it: only what was notified is built again. It must be the frame the same
+                    // state drawn from scratch gives, or a view is showing an old state.
                     let (done_tx, done_rx) = oneshot::channel();
                     // `update_window` (not `WindowHandle::update`): the root view must not be
                     // leased while a dispatched action updates it.
                     let scheduled = cx.update_window(window, |_root, window, _cx| {
-                        window.refresh();
-                        window.on_next_frame(move |window, _cx| {
-                            let _sent = done_tx.send(render(window, &path));
+                        before_next_draw(window, move |window, cx| {
+                            let _sent = done_tx.send(render(window, cx, &path));
                         });
                     });
                     match scheduled {
@@ -103,20 +110,15 @@ pub(crate) fn serve(
                     }
                 }
                 Command::Dump => {
-                    // Next-frame callbacks run before that frame's draw. The state read in
-                    // the first is exactly what the draw paints; the second sees that
-                    // frame's accessibility tree. Read at once, the tree could lag a state
-                    // change by a frame and a test would find a node its state promised.
+                    // Every dump also holds the frame the app draws against the same state
+                    // drawn from scratch (`Dump::stale`), so any test's dump catches a view
+                    // left showing an old state.
                     let (done_tx, done_rx) = oneshot::channel();
                     let workspace = workspace.clone();
                     let scheduled = cx.update_window(window, |_root, window, _cx| {
-                        window.on_next_frame(move |window, cx| {
-                            window.refresh();
-                            let mut dump = workspace.read(cx).dump(window, cx);
-                            window.on_next_frame(move |window, _cx| {
-                                dump.a11y = a11y_nodes(window);
-                                let _sent = done_tx.send(Reply::Dump(Box::new(dump)));
-                            });
+                        before_next_draw(window, move |window, cx| {
+                            let dump = dump(&workspace, window, cx);
+                            let _sent = done_tx.send(Reply::Dump(Box::new(dump)));
                         });
                     });
                     match scheduled {
@@ -139,26 +141,19 @@ pub(crate) fn serve(
                 | Command::UiPinch { .. }
                 | Command::UiInsertText { .. }
                 | Command::UiDeleteBackward => match uikit::inject(command) {
-                    Ok(()) => after_frame(window, Reply::Ok, Redraw::Window, cx).await,
+                    Ok(()) => after_frame(window, Reply::Ok, cx).await,
                     Err(message) => Reply::Error { message },
                 },
                 // Input settles on the next frame: focus moved by a click is only in the
                 // dispatch tree once it has been drawn, so a keystroke sent before that would
                 // go nowhere. Reply after the frame, and the driver never races the app.
-                // Typing draws only what the views asked for, as a keyboard's keys do: a
-                // forced frame per key would hold the echo's frame back a refresh.
                 other => {
-                    let redraw = if matches!(other, Command::Type { .. } | Command::Keys { .. }) {
-                        Redraw::Dirty
-                    } else {
-                        Redraw::Window
-                    };
                     let mut answer = None;
                     let applied = cx.update_window(window, |_root, window, cx| {
                         answer = Some(apply(&workspace, other, window, cx));
                     });
                     match (applied, answer) {
-                        (Ok(()), Some(answer)) => after_frame(window, answer, redraw, cx).await,
+                        (Ok(()), Some(answer)) => after_frame(window, answer, cx).await,
                         (Ok(()), None) => Reply::Error { message: "not applied".into() },
                         (Err(e), _) => error(&e),
                     }
@@ -212,27 +207,25 @@ async fn keep_dragged(parked: &Parked, into: String, runtime: &tokio::runtime::H
     }
 }
 
-/// What the frame a command settles on draws.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Redraw {
-    /// The whole window, whatever changed.
-    Window,
-    /// Only what was notified, which may be nothing.
-    Dirty,
+/// Run `f` in the next frame, once every next-frame callback of that frame has run and before
+/// the frame is drawn. The callbacks run in the order they were asked for, and one of them may
+/// notify a view (an animation asks for its frame that way): run among them, `f` would draw
+/// that frame before the notify that belongs in it.
+fn before_next_draw(window: &Window, f: impl FnOnce(&mut Window, &mut App) + 'static) {
+    let handle = window.window_handle();
+    window.on_next_frame(move |_window, cx| {
+        cx.defer(move |cx| {
+            let _closed = handle.update(cx, |_root, window, cx| f(window, cx));
+        });
+    });
 }
 
-/// `answer`, once the window has had a frame with everything dispatched so far.
-async fn after_frame(
-    window: AnyWindowHandle,
-    answer: Reply,
-    redraw: Redraw,
-    cx: &mut gpui::AsyncApp,
-) -> Reply {
+/// `answer`, once the window has had a frame with everything dispatched so far. The frame draws
+/// only what the command notified, as a person's input would: a view the command changed
+/// without telling shows its old state in it, and the next `Render` or `Dump` says so.
+async fn after_frame(window: AnyWindowHandle, answer: Reply, cx: &mut gpui::AsyncApp) -> Reply {
     let (done_tx, done_rx) = oneshot::channel();
     let scheduled = cx.update_window(window, |_root, window, _cx| {
-        if redraw == Redraw::Window {
-            window.refresh();
-        }
         window.on_next_frame(move |_window, _cx| {
             let _sent = done_tx.send(answer);
         });
@@ -661,23 +654,72 @@ const fn mouse_button(button: Button) -> MouseButton {
     }
 }
 
+/// How many lines of a stale frame's difference a reply quotes, each way.
 #[cfg(feature = "e2e")]
-fn render(window: &Window, path: &str) -> Reply {
-    match window.render_to_image() {
-        Ok(image) => {
-            let (width, height) = image.dimensions();
-            match image.save(path) {
-                Ok(()) => Reply::Rendered { width, height },
-                Err(e) => Reply::Error { message: format!("write {path}: {e}") },
+const STALE_LINES: usize = 12;
+
+/// The frame the app draws now, saved to `path`, and checked against the same state drawn from
+/// scratch: a difference is an error, and the frame from scratch is saved beside it
+/// (`<path>.scratch.png`) for the review.
+#[cfg(feature = "e2e")]
+fn render(window: &mut Window, cx: &mut App, path: &str) -> Reply {
+    // Next-frame callbacks run before the frame is drawn: draw it as the app would.
+    window.draw(cx).clear(cx);
+    let image = match window.render_to_image() {
+        Ok(image) => image,
+        Err(e) => return Reply::Error { message: format!("render: {e:#}") },
+    };
+    let stale = slopty_ui::retained::stale(window, cx, STALE_LINES);
+    let (width, height) = image.dimensions();
+    if let Err(e) = image.save(path) {
+        return Reply::Error { message: format!("write {path}: {e}") };
+    }
+    match stale {
+        None => Reply::Rendered { width, height },
+        Some(stale) => {
+            let scratch = format!("{path}.scratch.png");
+            if let Ok(image) = window.render_to_image() {
+                let _kept = image.save(&scratch);
             }
+            Reply::Error { message: format!("the frame drawn is stale ({scratch}): {stale}") }
         }
-        Err(e) => Reply::Error { message: format!("render: {e:#}") },
     }
 }
 
 #[cfg(not(feature = "e2e"))]
-fn render(_window: &Window, _path: &str) -> Reply {
+fn render(_window: &mut Window, _cx: &mut App, _path: &str) -> Reply {
     Reply::Error { message: "built without the `e2e` feature; no renderer access".into() }
+}
+
+/// The app's state as the frame about to be drawn shows it, with that frame checked against
+/// the same state drawn from scratch and the accessibility tree read from a frame of its own.
+///
+/// Runs before the next frame is drawn, once its next-frame callbacks have run
+/// ([`before_next_draw`]). The frame times are read first,
+/// so the frames the check draws are not in them. The tree is built only while a screen reader
+/// asks for it, and GPUI draws every view from scratch while it does: it is asked for in one
+/// frame here, so every other frame of a run is drawn as a person's would be.
+#[cfg(feature = "e2e")]
+fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dump {
+    let frames = frame_info(slopty_ui::frames::stats(cx));
+    window.draw(cx).clear(cx);
+    let stale = slopty_ui::retained::stale(window, cx, STALE_LINES);
+    window.set_a11y_active(true);
+    window.draw(cx).clear(cx);
+    let mut dump = workspace.read(cx).dump(window, cx);
+    dump.frames = frames;
+    dump.stale = stale;
+    window.set_a11y_active(false);
+    dump
+}
+
+#[cfg(not(feature = "e2e"))]
+#[expect(
+    clippy::needless_pass_by_ref_mut,
+    reason = "one signature for both builds: the e2e build's draws frames through them"
+)]
+fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dump {
+    workspace.read(cx).dump(window, cx)
 }
 
 /// The accessibility tree of the last frame, trimmed for the dump.
@@ -714,6 +756,7 @@ fn agent_line(status: &AgentStatus) -> String {
         AgentStatus::Blocked(BlockReason::Elicitation) => "blocked:elicitation".to_owned(),
         AgentStatus::Blocked(BlockReason::IdlePrompt) => "blocked:idle".to_owned(),
         AgentStatus::Done => "done".to_owned(),
+        AgentStatus::Waiting { tasks, crons } => format!("waiting:{tasks}:{crons}"),
     }
 }
 
@@ -982,7 +1025,7 @@ impl Workspace {
                 dump.terminals.push(TerminalInfo {
                     session: session.to_string(),
                     kind: "terminal".to_owned(),
-                    title: Some(view.terminal_title(session, cx)),
+                    title: Some(view.terminal_title(session)),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
                     rows: terminal.rows(),

@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 bytes.workspace = true
+# `EMSGSIZE`, to tell a datagram too large for the interface from other send errors (`udp`).
+libc.workspace = true
 noq.workspace = true
 noq-proto.workspace = true
 serde.workspace = true
@@ -26,6 +28,12 @@ socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+# Apple's batched `sendmsg_x`/`recvmsg_x` datapath, compiled in on macOS only (private calls
+# reached by `dlsym`, never on iOS), on unless `SLOPTY_BATCHED_UDP=0`
+# (`endpoint::Tuning::batched_udp`, docs/decisions/transport.md).
+[target.'cfg(target_os = "macos")'.dependencies]
+noq = { workspace = true, features = [ "fast-apple-datapath" ] }
 
 [dev-dependencies]
 slopty-tailnet = { workspace = true, features = [ "fake" ] }

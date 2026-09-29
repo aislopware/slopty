@@ -14,6 +14,7 @@
 //! * [`server`] — links to the server: its accept loop, and the dial to it.
 //! * [`known`] — the client's id and the workers it has added.
 //! * [`redial`] — when a dropped link is dialled again.
+//! * `udp` — the UDP socket under every endpoint, which finishes a send that went out in part.
 //! * `prefix` — the wire prefix each end opens the control stream with, and the check of the peer's
 //!   ([`slopty_proto::wire`]).
 //!
@@ -46,6 +47,7 @@ mod prefix;
 pub mod redial;
 pub mod server;
 pub mod streams;
+mod udp;
 pub mod worker;
 
 pub use addr::HostAddr;

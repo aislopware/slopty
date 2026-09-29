@@ -368,6 +368,8 @@ pub struct Workspace {
     view: Entity<WorkspaceView>,
     /// A physical keyboard is attached (polled with the settings; hides the key bar).
     hardware_keyboard: bool,
+    /// The system asks for motion to be reduced (polled with the settings).
+    reduce_motion: bool,
     theme: Theme,
     /// The user's `settings.toml` as last loaded (defaults when absent or broken).
     settings: Settings,
@@ -492,6 +494,7 @@ impl Workspace {
             directory_cache,
             view,
             hardware_keyboard: hardware_keyboard_attached(),
+            reduce_motion: slopty_platform::reduce_motion(),
             theme: Theme::default(),
             settings: Settings::default(),
             window_dark: true,
@@ -681,12 +684,26 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The system's Reduce Motion setting changed. What moves reads it as it is drawn, and a
+    /// view drawn from the last frame read it then: every window is drawn again from scratch.
+    /// GPUI's own animations (gpui-kit's among them) follow GPUI's flag, which is set with it.
+    fn set_reduce_motion(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.reduce_motion != on {
+            tracing::info!(on, "reduce motion");
+            self.reduce_motion = on;
+            slopty_ui::icons::motion_setting_changed(cx);
+            self.view.update(cx, WorkspaceView::motion_setting_changed);
+            cx.set_reduce_motion(on);
+            cx.refresh_windows();
+        }
+    }
+
     /// A keyboard was attached or removed: show or hide the key bar and the palette's chords.
     fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
         if self.hardware_keyboard != attached {
             tracing::info!(attached, "hardware keyboard");
             self.hardware_keyboard = attached;
-            self.view.update(cx, |v, _| v.set_hardware_keyboard(attached));
+            self.view.update(cx, |v, cx| v.set_hardware_keyboard(attached, cx));
             cx.notify();
         }
     }
@@ -2408,8 +2425,6 @@ fn key_spoken(label: &str) -> &str {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The frame's draw starts here; the probe element at the end of the tree closes it.
-        slopty_ui::frames::begin(cx);
         // Notch / Dynamic Island, home indicator and the soft keyboard on iOS; zero on macOS.
         // The workspace keeps the top and the sides clear itself.
         let insets = window.insets().effective();
@@ -2431,11 +2446,16 @@ impl Render for Workspace {
         // A page in a browser tile is a native view over everything GPUI draws: it hides
         // under the app's own dialogs as it does under the workspace's.
         let covered = welcome || settings_editor.is_some() || self.adding.is_some();
-        self.view.update(cx, |v, cx| {
-            v.set_covered(covered, cx);
-            // The key bar takes the status bar's row above the keyboard.
-            v.set_key_bar_shown(key_bar.is_some(), cx);
-        });
+        // The key bar takes the status bar's row above the keyboard. Told only a change: an
+        // update while the window draws would build everything that read the workspace again.
+        let shown = key_bar.is_some();
+        let told = self.view.read(cx);
+        if told.covered() != covered || told.key_bar_shown() != shown {
+            self.view.update(cx, |v, cx| {
+                v.set_covered(covered, cx);
+                v.set_key_bar_shown(shown, cx);
+            });
+        }
         let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, window, cx));
         let root = match self.split_view {
             Some(size) => div().w(size.width).h(size.height),
@@ -2480,7 +2500,6 @@ impl Render for Workspace {
             })
             .when_some(adding, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)
-            .child(slopty_ui::frames::probe())
     }
 }
 
@@ -2548,7 +2567,7 @@ fn apply_link_event(
             });
         }
         LinkEvent::Control(WorkerMsg::Clip(msg)) => {
-            view.update(cx, |v, _cx| v.clip_message(key, msg));
+            view.update(cx, |v, cx| v.clip_message(key, msg, cx));
         }
         LinkEvent::Control(WorkerMsg::Xfer(msg)) => {
             view.update(cx, |v, cx| v.xfer_message(msg, cx));
@@ -2572,10 +2591,15 @@ fn apply_link_event(
             view.update(cx, |v, cx| v.permission_event(event, cx));
         }
         // The handshake's ack was read when the link connected; the tick pings to draw a
-        // restarted worker's reset, so the pong carries nothing; and the app's link forwards ports
-        // itself (`LinkEvent::Ports`).
+        // restarted worker's reset, so the pong carries nothing; the app's link forwards ports
+        // itself (`LinkEvent::Ports`); and the pull request chip and the handoff pages come with
+        // the worker wave's UI (`.research/ui-followups-worker-wave.md`).
         LinkEvent::Control(
-            WorkerMsg::HelloAck(_) | WorkerMsg::Pong { .. } | WorkerMsg::Ports { .. },
+            WorkerMsg::HelloAck(_)
+            | WorkerMsg::Pong { .. }
+            | WorkerMsg::Ports { .. }
+            | WorkerMsg::Handoff(_)
+            | WorkerMsg::AgentBranch(_),
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
@@ -2861,7 +2885,7 @@ pub fn open_workspace(
         view.extend_palette(app_palette_items(None));
         view.set_layout_path(layout_path());
         view.set_pasteboard(pasteboard());
-        view.set_hardware_keyboard(hardware_keyboard_attached());
+        view.set_hardware_keyboard(hardware_keyboard_attached(), cx);
         #[cfg(feature = "e2e")]
         view.set_animation(false);
         view
@@ -2910,8 +2934,13 @@ pub fn open_workspace(
             ws.window_dark = dark;
             ws.apply_loaded(loaded, cx);
         });
-        cx.new(|cx| Root::new(root_view, window, cx))
+        // The frame probe times every frame from the root down.
+        let framed = cx.new(|_| slopty_ui::frames::Framed::new(root_view));
+        cx.new(|cx| Root::new(framed, window, cx))
     })?;
+    // GPUI's own animations hold still as the system asks, as Slopty's do; the settings poll
+    // keeps the flag in step ([`Workspace::set_reduce_motion`]).
+    cx.set_reduce_motion(slopty_platform::reduce_motion());
     watch_settings(workspace.clone(), cx);
     // A tapped note brings the app forward on its tile, on whichever worker it lives. The tap
     // that launched the app waited for `taps` above and arrives first, once the window is up.
@@ -2965,9 +2994,6 @@ pub fn open_workspace(
     // The self-test socket, for `cargo xtask e2e app`; never set for a normal launch.
     #[cfg(feature = "e2e")]
     if let Some(socket) = std::env::var_os(slopty_e2e::SOCKET_ENV) {
-        // The accessibility tree is built only while a screen reader asks for it; a test
-        // asks up front so `dump.a11y` has it.
-        window.update(cx, |_root, window, _cx| window.set_a11y_active(true))?;
         let runtime = workspace.read(cx).runtime.clone();
         e2e::serve(socket.into(), workspace, window.into(), &runtime, cx);
     }
@@ -3023,8 +3049,10 @@ fn watch_settings(workspace: Entity<Workspace>, cx: &App) {
         loop {
             cx.background_executor().timer(settings::POLL).await;
             let keyboard = hardware_keyboard_attached();
+            let reduce_motion = slopty_platform::reduce_motion();
             workspace.update(cx, |ws, cx| {
                 ws.set_hardware_keyboard(keyboard, cx);
+                ws.set_reduce_motion(reduce_motion, cx);
                 if ws.settings_seen.changed(&ws.settings_path) {
                     tracing::info!(path = %ws.settings_path.display(), "settings changed; reloading");
                     let loaded = Settings::load(&ws.settings_path);

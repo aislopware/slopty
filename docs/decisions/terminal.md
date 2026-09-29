@@ -284,13 +284,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   *Engine:* libghostty-vt's per-row `semantic_prompt` flag says "prompt row" but cannot
   separate two prompts on adjacent rows (a command with no output), and the `D` status is
   not exposed at all. `slopty_engine::osc133::Scanner` watches the bytes (state kept across
-  reads, payloads over 32 bytes dropped, `ESC \` and BEL terminators, `A;k=s`/`k=c` not
-  counted as starts); `write` feeds the terminal up to each mark, settles, and records the
-  cursor's absolute line in `prompt_starts` / `exit_marks` (both pruned below `base`, both
-  cleared with the epoch). A prompt row is `Prompt { exit }` only on a recorded start, else
-  `PromptContinuation`; the status is the newest `D` within 4 rows above the start that no
-  other start already claimed (the shell may print a blank line or the partial-line `%`
-  between `D` and the prompt). Covered by
+  reads, OSCs framed as libghostty frames them: see "The prompt-mark scanner reads OSCs as
+  libghostty does", `A;k=s`/`k=c` not counted as starts); `write` feeds the terminal up to
+  each mark, settles, and records the cursor's absolute line in `prompt_starts` /
+  `exit_marks` (both pruned below `base`, both cleared with the epoch). A prompt row is
+  `Prompt { exit }` only on a recorded start, else `PromptContinuation`; the status is the
+  newest `D` within 4 rows above the start that no other start already claimed (the shell may
+  print a blank line or the partial-line `%` between `D` and the prompt). Covered by
   `prompt_rows_carry_the_previous_commands_exit_status` (adjacent prompts, a `D` split
   across two writes, a gap row, a two-row prompt, the history path) and
   `captured_zsh_bytes_keep_output_rows_and_statuses` (bytes recorded from a real zsh:
@@ -2245,3 +2245,228 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   latest held back until its time, so the last value always goes out. The daemon also takes the
   moves queued while it works in one batch, each session once. Ten thousand reports over 1.5 s
   moved the summary 7 times (`a_flood_of_progress_moves_the_summary_a_bounded_number_of_times`).
+
+- ✅ **The prompt-mark scanner reads OSCs as libghostty does** (2026-09-30). ghostty `0538f7535`
+  (fork `29bbc6a`) makes CAN and SUB cancel an OSC in progress, as xterm does: `ESC ] 2 ; t CAN`
+  no longer sets the title. The engine's OSC 133 scanner still counted a mark cut off that way,
+  so a cancelled `133;D;1;` gave the next prompt a status the terminal never took. Checked
+  against `parse_table.zig` and the stream's OSC fast path, the scanner also differed in three
+  older ways, now fixed:
+  - An OSC ends on ESC whatever follows it, and that ESC starts the next sequence. The scanner
+    dropped an OSC whose ESC was not followed by `\`, where libghostty acts on it. The mark is
+    now reported at the ESC, and the `\` is fed after it.
+  - The other C0 controls are dropped inside an OSC, not collected into its payload. Inside an
+    escape they run without ending it, so `ESC ENQ ] 133;A BEL` is a mark.
+  - A payload may run to 128 bytes, up from 32. ghostty's own bash integration writes
+    `133;A;redraw=last;cl=line;aid=<pid>`, which is over 32 bytes, so that prompt start was
+    lost.
+
+  An OSC that is not a mark now drops the scanner back to waiting for the next ESC, since only
+  an ESC can start a mark. That removes the skip state and its `memchr2`, and the scan costs
+  113 instructions per OSC, down from 171 (MEASUREMENTS, "ghostty `0538f7535`").
+  - **Rejected: libghostty's new unknown-sequence callback for OSC** (#14452). It reports only
+    the OSC numbers libghostty does not implement. 133 is one it implements, so the marks
+    never reach the callback. No other OSC Slopty reads goes through a scanner of its own:
+    title, working directory, notifications, progress, clipboard and pointer shape each have
+    an effect callback or a getter. The Rust wrapper has no binding for the callback, and
+    none was added.
+  - Tests: `the_mark_scanner_frames_an_osc_as_libghostty_does` feeds an OSC 2 title and a
+    mark with the same framing (BEL, ST, ESC `[`, a C0 control after the ESC, CAN, SUB, and
+    an escape cancelled before `]`), and asserts that libghostty set the title exactly when
+    the scanner reported the mark. `a_cancelled_command_end_leaves_no_status` and
+    `an_osc_cancelled_by_can_or_sub_has_no_effect` cover the title, directory, notification,
+    progress and OSC 52 events, and a cancel split across reads. The scanner's own tests are
+    `can_and_sub_cancel_a_mark`, `any_escape_ends_the_mark_and_starts_the_next_sequence` and
+    `other_controls_do_not_end_a_mark`. The first two engine tests fail with the old scanner.
+  - The same bump clears the kitty placeholder flag when a whole row is erased (#14449). Frame
+    building reads that flag before it compares each cell with U+10EEEE, so an erased row is
+    no longer walked for placeholders. Output is unchanged, since the walk found nothing
+    there. The shared render device state (#14446) is in ghostty's renderer, which Slopty
+    does not build.
+
+- ✅ **ghostty comes from aislopware/ghostty, which carries the open PRs Slopty needs**
+  (2026-09-30). Slopty does not wait for upstream to merge a ghostty change it needs. It
+  finishes the change in a fork and reconciles later. `vendor/ghostty` now tracks
+  `aislopware/ghostty` (`.gitmodules`), whose `main` is ghostty `main` with our commits on top,
+  as in the other forks. In the checkout, `origin` is ghostty-org and `fork` is aislopware. The
+  libghostty-rs fork fetches the same repository at `GHOSTTY_COMMIT`
+  (`GHOSTTY_REPO` in `libghostty-vt-sys/build.rs`). To bump it, rebase `main` onto ghostty
+  `main`, push it to `fork`, and follow the steps in "Dev loop". Four PRs were weighed:
+  - **Taken: #14362, the alternate screen modes from the terminal's state** (korikhin; four
+    commits, rebased onto `0538f7535`, plus one of ours; it supersedes #14200). Before it, a
+    program that entered with `?47h` and left with `?1049l` left mode 47's bit set on the
+    primary screen. DECRQM then reported it set, and libghostty's formatter wrote `?47h` into
+    a checkpoint, so a restored session came back on the alternate screen with the primary's
+    rows drawn over it. With the PR, the modes 47, 1047 and 1049 answer from the active
+    screen, 1048 answers from whether a cursor is saved, and XTSAVE/XTRESTORE follow xterm.
+    `?1049r` no longer erases. The upstream review asked for a match with xterm, and the PR
+    shows one against xterm 411. Our commit `7d0734aa8` resolves the conflict with the render
+    hold, replaces the PR's review notes with comments, and adds `Terminal.modeGet`. That was
+    needed because the PR left the C API's mode get reading the bits, which are now always
+    false. It has a Zig test (`get mode answers the alternate screen modes from the active
+    screen`). The engine test is `leaving_the_alternate_screen_by_another_mode_leaves_it_everywhere`,
+    which covers the checkpoint and DECRQM and failed before the change. The one difference
+    from xterm left in place: xterm reports 1048 set from startup because it saves a cursor
+    for each screen at startup, while ghostty reports it reset until a cursor is saved.
+  - **Not taken: #14167, colon subparameters on any CSI.** ghostty already keeps colons on
+    SGR, which is the only place Slopty needs them. The PR opens them to every final for
+    kitty's multiple-cursor protocol, which xterm does not have and Slopty does not use. It
+    reworks the CSI parameter path, which is hot, and the maintainers still want benchmarks.
+    `colon_underline_styles_and_colours_reach_the_cells` shows `4:3`, `4:4`, `4:5`, `21`,
+    `58:2::r:g:b`, `58:5:n` and `58;2;r;g;b` reaching the cells the clients paint.
+  - **Not taken: #14133, the PNG hook reporting extra allocated bytes.** libghostty takes
+    ownership of the decoded buffer and frees it, so a decoder cannot reuse it, and rounding
+    the size up gains nothing. Doing the decode right removed the reason for the PR. The
+    decoder now allocates the RGBA buffer libghostty will keep, decodes into its front, and
+    widens RGB, gray and gray-alpha to RGBA in place from the back. Before, it made a
+    decode `Vec`, an RGBA `Vec` and a copy into libghostty's buffer. That is one allocation
+    of the image where there were three, and 17 % less time for RGBA, 6 % for RGB
+    (MEASUREMENTS, "PNG decode in place"). `every_png_colour_type_decodes_to_rgba` checks
+    each 8-bit colour type against `to_rgba`.
+  - The libghostty-rs `Bytes` exposed the fresh allocation as `[u8]` while it was
+    uninitialized. It is now zeroed first (fork `c18747b`), at a cost of about 1.5 % of the
+    RGBA decode.
+
+- ✅ **A shell's browser and editor are the client's** (2026-09-30, revised the same day after
+  an adversarial review; wire change). A program in a worker's shell that opens a web page
+  (`gh auth login`, Claude Code's `/login`, `cargo doc --open`, `open https://…`) opened it on the
+  worker's screen, which nobody in front of the client can see. A program that runs `$EDITOR`
+  (`git commit`, `git rebase -i`, `crontab -e`, Claude Code's Ctrl+G) got whatever editor the
+  shell had, in the terminal.
+  - **What a session gets.** ptyd's shell integration links the `slopty` CLI under three names:
+    `open` (`xdg-open` on Linux), `slopty-browser` and `slopty-editor`. The CLI tells them apart
+    by `argv[0]`. Every session gets the links' directory first on `PATH` (`SLOPTY_BIN`), and
+    `BROWSER` and `EDITOR` naming the two commands by absolute path. The shell scripts put the
+    directory back in front at every prompt in zsh, bash and fish, since macOS's `path_helper`
+    in `/etc/zprofile` moves the system directories ahead of anything inherited.
+  - **Defaults only, and never `VISUAL`.** git, `crontab`, `less`, `sudoedit`, zsh's
+    `edit-command-line` and Claude Code all read `VISUAL` ahead of `EDITOR`. Setting `VISUAL`
+    would beat an `EDITOR=nvim` that the user's rc exports, so it is not set. An `EDITOR` or
+    `VISUAL` that the rc exports wins by itself, and so do git's `GIT_EDITOR` and `core.editor`.
+    Nothing is set when the daemon's own environment already names a browser or an editor. One
+    of Slopty's own commands inherited that way (a daemon started inside a Slopty shell) counts
+    as none and is removed. `SLOPTY_NO_SHELL_INTEGRATION` turns all of it off.
+  - **One word each, by absolute path.** Claude Code runs `BROWSER` as one executable with the
+    URL as its only argument (`spawn(BROWSER || "open", [url])`). gh shlex-splits it. Python's
+    `webbrowser` reads it as a list of commands. git hands `EDITOR` to `sh -c`. An absolute
+    path with no space reads the same to all of them, and a program run with its own `PATH`
+    (`env PATH=/usr/bin:/bin git commit`) still finds it. The scripts' directory on macOS is
+    under Application Support, which has a space, so the commands then live in
+    `$TMPDIR/slopty-<uid>/bin`. That directory is made 0700 and is refused if it is a link, has
+    another owner, or can be reached by the group or others (`shell_integration::bin_dir`).
+    When no such place can be made, the commands go by bare name.
+  - **Only clients that say so are asked.** A client declares what it takes with
+    `ClientMsg::HandoffCaps { open, edit }` right after its hello, and again when that changes.
+    It is a message of its own rather than a hello field for two reasons. The control stream
+    is ordered, so it arrives ahead of anything the worker could hand over. And what a client
+    takes changes while it is connected, for example when the app's last window closes.
+    - The worker asks only clients that declared the kind of handoff, in this order:
+      1. clients focused on the session's tile, the latest first;
+      2. the client that last typed into it;
+      3. clients focused on something else;
+      4. the rest, by recency.
+    - With no client connected, or none that takes it, the program is answered at once with
+      `Handed::Nobody { why }`. `why` is `none_connected`, `none_capable`, `refused` or
+      `timed_out`, and the CLI says it on stderr.
+    - Each asked client has `TAKE_WAIT` = 3 s. When it runs out, the client is sent
+      `Withdrawn` and the next is asked. Replies carry their `ClientId`. A take that comes in
+      late from an earlier client still counts, since its page is already open, and then the
+      later one is withdrawn instead.
+    - Handoff ids start from the wall clock in microseconds each run, so a restarted worker
+      never reuses one that a client still holds.
+    - Focus is the terminal's own focus report (`TermRequest::Focus`, DEC 1004). The session
+      actor folds its viewers' reports into one, and a reconnecting client starts focused on
+      nothing.
+  - **A page opens only on a person's say; otherwise it is offered.** Any process running as
+    the user can reach the control socket, and so can any program in any session, so a
+    worker must not be able to drive the person's browser. A page opens without asking only
+    when all of these hold:
+    - the client asked typed into that session within `TYPED_RECENTLY` = 8 s. The Enter that
+      starts a login comes a moment before its page, and a login that starts a runtime first
+      (`az`, `gcloud`) takes a few seconds more;
+    - the address is not one to be wary of;
+    - fewer than 3 pages opened that way in the last 10 s.
+
+    Otherwise the page goes out with `offer: Some(reason)`. The client shows a notice naming
+    the host, answers `Offered { why }`, and the CLI prints where it was offered.
+    - Addresses to be wary of (`handoff::Wary`) are always offered, whoever typed:
+      - a name or password before the host (userinfo);
+      - an internationalised name, shown in its `xn--` form;
+      - loopback (`localhost`, `127/8`, `::1`, `0.0.0.0`). On the client that is the client's
+        own machine;
+      - private ranges: `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7` and
+        `.ts.net`;
+      - link-local: `169.254/16` and `fe80::/10`;
+      - local names: a single label, `.local`, `.lan`, `.home.arpa` and `.internal`.
+    - Both ends parse the address with the `url` crate (WHATWG, as a browser does), and what
+      is opened is that parse's serialisation. So `https://evil.com\@github.com` has host
+      `evil.com`, and it opens as `https://evil.com/@github.com`, so the host shown is the
+      host visited. Anything but `http`/`https` with a host, over 8 KiB, or holding whitespace
+      or a control character (which a browser would silently drop) is refused. The client
+      also offers rather than opens a page that reached it more than `LATE_AFTER` = 2 s after
+      it was asked, since by then the worker may be about to withdraw it.
+  - **The editor waits for the tile, and the save lands where the program reads it.**
+    `slopty edit --wait [+line] <file>` sends `CtlRequest::Edit` and keeps its socket open. A
+    client that takes it shows the file beside the session's tile. The worker answers when the
+    person is done: `Edited { Done }` exits 0, and `Edited { Cancelled }` exits 1, which makes
+    `git commit` stop.
+    - A file a waiting edit shows is saved **in place**: written over from the start, cut to
+      length and fsynced, keeping its inode, mode, owner and xattrs (`file::Rewrite::InPlace`).
+      BSD `crontab -e` and `visudo` read the edited file back through the descriptor they
+      opened before the editor ran. The usual temp-and-rename save left that descriptor on the
+      old contents, and the edit was silently lost. Other saves still replace atomically.
+    - The client's `Edited` goes through the connection's save queue behind its `WriteFile`s.
+      That queue now outlives the connection, so an edit ended just as the client drops still
+      lets the program go.
+    - A client that drops has `LOST_AFTER` = 5 min to come back, and is asked again under the
+      same id. After that the CLI hears `Lost` (exit 1). Closing the CLI withdraws the edit.
+      An edit that ends while its client is away is withdrawn when the client returns.
+  - **Fallbacks run here, at once.** With no worker, or `Nobody`, a page goes to the system's
+    opener: the first `open` on `PATH` that is not ours, else `/usr/bin/open`. A file goes to
+    `vi` with the same arguments, the editor git itself falls back to. Both are exec'd, so
+    their exit status is the program's. A page opened on a client is never also opened here:
+    when the worker stops answering partway through a list of URLs, only the ones not yet
+    handed over fall back.
+  - Tests:
+    - `slopty-proto`:
+      - `handoff::tests::only_web_addresses_with_a_host_are_openable`.
+      - `the_host_is_the_one_a_browser_visits_and_tricky_ones_are_marked`: backslash and
+        userinfo tricks, IDN, hex, octal and decimal IPv4, mapped IPv6, the private and local
+        classes.
+      - Goldens: `worker_handoff_*`, `client_handoff_{taken,offered,refused,edited,caps}`,
+        `ctl_request_{open,edit,wake}`, `ctl_reply_handoff` (every `Handed` and `NoClient`)
+        and `ctl_reply_wake`.
+    - `slopty-worker` `handoff::tests`:
+      - routing order;
+      - `only_a_client_that_takes_it_is_asked`;
+      - `a_page_opens_only_right_after_its_client_typed` (typing window, wary addresses,
+        burst limit);
+      - `a_late_answer_counts_and_the_others_are_withdrawn`;
+      - the re-ask after a reconnect;
+      - `an_edit_ended_while_its_client_was_away_is_withdrawn_on_return`;
+      - `a_new_run_numbers_past_the_last`;
+      - presence, rejoin and `a_gone_session_is_forgotten`.
+    - `slopty-worker` `file::tests::a_save_in_place_reaches_a_descriptor_held_open`. It also
+      shows that a replacing save does not reach a held descriptor.
+    - `slopty-pty`:
+      - `every_session_gets_the_handoff_commands`;
+      - `the_handoff_commands_live_where_no_space_splits_them` (including a planted directory
+        and a link);
+      - `the_handoff_commands_come_first_and_yield_to_the_users_editor`: zsh, bash and fish,
+        with no rc, an rc exporting `EDITOR=nvim`, and one exporting `VISUAL=nvim`.
+    - `slopty-client` `handoff::tests`.
+    - `slopty-cli` `tests/handoff.rs`: `open_steps_aside_for_what_is_not_a_web_page`,
+      `with_no_worker_the_systems_own_take_over` and `the_systems_exit_status_comes_through`.
+    - `slopty-workerd` `tests/handoff.rs` (real ptyd, worker and clients):
+      - `a_page_opens_on_the_client_that_just_typed`
+      - `a_page_nobody_typed_for_is_offered`
+      - `a_silent_or_refusing_client_is_passed_over`
+      - `with_no_client_to_take_it_a_page_opens_here_at_once`
+      - `an_editor_waits_for_the_tile_and_the_program_reads_the_save`: a `sh` that holds the
+        file open like `crontab` reads the save through its descriptor and by name.
+      - `an_edit_ended_as_the_client_leaves_still_lets_the_program_go`: failed 3 of 3 runs
+        with the old save task.
+      - `an_editor_given_up_withdraws_the_edit`
+      - `an_editor_with_no_client_to_show_it_is_vi_here`
+  - **Pending, UI side** (`.research/ui-followups-worker-wave.md`): declaring the caps; the
+    open, offer and edit handling; focus reports; the file card's "edit" pill.

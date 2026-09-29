@@ -12,8 +12,8 @@
 //! - `proptest`: the property tests at `PROPTEST_CASES` cases each;
 //! - `gpui-iterations`: `slopty-ui`'s tests with `ITERATIONS`, so every `#[gpui::test]` runs under
 //!   that many scheduler seeds (`SEED=<n>` replays a failure);
-//! - `miri`, `sanitize-address`, `sanitize-thread`, `coverage`, `features`, `fuzz`: `cargo xtask
-//!   deep` (`fuzz` runs every fuzz target for 30 s).
+//! - `miri`, `sanitize-address`, `sanitize-thread`, `sanitize-realtime`, `coverage`, `features`,
+//!   `fuzz`: `cargo xtask deep` (`fuzz` runs every fuzz target for 30 s).
 //!
 //! `cargo xtask nightly install` writes a `LaunchAgent` that runs it at 03:00, at background
 //! priority; `uninstall` removes it. Nothing here plays a sound or draws on the screen.
@@ -160,6 +160,7 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str) -> Vec<Check> {
         deep("miri", &["miri"], Some(Need::Nightly)),
         deep("sanitize-address", &["sanitize", "address"], Some(Need::Nightly)),
         deep("sanitize-thread", &["sanitize", "thread"], Some(Need::Nightly)),
+        deep("sanitize-realtime", &["sanitize", "realtime"], Some(Need::Nightly)),
         deep("coverage", &["coverage"], Some(Need::Tool("cargo-llvm-cov"))),
         deep("features", &["features"], Some(Need::Tool("cargo-hack"))),
         deep("fuzz", &["fuzz"], Some(Need::NightlyTool("cargo-fuzz"))),

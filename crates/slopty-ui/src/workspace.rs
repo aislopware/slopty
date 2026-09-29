@@ -33,6 +33,7 @@ mod browsers;
 mod commands;
 mod desktop;
 mod faces;
+mod facts;
 mod folders;
 mod inbox;
 mod marks;
@@ -135,9 +136,9 @@ enum Region {
 }
 
 /// One region of the workspace's chrome as a view of its own, so the frame can draw it
-/// cached. It holds nothing: it draws the workspace's region, and is drawn again only when
-/// notified, by the workspace changing ([`Chrome::notify`]) or by a clock of its own (an age,
-/// a turn's time, the frame time).
+/// cached. It holds nothing: it draws the workspace's region, which it reads and never writes
+/// ([`crate::draw`]), and is drawn again only when notified, by the workspace changing
+/// ([`Chrome::notify`]) or by a clock of its own (an age, a turn's time, the frame time).
 struct ChromeView {
     workspace: WeakEntity<WorkspaceView>,
     region: Region,
@@ -148,28 +149,39 @@ struct ChromeView {
 
 impl gpui::Render for ChromeView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        use gpui::IntoElement as _;
         #[cfg(test)]
         {
             self.renders = self.renders.saturating_add(1);
         }
         let region = self.region;
-        self.workspace
-            .update(cx, |workspace, cx| workspace.render_region(region, window, cx))
-            .unwrap_or_else(|_| gpui::Empty.into_any_element())
+        crate::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
+            workspace.render_region(region, window, cx)
+        })
     }
 }
 
-/// The strip, laid out and painted as a view of its own, from the element the workspace built
-/// for it this frame. What only moves the strip (a step of the layout's spring, a working
-/// mark's turn, a tile fading in) asks for a frame by notifying this view rather than the
-/// workspace, whose own notify is news of a change for the chrome and the titles.
-struct StripHost(Option<gpui::AnyElement>);
+/// The strip as a view of its own, built from the workspace, which it reads and never writes
+/// ([`crate::draw`]). What only moves the strip (a step of the layout's spring, a working mark's
+/// turn, a tile fading in, the pointer over a tile) builds this view alone: the workspace's own
+/// notify is news of a change for the chrome and the titles. What the strip drew is kept for it
+/// in [`strip::Drawn`].
+struct StripHost {
+    workspace: WeakEntity<WorkspaceView>,
+    /// How many times it has built: the proof that a frame of motion builds it alone.
+    #[cfg(test)]
+    builds: usize,
+}
 
 impl gpui::Render for StripHost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        use gpui::IntoElement as _;
-        self.0.take().unwrap_or_else(|| gpui::Empty.into_any_element())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        #[cfg(test)]
+        {
+            self.builds = self.builds.saturating_add(1);
+        }
+        let host = cx.entity_id();
+        crate::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
+            workspace.render_strip(host, window, cx)
+        })
     }
 }
 
@@ -518,6 +530,9 @@ pub struct WorkspaceView {
     layout: Layout,
     /// The layout's clock starts here.
     epoch: Instant,
+    /// The layout's clock held at a time, for tests that compare two frames drawn at one instant.
+    #[cfg(test)]
+    held_clock: Option<Duration>,
     /// Whether moves animate. Off under the self-test, where a frame is a step.
     animate: bool,
     workers: BTreeMap<WorkerKey, Worker>,
@@ -536,8 +551,6 @@ pub struct WorkspaceView {
     browser_links: HashMap<ItemId, std::sync::Weak<dyn slopty_client::remote::Remote>>,
     /// The app draws a dialog over the workspace: a page's native view must hide under it.
     covered: bool,
-    /// Bumped every time the workspace draws, so a browser tile knows whether it was drawn.
-    frames_drawn: u64,
     /// Where the toast was drawn, and in which frame: pages stop above it.
     toast_drawn: crate::browser::Drawn,
     /// The line a file tile opened at, for a view not made yet.
@@ -565,26 +578,21 @@ pub struct WorkspaceView {
     titles_dirty: bool,
     /// Each note's title and task count, worked out when its text changes.
     note_facts: HashMap<ItemId, tile::NoteFacts>,
-    /// The active workspace's strip as this frame lays it out: where the strip's thumb sits.
-    drawn_strip: slopty_client::layout::Strip,
-    /// Whether the strip's thumb shows ([`marks`]), the pointer is near the strip's bottom
-    /// edge, the timer that takes the thumb down, and the generation of its fade.
-    marks: marks::Marks,
-    marks_near: bool,
-    marks_timer: Option<Task<()>>,
-    marks_gen: u64,
+    /// What the strip drew, for the handlers to read ([`strip::Drawn`]).
+    drawn: Rc<strip::Drawn>,
     /// The navigator, the title bar and the status bar, each a view of its own.
     chrome: Chrome,
     /// The strip, a view of its own so its motion is not news.
     strip_host: Entity<StripHost>,
-    /// The workspace changed since the last frame, so the chrome draws in this one anyway.
-    chrome_due: bool,
+    /// The workspace changed since the strip last built, so the chrome draws in the frame the
+    /// strip builds in anyway. The strip, which a change always builds, takes it.
+    chrome_due: std::cell::Cell<bool>,
     /// How many changes the workspace took and how many times the titles were worked out: the
     /// proof that a frame of motion is neither.
     #[cfg(test)]
     counts: (usize, usize),
-    /// The command each shell runs, as its navigator row last said: a change draws it again.
-    running: HashMap<SessionId, Option<String>>,
+    /// What the strip and the chrome show of the shells, streams and faces ([`facts`]).
+    facts: facts::Facts,
     /// Holds the working marks' steps while a typed key waits for its echo.
     _keys: Subscription,
     /// Window titles the picker or a listing gave (the registry stores ids).
@@ -613,8 +621,6 @@ pub struct WorkspaceView {
     stream_grace: Duration,
     /// Remote tiles whose streams were let go for being off screen.
     parked: std::collections::HashSet<ItemId>,
-    /// Tiles on screen in the frame last drawn: what the status bar need not count again.
-    on_screen: std::collections::HashSet<ItemId>,
     picker: Option<(WorkerKey, Entity<WindowPicker>)>,
     palette: Option<Entity<CommandPalette>>,
     /// A dismissed palette still drawing its way out, dropped once that has played.
@@ -667,19 +673,9 @@ pub struct WorkspaceView {
     drag: Option<strip::Drag>,
     /// A trackpad or touch gesture in progress over the strip.
     gesture: strip::Gesture,
-    /// Where each drawn tile was last frame, in window coordinates.
-    placed: Vec<(TileRef, Bounds<Pixels>)>,
-    /// The strip's bounds in the window, as of the last frame.
-    viewport: Bounds<Pixels>,
     /// How much narrower than the window the workspace was laid out in the last frame: none,
     /// unless the app gives it less (an iPad's Split View, as the self-test sets it).
     width_inset: f32,
-    /// The tile focused when the tiles were last drawn.
-    drawn_focus: Option<TileRef>,
-    /// What had the keyboard when the tiles were last drawn.
-    drawn_keys: Option<FocusHandle>,
-    /// The zoom the tiles were last drawn at (the overview's).
-    drawn_zoom: f32,
     /// A timer is out to park the streams of remote tiles off screen.
     park_pending: bool,
     /// A terminal to focus on the next frame.
@@ -780,6 +776,8 @@ impl WorkspaceView {
             theme,
             layout,
             epoch: Instant::now(),
+            #[cfg(test)]
+            held_clock: None,
             animate: true,
             workers: BTreeMap::new(),
             terminals: HashMap::new(),
@@ -791,7 +789,6 @@ impl WorkspaceView {
             browsers: HashMap::new(),
             browser_links: HashMap::new(),
             covered: false,
-            frames_drawn: 0,
             toast_drawn: Rc::default(),
             file_focus: HashMap::new(),
             items_dirty: true,
@@ -802,17 +799,20 @@ impl WorkspaceView {
             places: HashMap::new(),
             titles_dirty: true,
             note_facts: HashMap::new(),
-            drawn_strip: slopty_client::layout::Strip::default(),
-            marks: marks::Marks::default(),
-            marks_near: false,
-            marks_timer: None,
-            marks_gen: 0,
+            drawn: Rc::default(),
             chrome: Chrome::new(cx),
-            strip_host: gpui::AppContext::new(cx, |_| StripHost(None)),
-            chrome_due: true,
+            strip_host: {
+                let workspace = cx.weak_entity();
+                gpui::AppContext::new(cx, |_| StripHost {
+                    workspace,
+                    #[cfg(test)]
+                    builds: 0,
+                })
+            },
+            chrome_due: std::cell::Cell::new(true),
             #[cfg(test)]
             counts: (0, 0),
-            running: HashMap::new(),
+            facts: facts::Facts::default(),
             _keys: keys,
             titles: HashMap::new(),
             agents: HashMap::new(),
@@ -826,7 +826,6 @@ impl WorkspaceView {
             unseen: HashMap::new(),
             stream_grace: STREAM_GRACE,
             parked: std::collections::HashSet::new(),
-            on_screen: std::collections::HashSet::new(),
             picker: None,
             palette: None,
             palette_leaving: None,
@@ -860,12 +859,7 @@ impl WorkspaceView {
             closed_seq: 0,
             drag: None,
             gesture: strip::Gesture::default(),
-            placed: Vec::new(),
-            viewport: Bounds::default(),
             width_inset: 0.0,
-            drawn_focus: None,
-            drawn_keys: None,
-            drawn_zoom: 1.0,
             park_pending: false,
             pending_focus: None,
             faces: faces::Faces::default(),
@@ -956,7 +950,7 @@ impl WorkspaceView {
     /// Where a tile was drawn last frame, in window points.
     #[must_use]
     pub fn tile_bounds(&self, tile: TileRef) -> Option<Bounds<Pixels>> {
-        self.placed.iter().find(|(t, _)| *t == tile).map(|(_, b)| *b)
+        self.drawn.placed.borrow().iter().find(|(t, _)| *t == tile).map(|(_, b)| *b)
     }
 
     /// Number of items across every worker.
@@ -1044,6 +1038,12 @@ impl WorkspaceView {
         self.layout.set_animate(on && !reduced_motion());
     }
 
+    /// The system's Reduce Motion setting changed: the springs, and every view, follow it.
+    pub fn motion_setting_changed(&mut self, cx: &mut Context<Self>) {
+        self.set_animation(self.animate);
+        cx.notify();
+    }
+
     /// Whether the app shows its key bar under the workspace. While it does, the status bar
     /// steps aside, so the keys sit on the content rather than a row of readouts above them.
     pub fn set_key_bar_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
@@ -1054,8 +1054,23 @@ impl WorkspaceView {
     }
 
     /// Whether a keyboard is attached, so the palette prints chords that can be pressed.
-    pub const fn set_hardware_keyboard(&mut self, attached: bool) {
-        self.hardware_keyboard = attached;
+    pub fn set_hardware_keyboard(&mut self, attached: bool, cx: &mut Context<Self>) {
+        if self.hardware_keyboard != attached {
+            self.hardware_keyboard = attached;
+            cx.notify();
+        }
+    }
+
+    /// Whether the app draws a dialog over the workspace ([`Self::set_covered`]).
+    #[must_use]
+    pub const fn covered(&self) -> bool {
+        self.covered
+    }
+
+    /// Whether the app shows its key bar under the workspace ([`Self::set_key_bar_shown`]).
+    #[must_use]
+    pub const fn key_bar_shown(&self) -> bool {
+        self.key_bar_shown
     }
 
     /// Lines the app adds to the palette after the workspace's own (settings, workers).
@@ -1121,7 +1136,22 @@ impl WorkspaceView {
 
     /// The layout's clock, advanced to now.
     fn tick(&mut self) {
-        self.layout.set_clock(self.epoch.elapsed());
+        self.layout.set_clock(self.now());
+    }
+
+    /// The time on the layout's clock.
+    fn now(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(held) = self.held_clock {
+            return held;
+        }
+        self.epoch.elapsed()
+    }
+
+    /// Hold the layout's clock at `at` since the workspace was made, or let it run (`None`).
+    #[cfg(test)]
+    pub(crate) const fn hold_clock(&mut self, at: Option<Duration>) {
+        self.held_clock = at;
     }
 
     /// Something in the layout may have changed: save it once things settle.
@@ -1230,10 +1260,10 @@ impl WorkspaceView {
 
     /// Draw one region of the chrome, for its view.
     fn render_region(
-        &mut self,
+        &self,
         region: Region,
         window: &Window,
-        cx: &Context<Self>,
+        cx: &crate::draw::Draw<'_, Self>,
     ) -> gpui::AnyElement {
         match region {
             Region::Navigator => self.render_navigator_region(window, cx),
@@ -1253,24 +1283,19 @@ impl WorkspaceView {
         }
         self.titles_dirty = true;
         self.faces_dirty = true;
+        self.prune_facts();
         self.drawn_waiting = self.needs_you();
         self.sync_clipboard_watch();
         self.sync_approvals(cx);
         self.chrome.notify(cx);
-        self.chrome_due = true;
-    }
-
-    /// Another frame of the strip's motion, which is no news for the chrome or the titles.
-    fn next_frame(&self, window: &Window) {
-        let host = self.strip_host.entity_id();
-        window.on_next_frame(move |_window, cx| cx.notify(host));
+        self.chrome_due.set(true);
     }
 
     /// Draw `region` again in the next frame: what it shows moved with the strip. Not in this
     /// one: a notify while drawing reaches a cached view only in the frame after. Nothing when
     /// the chrome draws in this frame anyway.
     fn chrome_next_frame(&self, region: Region, window: &Window) {
-        if self.chrome_due {
+        if self.chrome_due.get() {
             return;
         }
         let view = match region {
@@ -1314,7 +1339,6 @@ impl WorkspaceView {
             ("derived", self.derived.len()),
             ("places", self.places.len()),
             ("note_facts", self.note_facts.len()),
-            ("running", self.running.len()),
             ("titles", self.titles.len()),
             ("agents", self.agents.len()),
             ("server_agents", self.server_agents.len()),
@@ -1322,13 +1346,14 @@ impl WorkspaceView {
             ("recency", self.recency.len()),
             ("unseen", self.unseen.len()),
             ("parked", self.parked.len()),
-            ("on_screen", self.on_screen.len()),
+            ("on_screen", self.drawn.on_screen.borrow().len()),
             ("find_hits", self.find_hits.len()),
             ("palette_extra", self.palette_extra.len()),
             ("more_entries", self.more_entries.len()),
             ("closed", self.closed.len()),
-            ("placed", self.placed.len()),
+            ("placed", self.drawn.placed.borrow().len()),
             ("given_shell", self.given_shell.len()),
+            ("handed", self.drawn.handed.borrow().len()),
             ("given_pending", self.given_pending.len()),
             ("watching", self.watching.len()),
             ("uploads", self.uploads.len()),
@@ -1341,35 +1366,50 @@ impl WorkspaceView {
             ("faces.subscriptions", self.faces.subscriptions.len()),
             ("faces.held", self.faces.held.len()),
         ]
+        .into_iter()
+        .chain(self.facts.lens())
+        .collect()
     }
 
-    /// A shell's running command, as its terminal now has it, against what its navigator row
-    /// last said: a change (a command started or ended) draws the navigator again. Everything
-    /// else a terminal changes is its own.
+    /// A shell changed, and its facts are copied again ([`facts::ShellFacts`]). Most of what a
+    /// shell changes (its grid, its cursor) is its own; the rest is news only for what shows it.
+    /// A command that starts or ends retitles the shell and renumbers its twins at once, for its
+    /// navigator row and its header; a title its program sets is the chrome's news when the
+    /// tile's title follows it; how the last command ended marks the tile, its row and its tab;
+    /// who sizes the PTY is its header's.
     fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
-        let Some(view) = self.terminals.get(&session) else { return };
-        let now = view.read(cx).state().running_command();
-        let was = self.running.get(&session).and_then(Option::as_deref);
-        if now != was {
-            let started = now.is_some();
-            self.running.insert(session, now.map(str::to_owned));
-            // A running command is its shell's title.
-            self.titles_dirty = true;
-            App::notify(cx, self.chrome.navigator.entity_id());
-            // Still running at the threshold, the tile and its row say so; from then on the
-            // calm mark and the navigator's tick keep the time.
-            if started {
+        let Some((was, now)) = self.copy_shell(session, cx) else { return };
+        let (navigator, strip) = (self.chrome.navigator.entity_id(), self.strip_host.entity_id());
+        if was.running != now.running {
+            self.number_twins(cx);
+            App::notify(cx, navigator);
+            App::notify(cx, strip);
+            // Still running at the threshold, the tile and its row say so: the readouts' clock
+            // moves then, as well as each second ([`Self::keep_time`]).
+            if now.running.is_some() {
+                self.keep_time(cx);
                 let after = self.running_after;
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(after).await;
                     let _gone = this.update(cx, |this, cx| {
-                        if this.running.get(&session).is_some_and(Option::is_some) {
+                        if this.shell(session).is_some_and(|s| s.running.is_some()) {
+                            this.tick_readouts(cx);
                             cx.notify();
                         }
                     });
                 })
                 .detach();
             }
+        } else if was.last != now.last {
+            App::notify(cx, navigator);
+        }
+        if was.title != now.title {
+            self.retitled(session, cx);
+        }
+        if (was.exit, was.failure_in_view) != (now.exit, now.failure_in_view) {
+            cx.notify();
+        } else if was.driving != now.driving {
+            App::notify(cx, strip);
         }
     }
 }
@@ -1396,7 +1436,20 @@ impl WorkspaceView {
     }
 
     /// Focus asked for since the last frame, now that there is a window to give it in.
+    ///
+    /// A focus change draws every view again, but not one made while the window draws, as this
+    /// is: a view drawn from the last frame would keep the old focus (a field without its
+    /// caret). So when the focus moved, every view is drawn again once this frame is done.
     fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let before = window.focused(cx);
+        self.give_pending_focus(window, cx);
+        if window.focused(cx) != before {
+            window.defer(cx, |window, _cx| window.refresh());
+        }
+    }
+
+    /// [`Self::apply_pending_focus`]'s work.
+    fn give_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.pending_focus.take() {
             // A tile showing its conversation takes the keyboard in its composer.
             if let Some(face) = self.faces.views.get(&session).filter(|_| self.face_shown(session))
@@ -1429,7 +1482,10 @@ impl WorkspaceView {
             let handle = picker.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
-        if std::mem::take(&mut self.pending_focus_self) {
+        // A page's next dialog may have taken the keyboard since its last one gave it back.
+        if std::mem::take(&mut self.pending_focus_self)
+            && !self.browsers.values().any(|b| b.read(cx).dialog_has_keyboard(window, cx))
+        {
             window.focus(&self.focus, cx);
         }
         if std::mem::take(&mut self.pending_focus_palette)
@@ -1498,14 +1554,16 @@ impl gpui::Render for WorkspaceView {
             self.reconcile_notes_and_files(window, cx);
             self.reconcile_browsers(cx);
         }
-        self.frames_drawn = self.frames_drawn.wrapping_add(1);
         if std::mem::take(&mut self.faces_dirty) {
             self.sync_faces(window, cx);
         }
         self.apply_pending_focus(window, cx);
-        // One clock and one frame for everything this frame draws: the bar's column marks and
-        // the strip agree.
-        let frame = self.frame_at_clock(window);
+        // One clock for everything this frame draws: the bar's column marks and the strip,
+        // which the strip's own view builds from the layout as it stands now.
+        if self.advance(window) {
+            Self::motion_frame(cx.weak_entity(), self.strip_host.entity_id(), window);
+        }
+        let frame = self.layout.frame();
         self.follow_sized_displays(&frame, window, cx);
         self.arm_system_keys(window, cx);
         if std::mem::take(&mut self.titles_dirty) {
@@ -1515,24 +1573,13 @@ impl gpui::Render for WorkspaceView {
                 self.counts.1 = self.counts.1.saturating_add(1);
             }
         }
-        if self.drawn_strip != frame.strip {
-            let scrolled = (frame.strip.view.0 - self.drawn_strip.view.0).abs() > f32::EPSILON;
-            self.drawn_strip.clone_from(&frame.strip);
-            // Not under the self-test, whose frames are still pictures of where things land.
-            if scrolled && self.animate && marks::thumb(&frame.strip).is_some() {
-                self.strip_scrolled(cx);
-            }
-        }
         // First: a docked navigator narrows the title bar and the strip.
         self.place_navigator(window);
         if self.nav.drawn.is_some() {
             self.ensure_navigator_filter(window, cx);
         }
-        let strip = self.render_strip(&frame, window, cx);
-        self.strip_host.update(cx, |host, _| host.0 = Some(strip));
-        self.chrome_due = false;
+        self.serve_browsers(cx);
         let strip = gpui::IntoElement::into_any_element(self.strip_host.clone());
-        let toast = self.render_toast(cx);
         let menu = self.render_menu(window, cx);
         let picker = self.picker.as_ref().map(|(_, p)| p.clone());
         let palette = self.palette.clone().or_else(|| self.palette_leaving.clone());
@@ -1591,7 +1638,8 @@ impl gpui::Render for WorkspaceView {
             // without a change and the workspace has the keyboard.
             .capture_action(cx.listener(
                 |this, _: &gpui_kit::component::input::Escape, _window, cx| {
-                    if this.rename.is_some() {
+                    // Unless an input method composes in it: its Esc cancels the word.
+                    if this.rename.as_ref().is_some_and(|r| !r.input.read(cx).is_composing()) {
                         this.finish_rename(false, true, cx);
                         cx.stop_propagation();
                     }
@@ -1607,12 +1655,11 @@ impl gpui::Render for WorkspaceView {
             }))
             .on_action(cx.listener(Self::toggle_navigator))
             .child(Self::measure_width(cx))
-            .child(self.render_frame(strip, toast, window, cx))
+            .child(self.render_frame(strip, window, cx))
             .children(menu)
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
             .children(self.search_drawn())
-            .child(Self::browser_sync(cx))
     }
 }
 
@@ -1625,24 +1672,23 @@ impl WorkspaceView {
     }
 
     /// Takes how much of the window's width the workspace was laid out in; a change draws one
-    /// more frame at the new width, as the strip's own measure does.
+    /// more frame at the new width, as the strip's own measure does. Read while the window
+    /// draws, and written only once it is done, and only when it changed: a write while it
+    /// draws would build every view that read the workspace again.
     fn measure_width(cx: &Context<Self>) -> gpui::AnyElement {
         use gpui::{IntoElement as _, Styled as _};
         let entity = cx.entity();
         gpui::canvas(
             move |bounds, window, cx| {
                 let inset = f32::from(window.viewport_size().width - bounds.size.width);
-                entity.update(cx, |this, cx| {
-                    if (this.width_inset - inset).abs() > f32::EPSILON {
-                        this.width_inset = inset;
-                        let this = cx.weak_entity();
-                        cx.defer(move |cx| {
-                            if let Some(this) = this.upgrade() {
-                                this.update(cx, |_, cx| cx.notify());
-                            }
+                if (entity.read(cx).width_inset - inset).abs() > f32::EPSILON {
+                    cx.defer(move |cx| {
+                        entity.update(cx, |this, cx| {
+                            this.width_inset = inset;
+                            cx.notify();
                         });
-                    }
-                });
+                    });
+                }
             },
             |_bounds, (), _window, _cx| {},
         )
@@ -1658,7 +1704,6 @@ impl WorkspaceView {
     fn render_frame(
         &self,
         strip: gpui::AnyElement,
-        toast: Option<gpui::AnyElement>,
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
@@ -1693,15 +1738,7 @@ impl WorkspaceView {
         };
         let middle =
             gpui::div().relative().flex_1().min_h_0().w_full().flex().children(rail).child(
-                gpui::div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(strip)
-                    .children(toast),
+                gpui::div().relative().flex_1().min_w_0().h_full().flex().flex_col().child(strip),
             );
         gpui::div()
             .relative()

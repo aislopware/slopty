@@ -17,6 +17,12 @@
 # Written by slopty-ptyd on every start; edits here are lost. Opt out with
 # SLOPTY_NO_SHELL_INTEGRATION=1.
 
+# A tmux pane is no Slopty tile: its server may have started in another session, whose
+# presence file (held while a client looks at that tile) would silence this pane's agents.
+if set -q TMUX
+    set -e CLAUDE_CLIENT_PRESENCE_FILE
+end
+
 if status is-interactive; and not set -q __slopty_integrated
     set -g __slopty_integrated 1
 end
@@ -63,6 +69,16 @@ if status is-interactive; and test "$__slopty_integrated" = 1
     function __slopty_redraw --on-event fish_prompt
         functions -e __slopty_redraw
         printf '\e]133;A;redraw=1\a'
+    end
+end
+
+# Slopty's `open`, BROWSER and EDITOR first on the path (SLOPTY_BIN) before each prompt: the
+# user's config may have put the system's `open` ahead of it.
+if status is-interactive; and set -q SLOPTY_BIN
+    function __slopty_path --on-event fish_prompt
+        if test "$PATH[1]" != "$SLOPTY_BIN"
+            set -gx PATH $SLOPTY_BIN (string match -v -- $SLOPTY_BIN $PATH)
+        end
     end
 end
 

@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use slopty_core::shell_quote;
+use slopty_proto::agent::{PullRequest, Review, Worktree};
 
 use crate::{Hook, HookEvent};
 
@@ -53,6 +54,40 @@ pub fn meters(status: &Value) -> Meters {
     }
 }
 
+/// The open pull request (or GitLab merge request) in a status-line input: `pr`, present
+/// only while one is open, whose `review_state` and `kind` may each be absent.
+#[must_use]
+pub fn pull_request(status: &Value) -> Option<PullRequest> {
+    let pr = status.get("pr")?;
+    Some(PullRequest {
+        number: u32::try_from(pr.get("number")?.as_u64()?).ok()?,
+        url: pr.get("url")?.as_str()?.to_owned(),
+        review: match pr.get("review_state").and_then(Value::as_str) {
+            Some("approved") => Some(Review::Approved),
+            Some("pending") => Some(Review::Pending),
+            Some("changes_requested") => Some(Review::ChangesRequested),
+            Some("draft") => Some(Review::Draft),
+            _ => None,
+        },
+        merge_request: pr.get("kind").and_then(Value::as_str) == Some("mr"),
+    })
+}
+
+/// The worktree a `--worktree` session runs in: `worktree`, whose branches are absent for a
+/// worktree a hook made rather than git.
+#[must_use]
+pub fn worktree(status: &Value) -> Option<Worktree> {
+    let tree = status.get("worktree")?;
+    let text = |key: &str| tree.get(key).and_then(Value::as_str).map(str::to_owned);
+    Some(Worktree {
+        name: text("name")?,
+        path: text("path")?,
+        branch: text("branch"),
+        original_cwd: text("original_cwd").unwrap_or_default(),
+        original_branch: text("original_branch"),
+    })
+}
+
 /// The hook the wrapper forwards for one status-line input.
 #[must_use]
 pub fn hook(status: &Value) -> Hook {
@@ -63,6 +98,8 @@ pub fn hook(status: &Value) -> Hook {
         transcript_path: text("/transcript_path"),
         cwd: text("/workspace/current_dir").or_else(|| text("/cwd")),
         meters: Some(meters(status)),
+        pr: pull_request(status),
+        worktree: worktree(status),
         ..Hook::default()
     }
 }
@@ -162,6 +199,51 @@ mod tests {
         );
         let early = json!({ "context_window": { "used_percentage": null }, "model": {} });
         assert_eq!(meters(&early), Meters::default());
+        assert_eq!((hook.pr, hook.worktree), (None, None), "no pull request, no worktree");
+    }
+
+    /// The documented `pr` and `worktree`, read into the chip's facts; a merge request, a
+    /// review state this build does not know, and a hook-made worktree without branches read
+    /// as what they have.
+    #[test]
+    fn the_pull_request_and_worktree_are_read_from_the_status_line_input() {
+        let status = json!({
+            "pr": { "number": 1234, "url": "https://github.com/o/r/pull/1234", "review_state": "changes_requested" },
+            "worktree": {
+                "name": "my-feature", "path": "/p/.claude/worktrees/my-feature",
+                "branch": "worktree-my-feature", "original_cwd": "/p", "original_branch": "main"
+            }
+        });
+        let hook = hook(&status);
+        assert_eq!(
+            hook.pr,
+            Some(PullRequest {
+                number: 1234,
+                url: "https://github.com/o/r/pull/1234".to_owned(),
+                review: Some(Review::ChangesRequested),
+                merge_request: false,
+            })
+        );
+        assert_eq!(
+            hook.worktree,
+            Some(Worktree {
+                name: "my-feature".to_owned(),
+                path: "/p/.claude/worktrees/my-feature".to_owned(),
+                branch: Some("worktree-my-feature".to_owned()),
+                original_cwd: "/p".to_owned(),
+                original_branch: Some("main".to_owned()),
+            })
+        );
+        let mr = json!({
+            "pr": { "number": 7, "url": "https://gitlab.com/o/r/-/merge_requests/7", "kind": "mr", "review_state": "merged-ish" },
+            "worktree": { "name": "w", "path": "/w", "original_cwd": "/p" }
+        });
+        let pr = pull_request(&mr).expect("a merge request");
+        assert!(pr.merge_request);
+        assert_eq!(pr.review, None);
+        let tree = worktree(&mr).expect("a worktree");
+        assert_eq!((tree.branch, tree.original_branch), (None, None));
+        assert_eq!(pull_request(&json!({ "pr": { "url": "https://x/1" } })), None, "no number");
     }
 
     /// The wrapper's command survives the shell, its own is recognised, and the person's

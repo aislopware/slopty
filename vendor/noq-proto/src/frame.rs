@@ -219,6 +219,18 @@ pub(super) enum EncodableFrame<'a> {
     StreamsBlocked(StreamsBlocked),
 }
 
+impl EncodableFrame<'_> {
+    /// The encoded size of an ACK or PATH_ACK frame, without encoding it; `None` for any other
+    /// frame.
+    pub(super) fn ack_size(&self) -> Option<usize> {
+        match self {
+            Self::Ack(ack) => Some(ack.size()),
+            Self::PathAck(ack) => Some(ack.size()),
+            _ => None,
+        }
+    }
+}
+
 impl<'a> EncodableFrame<'a> {
     /// Whether this is an ACK-eliciting frame.
     pub(crate) fn is_ack_eliciting(&self) -> bool {
@@ -1072,6 +1084,36 @@ impl<'a> PathAckEncoder<'a> {
             false => FrameType::PathAck,
         }
     }
+
+    /// The encoded size of this frame, without encoding it.
+    pub(crate) fn size(&self) -> usize {
+        self.get_type().size()
+            + VarInt(self.path_id.0.into()).size()
+            + ack_body_size(self.delay, self.ranges, self.ecn)
+    }
+}
+
+/// The encoded size of what follows an ACK or PATH_ACK frame's type and path: the largest
+/// acknowledged, the delay, the ranges and the ECN counts.
+fn ack_body_size(delay: u64, ranges: &ArrayRangeSet, ecn: Option<&EcnCounts>) -> usize {
+    let var = |x: u64| VarInt(x).size();
+    let mut rest = ranges.iter().rev();
+    let Some(first) = rest.next() else {
+        return 0;
+    };
+    let mut size = var(first.end - 1)
+        + var(delay)
+        + var(ranges.range_count() as u64 - 1)
+        + var(first.end - first.start - 1);
+    let mut prev = first.start;
+    for block in rest {
+        size += var(prev - block.end - 1) + var(block.end - block.start - 1);
+        prev = block.start;
+    }
+    if let Some(ecn) = ecn {
+        size += var(ecn.ect0) + var(ecn.ect1) + var(ecn.ce);
+    }
+    size
 }
 
 impl<'a> Encodable for PathAckEncoder<'a> {
@@ -1184,6 +1226,11 @@ impl<'a> AckEncoder<'a> {
             true => FrameType::AckEcn,
             false => FrameType::Ack,
         }
+    }
+
+    /// The encoded size of this frame, without encoding it.
+    pub(crate) fn size(&self) -> usize {
+        self.get_type().size() + ack_body_size(self.delay, self.ranges, self.ecn)
     }
 }
 

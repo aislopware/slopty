@@ -22,7 +22,12 @@
 //!
 //! Each tick also hands the worker the conversation each session holds
 //! (`AgentTable::resumable`), which it keeps so a reboot can resume it
-//! (`slopty_worker::restore`).
+//! (`slopty_worker::restore`), and tells the sleep policy how many agents are working with
+//! their terminals still printing (`slopty_worker::wake`).
+//!
+//! Once, shortly after the daemon starts, the agents it found already running (a worker
+//! restarted under its shells) get back what only hooks had said before the restart, from
+//! Claude Code's own list of its sessions (`slopty_agent::roster`, `AgentTable::recover`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -33,13 +38,20 @@ use slopty_agent::transcript::{Progress, Tail};
 use slopty_agent::{Discovery, Observation};
 use slopty_core::SessionId;
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::AgentEvent;
+use slopty_proto::agent::{AgentEvent, AgentStatus};
 use slopty_worker::session::Probe;
 
 use crate::Daemon;
 
 /// How often every session's foreground process and title are read.
 const TICK: Duration = Duration::from_millis(750);
+
+/// The tick after which the agents already running are recovered from Claude Code's own list:
+/// by then every session's foreground process has been read.
+const RECOVER_AT_TICK: u64 = 2;
+
+/// How long `claude agents --json` may take, login shell included.
+const ROSTER_WAIT: Duration = Duration::from_secs(10);
 
 /// Every how many ticks an agent whose transcript is already known is looked up again:
 /// `/clear` and `/resume` start a new file, and the tail has to move with it. Finding one for
@@ -51,6 +63,7 @@ pub async fn watch(daemon: Daemon) -> ! {
     let home = slopty_platform::dirs::home();
     let mut tails: HashMap<SessionId, Tail> = HashMap::new();
     let mut ticks: u64 = 0;
+    let mut quiet = slopty_worker::wake::Quiet::default();
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -61,6 +74,10 @@ pub async fn watch(daemon: Daemon) -> ! {
         let ids: Vec<SessionId> = live.iter().map(|(id, _probe)| *id).collect();
         let running: HashSet<SessionId> = ids.iter().copied().collect();
         tails.retain(|session, _tail| running.contains(session));
+        let unlooked = daemon.handoffs.lock().retain(&ids);
+        for session in unlooked {
+            let _sent = daemon.presence.send((session, false));
+        }
         {
             let mut agents = daemon.agents.lock();
             let mut events = Vec::new();
@@ -74,7 +91,11 @@ pub async fn watch(daemon: Daemon) -> ! {
             drop(agents);
         }
 
+        keep_awake(&daemon, &mut quiet).await;
         ticks = ticks.wrapping_add(1);
+        if ticks == RECOVER_AT_TICK && !daemon.agents.lock().sessions_with_agents().is_empty() {
+            tokio::spawn(recover(daemon.clone(), home.clone()));
+        }
         for (session, path) in
             discover(&daemon, &home, ticks.is_multiple_of(REDISCOVER_EVERY)).await
         {
@@ -93,6 +114,87 @@ pub async fn watch(daemon: Daemon) -> ! {
         }
         follow(&daemon, &mut tails).await;
     }
+}
+
+/// Tell the sleep policy how many agents are working (a turn, a tool, or background work out)
+/// that showed signs of work within its cap: their terminals printing, and for a paused turn
+/// the processor time of the commands it left running (read off the runtime's blocking pool).
+async fn keep_awake(daemon: &Daemon, quiet: &mut slopty_worker::wake::Quiet) {
+    let working: Vec<(AgentEvent, Option<i32>)> = {
+        let agents = daemon.agents.lock();
+        agents
+            .snapshot()
+            .into_iter()
+            .filter(|event| match event.status {
+                AgentStatus::Working | AgentStatus::Tool { .. } => true,
+                AgentStatus::Waiting { tasks, .. } => tasks > 0,
+                _ => false,
+            })
+            .map(|event| {
+                let pid = agents.pid(event.session);
+                (event, pid)
+            })
+            .collect()
+    };
+    let now_wall = slopty_core::WallMs::now();
+    let sampled = tokio::task::spawn_blocking(move || {
+        working
+            .into_iter()
+            .map(|(event, pid)| {
+                let paused = matches!(event.status, AgentStatus::Waiting { .. }).then(|| {
+                    let cpu = pid
+                        .and_then(|pid| u32::try_from(pid).ok())
+                        .map_or(0, slopty_worker::ports::descendants_cpu);
+                    (now_wall.since(event.since_ms), cpu)
+                });
+                (event.session, paused)
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    let signs: Vec<slopty_worker::wake::Signs> = sampled
+        .into_iter()
+        .filter_map(|(session, paused)| {
+            let output = daemon.worker.get(session).ok()?.activity().borrow().output;
+            Some(slopty_worker::wake::Signs { session, output, paused })
+        })
+        .collect();
+    let at_work = quiet.working(&signs, std::time::Instant::now());
+    daemon.wake.lock().agents(at_work);
+}
+
+/// Put back what only the hooks had said of the agents already running when the daemon
+/// started, from `claude agents --json`.
+async fn recover(daemon: Daemon, home: PathBuf) {
+    let Some(out) =
+        slopty_worker::caps::agent_output("claude", &slopty_agent::roster::ARGS, ROSTER_WAIT).await
+    else {
+        tracing::debug!("claude agents --json gave nothing; agents recover from their next hook");
+        return;
+    };
+    let listed = match slopty_agent::roster::parse(&String::from_utf8_lossy(&out)) {
+        Ok(listed) => listed,
+        Err(e) => {
+            tracing::warn!(error = %e, "claude agents --json did not read");
+            return;
+        }
+    };
+    let settings = slopty_agent::hooks::settings_path(&home);
+    let hooked = tokio::task::spawn_blocking(move || {
+        slopty_agent::hooks::registered(&settings).is_ok_and(|events| !events.is_empty())
+    })
+    .await
+    .unwrap_or(false);
+    let mut agents = daemon.agents.lock();
+    let events = agents.recover(&listed, hooked);
+    tracing::info!(
+        listed = listed.len(),
+        recovered = events.len(),
+        "agents recovered from Claude Code's list"
+    );
+    broadcast(&daemon, &agents, events);
+    drop(agents);
 }
 
 /// Send what the poll found, dropping anything a hook has already overtaken.

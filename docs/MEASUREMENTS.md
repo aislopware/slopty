@@ -9178,3 +9178,468 @@ to 145 ms. Not a candidate.
 
 Ruling: `docs/decisions/video.md`, "Two stripes halve the encode at 3K and above, and cost a
 scroll twice the bits".
+
+## 2026-09-29 — UI frames on gpui-fast, retention on and off
+
+Mac Studio M1 Max, macOS 27.0, the dev profile (optimized, with debuginfo), window 1280×800 at
+1×, other sessions building in the same checkout (load average 6–13 in every run). Draw is the
+frame-time probe's span in ms, p50 / p95 / p99 / max; each scenario runs 5 s. **(a)** twenty
+flooding shells, the strip stepping column to column; **(b)** the same, the overview in and
+out; **(j)** one shell typed into at 15 keys a second with nothing else on screen changing,
+each echo drawn.
+
+```sh
+cargo xtask e2e smooth --filter 'test(twenty_streaming_shells_scroll_the_strip) | test(typing_draws_only_the_echo)'
+GPUI_VIEW_RETENTION=0 cargo xtask e2e smooth --no-build --filter '<the same>'   # retention off
+```
+
+"Before" is the tree before the switch: the zed fork, the workspace rendering the strip and the
+chrome through its own `Context`. "After" is gpui-fast `6d80f2d` with the strip and the chrome
+built from a read of the workspace and the bodies' facts (`docs/ARCHITECTURE.md` §6, "Drawing
+under retention"); the retention-off row is the same binary with the fork's view retention
+turned off.
+
+| run | (a) strip | (b) overview | (j) echo |
+|---|---|---|---|
+| before, zed fork | 1.8 / 3.0 / 3.7 / 3.8 | 1.8 / 3.2 / 5.0 / 16.7, 1 dropped | 1.6 / 3.7 / 4.2 / 4.2 |
+| after, retention on | 1.1 / 2.1 / 2.3 / 2.3 | 1.3 / 3.0 / 4.0 / 18.4, 1 dropped | 0.3 / 0.4 / 0.5 / 0.5 |
+| after, retention on, again | 1.1 / 2.1 / 2.3 / 2.5 | 1.4 / 3.3 / 5.1 / 16.4 | 0.4 / 1.1 / 1.5 / 1.5 |
+| after, retention off | 1.3 / 3.1 / 5.6 / 6.5 | 1.6 / 3.7 / 5.6 / 17.3, 1 dropped | 0.4 / 0.5 / 0.7 / 0.7 |
+
+- The echo costs a fifth of what it did: p50 1.6 → 0.3–0.4 ms, p95 3.7 → 0.4–1.1 ms. Most of
+  that is not view retention, since the retention-off row keeps it too. It comes from the
+  fork's other changes and from what an echo frame now builds; these runs do not tell the two
+  apart.
+- Retention itself shows on the strip: with it on, a frame of motion builds the strip and
+  replays the chrome and every tile body it did not hand anything new. Retention off, p95 goes
+  from 2.1 to 3.1 ms and p99 from 2.3 to 5.6 ms.
+- The overview's single slow frame (16–18 ms, one per run, before and after, retention on or
+  off) was not looked into here.
+- Frames arrive every 16.6 ms in (a) and (b) and every 68–70 ms in (j) (one per key) in every
+  run: nothing draws that did not change, and nothing that changed waited.
+- `typing_is_timed_with_and_without_the_local_echo_on_the_mac` times out waiting for its
+  echoes, before and after alike: the window is not the key window when the run starts.
+
+Logs: `target/logs/frames-before-zed.log`, `target/logs/smooth-after-fast.log`,
+`target/logs/smooth-after-fast-ab.log`.
+
+**Frame CPU, headless, retention on and off** (2026-09-30, gpui-fast `d5216f9`, the same test
+binary, load average 15–23). The window is GPUI's test window, so a number is the main thread's
+work for one frame (build, layout, prepaint, paint into the scene) with no GPU and no display.
+Three runs each, alternated; p50 / p95 in ms. The overview's springs run on the workspace's
+clock, held and moved 16.7 ms a frame, so both modes draw the same 400 frames.
+
+```sh
+cargo test -p slopty-ui --lib --no-run      # target/debug/deps/slopty_ui-<hash>
+for r in 1 2 3; do for ret in 1 0; do GPUI_VIEW_RETENTION=$ret target/debug/deps/slopty_ui-<hash> \
+  --ignored --exact --nocapture --test-threads 1 \
+  workspace::tests::chrome::measure_an_echo_frame_beside_the_chrome \
+  workspace::tests::chrome::measure_a_frame_of_motion_beside_the_chrome; done; done
+```
+
+| frame | retention on | retention off |
+|---|---|---|
+| a neighbour's echo beside a focused 80 × 40 grid | 0.105 / 0.167, 0.105 / 0.210, 0.106 / 0.327 | 0.271 / 0.653, 0.276 / 0.543, 0.280 / 2.349 |
+| the workspace notified, 60 shells + 60 notes | 0.900 / 1.388, 0.925 / 1.695, 0.947 / 5.263 | 0.853 / 1.458, 0.888 / 1.461, 0.922 / 5.467 |
+| a frame of the overview's spring, the same crowd | 0.756 / 1.233, 0.886 / 1.956, 0.815 / 3.210 | 0.854 / 1.456, 0.872 / 1.500, 0.915 / 7.610 |
+
+- An echo frame costs 0.105 ms with retention against 0.27–0.28 ms without: the terminal that
+  echoed is built, and the focused grid beside it and the chrome are replayed.
+- A frame of the spring saves 0.03–0.1 ms at p50. The fork replays a view only where it was
+  drawn, so every tile the spring moves is built again at its new place; what retention keeps
+  is the chrome and the tiles off the strip's moving part.
+- The workspace's own notify is a wash (−0.05 to +0.07 ms): it builds the chrome and the strip
+  either way.
+- The two modes differ only in `GPUI_VIEW_RETENTION`. While the spring's measurement ran on
+  the wall clock, its retention-off run did not finish in 30 minutes under this load; with the
+  clock held both modes finish in under a second.
+
+Log: `target/logs/ui-retention-ab.log`.
+
+## 2026-09-30 — a keystroke's parse in the file tile
+
+Mac Studio M1 Max, macOS 27.0, load average 23–29 (other sessions building). The file tile's
+editor colours a 2 000-line Rust file (`workspace.rs` repeated); one character is typed on row
+1 000. Before, every pause in typing parsed the whole text again off the UI thread. Now each
+line keeps the parser's state it starts in, and a parse runs from the edited line down to the
+first line that starts in the state it started in before (`highlight::editor::reparse`). Three
+runs:
+
+```sh
+cargo test -p slopty-ui --lib --no-run
+target/debug/deps/slopty_ui-<hash> --ignored --nocapture --exact \
+  highlight::editor::tests::timing_of_a_keystrokes_parse highlight::editor::tests::timing_of_a_frame_and_a_keystroke
+```
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| the whole text parsed (before) | 184 ms | 179 ms | 212 ms |
+| the lines the edit reaches (1 row), lists copied and spliced | 0.31 ms | 0.81 ms | 0.28 ms |
+| the first parse, a state kept per line | 236 ms | 218 ms | 268 ms |
+| 60 rows styled for a frame | 43 µs | 43 µs | 44 µs |
+
+A keystroke's parse is 220–650× cheaper. The first parse pays 20–30 % more than a parse that
+keeps no states, once per file. It now starts as the text arrives: the editor hands a text set
+whole over as an edit too, so the first colours used to wait out the 60 ms typing pause.
+
+
+## 2026-09-30 — ghostty `0538f7535`
+
+The engine's `*_cost` series before and after moving libghostty-vt from ghostty `12752b2ac` to
+`0538f7535` (fork `d1a57e4` → `29bbc6a`), then after the prompt-mark scanner rewrite that the
+bump called for. Instructions per operation. mac-studio, release, libghostty-vt ReleaseFast,
+other sessions building, one run each except the scanner column (three runs, which agreed to
+within 12 instructions). The new `osc_write_cost` pushes output dense with OSCs (an `ls
+--hyperlink` of 40 names per command, a title and the four prompt marks per command) through
+the engine and through libghostty alone. It was added for this bump, and it has no budget
+until `cargo xtask bench --filter osc_write_cost --update-budgets` records one.
+
+```sh
+SLOPTY_BENCH_OUT=$PWD/target/bench/ghostty-0538-after.jsonl \
+  nice -n 10 cargo nextest run --release -p slopty-engine -p workspace-hack \
+  --run-ignored only -E 'test(/_cost$/)' --no-capture --no-fail-fast
+```
+
+| series | before | after the bump | after the scanner |
+| --- | --- | --- | --- |
+| checkpoint `fill_engine` | 32812730 | 32873519 | |
+| checkpoint `fill_raw_vt` | 27045924 | 27058352 | |
+| checkpoint `format` | 45491682 | 45582781 | |
+| checkpoint `replay_one_chunk` | 35257816 | 35300407 | |
+| `frame_cost.take_frame` | 34349 | 34347 | |
+| `scroll_frame_cost.200x60` | 5301887 | 5301863 | |
+| `fetch_lines_cost.4096_rows` | 124857051 | 125036983 | |
+| `search_cost.50000_lines.plain` | 101123221 | 101394370 | |
+| `encode_cost.full_200x60` | 1084247 | 1084247 | |
+| `osc_write_cost.per_osc_raw_vt` | 6872 | 6926 | 6932–6936 |
+| `osc_write_cost.per_osc` | 7222 | 7267 | 7222–7234 |
+| `osc_scan_cost.per_osc` | 172 | 171 | 113 |
+
+The bump moved every series by less than 0.4 %, except the OSC path through libghostty. That
+path grew by 54 instructions per OSC (0.8 %), which is the new unknown-OSC plumbing and the
+CAN/SUB check at the end of every OSC. It is too small to patch in the fork. The scanner now
+drops back to waiting for the next ESC as soon as an OSC cannot be a mark, where it used to
+skip that OSC to its terminator with `memchr2`. That cut the scan from 171 to 113 instructions
+per OSC (p50 19 → 15 ns). The engine's overhead over libghostty on OSC-dense output fell from
+341 to about 290 instructions per OSC. Ruling: `docs/decisions/terminal.md`, "The prompt-mark
+scanner reads OSCs as libghostty does".
+
+Logs: `target/logs/ghostty-0538-before.log`, `target/logs/ghostty-0538-after.log`,
+`target/logs/ghostty-0538-scanner.log`. Numbers: `target/bench/ghostty-0538-*.jsonl`.
+
+## 2026-09-30 — Clipboard v2: copy to offer, and the two pastes
+
+Mac Studio M1 Max, macOS 27.0, debug build, a worker and its client on loopback QUIC, a named
+pasteboard (never the general one), other sessions building in the same checkout. Targets from
+`.research/design-dragdrop-clipboard.md` §7.
+
+```sh
+cargo nextest run -p slopty-workerd --no-capture -E 'test(/reaches_a_watching|pbpaste_on_the_worker/)'
+cargo nextest run -p slopty-client --no-capture -E 'test(/fetched_ahead_and_pastes/)'
+cargo nextest run -p slopty-input --no-capture -E 'test(/unchanged_board/)'
+```
+
+| What | Result | Target |
+| --- | --- | --- |
+| Copy on the worker → offer at a watching client, 40 copies after one warm-up | p50 30.7 ms, p95 51.6 ms, max 52.7 ms (earlier runs of the day: p95 52–55, max 52–77) | p95 ≤ 50 ms poll + RTT/2 + 5 ms |
+| Paste on the worker of the focused client's 100 kB copy, not held there: a second process reads the promise, which fetches it from the client, urgent | 2.1–4.3 ms over four runs | ≤ RTT + size ÷ goodput + 10 ms |
+| Paste on the client of a 300 kB picture the client fetched ahead, 20 pastes | p50 5.75 µs, max 6 µs | ≤ 5 ms |
+| One look at an unchanged pasteboard (`changeCount`), mean of 2000 | 1.5–4.5 µs over three runs, 0.003–0.009 % of a core at 20 looks a second | < 0.1 % of a core |
+| Read of another process's 200 MB copy, capped at 1 MiB (the first read), then whole | capped 39–44 ms, whole 19–21 ms, over two runs | |
+
+- Copy to offer sits where a 50 ms poll puts it: a copy lands at a uniform point in the period,
+  so the median wait is half of it and the worst is the whole of it, plus a few milliseconds
+  of read and send. The first copy on a cold pasteboard took about 1 s once; the test warms up
+  before sampling, and that first read is not in the table.
+- The lazy paste is the whole round trip a real app's paste makes on the worker: the reader's
+  `dataForType:` to the pasteboard server, the server to the worker's data provider, an urgent
+  `Fetch` to the client, the answer inline, and back.
+- The look's cost is the calling thread's wall time, which bounds its CPU. The pasteboard
+  server's share of a look and the poller's timer wake are not in it.
+- The capped read (`a_capped_read_of_a_big_copy_copies_nothing`, `cargo nextest run -p
+  slopty-input --no-capture -E 'test(/big_copy_copies_nothing/)'`) shows `dataForType:` brings
+  the bytes over from the pasteboard server whatever is done with them: the first read of the
+  copy, capped, took twice the second, whole one. So the cap saves the copy into this process
+  and keeping it, not the transfer, which is why a poll reads no type but text and file URLs.
+- After the review fixes of 2026-09-30 (the worker's board holding a copy from before it
+  started, the client's copy 30 s old): copy to offer p50 30.0 ms, p95 51.1 ms, max 52.6 ms;
+  the lazy paste 2.7 ms.
+
+## 2026-09-30 — target/ under a budget; a test binary's directory, not the volume
+
+Mac Studio M1 Max, macOS 27.0. Other sessions were building throughout (load average 5–20).
+`/Volumes/Lacie` (external APFS, `noowners`) holds the repository, and the internal disk is APFS
+with owners on. Rulings: `docs/decisions/tooling.md`, "target/ stays under a byte budget…" and
+"A test binary's directory, not the volume…".
+
+**What `target/` holds, by last use** (`cargo xtask prune --dry-run`, after the one-off
+`--idle-hours 6` pass of 2026-09-29):
+
+| used within | 1 h | 1–6 h | 6–24 h | 1–3 d | older |
+|---|---|---|---|---|---|
+| units and incremental caches | 37 GB | 66 GB | 26 GB | 0.9 GB | 1.2 GB |
+
+`target/` was 117.5 GB: `debug` 85.5 GB and `gate` 36.4 GB (tests 14, clippy-ios 8.8,
+clippy-host 4.9, rustdoc 2.4). A day's work is therefore about 130 GB, of which the gate's lanes
+are 36 GB. The budget is 160 GB and the floor 50 GB.
+
+**The first pass of the new prune**: 134 510 object files of earlier compiles deleted, 19.7 GB.
+`debug/deps` went from 152 737 entries to 64 263, and the tests lane's `deps/` from 102 568 to
+62 296. No unit was deleted, because the first pass starts the ledger. A pass takes 4.8 s to
+sweep and 4.5 s to size `target/` when no lock is held. A pass that has to look at every unit's
+objects (the first, or one after a ledger is lost) takes 26–53 s to sweep.
+
+**One test binary, `slopty-codec`'s `hevc_encode_then_decode`**, wall time of the process:
+
+| where the binary is | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| gate's `deps/`, 102 568 entries (Lacie) | 5.74 s | 5.68 s | 5.10–6.50 s |
+| a copy on the internal disk, small directory | 0.69 s | 0.55 s | 0.43 s |
+| a copy on Lacie, small directory | 0.50 s | 0.50 s | 0.37 s |
+| a hard link (same inode) on Lacie, small directory | 0.40 s | | |
+| a copy on the internal disk beside 100 000 empty files | 6.17 s | 2.08 s | 2.04 s |
+| gate's `deps/` after the prune, 62 296 entries | 4.76 s | 5.51 s | 3.42 s |
+| the same binary through a hard link in a small directory | 0.55 s | 0.64 s | 0.65 s |
+
+**The codec's suite under nextest** (48 tests, `Summary` time), fresh target dirs that differ
+only in where they are and in how many extra files `deps/` holds:
+
+| target dir | entries in `deps/` | runner | runs |
+|---|---|---|---|
+| Lacie | 1 092 | — | 2.9 s, 3.3 s |
+| Lacie | 101 092 | — | 33.3 s, 25.3 s |
+| internal | 1 092 | — | 3.1 s, 3.2 s, 2.7 s, 2.8 s |
+| internal | 11 092 | — | 3.6 s |
+| internal | 31 092 | — | 6.3 s |
+| internal | 101 092 | — | 36.2 s, 25.1 s, 33.2 s |
+| internal | 101 092 | `xtask test-runner` | 4.8 s, 5.4 s |
+| internal | 1 092 | shell stand-in for the runner | 3.2 s, 3.3 s |
+
+The slowest single test with 101 092 entries and no runner was 4.5–8.0 s, against 0.74 s with
+1 092.
+
+```sh
+# one binary, from where it is and from a copy or link elsewhere (cwd: crates/slopty-codec)
+/usr/bin/time -p <dir>/roundtrip-<hash> --exact tests::hevc_encode_then_decode
+# the suite, in a fresh target dir, then with 100 000 extra entries in deps/
+CARGO_TARGET_DIR=<dir> cargo nextest run -p slopty-codec -p workspace-hack --no-run
+CARGO_TARGET_DIR=<dir> cargo nextest run -p slopty-codec
+(cd <dir>/debug/deps && seq 1 100000 | sed 's/^/zzdummy-/' | xargs touch)
+CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="$PWD/target/xtask/debug/xtask-runner test-runner" \
+  CARGO_TARGET_DIR=<dir> cargo nextest run -p slopty-codec
+cargo xtask prune --dry-run
+```
+
+## 2026-09-30 — first launch of a new binary; RealtimeSanitizer on the render callback
+
+`cargo xtask doctor` from herdr (the chain was zsh ← Claude Code ← zsh ← herdr, and herdr was not
+listed under Developer Tools). Each of three fresh binaries was timed on its first launch
+against its second. Median cost of the first launch: **261 ms** a binary. The research note of
+2026-09-29 had measured 0.24 s on an idle Mac, and 0.8–12 s while `syspolicyd` ran at 238 %
+CPU under other sessions' builds. After the switch is on, `cargo xtask doctor` records the other
+side of this number.
+
+`cargo xtask deep sanitize realtime` (nightly 1.101.0 c1070d693, 2026-09-28): 49 tests passed,
+one of them the child process that allocates in `render` and dies of RealtimeSanitizer's
+report. The run took 37.7 s cold and 9.8 s warm. Without the probe the real callback trips
+nothing, both in the ring's tests, which call it directly, and in `player_starts_and_drains` on
+the device's I/O thread.
+
+## 2026-09-30 — PNG decode in place, and ghostty `7d0734aa8`
+
+A kitty `f=100` PNG of 1024 × 768 decoded through `PngDecoder`, before and after it began
+decoding into libghostty's buffer and widening in place. Both columns run with the
+libghostty-rs `Bytes` that zeroes its allocation. mac-studio, release, other sessions
+building. Three runs each, twenty images a run. The samples cycle through 0–250.
+
+```sh
+SLOPTY_BENCH_OUT=$PWD/target/bench/png.jsonl nice -n 10 cargo nextest run --release \
+  -p slopty-engine -p workspace-hack --run-ignored only -E 'test(png_decode_cost)' --no-capture
+```
+
+| series | instructions before | after | p50 before | after |
+| --- | --- | --- | --- | --- |
+| `png_decode_cost.rgb_1024x768` | 43973434–44028952 | 42615904–42683161 | 3.86–4.04 ms | 3.63–3.66 ms |
+| `png_decode_cost.rgba_1024x768` | 11835831–11838166 | 10456912–10465515 | 1.14–1.19 ms | 0.95–0.96 ms |
+
+One of the "after" RGB runs read 5.22 ms, one sample on a busy machine. The RGBA image gains
+most because its old path copied every byte twice for nothing. Zeroing the allocation cost
+about 190 000 instructions on the RGBA image (12.48 M → 12.68 M on the earlier sample
+pattern), with no change in wall time. `png_decode_cost` has no budget until
+`cargo xtask bench --filter png_decode_cost --update-budgets` records one.
+
+After the carried ghostty commits (`0538f7535` → `7d0734aa8`, the alternate screen modes),
+every engine `*_cost` series stayed within 1 % of the "after the bump" column of the entry
+above, for example `checkpoint fill_raw_vt` 27003718, `osc_write_cost.per_osc_raw_vt` 6926
+and `scroll_frame_cost.200x60` 5302025. The change adds one switch arm on a mode set, which is
+not on the print path.
+
+Logs: `target/logs/png-final-{old,new}.log`, `target/logs/ghostty-7d0734-after.log`.
+
+## 2026-09-30 — BBR3 on app-limited video, the batched Apple datapath, 1232-byte packets
+
+mac-studio, other sessions building throughout (load averages below). Rulings in
+`docs/decisions/transport.md`, "BBR3 on app-limited video" and the entries after it. Scripts and
+logs: `target/logs/bbr3-app/` (`run2.sh` → `all2.log`, `run3.sh` → `all3.log`).
+
+### BBR3 against Cubic, simulated
+
+`crates/slopty-net/tests/sim.rs` section (f): a 20 Mbit/s link, 2 ms each way, 100 ms of
+queue. The worker streams 60 fps video (25 kB P-frames, a 130 kB keyframe every 60 frames) and
+answers keys on the session stream. Eight seeds per controller, paused clock, so a run repeats
+exactly. "Unpatched" is noq-proto without patches 11 to 13 (`vendor/noq-proto/SLOPTY.md`),
+measured with a build switch that has since been removed.
+
+```sh
+SLOPTY_CC=bbr3 cargo nextest run -p slopty-net --release --test sim --run-ignored only \
+  -E 'test(video_report)' --no-capture      # also bbr3-unbounded, cubic
+```
+
+| controller | keyframe p99 | P-frame p99 | echo p50 / p99 | ProbeRTT / Startup samples |
+| --- | --- | --- | --- | --- |
+| bbr3, unpatched | 139 ms | — | — | ProbeRTT met by keyframes |
+| bbr3, patched | 55 ms | 32 ms | 9 / 10 ms | 0 / 0 |
+| bbr3-unbounded, patched | 55 ms | 32 ms | 9 / 31 ms | 0 / 32 |
+| cubic | 55 ms | 32 ms | 10 / 12 ms | — |
+
+55 ms is the keyframe's own serialisation at 20 Mbit/s, so every patched arm is at the floor.
+Unbounded, noq's window reached 50 to 75 kB against the bound's 22 kB, and the echo waited
+behind it. With 1 and 3 ms of jitter (`SLOPTY_SIM_JITTER_US`) the echo p99 read 15 against 31
+and 20 against 27 ms, bound against unbounded. In `VideoSim` (noq-proto's own test,
+`video_through_one_bottleneck`), ProbeRTT entries fell from 9 to 0 and P-frame p99 from 96 to
+48 ms.
+
+### BBR3 against Cubic, real time
+
+`echo_beside_flood` on the shaper (20 Mbit/s, 100 ms queue), bursts arm only, 8 interleaved
+rounds of four configurations, every keyframe and echo pooled. Load averages 12 to 41.
+
+```sh
+target/logs/bbr3-app/run2.sh    # echo_bin2 is the echo_beside_flood test binary of this change
+```
+
+| config | keyframes | keyframe p50 / p90 / p99 | over 80 ms | echo p50 / p99 | echoes over 50 ms | lost |
+| --- | --- | --- | --- | --- | --- | --- |
+| bbr3, patched | 114 | 54.9 / 75.0 / 170.6 ms | 7.0 % | 9.0 / 47.8 ms | 0.82 % | 0 |
+| bbr3, unpatched | 114 | 55.1 / 65.9 / 156.3 ms | 5.3 % | 9.0 / 51.9 ms | 1.05 % | 0 |
+| bbr3-unbounded | 111 | 54.9 / 64.9 / 163.5 ms | 6.3 % | 8.9 / 49.5 ms | 0.98 % | 0 |
+| cubic | 116 | 54.9 / 70.0 / 139.2 ms | 6.9 % | 9.4 / 52.3 ms | 1.09 % | 0 |
+
+At this load the four do not differ: the tail is the machine's scheduling, not the
+controller. The traces (`SLOPTY_PATH_TRACE_MS`) showed no ProbeRTT in the patched runs, and a
+first pacing sample of 23.8 MB/s from the measured round trip. Unbounded spent about 2 s in
+Startup. The simulation is the number of record for the controller.
+
+### ACK bundling
+
+`an_echo_carries_the_ack_of_its_key` (sim section (g)) counts the worker's packets per key: 2.02
+without noq-proto patch 15, 1.06 with it. The client's stays 2.02, since a key has no reply
+packet to ride.
+
+### The batched Apple datapath
+
+`datagram_send_cost` (worker, 300 frames of 64 datagrams of 1150 bytes over loopback), three
+interleaved pairs at load 31 to 37:
+
+```sh
+cargo test -p slopty-workerd --release --bin slopty-worker --no-run
+for i in 1 2 3; do for b in 0 1; do SLOPTY_BATCHED_UDP=$b <that binary> datagram_send_cost \
+  --ignored --nocapture --test-threads 1; done; done
+```
+
+| run | plain: cpu per frame, one-way p50 | batched: cpu per frame, one-way p50 |
+| --- | --- | --- |
+| 1 | 2033 µs, 1144 µs | 1466 µs, 918 µs |
+| 2 | 1900 µs, 1176 µs | 1633 µs, 1014 µs |
+| 3 | 2200 µs, 1106 µs | 1600 µs, 1249 µs |
+
+The batched path costs 23 % less CPU (2044 against 1566 µs per frame, means), and every
+datagram arrived on both. One-way p99 (16 to 39 ms) followed the load on both paths.
+
+The 53 ms round trip of 2026-09-04 is gone. `echo_beside_flood`'s clear-link echo over loopback,
+four interleaved pairs at load 26 to 37 (`target/logs/bbr3-app/run3.sh`):
+
+| | plain | batched |
+| --- | --- | --- |
+| clear-link echo p50, per run | 0.67, 0.69, 0.50, 1.06 ms | 0.64, 0.99, 0.57, 0.42 ms |
+| bursts echo p50, per run | 9.39, 9.67, 8.96, 8.66 ms | 13.32, 8.98, 8.92, 8.96 ms |
+
+That 50 ms belonged to iroh's socket layer, which is gone, not to `sendmsg_x`.
+`cargo nextest run -p slopty-net -p slopty-client` passed on both paths.
+
+### The receive buffer
+
+`keyframe_report` in `crates/slopty-net/src/endpoint.rs`: 1.5 MB of 1232-byte datagrams (a 5K
+keyframe at 4:4:4) sent over loopback to a socket nobody reads, the case of a receiver task
+that is late.
+
+```sh
+SLOPTY_UDP_RCVBUF=0 cargo test -p slopty-net --lib keyframe_report -- --ignored --nocapture
+cargo test -p slopty-net --lib keyframe_report -- --ignored --nocapture
+```
+
+| `SO_RCVBUF` | held |
+| --- | --- |
+| 786 896 B (macOS default) | 623 of 1 217 |
+| 4 MiB | 1 217 of 1 217 |
+
+### 1232-byte packets
+
+The largest datagram at the handshake, and the MTU reached, over loopback
+(`a_full_media_datagram_fits_from_the_first_packet`, with the old configuration put back for
+the "before" row):
+
+| | first `max_datagram_size` | MTU |
+| --- | --- | --- |
+| before: 1200 initial, discovery to 1252 | 1178 B | 1252 after 2.4 ms of probing |
+| after: 1232 initial and ceiling, 1200 minimum | 1210 B | 1232 from the first packet |
+
+A media datagram is up to 1200 bytes. Before, it did not fit until discovery finished, and it
+never fitted on an IPv6 tailnet path, where the 1252 probe (1300 bytes of IPv6 packet) cannot
+cross a 1280 TUN.
+
+A path narrower than 1232 (an IPv4 MTU of 1240, 1212 bytes of payload), simulated, eight seeds:
+256 kB from the worker on a uni stream.
+
+```sh
+cargo nextest run -p slopty-net --test sim -E 'test(narrower)' --no-capture
+```
+
+| minimum MTU | 256 kB took | MTU after | black holes detected |
+| --- | --- | --- | --- |
+| 1232 (the minimum at the ceiling) | 6.4 s | 1232 | 0 |
+| 1200 | 136 ms, every seed | 1200 | 1 |
+
+### The shipped socket and partial sends
+
+`a_round_trip_over_the_shipped_socket_takes_a_millisecond_not_fifty` (`tests/loopback.rs`): 200
+one-byte keys and echoes on one stream through `endpoint::bind`, batched path and 4 MiB receive
+buffer. Median 0.12 ms, worst 0.33 ms (load about 10).
+
+`loopback_short_sends` (`src/udp.rs`, ignored): 100 000 ten-datagram transmits of 1200 bytes
+through Slopty's sender to a socket nobody reads, three runs. Only the first transmit waited
+for room, while tokio learned the socket was writable, and none went out in part. The same
+flood straight through noq-udp's `try_send_partial` (1 000 000 datagrams, `SO_SNDBUF` default,
+70 kB and 300 kB) gave no short send and no `EWOULDBLOCK`.
+
+```sh
+cargo test -p slopty-net --release --lib loopback_short_sends -- --ignored --nocapture
+```
+
+`no_datagram_size_blocks_for_good_at_the_send_buffer_edge` (`vendor/noq-udp`) sends every size
+from `SO_SNDBUF` − 64 to `SO_SNDBUF` + 1 with an ECN `cmsg`. With the size check removed it fails
+at 65 616 bytes against a 65 631-byte buffer with `EWOULDBLOCK`, which is the kernel bug.
+
+### Sizing a bundled ACK
+
+What noq-proto patch 15 spends per ack-eliciting packet while an ACK is pending, to decide
+whether the ACK fits: a release loop of 2 000 000 ACK frames per row, load about 9.
+
+| ranges | encode into a `Vec` and take its length | `AckEncoder::size` |
+| --- | --- | --- |
+| 1 | 26.7 ns | 3.5 ns |
+| 3 | 51.7 ns | 5.5 ns |
+| 8 | 99.1 ns | 10.2 ns |
+
+The loop was a scratch test and is not kept. `ack_size_is_its_encoded_length` (a proptest)
+holds the computed size equal to the encoded one.

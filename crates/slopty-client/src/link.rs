@@ -127,7 +127,11 @@ impl WorkerLink {
         let mut tasks = JoinSet::new();
 
         let table = Arc::new(Table::default());
-        let clips = Arc::new(ClipCache::new(out_tx.clone()));
+        let path = quic.clone();
+        let budget = Box::new(move || {
+            crate::clip::prefetch_budget(slopty_net::endpoint::path_rtt_cwnd(&path))
+        });
+        let clips = Arc::new(ClipCache::new(out_tx.clone(), budget));
 
         let file_join = FileJoin::default();
         let control_events = events_tx.clone();
@@ -732,26 +736,49 @@ async fn receive_bulk(
 ) {
     match header.purpose.clone() {
         Purpose::Download => crate::xfer::receive(&table, header, rx).await,
-        Purpose::Clip { generation, format } => {
+        Purpose::Rep { rep } => {
             if header.size > MAX_CLIP_BYTES {
-                tracing::warn!(generation, size = header.size, "clipboard too big; refused");
+                tracing::warn!(item = rep.item, size = header.size, "clipboard too big; refused");
                 rx.stop();
-                clips.gone(generation);
+                clips.lost(&rep);
                 return;
             }
             let mut bytes = Vec::with_capacity(usize::try_from(header.size).unwrap_or(0));
             loop {
                 match rx.chunk(256 * 1024).await {
-                    Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+                    Ok(Some(chunk)) => {
+                        bytes.extend_from_slice(&chunk);
+                        if bytes.len() as u64 > header.size {
+                            tracing::debug!(
+                                item = rep.item,
+                                size = header.size,
+                                "clipboard bulk longer than it said"
+                            );
+                            rx.stop();
+                            clips.lost(&rep);
+                            return;
+                        }
+                        clips.receiving(&rep);
+                    }
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::debug!(generation, error = %e, "clipboard bulk cut");
-                        clips.gone(generation);
+                        tracing::debug!(item = rep.item, error = %e, "clipboard bulk cut");
+                        clips.lost(&rep);
                         return;
                     }
                 }
             }
-            clips.fill(generation, format, bytes);
+            if bytes.len() as u64 == header.size {
+                clips.fill(rep, bytes);
+            } else {
+                tracing::debug!(
+                    item = rep.item,
+                    size = header.size,
+                    got = bytes.len(),
+                    "clipboard bulk short"
+                );
+                clips.lost(&rep);
+            }
         }
         Purpose::Upload | Purpose::Save { .. } => {
             tracing::debug!(xfer = %header.xfer, "a worker does not upload or save; stopping it");
@@ -1003,6 +1030,8 @@ mod tests {
         let offer = ClientMsg::Clip(ClipMsg::Offer(Offer {
             origin: Peer::Client(slopty_core::ClientId::new()),
             generation: 1,
+            age_ms: 0,
+            concealed: false,
             items: Vec::new(),
         }));
         let paste =

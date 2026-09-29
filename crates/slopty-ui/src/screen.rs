@@ -322,6 +322,9 @@ pub struct ScreenView {
     label: SharedString,
     /// Renders so far.
     renders: u32,
+    /// The body's bounds as the last render read them (tests).
+    #[cfg(test)]
+    rendered_at: Bounds<Pixels>,
     /// The stream size the worker maps input with: the size last asked for, or last told by
     /// `Geometry`. The worker takes a new scale in order with the input behind it, so frames
     /// still in flight at the old scale must not move it (unlike `size`, the picture's).
@@ -593,25 +596,63 @@ pub const fn waiting_text(source: SourceState) -> &'static str {
 /// flashes and goes.
 pub const LOADING_GRACE: Duration = Duration::from_millis(32);
 
-/// When a waiting body was first drawn, kept as its element's state.
-struct Waiting(Instant);
+/// What a remote tile's header shows of its stream: its health and the trackpad's toggle.
+///
+/// Copied out of the view as it changes, so the header is drawn without reading the view,
+/// which changes with every frame it shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamHeader {
+    stream: u32,
+    health: Option<Health>,
+    /// A touch screen, where the trackpad's toggle shows.
+    touch: bool,
+    trackpad: bool,
+}
+
+/// Whether a waiting body's grace has run out, kept as its element's state.
+struct Waiting(bool);
 
 /// Whether the waiting body keyed by `key` has been drawn for [`LOADING_GRACE`] or longer.
 ///
-/// The first draw starts the clock and a timer that draws the view again when it runs out, so
-/// the words come in on their own. The clock is dropped with the element: a body that got its
-/// content and later waits again starts a new grace.
+/// The first draw starts a timer that marks the grace over and draws the view again, so the
+/// words come in on their own. The mark is the timer's, not a reading of the clock while
+/// drawing: a view drawn from the last frame and the same view built again agree on it. It is
+/// dropped with the element: a body that got its content and later waits again starts a new
+/// grace.
 pub fn past_grace(key: impl Into<gpui::ElementId>, window: &mut Window, cx: &mut App) -> bool {
-    let since = window.use_keyed_state(key, cx, |_window, cx| {
+    let over = window.use_keyed_state(key, cx, |_window, cx| {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(LOADING_GRACE).await;
-            let _gone = this.update(cx, |_, cx| cx.notify());
+            let _gone = this.update(cx, |over: &mut Waiting, cx| {
+                over.0 = true;
+                cx.notify();
+            });
         })
         .detach();
-        Waiting(cx.background_executor().now())
+        Waiting(false)
     });
-    let since = since.read(cx).0;
-    cx.background_executor().now().saturating_duration_since(since) >= LOADING_GRACE
+    over.read(cx).0
+}
+
+/// `shown` once the grace keyed by `key` has passed ([`past_grace`]), nothing before. Its clock
+/// starts as it is laid out, so a view built from another view's state, which cannot start
+/// one while it reads, can hold a grace too.
+#[derive(IntoElement)]
+pub(crate) struct AfterGrace {
+    key: gpui::ElementId,
+    shown: gpui::AnyElement,
+}
+
+impl AfterGrace {
+    pub(crate) fn new(key: impl Into<gpui::ElementId>, shown: impl IntoElement) -> Self {
+        Self { key: key.into(), shown: shown.into_any_element() }
+    }
+}
+
+impl gpui::RenderOnce for AfterGrace {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if past_grace(self.key, window, cx) { self.shown } else { gpui::Empty.into_any_element() }
+    }
 }
 
 /// How often the overlay's rates are recomputed, and the stream's health read.
@@ -817,6 +858,8 @@ impl ScreenView {
                 CaptureTarget::Window(id) => format!("Remote window {}", id.0).into(),
             },
             renders: 0,
+            #[cfg(test)]
+            rendered_at: Bounds::default(),
             mapped: size,
             out: Outbox::new(out, cx),
             theme,
@@ -887,6 +930,12 @@ impl ScreenView {
         self.renders
     }
 
+    /// Where the body was drawn, and where the last render laid the picture out for (tests).
+    #[cfg(test)]
+    pub(crate) const fn bounds_rendered(&self) -> (Bounds<Pixels>, Bounds<Pixels>) {
+        (self.bounds, self.rendered_at)
+    }
+
     /// Take what the stream hands over: each frame `take` puts up draws the view, and a cursor
     /// sample draws it only when the pointer drawn moves ([`Self::pointer_changed`]), at a time
     /// that function picks. Generic over the frame so a test can feed pictures of its own.
@@ -936,7 +985,6 @@ impl ScreenView {
                         Step::Frame(frame) => {
                             if take(view, frame, cx) {
                                 view.last_frame = Some(now);
-                                cx.notify();
                             }
                             due
                         }
@@ -1116,12 +1164,16 @@ impl ScreenView {
         })
     }
 
-    /// Read the counters; a change of health is the header's news.
+    /// Read the counters; a change of health is the header's news. The overlay, while it shows,
+    /// is drawn again with them: a still stream draws no frame that would.
     fn read_health(&mut self, cx: &mut Context<Self>) {
         let health = self.probe.read(&self.handle.stats(), &self.pacer.stats(), Instant::now());
         if health != self.health {
             self.health = health;
             cx.emit(ScreenViewEvent::Health);
+        }
+        if self.hud.is_some() {
+            cx.notify();
         }
     }
 
@@ -1131,22 +1183,32 @@ impl ScreenView {
         self.health
     }
 
-    /// The header's health mark for `view`: a dot and one word, only while something is wrong.
-    /// A click opens the stats overlay.
+    /// What its tile's header shows of the stream now ([`StreamHeader`]).
+    #[must_use]
+    pub const fn header(&self) -> StreamHeader {
+        StreamHeader {
+            stream: self.stream.0,
+            health: self.health,
+            touch: self.touch,
+            trackpad: self.trackpad(),
+        }
+    }
+
+    /// The header's health mark for `view`, whose header shows `header`: a dot and one word,
+    /// only while something is wrong. A click opens the stats overlay.
     #[must_use]
     pub fn health_mark(
         view: &gpui::Entity<Self>,
+        header: StreamHeader,
         theme: &Theme,
         k: f32,
-        cx: &App,
     ) -> Option<gpui::AnyElement> {
-        let this = view.read(cx);
-        let health = this.health?;
+        let health = header.health?;
         let s = theme.surfaces;
         let dot = if health == Health::Stalled { s.error_fill } else { s.warn_fill };
         let view = view.clone();
         let mark = div()
-            .id(SharedString::from(format!("health-{}", this.stream.0)))
+            .id(SharedString::from(format!("health-{}", header.stream)))
             .debug_selector(|| "stream-health".to_owned())
             .role(gpui::accesskit::Role::Button)
             .aria_label(SharedString::new_static(health.word()))
@@ -1175,15 +1237,33 @@ impl ScreenView {
         self.hud.is_some()
     }
 
-    /// Link RTT, shown in the overlay.
-    pub const fn set_rtt(&mut self, rtt: Option<Duration>) {
-        self.rtt = rtt;
+    /// Link RTT, shown in the overlay: drawn again with it while the overlay shows.
+    pub fn set_rtt(&mut self, rtt: Option<Duration>, cx: &mut Context<Self>) {
+        if self.rtt != rtt {
+            self.rtt = rtt;
+            if self.hud.is_some() {
+                cx.notify();
+            }
+        }
     }
 
-    /// The worker's latest bitrate decision, shown in the overlay and read for health.
-    pub fn set_rate(&mut self, target_bps: u32, verdict: RateVerdict, capped: bool) {
-        self.rate = Some((target_bps, verdict, capped));
+    /// The worker's latest bitrate decision, shown in the overlay (drawn again with it while it
+    /// shows) and read for health.
+    pub fn set_rate(
+        &mut self,
+        target_bps: u32,
+        verdict: RateVerdict,
+        capped: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.probe.verdict(verdict, Instant::now());
+        let rate = Some((target_bps, verdict, capped));
+        if self.rate != rate {
+            self.rate = rate;
+            if self.hud.is_some() {
+                cx.notify();
+            }
+        }
     }
 
     /// The worker said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
@@ -1342,8 +1422,11 @@ impl ScreenView {
     }
 
     /// The worker resized the target: the stream now has this pixel size at the current quality
-    /// scale, so the native size follows from it.
-    pub fn set_geometry(&mut self, width: u32, height: u32) {
+    /// scale, so the native size follows from it, and the picture is drawn at it.
+    pub fn set_geometry(&mut self, width: u32, height: u32, cx: &mut Context<Self>) {
+        if self.size != (width, height) {
+            cx.notify();
+        }
         self.size = (width, height);
         self.mapped = self.size;
         let scale = self.quality.scale.clamp(MIN_SCALE, 1.0);
@@ -1377,7 +1460,7 @@ impl ScreenView {
         true
     }
 
-    /// Put `buffer` up as the picture.
+    /// Put `buffer` up as the picture, drawn in the next frame.
     fn show(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
         #[expect(clippy::cast_possible_truncation, reason = "pixel counts")]
         let size = (buffer.get_width() as u32, buffer.get_height() as u32);
@@ -1388,6 +1471,7 @@ impl ScreenView {
         if self.frames == 1 {
             cx.emit(ScreenViewEvent::Ready);
         }
+        cx.notify();
     }
 
     /// Put `buffer` up as the picture, as a frame off the stream would (for the workspace's
@@ -1666,17 +1750,16 @@ impl ScreenView {
     #[must_use]
     pub fn trackpad_button(
         view: &gpui::Entity<Self>,
+        header: StreamHeader,
         theme: &Theme,
         k: f32,
-        cx: &App,
     ) -> Option<gpui::AnyElement> {
-        let this = view.read(cx);
-        if !this.touch {
+        if !header.touch {
             return None;
         }
-        let id = format!("trackpad-{}", this.stream.0);
+        let id = format!("trackpad-{}", header.stream);
         let icon = crate::icons::IconName::MousePointer2;
-        let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, this.trackpad(), k);
+        let button = kit::icon_toggle(theme, id, icon, TRACKPAD_MODE, header.trackpad, k);
         let view = view.clone();
         Some(
             button
@@ -2334,6 +2417,10 @@ impl Render for ScreenView {
             self.follow_screen(window, cx);
         }
         self.renders = self.renders.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.rendered_at = self.bounds;
+        }
         // Whatever asked for this render, it draws the pointer as it is now: a change that
         // waited for a frame has it.
         let drawn = self.pointer_drawn(cx.background_executor().now());
@@ -2345,10 +2432,25 @@ impl Render for ScreenView {
         let record_bounds = canvas(
             move |bounds, window, cx| {
                 let scale_factor = window.scale_factor();
-                entity.update(cx, |this, _| {
-                    this.bounds = bounds;
-                    this.scale_factor = scale_factor;
-                });
+                let this = entity.read(cx);
+                #[expect(clippy::float_cmp, reason = "any change of scale is news")]
+                let moved = this.bounds != bounds || this.scale_factor != scale_factor;
+                if moved {
+                    // The picture's place and the pointer were laid out at the old bounds in
+                    // this frame: the next one lays them out at these, and asks for the
+                    // stream's size again at the width it is now drawn.
+                    entity.update(cx, |this, _| {
+                        this.bounds = bounds;
+                        this.scale_factor = scale_factor;
+                    });
+                    let entity = entity.downgrade();
+                    window.on_next_frame(move |_window, cx| {
+                        let _gone = entity.update(cx, |this, cx| {
+                            this.set_painted_width(this.painted, cx);
+                            cx.notify();
+                        });
+                    });
+                }
             },
             // Registering as a text input is what raises the soft keyboard on iOS and lets an
             // input method compose; typed text arrives in `replace_text_in_range`.
@@ -3107,8 +3209,8 @@ mod tests {
             v.set_painted_width(10.0, cx);
         });
         assert_eq!(sent(&mut rx).len(), 1, "the same bucket again asks nothing");
-        view.update(cx, |v, _| {
-            v.set_geometry(100, 50);
+        view.update(cx, |v, cx| {
+            v.set_geometry(100, 50, cx);
             assert_eq!(v.size(), (100, 50));
             assert_eq!(v.native(), (400.0, 200.0), "native follows the scale in force (0.25)");
         });
@@ -3197,7 +3299,13 @@ mod tests {
             v.set_paste_hook(Rc::new(move || PasteAhead {
                 offer: once.replace(false).then(|| {
                     let origin = Peer::Client(slopty_core::ClientId::new());
-                    let offer = Offer { origin, generation: 1, items: Vec::new() };
+                    let offer = Offer {
+                        origin,
+                        generation: 1,
+                        age_ms: 0,
+                        concealed: false,
+                        items: Vec::new(),
+                    };
                     ClientMsg::Clip(ClipMsg::Offer(offer))
                 }),
                 files: None,
@@ -4248,6 +4356,46 @@ mod tests {
             .expect("pixel buffer");
         view.update(cx, |v, cx| v.show_picture(nv12, cx));
         assert_eq!(chroma(cx).map(chroma_label), Some("4:2:0"));
+    }
+
+    /// A picture put up is drawn in the next frame whoever put it up: under retention a view
+    /// changed without a notify keeps the frame it drew.
+    #[gpui::test]
+    fn a_picture_put_up_is_drawn(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        let drawn = renders(&view, cx);
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn.saturating_add(1), "the second picture, drawn");
+    }
+
+    /// The stats overlay on a still stream is drawn again with each reading of the counters,
+    /// and with the rate and the round trip as the worker and the link report them: no frame
+    /// off the stream comes to draw it.
+    #[gpui::test]
+    fn the_overlay_follows_its_numbers_on_a_still_stream(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| {
+            v.show_picture(picture(800, 600), cx);
+            v.set_hud(true, cx);
+        });
+        cx.run_until_parked();
+        let drawn = renders(&view, cx);
+        cx.executor().advance_clock(HUD_PERIOD);
+        cx.run_until_parked();
+        assert!(renders(&view, cx) > drawn, "the counters read again, drawn");
+        let drawn = renders(&view, cx);
+        view.update(cx, |v, cx| v.set_rate(8_000_000, RateVerdict::Cut, false, cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn.saturating_add(1), "the rate, drawn");
+        view.update(cx, |v, cx| v.set_rtt(Some(Duration::from_millis(12)), cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn.saturating_add(2), "the round trip, drawn");
+        view.update(cx, |v, cx| v.set_rtt(Some(Duration::from_millis(12)), cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn.saturating_add(2), "the same round trip: no frame");
     }
 
     /// A picture of `w` × `h` for a test to put up.

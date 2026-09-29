@@ -10,7 +10,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Rejected: slop-desk's raw UDP + "the WireGuard mesh is the security boundary" (phone-anywhere
   needs app-level auth); WebRTC (ICE/SDP dead weight); MoQ (relay/pub-sub shape).
 
-- ✅ **Default features off; `fast-apple-datapath` is banned.** (2026-09-24: iroh is gone; the ban
+- ✅ **Default features off; `fast-apple-datapath` is banned.** Superseded 2026-09-30 by **The
+  batched Apple datapath is on** (end of file): the 53 ms did not come back without iroh. (2026-09-24: iroh is gone; the ban
   carries over to `noq`, whose feature of the same name is off in the workspace.) `default-features = false,
   features = ["tls-ring"]`. iroh's default set includes `fast-apple-datapath` (dlsym of private
   `sendmsg_x`/`recvmsg_x`, batched UDP). Measured 2026-09-04 on loopback (`slopty ping`, see
@@ -908,7 +909,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   keep-alive 5 s, idle 45 s, migration on (the server default), `fast-apple-datapath` off. New:
   `initial_rtt` 5 ms (RFC 9002's 333 ms is for an unknown path and set the first handshake
   retransmission), and an MTU discovery ceiling of 1252 (Tailscale's TUN MTU of 1280 less 28
-  bytes of IPv4 and UDP). One ask was not taken: a datagram send buffer of about one frame. noq
+  bytes of IPv4 and UDP; superseded 2026-09-30 by **Every packet is 1232 bytes**). One ask was not taken: a datagram send buffer of about one frame. noq
   drops the *oldest* datagram when that buffer is full and a frame is pushed in one burst, so a
   buffer smaller than a keyframe would cut the head off every keyframe; the standing queue is
   already held to two frames by the capture guard (`frame_fits`), which drops whole frames.
@@ -1103,7 +1104,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   thing.
 
 - ✅ **noq's BBR3 follows the draft: clear the aggregation count on idle restart, mark ProbeRTT
-  app-limited, and leave ProbeBW_UP and the ProbeRTT dip as specified** (2026-09-25,
+  app-limited, and leave ProbeBW_UP and the ProbeRTT dip as specified** (partly superseded
+  2026-09-30 by **BBR3 on app-limited video**: Linux's aggregation cap is taken, and ProbeRTT
+  is skipped for a flow that goes quiet on its own) (2026-09-25,
   MEASUREMENTS.md "noq's BBR3 against the draft"). This settles items 2 and 3 of the
   "BBR3 stays the default" entry. Checked against draft-ietf-ccwg-bbr-06 and its editor's copy,
   Linux BBRv3 (`google/bbr` `v3`) and quiche's BBRv2.
@@ -1686,3 +1689,117 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     covers the error mapping. `crates/slopty-client/tests/wrong_build.rs` checks that a worker
     dial becomes the notice, and that a server on another build is reported once with no
     second dial within the fast backoff's first three steps.
+
+- ✅ **BBR3 on app-limited video: pace from the first round trip, cap the aggregation
+  allowance, and let a flow's own quiet round trips stand for ProbeRTT; the bound stays**
+  (2026-09-30, MEASUREMENTS.md "BBR3 on app-limited video, the batched Apple datapath,
+  1232-byte packets"). Video is application-limited: it sends a frame and waits for the next.
+  Three things in noq's BBR3 cost it, and `vendor/noq-proto/SLOPTY.md` patches 11 to 13 take
+  them, each with a unit test that fails without it.
+  - *First-RTT pacing (noq#800, finishing noq#802 and quinn#2481).* The constructor paces at
+    `2.77 × initial window / 1 ms`, Startup only raises it, and an app-limited flow never
+    leaves Startup. The first ACK now sets the rate from its packet's own round trip, as Linux
+    does on `has_seen_rtt`. The open PRs read the estimator, which does not yet hold that sample
+    when the controller sees the ACK (patch 6).
+  - *The `extra_acked` cap.* 100 ms at `BBR.bw`, Linux's `bbr_extra_acked_max_us`. The
+    2026-09-25 entry left it out because it did not bind once patch 2 cleared the count. It is
+    taken now as a guard, since any other runaway would grow the window with it.
+  - *The ProbeRTT skip.* The first packet of each frame leaves with no more in flight than
+    ProbeRTT allows. Its round trip is the sample ProbeRTT takes by holding the window at half
+    a BDP for 200 ms, so an expired filter refreshes from it and the flow never dips. A flow
+    never that quiet still probes. This goes beyond the draft, whose only skip is a restart from
+    idle. quiche's `avoid_unnecessary_probe_rtt` only spreads the dips out.
+  - *The probe-up exit was not taken.* The draft and Linux keep an app-limited flow in
+    `ProbeBW_UP`, and with the three above the simulated keyframe p99 already equals Cubic's.
+
+  Keyframe p99 against Cubic, simulated over eight seeds: 139 ms unpatched, 55 ms patched and
+  55 ms for Cubic, which is the keyframe's own serialisation. `video_beside_keys_keeps_its_keyframes_out_of_probe_rtt`
+  (`crates/slopty-net/tests/sim.rs`) holds keyframe p99 under 80 ms with no ProbeRTT and no
+  Startup sample, reading the model's state from `Snapshot::model_state` (patch 14). In real
+  time on this machine, at load 12 to 41, the four configurations could not be told apart
+  (keyframe p99 139 to 171 ms, 5 to 7 % over 80 ms, for all of them): the machine's scheduling
+  is the tail there, and the simulation is the number of record.
+
+  *The bound stays, for a new reason.* noq#800 was the case it guarded, and it is fixed. But
+  unbounded, noq's window sat at 50 to 75 kB against the bound's 22 kB, and an echo behind it
+  waited: echo p99 31 against 10 ms simulated, 31 against 15 and 27 against 20 ms with 1 and
+  3 ms of jitter. The unbounded flow also opened in Startup for about 2 s of real time. Keyframe
+  times were equal. The bound costs video nothing and keeps a key's echo out of video's queue.
+
+- ✅ **An ACK waiting on the delayed-ACK timer rides the next packet that leaves on its path**
+  (2026-09-30). Port of quinn#2747 (open) as noq-proto patch 15. An echo now carries the ACK of
+  the key it answers, so the worker sends 1.06 packets per key instead of 2.02
+  (`an_echo_carries_the_ack_of_its_key`, sim section (g)). The ACK goes only on its own path
+  and only when it fits, so a packet never grows. noq's `is_ack_only` did not count
+  OBSERVED_ADDRESS, so a debug assertion took such a packet with a bundled ACK for an ACK-only
+  one; that is fixed in the same patch.
+
+- ✅ **The batched Apple datapath is on** (2026-09-30, supersedes the 2026-09-04 ban). The ban
+  rested on a 53 ms loopback round trip measured through iroh. Without iroh, over noq with
+  quinn's two fixes vendored (`vendor/noq-udp/SLOPTY.md`: quinn#2727, the `SO_SNDBUF` floor
+  against macOS's permanent `EWOULDBLOCK`; quinn#2748's udp half, a partial `sendmsg_x`
+  reported rather than dropped), the clear-link echo reads the same on both paths (p50 0.42 to
+  0.99 ms against 0.50 to 1.06), and the worker's datagram send costs 23 % less CPU (1566
+  against 2044 µs per 64-datagram frame). The connection half of #2748 is Slopty's own socket
+  (`crates/slopty-net/src/udp.rs`): a transmit that went out in part is finished on the next
+  try, even across a wait for room, and only the same transmit resumes. noq's runtime never
+  enables the path, and `slopty-net` forbids `unsafe`, so noq-udp gained a safe
+  `try_enable_apple_fast_path` that checks both symbols resolve. macOS only; iOS never builds
+  the private calls. `SLOPTY_BATCHED_UDP=0` turns it off to measure against. Tests:
+  `a_long_transmit_arrives_whole_on_the_batched_path`, `a_partial_send_resumes_only_its_own_transmit`,
+  the three in `vendor/noq-udp/tests/tests.rs`, and
+  `a_round_trip_over_the_shipped_socket_takes_a_millisecond_not_fifty` (`tests/loopback.rs`,
+  through `endpoint::bind`: median 0.12 ms against the 5 ms bound).
+
+  *What no test here reaches.* A kernel short send that is then resumed after a wait for room.
+  Over loopback the kernel hands each datagram to the receiver at once and drops it there when
+  that buffer is full, so the send buffer never fills: 1 000 000 datagrams in ten-datagram
+  `sendmsg_x` calls, at the default, 70 kB and 300 kB of `SO_SNDBUF`, gave no short send and no
+  `EWOULDBLOCK` (`loopback_short_sends`, ignored; the one wait it prints is the first poll, while
+  tokio learns the socket is writable). A real interface's full queue answers `ENOBUFS`, which
+  the socket counts as a lost datagram. The resume logic is tested against a batch longer than
+  `sendmsg_x` takes, which noq never builds.
+
+  *Distribution.* `sendmsg_x` and `recvmsg_x` are private and reached by `dlsym`. Mac App Store
+  review rejects private calls, so a Store build would have to leave the feature out
+  (`slopty-net`'s macOS dependency line). Slopty is not distributed there today.
+
+- ✅ **Every packet is 1232 bytes, and the socket holds 4 MiB** (2026-09-30). 1232 is 1280,
+  the least any IPv6 link carries and Tailscale's TUN MTU, less 48 bytes of IPv6 and UDP. It is
+  noq's initial MTU and ceiling, and discovery is off. The minimum stays QUIC's 1200: an IPv4
+  path with an MTU of 1228 to 1259 (L2TP or IP security VPNs, some cellular links) carries the
+  handshake and path challenges, which are padded to 1200 only, and then loses every full
+  packet. With the minimum at 1232 black-hole detection had nowhere to fall back to, and 256 kB
+  took 6.4 s over such a path in the simulation; at 1200 it detects the black hole and takes
+  136 ms (`a_path_narrower_than_the_packets_falls_back_to_the_minimum`, a 1240-byte MTU, eight
+  seeds). A media datagram of 1200 bytes does not fit such a path at all (1178 bytes of room),
+  which is the video sender's to handle. When the local interface itself is narrower, the OS
+  refuses the send with `EMSGSIZE`, which no loss detection sees, so the socket says it once
+  at `warn` (`a_datagram_too_large_for_the_interface_is_lost_not_fatal`). The 1252 ceiling fitted IPv4
+  inside a tunnel only: its probe was lost on every IPv6 tailnet path, which left the MTU at
+  noq's 1200, and a media datagram (up to 1200 bytes) needs 1210 of room. Before, the first
+  `max_datagram_size` was 1178 bytes; now it is 1210 from the handshake
+  (`a_full_media_datagram_fits_from_the_first_packet`). `SO_RCVBUF` goes from
+  macOS's 786 896 bytes to 4 MiB (`kern.ipc.maxsockbuf` allows 8): 1.5 MB of datagrams sent to
+  a socket nobody reads, a 5K keyframe while the receiver task is late, kept 623 of 1 217 before
+  and all after (`the_socket_holds_a_large_keyframe_while_nobody_reads`). The 2026-09-26
+  finding that a 1080p keyframe fits the default still holds; a 5K one does not.
+  `SLOPTY_UDP_RCVBUF` overrides it, `0` for the OS's. The OS clamps a buffer to
+  `kern.ipc.maxsockbuf` without a word, so the endpoint warns when it got less than it asked,
+  and logs both buffers' effective sizes at `debug`; iOS's limits are not measured.
+
+- ✅ **quinn#2794, #2839 and #2735 are not ported** (2026-09-30). #2794 changes the ACK of a
+  loss probe when the peer lacks ACK frequency; Slopty's peers all have it, so the probe carries
+  IMMEDIATE_ACK already. #2839 prunes queued datagrams when a path reset or migration shrinks the
+  MTU; here a reset only ever returns to the initial 1232, so only its off-by-one is taken
+  (noq-proto patch 16: a datagram exactly at the new limit is kept). #2735 cuts allocations when a frame's datagrams are queued: about 64 a frame, some
+  2 µs of the 2.47 ms of CPU a frame costs, and it would mean vendoring `noq` itself.
+
+- ✅ **One key in eight over 50 ms on the mesh was loss on the way in** (2026-09-30). The
+  2026-09-30 library audit asked for a per-hop trace of the 2026-09-25 mesh finding. That trace
+  was already taken the same day (MEASUREMENTS.md, "datagram copies of a keystroke and its
+  echo"): the client lost 20 to 93 packets per 100 idle keys on the way to the MacBook while the
+  worker lost at most 4, and a lost lone key waits for the probe timeout. The worker "counted no
+  loss" because the loss was the client's. Datagram copies and the pacer patch took keys over
+  50 ms from 13.5 to 0.5 %. What is new is the instrument: `describe_path` now ends with the
+  connection's own `lost N of M sent`, so either end's log names the lossy direction.

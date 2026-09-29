@@ -2,6 +2,7 @@
 # this; `cargo xtask upstream sync` takes each upstream into its fork (a rebase, or a merge where
 # `strategy` says so), imports zed into the gpui-fast fork, pushes, moves the workspace pins and
 # rewrites the `base` / `base_date` / `checked` lines here, so drift shows up in git history.
+# `sync` also re-pins libghostty-rs to the ghostty fork and moves `vendor/ghostty`.
 # `checked` is the day a sync last confirmed the source current: a quiet upstream keeps an old
 # `base_date`. Once the later of the two dates is `check_every_days` old (0: always), the gate
 # asks the upstream for its branch head and warns when it moved past `base`. `checkout` is
@@ -18,7 +19,7 @@ fork = "https://github.com/aislopware/gpui-fast.git"
 branch = "main"
 checkout = ".research/gpui-fast"
 strategy = "merge"
-base = "6b3d5cad18e1611aa1d4832a1d74e5c5957920cd"
+base = "7ab23f46f2ba3a040ceb27d387383a2896bc5ae1"
 base_date = "2026-09-29"
 checked = "2026-09-29"
 check_every_days = 0
@@ -30,9 +31,9 @@ check_every_days = 0
 upstream = "https://github.com/zed-industries/zed.git"
 upstream_branch = "main"
 checkout = ".research/zed-main"
-base = "7960b2a7c9568e90fbe0727332149e5b2a5fd57a"
-base_date = "2026-09-12"
-checked = "2026-09-12"
+base = "5d5963361f3080539f2d7034e92736167c53a04a"
+base_date = "2026-09-29"
+checked = "2026-09-29"
 check_every_days = 7
 
 [gpui-kit]
@@ -42,11 +43,42 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "2ec5696c2e975ddd2b8380d12ec00631bd159128"
+base = "9c369db6f9b0f3754fdf5d2e4027acb1f68b1146"
 base_date = "2026-09-29"
 checked = "2026-09-29"
 # It lands several changes a day, so every gate asks.
 check_every_days = 0
+
+# The terminal. `vendor/ghostty` is a submodule on the fork, whose `main` carries our commits on
+# ghostty-org's `main`. `sync` rebases in the worktree `.research/ghostty`, never in
+# `vendor/ghostty`, re-pins libghostty-rs (`GHOSTTY_COMMIT`, bindings) and builds and tests the
+# binding against the rebased tree before pushing anything; `vendor/ghostty` then moves to the
+# pushed head. Upstream lands a dozen or more commits a day, about a third of them in what
+# libghostty-vt builds from: `paths` is that part (the terminal, its C API and headers, the SIMD
+# and Unicode code the parser and grid call, the key and mouse encoders we use, the lib-vt build
+# and the Zig and dependency pins). The gate asks once a day and warns only when a move touched
+# `paths`; `watch` names a head move or pull request only when it does.
+[ghostty]
+upstream = "https://github.com/ghostty-org/ghostty.git"
+upstream_branch = "main"
+fork = "https://github.com/aislopware/ghostty.git"
+branch = "main"
+checkout = "vendor/ghostty"
+strategy = "rebase"
+base = "0538f7535be0cbca6bbe54e6fde654d5c628f1f2"
+base_date = "2026-09-29"
+checked = "2026-09-29"
+check_every_days = 1
+paths = [
+    "src/terminal/",
+    "src/lib_vt.zig",
+    "include/ghostty/",
+    "src/simd/",
+    "src/unicode/",
+    "src/input/",
+    "src/build/GhosttyLibVt.zig",
+    "build.zig.zon",
+]
 
 [libghostty-rs]
 upstream = "https://github.com/Uzaaft/libghostty-rs.git"
@@ -59,3 +91,22 @@ base = "8953a740bc378cec3e07e1f6ca949f0595eab19b"
 base_date = "2026-09-28"
 checked = "2026-09-29"
 check_every_days = 7
+
+# noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.3.0 (tag
+# `noq-proto-v1.3.0`) with our patches on top (its `SLOPTY.md`). Nothing syncs it;
+# `cargo xtask upstream watch` reports its head and pull requests, and a bump is by hand.
+[noq]
+upstream = "https://github.com/n0-computer/noq.git"
+upstream_branch = "main"
+vendored = "vendor/noq-proto"
+base = "c1f411562e6078852749b8bcf1190523096a107f"
+
+# objc2 is vendored while a fix waits for a release: `vendor/objc2` is the published 0.6.4 with
+# upstream's use-after-free fix (#862) and `vendor/objc2-0.5` the same for 0.5.2 (their
+# `SLOPTY.md`). `cargo xtask upstream watch` reports its head and pull requests; once 0.6.5 ships
+# with the fix, both copies and their `[patch.crates-io]` lines go.
+[objc2]
+upstream = "https://github.com/madsmtm/objc2.git"
+upstream_branch = "main"
+vendored = "vendor/objc2"
+base = "8852b424193ca41602281b3d7540d7c8ed51e49a"

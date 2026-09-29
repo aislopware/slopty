@@ -252,7 +252,7 @@ fn a_small_overview_draws_tiles_as_miniatures(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(name).is_some(), "at rest the title is drawn");
     cx.simulate_keystrokes("cmd-alt-o");
     cx.run_until_parked();
-    let zoom = view.read_with(cx, |v, _| v.drawn_zoom);
+    let zoom = view.read_with(cx, |v, _| v.drawn.zoom.get());
     assert!(zoom < tile::SHAPES_BELOW, "three columns zoom under half: {zoom}");
     assert!(cx.debug_bounds(selector("item", first.item)).is_some(), "the tile is there");
     assert!(cx.debug_bounds(name).is_none(), "its title is not");

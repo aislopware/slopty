@@ -1,4 +1,4 @@
-# noq-proto, vendored with ten patches
+# noq-proto, vendored with sixteen patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -109,12 +109,83 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    `a_nat_rebinding_moves_the_connection_without_a_reconnect` (`crates/slopty-net/tests/sim.rs`,
    seed 10 loses the first challenge).
 
-Commits 2 and 3 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
+11. `fix(proto): Pace BBR3's Startup from the first round trip`
+
+   The constructor has no round trip, so `BBRInitPacingRate` uses 1 ms and paces at
+   `2.77 * InitialCwnd / 1 ms`, and Startup only ever raises the rate. A flow that stays
+   application-limited, as video does, never leaves Startup and kept that placeholder, which
+   on any path longer than a millisecond is no pacing at all (noq#800). The first ACK now
+   re-derives the rate from its own packet's round trip, as Linux BBR's
+   `bbr_init_pacing_rate_from_rtt` does on `has_seen_rtt`. This finishes noq#802 and
+   quinn#2481, which take the RTT from the estimator, and the estimator does not yet hold the
+   first sample when the controller sees the ACK (patch 6). Test:
+   `the_first_round_trip_sets_the_startup_pacing_rate`.
+
+12. `fix(proto): Cap BBR3's ACK-aggregation allowance at 100 ms of bandwidth`
+
+   `BBRUpdateMaxInflight` adds `extra_acked` to the window with no bound. Linux caps it at
+   `bbr_extra_acked_max_us`, 100 ms at `BBR.bw`, and so does this. Patch 2 removed the one
+   runaway seen so far; the cap keeps any other (a clumping path, a count that outlives its
+   interval) from growing the window with it. Test: `ack_aggregation_adds_at_most_100_ms_of_bandwidth`.
+
+13. `fix(proto): Refresh BBR3's ProbeRTT filter from a flow's own quiet round trips`
+
+   Video goes idle between frames, and the first packet of each frame leaves with no more in
+   flight than ProbeRTT would allow (`BBRProbeRTTCwnd`, half a BDP). That packet's round trip
+   is the measurement ProbeRTT takes by holding the window down for 200 ms, so when the filter
+   has expired it refreshes from such a sample and the flow does not dip. A flow that was
+   quiet within the last ProbeRTT's length waits for its next quiet sample rather than
+   refreshing from a loaded one. A flow never that quiet still enters ProbeRTT as the draft
+   says. This goes beyond draft-ietf-ccwg-bbr-06, whose only skip is on a restart from idle.
+   Tests: `a_flow_quiet_between_frames_refreshes_min_rtt_without_probe_rtt`,
+   `a_flow_never_quiet_still_probes_rtt`; `probe_bw_skips_probe_rtt_on_restart_from_idle` now
+   checks that the resume packet's own round trip refreshed the filter. In `VideoSim`, ProbeRTT
+   entries fell from 9 to 0 and P-frame p99 from 96 to 48 ms.
+
+14. `feat(proto): Expose BBR3's state`
+
+   `Bbr3::state_name` names the model's state as the draft does (`Startup`, `ProbeBW_UP`,
+   `ProbeRTT`, ...). Slopty's congestion snapshot carries it, and its simulated-network test
+   asserts that video never meets ProbeRTT.
+
+15. `feat(proto): Bundle a pending ACK into a packet that leaves anyway`
+
+   Port of quinn-rs/quinn#2747 (open). An ACK the delayed-ACK timer holds went out in a packet
+   of its own when the timer fired, even when an ack-eliciting packet had left on the same
+   path in the meantime. `populate_packet` now adds it, when it fits, to any ack-eliciting
+   packet on its own path that carries no ACK yet (`PendingAcks::can_bundle`). An echo now
+   carries the ACK of the key it answers: in Slopty's simulated network the worker sends 1.06
+   packets per key instead of 2.02. The ACK frame is built by a new `ack_frame`, shared with
+   `populate_acks`, and sized without encoding by `AckEncoder::size` and `PathAckEncoder::size`
+   (3.5 to 10 ns for one to eight ranges, where encoding into a `Vec` to measure it took 27 to
+   99 ns; `ack_size_is_its_encoded_length` holds the two equal). `SentFrames::is_ack_only` now also counts `path_retransmits`, since a
+   packet holding OBSERVED_ADDRESS and a bundled ACK is not ACK-only, and the debug assertion
+   that relies on it fired in the address-discovery tests. Test: `ack_bundled_with_datagrams`.
+   `path_open_challenge_lost` advanced wakeups a fixed number of times to reach the third
+   challenge; bundling moves a probe timeout in between, so it now advances until the
+   challenge count rises.
+
+16. `fix(proto): Keep a queued datagram exactly at the new limit`
+
+   Part of quinn-rs/quinn#2839 (open). When black-hole detection lowers the MTU, queued
+   datagrams that no longer fit are dropped, but the test was `len < max`, so one exactly at
+   the new limit went too, although `send` accepts that size. Slopty's minimum MTU sits below
+   its initial one, so the drop can happen. The rest of #2839 prunes the queue after a path
+   reset or migration; here those only ever raise the MTU back to the initial 1232, so it is not
+   taken. Test: `drop_oversized_keeps_datagrams_at_limit`.
+
+A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
+app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a
+flow in `ProbeBW_UP`, and with patches 11 to 13 the simulated keyframe p99 already matches
+Cubic's, so it had nothing left to win (docs/decisions/transport.md, "BBR3 on app-limited
+video").
+
+Commits 2, 3 and 13 share `VideoSim` in the `bbr3` tests: a screen encoder's frames through one
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what
 BBR3 does with that traffic (docs/MEASUREMENTS.md, "noq's BBR3 against the draft").
 
-Only `noq-proto` is patched (`[patch.crates-io]` in the workspace `Cargo.toml`); `noq` and
-`noq-udp` come from crates.io. The files are the crate as published (its normalised
+`noq-proto` and `noq-udp` (`vendor/noq-udp/SLOPTY.md`) are patched (`[patch.crates-io]` in
+the workspace `Cargo.toml`); `noq` comes from crates.io. The files are the crate as published (its normalised
 `Cargo.toml`, `src`, `benches`, licences) plus the patches. To move to a newer noq: take the
 new published crate and re-apply each commit (the diff is `git diff` of this directory against
 the published files), or drop this directory once upstream has them all.

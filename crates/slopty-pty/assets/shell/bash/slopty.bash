@@ -17,6 +17,10 @@
 # trap. Written by slopty-ptyd on every start; edits here are lost. Opt out with
 # SLOPTY_NO_SHELL_INTEGRATION=1. Works on bash 3.2 (macOS /bin/bash) and up.
 
+# A tmux pane is no Slopty tile: its server may have started in another session, whose
+# presence file (held while a client looks at that tile) would silence this pane's agents.
+[ -n "${TMUX-}" ] && unset CLAUDE_CLIENT_PRESENCE_FILE
+
 if [ -n "${SLOPTY_BASH_LOGIN-}" ]; then
     if [ -z "${SLOPTY_BASH_NOPROFILE-}" ]; then
         [ -r /etc/profile ] && . /etc/profile
@@ -57,9 +61,22 @@ _slopty_precmd() {
     _slopty_armed=0
 }
 
-# Last in PROMPT_COMMAND: report the working directory (OSC 7), (re)wrap PS1/PS2 (a theme
-# may have rebuilt them) and arm the trap.
+# Last in PROMPT_COMMAND: put SLOPTY_BIN first on the path, report the working directory
+# (OSC 7), (re)wrap PS1/PS2 (a theme may have rebuilt them) and arm the trap.
 _slopty_arm() {
+    # Slopty's `open`, BROWSER and EDITOR first on the path (SLOPTY_BIN): /etc/profile's
+    # path_helper and the user's files may have put the system's `open` ahead of it.
+    if [ -n "${SLOPTY_BIN-}" ]; then
+        case $PATH in
+            "$SLOPTY_BIN" | "$SLOPTY_BIN":*) ;;
+            *)
+                local _slopty_path=":$PATH:"
+                _slopty_path=${_slopty_path//":$SLOPTY_BIN:"/:}
+                _slopty_path=${_slopty_path#:}
+                PATH="$SLOPTY_BIN:${_slopty_path%:}"
+                ;;
+        esac
+    fi
     local _slopty_dir=${PWD//%/%25}
     printf '\033]7;file://%s%s\007' "$HOSTNAME" "${_slopty_dir// /%20}"
     case $PS1 in

@@ -95,6 +95,17 @@ impl ConversationView {
         self.composer.focus_handle(cx).is_focused(window)
     }
 
+    /// Whether an input method holds uncommitted text in one of the face's fields (a Telex
+    /// word, kana before conversion). The keys it reads then (Enter to commit, the arrows and
+    /// Tab over its candidates, Esc to cancel) are the input method's: the face's own uses of
+    /// them wait for the next press.
+    pub(super) fn composing(&self, cx: &App) -> bool {
+        self.composer.read(cx).is_composing()
+            || self.answer_field.read(cx).is_composing()
+            || self.deny.read(cx).is_composing()
+            || self.find_field().is_some_and(|field| field.read(cx).is_composing())
+    }
+
     /// ↑ (`-1`) or ↓ (`1`): a question's options while its field has the keyboard; in the
     /// composer, the open menu's rows, else the prompts sent before. Otherwise the field's own.
     pub(super) fn arrow(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {

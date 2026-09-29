@@ -2150,6 +2150,31 @@ mod tests {
         assert_eq!(f.first_visible_line, LineIndex(0));
     }
 
+    /// Underline styles and colours written with colon subparameters (SGR `4:n`, `58:2::r:g:b`,
+    /// `58:5:n`) and their semicolon forms reach the cells the clients paint.
+    #[test]
+    fn colon_underline_styles_and_colours_reach_the_cells() {
+        use slopty_grid::{Color, Underline};
+        let mut e = engine(10, 1);
+        e.write(b"\x1b[4:3;58:2::255:0:0mA\x1b[4:4;58:5:4mB\x1b[4:5;58;2;1;2;3mC");
+        e.write(b"\x1b[59;21mD\x1b[4:0mE\x1b[4:1mF");
+        let f = e.full_frame(0).unwrap();
+        let cells = &f.updates[0].line.cells;
+        let styles: Vec<(Underline, Color)> =
+            cells.iter().take(6).map(|c| (c.style.underline, c.style.underline_color)).collect();
+        assert_eq!(
+            styles,
+            [
+                (Underline::Curly, Color::Rgb(255, 0, 0)),
+                (Underline::Dotted, Color::Palette(4)),
+                (Underline::Dashed, Color::Rgb(1, 2, 3)),
+                (Underline::Double, Color::Default),
+                (Underline::None, Color::Default),
+                (Underline::Single, Color::Default),
+            ]
+        );
+    }
+
     #[test]
     fn partial_frames_carry_only_dirty_rows() {
         let mut e = engine(10, 3);
@@ -2994,6 +3019,63 @@ mod tests {
         assert!(e.drain_events().is_empty());
     }
 
+    /// CAN and SUB cancel an OSC: a title, a directory, a notification, a progress report or a
+    /// clipboard write cut off by one does nothing, whole or split across reads.
+    #[test]
+    fn an_osc_cancelled_by_can_or_sub_has_no_effect() {
+        let mut e = engine(20, 3);
+        e.write(b"\x1b]0;before\x07\x1b]7;file:///tmp\x07");
+        drop(e.drain_events());
+        e.write(b"\x1b]0;evil\x18\x1b]7;file:///etc\x1a\x1b]9;hi\x18\x1b]777;notify;t;b\x1a");
+        e.write(b"\x1b]9;4;1;50\x18\x1b]52;c;aGk=\x1a\x1b]2;split");
+        e.write(b"\x18");
+        assert_eq!(e.drain_events(), []);
+        e.write(b"\x1b]2;after\x1b\\");
+        assert_eq!(e.drain_events(), [EngineEvent::Title("after".to_owned())]);
+    }
+
+    /// The prompt-mark scanner ends and cancels an OSC where libghostty does: a title written
+    /// the same way shows whether libghostty acted on it.
+    #[test]
+    fn the_mark_scanner_frames_an_osc_as_libghostty_does() {
+        let framings = [
+            ("", "\x07", true),
+            ("", "\x1b\\", true),
+            ("", "\x1b[0m", true),
+            ("\x05", "\x07", true),
+            ("", "\x18\x07", false),
+            ("", "\x1a\x07", false),
+            ("\x18", "\x07", false),
+        ];
+        for (after_esc, end, acted) in framings {
+            let mut e = engine(20, 3);
+            e.write(format!("\x1b{after_esc}]2;t{end}").as_bytes());
+            let titled = e.drain_events().contains(&EngineEvent::Title("t".to_owned()));
+            let mut scanner = osc133::Scanner::default();
+            let marked =
+                scanner.scan(format!("\x1b{after_esc}]133;D;1;{end}").as_bytes()).is_some();
+            assert_eq!((titled, marked), (acted, acted), "{after_esc:?} … {end:?}");
+        }
+    }
+
+    /// A `D` cancelled by CAN leaves the next prompt without a status; one ended by an ESC that
+    /// is not ST still gives it one, as libghostty acts on such an OSC.
+    #[test]
+    fn a_cancelled_command_end_leaves_no_status() {
+        let mut e = engine(20, 6);
+        let prompt = b"\x1b]133;A\x07$ \x1b]133;B\x07";
+        e.write(prompt);
+        e.write(b"false\r\n\x1b]133;C\x07\x1b]133;D;1;\x18\x07");
+        e.write(prompt);
+        e.write(b"true\r\n\x1b]133;C\x07\x1b]133;D;0\x1b[0m");
+        e.write(prompt);
+        let f = e.full_frame(0).unwrap();
+        let marks: Vec<SemanticMark> = f.updates.iter().map(|u| u.line.mark).collect();
+        let prompt = |exit, input| SemanticMark::Prompt { exit, input };
+        assert_eq!(marks[1], prompt(None, Some(2)), "the cancelled status is not taken");
+        assert_eq!(marks[2], prompt(Some(0), None));
+    }
+
     /// OSC 9 (a body), OSC 777 `notify` (title and body) and OSC 99 (kitty) are one event;
     /// the fields are cut to a banner's worth.
     #[test]
@@ -3789,6 +3871,54 @@ mod checkpoint_tests {
         }
     }
 
+    /// What output dense with OSCs costs per OSC: `ls --hyperlink` (a link opened and closed
+    /// around each name), a title per command, and the four prompt marks, through the engine
+    /// and through libghostty alone. `cargo xtask bench --filter osc_write_cost` runs it.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn osc_write_cost() {
+        const COMMANDS: usize = 200;
+        const NAMES: usize = 40;
+        let mut out = Vec::new();
+        for i in 0..COMMANDS {
+            out.extend_from_slice(b"\x1b]133;A\x07\x1b]0;~/src\x07% \x1b]133;B\x07ls\r\n");
+            out.extend_from_slice(b"\x1b]133;C\x07");
+            for n in 0..NAMES {
+                out.extend_from_slice(
+                    format!(
+                        "\x1b]8;;file:///Users/me/src/slopty/crates/f{n}.rs\x1b\\f{n}.rs\x1b]8;;\x1b\\  "
+                    )
+                    .as_bytes(),
+                );
+                if n % 8 == 7 {
+                    out.extend_from_slice(b"\r\n");
+                }
+            }
+            out.extend_from_slice(format!("\x1b]133;D;{}\x07", i % 2).as_bytes());
+        }
+        let oscs = u64::try_from(COMMANDS * (5 + NAMES * 2)).unwrap();
+        let bench = Bench::new("engine.osc_write_cost");
+        let mut through_engine = bench.series("per_osc").ops(oscs);
+        let mut through_vt = bench.series("per_osc_raw_vt").ops(oscs);
+        for _ in 0..10 {
+            let mut e = engine(80, 24, 10_000);
+            through_engine.time(|| {
+                for chunk in out.chunks(65_536) {
+                    e.write(chunk);
+                }
+            });
+            let mut raw = Terminal::new(80, 24).unwrap();
+            raw.set_scrollback_max_lines(Some(10_000)).unwrap();
+            through_vt.time(|| {
+                for chunk in out.chunks(65_536) {
+                    raw.vt_write(chunk);
+                }
+            });
+        }
+        through_engine.report().unwrap();
+        through_vt.report().unwrap();
+    }
+
     #[test]
     fn margins_are_read_from_the_formatter_sequences() {
         let bytes = b"abc\x1b[3;10r\x1b[2;7s\x1b]7;file:///\x1b\\";
@@ -3827,6 +3957,30 @@ mod checkpoint_tests {
         b.write(b"\x1b[?1049l");
         assert_eq!(all_text(&b), ["before", "", ""]);
         assert_eq!(all_text(&b), all_text(&a));
+    }
+
+    /// A program that enters the alternate screen with one mode and leaves it with another
+    /// (`?47h`, then `?1049l`) is back on the primary: DECRQM says so for every one of the
+    /// three, and a checkpoint taken there replays onto the primary, not the alternate screen.
+    #[test]
+    fn leaving_the_alternate_screen_by_another_mode_leaves_it_everywhere() {
+        let mut a = engine(20, 3, 100);
+        a.write(b"primary\r\n\x1b[?47halt\x1b[?1049l");
+        assert!(!a.modes().unwrap().contains(TermModes::ALT_SCREEN));
+        let checkpoint = {
+            let mut v = Vec::new();
+            a.checkpoint(&mut v).unwrap();
+            v
+        };
+        let mut b = engine(20, 3, 100);
+        b.write(&checkpoint);
+        assert!(!b.modes().unwrap().contains(TermModes::ALT_SCREEN));
+        assert_eq!(all_text(&b), all_text(&a));
+        drop(a.drain_events());
+        a.write(b"\x1b[?47$p\x1b[?1047$p\x1b[?1049$p");
+        let replies: Vec<EngineEvent> = a.drain_events();
+        let reset = |m: &str| EngineEvent::PtyWrite(format!("\x1b[?{m};2$y").into_bytes());
+        assert_eq!(replies, [reset("47"), reset("1047"), reset("1049")]);
     }
 
     #[test]

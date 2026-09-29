@@ -18,7 +18,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
 use crate::PtyError;
-use crate::shell_integration::ShellIntegration;
+use crate::shell_integration::{self, ShellIntegration};
 
 /// What to run on the PTY.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -122,11 +122,28 @@ impl Pty {
             None => cmd.env_remove("TERMINFO"),
         };
         forget_parent_agent(&mut cmd);
-        for (k, v) in extra_env {
+        // Web pages and editors go to the client, unless the session's own variables say
+        // otherwise (they come after).
+        let handoff = integration.map(|si| {
+            let inherited = std::env::var("PATH").ok();
+            (si.handoff_env(&spec.env), si.handoff_path(&spec.env, inherited.as_deref()))
+        });
+        let (handoff_env, handoff_path) = handoff.unwrap_or_default();
+        // One of Slopty's own commands inherited from a daemon started inside a Slopty session
+        // is nobody's choice; a stale `VISUAL` would beat the user's `EDITOR`.
+        for name in ["BROWSER", "EDITOR", "VISUAL"] {
+            if std::env::var(name).is_ok_and(|v| shell_integration::is_handoff_command(&v)) {
+                cmd.env_remove(name);
+            }
+        }
+        for (k, v) in handoff_env.into_iter().chain(extra_env) {
             cmd.env(k, v);
         }
         for (k, v) in &spec.env {
             cmd.env(k, v);
+        }
+        if let Some(path) = handoff_path {
+            cmd.env("PATH", path);
         }
         let dup = |what: &'static str| slave.try_clone().map_err(|e| PtyError::os(what, e));
         cmd.stdin(Stdio::from(dup("dup slave for stdin")?));

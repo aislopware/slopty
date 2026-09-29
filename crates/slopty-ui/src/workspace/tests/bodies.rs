@@ -29,8 +29,7 @@ fn a_remote_window_waits_blank_then_says_what_is_opening(cx: &mut TestAppContext
     let tile = arrives(&view, cx, &fake, ItemKind::Window { window: slopty_core::WindowId(7) }, 1);
     let waiting = selector("waiting", tile.item);
     assert!(cx.debug_bounds(waiting).is_none(), "blank within the grace");
-    let status =
-        view.read_with(cx, |v, cx| v.item(tile).and_then(|item| v.tile_status(tile, item, cx)));
+    let status = view.read_with(cx, |v, _| v.item(tile).and_then(|item| v.tile_status(tile, item)));
     assert_eq!(status, Some(Status::Working), "the header slot turns");
 
     cx.executor().advance_clock(LOADING_GRACE);
@@ -91,7 +90,7 @@ fn a_failure_the_grid_shows_leaves_the_header_slot_alone(cx: &mut TestAppContext
     });
     cx.run_until_parked();
     let status = |cx: &mut VisualTestContext, tile: TileRef| {
-        view.read_with(cx, |v, cx| v.item(tile).and_then(|i| v.tile_status(tile, i, cx)))
+        view.read_with(cx, |v, _| v.item(tile).and_then(|i| v.tile_status(tile, i)))
     };
     assert_eq!(status(cx, shown_tile), None, "the grid shows `false` failing");
     assert_eq!(status(cx, away_tile), Some(Status::Failed), "its rows are off screen");

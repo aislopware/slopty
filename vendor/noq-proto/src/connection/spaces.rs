@@ -1168,6 +1168,12 @@ impl PendingAcks {
         self.immediate_ack_required && !self.ranges.is_empty()
     }
 
+    /// Whether ACK frames wait on the delayed-ACK timer, so one could ride a packet that
+    /// carries other frames: ack-eliciting packets arrived since the last ACK was sent.
+    pub(super) fn can_bundle(&self) -> bool {
+        self.ack_eliciting_since_last_ack_sent > 0 && !self.ranges.is_empty()
+    }
+
     /// Returns the delay since the packet with the largest packet number was received
     pub(super) fn ack_delay(&self, now: Instant) -> Duration {
         self.largest_packet

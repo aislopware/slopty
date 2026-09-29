@@ -30,25 +30,30 @@ bytemuck = { version = "1", default-features = false, features = ["aarch64_simd"
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-collections = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
+collections = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 crossbeam-utils = { version = "0.8" }
 derive_more = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 fastrand = { version = "2", features = ["js"] }
 fixedbitset = { version = "0.5", default-features = false, features = ["std"] }
+form_urlencoded = { version = "1" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-io = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
-gpui = { git = "https://github.com/aislopware/zed.git", features = ["test-support"] }
-http_client = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
+gpui = { git = "https://github.com/aislopware/gpui-fast.git", features = ["test-support"] }
+http_client = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
+icu_locale_core = { version = "2", default-features = false, features = ["alloc", "zerovec"] }
+icu_provider = { version = "2", default-features = false, features = ["alloc", "baked"] }
 image = { version = "0.25", default-features = false, features = ["dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
 indexmap = { version = "2", features = ["serde"] }
 insta = { version = "1", features = ["json", "redactions", "yaml"] }
 libc = { version = "0.2" }
+litemap = { version = "0.8", default-features = false, features = ["alloc"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFURL", "std"] }
 once_cell = { version = "1" }
+potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 rand = { version = "0.9" }
 rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
@@ -62,6 +67,8 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
+stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
+tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -71,13 +78,18 @@ tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["fast-rng", "serde", "v4", "v5", "v7"] }
 winnow = { version = "1" }
+writeable = { version = "0.6", default-features = false, features = ["alloc"] }
+yoke = { version = "0.8", default-features = false, features = ["alloc", "derive"] }
 zerocopy = { version = "0.8", default-features = false, features = ["derive", "simd"] }
+zerofrom = { version = "0.1", default-features = false, features = ["alloc", "derive"] }
+zerotrie = { version = "0.2", default-features = false, features = ["alloc", "yoke", "zerofrom"] }
+zerovec = { version = "0.11", default-features = false, features = ["alloc", "derive", "yoke"] }
 
 [build-dependencies]
 aho-corasick = { version = "1" }
 anstyle = { version = "1" }
 bstr = { version = "1" }
-collections = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
+collections = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 crossbeam-utils = { version = "0.8" }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
 indexmap = { version = "2", features = ["serde"] }
@@ -93,6 +105,7 @@ serde = { version = "1", features = ["alloc", "derive", "rc"] }
 serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["alloc", "preserve_order", "raw_value"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
+stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 toml_datetime = { version = "1", features = ["serde"] }
@@ -107,11 +120,13 @@ errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-gpui_apple = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
-gpui_macos = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
-gpui_platform = { git = "https://github.com/aislopware/zed.git", features = ["font-kit", "runtime_shaders", "test-support", "wayland", "x11"] }
+gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
+gpui_macos = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
+gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "runtime_shaders", "test-support", "wayland", "x11"] }
 itertools = { version = "0.13" }
-objc2 = { version = "0.6" }
+noq = { version = "1", default-features = false, features = ["fast-apple-datapath", "runtime-tokio"] }
+noq-udp = { path = "../vendor/noq-udp", default-features = false, features = ["fast-apple-datapath", "tracing"] }
+objc2 = { path = "../vendor/objc2" }
 objc2-app-kit = { version = "0.3" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFNotificationCenter", "CFPlugInCOM", "CFSet", "CFStream", "CFUUID", "objc2"] }
@@ -145,10 +160,10 @@ errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-gpui_apple = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
-gpui_ios = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
+gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
+gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-objc2 = { version = "0.6" }
+objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
@@ -172,10 +187,10 @@ errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
-gpui_apple = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
-gpui_ios = { git = "https://github.com/aislopware/zed.git", features = ["runtime_shaders", "test-support"] }
+gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
+gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 mio = { version = "1", features = ["net", "os-ext"] }
-objc2 = { version = "0.6" }
+objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }

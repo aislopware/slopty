@@ -226,13 +226,19 @@ impl Plate {
     /// The plate, to lay first in the region the rows scroll in, so it paints under them. It
     /// fills that region and draws only inside it.
     pub(crate) fn under(&self, theme: &Theme) -> impl IntoElement + use<> {
+        self.under_moving(theme, true)
+    }
+
+    /// [`Self::under`], on its row at once unless `moves`, as under Reduce Motion: for a list
+    /// whose owner holds its chrome still.
+    pub(crate) fn under_moving(&self, theme: &Theme, moves: bool) -> impl IntoElement + use<> {
         let glide = Rc::clone(&self.0);
         let fill = hsla(theme.surfaces.overlay);
         let radius = px(theme.radii.sm);
         gpui::canvas(
             |_, _, _| {},
             move |region, (), window, cx| {
-                let moving = crate::kit::motion(cx);
+                let moving = moves && crate::kit::motion(cx);
                 let mut glide = glide.borrow_mut();
                 let Some(plate) = glide.frame(Instant::now(), moving) else { return };
                 window.with_content_mask(Some(gpui::ContentMask { bounds: region }), |window| {
@@ -1528,6 +1534,12 @@ impl CommandPalette {
         left > px(0.5)
     }
 
+    /// Whether an input method holds uncommitted text in the field (a Telex word, kana before
+    /// conversion): the keys it reads then (the arrows, Tab, Esc) are its own.
+    fn composing(&self, cx: &App) -> bool {
+        self.input.read(cx).is_composing()
+    }
+
     fn step(&mut self, delta: i64, cx: &mut Context<Self>) {
         let count = i64::try_from(self.matched.len()).unwrap_or(0);
         if count == 0 {
@@ -1842,18 +1854,29 @@ impl Render for CommandPalette {
         let root = if self.leaving {
             root
         } else {
-            root.capture_action(cx.listener(|this, _: &MoveUp, _window, cx| this.step(-1, cx)))
-                .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| this.step(1, cx)))
-                .capture_action(cx.listener(|_this, _: &Escape, _window, cx| {
+            // While an input method composes in the field, the arrows and Esc are its own.
+            root.capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {
+                if !this.composing(cx) {
+                    this.step(-1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &MoveDown, _window, cx| {
+                if !this.composing(cx) {
+                    this.step(1, cx);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
+                if !this.composing(cx) {
                     cx.emit(PaletteEvent::Dismiss);
-                }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|_this, _ev, _window, cx| {
-                        cx.emit(PaletteEvent::Dismiss);
-                        cx.stop_propagation();
-                    }),
-                )
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _ev, _window, cx| {
+                    cx.emit(PaletteEvent::Dismiss);
+                    cx.stop_propagation();
+                }),
+            )
         };
         gpui::deferred(root).with_priority(Layer::Dialog.priority())
     }
