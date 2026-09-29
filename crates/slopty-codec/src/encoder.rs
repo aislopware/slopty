@@ -3,14 +3,16 @@
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, Type as _,
 };
 use objc2_core_media::{
     CMFormatDescription, CMSampleBuffer, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
-    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex, kCMSampleAttachmentKey_NotSync,
-    kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
+    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
+    kCMSampleAttachmentKey_IsDependedOnByOthers, kCMSampleAttachmentKey_NotSync, kCMTimeInvalid,
+    kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
@@ -20,7 +22,9 @@ use objc2_core_video::{
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionCopySupportedPropertyDictionary,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
-    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_DataRateLimits,
+    kVTCompressionPropertyKey_AverageBitRate, kVTCompressionPropertyKey_BaseLayerBitRateFraction,
+    kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+    kVTCompressionPropertyKey_CalculateMeanSquaredError, kVTCompressionPropertyKey_DataRateLimits,
     kVTCompressionPropertyKey_EnableLTR, kVTCompressionPropertyKey_ExpectedFrameRate,
     kVTCompressionPropertyKey_MaxFrameDelayCount, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaximumRealTimeFrameRate,
@@ -30,14 +34,17 @@ use objc2_video_toolbox::{
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTEncodeFrameOptionKey_ForceLTRRefresh,
     kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
     kVTPropertyNotSupportedErr, kVTPropertySupportedValueListKey,
-    kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
+    kVTSampleAttachmentKey_QualityMetrics, kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
+    kVTSampleAttachmentQualityMetricsKey_ChromaBlueMeanSquaredError,
+    kVTSampleAttachmentQualityMetricsKey_ChromaRedMeanSquaredError,
+    kVTSampleAttachmentQualityMetricsKey_LumaMeanSquaredError,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
 use slopty_proto::screen::VideoCodec;
 
 use crate::cf::{self, check};
-use crate::video::{Chroma, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder};
+use crate::video::{Chroma, EncodedPacket, EncoderConfig, FrameOptions, Mse, VideoEncoder};
 use crate::{CodecError, PixelBuffer, annexb};
 
 /// The 10-bit 4:4:4 profile's `ProfileLevel` value. The low-latency HEVC encoder lists it in its
@@ -82,6 +89,28 @@ fn retain(value: &CFType) -> CFRetained<CFType> {
     CFType::retain(value)
 }
 
+/// The share of frames in the base layer while temporal layers are on: every other frame is one
+/// nothing refers to. `BaseLayerFrameRateFraction` takes effect on a live session from its next
+/// frame, and 1.0 turns layers off again (MEASUREMENTS.md, "temporal layers on the worker's
+/// session").
+const LAYERED_BASE_FRACTION: f64 = 0.5;
+/// The share of the bitrate the base layer gets while layers are on. Of Apple's suggested 0.6 to
+/// 0.8, 0.8 cost the fewest bytes for the same picture on scrolling text, and it leaves the
+/// frames whose loss costs nothing the smaller share.
+const LAYERED_BASE_BITS: f64 = 0.8;
+
+/// Whether temporal layers were measured on the low-latency session for `codec` and `chroma`:
+/// every other frame marked, none dropped, a live toggle taken both ways (MEASUREMENTS.md,
+/// "temporal layers on each session"). HEVC 4:2:0 and 4:4:4 10-bit and H.264 4:2:0 were; a
+/// pair not yet measured gets no layers.
+const fn layers_measured(codec: VideoCodec, chroma: Chroma) -> bool {
+    matches!(
+        (codec, chroma),
+        (VideoCodec::Hevc, Chroma::Subsampled | Chroma::Full)
+            | (VideoCodec::H264, Chroma::Subsampled)
+    )
+}
+
 /// The per-frame refcon of a frame submitted as an LTR refresh. VideoToolbox hands a frame's
 /// `sourceFrameRefcon` back to the output callback with that frame and never dereferences it,
 /// so the flag rides with its own frame whatever is in flight or dropped around it.
@@ -113,6 +142,8 @@ const fn submission(options_keyframe: bool, options_refresh: bool, ltr: bool) ->
 struct Shared {
     sink: Sink,
     codec: VideoCodec,
+    /// Frames the session gave up: dropped by rate control or failed.
+    dropped: AtomicU64,
 }
 
 /// A hardware encoder.
@@ -122,7 +153,7 @@ pub struct Encoder {
     rate_control: RateControl,
     ltr: bool,
     // Declared last so it outlives the session's `Drop` (the callback's refcon points at it).
-    _shared: Arc<Shared>,
+    shared: Arc<Shared>,
 }
 
 // SAFETY: VideoToolbox sessions are documented as usable from any thread:
@@ -174,7 +205,7 @@ impl Encoder {
         if chroma == Chroma::Full && config.codec != VideoCodec::Hevc {
             return Err(CodecError::NoFullChroma(config.codec));
         }
-        let shared = Arc::new(Shared { sink, codec: config.codec });
+        let shared = Arc::new(Shared { sink, codec: config.codec, dropped: AtomicU64::new(0) });
         // SAFETY: framework-provided constant string.
         let hardware_key =
             unsafe { kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder };
@@ -229,7 +260,7 @@ impl Encoder {
         };
         // SAFETY: `create` returned a +1 reference.
         let session = unsafe { CFRetained::from_raw(raw) };
-        let mut encoder = Self { session, config, rate_control, ltr: false, _shared: shared };
+        let mut encoder = Self { session, config, rate_control, ltr: false, shared };
         encoder.configure()?;
         // SAFETY: the session is fully configured; this only pre-allocates encoder resources.
         let status = unsafe { encoder.session.prepare_to_encode_frames() };
@@ -392,7 +423,46 @@ impl Encoder {
         // SAFETY: framework-provided constant string.
         let ltr_key = unsafe { kVTCompressionPropertyKey_EnableLTR };
         self.ltr = self.set_optional(ltr_key, cf::boolean(true), "EnableLTR");
+        // The encoder's own error per frame, which tells a still picture's refinement when to
+        // stop (`docs/decisions/video.md`, "A still picture is refined until the encoder stops
+        // gaining on it").
+        // SAFETY: framework-provided constant string.
+        let mse_key = unsafe { kVTCompressionPropertyKey_CalculateMeanSquaredError };
+        self.set_optional(mse_key, cf::boolean(true), "CalculateMeanSquaredError");
         Ok(())
+    }
+
+    /// Temporal layers on or off from the next frame ([`VideoEncoder::set_temporal_layers`]);
+    /// whether the session writes them now.
+    ///
+    /// Only on a session whose layers were measured: HEVC 4:2:0, HEVC 4:4:4 10-bit and H.264
+    /// 4:2:0. Off puts both fractions back to 1.0, and so does an on that the session refused
+    /// half of, so a session is either wholly layered or as it was opened.
+    #[must_use]
+    pub fn set_temporal_layers(&self, on: bool) -> bool {
+        // SAFETY: framework-provided constant strings.
+        let (fraction_key, bits_key) = unsafe {
+            (
+                kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+                kVTCompressionPropertyKey_BaseLayerBitRateFraction,
+            )
+        };
+        let (fraction_name, bits_name) = ("BaseLayerFrameRateFraction", "BaseLayerBitRateFraction");
+        let layered = on
+            && layers_measured(self.config.codec, self.config.chroma)
+            && self.set_optional(bits_key, &cf::float(LAYERED_BASE_BITS), bits_name)
+            && self.set_optional(fraction_key, &cf::float(LAYERED_BASE_FRACTION), fraction_name);
+        if !layered {
+            self.set_optional(fraction_key, &cf::float(1.0), fraction_name);
+            self.set_optional(bits_key, &cf::float(1.0), bits_name);
+        }
+        layered
+    }
+
+    /// Frames the session has given up since it opened.
+    #[must_use]
+    pub fn frames_dropped(&self) -> u64 {
+        self.shared.dropped.load(Ordering::Relaxed)
     }
 
     /// The session's own `ProfileLevel` value named `name`, from the supported-value list it
@@ -579,6 +649,14 @@ impl VideoEncoder for VideoToolbox {
     fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError> {
         self.0.set_frame_rate(fps)
     }
+
+    fn set_temporal_layers(&self, on: bool) -> Result<bool, CodecError> {
+        Ok(self.0.set_temporal_layers(on))
+    }
+
+    fn frames_dropped(&self) -> u64 {
+        self.0.frames_dropped()
+    }
 }
 
 impl Drop for Encoder {
@@ -597,15 +675,16 @@ unsafe extern "C-unwind" fn output_callback(
     sample: *mut CMSampleBuffer,
 ) {
     let refresh = is_refresh(source);
+    // SAFETY: the refcon was created from `Arc::as_ptr` on the encoder's `Shared`, which the
+    // `Encoder` keeps alive until the session is invalidated (see `Drop`).
+    let shared: &Shared = unsafe { &*refcon.cast::<Shared>() };
     if status != 0 || flags.contains(VTEncodeInfoFlags::FrameDropped) {
         // A refresh lost here is asked for again: the receiver repeats its request until a
         // picture it can decode arrives.
         tracing::debug!(status, ?flags, refresh, "encoder dropped a frame");
+        shared.dropped.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    // SAFETY: the refcon was created from `Arc::as_ptr` on the encoder's `Shared`, which the
-    // `Encoder` keeps alive until the session is invalidated (see `Drop`).
-    let shared: &Shared = unsafe { &*refcon.cast::<Shared>() };
     let Some(sample) = NonNull::new(sample) else { return };
     // SAFETY: the sample buffer is valid for the duration of the callback.
     let sample: &CMSampleBuffer = unsafe { sample.as_ref() };
@@ -625,7 +704,8 @@ fn packet(
     // SAFETY: valid sample buffer.
     let block = unsafe { sample.data_buffer() }
         .ok_or(CodecError::Os { call: "CMSampleBufferGetDataBuffer", status: -1 })?;
-    let (keyframe, ltr_token) = attachments(sample);
+    let marks = attachments(sample);
+    let keyframe = marks.keyframe;
     // SAFETY: valid sample buffer.
     let pts_us = cf::micros(unsafe { sample.presentation_time_stamp() }).unwrap_or(0);
     let format = if keyframe {
@@ -659,19 +739,41 @@ fn packet(
     }
     let units = data.get_mut(head..).unwrap_or_default();
     annexb::length_prefixed_to_annexb_in_place(units)?;
-    Ok(EncodedPacket { data, keyframe, ltr_token, ltr_refresh: refresh, pts_us })
+    Ok(EncodedPacket {
+        data,
+        keyframe,
+        ltr_token: marks.ltr_token,
+        ltr_refresh: refresh,
+        // A refresh is what a receiver with a hole waits on; the frames after one decode from it
+        // whatever layer it took (MEASUREMENTS.md, "temporal layers on the worker's session").
+        discardable: marks.discardable && !keyframe && !refresh,
+        mse: marks.mse,
+        pts_us,
+    })
 }
 
-/// `(is_keyframe, ltr_token)` from the sample's first attachment dictionary.
-fn attachments(sample: &CMSampleBuffer) -> (bool, Option<u64>) {
+/// What an encoded sample says of itself.
+#[derive(Clone, Copy, Debug)]
+struct Marks {
+    keyframe: bool,
+    ltr_token: Option<u64>,
+    /// `IsDependedOnByOthers` is present and false: CoreMedia's own definition of a frame that
+    /// may be dropped (`CMSampleBuffer.h`).
+    discardable: bool,
+    mse: Option<Mse>,
+}
+
+/// [`Marks`] from the sample's first attachment dictionary.
+fn attachments(sample: &CMSampleBuffer) -> Marks {
+    let unmarked = Marks { keyframe: true, ltr_token: None, discardable: false, mse: None };
     // SAFETY: valid sample buffer; `false` never allocates.
     let Some(array) = (unsafe { sample.sample_attachments_array(false) }) else {
-        return (true, None);
+        return unmarked;
     };
     // SAFETY: CoreMedia documents the array's elements as CFDictionaries keyed by CFString.
     let array: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
         unsafe { CFRetained::cast_unchecked(array) };
-    let Some(dict) = array.get(0) else { return (true, None) };
+    let Some(dict) = array.get(0) else { return unmarked };
     // SAFETY: framework-provided constant string.
     let not_sync_key = unsafe { kCMSampleAttachmentKey_NotSync };
     let not_sync = dict
@@ -685,7 +787,41 @@ fn attachments(sample: &CMSampleBuffer) -> (bool, Option<u64>) {
         .and_then(|v| v.downcast::<CFNumber>().ok())
         .and_then(|n| n.as_i64())
         .and_then(|n| u64::try_from(n).ok());
-    (!not_sync, token)
+    // SAFETY: framework-provided constant string.
+    let depended_key = unsafe { kCMSampleAttachmentKey_IsDependedOnByOthers };
+    let depended =
+        dict.get(depended_key).and_then(|v| v.downcast::<CFBoolean>().ok()).map(|b| b.as_bool());
+    Marks {
+        keyframe: !not_sync,
+        ltr_token: token,
+        discardable: depended == Some(false),
+        mse: mse(&dict),
+    }
+}
+
+/// The encoder's per-plane error from a sample's `QualityMetrics` attachment, when the session
+/// measures it.
+fn mse(dict: &CFDictionary<CFString, CFType>) -> Option<Mse> {
+    // SAFETY: framework-provided constant strings.
+    let (metrics_key, luma_key, blue_key, red_key) = unsafe {
+        (
+            kVTSampleAttachmentKey_QualityMetrics,
+            kVTSampleAttachmentQualityMetricsKey_LumaMeanSquaredError,
+            kVTSampleAttachmentQualityMetricsKey_ChromaBlueMeanSquaredError,
+            kVTSampleAttachmentQualityMetricsKey_ChromaRedMeanSquaredError,
+        )
+    };
+    let metrics = dict.get(metrics_key)?.downcast::<CFDictionary>().ok()?;
+    // SAFETY: VTCompressionProperties.h: the metrics are a dictionary keyed by CFString whose
+    // values, for a single-view stream, are CFNumbers; they are only read.
+    let metrics: CFRetained<CFDictionary<CFString, CFType>> =
+        unsafe { CFRetained::cast_unchecked(metrics) };
+    let number = |key: &CFString| {
+        metrics.get(key).and_then(|v| v.downcast::<CFNumber>().ok()).and_then(|n| n.as_f64())
+    };
+    let luma = number(luma_key)?;
+    let chroma = number(blue_key).zip(number(red_key)).map(|(blue, red)| blue.midpoint(red));
+    Some(Mse { luma, chroma })
 }
 
 /// The parameter sets of a format description, borrowed from it. The stream's NAL lengths must
@@ -1020,6 +1156,104 @@ mod tests {
         let flagged: Vec<u64> =
             packets.iter().filter(|p| p.ltr_refresh).map(|p| p.pts_us).collect();
         assert_eq!(flagged, vec![7 * 16_667], "only the frame that asked is a refresh");
+    }
+
+    /// A number property of the live session, as it reads back.
+    fn read_number(encoder: &Encoder, key: &CFString) -> Option<f64> {
+        use objc2_video_toolbox::{VTSession, VTSessionCopyProperty};
+        let ptr: NonNull<CFType> = NonNull::from(&**encoder.session);
+        // SAFETY: VTSession.h: a compression session is a `VTSessionRef`; only read here.
+        let session: &VTSession = unsafe { ptr.cast::<VTSession>().as_ref() };
+        let mut out: *const CFType = ptr::null();
+        // SAFETY: VTSession.h: the value comes back +1 through a `CFTypeRef *` out pointer.
+        let status =
+            unsafe { VTSessionCopyProperty(session, key, None, (&raw mut out).cast::<c_void>()) };
+        let raw = NonNull::new(out.cast_mut()).filter(|_| status == 0)?;
+        // SAFETY: +1 reference from the copy call (Copy rule).
+        let value = unsafe { CFRetained::from_raw(raw) };
+        value.downcast::<CFNumber>().ok()?.as_f64()
+    }
+
+    /// Frames `0..frames` through `encoder`, a keyframe first and a refresh at 7, layers
+    /// switched off before `off`; how each came back, `L` for one nothing refers to.
+    fn layered_marks(
+        encoder: &Encoder,
+        rx: &std::sync::mpsc::Receiver<EncodedPacket>,
+        image: impl Fn(usize) -> CFRetained<CVPixelBuffer>,
+        (frames, off): (usize, usize),
+    ) -> Vec<EncodedPacket> {
+        assert!(encoder.set_temporal_layers(true), "a measured session has layers");
+        for i in 0..frames {
+            if i == off {
+                assert!(!encoder.set_temporal_layers(false));
+            }
+            let options = FrameOptions {
+                force_keyframe: i == 0,
+                force_ltr_refresh: i == 7,
+                acked_ltr: Vec::new(),
+            };
+            encoder.encode(&image(i), u64::try_from(i).unwrap() * 16_667, &options).unwrap();
+            encoder.flush().unwrap();
+        }
+        let packets = collect(rx, frames);
+        assert_eq!(packets.len(), frames, "no frame dropped");
+        let marks: String = packets.iter().map(|p| if p.discardable { 'L' } else { 'B' }).collect();
+        assert!(!packets[0].discardable && !packets[7].discardable, "{marks}");
+        let layered = &packets[1..off];
+        let skippable = layered.iter().filter(|p| p.discardable).count();
+        assert!(skippable >= 6, "about every other frame while on: {marks}");
+        assert!(
+            layered.windows(2).all(|w| !(w[0].discardable && w[1].discardable)),
+            "never two in a row: {marks}"
+        );
+        assert!(packets[off + 1..].iter().all(|p| !p.discardable), "off again: {marks}");
+        packets
+    }
+
+    /// With temporal layers on, every other frame comes back as one nothing refers to, never a
+    /// keyframe or a refresh. They turn off again on the live session with both fractions back
+    /// at 1.0, and every frame carries the encoder's own error.
+    #[test]
+    fn layers_mark_every_other_frame_and_turn_off_live() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let encoder = encoder(tx);
+        let packets = layered_marks(&encoder, &rx, frame, (24, 16));
+        // SAFETY: framework-provided constant strings.
+        let (fraction_key, bits_key) = unsafe {
+            (
+                kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+                kVTCompressionPropertyKey_BaseLayerBitRateFraction,
+            )
+        };
+        assert_eq!(read_number(&encoder, fraction_key), Some(1.0));
+        assert_eq!(read_number(&encoder, bits_key), Some(1.0), "the base layer has every bit");
+        assert!(
+            packets.iter().all(|p| p.mse.is_some_and(|m| m.luma >= 0.0 && m.luma_psnr() > 20.0)),
+            "every frame carries the encoder's error"
+        );
+        assert_eq!(encoder.frames_dropped(), 0);
+    }
+
+    /// The other two sessions the worker opens take layers as the 4:2:0 HEVC one does.
+    #[test]
+    fn layers_on_the_full_chroma_and_h264_sessions() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let full = full_chroma_encoder(tx);
+        layered_marks(&full, &rx, frame_444, (24, 16));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let config = EncoderConfig {
+            width: u32::try_from(W).unwrap(),
+            height: u32::try_from(H).unwrap(),
+            codec: VideoCodec::H264,
+            fps: 60,
+            bitrate_bps: 2_000_000,
+            chroma: Chroma::Subsampled,
+        };
+        let h264 = Encoder::new(config, move |packet| {
+            let _receiver_gone = tx.send(packet);
+        })
+        .unwrap();
+        layered_marks(&h264, &rx, frame, (24, 16));
     }
 
     /// The stream is full range and says BT.709 in its VUI, so the client's decoder outputs the

@@ -31,7 +31,8 @@
 //! output callback there, on the encoding thread, before the submit returns. So the callback
 //! path (`on_session_packet` → `on_packet`) takes nothing an encode holds, and nothing whose
 //! holder waits on an encode: it takes `counters.in_flight`, `counters.encode`, `watch`,
-//! `rate` and `ltr` one at a time, then `packetizer` → `lane` → the sink. It moves the rung
+//! `refine`, `rate` and `ltr` one at a time, then `packetizer` → `lane` → the sink. `refine` is
+//! a leaf: whoever takes it takes nothing else under it. It moves the rung
 //! in atomics; the next encode tells the session.
 //!
 //! Nothing but an encode takes `held` or `encoder`, so no runtime task waits on one (15 ms at
@@ -68,9 +69,9 @@ use slopty_core::{DisplayId, StreamId};
 use slopty_input::{InputError, InputSink as _, Pointer, PointerChanges, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, Fed, HEARTBEAT_AFTER, MediaError,
-    Pace, Packetizer, RateController, Redundancy, audio_datagram, cursor_datagram,
-    heartbeat_datagram,
+    Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, Fed, HEARTBEAT_AFTER, LayerGate,
+    MediaError, Pace, Packetizer, RateController, Redundancy, Refine, audio_datagram,
+    cursor_datagram, heartbeat_datagram,
 };
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::MAX_DATAGRAM;
@@ -242,6 +243,19 @@ pub const fn frame_fits(held: usize, cwnd: u64, target_bps: u64, fps: u16) -> bo
     (held as u64) <= limit
 }
 
+/// Frames an encoder session codes before it may write temporal layers: five seconds at 60.
+/// Switched on after the keyframe alone, the session lost 8 dB with room and 17 where the rate
+/// bound, for all the 600 frames measured after; after ten, 29 % more bytes with room and 16 dB
+/// where the rate bound; after 60 it was still 1.7 dB short where the rate bound; after 300 it
+/// matched a session switched after eleven seconds (MEASUREMENTS.md, "temporal layers switched on a
+/// live session").
+const LAYERS_AFTER_FRAMES: u64 = 300;
+
+/// The most a still picture's refinement frames may take together, in milliseconds of the
+/// encoder's rate: half a second. The measured 8 Mbit/s refinements took 170 kB in twelve frames
+/// (MEASUREMENTS.md, "a still picture refined"), under this at 500 kB.
+const REFINE_BUDGET_MS: u64 = 500;
+
 /// How long the link may take to drain a keyframe before one is deferred instead of encoded.
 ///
 /// The encoder sizes a keyframe from the picture and the average rate, never from what the path
@@ -328,12 +342,14 @@ const fn quiet_after_us(ceiling_fps: u16) -> u64 {
 }
 
 /// What the held capture could answer: it never reached the encoder, a refresh is pending, a
-/// keyframe is pending.
+/// keyframe is pending, or the still picture is worth coding again ([`Refine`]), from `refine_us`
+/// on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct Asks {
     owed: bool,
     refresh: bool,
     keyframe: bool,
+    refine: Option<u64>,
 }
 
 /// When the held capture should be encoded, if nothing newer arrives first; `None` when
@@ -343,15 +359,22 @@ struct Asks {
 /// picture has gone quiet ([`quiet_after_us`]) and, unless a keyframe is wanted, once the
 /// cadence gate lets a capture through again at `due_us` ([`Pace::due_at`]): the same gate a
 /// fresh capture passes, so a repair never spends more than the rung allows.
+///
+/// A refinement of the still picture waits for the quiet, the cadence, and its own spacing
+/// ([`Refine::spacing_us`]).
 const fn repair_at(asks: Asks, captured_us: u64, due_us: u64, ceiling_fps: u16) -> Option<u64> {
-    if !asks.owed && !asks.refresh && !asks.keyframe {
-        return None;
-    }
+    let refine_us = match asks.refine {
+        Some(at) => at,
+        None if !asks.owed && !asks.refresh && !asks.keyframe => return None,
+        None => 0,
+    };
     let quiet = captured_us.saturating_add(quiet_after_us(ceiling_fps));
     if asks.keyframe {
         return Some(quiet);
     }
-    Some(if due_us > quiet { due_us } else { quiet })
+    let at = if due_us > quiet { due_us } else { quiet };
+    let refining = !asks.owed && !asks.refresh;
+    Some(if refining && refine_us > at { refine_us } else { at })
 }
 
 /// One frame's period at `fps`, microseconds; a second at 0.
@@ -813,6 +836,12 @@ struct Live<V> {
     bps: u32,
     /// The frame rate it was last set to; 0 for the one it was built with.
     fps: u16,
+    /// Whether it was last told to write temporal layers; a session is built without them.
+    layers: bool,
+    /// Frames it was handed; layers wait for [`LAYERS_AFTER_FRAMES`] of them.
+    frames: u64,
+    /// Frames it had dropped when it was last asked.
+    dropped: u64,
 }
 
 /// Requests folded into the next encoded frame.
@@ -848,6 +877,8 @@ struct Counters {
     encoder_bps: AtomicU64,
     cropped: AtomicU64,
     repaired: AtomicU64,
+    /// Refinement frames of a still picture ([`Refine`]).
+    refined: AtomicU64,
     laned: AtomicU64,
     ltr_offered: AtomicU64,
     ltr_acked: AtomicU64,
@@ -890,6 +921,7 @@ impl Counters {
             encoder_bps: AtomicU64::new(0),
             cropped: AtomicU64::new(0),
             repaired: AtomicU64::new(0),
+            refined: AtomicU64::new(0),
             laned: AtomicU64::new(0),
             ltr_offered: AtomicU64::new(0),
             ltr_acked: AtomicU64::new(0),
@@ -913,9 +945,9 @@ impl Counters {
         in_flight.push_back((pts_us, now));
     }
 
-    /// The encoder returned the frame with `pts_us` at `now`: record its encode latency, and
-    /// return it when the frame's submission is on record.
-    fn returned(&self, pts_us: u64, now: u64) -> Option<u64> {
+    /// The encoder returned the frame with `pts_us` at `now`: its encode latency when the frame's
+    /// submission is on record, kept in the stream's figures when `record`.
+    fn returned(&self, pts_us: u64, now: u64, record: bool) -> Option<u64> {
         let submitted = {
             let mut in_flight = self.in_flight.lock();
             let at = in_flight.iter().position(|&(pts, _)| pts == pts_us);
@@ -924,7 +956,9 @@ impl Counters {
             found
         };
         let took = now.saturating_sub(submitted?);
-        self.encode.lock().push(took);
+        if record {
+            self.encode.lock().push(took);
+        }
         Some(took)
     }
 
@@ -1106,6 +1140,16 @@ struct Shared<P: Platform = Native> {
     packetizer: Mutex<Packetizer>,
     redundancy: Mutex<Redundancy>,
     rate: Mutex<RateController>,
+    /// Whether the encoder should write temporal layers, from the link's loss and the frames
+    /// a layered session drops ([`LayerGate`]); the next encode tells the session.
+    layers: Mutex<LayerGate>,
+    /// What [`Self::layers`] last decided, for the encode to read without the gate's lock.
+    layers_wanted: AtomicBool,
+    /// Frames the stream's encoder sessions dropped, all sessions together; the encode keeps it
+    /// ([`Self::tell`]), since only an encode may ask the session.
+    encoder_dropped: AtomicU64,
+    /// [`Self::encoder_dropped`] at the last receiver report.
+    dropped_reported: AtomicU64,
     /// Whether the stream carries 4:4:4 or 4:2:0, following the rate's decisions; the pipeline
     /// rebuilds for a change on its geometry tick ([`Pipeline::check_geometry`]).
     chroma: Mutex<ChromaGate>,
@@ -1159,6 +1203,13 @@ struct Shared<P: Platform = Native> {
     held_us: AtomicU64,
     /// The held capture has not reached the encoder.
     owed: AtomicBool,
+    /// Whether the still picture is worth coding again, and how far apart ([`Refine`]). Taken
+    /// alone, or last under an encode's locks.
+    refine: Mutex<Refine>,
+    /// Wire bytes of the refinement frame last packetized, until a frame that is not one is:
+    /// the one queue a refinement may leave ahead of the next change, which the guard lets
+    /// that change pass ([`Self::frame_fits`]).
+    refine_wire: AtomicU64,
     /// Wakes [`repair_loop`]: a capture was held back, or a request came in.
     repair: tokio::sync::Notify,
     /// Video datagrams waiting to be handed to QUIC behind a slice of the link, so audio goes
@@ -1222,7 +1273,14 @@ impl<P: Platform> Shared<P> {
     ) -> Self {
         Self {
             id,
-            encoder: Mutex::new(Live { session: None, bps: 0, fps: 0 }),
+            encoder: Mutex::new(Live {
+                session: None,
+                bps: 0,
+                fps: 0,
+                layers: false,
+                frames: 0,
+                dropped: 0,
+            }),
             staged: Mutex::new(None),
             mailbox: Mailbox::default(),
             audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
@@ -1230,6 +1288,10 @@ impl<P: Platform> Shared<P> {
             packetizer: Mutex::new(Packetizer::new(id)),
             redundancy: Mutex::new(Redundancy::new()),
             rate: Mutex::new(RateController::new(max_bps)),
+            layers: Mutex::new(LayerGate::default()),
+            layers_wanted: AtomicBool::new(false),
+            encoder_dropped: AtomicU64::new(0),
+            dropped_reported: AtomicU64::new(0),
             chroma: Mutex::new(ChromaGate::new(Chroma::Subsampled, (0, 0), 0)),
             sent_at_report: AtomicU64::new(0),
             last_push_us: AtomicU64::new(now::<P>()),
@@ -1250,6 +1312,8 @@ impl<P: Platform> Shared<P> {
             held: Mutex::new(None),
             held_us: AtomicU64::new(0),
             owed: AtomicBool::new(false),
+            refine: Mutex::new(Refine::default()),
+            refine_wire: AtomicU64::new(0),
             repair: tokio::sync::Notify::new(),
             lane: Mutex::new(Lane::default()),
             lane_wake: tokio::sync::Notify::new(),
@@ -1367,8 +1431,9 @@ impl<P: Platform> Shared<P> {
     fn put_in(&self, live: &mut Live<P::Video>) {
         let Some((session, number)) = self.staged.lock().take() else { return };
         let old = live.session.replace(session);
-        (live.bps, live.fps) = (0, 0);
+        (live.bps, live.fps, live.layers, live.frames, live.dropped) = (0, 0, false, 0, 0);
         self.session.store(number, Ordering::Relaxed);
+        self.refine.lock().rebuilt();
         self.rebuilt();
         retire(old);
     }
@@ -1389,6 +1454,26 @@ impl<P: Platform> Shared<P> {
             live.fps = fps;
             if let Err(e) = session.set_frame_rate(fps) {
                 tracing::warn!(stream = %self.id, fps, error = %e, "set frame rate");
+            }
+        }
+        let dropped = session.frames_dropped();
+        self.encoder_dropped.fetch_add(dropped.saturating_sub(live.dropped), Ordering::Relaxed);
+        live.dropped = dropped;
+        // A session is never layered in its first frames: switched on there, the encoder spends
+        // more and drops frames for the rest of the session (MEASUREMENTS.md, "temporal layers
+        // switched on a live session").
+        let layers =
+            self.layers_wanted.load(Ordering::Relaxed) && live.frames >= LAYERS_AFTER_FRAMES;
+        live.frames = live.frames.saturating_add(1);
+        if layers != live.layers {
+            live.layers = layers;
+            match session.set_temporal_layers(layers) {
+                Ok(written) => {
+                    tracing::debug!(stream = %self.id, layers, written, "temporal layers");
+                }
+                Err(e) => {
+                    tracing::warn!(stream = %self.id, layers, error = %e, "set temporal layers");
+                }
             }
         }
     }
@@ -1421,6 +1506,7 @@ impl<P: Platform> Shared<P> {
             held.take()
         };
         self.owed.store(false, Ordering::Relaxed);
+        self.refine.lock().stop();
         drop(forgotten);
     }
 
@@ -1573,7 +1659,9 @@ impl<P: Platform> Shared<P> {
     /// makes frames of a 60th of the rate (16.0 KB at 8 Mbit/s, against the 8.3 KB a 120th
     /// allows), and two frames' worth at 120 was one frame of them.
     fn frame_fits(&self) -> bool {
-        let held = self.held_bytes();
+        let held = self.held_bytes().saturating_sub(
+            usize::try_from(self.refine_wire.load(Ordering::Relaxed)).unwrap_or(usize::MAX),
+        );
         let cwnd = if held == 0 { 0 } else { self.sink.cwnd() };
         let rung = self.fps.load(Ordering::Relaxed);
         let fed = self.fed_fps.load(Ordering::Relaxed);
@@ -1684,12 +1772,23 @@ impl<P: Platform> Shared<P> {
             let pending = self.pending.lock();
             (pending.keyframe, pending.refresh)
         };
-        if !owed && !want_keyframe && !want_refresh {
+        // With nothing owed or asked, a repair can only be the still picture refined: coded
+        // again while the encoder keeps gaining on it, never ahead of its spacing.
+        let last = self.last_encoded_us.load(Ordering::Relaxed);
+        let refining = !fresh && !owed && !want_keyframe && !want_refresh;
+        if refining && self.refine_due().is_none_or(|due| now < due) {
+            return Attempt::Nothing;
+        }
+        // A refinement only goes onto an empty link, so it never queues behind a change nor
+        // stands a change's worth of bytes in front of one.
+        if refining && self.held_bytes() > 0 {
+            return Attempt::NoRoom;
+        }
+        if fresh && !owed && !want_keyframe && !want_refresh {
             return Attempt::Nothing;
         }
         // A repair is a picture of the target as it is now, stamped now: the capture's own time
         // would put it behind the frame already encoded from it.
-        let last = self.last_encoded_us.load(Ordering::Relaxed);
         let at = if fresh { frame.capture_ts_us } else { now };
         let fps = self.fps.load(Ordering::Relaxed);
         let mut pace = Pace::resume(self.pace_us.load(Ordering::Relaxed));
@@ -1742,13 +1841,29 @@ impl<P: Platform> Shared<P> {
             drop(pending);
             (options, standalone)
         };
-        // The encoder wants presentation times that only go forward.
-        let pts = at.max(last.saturating_add(1));
+        // The encoder wants presentation times that only go forward. A refinement is stamped a
+        // period early, so the capture after it keeps its own stamp ([`Refine::stamp`]).
+        let pts = if refining {
+            Refine::stamp(now, last, period_us(fps))
+        } else {
+            at.max(last.saturating_add(1))
+        };
         self.last_encoded_us.store(pts, Ordering::Relaxed);
-        pace.sent(at, fps);
-        self.pace_us.store(pace.next_us(), Ordering::Relaxed);
+        // A refinement takes no slot of the cadence: the next change goes at once rather than
+        // wait a period behind it. Its own spacing keeps it under the rung.
+        if !refining {
+            pace.sent(at, fps);
+            self.pace_us.store(pace.next_us(), Ordering::Relaxed);
+        }
         self.owed.store(false, Ordering::Relaxed);
-        if !fresh {
+        // Before the submit: an aligned session's callback runs inside it.
+        if refining {
+            self.refine.lock().refinement_sent(pts, now);
+            self.counters.refined.fetch_add(1, Ordering::Relaxed);
+        } else if fresh {
+            self.refine.lock().fresh(pts, now);
+        } else {
+            self.refine.lock().other_sent(now);
             self.counters.repaired.fetch_add(1, Ordering::Relaxed);
         }
         self.tell(&mut live, fps);
@@ -1756,7 +1871,7 @@ impl<P: Platform> Shared<P> {
         let outcome =
             live.session.as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
         if let Some(Err(e)) = outcome {
-            let _failed = self.counters.returned(pts, Source::<P>::now_us());
+            let _failed = self.counters.returned(pts, Source::<P>::now_us(), true);
             let stale = matches!(e, CodecError::WrongSize { .. });
             match e {
                 // The 4:4:4 session went in before ScreenCaptureKit switched to `xf44`; the
@@ -1811,12 +1926,23 @@ impl<P: Platform> Shared<P> {
         };
         // A session waiting to be put in wants its keyframe from whatever is held.
         let keyframe = keyframe || self.staged.lock().is_some();
+        let refine = self.refine_due();
         repair_at(
-            Asks { owed: self.owed.load(Ordering::Relaxed), refresh, keyframe },
+            Asks { owed: self.owed.load(Ordering::Relaxed), refresh, keyframe, refine },
             captured,
             self.due_at(),
             self.fps_ceiling.load(Ordering::Relaxed),
         )
+    }
+
+    /// When the still picture's next refinement frame may go; `None` when it is not worth one.
+    /// Its frames take at most [`REFINE_BUDGET_MS`] of the encoder's rate together.
+    fn refine_due(&self) -> Option<u64> {
+        let period = period_us(self.fps.load(Ordering::Relaxed));
+        let budget =
+            self.counters.encoder_bps.load(Ordering::Relaxed).saturating_mul(REFINE_BUDGET_MS)
+                / 8_000;
+        self.refine.lock().due_us(period, budget)
     }
 
     /// The earliest the cadence gate lets a capture through at the rung in force.
@@ -1948,19 +2074,38 @@ impl<P: Platform> Shared<P> {
     }
 
     /// VideoToolbox produced an access unit.
+    ///
+    /// A refinement of the still picture goes out like any frame but is no part of what the
+    /// stream reports: not an encoded frame (so a still source still reads idle), not in the
+    /// encode or latency figures, and not in the spend the layer gate weighs.
     fn on_packet(&self, packet: &EncodedPacket) {
         let now = now::<P>();
-        if let Some(took) = self.counters.returned(packet.pts_us, now) {
-            self.watch_encoder(took, packet.keyframe);
+        let bytes = u64::try_from(packet.data.len()).unwrap_or(u64::MAX);
+        let refined_at =
+            self.refine.lock().returned(packet.pts_us, packet.mse.map(|mse| mse.luma), bytes);
+        let took = self.counters.returned(packet.pts_us, now, refined_at.is_none());
+        if let Some(took) = took.filter(|_| !packet.keyframe) {
+            self.refine.lock().took(took);
         }
+        self.repair.notify_one();
         let latency = now.saturating_sub(packet.pts_us);
-        let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
-        // The quiet geometry probe learns the source draws again from this, not its backstop.
-        if self.source_idle.load(Ordering::Relaxed)
-            && self.source_idle.swap(false, Ordering::Relaxed)
-        {
-            self.geometry_wake.notify_one();
-        }
+        let encoded = if refined_at.is_some() {
+            self.counters.encoded.load(Ordering::Relaxed)
+        } else {
+            if let Some(took) = took {
+                self.watch_encoder(took, packet.keyframe);
+            }
+            self.counters.latency_max_us.fetch_max(latency, Ordering::Relaxed);
+            self.counters.latency_sum_us.fetch_add(latency, Ordering::Relaxed);
+            // The quiet geometry probe learns the source draws again from this, not its
+            // backstop.
+            if self.source_idle.load(Ordering::Relaxed)
+                && self.source_idle.swap(false, Ordering::Relaxed)
+            {
+                self.geometry_wake.notify_one();
+            }
+            self.counters.encoded.fetch_add(1, Ordering::Relaxed)
+        };
         if packet.keyframe {
             self.keyframe_submitted_us.store(0, Ordering::Relaxed);
             let bytes = u64::try_from(packet.data.len()).unwrap_or(u64::MAX);
@@ -1989,15 +2134,16 @@ impl<P: Platform> Shared<P> {
                 "keyframe encoded"
             );
         }
-        self.counters.latency_max_us.fetch_max(latency, Ordering::Relaxed);
-        self.counters.latency_sum_us.fetch_add(latency, Ordering::Relaxed);
+        // A refinement's stamp is a period early for the encoder's sake; the client is told
+        // when it was sent, which is what its delay trend reads.
         #[expect(clippy::cast_possible_truncation, reason = "low bits by design")]
-        let capture_ts_us = packet.pts_us as u32;
+        let capture_ts_us = refined_at.unwrap_or(packet.pts_us) as u32;
         let frame = EncodedFrame {
             data: &packet.data,
             keyframe: packet.keyframe,
             ltr_token: packet.ltr_token,
             ltr_refresh: packet.ltr_refresh,
+            discardable: packet.discardable,
             capture_ts_us,
         };
         let max = self.sink.max_size().map_or(MAX_DATAGRAM, |m| m.min(MAX_DATAGRAM));
@@ -2007,7 +2153,12 @@ impl<P: Platform> Shared<P> {
         // parity"). Under the packetizer's lock, so a NACK's answer never overtakes the frame.
         let cut = packetizer
             .packetize(&frame, send_ms_lo(now), |datagrams| self.send_video(datagrams, now))
-            .map(drop);
+            .map(|sent| {
+                let wire: usize = sent.datagrams.iter().map(Bytes::len).sum();
+                let wire =
+                    if refined_at.is_some() { u64::try_from(wire).unwrap_or(u64::MAX) } else { 0 };
+                self.refine_wire.store(wire, Ordering::Relaxed);
+            });
         drop(packetizer);
         if let Err(e) = cut {
             tracing::warn!(stream = %self.id, error = %e, "packetize failed");
@@ -2063,6 +2214,7 @@ impl<P: Platform> Shared<P> {
         let previous = self.sent_at_report.swap(sent_total, Ordering::Relaxed);
         let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
         let permille = self.redundancy.lock().on_report(report, sent);
+        self.follow_layers(permille > Redundancy::MIN);
         let parity_moved = {
             let mut packetizer = self.packetizer.lock();
             let moved = packetizer.parity_permille() != permille;
@@ -2102,6 +2254,16 @@ impl<P: Platform> Shared<P> {
         }
         drop(gate);
         Some(decision)
+    }
+
+    /// Turn temporal layers on or off as the link's loss (`lossy`) and the frames the encoder
+    /// dropped since the last report say ([`LayerGate`]); the next encode tells the session.
+    fn follow_layers(&self, lossy: bool) {
+        let total = self.encoder_dropped.load(Ordering::Relaxed);
+        let dropped = total.saturating_sub(self.dropped_reported.swap(total, Ordering::Relaxed));
+        let Some(on) = self.layers.lock().update(lossy, dropped) else { return };
+        self.layers_wanted.store(on, Ordering::Relaxed);
+        tracing::debug!(stream = %self.id, on, lossy, dropped, "temporal layers follow the link");
     }
 
     /// The guard dropped a frame: count it, and decide whether to ask for a picture that
@@ -3721,7 +3883,8 @@ impl<P: Platform> Pipeline<P> {
         let cursor_wakes = self.shared.cursor_wakes.load(Ordering::Relaxed);
         // Not in `ScreenStats` (a wire type): captures the encoder was too busy to take.
         let superseded = self.shared.counters.superseded.load(Ordering::Relaxed);
-        tracing::info!(stream = %self.id, ?stats, superseded, cursor_wakes, "screen stream closed");
+        let refined = self.shared.counters.refined.load(Ordering::Relaxed);
+        tracing::info!(stream = %self.id, ?stats, superseded, refined, cursor_wakes, "screen stream closed");
     }
 }
 
@@ -4711,9 +4874,9 @@ mod tests {
         let counters = Counters::new();
         counters.submitted(1, 1_000);
         counters.submitted(2, 2_000);
-        counters.returned(2, 2_500);
-        counters.returned(1, 4_000);
-        counters.returned(9, 5_000);
+        counters.returned(2, 2_500, true);
+        counters.returned(1, 4_000, true);
+        counters.returned(9, 5_000, true);
         let encode = counters.snapshot().encode;
         assert_eq!((encode.n, encode.p50_us, encode.max_us), (2, 3_000, 3_000), "500 and 3 000 µs");
         for pts in 0..u64::try_from(IN_FLIGHT_MAX).unwrap_or(u64::MAX) {
@@ -4725,7 +4888,7 @@ mod tests {
             Some(101),
             "the oldest forgotten"
         );
-        counters.returned(100, 20_000);
+        counters.returned(100, 20_000, true);
         assert_eq!(counters.snapshot().encode.n, 2, "a forgotten frame is not a sample");
     }
 
@@ -4765,6 +4928,8 @@ mod tests {
             keyframe: true,
             ltr_token: Some(1),
             ltr_refresh: false,
+            discardable: false,
+            mse: None,
             pts_us: host_now_us(),
         };
         shared.on_packet(&packet);
@@ -4919,6 +5084,8 @@ mod tests {
             keyframe,
             ltr_token: token,
             ltr_refresh: refresh,
+            discardable: false,
+            mse: None,
             pts_us: host_now_us(),
         }
     }
@@ -5219,6 +5386,140 @@ mod tests {
         assert_eq!(shared.repair_at(), None, "nothing held any more");
     }
 
+    /// A still picture is coded again once it has gone quiet, one frame at a time while the
+    /// encoder's error keeps falling, and stops when it no longer does. Refinements are two
+    /// periods apart and stamped one early, go only onto an empty link, and are no part of what
+    /// the stream reports as encoded.
+    #[test]
+    fn a_still_picture_is_refined_until_the_encoder_stops_gaining() {
+        let (shared, wire) = shared_for_frames();
+        shared.counters.encoder_bps.store(8_000_000, Ordering::Relaxed);
+        let period = period_us(60);
+        let error = |db: f64| slopty_codec::Mse {
+            luma: 255.0 * 255.0 / 10_f64.powf(db / 10.0),
+            chroma: None,
+        };
+        let came_back = |pts_us: u64, db: f64| EncodedPacket {
+            data: vec![7; 900],
+            keyframe: false,
+            ltr_token: None,
+            ltr_refresh: false,
+            discardable: false,
+            mse: Some(error(db)),
+            pts_us,
+        };
+        let mut frame = a_frame();
+        let base = host_now_us();
+        frame.capture_ts_us = base;
+        shared.on_frame(again(&frame));
+        shared.on_packet(&came_back(base, 48.5));
+        let mut at = shared.repair_at().expect("worth refining");
+        assert!(at >= base + 2 * period, "two periods after the picture: {}", at - base);
+        wire.held.store(1, Ordering::Relaxed);
+        assert_eq!(shared.repair_now(at), Attempt::NoRoom, "only onto an empty link");
+        wire.held.store(0, Ordering::Relaxed);
+        for db in [49.1, 50.5, 50.8, 51.1] {
+            assert_eq!(shared.repair_now(at), Attempt::Sent);
+            let pts = shared.last_encoded_us.load(Ordering::Relaxed);
+            assert_eq!(pts, at - period, "stamped a period early");
+            shared.on_packet(&came_back(pts, db));
+            let next = shared.repair_at().expect("still gaining");
+            assert!(next >= at + 2 * period, "two periods apart: {next} after {at}");
+            at = next;
+        }
+        assert_eq!(shared.repair_now(at - 1), Attempt::Nothing, "not before its time");
+        for db in [51.15, 51.2] {
+            assert_eq!(shared.repair_now(at), Attempt::Sent);
+            let pts = shared.last_encoded_us.load(Ordering::Relaxed);
+            shared.on_packet(&came_back(pts, db));
+            at = shared.repair_at().unwrap_or(at);
+        }
+        assert_eq!(shared.repair_at(), None, "the encoder stopped gaining");
+        assert_eq!(shared.counters.refined.load(Ordering::Relaxed), 6);
+        let stats = shared.stats();
+        assert_eq!(stats.repaired, 0, "a refinement is not a repair");
+        assert_eq!(stats.encoded, 1, "nor an encoded frame: a still source reads idle");
+        assert_eq!(stats.encode.n, 1, "nor in the encode figures");
+
+        // A new picture, one refinement of it that came back large, and a change taken 2 ms
+        // before the refinement went and handed over after it: the change goes at once with its
+        // own capture time as its stamp, though QUIC still holds more of the refinement than the
+        // guard lets any other frame pass.
+        frame.capture_ts_us = at + 100_000;
+        shared.on_frame(again(&frame));
+        shared.on_packet(&came_back(frame.capture_ts_us, 40.0));
+        let refine_at = shared.repair_at().expect("a new still picture");
+        assert_eq!(shared.repair_now(refine_at), Attempt::Sent);
+        let refinement = shared.last_encoded_us.load(Ordering::Relaxed);
+        shared.on_packet(&EncodedPacket { data: vec![7; 60_000], ..came_back(refinement, 41.0) });
+        let queued = usize::try_from(shared.refine_wire.load(Ordering::Relaxed)).unwrap();
+        assert!(queued > 60_000, "its datagrams are on record: {queued}");
+        wire.held.store(queued, Ordering::Relaxed);
+        frame.capture_ts_us = refine_at - 2_000;
+        shared.on_frame(again(&frame));
+        let change = shared.last_encoded_us.load(Ordering::Relaxed);
+        assert_eq!(change, refine_at - 2_000, "sent at once, stamped when it was taken");
+        assert!(change > refinement, "after the refinement's stamp");
+        assert!(!shared.owed.load(Ordering::Relaxed));
+        assert_eq!(shared.stats().dropped, 0, "nor dropped by the guard");
+        wire.held.store(queued + 1, Ordering::Relaxed);
+        shared.on_packet(&came_back(change, 42.0));
+        assert_eq!(shared.refine_wire.load(Ordering::Relaxed), 0, "any other frame ends that");
+    }
+
+    /// A keyframe or refresh answered while the picture is still is a frame of that picture: it
+    /// does not start refinement over, so refreshes cannot keep it going past its cap; and a
+    /// forgotten capture or a new session stops it.
+    #[test]
+    fn refreshes_forgetting_and_a_rebuild_end_refinement() {
+        let (shared, _wire) = shared_for_frames();
+        shared.counters.encoder_bps.store(8_000_000, Ordering::Relaxed);
+        let back = |pts_us: u64, db: f64| EncodedPacket {
+            data: vec![7; 900],
+            keyframe: false,
+            ltr_token: None,
+            ltr_refresh: false,
+            discardable: false,
+            mse: Some(slopty_codec::Mse {
+                luma: 255.0 * 255.0 / 10_f64.powf(db / 10.0),
+                chroma: None,
+            }),
+            pts_us,
+        };
+        let mut frame = a_frame();
+        frame.capture_ts_us = host_now_us();
+        shared.on_frame(again(&frame));
+        shared.on_packet(&back(frame.capture_ts_us, 30.0));
+        let mut db = 30.0;
+        let mut rounds = 0;
+        while let Some(at) = shared.repair_at() {
+            assert_eq!(shared.repair_now(at), Attempt::Sent);
+            db += 1.0;
+            shared.on_packet(&back(shared.last_encoded_us.load(Ordering::Relaxed), db));
+            // The client asks for a refresh after every refinement; with no reference
+            // acknowledged it is answered with a keyframe.
+            shared.request_refresh(1, false);
+            let refresh_at = shared.repair_at().expect("the refresh");
+            assert_eq!(shared.repair_now(refresh_at), Attempt::Sent);
+            let pts = shared.last_encoded_us.load(Ordering::Relaxed);
+            shared.on_packet(&EncodedPacket { keyframe: true, ..back(pts, db - 2.0) });
+            rounds += 1;
+            assert!(rounds <= slopty_media::MAX_REFINEMENTS, "refreshes kept it going");
+        }
+        assert_eq!(
+            shared.counters.refined.load(Ordering::Relaxed),
+            u64::from(slopty_media::MAX_REFINEMENTS)
+        );
+
+        frame.capture_ts_us = host_now_us();
+        shared.on_frame(again(&frame));
+        shared.on_packet(&back(frame.capture_ts_us, 30.0));
+        assert!(shared.repair_at().is_some());
+        shared.forget_held();
+        assert_eq!(shared.repair_at(), None, "forgotten");
+        assert!(shared.refine_due().is_none());
+    }
+
     /// While the picture keeps changing a held-back capture is overtaken by the next one, which
     /// is fresher; the repair waits for the quiet so it never sends the older frame instead.
     #[test]
@@ -5349,11 +5650,15 @@ mod tests {
         log: Log,
         /// The pictures it takes; any other size is refused, as VideoToolbox's session is.
         size: (usize, usize),
+        /// What it was told of temporal layers, in order.
+        layers: Arc<Mutex<Vec<bool>>>,
+        /// Frames it says it dropped.
+        dropped: Arc<AtomicU64>,
     }
 
     /// A [`Recorder`] session numbered `session`, logging to `log`, of [`a_frame`]'s size.
     fn recorder(session: u64, log: Log) -> Recorder {
-        Recorder { session, log, size: (16, 16) }
+        Recorder { session, log, size: (16, 16), layers: Arc::default(), dropped: Arc::default() }
     }
 
     impl slopty_codec::VideoEncoder for Recorder {
@@ -5387,6 +5692,15 @@ mod tests {
         fn set_frame_rate(&self, _fps: u16) -> Result<(), CodecError> {
             Ok(())
         }
+
+        fn set_temporal_layers(&self, on: bool) -> Result<bool, CodecError> {
+            self.layers.lock().push(on);
+            Ok(on)
+        }
+
+        fn frames_dropped(&self) -> u64 {
+            self.dropped.load(Ordering::Relaxed)
+        }
     }
 
     /// Hand `shared` the capture `frame` as the repair loop would, a second after the last one
@@ -5404,6 +5718,52 @@ mod tests {
         let attempt = shared.try_encode(&mut held, false, at.get());
         drop(held);
         attempt
+    }
+
+    /// Layers follow the gate only on a session that has coded [`LAYERS_AFTER_FRAMES`]; frames
+    /// the layered session drops turn them off; a rebuilt session starts without them and waits
+    /// its own frames.
+    #[test]
+    fn layers_wait_for_a_settled_session_and_follow_the_gate() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let at = std::cell::Cell::new(host_now_us());
+        let first = recorder(1, Log::default());
+        let (told, dropped) = (Arc::clone(&first.layers), Arc::clone(&first.dropped));
+        drop(shared.install(first, 1));
+        shared.follow_layers(true);
+        shared.follow_layers(true);
+        assert!(shared.layers_wanted.load(Ordering::Relaxed), "a lossy link");
+        for _ in 0..LAYERS_AFTER_FRAMES {
+            assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        }
+        assert!(told.lock().is_empty(), "not in the session's first frames");
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        assert_eq!(*told.lock(), vec![true], "on once it has settled");
+
+        dropped.store(3, Ordering::Relaxed);
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        shared.follow_layers(true);
+        assert!(!shared.layers_wanted.load(Ordering::Relaxed), "a layered session dropped frames");
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        assert_eq!(*told.lock(), vec![true, false]);
+
+        let mut gate = LayerGate::default();
+        gate.update(true, 0);
+        gate.update(true, 0);
+        *shared.layers.lock() = gate;
+        shared.layers_wanted.store(true, Ordering::Relaxed);
+        let second = recorder(2, Log::default());
+        let told = Arc::clone(&second.layers);
+        drop(shared.install(second, 2));
+        for _ in 0..LAYERS_AFTER_FRAMES {
+            assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        }
+        assert!(told.lock().is_empty(), "a rebuilt session waits its own frames");
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        assert_eq!(*told.lock(), vec![true]);
+        assert_eq!(shared.encoder_dropped.load(Ordering::Relaxed), 3, "the old session's drops");
     }
 
     /// A rebuild swaps the encoder and resets what described the old session in one step. An

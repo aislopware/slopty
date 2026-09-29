@@ -8789,3 +8789,392 @@ frames each, user clients of `AppleM2ScalerCSCDriver` counted by `ioreg` after t
 These are the sizes that test codes, as the stream was and padded. A padded stream never asks
 for the scaler that the guest lacks. Whether the guest's first padded keyframe then comes
 within 400 ms can only be read on the runner itself; this Mac has the scaler.
+
+## 2026-09-29 — temporal layers on the worker's session
+
+Mac Studio M1 Max, macOS 27.0, load average 3–5, run from `/tmp` under `nice` (the repo volume
+is mounted `noowners`, and each VideoToolbox session there revalidates the binary's
+signature). `temporal_layers_skip_and_toggle` runs the worker's low-latency session at
+1920 × 1088 on scrolling text, first with `BaseLayerFrameRateFraction` 0.5 and LTR acknowledged,
+then decodes the stream with frames left out and compares every decoded picture's hash against
+the whole stream's. The same session then prices the layers on a 60 fps beat.
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run        # target/debug/deps/chroma444-<hash>
+mkdir -p /tmp/slopty-p5 && cp target/debug/deps/chroma444-<hash> /tmp/slopty-p5/chroma444 && cd /tmp/slopty-p5
+nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_skip_and_toggle
+SLOPTY_PROBE_LAYERS_COST_ONLY=1 nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_skip_and_toggle
+```
+
+**What may be skipped.** A frame is "layer 1" when its sample says `IsDependedOnByOthers` false
+(`TSA_R`, `TemporalId` 1). Decoded, failed and differing are counted over the frames kept:
+
+| left out | decoded | failed | differ from the whole stream |
+| --- | --- | --- | --- |
+| every layer-1 frame | 45 | 0 | 0 |
+| every other layer-1 frame | 67 | 0 | 0 |
+| the layer-1 frames either side of an LTR refresh | 87 | 0 | 0 |
+| one base frame (control) | 20 | 69 | — |
+| a base frame at 30, refresh on a base slot (36) | 84 | 0 | 0 |
+| a base frame at 30, refresh on a layer-1 slot (37) | 83 | 0 | 0 |
+| a layer-1 frame at 31, no refresh | 89 | 0 | 0 |
+
+A refresh asked on a layer-1 slot comes back as a base frame (`TRAIL_R`, depended on), and LTR
+tokens ride base frames only. `BaseLayerFrameRateFraction` is taken live: unset it reads -1
+and every frame is base; 0.5 gives `BLBL…` from the next frame; 1.0 gives all base; 0.5 again
+gives `BLBL…`, every status 0, no keyframe. 0.67 and 0.75 are accepted and then every frame
+of 240 comes back dropped, so 0.5 is the only fraction this encoder codes.
+
+**What layers cost on a session opened with them** (120 frames on the beat after a settling
+second; `+ 0.8` is `BaseLayerBitRateFraction` 0.8, the cheapest of Apple's suggested 0.6–0.8):
+
+| size, target | layers | encode p50 | dropped | base / layer-1 frame | spent | luma PSNR |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1920 × 1088, 16 Mbit/s | none | 6.41 ms | 0 | 12.3 KB | 5.89 Mbit/s | 53.27 dB |
+| | 0.5 | 6.38 ms | 0 | 17.5 / 12.9 KB | 7.31 Mbit/s | 53.24 dB |
+| | 0.5 + 0.8 | 6.31 ms | 0 | 17.3 / 11.7 KB | 6.96 Mbit/s (+18 %) | 53.23 dB |
+| 3024 × 1968, 32 Mbit/s | none | 15.27 ms | 0 | 23.9 KB | 11.48 Mbit/s | 53.30 dB |
+| | 0.5 | 16.87 ms | 0 | 38.2 / 24.3 KB | 14.98 Mbit/s | 53.05 dB |
+| | 0.5 + 0.8 | 15.25 ms | 0 | 37.7 / 20.5 KB | 13.97 Mbit/s (+22 %) | 53.04 dB |
+| 1920 × 1088, 3 Mbit/s | none | 6.38 ms | 18 | 6.3 KB | 3.00 Mbit/s | 45.30 dB |
+| | 0.5 + 0.8 | 6.42 ms | 36 | 7.9 / 3.5 KB | 2.68 Mbit/s | 42.83 dB |
+| 3024 × 1968, 6 Mbit/s | none | 15.29 ms | 50 | 12.6 KB | 5.99 Mbit/s | 46.94 dB |
+| | 0.5 + 0.8 | 15.33 ms | 68 | 15.9 / 7.5 KB | 5.10 Mbit/s | 41.35 dB |
+
+Encode time does not move. On a session opened with layers, they cost 18–22 % more bytes at
+the same picture where the rate leaves room, and 2.5–5.6 dB of luma and twice the dropped
+frames where the rate is the limit. That is not how the worker uses them: it switches them on a
+session that has run a while, where they cost next to nothing ("temporal layers switched on a
+live session" below). Ruling: `docs/decisions/video.md`, "Frames nothing refers to are skipped,
+not refreshed".
+
+## 2026-09-29 — temporal layers switched on a live session
+
+Mac Studio M1 Max, macOS 27.0, run from `/tmp` under `nice`, load average per row in the log
+(3–17: other sessions building). The first cut above priced sessions opened with layers on.
+The worker switches them on and off on a session that is already running, which is a
+different encoder. Three probes in `crates/slopty-codec/tests/chroma444.rs` price that. Each
+runs the worker's session on scrolling text on a 60 fps beat, and every phase starts with a
+settling second.
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run      # target/debug/deps/chroma444-<hash>
+mkdir -p /tmp/slopty-rev && cp target/debug/deps/chroma444-<hash> /tmp/slopty-rev/chroma444 && cd /tmp/slopty-rev
+nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_live_cost
+nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_when_switched_on
+nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_by_codec
+nice ./chroma444 --ignored --nocapture --exact tests::mean_squared_error_cost
+```
+
+**Switched on a running session** (`temporal_layers_live_cost`). One session runs five phases of
+600 frames each: without layers, then on, off, on and off. "On" is 0.5 + 0.8, and "off" puts
+both fractions back to 1.0. A second session is opened with layers on, for comparison. Cells
+give the spend in Mbit/s, the dropped frames of 600 and the luma PSNR of the phase's end:
+
+| size, target | as opened | on | off | on | off | opened layered |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1920 × 1088, 16 Mbit/s | 5.88, 0, 53.27 | 5.37, 0, 53.31 | 5.87, 0, 53.29 | 5.36, 0, 53.31 | 5.87, 0, 53.29 | 6.95, 0, 53.23 |
+| 1920 × 1088, 3 Mbit/s | 3.00, 18, 45.53 | 2.83, 0, 46.45 | 3.00, 0, 46.48 | 2.82, 0, 47.38 | 3.00, 0, 47.07 | 2.79, 36, 44.38 |
+| 3024 × 1968, 32 Mbit/s | 11.48, 0, 53.30 | 12.69, 0, 53.29 | 11.47, 0, 53.30 | 12.68, 0, 53.29 | 11.47, 0, 53.30 | 13.96, 0, 53.04 |
+| 3024 × 1968, 6 Mbit/s | 6.11, 50, 48.19 | 5.75, 0, 47.77 | 6.07, 0, 48.16 | 5.61, 0, 47.94 | 6.10, 0, 48.54 | 5.46, 68, 42.27 |
+
+Switched on a running session, layers cost −9 % to +11 % of the bytes where the rate has room,
+at the same picture. Where the rate binds, the luma moved −0.6 to +0.9 dB against the phase on
+either side, and no layered phase dropped a frame. The drops in the first column are the
+session's start. Layer-1 frames are small on a running session (5.5 KB against 16.9 KB base
+frames at 1080p 16 Mbit/s), where the opened-layered session makes them 11.7 KB. Leaving out
+all 600 marked frames of the toggled 1080p streams decoded every other frame to the same
+picture as the whole stream (2400 and 2382 frames, none failed, none differed).
+
+**How long a session must run first** (`temporal_layers_when_switched_on`, 1920 × 1088, layers
+on after N frames, then 600 frames measured):
+
+| on after | 16 Mbit/s: spent, dropped, luma | 3 Mbit/s: spent, dropped, luma |
+| --- | --- | --- |
+| 0 (before the keyframe) | 6.95, 0, 53.23 | 2.79, 36, 44.38 |
+| 1 | 16.03, 0, 45.63 | 2.94, 41, 29.08 |
+| 10 | 6.95, 0, 53.14 | 2.93, 20, 30.06 |
+| 60 | 5.39, 0, 53.30 | 2.85, 0, 44.72 |
+| 300 | 5.37, 0, 53.30 | 2.83, 0, 46.46 |
+
+Switched on within the first ten frames, the session behaves as one opened layered, or far
+worse: after the keyframe alone it lost 7.6 dB with room and 17 dB where the rate binds, for all
+600 frames. After 60 frames it has room again but has not recovered from its start where the
+rate binds. After 300 it matches the running session above. The worker waits for 300 frames
+(`LAYERS_AFTER_FRAMES`).
+
+**Each codec the worker opens** (`temporal_layers_by_codec`, 1920 × 1088, one session per row
+through five phases of 150 frames: as opened, on, the frame fraction off with the bit fraction
+left at 0.8, both off, and on again; spent in Mbit/s and luma PSNR, every layered phase marked
+75 of 150 frames and dropped none):
+
+| session, target | as opened | on | off, bits at 0.8 | off, both 1.0 | on again |
+| --- | --- | --- | --- | --- | --- |
+| HEVC 4:2:0, 16 Mbit/s | 5.90, 53.27 | 5.38, 53.31 | 5.88, 53.29 | 5.88, 53.29 | 5.37, 53.31 |
+| HEVC 4:2:0, 4 Mbit/s | 3.76, 50.41 (16 dropped) | 3.76, 50.94 | 4.01, 51.29 | 4.00, 51.29 | 3.72, 51.39 |
+| HEVC 4:4:4 10-bit, 16 Mbit/s | 9.18, 55.34 | 8.01, 55.42 | 8.94, 55.41 | 8.93, 55.42 | 7.99, 55.47 |
+| HEVC 4:4:4 10-bit, 4 Mbit/s | 3.69, 39.08 (20 dropped) | 3.64, 39.95 | 4.00, 40.05 | 4.00, 40.67 | 3.66, 40.86 |
+| H.264 4:2:0, 16 Mbit/s | 5.97, 49.37 | 5.26, 49.35 | 5.73, 49.37 | 5.73, 49.37 | 5.26, 49.35 |
+| H.264 4:2:0, 4 Mbit/s | 3.72, 38.90 (15 dropped) | 3.60, 41.71 | 4.01, 43.38 | 4.00, 43.63 | 3.88, 42.37 |
+
+All three sessions code 0.5. HEVC in either chroma costs at most 0.35 dB where the rate binds
+(0.6 dB in the table above).
+H.264 costs 1.3–1.7 dB there, and nothing where the rate has room. Layered sessions spend
+under a binding target (3.60–3.88 of 4 Mbit/s), so spend reads as room exactly when layers are
+on: it cannot say whether they cost picture. Putting the bit fraction back to 1.0 as well as the
+frame fraction was worth up to 0.6 dB on 4:4:4 at 4 Mbit/s and 0.25 dB on H.264, and nothing
+with room.
+
+**The encoder's error report** (`mean_squared_error_cost`, one session per row, 16 Mbit/s,
+alternated twice). `CalculateMeanSquaredError` costs nothing measurable. One frame in flight
+at 1080p took 6.05–6.17 ms without it and 6.09–6.19 ms with it; on the beat, 6.23–6.30 against
+6.28–6.29. At 3024 × 1968 it took 15.13–15.29 against 15.21–15.23 ms. Set before the first
+frame, every sample carried the error (240 of 240). Toggled on a running session, the set
+returns 0 and no sample carries it (0 of 60 in every phase), so it is set at open and stays on.
+
+## 2026-09-29 — temporal layers under clumped loss
+
+A simulation, so any machine gives the same numbers. `layers_under_burst_loss` in
+`crates/slopty-media/tests/burst_loss.rs` runs the link of "two parity fragments on small
+frames" above (Gilbert loss, 10 ms each way, NACKs, parity, refreshes), three seeds × 60 s,
+10 800 frames a case. With layers, base frames are 1.378× and layer-1 frames 0.450× the mean
+frame without layers: the 1080p sizes of layers switched on a running session, as the worker
+switches them ("temporal layers switched on a live session" above). The first cut used the
+sizes of a session opened layered (1.407× and 0.958×). Off is the stream as it is; unflagged
+has layers but the receiver does not know which frames it may skip; flagged sets `DISCARDABLE` and
+`PREV_DISCARDABLE` and the reassembler skips a layer-1 frame it cannot repair. Cells are
+off / unflagged / flagged; the count in brackets is the unflagged refreshes that a layer-1
+frame's loss started.
+
+```sh
+cargo nextest run -p slopty-media --release --run-ignored only -E 'test(layers_under_burst_loss)' --no-capture
+```
+
+| scene | loss, run | waited a round trip | refresh episodes (a layer-1 loss) | still | skipped | wire Mbit/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| still | 0 % | 0 / 0 / 0 | 0 / 0 (0) / 0 | 0.0 / 0.0 / 0.0 s | 0 | 1.98 / 1.83 / 1.83 |
+| still | 1 %, 1 | 0 / 1 / 1 | 0 / 0 (0) / 0 | 0.0 / 0.0 / 0.0 s | 0 | 2.37 / 2.19 / 2.19 |
+| still | 1 %, 2 | 78 / 64 / 53 | 0 / 0 (0) / 0 | 1.8 / 1.7 / 1.4 s | 16 | 2.26 / 2.09 / 2.11 |
+| still | 1 %, 4 | 102 / 97 / 64 | 0 / 2 (0) / 0 | 2.3 / 2.7 / 2.0 s | 36 | 2.14 / 1.97 / 2.00 |
+| still | 3 %, 1 | 3 / 1 / 1 | 0 / 0 (0) / 0 | 0.1 / 0.0 / 0.0 s | 0 | 2.46 / 2.28 / 2.28 |
+| still | 3 %, 2 | 166 / 159 / 114 | 0 / 0 (0) / 0 | 4.3 / 4.2 / 3.3 s | 47 | 2.46 / 2.27 / 2.27 |
+| still | 3 %, 4 | 254 / 249 / 152 | 3 / 5 (1) / 1 | 6.7 / 6.7 / 5.1 s | 99 | 2.39 / 2.21 / 2.23 |
+| still | 5 %, 1 | 5 / 5 / 5 | 0 / 0 (0) / 0 | 0.1 / 0.1 / 0.1 s | 0 | 2.46 / 2.28 / 2.28 |
+| still | 5 %, 2 | 245 / 236 / 176 | 1 / 1 (0) / 0 | 6.4 / 6.2 / 4.7 s | 62 | 2.48 / 2.31 / 2.31 |
+| still | 5 %, 4 | 439 / 423 / 292 | 6 / 6 (2) / 5 | 11.2 / 11.3 / 9.6 s | 152 | 2.49 / 2.28 / 2.30 |
+| still | 10 %, 1 | 34 / 39 / 39 | 0 / 0 (0) / 0 | 0.8 / 1.0 / 1.0 s | 0 | 2.46 / 2.29 / 2.29 |
+| still | 10 %, 2 | 607 / 546 / 368 | 1 / 4 (1) / 2 | 15.4 / 14.6 / 11.2 s | 188 | 2.52 / 2.35 / 2.34 |
+| still | 10 %, 4 | 867 / 871 / 561 | 21 / 13 (5) / 13 | 22.6 / 22.4 / 18.7 s | 281 | 2.57 / 2.39 / 2.38 |
+| scroll | 0 % | 0 / 0 / 0 | 0 / 0 (0) / 0 | 0.0 / 0.0 / 0.0 s | 0 | 7.40 / 6.88 / 6.88 |
+| scroll | 1 %, 1 | 6 / 1 / 1 | 0 / 0 (0) / 0 | 0.1 / 0.0 / 0.0 s | 0 | 7.95 / 7.39 / 7.39 |
+| scroll | 1 %, 2 | 180 / 153 / 117 | 0 / 0 (0) / 0 | 4.2 / 3.5 / 2.9 s | 32 | 7.92 / 7.37 / 7.38 |
+| scroll | 1 %, 4 | 255 / 229 / 162 | 0 / 0 (0) / 0 | 5.5 / 5.0 / 4.2 s | 68 | 7.83 / 7.27 / 7.29 |
+| scroll | 3 %, 1 | 50 / 26 / 23 | 0 / 0 (0) / 0 | 1.2 / 0.6 / 0.6 s | 4 | 8.08 / 7.58 / 7.58 |
+| scroll | 3 %, 2 | 518 / 400 / 242 | 1 / 0 (0) / 0 | 11.6 / 9.2 / 6.3 s | 141 | 8.13 / 7.63 / 7.67 |
+| scroll | 3 %, 4 | 649 / 575 / 391 | 0 / 0 (0) / 0 | 13.7 / 12.5 / 9.5 s | 148 | 8.12 / 7.60 / 7.64 |
+| scroll | 5 %, 1 | 103 / 54 / 35 | 0 / 0 (0) / 0 | 2.5 / 1.3 / 1.0 s | 15 | 8.29 / 7.78 / 7.79 |
+| scroll | 5 %, 2 | 785 / 594 / 355 | 2 / 0 (0) / 0 | 17.5 / 13.4 / 9.5 s | 227 | 8.36 / 7.85 / 7.90 |
+| scroll | 5 %, 4 | 1072 / 933 / 563 | 3 / 0 (0) / 0 | 21.5 / 19.4 / 14.1 s | 277 | 8.32 / 7.81 / 7.91 |
+| scroll | 10 %, 1 | 245 / 149 / 70 | 0 / 0 (0) / 0 | 5.8 / 3.5 / 2.2 s | 83 | 8.87 / 8.29 / 8.30 |
+| scroll | 10 %, 2 | 1313 / 1060 / 504 | 7 / 4 (4) / 0 | 27.6 / 22.6 / 13.4 s | 470 | 8.97 / 8.40 / 8.47 |
+| scroll | 10 %, 4 | 1950 / 1591 / 943 | 24 / 15 (7) / 7 | 38.8 / 33.0 / 23.2 s | 545 | 8.94 / 8.43 / 8.53 |
+
+Over every case: 69 refresh episodes off, 50 unflagged (20 of them, 40 %, a layer-1 frame's
+loss that a receiver that knew could have skipped), 28 flagged. Flagged, the picture stands
+still 13–51 % less at 1–10 % loss in runs of 2 and 4, and the scrolling screen at 10 % in runs
+of 4 goes from 24 refreshes to 7. The wire carries 7–9 % less with layers, since layer-1 frames
+of a running session are small; the first cut, with the opened session's sizes, paid 15–18 %
+more. A stream without the bits is untouched: `parity_under_burst_loss` prints the same
+numbers, digit for digit, before and after the reassembler learned to skip (the simulation
+draws its random frame sizes only with layers on).
+
+## 2026-09-29 — a still picture refined
+
+Mac Studio M1 Max, macOS 27.0, load average 8.4–8.9 (other sessions building), run from `/tmp`
+under `nice`. `still_picture_refinement` codes 30 frames of text scrolling 16 rows a frame, then
+12 more of the last picture unchanged, on the worker's session at 1920 × 1088 with
+`CalculateMeanSquaredError` on, and decodes each frame for its PSNR against the source. The
+still frames are stamped as the worker stamps refinements: two periods apart, each a period
+before it is sent (`Refine::stamp`). The encoder's own error comes back on each sample
+(`kVTSampleAttachmentKey_QualityMetrics`). The session is deterministic: a rerun at load 4
+gave the same bytes and PSNR to the digit.
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run
+mkdir -p /tmp/slopty-rev && cp target/debug/deps/chroma444-<hash> /tmp/slopty-rev/chroma444 && cd /tmp/slopty-rev
+nice ./chroma444 --ignored --nocapture --exact tests::still_picture_refinement
+nice ./chroma444 --ignored --nocapture --exact tests::a_change_after_a_refinement
+```
+
+Luma PSNR at the last moving frame, then after 1, 2, 4 and 8 frames of the still picture, and
+the best of the 12 (4:4:4 rows are luma of the 10-bit stream read at 8 bits). "Policy" is where
+`Refine`'s plateau rule stops on the encoder's error series, and what it sent until then; the
+probe codes 12, so "12" means it would have gone on:
+
+| stream | target | at the stop | + 1 / 2 / 4 / 8 | best, reached at | over the frame's share | policy | refinement encode p50 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4:2:0 | 4 Mbit/s | 33.0 dB | 33.6 / 33.6 / 34.4 / 37.9 | 42.6 at 12 | 5 of 12 | 12, 131 KB, 42.6 dB | 6.26 ms |
+| 4:2:0 | 8 Mbit/s | 48.5 dB | 49.1 / 50.5 / 51.6 / 52.9 | 53.3, within 0.3 dB at 9 | 4 of 12 | 12, 153 KB, 53.3 dB | 6.57 ms |
+| 4:2:0 | 16 Mbit/s | 53.4 dB | 53.5 / 53.5 / 53.6 / 53.6 | 53.6 at 1 | 0 | 4, 5.8 KB, 53.6 dB | 6.42 ms |
+| 4:4:4 | 8 Mbit/s | 35.8 dB | 37.7 / 38.1 / 40.3 / 44.2 | 47.7 at 12 | 7 of 12 | 12, 249 KB, 47.7 dB | 6.59 ms |
+| 4:4:4 | 16 Mbit/s | 52.2 dB | 52.6 / 53.4 / 54.3 / 55.0 | 55.3, within 0.3 dB at 8 | 0 | 11, 63 KB, 55.3 dB | 6.56 ms |
+| 4:4:4 | 32 Mbit/s | 56.3 dB | 56.5 / 56.5 / 56.7 / 56.7 | 56.7 at 1 | 0 | 4, 2.9 KB, 56.7 dB | 6.33 ms |
+
+4:4:4 chroma at 8 Mbit/s went from 36.7 to 42.8 dB in eight frames. At 4 Mbit/s the encoder
+dropped the last moving frame and 1 of the 12 still frames; the policy counts a dropped frame
+as sent and goes on blind. A still frame costs the encoder a whole frame's time (6.3–6.6 ms
+against 6.5–7.2 moving). Refinement frames are small where the rate had room: 0.2–2 KB at 16
+Mbit/s 4:2:0 and 32 Mbit/s 4:4:4, and 1.4–17 KB at 16 Mbit/s 4:4:4, which still gained 3 dB.
+Where the rate binds, about every other one spends more than a frame's share (17–42 KB at 8 Mbit/s, where a 60th of the rate is
+16.7 KB). The encoder's error, as PSNR, tracks the decoded luma within 1–2.7 dB on 4:2:0 and
+runs 11–13 dB low on 4:4:4, where it is in 10-bit units, so the policy reads only its ratios.
+With the first cut's stamps (one period apart, stamped when sent) the same streams gained
+less: 4:4:4 at 8 Mbit/s reached 41.4 dB after eight frames, where two periods apart it reached
+44.2.
+
+**Input to glass while refining** (`input_to_glass_on_a_still_screen_while_refining` in
+`crates/slopty-worker/src/screen/synthetic.rs`, ignored; load 2–7). The worker's whole path on
+the drawn 1920 × 1080 display, at the real cadence: the canvas stands still and changes only on
+a click, every 80–150 ms, so each click lands in the quiet where refinement runs. 20 s a run,
+refinement off and on alternated twice, on loopback and on a 20 Mbit/s link with 5 ms each way
+(`Wire` holds what the rate has not yet let leave, so a refinement's bytes are still queued
+when a change comes).
+
+```sh
+cargo test -p slopty-worker --lib --no-run                # target/debug/deps/slopty_worker-<hash>
+cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-rev/slopty_worker && cd /tmp/slopty-rev
+TMPDIR=/tmp nice ./slopty_worker --ignored --exact screen::synthetic::tests::input_to_glass_on_a_still_screen_while_refining --nocapture
+```
+
+| link | refinement | input sent → present p50 / p95 / max | refinements in 20 s |
+| --- | --- | --- | --- |
+| loopback | off | 26.79 / 45.41 / 50.86 ms, 27.45 / 47.95 / 58.38 | 0 |
+| loopback | on | 26.18 / 46.55 / 54.90 ms, 28.26 / 48.81 / 60.37 | 190, 190 |
+| 20 Mbit/s, 5 ms | off | 44.23 / 57.08 / 67.29 ms, 47.06 / 56.91 / 68.53 | 0 |
+| 20 Mbit/s, 5 ms | on | 45.83 / 54.36 / 68.16 ms, 47.01 / 54.90 / 57.18 | 189, 189 |
+
+Refinement moves nothing past the spread between two runs of the same case. Every click was
+seen (174 of 174), and no frame was dropped. The encoder was at 30 Mbit/s with room, so the
+refinements were small (1.2 KiB a frame on the wire, against 0.8 without); a large refinement
+ahead of a change on a slow link is the guard's case, tested in the worker
+(`a_still_picture_is_refined_until_the_encoder_stops_gaining`).
+
+**The change right after a refinement** (`a_change_after_a_refinement`). The text scrolls,
+stops, is refined twice, and scrolls on; the first change is timed 1 ms after the second
+refinement. Bytes and luma of the change, and the mean of the four frames after it:
+
+| stream, 8 Mbit/s | before the change | the change | the next four |
+| --- | --- | --- | --- |
+| 4:2:0 | no refinement (a 100 ms pause) | 9.4 KB, 48.97 dB | 25.0 KB, 51.45 dB |
+| | two refinements stamped when sent | 14.4 KB, 50.94 dB | 11.7 KB, 51.67 dB |
+| | two refinements stamped a period early | 10.3 KB, 50.84 dB | 12.4 KB, 51.52 dB |
+| 4:4:4 | no refinement | 59.7 KB, 38.42 dB | 21.9 KB, 41.13 dB |
+| | stamped when sent | 15.8 KB, 39.73 dB | 9.3 KB, 40.87 dB |
+| | stamped a period early | 24.3 KB, 38.91 dB | 10.5 KB, 40.12 dB |
+
+A refinement leaves the change better and cheaper than no refinement: 1.9 dB better on 4:2:0,
+0.5–1.3 dB and a third to a half of the bytes on 4:4:4. The encoder did not squeeze the change
+after a refinement stamped 1 ms before it: it gave it more bytes than after one a period
+before. The two stampings differ by 0.1 dB on 4:2:0 and 0.8 dB on 4:4:4, over one sequence.
+The worker stamps a period early for a reason of its own: stamps only go forward, so a
+refinement stamped when sent would push a capture taken just before it to a stamp past its
+capture time.
+
+## 2026-09-29 — stripes across the two encode engines
+
+Mac Studio M1 Max (two `ave2` encode engines), macOS 27.0, run from `/tmp` under `nice`. The
+load average is printed per row: 4.8–10.7 for the first table (other sessions building), 2.8–5.1
+for the rest. `stripes_across_engines` in `crates/slopty-codec/tests/chroma444.rs` opens one
+low-latency session per horizontal stripe, each set up as the worker's and fed its rows of the
+same scrolling text. Each stripe runs on its own thread, and every stripe of a frame is
+submitted at the same instant. The probe runs 40 frames one at a time, then 4 s on a 60 or 120
+beat. A frame counts when its last stripe comes back. "One in flight" is submit → last stripe
+back, one frame at a time. "Skew" is first → last stripe back in that run: near 0 when the
+stripes ran side by side, near a stripe's encode when they took turns. "Late" is due → last
+stripe back on the beat; "queues" means the beat outran the encoder and the lateness grew for
+the whole run. Stripes are the nearest multiple of 64 rows to an even share. Each gets its share
+of the target by the rows it shows, 32 Mbit/s (40 at 4K and 5K) for the whole unless stated.
+PSNR is the luma of the last 8 decoded frames. "Seam" is the 8 rows each side of it, striped
+against the same rows of the whole picture.
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run      # target/debug/deps/chroma444-<hash>
+mkdir -p /tmp/slopty-rev && cp target/debug/deps/chroma444-<hash> /tmp/slopty-rev/chroma444 && cd /tmp/slopty-rev
+nice ./chroma444 --ignored --nocapture --exact tests::stripes_across_engines
+SLOPTY_PROBE_OVERLAP=64 SLOPTY_PROBE_STRIPES=1,2 SLOPTY_PROBE_SIZES=3024x1968,3840x2160,5120x2880 nice ./chroma444 --ignored --nocapture --exact tests::stripes_across_engines
+SLOPTY_PROBE_EXPECT=120 SLOPTY_PROBE_OVERLAP=64 SLOPTY_PROBE_STRIPES=1,2 SLOPTY_PROBE_SIZES=1920x1088,3024x1968 nice ./chroma444 --ignored --nocapture --exact tests::stripes_across_engines
+SLOPTY_PROBE_RATE=6000000 SLOPTY_PROBE_OVERLAP=64 SLOPTY_PROBE_STRIPES=1,2 SLOPTY_PROBE_SIZES=3024x1968 nice ./chroma444 --ignored --nocapture --exact tests::stripes_across_engines
+SLOPTY_PROBE_EXPECT=120 SLOPTY_PROBE_RATE=6000000 SLOPTY_PROBE_OVERLAP=64 SLOPTY_PROBE_STRIPES=1,2 SLOPTY_PROBE_SIZES=3024x1968 nice ./chroma444 --ignored --nocapture --exact tests::stripes_across_engines
+SLOPTY_PROBE_RATE=8000000 SLOPTY_PROBE_OVERLAP=64 SLOPTY_PROBE_STRIPES=1,2 SLOPTY_PROBE_SIZES=3840x2160 nice ./chroma444 --ignored --nocapture --exact tests::stripes_across_engines
+SLOPTY_PROBE_ENCODER=plain SLOPTY_PROBE_STRIPES=1,2 SLOPTY_PROBE_SIZES=3024x1968,3840x2160 nice ./chroma444 --ignored --nocapture --exact tests::stripes_across_engines
+```
+
+**One picture against two stripes** (no overlap; ms):
+
+| size | beat | one in flight: 1 → 2 stripes | skew with 2 | late p50 on the beat: 1 → 2 | submitted a second: 1 → 2 | spent Mbit/s: 1 → 2 | PSNR: 1 → 2 | seam: 2 / whole |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1920 × 1088 | 60 | 6.43 → 7.86 | 3.27 | 8.80 → 10.99 | 60 → 60 | 5.75 → 15.21 | 53.95 → 53.62 | 50.12 / 53.26 |
+| 1920 × 1088 | 120 | 6.48 → 7.51 | 3.30 | 11.32 → 7.28 | 118.5 → 120 | 7.98 → 19.06 | 53.55 → 53.35 | 50.28 / 52.63 |
+| 3024 × 1968 | 60 | 15.34 → 15.96 | 7.70 | queues → 16.02 | 57.8 → 60.1 | 11.13 → 20.41 | 53.36 → 53.30 | 51.55 / 53.68 |
+| 3024 × 1968 | 120 | 15.34 → 8.54 | 0.25 | queues → 19.09 | 65.2 → 118.3 | 13.90 → 25.63 | 53.23 → 53.24 | 51.68 / 53.29 |
+| 3840 × 2160 | 60 | 20.55 → 10.99 | 0.03 | queues → 12.05 | 48.9 → 60.0 | 18.08 → 28.89 | 53.49 → 53.37 | 51.61 / 53.69 |
+| 3840 × 2160 | 120 | 20.52 → 11.07 | 0.01 | queues → queues | 49.0 → 90.5 | 21.80 → 35.00 | 53.50 → 53.41 | 52.35 / 53.86 |
+| 5120 × 2880 | 60 | 35.04 → 18.57 | 0.58 | queues → queues | 27.7 → 53.4 | 23.69 → 36.90 | 53.11 → 52.52 | 50.81 / 53.11 |
+| 5120 × 2880 | 120 | 34.85 → 18.50 | 0.62 | queues → queues | 26.9 → 48.8 | 30.14 → 38.27 | 53.28 → 51.73 | 48.88 / 53.22 |
+
+The 3024 × 1968 row at 120 keeps the beat (118.3 a second), 19 ms late at the median. On the
+beat its stripes come back 11 ms apart at the median, where one at a time they come back 0.25
+ms apart: on a 120 beat an engine is still busy with one stripe of the previous frame when the
+next arrives. Four stripes are never better than two: 16.49 ms at 4K 60 (skew 10.5, two stripes
+on each engine taking turns), 28.54 at 5K, 13.6–13.7 at 3024 × 1968, and 1–15 dB lost at the
+seams.
+
+**Where the driver puts a session.** At 1080p, and at 3024 × 1968 on a 60 beat, the two
+stripes take turns: the skew is half the whole picture's encode, and the pair takes longer than
+the whole. At 3024 × 1968 on a 120 beat, and at 4K and 5K on either beat, they run side by side.
+The switch follows the load the sessions declare. With `ExpectedFrameRate` 120 on a 60 beat
+(`SLOPTY_PROBE_EXPECT=120`, overlap 64), 3024 × 1968 went side by side: 8.70 ms one in flight
+(skew 0.29) against 18.13 declared at 60 (skew 8.16), late p50 11.96 against 24.53, and the
+same spend (23.26 against 23.24 Mbit/s). 1080p still took turns (7.62 ms, skew 3.45). The point
+where it switches lies between 1080p halves at 120 and 3024 × 1968 halves at 60. The picture
+that fits: the driver packs sessions onto one engine while one engine's pixel rate covers them
+(about 400 megapixels a second, from 20.5 ms for a 4K frame). Neither
+`RecommendedParallelizationLimit` nor `UsingHardwareAcceleratedVideoEncoder` answers on the
+low-latency session (-12900 for both). The plain hardware session reads 2 and true.
+
+**Rows past each seam** (`SLOPTY_PROBE_OVERLAP=64`: each stripe also codes the 64 rows beyond
+each seam, only its own rows count, and its target is its share of the rows shown). Scrolled
+content keeps its reference inside the stripe. The seam is then within 0.4 dB of the whole
+picture's same rows: 53.45 / 53.68 dB at 3024 × 1968 60, 53.61 / 53.29 at 120, 53.52 / 53.69 at
+4K 60, 54.20 / 53.86 at 4K 120, 52.90 / 53.11 and 52.85 / 53.22 at 5K, 52.43 / 52.79 and
+52.67 / 52.63 at 1080p. Two stripes with the overlap took 11.5–12.8 ms at 4K, 21.2 at 5K and
+8.7–9.5 at 3024 × 1968 declared at 120. The last is over a 120 period: on a 120 beat they fell
+behind (88–100 a second), where without the overlap they kept it.
+
+**Where the rate is the limit** (overlap 64; the whole picture 8 Mbit/s at 4K, 6 at 3024 ×
+1968; the 3024 × 1968 rows are the control for the declared rate):
+
+| size, declared | beat | one in flight: 1 → 2 | submitted: 1 → 2 | spent Mbit/s: 1 → 2 | PSNR: 1 → 2 |
+| --- | --- | --- | --- | --- | --- |
+| 3840 × 2160 | 60 | 20.62 → 11.51 | 43.5 → 60.0 | 8.03 → 8.02 | 43.52 → 36.65 |
+| 3840 × 2160 | 120 | 21.58 → 11.46 | 44.4 → 74.4 | 8.02 → 8.02 | 41.32 → 34.72 |
+| 3024 × 1968, declared 60 | 60 | 14.95 → 16.55 (skew 8.14) | 60.1 → 60.0 | 6.09 → 6.01 | 47.37 → 37.69 |
+| 3024 × 1968, declared 120 | 60 | 15.28 → 8.91 (skew 0.30) | 60.1 → 60.1 | 6.26 → 5.99 | 47.60 → 37.76 |
+| 3024 × 1968 | 120 | 15.40–15.49 → 8.74–8.79 | 57.0–62.9 → 91.9–104.3 | 6.01 → 6.00 | 44.98 → 36.45 |
+
+Declaring 120 on a 60 beat changes neither the spend nor the picture (37.76 against 37.69 dB
+striped, 47.60 against 47.37 whole) and halves the stripes' encode.
+
+Stripes cost scrolling dearly. Scrolled text enters every coded region at its bottom edge,
+where nothing can predict it. The whole picture has one such edge, while two stripes have
+two, and that band is nearly all a scroll's bits. With room under the target they spent
+1.3–2.6× the whole picture's bits for the same PSNR, from 5K down to 1080p. At a binding rate,
+at the same spend, the stripes lost 7–10 dB.
+
+**The plain hardware encoder** (no low-latency rate control, same properties otherwise):
+whole-picture 4K took 17.7 ms at 60, against 20.5 on the low-latency session. It overspent its
+target (79.6 Mbit/s against 40 with two stripes at 4K 120), and its two stripes at 4K 60 queued
+to 145 ms. Not a candidate.
+
+Ruling: `docs/decisions/video.md`, "Two stripes halve the encode at 3K and above, and cost a
+scroll twice the bits".

@@ -1704,6 +1704,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `FECGroupID`, `FECLastFrameInGroup` and `FECLevelOfProtection` (3), hints VideoToolbox makes
     for FaceTime's own FEC; nothing reads them.
   - Test: `temporal_layers` in `crates/slopty-codec/tests/chroma444.rs`, ignored.
+  - Taken up the same day: "Frames nothing refers to are skipped, not refreshed" below. The
+    10 % measured here was 18–22 % on a session opened layered, and −9 % to +11 % switched on
+    a session that has settled, as the worker switches them.
 
 - ✅ **A stream recovers with a keyframe until a reference is acknowledged, and one keyframe
   answers the refreshes that cross it** (2026-09-29, M1 Max, macOS 27.0; MEASUREMENTS "refresh
@@ -1746,3 +1749,246 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `a_picture_of_another_aspect_is_letterboxed_and_the_pointer_follows` and
     `fit_keeps_the_pictures_aspect_and_centres_it` in `slopty-ui`. The stream goldens check
     that the bars are bare surface.
+
+- ✅ **Frames nothing refers to are skipped, not refreshed; the encoder writes them while the
+  link loses, on a session that has settled** (2026-09-29, M1 Max, macOS 27.0; MEASUREMENTS
+  "temporal layers on the worker's session", "temporal layers switched on a live session" and
+  "temporal layers under clumped loss").
+  - The mechanism. `BaseLayerFrameRateFraction` 0.5 with `BaseLayerBitRateFraction` 0.8 makes
+    every other frame one nothing later predicts from (`IsDependedOnByOthers` false). The
+    encoder reads that attachment onto `EncodedPacket::discardable`. The packetizer sets
+    `slopty_proto::media::flags::DISCARDABLE` on every datagram of such a frame, and
+    `PREV_DISCARDABLE` on every datagram of the frame after it, so a receiver that lost the
+    whole frame still knows. The flag is never set on a keyframe, a refresh, or a frame that
+    carries a long-term reference.
+  - The reassembler NACKs such a frame once, and only while no later frame is complete. It
+    never waits for it behind a complete one. Once parity and that NACK cannot repair it, it
+    skips the frame: no refresh and no give-up of the stream. A partial frame learns it may be
+    skipped from the next frame's `PREV_DISCARDABLE` too. The frame counts in
+    `frames_skipped`, not as lost; its missing datagrams still count in the loss rate that
+    parity follows. On the client, a decode error on such a frame with the decoder still
+    whole asks for nothing either.
+  - Measured on the encoder: leaving out every such frame, every other one, or those around a
+    refresh decodes every kept frame to the same picture as the whole stream, with no error,
+    on sessions opened layered and on sessions switched live. A lost base frame recovers with
+    a refresh on either kind of slot.
+  - Measured on the link (a simulation with the frame sizes of layers switched on a running
+    session): over the clumped-loss cases, refresh episodes went from 69 without layers to 28
+    with them. The picture stood still 13–51 % less at 1–10 % loss in runs of 2 and 4, and the
+    wire carried 7–9 % less. With layers but a receiver that did not know, 40 % of the
+    refreshes came from a frame it could have skipped.
+  - What they cost depends on when they are switched on, and the worker switches them only on
+    a session that has coded `LAYERS_AFTER_FRAMES` (300, five seconds at 60):
+    - switched on such a session they cost −9 % to +11 % of the bytes where the rate has room,
+      at the same picture; where it binds, HEVC moved −0.6 to +0.9 dB and H.264 lost 1.3–1.7 dB,
+      and no layered phase dropped a frame;
+    - opened with them, or switched on within the first ten frames, they cost 18–22 % more
+      bytes, 2–6 dB and more dropped frames; switched on after the keyframe alone, 8–17 dB.
+  - The gate (`LayerGate` in `slopty-media`) follows the link and nothing the layers move. On
+    after two report windows in a row whose parity ratio is above `Redundancy::MIN` (about
+    100 ms), off after 40 clean windows (two seconds). The encoder's spend cannot judge room:
+    layered sessions spend under a binding target, so spend reads as room exactly while layers
+    are on. H.264's 1.3–1.7 dB where the rate binds is paid only while the link loses, against
+    13–51 % less still picture; smoothness ranks above sharpness.
+  - A safety valve for what the probes did not see. A layered session never dropped a frame in
+    any measured phase, and a fraction the encoder cannot code drops every one. The encoder
+    counts frames it dropped (`Encoder::frames_dropped`), and if a layered session drops any
+    in a report window, layers go off and stay off for 200 windows (ten seconds).
+  - Only measured pairs layer (`layers_measured` in the encoder): HEVC 4:2:0, HEVC 4:4:4
+    10-bit and H.264 4:2:0, each coding every other frame as layer 1. On anything else
+    `set_temporal_layers(true)` leaves the session as it is.
+  - Off puts both fractions back to 1.0. Leaving the bit fraction at 0.8 cost up to 0.6 dB
+    where the rate binds. If setting either fails, both are reset to 1.0.
+  - 0.5 is the only fraction this encoder codes. 0.67 and 0.75 are accepted, and then every
+    frame comes back dropped.
+  - Latency: the encoder's time does not move (6.3 against 6.4 ms at 1080p, 15.25 against
+    15.27 at 3024 × 1968). A skipped frame shows its successor one frame interval later, where
+    the same loss used to cost a round trip and a refresh.
+  - The client's reports do not yet say whether a stream is layered; `ScreenStats` gains
+    `layered` with the stripes wire change below.
+  - Tests:
+    - `layers_follow_the_link_with_hysteresis`,
+      `a_layered_session_that_drops_frames_loses_them_for_the_hold` and
+      `drops_without_layers_change_nothing` in `slopty-media`;
+    - `a_frame_nothing_refers_to_that_never_arrives_is_skipped_without_a_refresh`,
+      `a_frame_nothing_refers_to_is_nacked_once_and_shown_when_repaired_in_time`,
+      `a_frame_nothing_refers_to_is_not_waited_for_behind_a_complete_one`,
+      `at_its_deadline_a_frame_nothing_refers_to_is_skipped_and_any_other_refreshed`,
+      `a_partial_frame_learns_it_may_be_skipped_from_the_next_frame` and
+      `the_layer_bits_ride_the_frame_and_the_one_after_it` in
+      `crates/slopty-media/tests/pipeline.rs`, and
+      `a_frame_carrying_a_reference_is_never_skippable` in the packetizer;
+    - `a_refused_frame_asks_by_what_it_was_and_what_is_left` and
+      `a_failed_frame_nothing_refers_to_asks_for_nothing_unless_the_session_went` in
+      `slopty-client`;
+    - `layers_wait_for_a_settled_session_and_follow_the_gate` in the worker;
+    - `layers_mark_every_other_frame_and_turn_off_live` and
+      `layers_on_the_full_chroma_and_h264_sessions` in `slopty-codec`, on the real encoder:
+      every other frame marked, both fractions read back 1.0 after off, every frame carries
+      its error, none dropped.
+  - Measurements (ignored): `temporal_layers_skip_and_toggle`, `temporal_layers_live_cost`,
+    `temporal_layers_when_switched_on`, `temporal_layers_by_codec` in `chroma444.rs`, and
+    `layers_under_burst_loss` in `burst_loss.rs`.
+
+- ✅ **A still picture is refined until the encoder stops gaining on it** (2026-09-29, M1 Max,
+  macOS 27.0; MEASUREMENTS "a still picture refined").
+  - When the screen stops, ScreenCaptureKit sends nothing more, and the last frame stays as
+    it was coded. Handed the same picture again, the low-latency encoder spends the next
+    frames on what it missed. At 8 Mbit/s, 1080p 4:2:0 went from 48.5 to 52.9 dB of luma in
+    eight frames, and 4:4:4 from 35.8 to 44.2. Where the moving picture already had its rate
+    there was little to gain: 53.4 to 53.6 dB at 16 Mbit/s.
+  - Once the picture is quiet (the repair loop's quiet mark), the worker codes the held
+    capture again, one refinement frame at a time. The policy is `Refine` in `slopty-media`.
+    It uses the encoder's own error per frame (`CalculateMeanSquaredError`, read back as
+    `EncodedPacket::mse`; it costs no encode time measured, and a session takes it only
+    before its first frame, so it is set at open). A refinement goes on while the error falls
+    by at least 0.2 dB over two frames. Only ratios of the error are used, so 10-bit 4:4:4,
+    whose error is in 10-bit units, reads the same.
+  - It stops at a plateau, on a lossless frame, after 32 frames, after 4 when the encoder
+    reports no error, when its frames have taken half a second of the encoder's rate
+    (`REFINE_BUDGET_MS`), and as soon as a new picture is coded. Only a fresh capture starts
+    a picture over. A keyframe or refresh answered while the picture is still is a frame of
+    the same picture: its error restarts the record, but not the count or the budget, so
+    refreshes cannot keep refinement going. A forgotten capture and a rebuilt session end it.
+  - It never competes with a change for the link. A refinement goes only onto an empty link
+    (nothing held in QUIC's send buffer; otherwise `NoRoom`). A change that follows is not
+    held back by the refinement's own bytes: the congestion guard (`frame_fits`) leaves out
+    the last refinement's wire bytes, and any other frame ends that exemption.
+  - It never competes with a change for the encoder for long. The low-latency encoder codes
+    inside the submit, so a change that lands on a refinement waits for it. Refinement frames
+    are therefore at least two periods and four mean encode times apart, and take no slot of
+    the cadence, so the change behind one goes at once. A change can wait for at most one
+    refinement's encode, and on a slow link for the rest of that refinement's bytes ahead of
+    it on the wire. Measured input to glass on a still screen that changes on a click every
+    80–150 ms, about one refinement between clicks: p50 26.2–28.3 ms with refinement against
+    26.8–27.5 without on loopback, 45.8–47.0 against 44.2–47.1 on a 20 Mbit/s link with 5 ms
+    each way, and p95 within 2.5 ms either way. Those refinements were small (about 1 KB); a
+    large one on a slow link is covered by the guard's test, not by this measurement.
+  - Its stamp for the encoder is a period before it is sent, and after the last stamp.
+    Stamps only go forward, so one stamped when sent would push a capture taken just before
+    it to a stamp past its capture time. Its capture time on the wire is when it was sent.
+    The encoder was not seen to squeeze the change after a refinement either way, and a
+    refinement leaves the change better and cheaper than no refinement (1.9 dB on 4:2:0 at 8
+    Mbit/s; 0.5–1.3 dB and a third to a half of the bytes on 4:4:4).
+  - Refinements are not frames of the source. They count apart from repairs (`refined` in
+    the stream's close log), and not in `encoded`, the source's idle tracking, the encode
+    figures, the capture-to-packet latency or the encoder watch. `ScreenStats` has no field
+    for them yet; it gains `refined` with the stripes wire change below.
+  - Tests:
+    - the `refine::tests` in `slopty-media` (the gains from the measured series, every bound
+      and the budget, refreshes that do not restart it, refinements known by their stamps,
+      the spacing, the stamp and a rebuild);
+    - in the worker, `a_still_picture_is_refined_until_the_encoder_stops_gaining` (the budget,
+      only onto an empty link, the stamp, two periods apart, kept out of the stats, and a
+      change taken just before a large refinement sent at once with its own stamp and not
+      dropped by the guard) and `refreshes_forgetting_and_a_rebuild_end_refinement`;
+    - the ignored probes `still_picture_refinement` and `a_change_after_a_refinement` in
+      `chroma444.rs`, and the measurement `input_to_glass_on_a_still_screen_while_refining`
+      in the worker.
+
+- ✅ **Two stripes halve the encode at 3K and above, and cost a scroll twice the bits**
+  (2026-09-29, M1 Max with two `ave2` engines, macOS 27.0; MEASUREMENTS "stripes across the two
+  encode engines"). The question was whether two low-latency sessions, each coding its own
+  horizontal stripe of the same capture at the same instant, run on the two engines at once.
+  - They do, once the sessions ask for more than one engine's pixel rate. Measured one frame
+    in flight, the whole picture against two stripes, with the stripes back within 0.6 ms of
+    each other:
+    - 4K: 20.6 → 11.0 ms without the overlap below, 11.5–12.8 with it; 60 fps kept where the
+      whole picture made 42–49;
+    - 5K: 35.0 → 18.5 ms (21.2 with the overlap), about 50 fps where the whole picture made 27;
+    - 3024 × 1968 declared at 120: 15.3 → 8.5 ms, 8.7–9.5 with the overlap.
+  - Below that load the driver puts both sessions on one engine, and they take turns: the
+    stripes come back 3.3 ms apart at 1080p and 8.2 ms apart at 3024 × 1968 declared at 60,
+    and the pair is slower than the whole picture. Declaring `ExpectedFrameRate` 120 moves
+    3024 × 1968 onto both engines on a 60 beat (18.1 → 8.7 ms with the overlap). It costs
+    nothing measured: at a binding 6 Mbit/s, declared 60 and declared 120 spent 6.01 and 5.99
+    Mbit/s and gave 37.69 and 37.76 dB. 1080p stays on one engine either way. Four stripes are
+    never better than two on two engines.
+  - The design's bar was 4K at no more than 14 ms: met at 11.5–12.8 ms with the overlap. A 120
+    beat stays out of reach: at 4K 11.5 ms is more than a period, and the mailbox carried
+    72–90 frames a second, not 120. At 3024 × 1968 two stripes without the overlap kept 118 of
+    120 (8.5 ms, 19 ms late at the median), and with the overlap they take longer than the 8.3
+    ms period and fall behind (88–100 a second).
+  - Seams: coding 64 rows past each seam in each stripe, with each stripe showing only its
+    own rows, keeps the rows at the seam within 0.4 dB of the whole picture's. The cost is
+    about 6 % more rows coded. Without the overlap, the seam was 1.5–4.3 dB worse.
+  - The cost is scrolling. Text scrolled into a coded region enters at its bottom edge, where
+    nothing predicts it, and that edge is nearly all a scroll's bits. Two stripes have two such
+    edges. With room under the target they spent 1.3–2.6× the bits for the same picture. Where
+    the rate is the limit they lost 7–10 dB at the same spend.
+  - So stripes are a mode for a link with room, not a default. They are on only when all of
+    these hold:
+    - this machine's two engines are shown to run side by side (timed once per boot at the
+      stream's stripe size, as `warm_up` already does one capture);
+    - the whole picture's encode is over 12 ms (3024 × 1968 and up);
+    - the encoder spends well under half its target, so twice a scroll still fits.
+    Switching mode rebuilds the sessions, so the gate holds for seconds, not report windows.
+  - Not taken:
+    - the plain hardware encoder, which overspent its target 2× and queued its stripes;
+    - slices in one bitstream (`NumberOfSlices` fails every frame, design §3.1);
+    - two capture streams, one per half, which would not share a display time.
+  - Measurement: `stripes_across_engines` in `crates/slopty-codec/tests/chroma444.rs`
+    (ignored), with the knobs for stripes, overlap, declared rate, target and encoder in its
+    doc. The build plan is the next entry.
+
+- ⏸ **Two stripes, built: the wire, the worker and the client** (designed 2026-09-29, not
+  built; the ruling above).
+  - Build only behind the gate in the ruling. Two stripes, never more.
+  - Geometry, one function both ends call (`slopty-media`, `stripes.rs`). The seam is the
+    multiple of 64 (the HEVC CTU) nearest half, and each stripe also codes `OVERLAP` = 64 rows
+    past it. Stripe 0 shows `[0, seam)` and codes `[0, seam + 64)`; stripe 1 shows
+    `[seam, H)` and codes `[seam − 64, H)`. For 3024 × 1968 that is 960 + 1008 shown and
+    1024 + 1072 coded; for 3840 × 2160, 1088 + 1072 and 1152 + 1136; for 5120 × 2880,
+    1472 + 1408 and 1536 + 1472. Every coded height is a multiple of 16 when H is, which the
+    padding already guarantees.
+  - Wire (`slopty-proto`):
+    - a `Stripe { media: StreamId, coded_top, coded_rows, shown_top }` in `screen.rs`: each
+      stripe is its own media stream, with its own reassembly, NACKs, refreshes and reports;
+    - `ScreenEvent::Opened` and `ScreenEvent::Geometry` gain `stripes: Vec<Stripe>`, empty for
+      one picture. With stripes, `stream` stays the stream the client asked for (control,
+      audio, cursor), and video arrives only on each `Stripe::media`. A resize can turn stripes
+      on or off and moves the seam;
+    - `FramePrefix` gains a `stripes: u8` mask of the stripes coded from this capture (0 when
+      unstriped) and 3 reserved bytes, so `FRAME_PREFIX_BYTES` goes from 16 to 20. The capture
+      is already named by `capture_ts_us`, which every stripe of one capture shares;
+    - `ScreenStats` gains `refined` (refinement frames), `superseded` (captures replaced in the
+      encode mailbox) and `layered` (whether the encoder writes temporal layers now), which the
+      worker counts today and logs only at close;
+    - goldens: `Opened` with and without stripes (it has none today), `Geometry` with stripes,
+      the prefix round trip with the mask, and the stats literal. `ClientMsg` needs nothing:
+      NACKs, refreshes, reports and LTR acks are already per `StreamId`.
+  - Capture → stripes (worker). One ScreenCaptureKit stream as today. Each stripe's session
+    has its own IOSurface-backed `CVPixelBufferPool` of `coded_rows` rows. Per capture, the
+    stripe's coded rows of both planes are copied into a pool buffer (12.4 MB a frame at 4K):
+    a CPU copy first, a Metal blit only if the copy measures over 0.5 ms, and never
+    `VTPixelTransferSession`, which goes through the scaler the padding work removed. A probe
+    `stripes_copy_cost` measures the copy at the three sizes before building.
+  - Encode (worker). `Live` holds one or two stripe sessions, each with its own `Encoder`,
+    encode thread and one-frame mailbox (an aligned submit encodes inside the call, and both
+    stripes must submit at the same instant), and its own packetizer, redundancy, LTR book,
+    pending keyframe or refresh and generation. The capture goes to every stripe's mailbox
+    with one `capture_ts_us`. Every stripe session declares `ExpectedFrameRate` = max(rung,
+    120). One `RateController` per stream: each stripe gets `encoder_bps` × its shown rows /
+    the picture's rows, and `frame_fits` budgets each its share. `EncoderWatch` is fed by the
+    slowest stripe. A refresh or NACK on a stripe's `media` is answered by that stripe alone,
+    and the next frame's mask names only the stripes coded from that capture. `LayerGate` and
+    `Refine` run per stripe.
+  - The gate: `warm_up` times one session against two concurrent ones at the stripe size, once
+    per boot and size class, and keeps whether two beat one by 25 %. Stripes go on when that
+    holds, the whole picture's mean encode is over 12 ms and the smoothed spend is under 45 %
+    of target, and off at 70 %, with a few seconds' hold each way. Switching rebuilds the
+    sessions (keyframes) through `install`/`put_in` and sends `Geometry` with the new stripes.
+  - Client (`slopty-client`, then the view). The router sends each `Stripe::media` to the
+    stream's worker task, which holds one reassembler and decoder per stripe. A `Stitch`
+    groups decoded stripes by `capture_ts_us`, presents a capture when every stripe in its
+    mask has decoded or one display refresh after the first did (then with the other stripe's
+    previous picture, counted as a `seam_tear`). A stripe waiting for its refresh keeps its
+    last picture while the other goes on. The view draws each stripe's shown rows in one
+    layer, two textured quads with source rects; cursor, zoom, letterbox and pointer mapping
+    stay in whole-picture coordinates.
+  - Tests to write with it: `layout` at the three sizes; a capture reaching both mailboxes
+    with one stamp; a refresh on one stripe coding only that stripe, with the mask saying so;
+    the gate's hysteresis; a real session at 3840 × 2160 whose stripes come back within 2 ms
+    of each other and under 14 ms, from `/tmp`; `Stitch` with both stripes, one late past a
+    refresh, and one stripe's refresh; an e2e on the drawn 4K display with stripes forced on,
+    the seam rows' PSNR in the golden.

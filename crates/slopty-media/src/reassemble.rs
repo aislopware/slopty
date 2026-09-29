@@ -17,6 +17,12 @@
 //! * **Need refresh** (after a loss): the worker is asked for a refresh from the last good frame;
 //!   the next IDR or LTR-refresh frame restarts delivery and everything older is dropped.
 //!
+//! A frame nothing refers to (the encoder's temporal layer 1, [`FrameInfo::discardable`]) is never
+//! worth a refresh. It is asked for once, and only while no later frame is complete; once a later
+//! frame is complete, or its deadline passes, it is skipped and delivery goes on with the next
+//! frame. Its own datagrams say what it is, and so do the next frame's, so a frame that lost every
+//! fragment is skipped too.
+//!
 //! Frames whose fragments all arrive are delivered without any parity work; parity is only
 //! decoded when data fragments are missing and enough parity arrived.
 
@@ -175,6 +181,8 @@ pub struct FrameInfo {
     pub ltr_token: Option<u64>,
     /// Recovery frame from an acknowledged LTR.
     pub ltr_refresh: bool,
+    /// Nothing later refers to this frame: a decoder that cannot use it needs no refresh.
+    pub discardable: bool,
     /// Worker capture timestamp, microseconds (low 32 bits).
     pub capture_ts_us: u32,
     /// Needed parity or a retransmission.
@@ -324,6 +332,8 @@ pub struct ReassemblerStats {
     pub frames_retransmit: u64,
     /// Frames given up on.
     pub frames_lost: u64,
+    /// Frames nothing refers to that were skipped rather than repaired: no refresh, no wait.
+    pub frames_skipped: u64,
     /// Fragments that never arrived (counted when a frame resolves).
     pub datagrams_lost: u64,
     /// Data fragments the worker cut frames into (counted once per frame seen).
@@ -355,10 +365,12 @@ struct Partial {
     nacks: u8,
     nacked_at: Option<Instant>,
     retransmitted: bool,
+    /// Nothing later refers to it: its own flags said so, or the next frame's did.
+    discardable: bool,
 }
 
 impl Partial {
-    fn new(header: &MediaHeader, shard_bytes: usize, now: Instant) -> Self {
+    fn new(header: &MediaHeader, shard_bytes: usize, now: Instant, discardable: bool) -> Self {
         let data_count = usize::from(header.data_count.get());
         let parity_count = usize::from(header.parity_count);
         Self {
@@ -374,6 +386,7 @@ impl Partial {
             nacks: 0,
             nacked_at: None,
             retransmitted: false,
+            discardable: discardable || header.flags & flags::DISCARDABLE != 0,
         }
     }
 
@@ -410,12 +423,36 @@ enum Slot {
         first_seen: Instant,
         nacks: u8,
         nacked_at: Option<Instant>,
+        /// The next frame said nothing refers to this one.
+        discardable: bool,
     },
     Partial(Partial),
     Complete {
         out: FrameOut,
         first_seen: Instant,
     },
+    /// A frame nothing refers to, given up on without a refresh: delivery steps over it.
+    Skipped,
+}
+
+impl Slot {
+    const fn unknown(now: Instant) -> Self {
+        Self::Unknown { first_seen: now, nacks: 0, nacked_at: None, discardable: false }
+    }
+
+    /// Nothing more will come of it: delivered-ready or stepped over.
+    const fn settled(&self) -> bool {
+        matches!(self, Self::Complete { .. } | Self::Skipped)
+    }
+
+    /// Still waited for, and nothing later refers to it.
+    const fn discardable(&self) -> bool {
+        match self {
+            Self::Unknown { discardable, .. } => *discardable,
+            Self::Partial(p) => p.discardable,
+            Self::Complete { .. } | Self::Skipped => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -769,22 +806,23 @@ impl Reassembler {
                 self.enter_refresh(now);
             } else {
                 for missing in next..frame {
-                    self.frames.entry(missing).or_insert(Slot::Unknown {
-                        first_seen: now,
-                        nacks: 0,
-                        nacked_at: None,
-                    });
+                    self.frames.entry(missing).or_insert_with(|| Slot::unknown(now));
                 }
             }
         }
+        if header.flags & flags::PREV_DISCARDABLE != 0
+            && let Some(previous) = frame.checked_sub(1)
+        {
+            match self.frames.get_mut(&previous) {
+                Some(Slot::Unknown { discardable, .. }) => *discardable = true,
+                Some(Slot::Partial(p)) => p.discardable = true,
+                Some(Slot::Complete { .. } | Slot::Skipped) | None => {}
+            }
+        }
 
-        let slot = self.frames.entry(frame).or_insert(Slot::Unknown {
-            first_seen: now,
-            nacks: 0,
-            nacked_at: None,
-        });
-        if let Slot::Unknown { .. } = slot {
-            *slot = Slot::Partial(Partial::new(header, payload.len(), now));
+        let slot = self.frames.entry(frame).or_insert_with(|| Slot::unknown(now));
+        if let Slot::Unknown { discardable, .. } = *slot {
+            *slot = Slot::Partial(Partial::new(header, payload.len(), now, discardable));
             self.stats.data_shards =
                 self.stats.data_shards.saturating_add(u64::try_from(data_count).unwrap_or(0));
             self.stats.parity_shards = self
@@ -856,8 +894,13 @@ impl Reassembler {
             self.window.datagrams_lost.saturating_add(u32::try_from(missing).unwrap_or(u32::MAX));
     }
 
-    /// Give up on `frame`.
+    /// Give up on `frame`: skip it when nothing refers to it, otherwise lose it and ask for a
+    /// refresh.
     fn lose(&mut self, frame: u32, missing: u64, now: Instant) {
+        if self.frames.get(&frame).is_some_and(Slot::discardable) {
+            self.skip(frame, missing);
+            return;
+        }
         self.frames.remove(&frame);
         self.give_up(frame);
         self.stats.frames_lost = self.stats.frames_lost.saturating_add(1);
@@ -867,6 +910,15 @@ impl Reassembler {
             Need::Frame(_) => self.enter_refresh(now),
             Need::Keyframe | Need::Refresh => self.request_refresh(now),
         }
+    }
+
+    /// Step over `frame`, which nothing refers to: no refresh, and delivery goes on past it.
+    fn skip(&mut self, frame: u32, missing: u64) {
+        tracing::debug!(frame, missing, "frame nothing refers to skipped");
+        self.frames.insert(frame, Slot::Skipped);
+        self.give_up(frame);
+        self.stats.frames_skipped = self.stats.frames_skipped.saturating_add(1);
+        self.count_lost_datagrams(missing);
     }
 
     /// Nothing more of `frame` is wanted.
@@ -898,6 +950,20 @@ impl Reassembler {
             let next = match self.need {
                 Need::Frame(n) => match self.frames.get(&n) {
                     Some(Slot::Complete { .. }) => n,
+                    Some(Slot::Skipped) => {
+                        self.frames.remove(&n);
+                        self.need = Need::Frame(n.wrapping_add(1));
+                        continue;
+                    }
+                    // A later picture is ready: showing it beats waiting for one nothing needs.
+                    Some(slot) if slot.discardable() && self.complete_after(n) => {
+                        let missing = match slot {
+                            Slot::Partial(p) => p.missing_data_count(),
+                            _ => 1,
+                        };
+                        self.skip(n, missing);
+                        continue;
+                    }
                     _ => break,
                 },
                 Need::Keyframe | Need::Refresh => {
@@ -927,6 +993,13 @@ impl Reassembler {
         }
     }
 
+    /// Whether a frame after `frame` is complete.
+    fn complete_after(&self, frame: u32) -> bool {
+        self.frames
+            .range(frame.saturating_add(1)..)
+            .any(|(_, slot)| matches!(slot, Slot::Complete { .. }))
+    }
+
     fn record_delivery(&mut self, out: &FrameOut, now: Instant) {
         self.stats.frames_ok = self.stats.frames_ok.saturating_add(1);
         self.window.frames_ok = self.window.frames_ok.saturating_add(1);
@@ -952,6 +1025,13 @@ impl Reassembler {
             let missing = match slot {
                 Slot::Complete { .. } => {
                     self.frames.remove(&frame);
+                    continue;
+                }
+                Slot::Skipped => {
+                    self.frames.remove(&frame);
+                    if self.need == Need::Frame(frame) {
+                        self.need = Need::Frame(frame.wrapping_add(1));
+                    }
                     continue;
                 }
                 Slot::Unknown { .. } => 1,
@@ -1068,7 +1148,7 @@ impl Reassembler {
     fn attribute(&mut self, gap: Duration, stamp: Stamp, dozed: Duration, kind: Option<Kind>) {
         let threshold = self.stall_threshold();
         let worker = Self::worker_share(stamp, gap);
-        let pending = self.frames.values().any(|s| !matches!(s, Slot::Complete { .. }));
+        let pending = self.frames.values().any(|s| !s.settled());
         let a = &mut self.stats.silences;
         a.gap_ms_max = a.gap_ms_max.max(u64::try_from(gap.as_millis()).unwrap_or(u64::MAX));
         a.dozed_ms_max = a.dozed_ms_max.max(u64::try_from(dozed.as_millis()).unwrap_or(u64::MAX));
@@ -1136,15 +1216,15 @@ impl Reassembler {
     /// The link moved again after a `gap` with nothing on it: restart every pending frame's
     /// NACK clock, so the answer to a NACK that was stuck in the stall gets its round trip.
     fn resume(&mut self, now: Instant, gap: Duration) {
-        if self.frames.values().all(|slot| matches!(slot, Slot::Complete { .. })) {
+        if self.frames.values().all(Slot::settled) {
             return;
         }
         tracing::debug!(?gap, pending = self.frames.len(), "link resumed; deadlines restart");
         let fresh = now.checked_sub(self.nack_delay).unwrap_or(now);
         for slot in self.frames.values_mut() {
             match slot {
-                Slot::Complete { .. } => {}
-                Slot::Unknown { first_seen, nacks, nacked_at } => {
+                Slot::Complete { .. } | Slot::Skipped => {}
+                Slot::Unknown { first_seen, nacks, nacked_at, .. } => {
                     *first_seen = fresh;
                     *nacked_at = (*nacks > 0).then_some(now);
                 }
@@ -1188,12 +1268,23 @@ impl Reassembler {
                 .is_none_or(|t| now.saturating_duration_since(t) >= retry_gap && arrived_at > t)
         };
 
+        // A frame nothing refers to is asked for once, and not at all once a later picture is
+        // ready to show in its place.
+        let newest_complete = self
+            .frames
+            .iter()
+            .rev()
+            .find_map(|(&f, slot)| matches!(slot, Slot::Complete { .. }).then_some(f));
+        let worth_asking = |frame: u32, discardable: bool, tries: u8| {
+            !discardable || (tries == 0 && newest_complete.is_none_or(|newest| newest < frame))
+        };
+
         let mut lost: Vec<(u32, u64)> = Vec::new();
         let mut nacks: Vec<Action> = Vec::new();
         for (&frame, slot) in &mut self.frames {
             match slot {
-                Slot::Complete { .. } => {}
-                Slot::Unknown { first_seen, nacks: tries, nacked_at } => {
+                Slot::Complete { .. } | Slot::Skipped => {}
+                Slot::Unknown { first_seen, nacks: tries, nacked_at, discardable } => {
                     let age = now.saturating_duration_since(*first_seen);
                     if age >= max_hold || (age >= deadline && flowing) {
                         tracing::debug!(
@@ -1207,6 +1298,7 @@ impl Reassembler {
                         lost.push((frame, 1));
                     } else if in_order
                         && *tries < retries
+                        && worth_asking(frame, *discardable, *tries)
                         && age >= nack_delay
                         && retry_due(*nacked_at)
                     {
@@ -1241,6 +1333,7 @@ impl Reassembler {
                         lost.push((frame, p.missing_data_count()));
                     } else if (in_order || p.restartable(accept_refresh))
                         && p.nacks < retries
+                        && worth_asking(frame, p.discardable, p.nacks)
                         && quiet >= nack_delay
                         && retry_due(p.nacked_at)
                     {
@@ -1408,6 +1501,7 @@ fn assemble(
             keyframe: f & flags::KEYFRAME != 0,
             ltr_token: (f & flags::LTR != 0).then_some(prefix.ltr_token.get()),
             ltr_refresh: f & flags::LTR_REFRESH != 0,
+            discardable: partial.discardable,
             capture_ts_us: prefix.capture_ts_us.get(),
             recovered: fec || partial.retransmitted,
         },
@@ -1514,6 +1608,7 @@ mod cost_tests {
                         keyframe: n == 0,
                         ltr_token: None,
                         ltr_refresh: false,
+                        discardable: false,
                         capture_ts_us: n,
                     };
                     packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()

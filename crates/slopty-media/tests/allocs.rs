@@ -30,6 +30,7 @@ mod allocs {
             keyframe: n == 0,
             ltr_token: None,
             ltr_refresh: false,
+            discardable: false,
             capture_ts_us: n,
         }
     }

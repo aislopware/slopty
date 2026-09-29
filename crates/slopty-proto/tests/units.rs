@@ -45,8 +45,15 @@ mod units {
         }
         assert_eq!(Kind::from_u8(5), None, "a terminal copy is a channel of its own");
         assert_eq!(
-            [flags::KEYFRAME, flags::LTR, flags::LTR_REFRESH, flags::RETRANSMIT],
-            [1, 2, 4, 8]
+            [
+                flags::KEYFRAME,
+                flags::LTR,
+                flags::LTR_REFRESH,
+                flags::RETRANSMIT,
+                flags::DISCARDABLE,
+                flags::PREV_DISCARDABLE,
+            ],
+            [1, 2, 4, 8, 16, 32]
         );
         let mut header = MediaHeader::new_zeroed();
         header.kind = Kind::VideoData as u8;

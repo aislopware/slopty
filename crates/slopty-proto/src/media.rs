@@ -64,6 +64,15 @@ pub mod flags {
     pub const LTR_REFRESH: u8 = 1 << 2;
     /// This datagram is a retransmission (NACK reply).
     pub const RETRANSMIT: u8 = 1 << 3;
+    /// Nothing later refers to this frame (a temporal layer-1 frame).
+    ///
+    /// A receiver that cannot repair it skips it instead of asking for a refresh. Set on every
+    /// datagram of the frame, data and parity; never on a keyframe, an LTR refresh or a
+    /// long-term reference.
+    pub const DISCARDABLE: u8 = 1 << 4;
+    /// The frame numbered one below this one was [`DISCARDABLE`]. Set on every datagram of the
+    /// frame after it, so a receiver that lost that frame whole still knows it may skip it.
+    pub const PREV_DISCARDABLE: u8 = 1 << 5;
 }
 
 /// The fixed header at the front of every media datagram.

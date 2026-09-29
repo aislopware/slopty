@@ -441,24 +441,48 @@ mod tests {
     }
 
     /// The worker's end of the link: datagrams go straight into the client's router on
-    /// loopback, or down a delay line.
+    /// loopback, or down a delay line; with a `rate`, each leaves when the link has sent the
+    /// ones before it, and what has not left is what the transport holds.
     struct Wire {
         router: ScreenRouter,
         line: Option<mpsc::UnboundedSender<(Instant, Vec<Bytes>)>>,
         /// Bytes of every datagram sent: data, parity, retransmits, cursor and heartbeats.
         bytes: std::sync::atomic::AtomicU64,
+        /// The link's rate in bits a second, and the batches not yet sent on it: when each
+        /// leaves and its bytes.
+        rate: Option<(u64, Mutex<Leaving>)>,
     }
+
+    /// Batches handed to a rate-limited link and not yet sent on it: when each leaves, and its
+    /// bytes.
+    type Leaving = VecDeque<(Instant, usize)>;
 
     impl Wire {
         fn new(
             router: ScreenRouter,
             line: Option<mpsc::UnboundedSender<(Instant, Vec<Bytes>)>>,
+            rate_bps: Option<u64>,
         ) -> Self {
-            Self { router, line, bytes: std::sync::atomic::AtomicU64::new(0) }
+            Self {
+                router,
+                line,
+                bytes: std::sync::atomic::AtomicU64::new(0),
+                rate: rate_bps.map(|bps| (bps, Mutex::new(VecDeque::new()))),
+            }
         }
 
         fn bytes(&self) -> u64 {
             self.bytes.load(Ordering::Relaxed)
+        }
+
+        /// When `bytes` handed over at `now` have left the link.
+        fn departure(&self, now: Instant, bytes: usize) -> Instant {
+            let Some((bps, queue)) = &self.rate else { return now };
+            let mut queue = queue.lock();
+            let free = queue.back().map_or(now, |(last, _)| (*last).max(now));
+            let at = free + Duration::from_secs_f64(bytes as f64 * 8.0 / *bps as f64);
+            queue.push_back((at, bytes));
+            at
         }
     }
 
@@ -467,10 +491,11 @@ mod tests {
             let now = Instant::now();
             let sent: usize = datagrams.iter().map(Bytes::len).sum();
             self.bytes.fetch_add(sent as u64, Ordering::Relaxed);
+            let left = self.departure(now, sent);
             match &self.line {
                 None => self.router.route_many(datagrams.iter().cloned(), now),
                 Some(line) => {
-                    line.send((now, datagrams.to_vec())).map_err(|_gone| Refused::Closed)?;
+                    line.send((left, datagrams.to_vec())).map_err(|_gone| Refused::Closed)?;
                 }
             }
             Ok(())
@@ -481,7 +506,13 @@ mod tests {
         }
 
         fn held(&self) -> usize {
-            0
+            let Some((_, queue)) = &self.rate else { return 0 };
+            let now = Instant::now();
+            let mut queue = queue.lock();
+            while queue.front().is_some_and(|(at, _)| *at <= now) {
+                queue.pop_front();
+            }
+            queue.iter().map(|(_, bytes)| bytes).sum()
         }
 
         fn cwnd(&self) -> u64 {
@@ -490,6 +521,23 @@ mod tests {
 
         fn is_closed(&self) -> bool {
             false
+        }
+    }
+
+    /// What a measurement run changes from the plain stream.
+    #[derive(Clone, Copy, Debug)]
+    struct Knobs {
+        /// The stream's sides padded to this, in place of its codec's own multiple.
+        pad_to: Option<u32>,
+        /// The link's rate, bits a second; unlimited when `None`.
+        link_bps: Option<u64>,
+        /// Whether the worker refines a still picture.
+        refine: bool,
+    }
+
+    impl Default for Knobs {
+        fn default() -> Self {
+            Self { pad_to: None, link_bps: None, refine: true }
         }
     }
 
@@ -544,11 +592,11 @@ mod tests {
         loss_permille: u32,
         seconds: u64,
     ) {
-        run_padded::<P>(label, fps, one_way, loss_permille, seconds, None).await;
+        run_padded::<P>(label, fps, one_way, loss_permille, seconds, Knobs::default()).await;
     }
 
-    /// [`run`] with the stream's sides padded to `pad_to` in place of its codec's own multiple,
-    /// when that is given ([`Pipeline::open_padded`]).
+    /// [`run`] with the [`Knobs`]: the stream's sides padded ([`Pipeline::open_padded`]), a link
+    /// of a given rate, refinement off.
     #[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
     async fn run_padded<P: Platform>(
         label: &str,
@@ -556,8 +604,9 @@ mod tests {
         one_way: Duration,
         loss_permille: u32,
         seconds: u64,
-        pad_to: Option<u32>,
+        knobs: Knobs,
     ) {
+        let Knobs { pad_to, link_bps, refine } = knobs;
         let ScreenEvent::Listing { displays, .. } = Pipeline::<P>::listing().await.unwrap() else {
             panic!("no listing")
         };
@@ -568,11 +617,11 @@ mod tests {
         } else {
             ScreenRouter::new()
         };
-        let line = (!one_way.is_zero()).then(|| {
+        let line = (!one_way.is_zero() || link_bps.is_some()).then(|| {
             let router = router.clone();
             delay_line(one_way, move |datagrams: Vec<Bytes>, at| router.route_many(datagrams, at))
         });
-        let wire = Arc::new(Wire::new(router.clone(), line));
+        let wire = Arc::new(Wire::new(router.clone(), line, link_bps));
         let (mut stream, opened) = Pipeline::<P>::open_padded(
             STREAM,
             CaptureTarget::Display(display.id),
@@ -584,6 +633,9 @@ mod tests {
         .await
         .unwrap();
         let ScreenEvent::Opened { codec, width, height, .. } = opened else { panic!("{opened:?}") };
+        if !refine {
+            stream.shared.refine.lock().disable();
+        }
 
         let control = stream.control();
         let feedback = {
@@ -718,9 +770,15 @@ mod tests {
         let stats = handle.stats();
         let worker = stream.stats();
         eprintln!(
-            "MEASURE glass {label}: {width}×{height} {codec:?} at {hz:.0} Hz, {fps} fps asked, one way {:.1} ms, loss {:.1} %",
+            "MEASURE glass {label}: {width}×{height} {codec:?} at {hz:.0} Hz, {fps} fps asked, one way {:.1} ms, loss {:.1} %, link {}, refinement {}, load {}",
             ms(one_way),
-            f64::from(loss_permille) / 10.0
+            f64::from(loss_permille) / 10.0,
+            link_bps.map_or_else(
+                || "unlimited".to_owned(),
+                |bps| format!("{:.0} Mbit/s", bps as f64 / 1e6)
+            ),
+            if refine { "on" } else { "off" },
+            load_average(),
         );
         eprintln!("  capture → present (pacer ring):  {}", ring(&glass.capture));
         eprintln!(
@@ -794,17 +852,29 @@ mod tests {
             wire_bytes / encoded.max(1.0) / 1024.0,
         );
         eprintln!(
-            "  cadence: rung {} under a ceiling of {}, encoder fed {} a second at the last window, {} captures replaced in the mailbox",
+            "  cadence: rung {} under a ceiling of {}, encoder fed {} a second at the last window, {} captures replaced in the mailbox, {} refinements",
             stream.shared.fps.load(Ordering::Relaxed),
             stream.shared.fps_ceiling.load(Ordering::Relaxed),
             stream.shared.fed_fps.load(Ordering::Relaxed),
             stream.shared.counters.superseded.load(Ordering::Relaxed),
+            stream.shared.counters.refined.load(Ordering::Relaxed),
         );
         assert!(glass.capture.count > 0, "no frame was timed from its capture");
         assert!(glass.input.count > 0, "no input reached the glass");
         drop(handle);
         reporting.abort();
         stream.close().await;
+    }
+
+    /// The system's load average over the last minute, for the record.
+    fn load_average() -> String {
+        std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|text| text.split_whitespace().nth(1).map(str::to_owned))
+            .unwrap_or_default()
     }
 
     /// The pixel format of the next picture the client decodes whose format `wanted` accepts,
@@ -843,7 +913,7 @@ mod tests {
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
         runtime.unwrap().block_on(async {
             let router = ScreenRouter::new();
-            let wire = Arc::new(Wire::new(router.clone(), None));
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
             // A quarter of the drawn 3024 × 1964 panel, whatever display this Mac has: its enter
             // line is under the 12 Mbit/s a stream opens at, and eight cuts reach under its
             // leave line. A quarter of a 1024 × 768 panel (a CI runner's) never falls that far.
@@ -1022,7 +1092,7 @@ mod tests {
         runtime.unwrap().block_on(async {
             let Placed { id: editor, .. } = WINDOWS[0];
             let router = ScreenRouter::new();
-            let wire = Arc::new(Wire::new(router.clone(), None));
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
             let quality = Quality { scale, ..Quality::default() };
             let (stream, opened) = Pipeline::<Synthetic>::open(
                 STREAM,
@@ -1080,7 +1150,7 @@ mod tests {
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
         runtime.unwrap().block_on(async {
             let router = ScreenRouter::new();
-            let wire = Arc::new(Wire::new(router.clone(), None));
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
             let full = Quality { scale: 1.0, ..Quality::default() };
             let (mut stream, opened) = Pipeline::<Synthetic>::open(
                 STREAM,
@@ -1117,6 +1187,9 @@ mod tests {
                 spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
             let mut frames = handle.frames();
             assert!(next_picture(&mut frames, |_any| true).await.is_some(), "a first picture");
+            // Counted from the first picture on: before it, a session slow to open (a loaded
+            // machine) rightly asks again for the keyframe it waits for.
+            let before = handle.stats();
             for step in 0..6 {
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 let scale = if step % 2 == 0 { 0.25 } else { 0.5 };
@@ -1142,7 +1215,11 @@ mod tests {
                 worker.ltr.refreshes_delta,
             );
             assert_eq!(
-                (stats.decode_errors, stats.refreshes, stats.frames_lost),
+                (
+                    stats.decode_errors.saturating_sub(before.decode_errors),
+                    stats.refreshes.saturating_sub(before.refreshes),
+                    stats.frames_lost.saturating_sub(before.frames_lost),
+                ),
                 (0, 0, 0),
                 "{stats:#?}"
             );
@@ -1311,7 +1388,7 @@ mod tests {
             };
             let display = displays.first().expect("a display");
             let router = ScreenRouter::new();
-            let wire = Arc::new(Wire::new(router, None));
+            let wire = Arc::new(Wire::new(router, None, None));
             let quality = Quality { fps: 60, scale: 0.25, ..Quality::default() };
             let (mut stream, _opened) = Pipeline::<Drawn>::open(
                 STREAM,
@@ -1438,9 +1515,48 @@ mod tests {
         runtime.block_on(async {
             for _ in 0..rounds {
                 for (label, pad_to) in [("even (before)", Some(2)), ("padded to 16", None)] {
-                    run_padded::<Synthetic>(label, 60, Duration::ZERO, 0, seconds, pad_to).await;
+                    let knobs = Knobs { pad_to, ..Knobs::default() };
+                    run_padded::<Synthetic>(label, 60, Duration::ZERO, 0, seconds, knobs).await;
                 }
             }
         });
+    }
+
+    /// Input → glass on a still screen, the worker refining it between inputs against the same
+    /// with refinement off, alternated (`docs/MEASUREMENTS.md`, "a still picture refined"). The
+    /// canvas stands still and changes only on a click, every 80–150 ms, so each click lands
+    /// in the quiet where refinement runs. On loopback, and on a link of `SLOPTY_GLASS_LINK`
+    /// Mbit/s (default 20) with 5 ms each way, where a refinement's bytes are still leaving when
+    /// a change comes. `SLOPTY_GLASS_SECONDS` sets each run's length (default 20),
+    /// `SLOPTY_GLASS_ROUNDS` the pairs (default 2).
+    #[test]
+    #[ignore = "measurement"]
+    fn input_to_glass_on_a_still_screen_while_refining() {
+        slopty_platform::user_interactive_thread();
+        slopty_capture::synthetic::set_still(true);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let knob = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+        };
+        let (seconds, rounds) = (knob("SLOPTY_GLASS_SECONDS", 20), knob("SLOPTY_GLASS_ROUNDS", 2));
+        let link = knob("SLOPTY_GLASS_LINK", 20) * 1_000_000;
+        runtime.block_on(async {
+            for _ in 0..rounds {
+                for refine in [false, true] {
+                    let knobs = Knobs { refine, ..Knobs::default() };
+                    run_padded::<Drawn>("still, loopback", 60, Duration::ZERO, 0, seconds, knobs)
+                        .await;
+                    let knobs = Knobs { refine, link_bps: Some(link), ..Knobs::default() };
+                    let one_way = Duration::from_millis(5);
+                    run_padded::<Drawn>("still, shaped", 60, one_way, 0, seconds, knobs).await;
+                }
+            }
+        });
+        slopty_capture::synthetic::set_still(false);
     }
 }

@@ -40,7 +40,7 @@ pub struct FrameOptions {
 }
 
 /// One encoded access unit, Annex B, parameter sets inline before keyframes.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct EncodedPacket {
     /// Bitstream.
     pub data: Vec<u8>,
@@ -50,8 +50,33 @@ pub struct EncodedPacket {
     pub ltr_token: Option<u64>,
     /// This very frame was submitted with `force_ltr_refresh` (and the session has LTR).
     pub ltr_refresh: bool,
+    /// Nothing later refers to this frame: the encoder's temporal layer 1
+    /// ([`VideoEncoder::set_temporal_layers`]). Never a keyframe or a refresh.
+    pub discardable: bool,
+    /// How far the encoder's own reconstruction of this frame is from its source, when the
+    /// session measures it.
+    pub mse: Option<Mse>,
     /// The presentation timestamp passed to `encode`.
     pub pts_us: u64,
+}
+
+/// Mean squared error of an encoded frame against its source, per sample, on the encoder's own
+/// reconstruction (which may lack the decoder's loop filters, so it can read a little off the
+/// true figure).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Mse {
+    /// Luma.
+    pub luma: f64,
+    /// The mean of the two chroma planes, when the encoder gave both.
+    pub chroma: Option<f64>,
+}
+
+impl Mse {
+    /// Luma PSNR in dB for 8-bit samples; infinite for a lossless frame.
+    #[must_use]
+    pub fn luma_psnr(&self) -> f64 {
+        10.0 * (255.0 * 255.0 / self.luma).log10()
+    }
 }
 
 /// A hardware video encoder, as a screen stream drives it.
@@ -98,6 +123,24 @@ pub trait VideoEncoder: Send + Sync + Sized + 'static {
     ///
     /// The encoder refused the property.
     fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError>;
+
+    /// Turn temporal layers on or off from the next frame: with them on, every other frame is
+    /// one nothing later refers to ([`EncodedPacket::discardable`]), which a receiver may skip
+    /// when it cannot repair it. Returns whether the session writes layers now. An encoder
+    /// without them writes none, whatever it is asked.
+    ///
+    /// # Errors
+    ///
+    /// The encoder refused the property.
+    fn set_temporal_layers(&self, _on: bool) -> Result<bool, CodecError> {
+        Ok(false)
+    }
+
+    /// Frames the session gave up since it opened (its rate control dropped them, or they
+    /// failed); 0 for an encoder that never does.
+    fn frames_dropped(&self) -> u64 {
+        0
+    }
 }
 
 /// An Opus encoder for the captured audio: 48 kHz interleaved stereo float in, 10 ms packets

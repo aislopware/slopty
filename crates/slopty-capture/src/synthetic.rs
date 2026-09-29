@@ -150,6 +150,16 @@ fn beat_hz() -> Option<f64> {
     (hz > 0).then(|| f64::from(hz))
 }
 
+/// Every canvas's page stands still while set: nothing scrolls, and a canvas delivers a picture
+/// only when an input changed it, as ScreenCaptureKit sends nothing for a screen that does not
+/// change. A measurement sets it to time what a still screen does between inputs.
+static STILL: AtomicBool = AtomicBool::new(false);
+
+/// Stand every canvas's page still (`true`) or let it scroll again.
+pub fn set_still(still: bool) {
+    STILL.store(still, Ordering::Release);
+}
+
 /// Take one input: every picture drawn from now on counts it. Returns the new count.
 pub fn take_input() -> u64 {
     INPUTS.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
@@ -281,8 +291,10 @@ impl Painter {
     fn paint(&mut self, inputs: u64, at_us: u64) -> Option<PixelBuffer> {
         let origin = *self.origin_us.get_or_insert(at_us);
         let elapsed = at_us.saturating_sub(origin);
-        self.scrolled =
-            usize::try_from(elapsed.saturating_mul(SCROLL_PX_PER_S) / 1_000_000).unwrap_or(0);
+        if !STILL.load(Ordering::Acquire) {
+            self.scrolled =
+                usize::try_from(elapsed.saturating_mul(SCROLL_PX_PER_S) / 1_000_000).unwrap_or(0);
+        }
         let slot = self.free_slot()?;
         let slot = self.slots.get_mut(slot)?;
         let buffer = slot.buffer.as_cv().retain();
@@ -492,6 +504,9 @@ struct Beat {
     painter: Mutex<Option<Painter>>,
     period_us: u64,
     sink: Box<dyn Fn(CapturedFrame) + Send + Sync>,
+    /// The input count of the last picture delivered, `u64::MAX` before the first: while the
+    /// page stands still ([`set_still`]) a picture goes only when it changed.
+    delivered_inputs: AtomicU64,
 }
 
 impl Beat {
@@ -502,8 +517,16 @@ impl Beat {
         }
         // The picture exists from here on, as a display time does for ScreenCaptureKit's.
         let shown_us = host_now_us();
-        let picture = self.painter.lock().as_mut().and_then(|p| p.paint(inputs_taken(), shown_us));
+        let inputs = inputs_taken();
+        let unchanged = STILL.load(Ordering::Acquire)
+            && self.delivered_inputs.load(Ordering::Acquire) == inputs;
+        let picture = if unchanged {
+            None
+        } else {
+            self.painter.lock().as_mut().and_then(|p| p.paint(inputs, shown_us))
+        };
         if let Some(image) = picture {
+            self.delivered_inputs.store(inputs, Ordering::Release);
             let now_us = host_now_us();
             let age_us = now_us.saturating_sub(shown_us);
             (self.sink)(CapturedFrame {
@@ -620,6 +643,7 @@ impl CaptureSource for Canvas {
             painter: Mutex::new(Painter::new(config)),
             period_us,
             sink: Box::new(sink),
+            delivered_inputs: AtomicU64::new(u64::MAX),
         });
         // User-interactive, as the capture queue it stands in for is.
         let interactive = DispatchQueueAttr::with_qos_class(

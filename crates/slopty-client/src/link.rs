@@ -1104,6 +1104,7 @@ mod tests {
             keyframe: true,
             ltr_token: None,
             ltr_refresh: false,
+            discardable: false,
             capture_ts_us: 1,
         };
         let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
@@ -1176,6 +1177,7 @@ mod tests {
                 keyframe: n == 0,
                 ltr_token: None,
                 ltr_refresh: false,
+                discardable: false,
                 capture_ts_us: n,
             };
             let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();

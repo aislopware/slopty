@@ -259,6 +259,8 @@ struct Parked {
     ltr_token: Option<u64>,
     /// A keyframe or an LTR refresh: the frame that restarts decoding.
     restarts: bool,
+    /// Nothing later refers to it: failing on it leaves every reference intact.
+    discardable: bool,
 }
 
 /// What the decoder callback leaves for the stream worker: the frames it is working on, the
@@ -269,6 +271,8 @@ struct Inflight {
     /// Tokens of frames the decoder returned a picture for, not yet given to the reassembler.
     acks: Vec<u64>,
     failed: Option<Failed>,
+    /// Failures on frames nothing refers to, which need no refresh.
+    failed_discardable: u64,
 }
 
 /// Failures since the worker last looked, folded into one.
@@ -285,11 +289,18 @@ struct Failed {
 }
 
 impl Inflight {
-    fn park(&mut self, pts_us: u64, arrived: Instant, ltr_token: Option<u64>, restarts: bool) {
+    fn park(
+        &mut self,
+        pts_us: u64,
+        arrived: Instant,
+        ltr_token: Option<u64>,
+        restarts: bool,
+        discardable: bool,
+    ) {
         if self.parked.len() >= ARRIVALS {
             self.parked.pop_front();
         }
-        self.parked.push_back(Parked { pts_us, arrived, ltr_token, restarts });
+        self.parked.push_back(Parked { pts_us, arrived, ltr_token, restarts, discardable });
     }
 
     /// The frame with this timestamp, and everything older forgotten with it.
@@ -305,9 +316,16 @@ impl Inflight {
         Some(parked.arrived)
     }
 
-    /// The decoder returned no picture for this frame: its token is never acknowledged.
+    /// The decoder returned no picture for this frame: its token is never acknowledged. A frame
+    /// nothing refers to, failed with the session intact, took no reference with it, so it asks
+    /// for nothing.
     fn failed(&mut self, failure: DecodeFailure) {
-        let restarts = self.take(failure.pts_us).is_some_and(|parked| parked.restarts);
+        let parked = self.take(failure.pts_us);
+        if parked.is_some_and(|p| p.discardable) && !failure.session_lost() {
+            self.failed_discardable = self.failed_discardable.saturating_add(1);
+            return;
+        }
+        let restarts = parked.is_some_and(|p| p.restarts);
         let before = self.failed.unwrap_or(Failed {
             pts_us: 0,
             session_lost: false,
@@ -345,6 +363,8 @@ pub struct ScreenStats {
     pub frames_retransmit: u64,
     /// Frames given up on.
     pub frames_lost: u64,
+    /// Frames nothing refers to that were skipped instead of repaired, at no refresh.
+    pub frames_skipped: u64,
     /// Data fragments that never arrived (counted as each frame resolves).
     pub datagrams_lost: u64,
     /// Parity the worker is sending, in thousandths of the data fragments, as observed on the
@@ -857,16 +877,26 @@ impl Worker {
             // Park the frame before submitting: VideoToolbox may call back on another thread
             // before `decode` returns. Its token is acknowledged only once a picture comes back.
             let restarts = frame.info.keyframe || frame.info.ltr_refresh;
-            self.inflight.lock().park(pts, frame.arrived, frame.info.ltr_token, restarts);
+            let discardable = frame.info.discardable;
+            self.inflight.lock().park(
+                pts,
+                frame.arrived,
+                frame.info.ltr_token,
+                restarts,
+                discardable,
+            );
             if restarts {
                 self.restart_pts = Some(pts);
             }
             if let Err(e) = self.decoder.decode(&frame.data, pts) {
                 let _gone = self.inflight.lock().take(pts);
                 self.counters.decode_errors = self.counters.decode_errors.saturating_add(1);
-                // No session left means nothing but a keyframe can be decoded, and a refresh
-                // that failed would fail again off the same references.
-                let keyframe = !self.decoder.ready() || restarts;
+                let Some(keyframe) =
+                    refresh_after_refusal(discardable, self.decoder.ready(), restarts)
+                else {
+                    tracing::debug!(stream = %self.stream, frame = frame.info.frame, error = %e, "decode of a frame nothing refers to");
+                    continue;
+                };
                 tracing::debug!(stream = %self.stream, frame = frame.info.frame, error = %e, keyframe, "decode");
                 self.reassembler.force_refresh(Instant::now(), keyframe);
             }
@@ -879,13 +909,19 @@ impl Worker {
         if !self.news.swap(false, Ordering::Acquire) {
             return;
         }
-        let (acks, failed) = {
+        let (acks, failed, failed_discardable) = {
             let mut inflight = self.inflight.lock();
-            (std::mem::take(&mut inflight.acks), inflight.failed.take())
+            (
+                std::mem::take(&mut inflight.acks),
+                inflight.failed.take(),
+                std::mem::take(&mut inflight.failed_discardable),
+            )
         };
         for token in acks {
             self.reassembler.ack_ltr(token);
         }
+        self.counters.decode_errors =
+            self.counters.decode_errors.saturating_add(failed_discardable);
         let Some(failed) = failed else { return };
         self.counters.decode_errors = self.counters.decode_errors.saturating_add(failed.count);
         let Some(keyframe) = refresh_for(failed, self.restart_pts, self.decoder.ready()) else {
@@ -933,6 +969,7 @@ impl Worker {
         self.counters.frames_fec = stats.frames_fec;
         self.counters.frames_retransmit = stats.frames_retransmit;
         self.counters.frames_lost = stats.frames_lost;
+        self.counters.frames_skipped = stats.frames_skipped;
         self.counters.datagrams_lost = stats.datagrams_lost;
         self.counters.parity_permille = observed_parity(&stats);
         self.counters.data_shards = stats.data_shards;
@@ -963,6 +1000,15 @@ impl Worker {
             }
         }
     }
+}
+
+/// What the decoder refusing a frame as it was submitted asks of the worker: nothing for a
+/// frame nothing refers to while the decoder's session holds, since the next frame decodes;
+/// otherwise a refresh, and a keyframe when no session is left or the refused frame was itself
+/// a restart, which would fail again off the same references. The callback's failures go
+/// through [`refresh_for`].
+const fn refresh_after_refusal(discardable: bool, ready: bool, restarts: bool) -> Option<bool> {
+    if discardable && ready { None } else { Some(!ready || restarts) }
 }
 
 /// The refresh a decode failure asks for, `Some(keyframe)`; `None` when the last restart,
@@ -1020,7 +1066,7 @@ mod arrival_tests {
         let at = |ms: u64| epoch.checked_add(Duration::from_millis(ms)).unwrap();
         let mut arrivals = Inflight::default();
         for i in 0..4_u64 {
-            arrivals.park(i * 1_000, at(i * 16), None, false);
+            arrivals.park(i * 1_000, at(i * 16), None, false, false);
         }
         assert_eq!(arrivals.decoded(2_000), Some(at(32)));
         assert_eq!(arrivals.decoded(1_000), None, "older frames went with it");
@@ -1035,10 +1081,10 @@ mod arrival_tests {
     fn a_token_is_acknowledged_by_its_picture_and_a_failure_is_kept() {
         let epoch = Instant::now();
         let mut inflight = Inflight::default();
-        inflight.park(1, epoch, Some(11), false);
-        inflight.park(2, epoch, Some(12), false);
-        inflight.park(3, epoch, None, false);
-        inflight.park(4, epoch, Some(14), false);
+        inflight.park(1, epoch, Some(11), false, false);
+        inflight.park(2, epoch, Some(12), false, false);
+        inflight.park(3, epoch, None, false, false);
+        inflight.park(4, epoch, Some(14), false, false);
         assert!(inflight.acks.is_empty(), "submitted is not decoded");
         let failure = |pts_us: u64, status: i32| DecodeFailure { pts_us, status };
         inflight.failed(failure(1, -12_909));
@@ -1063,8 +1109,8 @@ mod arrival_tests {
         let epoch = Instant::now();
         let failure = |pts_us: u64| DecodeFailure { pts_us, status: -12_909 };
         let mut inflight = Inflight::default();
-        inflight.park(10, epoch, None, true);
-        inflight.park(11, epoch, None, false);
+        inflight.park(10, epoch, None, true, false);
+        inflight.park(11, epoch, None, false, false);
         inflight.failed(failure(10));
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(10), true), Some(true), "the refresh failed");
@@ -1072,17 +1118,47 @@ mod arrival_tests {
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(10), true), Some(false), "a frame after it failed");
         // Both fail before the worker looks: the fold keeps that the refresh was among them.
-        inflight.park(13, epoch, None, true);
-        inflight.park(14, epoch, None, false);
+        inflight.park(13, epoch, None, true, false);
+        inflight.park(14, epoch, None, false, false);
         inflight.failed(failure(13));
         inflight.failed(failure(14));
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(13), true), Some(true), "the refresh was among them");
-        inflight.park(12, epoch, None, false);
+        inflight.park(12, epoch, None, false, false);
         inflight.failed(failure(12));
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(20), true), None, "already replaced");
         assert_eq!(refresh_for(failed, Some(12), false), Some(true), "no session left");
+    }
+
+    /// A frame the decoder refuses as it is submitted: one nothing refers to asks for nothing
+    /// while the session holds; any other asks for a refresh, a keyframe once the session is
+    /// gone or when the refused frame was a restart.
+    #[test]
+    fn a_refused_frame_asks_by_what_it_was_and_what_is_left() {
+        assert_eq!(refresh_after_refusal(true, true, false), None, "skippable, session holds");
+        assert_eq!(refresh_after_refusal(true, false, false), Some(true), "no session left");
+        assert_eq!(refresh_after_refusal(false, true, false), Some(false), "a refresh");
+        assert_eq!(refresh_after_refusal(false, true, true), Some(true), "a restart failed");
+        assert_eq!(refresh_after_refusal(false, false, false), Some(true));
+    }
+
+    /// A frame nothing refers to that fails with the session intact asks for nothing; one that
+    /// lost the session asks for a keyframe like any other.
+    #[test]
+    fn a_failed_frame_nothing_refers_to_asks_for_nothing_unless_the_session_went() {
+        let epoch = Instant::now();
+        let mut inflight = Inflight::default();
+        inflight.park(1, epoch, Some(11), false, true);
+        inflight.failed(DecodeFailure { pts_us: 1, status: -12_909 });
+        assert_eq!((inflight.failed, inflight.failed_discardable), (None, 1));
+        assert!(inflight.acks.is_empty(), "its token is not acknowledged");
+        inflight.park(2, epoch, None, false, true);
+        inflight.failed(DecodeFailure { pts_us: 2, status: -12_903 });
+        assert_eq!(
+            inflight.failed,
+            Some(Failed { pts_us: 2, session_lost: true, restart: false, count: 1 })
+        );
     }
 
     /// The ring is bounded: a decoder that never calls back cannot grow it.
@@ -1091,7 +1167,7 @@ mod arrival_tests {
         let epoch = Instant::now();
         let mut arrivals = Inflight::default();
         for i in 0..(u64::try_from(ARRIVALS).unwrap() + 10) {
-            arrivals.park(i, epoch, None, false);
+            arrivals.park(i, epoch, None, false, false);
         }
         assert_eq!(arrivals.parked.len(), ARRIVALS);
         assert_eq!(arrivals.decoded(0), None);
@@ -1285,15 +1361,15 @@ mod tests {
         let mut arrivals = Inflight::default();
         let t0 = Instant::now();
         let t = |n: u64| t0 + Duration::from_micros(n);
-        arrivals.park(10, t(1), None, false);
-        arrivals.park(20, t(2), None, false);
-        arrivals.park(30, t(3), None, false);
+        arrivals.park(10, t(1), None, false, false);
+        arrivals.park(20, t(2), None, false, false);
+        arrivals.park(30, t(3), None, false, false);
         assert_eq!(arrivals.decoded(20), Some(t(2)));
         assert_eq!(arrivals.decoded(10), None, "older than the one taken: forgotten with it");
         assert_eq!(arrivals.decoded(30), Some(t(3)));
         assert!(arrivals.parked.is_empty());
         for n in 0..u64::try_from(ARRIVALS).unwrap_or(u64::MAX).saturating_add(5) {
-            arrivals.park(n, t(n), None, false);
+            arrivals.park(n, t(n), None, false, false);
         }
         assert_eq!(arrivals.parked.len(), ARRIVALS, "bounded");
         assert_eq!(arrivals.decoded(0), None, "the oldest were dropped to make room");
@@ -1439,8 +1515,14 @@ mod worker_tests {
         capture_ts_us: u32,
     ) -> Vec<Bytes> {
         let data = frame_bytes();
-        let frame =
-            EncodedFrame { data: &data, keyframe, ltr_token, ltr_refresh: false, capture_ts_us };
+        let frame = EncodedFrame {
+            data: &data,
+            keyframe,
+            ltr_token,
+            ltr_refresh: false,
+            discardable: false,
+            capture_ts_us,
+        };
         packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()
     }
 
@@ -1565,6 +1647,7 @@ mod worker_tests {
                 keyframe: true,
                 ltr_token: None,
                 ltr_refresh: false,
+                discardable: false,
                 capture_ts_us: n.saturating_mul(16_667),
             };
             let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();

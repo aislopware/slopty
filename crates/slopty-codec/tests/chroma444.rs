@@ -23,6 +23,14 @@
 //! (`SLOPTY_PROBE_ALIGN=16`); and what a submit costs the calling thread and how many source
 //! pictures the session holds (`submit_blocking_and_pictures_held`), and whether a session
 //! opens the M2 scaler for a picture off 16 (`the_scaler_is_opened_only_off_16`).
+//!
+//! Three more on the worker's session (MEASUREMENTS, 2026-09-29):
+//! - "temporal layers on the worker's session": which layer-1 frames a decoder can do without, the
+//!   live toggle and what the layers cost (`temporal_layers_skip_and_toggle`, probe P5);
+//! - "a still picture refined": what coding a still picture again buys, frame by frame
+//!   (`still_picture_refinement`, probe P6);
+//! - "stripes across the two encode engines": whether sessions on stripes of one picture run on
+//!   both engines at once (`stripes_across_engines`, probe P3).
 
 #![cfg(target_os = "macos")]
 
@@ -53,13 +61,15 @@ mod tests {
         CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
         kCMHEVCTemporalLevelInfoKey_TemporalLevel, kCMSampleAttachmentKey_DependsOnOthers,
         kCMSampleAttachmentKey_HEVCTemporalLevelInfo, kCMSampleAttachmentKey_IsDependedOnByOthers,
-        kCMSampleAttachmentKey_NotSync, kCMTimeInvalid, kCMVideoCodecType_HEVC,
+        kCMSampleAttachmentKey_NotSync, kCMTimeInvalid, kCMVideoCodecType_H264,
+        kCMVideoCodecType_HEVC,
     };
     use objc2_core_video::{
         CVImageBuffer, CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddress,
         CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
-        CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetPixelFormatType,
-        CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeight,
+        CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+        CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
         kCVImageBufferCleanApertureHeightKey, kCVImageBufferCleanApertureHorizontalOffsetKey,
         kCVImageBufferCleanApertureVerticalOffsetKey, kCVImageBufferCleanApertureWidthKey,
         kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVPixelBufferIOSurfacePropertiesKey,
@@ -78,7 +88,9 @@ mod tests {
         VTSessionCopyProperty, VTSessionSetProperty, kVTCompressionPreset_VideoConferencing,
         kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
         kVTCompressionPropertyKey_AverageBitRate,
+        kVTCompressionPropertyKey_BaseLayerBitRateFraction,
         kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+        kVTCompressionPropertyKey_CalculateMeanSquaredError,
         kVTCompressionPropertyKey_CleanAperture, kVTCompressionPropertyKey_DataRateLimits,
         kVTCompressionPropertyKey_EnableLTR, kVTCompressionPropertyKey_ExpectedFrameRate,
         kVTCompressionPropertyKey_MaxFrameDelayCount,
@@ -86,11 +98,16 @@ mod tests {
         kVTCompressionPropertyKey_MaximumRealTimeFrameRate,
         kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
         kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+        kVTCompressionPropertyKey_RecommendedParallelizationLimit,
         kVTCompressionPropertyKey_SupportedPresetDictionaries,
         kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
         kVTCompressionPropertyKey_YCbCrMatrix,
         kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder,
+        kVTEncodeFrameOptionKey_AcknowledgedLTRTokens, kVTEncodeFrameOptionKey_ForceKeyFrame,
+        kVTEncodeFrameOptionKey_ForceLTRRefresh, kVTProfileLevel_H264_High_AutoLevel,
         kVTProfileLevel_HEVC_Main_AutoLevel, kVTPropertySupportedValueListKey,
+        kVTSampleAttachmentKey_QualityMetrics,
+        kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
         kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
         kVTVideoEncoderList_CodecType, kVTVideoEncoderList_EncoderID,
         kVTVideoEncoderList_IsHardwareAccelerated,
@@ -474,6 +491,11 @@ mod tests {
     /// read at the decoded buffer's own subsampling and replicated to full resolution, the way
     /// a nearest sampler would show it.
     fn psnr(p: &Picture, image: &CVPixelBuffer) -> (f64, f64) {
+        psnr_at(p, image, 0)
+    }
+
+    /// [`psnr`] of `p` against the decoded rows from `first_row` down.
+    fn psnr_at(p: &Picture, image: &CVPixelBuffer, first_row: usize) -> (f64, f64) {
         let format = CVPixelBufferGetPixelFormatType(image);
         let (sx, sy, bits) = layout(format);
         let (mut ey, mut ec) = (0.0_f64, 0.0_f64);
@@ -497,10 +519,10 @@ mod tests {
                 for x in 0..p.w {
                     let i = y * p.w + x;
                     if plane == 0 {
-                        let d = read(x, y, 0, 1) - f64::from(p.y[i]);
+                        let d = read(x, first_row + y, 0, 1) - f64::from(p.y[i]);
                         ey += d * d;
                     } else {
-                        let (cx, cy) = (x / sx, y / sy);
+                        let (cx, cy) = (x / sx, (first_row + y) / sy);
                         let db = read(cx, cy, 0, 2) - f64::from(p.cb[i]);
                         let dr = read(cx, cy, 1, 2) - f64::from(p.cr[i]);
                         ec += db * db + dr * dr;
@@ -576,6 +598,18 @@ mod tests {
             format: u32,
             bitrate: i64,
         ) -> Result<Self, (&'static str, i32)> {
+            Self::of(kCMVideoCodecType_HEVC, (w, h), spec, profile, format, bitrate)
+        }
+
+        /// [`Session::new`] for `codec`, a `CMVideoCodecType`.
+        fn of(
+            codec: u32,
+            (w, h): (usize, usize),
+            spec: Spec,
+            profile: Option<&CFString>,
+            format: u32,
+            bitrate: i64,
+        ) -> Result<Self, (&'static str, i32)> {
             // SAFETY: framework-provided constant strings.
             let (ll, hw, id_key) = unsafe {
                 (
@@ -605,7 +639,7 @@ mod tests {
                     None,
                     w as i32,
                     h as i32,
-                    kCMVideoCodecType_HEVC,
+                    codec,
                     Some(spec.as_opaque()),
                     Some(source.as_opaque()),
                     None,
@@ -777,6 +811,9 @@ mod tests {
     /// Whether the hardware decoder was in use, and the last pictures it gave back.
     type Tail = (Option<bool>, Vec<Pixels>);
 
+    /// What failed, and the status it failed with.
+    type Failure = (&'static str, i32);
+
     /// Decode `samples` into `output` format; `(hardware in use, the last `keep` pictures)`, or
     /// the failing status.
     fn decode_tail(
@@ -785,6 +822,32 @@ mod tests {
         require_hardware: bool,
         keep: usize,
     ) -> Result<Tail, (&'static str, i32)> {
+        let mut tail: std::collections::VecDeque<Pixels> =
+            std::collections::VecDeque::with_capacity(keep + 1);
+        let samples: Vec<&Sample> = samples.iter().collect();
+        let (hardware, failed) = decode_each(&samples, output, require_hardware, |picture| {
+            let Ok(p) = picture else { return false };
+            tail.push_back(p);
+            if tail.len() > keep {
+                tail.pop_front();
+            }
+            true
+        })?;
+        match failed {
+            Some(failure) => Err(failure),
+            None => Ok((hardware, tail.into())),
+        }
+    }
+
+    /// Decode `samples` in order on one session and hand `each` every picture, or the status a
+    /// sample failed with; `each` returns whether to go on. `(hardware in use, the failure that
+    /// stopped it)`, or the status the session could not be made with.
+    fn decode_each(
+        samples: &[&Sample],
+        output: u32,
+        require_hardware: bool,
+        mut each: impl FnMut(Result<Pixels, i32>) -> bool,
+    ) -> Result<(Option<bool>, Option<Failure>), Failure> {
         let first = samples.first().ok_or(("no samples", 0))?;
         // SAFETY: a valid sample buffer.
         let format = unsafe { first.0.format_description() }.ok_or(("format", 0))?;
@@ -820,8 +883,6 @@ mod tests {
         let hardware = copy_bool(&session, unsafe {
             kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder
         });
-        let mut tail: std::collections::VecDeque<Pixels> =
-            std::collections::VecDeque::with_capacity(keep + 1);
         let mut failed = None;
         for sample in samples {
             // SAFETY: a valid sample and session; synchronous decode, no refcon.
@@ -833,33 +894,27 @@ mod tests {
                     ptr::null_mut(),
                 )
             };
-            if status != 0 {
-                failed = Some(("decode", status));
-                break;
-            }
-            match rx.recv_timeout(Duration::from_secs(10)) {
-                Ok(Ok(p)) => {
-                    tail.push_back(p);
-                    if tail.len() > keep {
-                        tail.pop_front();
+            let (picture, why) = if status == 0 {
+                match rx.recv_timeout(Duration::from_secs(10)) {
+                    Ok(Ok(p)) => (Ok(p), ""),
+                    Ok(Err(s)) => (Err(s), "output"),
+                    Err(_) => {
+                        failed = Some(("timeout", 0));
+                        break;
                     }
                 }
-                Ok(Err(s)) => {
-                    failed = Some(("output", s));
-                    break;
-                }
-                Err(_) => {
-                    failed = Some(("timeout", 0));
-                    break;
-                }
+            } else {
+                (Err(status), "decode")
+            };
+            let status = picture.as_ref().err().copied();
+            if !each(picture) {
+                failed = status.map(|s| (why, s));
+                break;
             }
         }
         // SAFETY: invalidation stops callbacks before `tx` is dropped.
         unsafe { session.invalidate() }
-        match failed {
-            Some(failure) => Err(failure),
-            None => Ok((hardware, tail.into())),
-        }
+        Ok((hardware, failed))
     }
 
     /// Nanoseconds as milliseconds.
@@ -1351,16 +1406,34 @@ mod tests {
         /// hardware HEVC Main 4:2:0 fed `420f`, with every property `Encoder::configure` sets
         /// (the optional ones as best effort, as there) and `fps` expected.
         fn worker(w: usize, h: usize, bitrate: i64, fps: i32) -> Result<Self, (&'static str, i32)> {
+            Self::worker_on(Spec::LowLatencyHardware, w, h, bitrate, fps)
+        }
+
+        /// [`Session::worker`] on the encoder `spec` picks.
+        fn worker_on(
+            spec: Spec,
+            w: usize,
+            h: usize,
+            bitrate: i64,
+            fps: i32,
+        ) -> Result<Self, (&'static str, i32)> {
             // SAFETY: framework-provided constant string.
             let main = unsafe { kVTProfileLevel_HEVC_Main_AutoLevel };
-            let mut session = Self::new(
-                w,
-                h,
-                Spec::LowLatencyHardware,
-                Some(main),
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                bitrate,
-            )?;
+            let source = (main, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            Self::worker_as(spec, kCMVideoCodecType_HEVC, source, (w, h), bitrate, fps)
+        }
+
+        /// [`Session::worker`] on the encoder `spec` picks, for `codec` in `profile` fed
+        /// `format`.
+        fn worker_as(
+            spec: Spec,
+            codec: u32,
+            (profile, format): (&CFString, u32),
+            (w, h): (usize, usize),
+            bitrate: i64,
+            fps: i32,
+        ) -> Result<Self, (&'static str, i32)> {
+            let mut session = Self::of(codec, (w, h), spec, Some(profile), format, bitrate)?;
             session.set_fps(fps);
             let limits = CFArray::from_retained_objects(&[
                 CFNumber::new_i64(bitrate * 5 / 32),
@@ -1464,6 +1537,18 @@ mod tests {
         frames: usize,
         settle: usize,
     ) -> Beat {
+        on_beat_from(session, images, 0, frames, settle)
+    }
+
+    /// [`on_beat`] with presentation stamps counted from `first`, so a session can be fed on
+    /// the beat more than once and its stamps still only go forward.
+    fn on_beat_from(
+        session: &Session,
+        images: &[CFRetained<CVPixelBuffer>],
+        first: usize,
+        frames: usize,
+        settle: usize,
+    ) -> Beat {
         let stride = (120 / session.fps.max(1)) as usize;
         let period = Duration::from_secs(1) / session.fps as u32;
         let mut submitted = Vec::with_capacity(frames);
@@ -1479,7 +1564,7 @@ mod tests {
                 std::thread::sleep(wait);
             }
             submitted.push(Instant::now());
-            let status = session.submit(&images[(i * stride) % images.len()], i as i64);
+            let status = session.submit(&images[(i * stride) % images.len()], (first + i) as i64);
             assert_eq!(status, 0, "submit");
             while let Ok(got) = session.rx.try_recv() {
                 back.push(got);
@@ -1613,8 +1698,13 @@ mod tests {
 
     /// Mean luma PSNR of the last decoded pictures of `samples` against their sources.
     fn tail_psnr(samples: Vec<(usize, Sample)>, pictures: &[Picture]) -> f64 {
+        tail_psnr_as(samples, pictures, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+    }
+
+    /// [`tail_psnr`] decoded into `output`.
+    fn tail_psnr_as(samples: Vec<(usize, Sample)>, pictures: &[Picture], output: u32) -> f64 {
         let (sources, samples): (Vec<usize>, Vec<Sample>) = samples.into_iter().unzip();
-        match decode_tail(&samples, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, true, 10) {
+        match decode_tail(&samples, output, true, 10) {
             Ok((_, tail)) if !tail.is_empty() => {
                 let first = sources.len() - tail.len();
                 let sum: f64 = tail
@@ -2167,6 +2257,1442 @@ mod tests {
             index += 1;
             if index >= count {
                 return None;
+            }
+        }
+    }
+
+    // ---- Temporal layers: what a receiver may skip (probe P5) --------------------------------
+
+    impl Session {
+        /// Submit one picture with per-frame `options`; the status.
+        fn submit_with(&self, image: &CVPixelBuffer, index: i64, options: Option<&Dict>) -> i32 {
+            let pts =
+                CMTime { value: index, timescale: self.fps, flags: CMTimeFlags::Valid, epoch: 0 };
+            // SAFETY: a valid image, session and options dictionary for the call; no refcon.
+            unsafe {
+                self.vt.encode_frame(
+                    image,
+                    pts,
+                    kCMTimeInvalid,
+                    options.map(CFDictionary::as_opaque),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            }
+        }
+
+        /// Encode one picture with `options` and wait for it.
+        fn encode_with(
+            &self,
+            image: &CVPixelBuffer,
+            index: i64,
+            options: Option<&Dict>,
+        ) -> (Duration, Option<Sample>) {
+            let submitted = Instant::now();
+            if self.submit_with(image, index, options) != 0 {
+                return (Duration::ZERO, None);
+            }
+            match self.rx.recv_timeout(Duration::from_secs(10)) {
+                Ok((at, sample)) => (at.duration_since(submitted), sample),
+                Err(_) => (Duration::ZERO, None),
+            }
+        }
+    }
+
+    /// The `TemporalId` of a sample's first slice.
+    fn temporal_id(sample: &CMSampleBuffer) -> Option<u8> {
+        nal_headers(sample).into_iter().find(|(t, _)| *t < 32).map(|(_, tid)| tid)
+    }
+
+    /// The long-term-reference token a sample asks the receiver to acknowledge.
+    fn ltr_token(sample: &CMSampleBuffer) -> Option<i64> {
+        // SAFETY: valid sample buffer; `false` never allocates.
+        let array = unsafe { sample.sample_attachments_array(false) }?;
+        // SAFETY: CMSampleBuffer.h: an array of CFDictionaries keyed by CFString.
+        let array: CFRetained<CFArray<Dict>> = unsafe { CFRetained::cast_unchecked(array) };
+        let d = array.get(0)?;
+        // SAFETY: framework-provided constant string.
+        let key = unsafe { kVTSampleAttachmentKey_RequireLTRAcknowledgementToken };
+        d.get(key).and_then(|v| v.downcast::<CFNumber>().ok()).and_then(|n| n.as_i64())
+    }
+
+    /// A hash of a decoded 4:2:0 picture's visible samples, both planes.
+    fn picture_hash(image: &CVPixelBuffer) -> u64 {
+        let (w, h) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+        let mut acc = 0xcbf2_9ce4_8422_2325_u64;
+        with_planes(image, true, |plane, base, stride| {
+            let rows = if plane == 0 { h } else { h / 2 };
+            for y in 0..rows {
+                // SAFETY: the plane is locked, so row `y < rows` starts inside it.
+                let start = unsafe { base.add(y * stride) };
+                // SAFETY: NV12 rows are `w <= stride` readable bytes in both planes.
+                let row = unsafe { std::slice::from_raw_parts(start, w) };
+                for &b in row {
+                    acc = (acc ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+                }
+            }
+        });
+        acc
+    }
+
+    /// Decode `samples` in order on one hardware session, going on past failures: per sample,
+    /// the picture's hash or the status it failed with.
+    fn decode_hashes(samples: &[&Sample]) -> Vec<Result<u64, i32>> {
+        let mut out = Vec::with_capacity(samples.len());
+        let decoded =
+            decode_each(samples, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, true, |picture| {
+                out.push(picture.map(|p| picture_hash(&p.0)));
+                true
+            });
+        if let Err(e) = decoded {
+            panic!("decoder session: {e:?}");
+        }
+        out
+    }
+
+    /// One frame of the layered stream and what it says of itself.
+    struct Marked {
+        sample: Sample,
+        tid: Option<u8>,
+        depended: Option<bool>,
+        token: Option<i64>,
+        refresh: bool,
+    }
+
+    /// Frame options: a keyframe, an LTR refresh, the tokens acknowledged since the last frame.
+    fn frame_options(keyframe: bool, refresh: bool, acked: &[i64]) -> Option<CFRetained<Dict>> {
+        let tokens: Vec<CFRetained<CFNumber>> =
+            acked.iter().map(|&t| CFNumber::new_i64(t)).collect();
+        let tokens = CFArray::from_retained_objects(&tokens);
+        // SAFETY: framework-provided constant strings.
+        let (key, refresh_key, acked_key) = unsafe {
+            (
+                kVTEncodeFrameOptionKey_ForceKeyFrame,
+                kVTEncodeFrameOptionKey_ForceLTRRefresh,
+                kVTEncodeFrameOptionKey_AcknowledgedLTRTokens,
+            )
+        };
+        let mut pairs: Vec<(&CFString, &CFType)> = Vec::new();
+        if keyframe {
+            pairs.push((key, yes()));
+        }
+        if refresh {
+            pairs.push((refresh_key, yes()));
+        }
+        if !acked.is_empty() {
+            pairs.push((acked_key, &tokens));
+        }
+        (!pairs.is_empty()).then(|| dict(&pairs))
+    }
+
+    /// A letter per frame: `K` keyframe, `B` base layer, `L` layer 1, then `r` for a refresh,
+    /// `t` for a frame that offers an LTR token and `d` for one marked depended on.
+    fn pattern(frames: &[Marked]) -> String {
+        frames
+            .iter()
+            .map(|f| {
+                let head = match f.tid {
+                    _ if f.depended.is_none() && f.token.is_some() => "K",
+                    Some(0) => "B",
+                    Some(_) => "L",
+                    None => "?",
+                };
+                let mut s = head.to_owned();
+                if f.refresh {
+                    s.push('r');
+                }
+                if f.token.is_some() {
+                    s.push('t');
+                }
+                if f.tid.is_some_and(|t| t > 0) && f.depended != Some(false) {
+                    s.push('d');
+                }
+                s
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Decode the frames `keep` selects and compare each picture with the whole stream's
+    /// picture of the same frame: `(decoded, failed, differing)`.
+    fn decode_without(
+        frames: &[Marked],
+        full: &[Result<u64, i32>],
+        keep: impl Fn(usize, &Marked) -> bool,
+    ) -> (usize, usize, usize) {
+        let kept: Vec<usize> = (0..frames.len()).filter(|&i| keep(i, &frames[i])).collect();
+        let samples: Vec<&Sample> = kept.iter().map(|&i| &frames[i].sample).collect();
+        let got = decode_hashes(&samples);
+        let mut out = (0, 0, 0);
+        for (&i, picture) in kept.iter().zip(&got) {
+            match (picture, &full[i]) {
+                (Ok(a), Ok(b)) if a == b => out.0 += 1,
+                (Ok(_), _) => {
+                    out.0 += 1;
+                    out.2 += 1;
+                }
+                (Err(_), _) => out.1 += 1,
+            }
+        }
+        out
+    }
+
+    /// Probe P5 (`docs/decisions/video.md`, temporal layers): on the worker's session with
+    /// `BaseLayerFrameRateFraction` 0.5, which frames nothing refers to, whether a decoder given
+    /// the stream without some or all of them decodes every other frame to the very picture
+    /// the whole stream gives, with LTR tokens acknowledged and a refresh in the middle; whether
+    /// layers can be turned on and off on a live session; and what they cost in encode time,
+    /// bytes and picture at 1080p and 3024 × 1968, with each `BaseLayerBitRateFraction` Apple
+    /// suggests.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn temporal_layers_skip_and_toggle() {
+        type Keep<'a> = Box<dyn Fn(usize, &Marked) -> bool + 'a>;
+        // SAFETY: framework-provided constant strings.
+        let (fraction_key, bit_key) = unsafe {
+            (
+                kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+                kVTCompressionPropertyKey_BaseLayerBitRateFraction,
+            )
+        };
+        let (w, h) = (1920, 1088);
+        let (_, images) = scrolling(w, h);
+
+        let only_cost = std::env::var_os("SLOPTY_PROBE_LAYERS_COST_ONLY").is_some();
+        if !only_cost {
+            // 1. What may be skipped, with LTR acknowledged and a refresh at frame 45.
+            let session = Session::worker(w, h, 16_000_000, 60).expect("session");
+            let status = set(&session.vt, fraction_key, &CFNumber::new_f64(0.5));
+            let mut acked: Vec<i64> = Vec::new();
+            let mut frames: Vec<Marked> = Vec::new();
+            for i in 0..90_usize {
+                let refresh = i == 45;
+                let options = frame_options(i == 0, refresh, &acked);
+                acked.clear();
+                let (_, sample) =
+                    session.encode_with(&images[i % images.len()], i as i64, options.as_deref());
+                let sample = sample.expect("a frame");
+                let (depended, ..) = sample_marks(&sample.0);
+                let token = ltr_token(&sample.0);
+                acked.extend(token);
+                frames.push(Marked {
+                    tid: temporal_id(&sample.0),
+                    depended,
+                    token,
+                    refresh,
+                    sample,
+                });
+            }
+            eprintln!("MEASURE layers set_status={status} pattern: {}", pattern(&frames));
+            let all: Vec<&Sample> = frames.iter().map(|f| &f.sample).collect();
+            let full = decode_hashes(&all);
+            let full_failed = full.iter().filter(|r| r.is_err()).count();
+            eprintln!("MEASURE layers whole stream: {} frames, {full_failed} failed", full.len());
+            let layer1 = |f: &Marked| f.tid.is_some_and(|t| t > 0);
+            let control = (20..frames.len()).find(|&i| !layer1(&frames[i])).unwrap_or(20);
+            let cases: [(&str, Keep<'_>); 4] = [
+                ("every layer-1 frame dropped", Box::new(|_, f| !layer1(f))),
+                ("every other layer-1 frame dropped", Box::new(|i, f| !(layer1(f) && i % 4 == 1))),
+                (
+                    "the layer-1 frames around the refresh dropped",
+                    Box::new(|i, f| !(layer1(f) && (43..=48).contains(&i))),
+                ),
+                ("one base frame dropped (control)", Box::new(move |i, _| i != control)),
+            ];
+            for (name, keep) in cases {
+                let (decoded, failed, differing) = decode_without(&frames, &full, keep);
+                eprintln!(
+                    "MEASURE layers {name}: decoded={decoded} failed={failed} differing_from_whole={differing}"
+                );
+            }
+
+            // 1b. A refresh after a lost base frame: the client decodes frames 0–29, loses base
+            // frame 30 and acknowledges nothing from there until the refresh it asks for, which the
+            // worker makes at frame 36. From the refresh on, every frame must decode to the whole
+            // stream's picture with frames 30–35 never given to the decoder.
+            for (lost, refresh_at, label) in
+                [(30_usize, 36_usize, "base"), (30, 37, "base"), (31, 0, "layer-1")]
+            {
+                let session = Session::worker(w, h, 16_000_000, 60).expect("session");
+                set(&session.vt, fraction_key, &CFNumber::new_f64(0.5));
+                let mut acked: Vec<i64> = Vec::new();
+                let mut frames: Vec<Marked> = Vec::new();
+                let layer1_lost = label == "layer-1";
+                for i in 0..90_usize {
+                    let refresh = i == refresh_at && !layer1_lost;
+                    let options = frame_options(i == 0, refresh, &acked);
+                    acked.clear();
+                    let (_, sample) = session.encode_with(
+                        &images[i % images.len()],
+                        i as i64,
+                        options.as_deref(),
+                    );
+                    let sample = sample.expect("a frame");
+                    let (depended, ..) = sample_marks(&sample.0);
+                    let token = ltr_token(&sample.0);
+                    // The client acknowledges only what it decoded: nothing between the loss and
+                    // the refresh when a base frame went, only the lost frame
+                    // itself when it was layer 1.
+                    let decoded = if layer1_lost { i != lost } else { i < lost || i >= refresh_at };
+                    if decoded {
+                        acked.extend(token);
+                    }
+                    frames.push(Marked {
+                        tid: temporal_id(&sample.0),
+                        depended,
+                        token,
+                        refresh,
+                        sample,
+                    });
+                }
+                let all: Vec<&Sample> = frames.iter().map(|f| &f.sample).collect();
+                let full = decode_hashes(&all);
+                let tid_lost = frames[lost].tid;
+                let (decoded, failed, differing) = decode_without(&frames, &full, |i, _| {
+                    if layer1_lost { i != lost } else { i < lost || i >= refresh_at }
+                });
+                eprintln!(
+                    "MEASURE layers recovery, {label} frame {lost} lost (TemporalId {tid_lost:?}): \
+                     decoded={decoded} failed={failed} differing_from_whole={differing}; pattern from 26: {}",
+                    pattern(&frames[26..44])
+                );
+            }
+
+            // 2. On and off on a live session.
+            let session = Session::worker(w, h, 16_000_000, 60).expect("session");
+            let mut index = 0_i64;
+            for (label, fraction) in
+                [("unset", None), ("0.5", Some(0.5)), ("1.0", Some(1.0)), ("0.5 again", Some(0.5))]
+            {
+                let status =
+                    fraction.map(|f| set(&session.vt, fraction_key, &CFNumber::new_f64(f)));
+                let read_back = copy_property(&session.vt, fraction_key).map(|v| describe(&v));
+                let mut segment = Vec::new();
+                for _ in 0..16 {
+                    let options = frame_options(index == 0, false, &[]);
+                    let (_, sample) = session.encode_with(
+                        &images[index as usize % images.len()],
+                        index,
+                        options.as_deref(),
+                    );
+                    index += 1;
+                    let sample = sample.expect("a frame");
+                    let (depended, ..) = sample_marks(&sample.0);
+                    segment.push(Marked {
+                        tid: temporal_id(&sample.0),
+                        depended,
+                        token: ltr_token(&sample.0),
+                        refresh: false,
+                        sample,
+                    });
+                }
+                eprintln!(
+                    "MEASURE layers live {label}: set_status={status:?} read_back={read_back:?} pattern: {}",
+                    pattern(&segment)
+                );
+            }
+        }
+
+        // 3. The cost, on a real-time beat: at a rate the picture does not reach, where layers
+        // cost bits, and at one it does, where they cost picture.
+        for ((w, h), bitrate) in [
+            ((1920_usize, 1088_usize), 16_000_000_i64),
+            ((1920, 1088), 3_000_000),
+            ((3024, 1968), 32_000_000),
+            ((3024, 1968), 6_000_000),
+        ] {
+            let pictures: Vec<Picture> = (0..12).map(|i| picture(w, h, i * 8)).collect();
+            let images: Vec<_> = pictures
+                .iter()
+                .map(|p| fill(p, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+                .collect();
+            for (label, layers, base_bits) in [
+                ("none", None, None),
+                ("0.5", Some(0.5), None),
+                ("0.5, base bits 0.7", Some(0.5), Some(0.7)),
+                ("0.5, base bits 0.8", Some(0.5), Some(0.8)),
+                ("0.67, base bits 0.8", Some(0.67), Some(0.8)),
+                ("0.75, base bits 0.8", Some(0.75), Some(0.8)),
+            ] {
+                let session = Session::worker(w, h, bitrate, 60).expect("session");
+                if let Some(fraction) = layers {
+                    set(&session.vt, fraction_key, &CFNumber::new_f64(fraction));
+                }
+                if let Some(bits) = base_bits {
+                    set(&session.vt, bit_key, &CFNumber::new_f64(bits));
+                }
+                let beat = on_beat(&session, &images, 240, 60);
+                let spread = Spread::of_durations(&beat.times).unwrap_or_default();
+                let (mut base, mut upper) = ((0_usize, 0_usize), (0_usize, 0_usize));
+                for (_, s) in beat.samples.iter().skip(60) {
+                    let bytes = sample_bytes(&s.0);
+                    let slot = if temporal_id(&s.0).is_some_and(|t| t > 0) {
+                        &mut upper
+                    } else {
+                        &mut base
+                    };
+                    slot.0 += 1;
+                    slot.1 += bytes;
+                }
+                let spent = (beat.bytes * 8) as f64 / 3.0 / 1e6;
+                let psnr_y = tail_psnr(beat.samples, &pictures);
+                eprintln!(
+                    "MEASURE layers cost {w}x{h} {label} load={}: on_beat p50={:.2}ms p95={:.2}ms dropped={} \
+                     base {} x {} B, layer-1 {} x {} B, spent={spent:.2}Mbit/s psnr_y={psnr_y:.2}dB",
+                    load_average(),
+                    ms(spread.p50),
+                    ms(spread.p95),
+                    beat.dropped,
+                    base.0,
+                    base.1 / base.0.max(1),
+                    upper.0,
+                    upper.1 / upper.0.max(1),
+                );
+            }
+        }
+    }
+
+    // ---- A still picture refined (probe P6) ---------------------------------------------------
+
+    /// The stamp of the `k`th refinement (from 1) after a last moving frame stamped `last`, as
+    /// the worker stamps them at a 60 Hz rung: sent two periods apart, each stamped a period
+    /// before it was sent (`slopty_media::Refine::stamp`).
+    fn refinement_stamp(last: u64, k: u64) -> u64 {
+        last + k * 2 * 16_667 - 16_667
+    }
+
+    /// Where the worker's policy stops (`slopty_media::Refine::wanted`, copied: the probe does
+    /// not link the media crate): the number of refinements it sends after the fresh frame's
+    /// error `fresh`, the refinements' errors being `mse`. A frame the encoder dropped reports
+    /// none, as on the worker, and the policy goes on blind for a few frames.
+    fn refinements_sent(fresh: Option<f64>, mse: &[Option<f64>]) -> usize {
+        const BLIND: usize = 4;
+        // Hundredths of a dB, as `gain_centi_db`.
+        let gain = |before: f64, after: f64| 1000.0 * (before / after).log10();
+        let mut record = [fresh, None, None];
+        for (sent, m) in mse.iter().enumerate() {
+            let wanted = match record {
+                [Some(newest), ..] if newest <= 0.0 => false,
+                [Some(newest), _, Some(two_back)] => gain(two_back, newest) >= 20.0,
+                [Some(newest), Some(one_back), None] => gain(one_back, newest) >= 10.0,
+                [Some(_), None, _] => true,
+                [None, ..] => sent < BLIND,
+            };
+            if !wanted {
+                return sent;
+            }
+            record = [*m, record[0], record[1]];
+        }
+        mse.len()
+    }
+
+    /// Probe P6 (`docs/decisions/video.md`, still-picture refinement): the text scrolls for half
+    /// a second on the worker's session, then stops, and the last picture is handed to the
+    /// encoder again with the stamps the worker gives refinements ([`refinement_stamp`]). Each
+    /// frame after the stop: its bytes against the rate's per-frame budget, how long the encoder
+    /// took, the error the encoder reports, and the luma and chroma PSNR of the decoded picture
+    /// against the source; and where the worker's policy stops. 4:2:0 at 4, 8 and 16 Mbit/s,
+    /// 4:4:4 at 8, 16 and 32; `SLOPTY_PROBE_SIZES` picks the sizes (1920 × 1088).
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn still_picture_refinement() {
+        use slopty_codec::{Chroma, Decoder, Encoder, EncoderConfig, FrameOptions};
+        use slopty_proto::screen::VideoCodec;
+
+        const MOVING: usize = 30;
+        const STILL: usize = 12;
+        for (w, h) in probe_sizes(&[(1920, 1088)]) {
+            let pictures: Vec<Picture> = (0..MOVING).map(|i| picture(w, h, i * 16)).collect();
+            for (chroma, rates) in [
+                (Chroma::Subsampled, [4_000_000_u32, 8_000_000, 16_000_000]),
+                (Chroma::Full, [8_000_000, 16_000_000, 32_000_000]),
+            ] {
+                let format = slopty_codec::pixel_format(chroma);
+                let images: Vec<_> = pictures.iter().map(|p| fill(p, format)).collect();
+                for rate in rates {
+                    let (tx, rx) = mpsc::channel();
+                    let encoder = Encoder::new(
+                        EncoderConfig {
+                            width: w as u32,
+                            height: h as u32,
+                            codec: VideoCodec::Hevc,
+                            fps: 60,
+                            bitrate_bps: rate,
+                            chroma,
+                        },
+                        move |packet| {
+                            let _gone = tx.send(packet);
+                        },
+                    )
+                    .expect("the worker's session");
+                    // A frame the encoder dropped comes back as nothing: the picture before it
+                    // stands, and its bytes are none.
+                    let mut packets: Vec<Option<slopty_codec::EncodedPacket>> = Vec::new();
+                    let mut took = Vec::new();
+                    for i in 0..MOVING + STILL {
+                        let image = &images[i.min(MOVING - 1)];
+                        let options =
+                            FrameOptions { force_keyframe: i == 0, ..FrameOptions::default() };
+                        let start = Instant::now();
+                        let last = MOVING as u64 * 16_667;
+                        let pts = if i < MOVING {
+                            (i as u64 + 1) * 16_667
+                        } else {
+                            refinement_stamp(last, (i + 1 - MOVING) as u64)
+                        };
+                        encoder.encode(image, pts, &options).expect("encode");
+                        encoder.flush().expect("flush");
+                        took.push(start.elapsed());
+                        packets.push(rx.try_recv().ok());
+                    }
+                    let dropped = packets.iter().filter(|p| p.is_none()).count();
+                    let (dtx, drx) = mpsc::channel();
+                    let mut decoder = Decoder::new(VideoCodec::Hevc, move |frame| {
+                        let _gone = dtx.send(frame);
+                    });
+                    let mut scores = Vec::new();
+                    let mut shown = (0.0, 0.0);
+                    for (i, packet) in packets.iter().enumerate() {
+                        if let Some(packet) = packet {
+                            decoder.decode(&packet.data, packet.pts_us).expect("decode");
+                            let decoded =
+                                drx.recv_timeout(Duration::from_secs(10)).expect("a picture");
+                            shown = psnr(&pictures[i.min(MOVING - 1)], decoded.image.as_cv());
+                        }
+                        scores.push(shown);
+                    }
+                    let bytes = |i: usize| packets[i].as_ref().map_or(0, |p| p.data.len());
+                    let budget = rate as usize / 8 / 60;
+                    let moving_took = Spread::of_durations(&took[5..MOVING]).unwrap_or_default();
+                    let still_took = Spread::of_durations(&took[MOVING..]).unwrap_or_default();
+                    let last = MOVING - 1;
+                    let best = scores[MOVING..].iter().map(|s| s.0).fold(f64::MIN, f64::max);
+                    let crisp = scores[MOVING..]
+                        .iter()
+                        .position(|s| s.0 >= best - 0.3)
+                        .map_or(STILL, |k| k + 1);
+                    let over_budget =
+                        (MOVING..MOVING + STILL).filter(|&i| bytes(i) > budget).count();
+                    let series: Vec<Option<f64>> = packets[MOVING..]
+                        .iter()
+                        .map(|p| p.as_ref().and_then(|p| p.mse).map(|m| m.luma))
+                        .collect();
+                    let fresh = packets[last].as_ref().and_then(|p| p.mse).map(|m| m.luma);
+                    let stops = refinements_sent(fresh, &series);
+                    let spent: usize = (MOVING..MOVING + stops).map(bytes).sum();
+                    eprintln!(
+                        "MEASURE refine {w}x{h} {chroma:?} {} Mbit/s load={}: moving p50 {:.2} ms, \
+                         refinement p50 {:.2} ms; stop at luma {:.2} dB chroma {:.2} dB ({} B); \
+                         after 1/2/4/8 refinement frames luma {:.2}/{:.2}/{:.2}/{:.2} dB, chroma \
+                         {:.2}/{:.2}/{:.2}/{:.2} dB; within 0.3 dB of the best ({best:.2}) after \
+                         {crisp}; {over_budget} of {STILL} over the {budget} B budget; \
+                         {dropped} dropped; the policy sends {stops} ({spent} B) and stops at \
+                         luma {:.2} dB",
+                        rate / 1_000_000,
+                        load_average(),
+                        ms(moving_took.p50),
+                        ms(still_took.p50),
+                        scores[last].0,
+                        scores[last].1,
+                        bytes(last),
+                        scores[MOVING].0,
+                        scores[MOVING + 1].0,
+                        scores[MOVING + 3].0,
+                        scores[MOVING + 7].0,
+                        scores[MOVING].1,
+                        scores[MOVING + 1].1,
+                        scores[MOVING + 3].1,
+                        scores[MOVING + 7].1,
+                        scores[(MOVING + stops).max(last + 1) - 1].0,
+                    );
+                    let series: Vec<String> = (last..MOVING + STILL)
+                        .map(|i| {
+                            format!(
+                                "{}:{:.1}/{:.1}dB {}B mse_psnr={}",
+                                i as isize - last as isize,
+                                scores[i].0,
+                                scores[i].1,
+                                bytes(i),
+                                packets[i].as_ref().and_then(|p| p.mse).map_or_else(
+                                    || "-".to_owned(),
+                                    |m| format!("{:.1}", m.luma_psnr())
+                                ),
+                            )
+                        })
+                        .collect();
+                    eprintln!(
+                        "MEASURE refine series {chroma:?} {}M: {}",
+                        rate / 1_000_000,
+                        series.join(" ")
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- Stripes across the two media engines (probe P3) ------------------------------------
+
+    /// `(first row, rows)` of each of `n` horizontal stripes of a picture `h` rows tall: each the
+    /// nearest multiple of 64 rows (the HEVC CTU) to an even share, the last taking what is left.
+    fn stripe_rows(h: usize, n: usize) -> Vec<(usize, usize)> {
+        let share = ((h / n + 32) / 64 * 64).max(64);
+        let mut out = Vec::with_capacity(n);
+        let mut top = 0;
+        for k in 0..n {
+            let rows = if k + 1 == n { h - top } else { share };
+            out.push((top, rows));
+            top += rows;
+        }
+        out
+    }
+
+    /// The rows each stripe codes: its own, and `overlap` more on each side that meets another
+    /// stripe, so a scroll across a seam still finds its reference inside the stripe. The client
+    /// shows only the stripe's own rows.
+    fn coded_rows(stripes: &[(usize, usize)], h: usize, overlap: usize) -> Vec<(usize, usize)> {
+        stripes
+            .iter()
+            .map(|&(top, rows)| {
+                let first = top.saturating_sub(overlap);
+                let end = (top + rows + overlap).min(h);
+                (first, end - first)
+            })
+            .collect()
+    }
+
+    /// Rows `top..top + rows` of `p`, as a picture of their own.
+    fn rows_of(p: &Picture, top: usize, rows: usize) -> Picture {
+        let range = top * p.w..(top + rows) * p.w;
+        Picture {
+            w: p.w,
+            h: rows,
+            y: p.y[range.clone()].to_vec(),
+            cb: p.cb[range.clone()].to_vec(),
+            cr: p.cr[range.clone()].to_vec(),
+            rgb: p.rgb[range].to_vec(),
+        }
+    }
+
+    /// What one stripe's session did in a striped run.
+    struct StripeRun {
+        /// `UsingHardwareAcceleratedVideoEncoder` as the session reads it.
+        hardware: String,
+        /// `RecommendedParallelizationLimit` as the session reads it.
+        parallel: String,
+        /// Submit → callback per frame with one frame in flight, every stripe submitted at once.
+        serial: Vec<Option<(Duration, Instant)>>,
+        /// The frames coded one at a time, which the beat's frames refer back to.
+        lead: Vec<Sample>,
+        /// When the beat's first frame was due, the same for every stripe.
+        start: Instant,
+        /// When each frame on the beat went in.
+        submitted: Vec<Instant>,
+        /// Each frame on the beat as it came back.
+        back: Vec<(Instant, Option<Sample>)>,
+    }
+
+    /// Everything the stripe threads share: the barrier they submit together on, the instant
+    /// the beat starts, and whether any of them could not open its session.
+    struct Together {
+        barrier: std::sync::Barrier,
+        start: std::sync::OnceLock<Instant>,
+        refused: std::sync::atomic::AtomicBool,
+    }
+
+    /// One stripe's session, fed rows `top..top + rows` of `pictures`: `serial` frames one at a
+    /// time, then `frames` on the beat, all in step with the other stripes' threads.
+    fn stripe_run(
+        (w, h): (usize, usize),
+        (top, rows, shown): (usize, usize, usize),
+        (bitrate, fps): (i64, i32),
+        pictures: &[Picture],
+        (serial, frames): (usize, usize),
+        together: &Together,
+    ) -> Result<StripeRun, Failure> {
+        use std::sync::atomic::Ordering;
+        // The stripe's share of the target is its share of the picture it shows: the rows past
+        // a seam it codes too are the other stripe's to pay for.
+        let share = bitrate * shown as i64 / h as i64;
+        let spec = if std::env::var("SLOPTY_PROBE_ENCODER").as_deref() == Ok("plain") {
+            Spec::Hardware
+        } else {
+            Spec::LowLatencyHardware
+        };
+        let session = Session::worker_on(spec, w, rows, share, fps).and_then(|session| {
+            let Some(expect) =
+                std::env::var("SLOPTY_PROBE_EXPECT").ok().and_then(|v| v.parse::<i64>().ok())
+            else {
+                return Ok(session);
+            };
+            // SAFETY: framework-provided constant string.
+            let key = unsafe { kVTCompressionPropertyKey_ExpectedFrameRate };
+            match set(&session.vt, key, &CFNumber::new_i64(expect)) {
+                0 => Ok(session),
+                status => Err(("ExpectedFrameRate", status)),
+            }
+        });
+        if session.is_err() {
+            together.refused.store(true, Ordering::SeqCst);
+        }
+        let images: Vec<_> = pictures
+            .iter()
+            .map(|p| fill(&rows_of(p, top, rows), kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+            .collect();
+        together.barrier.wait();
+        let session = session?;
+        if together.refused.load(Ordering::SeqCst) {
+            return Err(("another stripe refused", 0));
+        }
+        // SAFETY: framework-provided constant string.
+        let parallel = copy_property(&session.vt, unsafe {
+            kVTCompressionPropertyKey_RecommendedParallelizationLimit
+        })
+        .map_or_else(|status| format!("status {status}"), |v| describe(&v));
+        let mut lead = Vec::with_capacity(serial);
+        let serial = (0..serial)
+            .map(|i| {
+                together.barrier.wait();
+                let submitted = Instant::now();
+                let (took, sample) = session.encode(&images[i % images.len()], i as i64);
+                sample.map(|sample| {
+                    lead.push(sample);
+                    (took, submitted + took)
+                })
+            })
+            .collect();
+        let stride = (120 / session.fps.max(1)) as usize;
+        let period = Duration::from_secs(1) / session.fps as u32;
+        together.barrier.wait();
+        let start = *together.start.get_or_init(|| Instant::now() + Duration::from_millis(20));
+        let mut submitted = Vec::with_capacity(frames);
+        let mut back = Vec::with_capacity(frames);
+        for i in 0..frames {
+            let due = start + period * i as u32;
+            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a measurement's real-time beat, on its own thread"
+                )]
+                std::thread::sleep(wait);
+            }
+            submitted.push(Instant::now());
+            let status = session.submit(&images[(i * stride) % images.len()], 1_000 + i as i64);
+            if status != 0 {
+                return Err(("submit", status));
+            }
+            while let Ok(got) = session.rx.try_recv() {
+                back.push(got);
+            }
+        }
+        while back.len() < frames {
+            match session.rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(got) => back.push(got),
+                Err(_) => break,
+            }
+        }
+        // SAFETY: framework-provided constant string.
+        let hardware = copy_property(&session.vt, unsafe {
+            kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder
+        })
+        .map_or_else(|status| format!("status {status}"), |v| describe(&v));
+        Ok(StripeRun { hardware, parallel, serial, lead, start, submitted, back })
+    }
+
+    /// The last `keep` decoded pictures of `back` on the beat, each with its source's index.
+    fn decoded_tail(
+        run: &StripeRun,
+        stride: usize,
+        sources: usize,
+        keep: usize,
+    ) -> Vec<(usize, Pixels)> {
+        let (indices, samples): (Vec<usize>, Vec<&Sample>) = run
+            .lead
+            .iter()
+            .map(|s| (usize::MAX, s))
+            .chain(
+                run.back
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, (_, s))| s.as_ref().map(|s| ((i * stride) % sources, s))),
+            )
+            .unzip();
+        let mut all = Vec::new();
+        let decoded = decode_each(
+            &samples,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            true,
+            |picture| picture.map(|p| all.push(p)).is_ok(),
+        );
+        if !matches!(decoded, Ok((_, None))) || all.len() != indices.len() {
+            return Vec::new();
+        }
+        let first = all.len().saturating_sub(keep).max(run.lead.len());
+        indices.into_iter().zip(all).skip(first).collect()
+    }
+
+    /// Two and four low-latency sessions on horizontal stripes of one picture against one
+    /// session on the whole (design §3.3): every stripe submitted at the same instant, one frame
+    /// in flight and then on a 60 and a 120 beat, a frame counting when its last stripe comes
+    /// back. Stripes pay off only if the sessions run on the chip's two encode engines at once;
+    /// if they take turns on one, the later stripe comes back when the whole picture would have.
+    /// Also prints each session's `RecommendedParallelizationLimit`, the rate the stripes spend
+    /// together, and the luma PSNR of the whole picture and of the 8 rows each side of a seam,
+    /// striped against whole. `SLOPTY_PROBE_SIZES` picks sizes, `SLOPTY_PROBE_STRIPES=2,4` counts,
+    /// and `SLOPTY_PROBE_ENCODER=plain` runs the hardware encoder without low-latency rate control
+    /// (the one that codes a 5K frame in half the time), set up otherwise the same.
+    /// `SLOPTY_PROBE_EXPECT=120` tells every session that frame rate whatever the beat, and
+    /// `SLOPTY_PROBE_OVERLAP=64` codes that many rows past each seam ([`coded_rows`]).
+    /// `SLOPTY_PROBE_RATE` sets the whole picture's target in bits a second.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn stripes_across_engines() {
+        const SECONDS: usize = 4;
+        const SERIAL: usize = 40;
+        const KEEP: usize = 8;
+        const BAND: usize = 8;
+        let sizes = probe_sizes(&[(1920, 1088), (3024, 1968), (3840, 2160), (5120, 2880)]);
+        let overlap: usize =
+            std::env::var("SLOPTY_PROBE_OVERLAP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let counts: Vec<usize> = std::env::var("SLOPTY_PROBE_STRIPES").ok().map_or_else(
+            || vec![1, 2, 4],
+            |list| list.split(',').filter_map(|n| n.trim().parse().ok()).collect(),
+        );
+        for (w, h) in sizes {
+            let pictures: Vec<Picture> = (0..12).map(|i| picture(w, h, i * 8)).collect();
+            let bitrate: i64 = std::env::var("SLOPTY_PROBE_RATE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(if w * h > 4_000_000 { 40_000_000 } else { 32_000_000 });
+            for fps in [60_i32, 120] {
+                let mut whole: Option<Vec<(usize, Pixels)>> = None;
+                for &n in &counts {
+                    let stripes = stripe_rows(h, n);
+                    let coded = coded_rows(&stripes, h, overlap);
+                    let together = Together {
+                        barrier: std::sync::Barrier::new(n),
+                        start: std::sync::OnceLock::new(),
+                        refused: std::sync::atomic::AtomicBool::new(false),
+                    };
+                    let frames = fps as usize * SECONDS;
+                    let runs: Vec<Result<StripeRun, Failure>> = std::thread::scope(|scope| {
+                        let handles: Vec<_> = coded
+                            .iter()
+                            .zip(&stripes)
+                            .map(|(&(top, rows), &(_, shown))| {
+                                let stripe = (top, rows, shown);
+                                let (pictures, together) = (&pictures, &together);
+                                scope.spawn(move || {
+                                    stripe_run(
+                                        (w, h),
+                                        stripe,
+                                        (bitrate, fps),
+                                        pictures,
+                                        (SERIAL, frames),
+                                        together,
+                                    )
+                                })
+                            })
+                            .collect();
+                        handles
+                            .into_iter()
+                            .map(|h| h.join().unwrap_or(Err(("panicked", 0))))
+                            .collect()
+                    });
+                    let runs = match runs.into_iter().collect::<Result<Vec<_>, _>>() {
+                        Ok(runs) => runs,
+                        Err(e) => {
+                            eprintln!("MEASURE stripes {w}x{h} n={n} fps={fps} refused {e:?}");
+                            continue;
+                        }
+                    };
+                    let settle = fps as usize;
+                    let each: Vec<Vec<(Duration, Instant)>> = (5..SERIAL)
+                        .filter_map(|i| {
+                            runs.iter().map(|r| r.serial[i]).collect::<Option<Vec<_>>>()
+                        })
+                        .collect();
+                    let serial: Vec<Duration> = each
+                        .iter()
+                        .filter_map(|frame| frame.iter().map(|(took, _)| *took).max())
+                        .collect();
+                    // First → last stripe back with one frame in flight, all submitted together:
+                    // near 0 side by side, near a stripe's encode when they take turns.
+                    let serial_skew: Vec<Duration> = each
+                        .iter()
+                        .filter_map(|frame| {
+                            let last = frame.iter().map(|(_, at)| *at).max()?;
+                            let first = frame.iter().map(|(_, at)| *at).min()?;
+                            Some(last.saturating_duration_since(first))
+                        })
+                        .collect();
+                    let serial_skew = Spread::of_durations(&serial_skew).unwrap_or_default();
+                    let period = Duration::from_secs(1) / fps as u32;
+                    let start = runs.first().map(|r| r.start);
+                    let (mut late, mut took, mut skew, mut dropped) =
+                        (Vec::new(), Vec::new(), Vec::new(), 0);
+                    for i in settle..frames {
+                        let back: Option<Vec<Instant>> = runs
+                            .iter()
+                            .map(|r| r.back.get(i).filter(|b| b.1.is_some()).map(|b| b.0))
+                            .collect();
+                        let (Some(back), Some(start)) = (back, start) else {
+                            dropped += 1;
+                            continue;
+                        };
+                        let (Some(&last), Some(&first)) = (back.iter().max(), back.iter().min())
+                        else {
+                            continue;
+                        };
+                        late.push(last.saturating_duration_since(start + period * i as u32));
+                        let own = runs
+                            .iter()
+                            .zip(&back)
+                            .map(|(r, at)| at.saturating_duration_since(r.submitted[i]))
+                            .max()
+                            .unwrap_or_default();
+                        took.push(own);
+                        skew.push(last.saturating_duration_since(first));
+                    }
+                    let bytes: usize = runs
+                        .iter()
+                        .flat_map(|r| r.back.iter().skip(settle))
+                        .filter_map(|(_, s)| s.as_ref().map(|s| sample_bytes(&s.0)))
+                        .sum();
+                    let spent = (bytes * 8) as f64 / (SECONDS - 1) as f64 / 1e6;
+                    let submitted_fps = runs
+                        .iter()
+                        .map(|r| {
+                            let span = r.submitted.last().zip(r.submitted.first());
+                            let secs = span.map_or(0.0, |(l, f)| (*l - *f).as_secs_f64());
+                            (r.submitted.len().saturating_sub(1)) as f64 / secs.max(1e-9)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+                    let stride = (120 / fps) as usize;
+                    let tails: Vec<Vec<(usize, Pixels)>> = runs
+                        .iter()
+                        .map(|r| decoded_tail(r, stride, pictures.len(), KEEP))
+                        .collect();
+                    let psnr_whole = if tails.iter().any(Vec::is_empty) {
+                        f64::NAN
+                    } else {
+                        let weighted: f64 = tails
+                            .iter()
+                            .zip(stripes.iter().zip(&coded))
+                            .map(|(tail, (&(top, rows), &(first, _)))| {
+                                let mean = tail
+                                    .iter()
+                                    .map(|(src, p)| {
+                                        let own = rows_of(&pictures[*src], top, rows);
+                                        psnr_at(&own, &p.0, top - first).0
+                                    })
+                                    .sum::<f64>()
+                                    / tail.len() as f64;
+                                mean * rows as f64
+                            })
+                            .sum();
+                        weighted / h as f64
+                    };
+                    // The rows each side of every seam: striped, and the same rows of the whole.
+                    let seams: Vec<String> = stripes
+                        .windows(2)
+                        .enumerate()
+                        .map(|(k, pair)| {
+                            let [(top, rows), (next, _)] = [pair[0], pair[1]];
+                            let (upper_first, lower_first) = (coded[k].0, coded[k + 1].0);
+                            let (upper, lower) = (&tails[k], &tails[k + 1]);
+                            let striped = upper
+                                .iter()
+                                .zip(lower)
+                                .map(|((su, pu), (sl, pl))| {
+                                    let above = rows_of(&pictures[*su], next - BAND, BAND);
+                                    let below = rows_of(&pictures[*sl], next, BAND);
+                                    f64::midpoint(
+                                        psnr_at(&above, &pu.0, next - BAND - upper_first).0,
+                                        psnr_at(&below, &pl.0, next - lower_first).0,
+                                    )
+                                })
+                                .sum::<f64>()
+                                / upper.len().min(lower.len()).max(1) as f64;
+                            let one = whole.as_ref().map_or(f64::NAN, |tail| {
+                                tail.iter()
+                                    .map(|(src, p)| {
+                                        let band = rows_of(&pictures[*src], next - BAND, 2 * BAND);
+                                        psnr_at(&band, &p.0, next - BAND).0
+                                    })
+                                    .sum::<f64>()
+                                    / tail.len().max(1) as f64
+                            });
+                            debug_assert_eq!(top + rows, next);
+                            format!("{next}:{striped:.2}/{one:.2}dB")
+                        })
+                        .collect();
+                    if std::env::var_os("SLOPTY_PROBE_TRACE").is_some()
+                        && let Some(start) = start
+                    {
+                        for i in (0..frames).step_by(fps as usize / 4) {
+                            let at = |t: Instant| {
+                                ms(t.saturating_duration_since(start).as_nanos() as u64)
+                            };
+                            let backs: Vec<String> = runs
+                                .iter()
+                                .map(|r| {
+                                    format!(
+                                        "in {:.1} back {:.1}",
+                                        at(r.submitted[i]),
+                                        r.back.get(i).map_or(f64::NAN, |b| at(b.0))
+                                    )
+                                })
+                                .collect();
+                            eprintln!(
+                                "TRACE {i} due {:.1}: {}",
+                                ms((period * i as u32).as_nanos() as u64),
+                                backs.join(", ")
+                            );
+                        }
+                    }
+                    let serial = Spread::of_durations(&serial).unwrap_or_default();
+                    let late = Spread::of_durations(&late).unwrap_or_default();
+                    let took = Spread::of_durations(&took).unwrap_or_default();
+                    let skew = Spread::of_durations(&skew).unwrap_or_default();
+                    let rows: Vec<usize> = coded.iter().map(|s| s.1).collect();
+                    let hardware: Vec<&str> = runs.iter().map(|r| r.hardware.as_str()).collect();
+                    eprintln!(
+                        "MEASURE stripes {w}x{h} n={n} overlap={overlap} rows={rows:?} fps={fps} load={} \
+                         hardware={hardware:?} parallel_limit={} | one_in_flight p50={:.2}ms \
+                         p95={:.2}ms skew p50={:.2}ms p95={:.2}ms | on_beat late p50={:.2}ms p95={:.2}ms max={:.2}ms \
+                         took p50={:.2}ms skew p50={:.2}ms p95={:.2}ms dropped={dropped}/{} \
+                         submitted={submitted_fps:.1}fps spent={spent:.2}Mbit/s \
+                         psnr_y={psnr_whole:.2}dB seams(striped/whole)={}",
+                        load_average(),
+                        runs.first().map_or("", |r| r.parallel.as_str()),
+                        ms(serial.p50),
+                        ms(serial.p95),
+                        ms(serial_skew.p50),
+                        ms(serial_skew.p95),
+                        ms(late.p50),
+                        ms(late.p95),
+                        ms(late.max),
+                        ms(took.p50),
+                        ms(skew.p50),
+                        ms(skew.p95),
+                        frames - settle,
+                        seams.join(" "),
+                    );
+                    if n == 1 {
+                        whole = tails.into_iter().next();
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Layers by codec, and what switching them off leaves behind (review of P5) ----------
+
+    /// Whether a sample says nothing later refers to it (`IsDependedOnByOthers` false).
+    fn discardable(sample: &CMSampleBuffer) -> bool {
+        sample_marks(sample).0 == Some(false)
+    }
+
+    /// The worker's three sessions, each fed its own source format: HEVC Main 4:2:0, HEVC Main
+    /// 4:4:4 10-bit and H.264 High.
+    fn codecs() -> Vec<(&'static str, u32, CFRetained<CFString>, u32)> {
+        let (_, _, ll_profiles, _) = supported_for(1920, 1080, &low_latency_spec());
+        // SAFETY: framework-provided constant strings.
+        let (main, high) =
+            unsafe { (kVTProfileLevel_HEVC_Main_AutoLevel, kVTProfileLevel_H264_High_AutoLevel) };
+        let mut out = vec![(
+            "HEVC 4:2:0",
+            kCMVideoCodecType_HEVC,
+            CFRetained::from(main),
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        )];
+        if let Some(full) = advertised(&ll_profiles, "HEVC_Main44410_AutoLevel") {
+            out.push((
+                "HEVC 4:4:4 10-bit",
+                kCMVideoCodecType_HEVC,
+                full,
+                kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+            ));
+        }
+        out.push((
+            "H.264 4:2:0",
+            kCMVideoCodecType_H264,
+            CFRetained::from(high),
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        ));
+        out
+    }
+
+    /// Temporal layers on each of the worker's sessions, switched on and off on one live
+    /// session: what each phase spends, drops and marks, and the luma PSNR at its end. The
+    /// phases: as opened; `BaseLayerFrameRateFraction` 0.5 with `BaseLayerBitRateFraction` 0.8;
+    /// the frame fraction back to 1.0 with the bit fraction left at 0.8 (how the first cut
+    /// switched them off); both back to 1.0; and on again.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn temporal_layers_by_codec() {
+        const PHASE: usize = 150;
+        const SETTLE: usize = 30;
+        // SAFETY: framework-provided constant strings.
+        let (fraction_key, bits_key) = unsafe {
+            (
+                kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+                kVTCompressionPropertyKey_BaseLayerBitRateFraction,
+            )
+        };
+        let (w, h) = (1920, 1088);
+        let pictures: Vec<Picture> = (0..12).map(|i| picture(w, h, i * 8)).collect();
+        for (label, codec, profile, format) in codecs() {
+            let images: Vec<_> = pictures.iter().map(|p| fill(p, format)).collect();
+            for rate in [16_000_000_i64, 4_000_000] {
+                let session = match Session::worker_as(
+                    Spec::LowLatencyHardware,
+                    codec,
+                    (&profile, format),
+                    (w, h),
+                    rate,
+                    60,
+                ) {
+                    Ok(session) => session,
+                    Err(e) => {
+                        eprintln!("MEASURE layers codec {label} {rate}: refused {e:?}");
+                        continue;
+                    }
+                };
+                let phases: [(&str, &[(&CFString, f64)]); 5] = [
+                    ("as opened", &[]),
+                    ("0.5 + 0.8", &[(bits_key, 0.8), (fraction_key, 0.5)]),
+                    ("off, bits left 0.8", &[(fraction_key, 1.0)]),
+                    ("off, bits 1.0", &[(bits_key, 1.0)]),
+                    ("on again", &[(bits_key, 0.8), (fraction_key, 0.5)]),
+                ];
+                let label = format!("codec {label} {} Mbit/s", rate / 1_000_000);
+                in_phases(&session, (&images, &pictures), format, &label, &phases, (PHASE, SETTLE));
+            }
+        }
+    }
+
+    /// Feed `session` on a 60 beat through `phases`, each `len` frames with the properties it
+    /// names set first; per phase, from its `settle`th frame: what came back, what was
+    /// dropped and marked discardable, the mean base and layer-1 frame, the rate spent, and
+    /// the luma PSNR of its last frames decoded from the stream's start. Every sample, in
+    /// order, with its picture's index.
+    fn in_phases(
+        session: &Session,
+        (images, pictures): (&[CFRetained<CVPixelBuffer>], &[Picture]),
+        format: u32,
+        label: &str,
+        phases: &[(&str, &[(&CFString, f64)])],
+        (len, settle): (usize, usize),
+    ) -> Vec<(usize, Sample)> {
+        let lengths: Vec<Phase<'_>> =
+            phases.iter().map(|&(phase, sets)| (phase, sets, len)).collect();
+        in_phases_of(session, (images, pictures), format, label, &lengths, settle)
+    }
+
+    /// A phase of [`in_phases_of`]: its name, the properties set before it, and its frames.
+    type Phase<'a> = (&'a str, &'a [(&'a CFString, f64)], usize);
+
+    /// [`in_phases`] with a length of its own for each phase; `settle` is capped at half a
+    /// phase.
+    fn in_phases_of(
+        session: &Session,
+        (images, pictures): (&[CFRetained<CVPixelBuffer>], &[Picture]),
+        format: u32,
+        label: &str,
+        phases: &[Phase<'_>],
+        settle: usize,
+    ) -> Vec<(usize, Sample)> {
+        let mut all: Vec<(usize, Sample)> = Vec::new();
+        let mut first = 0;
+        for &(phase, sets, len) in phases {
+            let settle = settle.min(len / 2);
+            let statuses: Vec<i32> = sets
+                .iter()
+                .map(|(key, value)| set(&session.vt, key, &CFNumber::new_f64(*value)))
+                .collect();
+            let beat = on_beat_from(session, images, first, len, settle);
+            first += len;
+            let (mut base, mut upper) = ((0_usize, 0_usize), (0_usize, 0_usize));
+            for (_, s) in beat.samples.iter().skip(settle) {
+                let slot = if discardable(&s.0) { &mut upper } else { &mut base };
+                slot.0 += 1;
+                slot.1 += sample_bytes(&s.0);
+            }
+            let returned = beat.samples.len();
+            let spent = (beat.bytes * 8) as f64 / ((len - settle) as f64 / 60.0) / 1e6;
+            all.extend(beat.samples);
+            let (sources, samples): (Vec<usize>, Vec<Sample>) =
+                std::mem::take(&mut all).into_iter().unzip();
+            let psnr_y = match decode_tail(&samples, format, true, 10) {
+                Ok((_, tail)) if !tail.is_empty() => {
+                    let first = sources.len() - tail.len();
+                    tail.iter()
+                        .zip(&sources[first..])
+                        .map(|(p, &source)| psnr(&pictures[source], &p.0).0)
+                        .sum::<f64>()
+                        / tail.len() as f64
+                }
+                Ok(_) => f64::NAN,
+                Err(e) => {
+                    eprintln!("  decode failed {e:?}");
+                    f64::NAN
+                }
+            };
+            all = sources.into_iter().zip(samples).collect();
+            let spread = Spread::of_durations(&beat.times).unwrap_or_default();
+            eprintln!(
+                "MEASURE layers {label} [{phase}] load={} set={statuses:?}: returned \
+                 {returned}/{len} dropped {} base {} x {} B, layer-1 {} x {} B, \
+                 spent={spent:.2}Mbit/s encode p50={:.2}ms psnr_y={psnr_y:.2}dB",
+                load_average(),
+                beat.dropped,
+                base.0,
+                base.1 / base.0.max(1),
+                upper.0,
+                upper.1 / upper.0.max(1),
+                ms(spread.p50),
+            );
+        }
+        all
+    }
+
+    /// What layers cost where they ship: switched on and off on a live session that has run a
+    /// while, in long phases, against a session opened with them on. The first cut of this
+    /// measurement compared fresh sessions only.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn temporal_layers_live_cost() {
+        const PHASE: usize = 600;
+        const SETTLE: usize = 60;
+        // SAFETY: framework-provided constant strings.
+        let (fraction_key, bits_key) = unsafe {
+            (
+                kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+                kVTCompressionPropertyKey_BaseLayerBitRateFraction,
+            )
+        };
+        let on: &[(&CFString, f64)] = &[(bits_key, 0.8), (fraction_key, 0.5)];
+        let off: &[(&CFString, f64)] = &[(bits_key, 1.0), (fraction_key, 1.0)];
+        let format = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+        let sizes: Vec<(usize, usize)> = probe_sizes(&[(1920, 1088), (3024, 1968)]);
+        for (w, h) in sizes {
+            let rates = if w * h > 4_000_000 {
+                [32_000_000_i64, 6_000_000]
+            } else {
+                [16_000_000, 3_000_000]
+            };
+            let pictures: Vec<Picture> = (0..12).map(|i| picture(w, h, i * 8)).collect();
+            let images: Vec<_> = pictures.iter().map(|p| fill(p, format)).collect();
+            for rate in rates {
+                let label = format!("live {w}x{h} {} Mbit/s", rate / 1_000_000);
+                let session = Session::worker(w, h, rate, 60).expect("session");
+                let phases: [(&str, &[(&CFString, f64)]); 5] =
+                    [("warm", &[]), ("on", on), ("off", off), ("on", on), ("off", off)];
+                let all = in_phases(
+                    &session,
+                    (&images, &pictures),
+                    format,
+                    &label,
+                    &phases,
+                    (PHASE, SETTLE),
+                );
+                // The frames a live toggle marks can go: the rest decode to the same pictures.
+                let samples: Vec<&Sample> = all.iter().map(|(_, s)| s).collect();
+                let full = decode_hashes(&samples);
+                let kept: Vec<usize> =
+                    (0..samples.len()).filter(|&i| !discardable(&samples[i].0)).collect();
+                let got = decode_hashes(&kept.iter().map(|&i| samples[i]).collect::<Vec<_>>());
+                let failed = got.iter().filter(|g| g.is_err()).count();
+                let differ = kept
+                    .iter()
+                    .zip(&got)
+                    .filter(|(i, g)| matches!((g, &full[**i]), (Ok(a), Ok(b)) if a != b))
+                    .count();
+                eprintln!(
+                    "MEASURE layers {label} without the {} marked frames: {} decoded, {failed} \
+                     failed, {differ} differ from the whole stream",
+                    samples.len() - kept.len(),
+                    got.len() - failed,
+                );
+                let fresh = Session::worker(w, h, rate, 60).expect("session");
+                let label = format!("opened layered {w}x{h} {} Mbit/s", rate / 1_000_000);
+                let phases: [(&str, &[(&CFString, f64)]); 2] =
+                    [("on from the start", on), ("on", &[])];
+                in_phases(&fresh, (&images, &pictures), format, &label, &phases, (PHASE, SETTLE));
+            }
+        }
+    }
+
+    /// Whether the sample carries the encoder's error (`kVTSampleAttachmentKey_QualityMetrics`).
+    fn has_quality_metrics(sample: &CMSampleBuffer) -> bool {
+        // SAFETY: framework-provided constant string.
+        let key = unsafe { kVTSampleAttachmentKey_QualityMetrics };
+        sample_marks(sample).4.iter().any(|entry| entry.starts_with(&key.to_string()))
+    }
+
+    /// What `CalculateMeanSquaredError` costs the worker's session: encode time one frame at a
+    /// time and on a 60 beat with it off and on, alternated twice, at 1080p and 3024 × 1968;
+    /// and whether a live session takes it on and off between frames.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn mean_squared_error_cost() {
+        // SAFETY: framework-provided constant string.
+        let key = unsafe { kVTCompressionPropertyKey_CalculateMeanSquaredError };
+        for (w, h) in probe_sizes(&[(1920, 1088), (3024, 1968)]) {
+            let (_, images) = scrolling(w, h);
+            for round in 0..2 {
+                for on in [false, true] {
+                    let session = Session::worker(w, h, 16_000_000, 60).expect("session");
+                    let status = if on { set(&session.vt, key, yes()) } else { 0 };
+                    let serial = one_at_a_time(&session, &images, 60, 10);
+                    let beat = on_beat_from(&session, &images, 1_000, 240, 60);
+                    let spread = Spread::of_durations(&beat.times).unwrap_or_default();
+                    let metrics =
+                        beat.samples.iter().filter(|(_, s)| has_quality_metrics(&s.0)).count();
+                    eprintln!(
+                        "MEASURE mse {w}x{h} round {round} mse={on} status={status} load={}: \
+                         one in flight p50={:.2}ms p95={:.2}ms | on beat p50={:.2}ms \
+                         p95={:.2}ms | with metrics {metrics}/{}",
+                        load_average(),
+                        ms(serial.p50),
+                        ms(serial.p95),
+                        ms(spread.p50),
+                        ms(spread.p95),
+                        beat.samples.len(),
+                    );
+                }
+            }
+            let session = Session::worker(w, h, 16_000_000, 60).expect("session");
+            let mut seen = Vec::new();
+            for (step, on) in [(0, false), (1, true), (2, false), (3, true)] {
+                let status = set(&session.vt, key, CFBoolean::new(on));
+                let beat = on_beat_from(&session, &images, step * 60, 60, 5);
+                let metrics =
+                    beat.samples.iter().filter(|(_, s)| has_quality_metrics(&s.0)).count();
+                seen.push(format!("{on}(status {status}): {metrics}/{}", beat.samples.len()));
+            }
+            eprintln!("MEASURE mse {w}x{h} toggled live: {}", seen.join(", "));
+        }
+    }
+
+    /// How long a session must run before layers switched on behave as on a session that has
+    /// run a while: on after 0 (before the keyframe), 1, 10, 60 and 300 frames, then 600 frames
+    /// measured, at a rate with room and one that binds.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn temporal_layers_when_switched_on() {
+        // SAFETY: framework-provided constant strings.
+        let (fraction_key, bits_key) = unsafe {
+            (
+                kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
+                kVTCompressionPropertyKey_BaseLayerBitRateFraction,
+            )
+        };
+        let on: &[(&CFString, f64)] = &[(bits_key, 0.8), (fraction_key, 0.5)];
+        let format = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+        let (w, h) = (1920, 1088);
+        let pictures: Vec<Picture> = (0..12).map(|i| picture(w, h, i * 8)).collect();
+        let images: Vec<_> = pictures.iter().map(|p| fill(p, format)).collect();
+        for rate in [16_000_000_i64, 3_000_000] {
+            for after in [0_usize, 1, 10, 60, 300] {
+                let session = Session::worker(w, h, rate, 60).expect("session");
+                let label = format!("on after {after} {w}x{h} {} Mbit/s", rate / 1_000_000);
+                let mut phases: Vec<Phase<'_>> = Vec::new();
+                if after > 0 {
+                    phases.push(("before", &[], after));
+                }
+                phases.push(("on", on, 600));
+                in_phases_of(&session, (&images, &pictures), format, &label, &phases, 60);
+            }
+        }
+    }
+
+    /// What a refinement does to the change right after it (review of P6): the text scrolls,
+    /// stops, and scrolls on 1 ms after the stop's second refinement. The change's bytes and
+    /// luma PSNR, and the next four frames', with no refinement before it (a 100 ms pause),
+    /// with refinements stamped when they were sent (the first cut: the change comes 1 ms of
+    /// stamps after one), and stamped as the worker now stamps them. 4:2:0 and 4:4:4 at 8
+    /// Mbit/s, 1920 × 1088.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn a_change_after_a_refinement() {
+        use slopty_codec::{Chroma, Decoder, Encoder, EncoderConfig, FrameOptions};
+        use slopty_proto::screen::VideoCodec;
+
+        const MOVING: usize = 30;
+        const AFTER: usize = 5;
+        let (w, h) = (1920, 1088);
+        let pictures: Vec<Picture> = (0..MOVING + AFTER).map(|i| picture(w, h, i * 16)).collect();
+        for chroma in [Chroma::Subsampled, Chroma::Full] {
+            let format = slopty_codec::pixel_format(chroma);
+            let images: Vec<_> = pictures.iter().map(|p| fill(p, format)).collect();
+            let last = MOVING as u64 * 16_667;
+            // (label, refinement stamps, the change's stamp)
+            let cases: [(&str, Vec<u64>, u64); 3] = [
+                ("no refinement", Vec::new(), last + 100_000),
+                ("stamped when sent", vec![last + 33_334, last + 66_668], last + 67_668),
+                (
+                    "stamped a period early",
+                    vec![refinement_stamp(last, 1), refinement_stamp(last, 2)],
+                    last + 67_668,
+                ),
+            ];
+            for (label, refinements, change) in cases {
+                let (tx, rx) = mpsc::channel();
+                let encoder = Encoder::new(
+                    EncoderConfig {
+                        width: w as u32,
+                        height: h as u32,
+                        codec: VideoCodec::Hevc,
+                        fps: 60,
+                        bitrate_bps: 8_000_000,
+                        chroma,
+                    },
+                    move |packet| {
+                        let _gone = tx.send(packet);
+                    },
+                )
+                .expect("the worker's session");
+                // (picture, stamp) in the order they go in.
+                let mut plan: Vec<(usize, u64)> =
+                    (0..MOVING).map(|i| (i, (i as u64 + 1) * 16_667)).collect();
+                plan.extend(refinements.iter().map(|&pts| (MOVING - 1, pts)));
+                plan.extend((0..AFTER).map(|k| (MOVING + k, change + k as u64 * 16_667)));
+                let mut packets = Vec::new();
+                for (k, &(i, pts)) in plan.iter().enumerate() {
+                    let options =
+                        FrameOptions { force_keyframe: k == 0, ..FrameOptions::default() };
+                    encoder.encode(&images[i], pts, &options).expect("encode");
+                    encoder.flush().expect("flush");
+                    packets.push((i, rx.try_recv().ok()));
+                }
+                let (dtx, drx) = mpsc::channel();
+                let mut decoder = Decoder::new(VideoCodec::Hevc, move |frame| {
+                    let _gone = dtx.send(frame);
+                });
+                let mut scored = Vec::new();
+                for (i, packet) in &packets {
+                    let Some(packet) = packet else {
+                        scored.push((0, f64::NAN));
+                        continue;
+                    };
+                    decoder.decode(&packet.data, packet.pts_us).expect("decode");
+                    let decoded = drx.recv_timeout(Duration::from_secs(10)).expect("a picture");
+                    scored.push((packet.data.len(), psnr(&pictures[*i], decoded.image.as_cv()).0));
+                }
+                let tail = &scored[scored.len() - AFTER..];
+                let rest = &tail[1..];
+                eprintln!(
+                    "MEASURE change after refinement {chroma:?} 8 Mbit/s [{label}] load={}: the \
+                     change {} B at {:.2} dB; the next {} frames {:.0} B at {:.2} dB",
+                    load_average(),
+                    tail[0].0,
+                    tail[0].1,
+                    rest.len(),
+                    rest.iter().map(|s| s.0 as f64).sum::<f64>() / rest.len() as f64,
+                    rest.iter().map(|s| s.1).sum::<f64>() / rest.len() as f64,
+                );
             }
         }
     }

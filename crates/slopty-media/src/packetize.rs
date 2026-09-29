@@ -44,6 +44,11 @@ pub struct EncodedFrame<'a> {
     pub ltr_token: Option<u64>,
     /// Encoded as a recovery frame from an acknowledged LTR.
     pub ltr_refresh: bool,
+    /// Nothing later refers to this frame (the encoder's temporal layer 1). Its datagrams, and
+    /// the next frame's, say so, and a receiver that cannot repair it skips it instead of asking
+    /// for a refresh. Ignored on a keyframe, a refresh or a frame with an `ltr_token`: later
+    /// frames are predicted from those.
+    pub discardable: bool,
     /// Capture time, worker monotonic microseconds (low 32 bits).
     pub capture_ts_us: u32,
 }
@@ -124,6 +129,9 @@ pub struct Packetizer {
     encoder: Option<ReedSolomonEncoder>,
     history: VecDeque<SentFrame>,
     datagrams_sent: u64,
+    /// The last frame cut was [`flags::DISCARDABLE`]: the next one carries
+    /// [`flags::PREV_DISCARDABLE`].
+    previous_discardable: bool,
 }
 
 impl std::fmt::Debug for Packetizer {
@@ -149,6 +157,7 @@ impl Packetizer {
             encoder: None,
             history: VecDeque::with_capacity(HISTORY_FRAMES),
             datagrams_sent: 0,
+            previous_discardable: false,
         }
     }
 
@@ -222,9 +231,10 @@ impl Packetizer {
             data_count: U16::new(layout.data_count),
             parity_count: layout.parity_count,
             kind: Kind::VideoData as u8,
-            flags: frame_flags(frame),
+            flags: frame_flags(frame, self.previous_discardable),
             send_ms_lo,
         };
+        self.previous_discardable = header.flags & flags::DISCARDABLE != 0;
         // The frame body is the prefix, the bitstream, then zeros to the last shard's end; the
         // prefix is shorter than the smallest shard, so it only ever opens the first one.
         let mut rest = frame.data;
@@ -314,8 +324,18 @@ fn slices(wire: &Bytes, count: usize, stride: usize) -> impl Iterator<Item = Byt
     })
 }
 
-const fn frame_flags(frame: &EncodedFrame<'_>) -> u8 {
+/// A frame's header flags; `previous_discardable` says the frame cut before it was
+/// [`flags::DISCARDABLE`].
+const fn frame_flags(frame: &EncodedFrame<'_>, previous_discardable: bool) -> u8 {
     let mut f = 0;
+    // A keyframe, a refresh and a long-term reference are what later frames are predicted
+    // from, whatever the encoder's attachment said.
+    if frame.discardable && !frame.keyframe && !frame.ltr_refresh && frame.ltr_token.is_none() {
+        f |= flags::DISCARDABLE;
+    }
+    if previous_discardable {
+        f |= flags::PREV_DISCARDABLE;
+    }
     if frame.keyframe {
         f |= flags::KEYFRAME;
     }
@@ -435,6 +455,7 @@ mod tests {
                 keyframe: false,
                 ltr_token: None,
                 ltr_refresh: false,
+                discardable: false,
                 capture_ts_us: 0,
             };
             p.packetize(&frame, 0, |_| {}).unwrap().layout.shard_bytes
@@ -464,6 +485,7 @@ mod tests {
             keyframe: true,
             ltr_token: Some(42),
             ltr_refresh: false,
+            discardable: false,
             capture_ts_us: 99,
         };
         let sent = p.packetize(&frame, 7, |_| {}).unwrap().clone();
@@ -499,6 +521,7 @@ mod tests {
             keyframe: false,
             ltr_token: None,
             ltr_refresh: false,
+            discardable: false,
             capture_ts_us: 0,
         };
         for _ in 0..HISTORY_FRAMES + 2 {
@@ -551,6 +574,7 @@ mod tests {
             keyframe: true,
             ltr_token: None,
             ltr_refresh: false,
+            discardable: false,
             capture_ts_us: 0,
         };
         let sent = p.packetize(&frame, 0, |_| {}).unwrap();
@@ -588,6 +612,7 @@ mod tests {
             keyframe: false,
             ltr_token: Some(7),
             ltr_refresh: true,
+            discardable: false,
             capture_ts_us: 5,
         };
         let sent = p.packetize(&frame, 3, |_| {}).unwrap().clone();
@@ -646,6 +671,7 @@ mod tests {
                 keyframe: false,
                 ltr_token: None,
                 ltr_refresh: false,
+                discardable: false,
                 capture_ts_us: 0,
             };
             for permille in [DEFAULT_PARITY_PERMILLE, 0] {
@@ -670,5 +696,27 @@ mod tests {
                 first.report().unwrap();
             }
         }
+    }
+
+    /// A long-term reference is what a refresh is predicted from, so a frame carrying one is
+    /// never one a receiver may skip, whatever the encoder said of it.
+    #[test]
+    fn a_frame_carrying_a_reference_is_never_skippable() {
+        let mut p = Packetizer::new(StreamId(1));
+        let data = vec![7_u8; 900];
+        let frame = |ltr_token| EncodedFrame {
+            data: &data,
+            keyframe: false,
+            ltr_token,
+            ltr_refresh: false,
+            discardable: true,
+            capture_ts_us: 1,
+        };
+        let flags_of = |sent: &SentFrame| MediaHeader::parse(&sent.datagrams[0]).unwrap().0.flags;
+        let with_token = flags_of(p.packetize(&frame(Some(9)), 0, |_| {}).unwrap());
+        assert_eq!(with_token & flags::DISCARDABLE, 0, "a reference is kept");
+        let after = flags_of(p.packetize(&frame(None), 0, |_| {}).unwrap());
+        assert_eq!(after & flags::PREV_DISCARDABLE, 0, "nor is it named skippable by the next");
+        assert_eq!(after & flags::DISCARDABLE, flags::DISCARDABLE);
     }
 }

@@ -19,13 +19,16 @@
 
 mod cursor;
 mod heartbeat;
+mod layers;
 mod packetize;
 mod rate;
 mod reassemble;
 mod redundancy;
+mod refine;
 
 pub use cursor::{cursor_datagram, parse_cursor};
 pub use heartbeat::{HEARTBEAT_AFTER, heartbeat_datagram};
+pub use layers::LayerGate;
 pub use packetize::{
     EncodedFrame, Layout, MAX_DATA_FRAGMENTS, MAX_PARITY_FRAGMENTS, MIN_PARITY_FRAGMENTS,
     Packetizer, SentFrame, audio_datagram, layout,
@@ -40,6 +43,7 @@ pub use reassemble::{
     STALL_GAP, StallAttribution,
 };
 pub use redundancy::Redundancy;
+pub use refine::{IDLE_SHARE, MAX_REFINEMENTS, PERIODS_APART, Refine};
 
 /// Errors from packetizing.
 #[derive(Clone, Copy, Debug, thiserror::Error)]
