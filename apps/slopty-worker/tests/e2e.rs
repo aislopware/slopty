@@ -988,6 +988,71 @@ mod tests {
         }
     }
 
+    /// A text search through the real worker: its matches come back as pages with what
+    /// `.gitignore` excludes left out, then its end. A search started while another is going
+    /// stops that one, which says nothing more, and runs to its own end.
+    #[tokio::test]
+    async fn a_text_search_streams_its_matches_and_a_new_one_stops_the_last() {
+        use slopty_proto::search::{SearchEvent, SearchQuery, SearchRequest};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, mut worker) = connect(dir.path()).await;
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::create_dir_all(tree.join("build")).unwrap();
+        std::fs::write(tree.join(".gitignore"), "build\n").unwrap();
+        std::fs::write(tree.join("src/lib.rs"), "//! Docs.\npub fn needle() {}\n").unwrap();
+        std::fs::write(tree.join("build/out.rs"), "needle\n").unwrap();
+        let hay = tree.join("hay");
+        std::fs::create_dir_all(&hay).unwrap();
+        for n in 0..3_000 {
+            std::fs::write(hay.join(format!("{n}.txt")), "hay and more hay\n").unwrap();
+        }
+        let root = tree.to_string_lossy().into_owned();
+        let start = |id, pattern: &str| {
+            let query = SearchQuery { pattern: pattern.to_owned(), ..SearchQuery::default() };
+            ClientMsg::Search(SearchRequest::Start { id, root: root.clone(), query })
+        };
+        let search = |m| match m {
+            WorkerMsg::Search(event) => Some(event),
+            _ => None,
+        };
+
+        let asked = std::time::Instant::now();
+        worker.tx.send(&start(1, "needle")).await.unwrap();
+        let mut found = Vec::new();
+        let summary = loop {
+            match next_msg(&mut worker, search).await {
+                SearchEvent::Hits { id: 1, files } => found.extend(files),
+                SearchEvent::Done { id: 1, summary } => break summary,
+                other => panic!("{other:?}"),
+            }
+        };
+        eprintln!("search over {} files: {:?}", summary.searched, asked.elapsed());
+        let paths: Vec<&str> = found.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/lib.rs"], "the ignored build is not searched");
+        let line = found.first().and_then(|f| f.lines.first()).unwrap();
+        assert_eq!((line.line, line.text.as_str()), (2, "pub fn needle() {}"));
+        assert_eq!((summary.files, summary.lines, summary.capped), (1, 1, false));
+        assert!(summary.searched > 3_000, "{summary:?}");
+
+        worker.tx.send(&start(2, "hay")).await.unwrap();
+        worker.tx.send(&start(3, "needle")).await.unwrap();
+        let mut second = Vec::new();
+        loop {
+            match next_msg(&mut worker, search).await {
+                SearchEvent::Done { id: 3, .. } => break,
+                event => second.push(event),
+            }
+        }
+        let ended = second.iter().any(|e| matches!(e, SearchEvent::Done { id: 2, .. }));
+        assert!(!ended, "the first search was stopped before its end");
+        let quiet = arrives(&mut worker, Duration::from_millis(300), |m| {
+            matches!(m, WorkerMsg::Search(e) if e.id() == 2).then_some(())
+        });
+        assert!(!quiet.await, "nothing more of the stopped search");
+    }
+
     /// The next item sync `wanted` on `worker`'s control stream, skipping everything else.
     async fn next_items(worker: &mut WorkerConn, wanted: impl Fn(&ItemSync) -> bool) -> ItemSync {
         loop {

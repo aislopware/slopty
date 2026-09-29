@@ -196,7 +196,7 @@ impl Hub {
         let (events, _none) = broadcast::channel(EVENT_BUFFER);
         let (persist, _none) = watch::channel(Vec::new());
         let first = run_seed();
-        let log = Mutex::new(Log { ring: VecDeque::new(), first, next: first });
+        let log = Mutex::new(Log { ring: VecDeque::with_capacity(EVENT_LOG), first, next: first });
         let (head, _none) = watch::channel(first);
         let state = Mutex::new(state);
         Self { inner: Arc::new(Inner { name, lan, state, events, persist, log, head }) }
@@ -634,10 +634,12 @@ impl Hub {
         let seq = log.next;
         log.next = seq.saturating_add(1);
         let event = HubEvent { seq, at_ms: WallMs::now(), what };
-        log.ring.push_back(event.clone());
-        if log.ring.len() > EVENT_LOG {
+        // Room is made before the push: a push onto a full ring would double its buffer to
+        // hold one event over the bound, and a ring cycles through all of its buffer.
+        if log.ring.len() == EVENT_LOG {
             log.ring.pop_front();
         }
+        log.ring.push_back(event.clone());
         self.inner.head.send_replace(log.next);
         drop(log);
         self.announce(FromServer::Event(event));

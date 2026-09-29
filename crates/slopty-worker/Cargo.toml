@@ -12,8 +12,11 @@ workspace = true
 
 [dependencies]
 blake3.workspace = true
-ignore.workspace = true
 bytes.workspace = true
+grep-matcher.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+ignore.workspace = true
 libc.workspace = true
 parking_lot.workspace = true
 # The still pictures orchestration takes, as PNG.

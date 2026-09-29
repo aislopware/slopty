@@ -15,6 +15,7 @@
 //!   drops go up into it.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
 //! * [`picker`] — the "add a window" chooser.
+//! * [`search`] — search in files on a worker: the matches grouped by file as they stream in.
 //! * [`paste_key`] — the system's paste button over the iOS key bar's Paste.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
@@ -54,6 +55,7 @@ pub mod picker;
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"
 )]
 pub mod screen;
+pub mod search;
 pub mod settings_editor;
 pub mod settings_form;
 pub mod shown;

@@ -83,6 +83,10 @@ objc2-app-kit = { workspace = true, features = [
     # The browser tile (`web`): its first responder, the key and click watch, the snapshot.
     "NSBitmapImageRep",
     "objc2-core-foundation",
+    # The Dock tile's progress bar (`dock`).
+    "NSControl",
+    "NSImageView",
+    "NSProgressIndicator",
 ] }
 objc2-web-kit = { workspace = true, features = [
     "block2",

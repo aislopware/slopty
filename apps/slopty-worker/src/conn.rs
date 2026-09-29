@@ -303,6 +303,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         screen_order: ScreenOrder::default(),
         copies: slopty_net::echo::Copies::from_env(),
         follows: HashMap::new(),
+        searches: slopty_worker::search::Searches::default(),
     };
     daemon.wake.lock().client_joined();
 
@@ -832,6 +833,8 @@ struct Peer<'d> {
     /// The agents' conversations this client follows: each one's task takes its requests
     /// here, and ends when the sender goes.
     follows: HashMap<SessionId, mpsc::UnboundedSender<crate::follow::Command>>,
+    /// The text search this client runs, stopped by its next one and with the connection.
+    searches: slopty_worker::search::Searches,
 }
 
 impl Drop for Peer<'_> {
@@ -937,6 +940,7 @@ impl Peer<'_> {
             ClientMsg::FindFiles { root, query } => {
                 self.tasks.spawn(crate::files::find(self.out.clone(), root, query));
             }
+            ClientMsg::Search(request) => self.searches.handle(request, &self.out),
             ClientMsg::ReadFile { path } => {
                 // An admitted client can open a shell here; a read is nothing it could not do.
                 let (client, conn, out) = (self.client, self.conn.clone(), self.out.clone());

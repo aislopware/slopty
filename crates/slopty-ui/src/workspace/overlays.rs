@@ -250,7 +250,7 @@ impl WorkspaceView {
     }
 
     /// The focused tile's own find-bar needle, to start a find in every tile from.
-    fn active_needle(&self, cx: &gpui::App) -> String {
+    pub(super) fn active_needle(&self, cx: &gpui::App) -> String {
         let Some(tile) = self.focused() else { return String::new() };
         let Some(active) = self.item(tile) else { return String::new() };
         let needle = match &active.kind {

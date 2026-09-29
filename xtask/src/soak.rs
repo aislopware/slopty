@@ -8,13 +8,20 @@
 //! - read the terminal's output as a second reader;
 //! - close it.
 //!
+//! Before the load, [`FILL_CYCLES`] cycles, [`FILL_LANES`] at a time, fill the daemons' bounded
+//! stores, so the load's slope sees only what grows without bound. A store still filling grows
+//! as steadily as a leak, and a minute of load cannot tell them apart. What the fill cost each
+//! daemon is reported beside the slope, and the peak budget still bounds it.
+//!
 //! Every `--interval` it samples each daemon's physical footprint (`ri_phys_footprint`), open
 //! descriptors and threads (`slopty_testkit::process`). It fails when
 //! - a daemon's footprint grows, by least squares over the last two thirds of the load, faster than
 //!   [`SLOPE_KIB_PER_MIN`];
 //! - a daemon's peak footprint passes its [`PEAK_MIB`] budget;
 //! - a daemon holds more descriptors or threads after the load has settled than before it;
-//! - `leaks <pid>` finds a leak in a daemon at the end (exit 1; `man leaks`).
+//! - `leaks <pid>` finds a leak in a daemon at the end (exit 1; `man leaks`);
+//! - a hook report fails, or a CLI call cannot reach the server (it is sent again once, so the load
+//!   goes on).
 //!
 //! No display stream runs: the worker has no switch that puts its synthetic capture behind a
 //! stream, and a real one needs Screen Recording. Nothing is drawn, captured or played.
@@ -27,6 +34,8 @@ use std::fs::File;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -52,8 +61,22 @@ const SETTLE: Duration = Duration::from_secs(12);
 /// How long one CLI call may take.
 const CALL: Duration = Duration::from_secs(60);
 
+/// What the CLI says when its dial to the server failed (`apps/slopty-cli/src/link.rs`).
+const UNREACHED: &str = "cannot reach the server";
+
 /// Lines each cycle's flood prints.
 const FLOOD_LINES: u32 = 20_000;
+
+/// Cycles that fill the daemons' bounded stores before the baseline. The largest fill at 1 024
+/// cycles: the server's event log keeps 4 096 events (`slopty_server::hub::EVENT_LOG`) and a
+/// cycle logs four (opened, working, idle, closed); the worker's idempotency ledger keeps 4 096
+/// keys and a cycle sends four keyed verbs (open, send, wait, close). The rest is margin, so the
+/// samples show the footprint level off before the baseline is taken.
+const FILL_CYCLES: u32 = 1_536;
+
+/// Fill cycles run at once: few enough that the floods running together stay inside the
+/// worker's peak budget (eight at once peaked at 173 MiB).
+const FILL_LANES: usize = 4;
 
 #[derive(Args, Debug, Clone)]
 pub struct SoakOpts {
@@ -139,6 +162,11 @@ fn build(sh: &Shell, debug: bool) -> Result<Utf8PathBuf> {
 /// The three daemons on a temporary root.
 struct Stack {
     root: PathBuf,
+    /// Numbers each call's output files, so calls can run at once.
+    calls: AtomicU64,
+    /// Calls that could not reach the server at the first try, and the first one's error.
+    unreached: AtomicU64,
+    first_unreached: OnceLock<String>,
     slopty_bin: PathBuf,
     cli: PathBuf,
     server: String,
@@ -181,6 +209,9 @@ impl Stack {
             slopty_bin: bin.join("slopty").into_std_path_buf(),
             cli: root.join("cli"),
             root,
+            calls: AtomicU64::new(0),
+            unreached: AtomicU64::new(0),
+            first_unreached: OnceLock::new(),
             server: String::new(),
             daemons: Vec::new(),
         };
@@ -271,10 +302,25 @@ impl Stack {
             .with_context(|| format!("slopty {args:?} printed {:?}", String::from_utf8_lossy(&out)))
     }
 
-    /// `slopty` with `args` and `env`, its stdout; fails on an exit status or after [`CALL`].
+    /// [`Self::call_once`], sent again once when it could not reach the server. A dial that
+    /// failed sent no verb, so nothing is done twice; the miss is counted as a finding, and the
+    /// load is still worth watching.
     fn call(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
-        let stdout = self.root.join("call.out");
-        let stderr = self.root.join("call.err");
+        match self.call_once(args, env) {
+            Err(e) if format!("{e:#}").contains(UNREACHED) => {
+                self.unreached.fetch_add(1, Ordering::Relaxed);
+                let _first = self.first_unreached.set(format!("{e:#}"));
+                self.call_once(args, env)
+            }
+            answered => answered,
+        }
+    }
+
+    /// `slopty` with `args` and `env`, its stdout; fails on an exit status or after [`CALL`].
+    fn call_once(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Vec<u8>> {
+        let call = self.calls.fetch_add(1, Ordering::Relaxed);
+        let stdout = self.root.join(format!("call-{call}.out"));
+        let stderr = self.root.join(format!("call-{call}.err"));
         let mut child = Command::new(&self.slopty_bin)
             .arg("--data-dir")
             .arg(&self.cli)
@@ -286,10 +332,13 @@ impl Stack {
             .stderr(File::create(&stderr)?)
             .spawn()
             .context("spawn slopty")?;
-        let status = wait_child(&mut child, CALL).with_context(|| format!("slopty {args:?}"))?;
+        let status = wait_child(&mut child, CALL).with_context(|| format!("slopty {args:?}"));
         let err = std::fs::read_to_string(&stderr).unwrap_or_default();
+        let out = std::fs::read(&stdout);
+        let _removed = (std::fs::remove_file(&stdout), std::fs::remove_file(&stderr));
+        let status = status?;
         ensure!(status.success(), "slopty {args:?}: {status}: {}", err.trim());
-        Ok(std::fs::read(&stdout)?)
+        Ok(out?)
     }
 
     fn pids(&self) -> Vec<(&'static str, i32)> {
@@ -457,6 +506,53 @@ fn settle(
     }
 }
 
+/// Run [`FILL_CYCLES`] cycles, [`FILL_LANES`] at a time, sampling as usual.
+/// Cycles are numbered on from `last`; returns the last number taken.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; pacing samples")]
+fn fill(
+    stack: &Stack,
+    samples: &mut Vec<Sample>,
+    missed: &mut Vec<String>,
+    started: Instant,
+    interval: Duration,
+    last: u32,
+) -> Result<u32> {
+    let next = AtomicU32::new(last.saturating_add(1));
+    let end = next.load(Ordering::Relaxed).saturating_add(FILL_CYCLES);
+    std::thread::scope(|scope| {
+        let lanes: Vec<_> = std::iter::repeat_with(|| {
+            scope.spawn(|| {
+                let mut lost = Vec::new();
+                let ran = loop {
+                    let n = next.fetch_add(1, Ordering::Relaxed);
+                    if n >= end {
+                        break Ok(());
+                    }
+                    if let Err(e) = cycle(stack, n, &mut lost) {
+                        // The other lanes stop at their next cycle.
+                        next.store(end, Ordering::Relaxed);
+                        break Err(e);
+                    }
+                };
+                (ran, lost)
+            })
+        })
+        .take(FILL_LANES)
+        .collect();
+        while !lanes.iter().all(std::thread::ScopedJoinHandle::is_finished) {
+            samples.extend(sample(stack, started, "fill"));
+            std::thread::sleep(interval);
+        }
+        for lane in lanes {
+            let (ran, lost) =
+                lane.join().map_err(|_panic| anyhow::anyhow!("a fill lane panicked"))?;
+            missed.extend(lost);
+            ran?;
+        }
+        Ok(end.saturating_sub(1))
+    })
+}
+
 /// The least-squares slope of `points` (seconds, bytes), in KiB a minute.
 #[expect(clippy::cast_precision_loss, reason = "a count of samples, far below 2^52")]
 fn slope_kib_per_min(points: &[(f64, f64)]) -> Option<f64> {
@@ -504,6 +600,13 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
         cycle(stack, n, &mut missed)?;
     }
     settle(stack, &mut samples, started, interval, "warm");
+    let unfilled = sample(stack, started, "unfilled");
+    samples.extend(unfilled.iter().copied());
+    println!("▶ fill the bounded stores: {FILL_CYCLES} cycles, {FILL_LANES} at a time");
+    let fill_started = Instant::now();
+    n = fill(stack, &mut samples, &mut missed, started, interval, n)?;
+    let fill_took = fill_started.elapsed();
+    settle(stack, &mut samples, started, interval, "filled");
     let baseline = sample(stack, started, "baseline");
     samples.extend(baseline.iter().copied());
     println!("▶ load for {} s", opts.seconds);
@@ -535,8 +638,16 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
             u64::from(n).saturating_mul(2)
         ));
     }
+    let unreached = stack.unreached.load(Ordering::Relaxed);
+    if let Some(first) = stack.first_unreached.get() {
+        failures.push(format!(
+            "{unreached} of {} calls could not reach the server at the first try; the first: {first}",
+            stack.calls.load(Ordering::Relaxed)
+        ));
+    }
     let mut daemons = serde_json::Map::new();
     for (name, pid) in stack.pids() {
+        let empty = unfilled.iter().find(|s| s.daemon == name).context("an unfilled sample")?;
         let before = baseline.iter().find(|s| s.daemon == name).context("a baseline sample")?;
         let after = end.iter().find(|s| s.daemon == name).context("an end sample")?;
         let load: Vec<(f64, f64)> = samples
@@ -579,7 +690,8 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
             failures.push(format!("{name}: {verdict} (leaks-{name}.txt)"));
         }
         println!(
-            "  {name}: footprint {} → {} KiB, slope {} KiB/min, peak {} MiB; fds {} → {}; threads {} → {}; {verdict}",
+            "  {name}: footprint {} → {} filled → {} KiB, slope {} KiB/min, peak {} MiB; fds {} → {}; threads {} → {}; {verdict}",
+            empty.footprint >> 10,
             before.footprint >> 10,
             after.footprint >> 10,
             slope.map_or_else(|| "—".to_owned(), |s| format!("{s:.1}")),
@@ -592,6 +704,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
         daemons.insert(
             name.to_owned(),
             json!({
+                "footprint_unfilled": empty.footprint,
                 "footprint_baseline": before.footprint,
                 "footprint_end": after.footprint,
                 "slope_kib_per_min": slope,
@@ -619,7 +732,10 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     let spread = slopty_testkit::stats::Spread::of(&mut cycle_ms);
     let summary = json!({
         "seconds": opts.seconds,
+        "fill_cycles": FILL_CYCLES,
+        "fill_seconds": fill_took.as_secs_f64(),
         "cycles": cycles.len(),
+        "calls_unreached": unreached,
         "cycle_ms": spread.map(|s| json!({"p50": s.p50, "p95": s.p95, "max": s.max})),
         "slope_budget_kib_per_min": SLOPE_KIB_PER_MIN,
         "daemons": daemons,

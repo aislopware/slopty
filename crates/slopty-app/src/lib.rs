@@ -45,6 +45,7 @@ use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
 use slopty_platform::notify::{Notifier, Tap};
 use slopty_proto::WorkerMsg;
+use slopty_proto::terminal::{Progress, ProgressState};
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Density, Spacing, Theme, Typography};
 use slopty_ui::a11y::tab_stop;
@@ -393,8 +394,11 @@ pub struct Workspace {
     this_mac_runs: u64,
     /// What reaches the system's notifications while the app is not in front.
     attention: Attention,
-    /// The terminals whose finished commands [`Self::attention`] hears, by session.
-    heard_terminals: std::collections::HashMap<SessionId, gpui::Subscription>,
+    /// The terminals whose finished commands [`Self::attention`] hears and whose progress the
+    /// Dock shows, by session.
+    heard_terminals: std::collections::HashMap<SessionId, Heard>,
+    /// What the Dock tile's bar shows, so a terminal's redraw sets it only when it changes.
+    dock_progress: Option<slopty_platform::dock::DockProgress>,
     /// The time iOS grants after the app leaves the screen, held until it returns, so the links
     /// stay up for what arrives just after the phone is pocketed.
     #[cfg(target_os = "ios")]
@@ -403,6 +407,20 @@ pub struct Workspace {
     /// paste there needs no permission alert.
     #[cfg(target_os = "ios")]
     paste_key: Option<Rc<slopty_ui::paste_key::PasteKey>>,
+}
+
+/// A terminal the app follows: its finished commands and notes, and its redraws, which carry
+/// its progress report (a report has no event of its own).
+struct Heard {
+    _events: [gpui::Subscription; 2],
+    /// The report last read, so a redraw that did not change it costs one comparison.
+    progress: Progress,
+}
+
+impl std::fmt::Debug for Heard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Heard").field("progress", &self.progress).finish_non_exhaustive()
+    }
 }
 
 impl Workspace {
@@ -466,6 +484,7 @@ impl Workspace {
             this_mac_runs: 0,
             attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
             heard_terminals: std::collections::HashMap::new(),
+            dock_progress: None,
             #[cfg(target_os = "ios")]
             grace: None,
             #[cfg(target_os = "ios")]
@@ -485,7 +504,9 @@ impl Workspace {
         let look = view.attention_look(cx);
         let terminals = view.terminal_views();
         self.attention.look(&look);
+        let before = self.heard_terminals.len();
         self.heard_terminals.retain(|session, _| terminals.iter().any(|(s, _)| s == session));
+        let mut changed = self.heard_terminals.len() != before;
         for (session, terminal) in terminals {
             if self.heard_terminals.contains_key(&session) {
                 continue;
@@ -502,7 +523,31 @@ impl Workspace {
                     }
                     _ => {}
                 });
-            self.heard_terminals.insert(session, heard);
+            let redrawn = cx.observe(&terminal, move |ws: &mut Self, terminal, cx| {
+                let progress = terminal.read(cx).state().progress();
+                if let Some(heard) = ws.heard_terminals.get_mut(&session)
+                    && heard.progress != progress
+                {
+                    heard.progress = progress;
+                    ws.show_progress();
+                }
+            });
+            let progress = terminal.read(cx).state().progress();
+            changed |= progress.state != ProgressState::None;
+            self.heard_terminals.insert(session, Heard { _events: [heard, redrawn], progress });
+        }
+        if changed {
+            self.show_progress();
+        }
+    }
+
+    /// Gather every terminal's progress report into the Dock tile's bar.
+    fn show_progress(&mut self) {
+        let reports = self.heard_terminals.values().map(|heard| heard.progress);
+        let progress = slopty_platform::dock::DockProgress::gather(reports);
+        if progress != self.dock_progress {
+            self.dock_progress = progress;
+            slopty_platform::dock::set_progress(progress);
         }
     }
 
@@ -2354,6 +2399,9 @@ fn apply_link_event(
         }
         LinkEvent::Control(WorkerMsg::Folder { path, listing }) => {
             view.update(cx, |v, cx| v.folder_listed(key, &path, &listing, cx));
+        }
+        LinkEvent::Control(WorkerMsg::Search(event)) => {
+            view.update(cx, |v, cx| v.search_event(key, event, cx));
         }
         LinkEvent::Control(WorkerMsg::HooksInstalled { ok, message }) => {
             view.update(cx, |v, cx| {

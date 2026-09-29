@@ -1456,6 +1456,7 @@ mod palette;
 mod popout;
 mod remote;
 mod save_copy;
+mod search;
 mod shell_drag;
 mod strip_marks;
 mod tab_strip;

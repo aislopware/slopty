@@ -411,6 +411,76 @@ mod golden {
         );
     }
 
+    /// Project-wide text search: a start with every toggle and a glob each way, a stop, a
+    /// page of hits (a line cut round its match, two matches on one line), how it ended, and
+    /// why it could not start.
+    #[test]
+    fn text_search() {
+        use slopty_proto::search::{
+            FileHits, LineHit, SearchEvent, SearchQuery, SearchRequest, SearchSummary, Span,
+        };
+        snap(
+            "client_search_start",
+            &ClientMsg::Search(SearchRequest::Start {
+                id: 7,
+                root: "~/w/slopty".to_owned(),
+                query: SearchQuery {
+                    pattern: r"fn \w+".to_owned(),
+                    regex: true,
+                    match_case: true,
+                    whole_word: true,
+                    globs: vec!["*.rs".to_owned(), "!target/**".to_owned()],
+                },
+            }),
+        );
+        snap("client_search_stop", &ClientMsg::Search(SearchRequest::Stop { id: 7 }));
+        snap(
+            "worker_search_hits",
+            &WorkerMsg::Search(SearchEvent::Hits {
+                id: 7,
+                files: vec![FileHits {
+                    path: "src/main.rs".to_owned(),
+                    lines: vec![
+                        LineHit {
+                            line: 12,
+                            text: "fn main() { run(); }".to_owned(),
+                            spans: vec![Span { start: 0, end: 7 }, Span { start: 12, end: 15 }],
+                            cut_before: false,
+                            cut_after: false,
+                        },
+                        LineHit {
+                            line: 4_096,
+                            text: "let x = fn_table[3];".to_owned(),
+                            spans: vec![Span { start: 8, end: 10 }],
+                            cut_before: true,
+                            cut_after: true,
+                        },
+                    ],
+                }],
+            }),
+        );
+        snap(
+            "worker_search_done",
+            &WorkerMsg::Search(SearchEvent::Done {
+                id: 7,
+                summary: SearchSummary {
+                    files: 38,
+                    lines: 2_000,
+                    searched: 1_204,
+                    capped: true,
+                    elapsed_ms: 41,
+                },
+            }),
+        );
+        snap(
+            "worker_search_failed",
+            &WorkerMsg::Search(SearchEvent::Failed {
+                id: 8,
+                error: "regex parse error: unclosed group".to_owned(),
+            }),
+        );
+    }
+
     /// File tiles and the palette's quick open (protocol 20+): a read, a watch, a search
     /// and their answers, and a file item in the registry.
     #[test]

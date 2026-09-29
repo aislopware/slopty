@@ -25,6 +25,8 @@
 //!   relay long enough to say so, and what to say.
 //! * [`pacing`] — [`pacing::Pacer`]: when a decoded frame goes on screen, and the arrival → present
 //!   numbers the overlay and the tests read.
+//! * [`search`] — [`search::SearchResults`]: a text search on a worker as its pages come in, in
+//!   path order, and the rows a results list draws.
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -43,6 +45,7 @@ pub mod relay;
 pub mod remote;
 #[cfg(target_vendor = "apple")]
 pub mod screen;
+pub mod search;
 pub mod server;
 pub mod term;
 pub mod tunnel;

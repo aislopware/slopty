@@ -142,7 +142,9 @@ under `target/deep/`:
   whose samples run other threads is `wall_only()`: the instruction count is the process's.
 - `cargo xtask soak [--seconds 60] [--interval 2] [--stacks] [--debug] [--out <dir>]` starts the
   server, ptyd and worker from a temporary HOME and drives open, flood, hook, read and close
-  cycles through the CLI. It fails on footprint growth, a peak over budget, descriptors or
+  cycles through the CLI. It first runs 1 536 cycles, four at a time, so the bounded stores
+  (the server's event log, the worker's idempotency ledger) are full before the baseline, and
+  the slope is taken over the load alone. It fails on footprint growth, a peak over budget, descriptors or
   threads left behind, or a leak `leaks` finds. The samples, logs, `leaks` reports and
   `summary.json` go to `target/deep/soak/last`. The daemons it runs are copies under
   `target/deep/soak/bin`, signed ad hoc for `leaks`; the build's own binaries keep their

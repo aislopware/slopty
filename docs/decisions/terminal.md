@@ -2030,6 +2030,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `claude_codes_turn_bar_and_a_prompt_end_progress` (engine),
     `progress_reaches_the_viewers_and_a_late_attach` (actor), `progress_and_restored_are_kept`
     (client). Goldens: `worker_term_progress`, `worker_term_progress_indeterminate`.
+  - **The Dock shows one bar for all of them** (2026-09-29), the system's
+    `NSProgressIndicator` under the app icon, as Finder shows a copy. The bar is the report
+    furthest behind, so it fills only when every program is done. A failure is left to the
+    tile's red bar and the finished-command note, because the Dock bar has no tone. The app
+    keeps each terminal's last report and compares it on the terminal's redraw, so a redraw
+    that did not change it costs one comparison. iOS has no equivalent short of a Live
+    Activity. Test: `slopty_platform::dock` (`the_bar_is_the_report_furthest_behind`).
 - ✅ **Sessions come back after a reboot** (2026-09-29, product gap 14). ptyd keeps shells alive
   across a worker restart, but a reboot or ptyd ending lost every shell. The items stayed,
   pointing at sessions that no longer existed.

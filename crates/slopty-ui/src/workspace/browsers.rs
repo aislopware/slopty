@@ -292,6 +292,7 @@ impl WorkspaceView {
         Cover {
             overlay: self.covered
                 || self.palette.is_some()
+                || self.search_shown()
                 || self.picker.is_some()
                 || self.menu.is_some()
                 || self.nav.open,

@@ -25,6 +25,7 @@ arrayvec = { version = "0.7", default-features = false, features = ["std"] }
 bit-set = { version = "0.8" }
 bit-vec = { version = "0.8" }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+bstr = { version = "1" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "extern_crate_alloc", "wasm_simd"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
@@ -51,7 +52,7 @@ once_cell = { version = "1" }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 rand = { version = "0.9" }
 rand_chacha = { version = "0.9", default-features = false, features = ["std"] }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
 rmcp = { version = "3", default-features = false, features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
 rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
@@ -75,6 +76,7 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [build-dependencies]
 aho-corasick = { version = "1" }
 anstyle = { version = "1" }
+bstr = { version = "1" }
 collections = { git = "https://github.com/aislopware/zed.git", default-features = false, features = ["test-support"] }
 crossbeam-utils = { version = "0.8" }
 derive_more-impl = { version = "2", features = ["add", "add_assign", "debug", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
@@ -84,7 +86,7 @@ memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = { version = "1" }
-regex-automata = { version = "0.4", default-features = false, features = ["dfa", "hybrid", "meta", "nfa", "perf", "std", "unicode"] }
+regex-automata = { version = "0.4" }
 regex-syntax = { version = "0.8" }
 rust-i18n-support = { version = "4", default-features = false, features = ["codegen"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }

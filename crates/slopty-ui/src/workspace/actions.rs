@@ -75,6 +75,9 @@ actions!(
         /// Find text in every tile: the palette lists the tiles it is in with their hit
         /// counts, and ↩ opens that tile's find bar on it.
         FindEverywhere,
+        /// Search the files under the focused tile's directory on its worker: the matches
+        /// grouped by file as they are found, ↩ opening one in a file tile at its line.
+        SearchInFiles,
         /// Focus the column to the left.
         FocusColumnLeft,
         /// Focus the column to the right.
@@ -202,6 +205,8 @@ const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
 /// A folder tile with the keyboard.
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
+/// Search in files, its fields holding the keyboard.
+const SEARCH: Option<&str> = Some(crate::search::CTX);
 /// A tile's window of its own ([`super::popout`]): its picture takes every chord but the one
 /// that puts it back.
 const POP_OUT: Option<&str> = Some(super::popout::CTX);
@@ -237,6 +242,12 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         // A focused field (a find bar, the palette, a note) is a gpui-kit input, whose own
         // ⌘⇧F is replace; ours is bound in its context after it, so it wins there too.
         KeyBinding::new("cmd-shift-f", FindEverywhere, Some("Input")),
+        KeyBinding::new("cmd-alt-f", SearchInFiles, CTX),
+        KeyBinding::new("cmd-alt-f", SearchInFiles, FILE_INPUT),
+        // The search surface's toggles, VS Code's keys.
+        KeyBinding::new("cmd-alt-c", crate::search::ToggleMatchCase, SEARCH),
+        KeyBinding::new("cmd-alt-w", crate::search::ToggleWholeWord, SEARCH),
+        KeyBinding::new("cmd-alt-r", crate::search::ToggleRegex, SEARCH),
         KeyBinding::new("cmd-alt-left", FocusColumnLeft, CTX),
         KeyBinding::new("cmd-alt-right", FocusColumnRight, CTX),
         KeyBinding::new("cmd-alt-up", FocusUp, CTX),
@@ -370,6 +381,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Name this tile", IconName::Pencil, Box::new(RenameItem)),
         w("Point other devices at this tile", IconName::Cast, Box::new(PointOthers)),
         w("Find in every tile", IconName::Search, Box::new(FindEverywhere)),
+        w(super::project_search::SEARCH_IN_FILES, IconName::FolderSearch, Box::new(SearchInFiles)),
         w("List workers", IconName::Server, Box::new(ListWorkers)),
         w("Forwarded ports", IconName::Cable, Box::new(ListPorts)),
         w("Column to the left", IconName::ArrowLeft, Box::new(FocusColumnLeft)),

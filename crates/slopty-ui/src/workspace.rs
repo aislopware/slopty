@@ -40,6 +40,7 @@ mod miniature;
 mod navigator;
 mod overlays;
 mod popout;
+mod project_search;
 pub mod remote;
 mod rollup;
 mod statusbar;
@@ -602,6 +603,8 @@ pub struct WorkspaceView {
     palette: Option<Entity<CommandPalette>>,
     /// A dismissed palette still drawing its way out, dropped once that has played.
     palette_leaving: Option<Entity<CommandPalette>>,
+    /// Search in files: the surface, shown or kept, and where the keyboard goes back to.
+    search: project_search::Surface,
     find_needle: Option<String>,
     find_hits: HashMap<ItemId, (u32, PaletteRun)>,
     pending_find: Option<(SessionId, String)>,
@@ -809,6 +812,7 @@ impl WorkspaceView {
             picker: None,
             palette: None,
             palette_leaving: None,
+            search: project_search::Surface::default(),
             find_needle: None,
             find_hits: HashMap::new(),
             pending_find: None,
@@ -1435,6 +1439,7 @@ impl WorkspaceView {
                 cx.defer_in(window, move |_this, window, cx| window.dispatch_action(action, cx));
             }
         }
+        self.settle_search_focus(window, cx);
         for run in std::mem::take(&mut self.pending_runs) {
             cx.defer_in(window, move |_this, window, cx| run(window, cx));
         }
@@ -1558,6 +1563,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::reload_page))
             .on_action(cx.listener(Self::point_others))
             .on_action(cx.listener(Self::find_everywhere))
+            .on_action(cx.listener(Self::search_in_files))
             .on_action(cx.listener(Self::upload_from_files))
             .on_action(cx.listener(Self::save_copy))
             // Esc in the name field: the input's own action, taken here so the field closes
@@ -1584,6 +1590,7 @@ impl gpui::Render for WorkspaceView {
             .children(menu)
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
+            .children(self.search_drawn())
             .child(Self::browser_sync(cx))
     }
 }

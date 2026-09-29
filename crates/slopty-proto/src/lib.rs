@@ -45,6 +45,7 @@ pub mod media;
 pub mod orchestration;
 pub mod ptyd;
 pub mod screen;
+pub mod search;
 pub mod server;
 pub mod tailnet;
 pub mod terminal;
@@ -138,6 +139,9 @@ pub enum ClientMsg {
         /// An absolute directory on the worker, or `~/…` in its home.
         path: String,
     },
+    /// Start or stop a text search in the files under a directory; answered with
+    /// `WorkerMsg::Search` pages as the worker finds matches.
+    Search(search::SearchRequest),
 }
 
 impl ClientMsg {
@@ -161,6 +165,7 @@ impl ClientMsg {
             Self::Xfer(_) => "Xfer",
             Self::Conversation(_) => "Conversation",
             Self::ListFolder { .. } => "ListFolder",
+            Self::Search(_) => "Search",
         }
     }
 }
@@ -272,6 +277,8 @@ pub enum WorkerMsg {
     },
     /// The worker's one-minute load average moved since [`handshake::HelloAck::load`].
     Load(f32),
+    /// A page of a text search this client started, or how it ended.
+    Search(search::SearchEvent),
 }
 
 impl WorkerMsg {
@@ -301,6 +308,7 @@ impl WorkerMsg {
             Self::SessionChanged(_) => "SessionChanged",
             Self::Failed { .. } => "Failed",
             Self::Load(_) => "Load",
+            Self::Search(_) => "Search",
         }
     }
 }

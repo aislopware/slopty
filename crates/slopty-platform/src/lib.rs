@@ -22,6 +22,8 @@
 
 pub mod continued;
 pub mod dirs;
+#[cfg(target_vendor = "apple")]
+pub mod dock;
 #[cfg(target_os = "macos")]
 pub mod drag;
 #[cfg(target_vendor = "apple")]

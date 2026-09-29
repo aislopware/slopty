@@ -82,5 +82,10 @@ mod units {
             item: ItemId::new(),
         };
         assert_eq!(WorkerMsg::Items(pointed).kind(), "Items");
+        let stop = slopty_proto::search::SearchRequest::Stop { id: 3 };
+        assert_eq!(ClientMsg::Search(stop).kind(), "Search");
+        let failed = slopty_proto::search::SearchEvent::Failed { id: 3, error: String::new() };
+        assert_eq!(failed.id(), 3);
+        assert_eq!(WorkerMsg::Search(failed).kind(), "Search");
     }
 }

@@ -7859,3 +7859,162 @@ that read is most of the cost, so the flood moved by less than the noise. The wi
 not change: 228 B for an echo, 653 B for an Enter, and 505 B per scrolled frame.
 `xtask/budgets.toml` records the three cheaper series. Ruling: `docs/decisions/terminal.md`,
 "A frame's rows are shared, not copied".
+
+## 2026-09-29 — The server's growth was its event log filling, with twice the room it needs
+
+Mac Studio M1 Max, macOS 27.0, release daemons copied and signed ad hoc for `leaks`, other
+sessions building beside it. The server grew 173 KiB/min in the first soak and 228 KiB/min in
+the second. That was the hub's event log filling. The log is bounded (`EVENT_LOG`, 4 096
+`HubEvent`s), but it pushed each event before it dropped the oldest, so the 4 097th push
+doubled the `VecDeque` to 8 192 slots of 256 B. A ring writes its way through the whole
+buffer, so the footprint kept rising until 8 192 events. At four events a soak cycle (opened,
+working, idle, closed) and 158 cycles a minute, that is about 2 048 cycles, or 13 minutes.
+It then held about 1 MiB more than the bound calls for. Each cycle costs about 1.2 KiB (four
+slots and the opened terminal's strings), which is the slope both soaks measured. The log
+now drops the oldest event before it pushes and reserves its 4 096 slots up front
+(`Hub::happen`, `crates/slopty-server/src/hub.rs`).
+
+Nothing else in the server grows. A one-off harness in one process ran a real `Server`, a fake
+worker link and a live-heap allocator. With the log already full, it made 600 soak-shaped
+cycles of five fresh client links, each asking one forwarded verb. The heap went from 2 898
+to 3 028 KiB over the first 300 cycles as noq's and tokio's tables sized themselves, then
+stayed at 3 028 KiB through cycle 600. Per-link state goes when the link does: the requests'
+`JoinSet`, the broadcast receiver and the pending-reply entry all leave with it.
+
+```sh
+cargo nextest run -p slopty-server --test heap --no-capture
+cargo xtask soak --out target/deep/soak/server-after
+```
+
+`heap::the_hub_holds_its_event_log_and_no_more` drives a hub on the test's own thread through
+2 × 1 024 cycles and then 2 × 1 024 more, counting the bytes the thread holds (allocated minus
+freed). It checks the growth against the log's bound: 4 096 slots, plus the strings of the
+1 024 terminals the log still holds, plus 16 KiB. The old `happen` was restored for the
+"before" column.
+
+| | hub growth over 2 048 cycles | over the next 2 048 | bound |
+| --- | --- | --- | --- |
+| before | 2 206 KiB | +0 B | 1 199 KiB (fails) |
+| after | 159 KiB | +0 B | 1 199 KiB |
+
+### The soak fills the bounded stores before it takes the baseline
+
+In a store that is still filling, the footprint climbs as steadily as it does under a leak,
+and a minute of load cannot tell the two apart. The soak now runs 1 536 cycles, four at a
+time, between the warm-up and the baseline. The largest stores fill by cycle 1 024: the
+server's log (4 096 events at four a cycle) and the worker's idempotency ledger (4 096 keys at
+four keyed verbs a cycle: open, send, wait, close). The slope is then taken over the load
+alone. Each daemon's line now shows its footprint before the fill, after it and at the end,
+and the samples carry the fill's own curve, so what a store costs is on the record and the
+peak budget still bounds it. The fill took 148 s.
+
+Fill cycles run the full flood. When eight ran at once, the worker peaked at 173 MiB, over its
+128 MiB budget, so four run at once (peak 91 MiB). A fill of one-line cycles kept the peaks
+low, but it left the worker's flood path to warm up during the load, where it read as
+204 KiB/min.
+
+One soak each way, 60 s of load after the fill. The "before" column is the old `happen` under
+the new soak:
+
+| daemon | before the fill → filled → end | slope over the load | peak |
+| --- | --- | --- | --- |
+| server, before | 4 192 → 6 976 → 7 120 KiB | **149 KiB/min** (fails) | 6 MiB |
+| server, after | 4 336 → 6 848 → 6 720 KiB | −50 KiB/min | 6 MiB |
+| ptyd, after | 2 592 → 3 856 → 3 856 KiB | 0 KiB/min | 5 MiB |
+| worker, after | 8 032 → 15 984 → 16 000 KiB | 0 KiB/min | 91 MiB |
+
+The server's footprint during the fill, one sample every 6 s:
+
+- before: 5 088, 5 200, 5 376 … 6 784, 6 864, 6 912, 6 976, and through the load 6 976, 6 992,
+  7 008 … 7 104, 7 120 (+16 KiB every 6 s, still filling the doubled buffer);
+- after: 5 200, 5 264, 5 408 … 6 656, 6 720, then 6 720, 6 736, 6 736, 6 736, 6 816, 6 832,
+  6 848, and through the load 6 848, then 6 720 to the end.
+
+After the fix the server levels off about 100 s into the fill, roughly 1 040 cycles in,
+which is where 4 096 events fill the log. It goes on growing about 1.3 MiB beyond the log's
+own heap. The harness above puts that down to the tables of four links at once and the
+allocator's zones. No run had descriptors, threads or leaks left over: server 11 → 11
+descriptors and 11 → 11 threads, `leaks` 0.
+
+Once its stores have filled, the worker's slope is 0 KiB/min. The 939 KiB/min it showed
+before (the second soak) was the ledger and the event broadcast filling, as that entry
+estimated.
+
+### A finding the fill brought out: a dial to the server sometimes gets no answer
+
+1 to 2 of about 11 870 CLI calls a run failed with `cannot reach the server at
+127.0.0.1:<port>: connect: …: no answer`, meaning the QUIC handshake timed out
+(`slopty_net::client::HANDSHAKE_TIMEOUT`, 2 s). It also stopped an earlier 600 s soak at an
+`output` call. The soak now sends such a call again once (a failed dial sent no verb), counts
+it as a failure, and goes on with the load. The one-off harness hit it with a fresh client
+endpoint per link, while the server was pushing events to its clients. The server logged
+`dialer dropped … unsent packet acked`, then `bad transport parameters: parameter had illegal
+value` at each Initial the client resent (at 0.02, 0.06, 0.3 and 1.3 s), all from one client
+port. Links from one reused endpoint never hit it, and neither did 4 000 fresh endpoints with
+no traffic, 437 of them on a port used before. The likely cause is a packet from another
+connection crossing into this one on a reused port. The null crypto (`slopty_net::crypto`)
+has no AEAD tag to reject such a packet, and the reset-token lookup in `noq-proto`'s
+`ConnectionIndex::get` routes by remote address and the datagram's last 16 bytes. This is in
+`slopty-net` and `vendor/noq-proto`, and is not measured further here.
+
+## 2026-09-29 — prediction over the line editor's keys
+
+What the local echo draws while a line is edited, before and after ← → and ⌫ are guessed inside a
+shell's input (decisions/prediction-editing.md). The rig is `crates/slopty-predict/tests/editing.rs`.
+It replays a zle-like line editor on row 0 of an 80-column screen: insert mode, OSC 133 input from
+column 2, a right prompt `~/src/slopty` drawn while the line leaves room, and in the second session
+a history suggestion in bright black that → at the end of the buffer takes. Each key reaches the
+worker half a round trip after it is pressed. The frame answering it (the line after that key,
+`input_ack` = the key) arrives half a round trip later. The predictor is `Policy::Adaptive`, told
+the round trip, with a 60 Hz display. Keys come at 15/s (66 ms) typed and 30/s (33 ms) held, with a
+400 ms pause between steps.
+
+"Right as pressed" means the row the client shows right after the key (the last frame, with the
+guesses drawn over it when `visible`) reads as the shell's line after that key, cursor included;
+a suggestion's grey and the right prompt are skipped by the reader. "Key → right" is from the
+press to the first moment the client shows that line or a later one. "Wrong overlays" counts the
+moments, at a key or a frame, when the client showed a line the shell never had. Before is the
+predictor at `acc89259`, after is this change, on the same rig.
+
+| session | rtt | keys right as pressed | key → right, mean ms | p50 / p95 ms | wrong overlays | misses |
+| --- | --- | --- | --- | --- | --- | --- |
+| fixing a typo, before | 20 ms | 17 of 47 | 12.8 | 20 / 20 | 0 | 0 |
+| fixing a typo, after | 20 ms | **45 of 47** | **0.9** | 0 / 0 | 0 | 0 |
+| taking a suggestion, before | 20 ms | 4 of 31 | 17.4 | 20 / 20 | 4 | 0 |
+| taking a suggestion, after | 20 ms | **27 of 31** | **2.6** | 0 / 20 | **0** | 0 |
+| fixing a typo, before | 40 ms | 17 of 47 | 25.5 | 40 / 40 | 0 | 0 |
+| fixing a typo, after | 40 ms | **45 of 47** | **1.7** | 0 / 0 | 0 | 0 |
+| taking a suggestion, before | 40 ms | 4 of 31 | 34.8 | 40 / 40 | 4 | 0 |
+| taking a suggestion, after | 40 ms | **26 of 31** | **5.4** | 0 / 40 | **0** | 0 |
+
+"Fixing a typo" types `echo halo world`, holds ← 7 times, types `l`, holds → 7 times, erases 5,
+types `there`, holds ← 5 times, erases 1 and types `-`. "Taking a suggestion" types `git co`,
+presses → (the suggestion `git commit -m 'fix the build'` is taken), holds ← 7 times, erases 3,
+types `fixes`, holds → 7 times and erases 2. Before, every arrow and every ⌫ past the predictor's
+own guesses waited for the echo, and so did the next key. The four wrong overlays were keys typed
+in the middle of the text, drawn over the character under the cursor where the shell pushed it
+right. After, the keys not drawn as pressed are the two warm-up keys, the → that takes the
+suggestion (the shell's to draw), and one or two keys of the tentative epoch after it: one at
+20 ms, two at 40 ms, where a held key repeats twice within a round trip.
+
+Random sessions (`random_editing_never_shows_a_wrong_line`): 2 000 sessions of 10–119 keys, 60 %
+typing from `git cm-'fxhb`, 20 % ←, 10 % →, 10 % ⌫, 10–150 ms apart, round trips of 5–85 ms, half
+with the suggestion and half with a right prompt `~/src main` that the line grows into, a session
+ending before its line would wrap:
+
+| predictor | keys right as pressed | wrong overlays | misses | sessions with either |
+| --- | --- | --- | --- | --- |
+| before | 11 565 of 131 867 | 31 642 | 979 | 1 825 |
+| after | **117 907 of 131 867** | **0** | **0** | **0** |
+
+The same property held over 100 000 sessions of that kind (6 447 066 keys, 76 s).
+
+Scenario (d) of the smooth suite (`typing_over_a_shaped_round_trip_on_the_mac`) types 60 letters
+and no arrow or ⌫, at the fixed round trips 5, 10, 15 and 20 ms (`SHAPED_RTTS` in
+`crates/slopty-e2e/tests/smooth.rs`; 40 ms is not among them, and that crate was not this
+change's to edit). It measures the printable path, which this change leaves as it was at the
+end of the text; it was not rerun here (see the report).
+
+```sh
+cargo test -p slopty-predict --test editing -- --nocapture
+```
