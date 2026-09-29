@@ -314,7 +314,7 @@ mod tests {
     }
 
     fn key(code: KeyCode, action: KeyAction) -> ScreenInput {
-        ScreenInput::Key { code, action, mods: Mods::SUPER, text: None }
+        ScreenInput::Key { code, action, mods: Mods::SUPER }
     }
 
     /// A stream dropped mid-⌘-drag (the connection went, or the stream closed) leaves nothing
@@ -570,7 +570,10 @@ mod tests {
             .into_iter()
             .filter_map(|p| match p.event {
                 Event::Mouse { kind, at, .. } => Some((kind, at.x)),
-                Event::Key { .. } | Event::Scroll { .. } => None,
+                Event::Key { .. }
+                | Event::Scroll { .. }
+                | Event::Text { .. }
+                | Event::Media { .. } => None,
             })
             .collect();
         assert_eq!(

@@ -3,6 +3,7 @@
 use anyhow::Result;
 use xshell::{Shell, cmd};
 
+use crate::gate::LaneId;
 use crate::tools::{has, step};
 
 /// Tools installed with `cargo binstall`. Versions are floors; binstall fetches prebuilt binaries.
@@ -28,12 +29,16 @@ const TOOLS: &[(&str, &str)] = &[
     ("cargo-fuzz", "0.13.2"),
 ];
 
-pub fn run(sh: &Shell, no_tools: bool) -> Result<()> {
+/// Install the tools and sync the submodules. Given `lanes`, only what those gate lanes run:
+/// a CI job runs one lane and needs neither the other lanes' tools nor `xcodegen`.
+pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId]) -> Result<()> {
+    let everything = lanes.is_empty();
+    let wanted = |tool: &str| everything || lanes.iter().any(|lane| lane.tools().contains(&tool));
     if !no_tools {
         if !has(sh, "cargo-binstall") {
             step("install cargo-binstall", &cmd!(sh, "cargo install cargo-binstall --locked"))?;
         }
-        for (tool, version) in TOOLS {
+        for (tool, version) in TOOLS.iter().filter(|(tool, _)| wanted(tool)) {
             let spec = format!("{tool}@{version}");
             step(
                 &format!("binstall {spec}"),
@@ -42,7 +47,13 @@ pub fn run(sh: &Shell, no_tools: bool) -> Result<()> {
         }
         // The canonical formatter is nightly rustfmt (unstable options in rustfmt.toml: import
         // granularity, comment wrapping). Stable rustfmt ignores them and would fight the gate.
-        if cmd!(sh, "rustup run nightly rustfmt --version").quiet().ignore_stderr().read().is_err()
+        let formats = everything || lanes.contains(&LaneId::Tools);
+        if formats
+            && cmd!(sh, "rustup run nightly rustfmt --version")
+                .quiet()
+                .ignore_stderr()
+                .read()
+                .is_err()
         {
             step(
                 "nightly rustfmt",
@@ -56,10 +67,27 @@ pub fn run(sh: &Shell, no_tools: bool) -> Result<()> {
             println!("  note: `brew install zig` (0.16) is needed to build libghostty-vt");
         }
     }
-    if !no_tools && !has(sh, "xcodegen") {
+    if !no_tools && everything && !has(sh, "xcodegen") {
         // XcodeGen is a Swift tool with no cargo distribution; Homebrew is the supported route.
         step("brew install xcodegen", &cmd!(sh, "brew install xcodegen"))?;
     }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::ValueEnum as _;
+
+    use super::{LaneId, TOOLS};
+
+    /// `setup --lane` installs a lane's tools from the pinned list, so each must be on it.
+    #[test]
+    fn every_tool_a_lane_runs_is_pinned() {
+        for lane in LaneId::value_variants() {
+            for tool in lane.tools() {
+                assert!(TOOLS.iter().any(|(pinned, _)| pinned == tool), "{lane:?} runs {tool}");
+            }
+        }
+    }
 }

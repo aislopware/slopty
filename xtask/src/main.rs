@@ -48,6 +48,9 @@ enum Cmd {
         /// Skip installing tools; only sync submodules.
         #[arg(long)]
         no_tools: bool,
+        /// Install only the tools this gate lane runs; repeat for several (a CI job per lane).
+        #[arg(long = "lane", value_enum)]
+        lanes: Vec<gate::LaneId>,
     },
     /// List enabled macOS input sources, or select one by id (for input-method testing).
     Ime {
@@ -81,6 +84,13 @@ enum Cmd {
         /// the packages changed).
         #[arg(long)]
         since_pass: bool,
+        /// On a hosted runner: in place, and the tests lane skips the tests that read hardware a
+        /// runner's virtual Mac lacks (nextest's `ci` profile).
+        #[arg(long)]
+        ci: bool,
+        /// Run only this lane; repeat for several. The tools lane carries the fmt check.
+        #[arg(long = "lane", value_enum)]
+        lanes: Vec<gate::LaneId>,
     },
     /// Delete the build units and incremental caches nothing has used for a while, in every
     /// target dir under `target/` (also run, skipping busy dirs, after `check` and `gate`).
@@ -203,15 +213,16 @@ fn main() -> Result<()> {
     let sh = Shell::new()?;
     sh.change_dir(tools::repo_root()?);
     match cli.cmd {
-        Cmd::Setup { no_tools } => setup::run(&sh, no_tools),
+        Cmd::Setup { no_tools, lanes } => setup::run(&sh, no_tools, &lanes),
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
         Cmd::Check { packages } => {
             let checked = check::run(&sh, &packages);
             prune::auto();
             checked
         }
-        Cmd::Gate { fix, quick, in_place, since_pass } => {
-            let gated = gate::run(&sh, gate::Options { fix, quick, in_place, since_pass });
+        Cmd::Gate { fix, quick, in_place, since_pass, ci, lanes } => {
+            let opts = gate::Options { fix, quick, in_place: in_place || ci, since_pass };
+            let gated = gate::run_only(&sh, opts, &gate::Only { lanes, ci });
             prune::auto();
             gated
         }

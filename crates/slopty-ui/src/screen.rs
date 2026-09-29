@@ -31,11 +31,10 @@ use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::{
     Animation, AnimationExt as _, App, Autocapitalize, Bounds, Context, CursorStyle,
     ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, LongPressEvent,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, ParentElement as _, Path, PathBuilder, PinchEvent, Pixels, Point, Render,
-    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
+    InteractiveElement as _, IntoElement, Keystroke, LongPressEvent, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, Path, PathBuilder,
+    PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString,
+    Size, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
     TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
     px, size, surface,
 };
@@ -55,6 +54,7 @@ use crate::colors::hsla;
 use crate::{keys, kit};
 
 mod health;
+mod keyboard;
 mod touch;
 mod zoom;
 
@@ -351,13 +351,15 @@ pub struct ScreenView {
     paste_hold: (u32, Vec<ScreenInput>),
     /// Modifiers armed by the phone key bar; applied to the next key, then cleared.
     sticky: Modifiers,
+    /// Keys by position, composed text, Caps Lock and the input source (`keyboard`).
+    keyboard: keyboard::Keyboard,
     /// The modifier keys as last reported, so a change forwards the key that moved.
     modifiers: Modifiers,
     /// Focus leaving the view and the window going inactive each release what is held on the
     /// worker, and the window moving to another screen asks for that screen's refresh. They are
     /// registered with the window the view renders in (the constructor has none), and again
     /// when it renders in another: a tile popped out into a window of its own.
-    let_go: Option<(gpui::AnyWindowHandle, [Subscription; 3])>,
+    let_go: Option<(gpui::AnyWindowHandle, [Subscription; 4])>,
     /// The screen the view's window is on, and its refresh in hertz (0 when it does not say);
     /// `None` until the view renders.
     screen: Option<(Option<u32>, u16)>,
@@ -831,6 +833,7 @@ impl ScreenView {
             paste_hook: None,
             paste_hold: (0, Vec::new()),
             sticky: Modifiers::default(),
+            keyboard: keyboard::Keyboard::new(cx),
             marked: None,
             hud: None,
             hud_details: false,
@@ -1404,7 +1407,13 @@ impl ScreenView {
         self.out.send(ClientMsg::Screen(req));
     }
 
+    /// Send `input` after the keys taken ahead of it (`keyboard`).
     fn input(&mut self, input: ScreenInput) {
+        self.drain_taken();
+        self.send_input(input);
+    }
+
+    fn send_input(&mut self, input: ScreenInput) {
         if self.paste_hold.0 > 0 {
             self.paste_hold.1.push(input);
             return;
@@ -1963,37 +1972,15 @@ impl ScreenView {
         }
     }
 
-    fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        if is_paste_chord(&ev.keystroke) {
-            self.push_clipboard(cx);
-        }
-        let text = ev.keystroke.key_char.clone().filter(|t| !t.is_empty());
-        self.press_key(&ev.keystroke, ev.is_held, text);
-        cx.stop_propagation();
-    }
-
-    /// A key went down (or repeats): remember it as held and send it.
-    fn press_key(&mut self, keystroke: &Keystroke, repeat: bool, text: Option<String>) {
-        let code = keys::key_code(&keystroke.key);
-        if !self.held.contains(&code) {
-            self.held.push(code);
-        }
-        self.input(ScreenInput::Key {
-            code,
-            action: if repeat { KeyAction::Repeat } else { KeyAction::Press },
-            mods: keys::mods(keystroke.modifiers),
-            text,
-        });
-    }
-
     /// Focus left the view or the window went inactive: release on the worker every button,
     /// key and modifier whose press went there, since the release never will (⌘-tab away with
     /// ⌘ held, a click on another tile while a key is down) — input stuck down on the worker
-    /// is the one thing a remote desktop must never leave behind.
-    fn let_go(&mut self, cx: &mut Context<Self>) {
+    /// is the one thing a remote desktop must never leave behind. Keys go before modifiers.
+    fn let_go(&mut self, cx: &Context<Self>) {
+        self.keyboard_blurred(cx);
         let (x, y) = self.pointer_at;
         for button in std::mem::take(&mut self.buttons) {
-            self.input(ScreenInput::Button {
+            self.send_input(ScreenInput::Button {
                 button,
                 down: false,
                 x,
@@ -2002,48 +1989,13 @@ impl ScreenView {
                 mods: Mods::empty(),
             });
         }
-        for code in std::mem::take(&mut self.held) {
-            self.input(ScreenInput::Key {
-                code,
-                action: KeyAction::Release,
-                mods: Mods::empty(),
-                text: None,
-            });
+        let (modifiers, plain): (Vec<KeyCode>, Vec<KeyCode>) =
+            std::mem::take(&mut self.held).into_iter().partition(|&code| is_modifier(code));
+        for code in plain.into_iter().chain(modifiers) {
+            let action = KeyAction::Release;
+            self.send_input(ScreenInput::Key { code, action, mods: Mods::empty() });
         }
-        self.modifiers(Modifiers::default(), cx);
-    }
-
-    fn key_up(&mut self, ev: &KeyUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        let code = keys::key_code(&ev.keystroke.key);
-        let Some(at) = self.held.iter().position(|&c| c == code) else { return };
-        self.held.swap_remove(at);
-        self.input(ScreenInput::Key {
-            code,
-            action: KeyAction::Release,
-            mods: keys::mods(ev.keystroke.modifiers),
-            text: None,
-        });
-        cx.stop_propagation();
-    }
-
-    fn modifiers_changed(
-        &mut self,
-        ev: &ModifiersChangedEvent,
-        _w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.modifiers(ev.modifiers, cx);
-    }
-
-    /// The modifier keys moved: forward each one that went down or up as its own key, so a
-    /// remote program sees ⌘ held on its own, ⌥ pressed over a menu, ⇧ held to run. GPUI
-    /// names no side, so the left key stands for both.
-    fn modifiers(&mut self, now: Modifiers, cx: &mut Context<Self>) {
-        let was = std::mem::replace(&mut self.modifiers, now);
-        for (code, action) in modifier_keys(was, now) {
-            self.input(ScreenInput::Key { code, action, mods: keys::mods(now), text: None });
-        }
-        cx.stop_propagation();
+        self.modifiers = Modifiers::default();
     }
 
     /// Before a paste reaches the worker, make sure it pastes what this client copied: this
@@ -2085,26 +2037,6 @@ impl ScreenView {
         cx.notify();
     }
 
-    /// Press and release one key on the worker: the phone key bar and the soft keyboard, which
-    /// have no key-up of their own. Armed modifiers apply and clear.
-    pub fn press(&mut self, mut keystroke: Keystroke, cx: &mut Context<Self>) {
-        let armed = std::mem::take(&mut self.sticky);
-        keystroke.modifiers.control |= armed.control;
-        keystroke.modifiers.platform |= armed.platform;
-        if is_paste_chord(&keystroke) {
-            self.push_clipboard(cx);
-        }
-        let code = keys::key_code(&keystroke.key);
-        let mods = keys::mods(keystroke.modifiers);
-        // A modified key is a chord, not typing: no text, or the worker would insert it too.
-        let text = keystroke
-            .key_char
-            .filter(|t| !t.is_empty() && !mods.intersects(Mods::CTRL | Mods::SUPER));
-        self.input(ScreenInput::Key { code, action: KeyAction::Press, mods, text });
-        self.input(ScreenInput::Key { code, action: KeyAction::Release, mods, text: None });
-        cx.notify();
-    }
-
     /// Touch: a long press over the picture is a right click on the worker (context menus);
     /// a plain drag stays the strip's. Returns whether the gesture was claimed.
     fn long_press(&mut self, ev: &LongPressEvent, cx: &mut Context<Self>) -> bool {
@@ -2126,8 +2058,8 @@ impl ScreenView {
         true
     }
 
-    /// Type `text` on the worker one key per character, as committed text is, so it lands
-    /// where a paste cannot (a login window, a field that refuses paste). Only the first
+    /// Type `text` on the worker as committed text is, a line break as ↩, so it lands where a
+    /// paste cannot (a login window, a field that refuses paste). Only the first
     /// [`TYPE_MAX`] bytes go, as Jump caps it; returns whether the text was cut.
     ///
     /// It goes `TYPE_BURST` characters at a time, each burst once the last has left the
@@ -2158,24 +2090,9 @@ impl ScreenView {
         if self.out.waiting.borrow().is_empty() {
             let take = self.typing.len().min(TYPE_BURST);
             let burst: String = self.typing.drain(..take).collect();
-            self.type_keys(&burst, cx);
+            self.commit_text(&burst, cx);
         }
         !self.typing.is_empty()
-    }
-
-    /// One key per character: the worker sees ordinary typing (a single event carrying a whole
-    /// string trips apps that read the key code, not the string).
-    fn type_keys(&mut self, text: &str, cx: &mut Context<Self>) {
-        for c in text.chars() {
-            let key = match c {
-                '\n' | '\r' => "enter".to_owned(),
-                '\t' => "tab".to_owned(),
-                ' ' => "space".to_owned(),
-                _ => c.to_string(),
-            };
-            let key_char = (!c.is_control()).then(|| c.to_string());
-            self.press(Keystroke { modifiers: Modifiers::default(), key, key_char }, cx);
-        }
     }
 
     /// Whether the system's shortcuts go to the worker while this tile has the keyboard.
@@ -2191,25 +2108,6 @@ impl ScreenView {
             self.system_keys = on;
             cx.notify();
         }
-    }
-
-    /// A system shortcut's key, taken off this Mac for the worker: pressed (or repeated), or
-    /// let go. Its modifiers went already, as the person pressed them; a release whose press
-    /// never went here is dropped, and one still held is let go with the rest when the tile
-    /// loses the keyboard.
-    pub fn system_key(&mut self, code: KeyCode, down: bool, mods: Mods, cx: &mut Context<Self>) {
-        let action = if down {
-            if !self.held.contains(&code) {
-                self.held.push(code);
-            }
-            KeyAction::Press
-        } else {
-            let Some(at) = self.held.iter().position(|k| *k == code) else { return };
-            self.held.remove(at);
-            KeyAction::Release
-        };
-        self.input(ScreenInput::Key { code, action, mods, text: None });
-        cx.notify();
     }
 
     /// The phone's "paste" key: ⌘V on the worker, this client's clipboard pushed first.
@@ -2382,12 +2280,18 @@ fn hold(waiting: &mut VecDeque<ClientMsg>, msg: ClientMsg) {
 }
 
 /// Whether `msg` may not be dropped: anything but input, and input that ends something — a key
-/// or button release, a scroll gesture's or momentum's end.
+/// or button release, a scroll gesture's or momentum's end — or that a letter would be missing
+/// without: text, Caps Lock's state, the input source the keys are read under and its release.
 const fn must_arrive(msg: &ClientMsg) -> bool {
     let ClientMsg::Screen(ScreenRequest::Input { input, .. }) = msg else { return true };
     matches!(
         input,
         ScreenInput::Key { action: KeyAction::Release, .. }
+            | ScreenInput::Text { .. }
+            | ScreenInput::Lock { .. }
+            | ScreenInput::KeyboardSource { .. }
+            | ScreenInput::KeyboardReleased
+            | ScreenInput::Media { down: false, .. }
             | ScreenInput::Button { down: false, .. }
             | ScreenInput::Scroll { phase: ScrollPhase::Ended | ScrollPhase::Cancelled, .. }
             | ScreenInput::Scroll { momentum: ScrollPhase::Ended | ScrollPhase::Cancelled, .. }
@@ -2413,14 +2317,20 @@ impl Render for ScreenView {
                 self.let_go(cx);
             }
             let blur = cx.on_blur(&self.focus, window, |this, _window, cx| this.let_go(cx));
+            // Taking the keyboard tells the worker this device's input source and Caps Lock.
+            let focus = cx.on_focus(&self.focus, window, |this, _window, _cx| {
+                this.keyboard_focused();
+            });
             let inactive = cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
                     this.let_go(cx);
+                } else if this.focus.is_focused(window) {
+                    this.keyboard_focused();
                 }
             });
             let moved =
                 cx.observe_window_bounds(window, |this, window, cx| this.follow_screen(window, cx));
-            self.let_go = Some((here, [blur, inactive, moved]));
+            self.let_go = Some((here, [blur, focus, inactive, moved]));
             self.follow_screen(window, cx);
         }
         self.renders = self.renders.wrapping_add(1);
@@ -2734,12 +2644,14 @@ impl EntityInputHandler for ScreenView {
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.marked.take().is_some() {
+            self.follow_taking();
             cx.notify();
         }
     }
 
-    /// Committed text: one key per character so the worker sees ordinary typing (a single
-    /// event carrying a whole string trips apps that read the key code, not the string).
+    /// Committed text: what this device's text system made of the keys (a character, a dead
+    /// key's or an input method's result, dictation) goes as text, which the worker types
+    /// whatever its own layout.
     fn replace_text_in_range(
         &mut self,
         _range: Option<std::ops::Range<usize>>,
@@ -2748,7 +2660,8 @@ impl EntityInputHandler for ScreenView {
         cx: &mut Context<Self>,
     ) {
         self.marked = None;
-        self.type_keys(text, cx);
+        self.commit_text(text, cx);
+        self.follow_taking();
     }
 
     fn replace_and_mark_text_in_range(
@@ -2760,6 +2673,7 @@ impl EntityInputHandler for ScreenView {
         cx: &mut Context<Self>,
     ) {
         self.marked = (!new_text.is_empty()).then(|| new_text.to_owned());
+        self.follow_taking();
         cx.notify();
     }
 
@@ -2799,19 +2713,20 @@ impl EntityInputHandler for ScreenView {
     }
 }
 
-/// The modifier keys that went down or up between `was` and `now`, as presses and releases.
-/// The fn key is left out: the worker's own fn setting (emoji picker, dictation) would fire.
-fn modifier_keys(was: Modifiers, now: Modifiers) -> Vec<(KeyCode, KeyAction)> {
-    [
-        (was.shift, now.shift, KeyCode::ShiftLeft),
-        (was.control, now.control, KeyCode::ControlLeft),
-        (was.alt, now.alt, KeyCode::AltLeft),
-        (was.platform, now.platform, KeyCode::MetaLeft),
-    ]
-    .into_iter()
-    .filter(|(before, after, _)| before != after)
-    .map(|(_, down, code)| (code, if down { KeyAction::Press } else { KeyAction::Release }))
-    .collect()
+/// Keys that only hold a modifier: let go of after the others.
+const fn is_modifier(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::ShiftLeft
+            | KeyCode::ShiftRight
+            | KeyCode::ControlLeft
+            | KeyCode::ControlRight
+            | KeyCode::AltLeft
+            | KeyCode::AltRight
+            | KeyCode::MetaLeft
+            | KeyCode::MetaRight
+            | KeyCode::Fn
+    )
 }
 
 /// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the worker read its pasteboard.
@@ -3068,38 +2983,38 @@ mod tests {
 
     /// A modifier pressed on its own reaches the worker as that key: each one that moves is a
     /// press or a release carrying the new state, an unchanged state sends nothing, and the
-    /// fn key is never forwarded.
+    /// fn key is never forwarded as a key, only as the state the others carry.
     #[gpui::test]
     fn modifier_keys_go_to_the_worker_as_they_move(cx: &mut gpui::TestAppContext) {
         let (view, mut rx) = view(cx);
         let key = |req: &ScreenRequest| match req {
-            ScreenRequest::Input {
-                input: ScreenInput::Key { code, action, mods, text }, ..
-            } => Some((*code, *action, *mods, text.clone())),
+            ScreenRequest::Input { input: ScreenInput::Key { code, action, mods }, .. } => {
+                Some((*code, *action, *mods))
+            }
             _ => None,
         };
         let shift = Modifiers { shift: true, ..Modifiers::default() };
-        view.update(cx, |v, cx| v.modifiers(shift, cx));
+        view.update(cx, |v, _| v.modifiers_moved(shift, false));
         assert_eq!(
             sent(&mut rx).iter().filter_map(key).collect::<Vec<_>>(),
-            vec![(KeyCode::ShiftLeft, KeyAction::Press, Mods::SHIFT, None)]
+            vec![(KeyCode::ShiftLeft, KeyAction::Press, Mods::SHIFT)]
         );
-        view.update(cx, |v, cx| v.modifiers(shift, cx));
+        view.update(cx, |v, _| v.modifiers_moved(shift, false));
         assert!(sent(&mut rx).is_empty(), "nothing moved");
         let both =
             Modifiers { shift: true, platform: true, function: true, ..Modifiers::default() };
-        view.update(cx, |v, cx| v.modifiers(both, cx));
+        view.update(cx, |v, _| v.modifiers_moved(both, false));
         assert_eq!(
             sent(&mut rx).iter().filter_map(key).collect::<Vec<_>>(),
-            vec![(KeyCode::MetaLeft, KeyAction::Press, Mods::SHIFT | Mods::SUPER, None)],
-            "⌘ joins ⇧; fn stays local"
+            vec![(KeyCode::MetaLeft, KeyAction::Press, Mods::SHIFT | Mods::SUPER | Mods::FN)],
+            "⌘ joins ⇧; fn rides on it"
         );
-        view.update(cx, |v, cx| v.modifiers(Modifiers::default(), cx));
+        view.update(cx, |v, _| v.modifiers_moved(Modifiers::default(), false));
         assert_eq!(
             sent(&mut rx).iter().filter_map(key).collect::<Vec<_>>(),
             vec![
-                (KeyCode::ShiftLeft, KeyAction::Release, Mods::empty(), None),
-                (KeyCode::MetaLeft, KeyAction::Release, Mods::empty(), None),
+                (KeyCode::ShiftLeft, KeyAction::Release, Mods::empty()),
+                (KeyCode::MetaLeft, KeyAction::Release, Mods::empty()),
             ]
         );
     }
@@ -3121,10 +3036,10 @@ mod tests {
         };
         let cmd = Modifiers { platform: true, ..Modifiers::default() };
         view.update(cx, |v, cx| {
-            v.modifiers(cmd, cx);
+            v.modifiers_moved(cmd, false);
             let a = Keystroke { modifiers: cmd, key: "a".into(), key_char: None };
-            v.press_key(&a, false, None);
-            v.press_key(&a, true, None);
+            v.key_pressed(&a, false, cx);
+            v.key_pressed(&a, true, cx);
         });
         assert_eq!(
             keys(sent(&mut rx)),
@@ -3134,13 +3049,13 @@ mod tests {
                 (KeyCode::A, KeyAction::Repeat),
             ]
         );
-        view.update(cx, ScreenView::let_go);
+        view.update(cx, |v, cx| v.let_go(cx));
         assert_eq!(
             keys(sent(&mut rx)),
             vec![(KeyCode::A, KeyAction::Release), (KeyCode::MetaLeft, KeyAction::Release)],
             "the key, then the modifier, let go"
         );
-        view.update(cx, ScreenView::let_go);
+        view.update(cx, |v, cx| v.let_go(cx));
         assert!(sent(&mut rx).is_empty(), "nothing held: nothing sent");
     }
 
@@ -3236,26 +3151,32 @@ mod tests {
             v.press(chord("a"), cx);
             assert!(!v.sticky(Sticky::Command), "armed for one key only");
         });
-        let keys: Vec<(KeyAction, Mods, Option<String>)> = sent(&mut rx)
+        let keys: Vec<(KeyAction, Mods)> = sent(&mut rx)
             .into_iter()
             .filter_map(|req| match req {
-                ScreenRequest::Input {
-                    input: ScreenInput::Key { action, mods, text, .. }, ..
-                } => Some((action, mods, text)),
+                ScreenRequest::Input { input: ScreenInput::Key { action, mods, .. }, .. } => {
+                    Some((action, mods))
+                }
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            keys,
-            [(KeyAction::Press, Mods::SUPER, None), (KeyAction::Release, Mods::SUPER, None)]
-        );
-        // The soft keyboard's stroke carries the typed character.
+        assert_eq!(keys, [(KeyAction::Press, Mods::SUPER), (KeyAction::Release, Mods::SUPER)]);
+        // A plain key is its place; a character with none is typed as text.
         let typed = Keystroke { key_char: Some("b".to_owned()), ..chord("b") };
         view.update(cx, |v, cx| v.press(typed, cx));
         let plain = sent(&mut rx);
         assert!(
-            matches!(plain.as_slice(), [ScreenRequest::Input { input: ScreenInput::Key { mods, text: Some(t), .. }, .. }, _] if mods.is_empty() && t == "b"),
-            "a plain key types its text: {plain:?}"
+            matches!(plain.as_slice(), [ScreenRequest::Input { input: ScreenInput::Key { code: KeyCode::B, mods, .. }, .. }, _] if mods.is_empty()),
+            "a plain key goes by its place: {plain:?}"
+        );
+        let ch = Keystroke { key_char: Some("ч".to_owned()), ..chord("ч") };
+        view.update(cx, |v, cx| v.press(ch, cx));
+        assert_eq!(
+            sent(&mut rx),
+            [ScreenRequest::Input {
+                stream: StreamId(4),
+                input: ScreenInput::Text { text: "ч".to_owned() }
+            }]
         );
         view.update(cx, |v, _| {
             assert!(!v.muted());
@@ -3676,10 +3597,10 @@ mod tests {
         cx.simulate_mouse_down(middle, MouseButton::Right, Modifiers::default());
         cx.run_until_parked();
         drop(inputs(&mut rx));
-        view.update(cx, ScreenView::let_go);
+        view.update(cx, |v, cx| v.let_go(cx));
         let got = inputs(&mut rx);
         assert_eq!(released(&got), [(ProtoButton::Right, 400.0, 300.0)], "{got:?}");
-        view.update(cx, ScreenView::let_go);
+        view.update(cx, |v, cx| v.let_go(cx));
         assert!(inputs(&mut rx).is_empty(), "let go once");
     }
 
@@ -3713,8 +3634,7 @@ mod tests {
             ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx)
         });
         let mv = |x: f32| ScreenInput::Move { x, y: 0.0 };
-        let key =
-            |action| ScreenInput::Key { code: KeyCode::A, action, mods: Mods::SUPER, text: None };
+        let key = |action| ScreenInput::Key { code: KeyCode::A, action, mods: Mods::SUPER };
         let button = |down| ScreenInput::Button {
             button: ProtoButton::Left,
             down,

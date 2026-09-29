@@ -30,20 +30,26 @@ pub const TYPE_CLIPBOARD: &str = "Type the clipboard";
 pub const SEND_SYSTEM_KEYS: &str = "Send system shortcuts";
 /// The palette's name for [`ToggleSystemKeys`] while the shortcuts go to the worker.
 pub const KEEP_SYSTEM_KEYS: &str = "Keep system shortcuts on this Mac";
+/// What a notice says when macOS kept its hotkeys and only the tap's own list goes.
+pub const ONLY_CHORDS: &str = "macOS kept its shortcuts: only the app switcher, Spotlight, \
+    Spaces and screenshots go to the remote Mac";
 
 /// What takes the system's shortcuts off this Mac: the session tap
 /// ([`slopty_platform::system_keys::Tap`]), or a stand-in in tests, which never make a tap.
 pub trait KeyPort {
     /// Start tapping, the chords taken going to `chords`; whether it taps.
     fn install(&mut self, chords: tokio::sync::mpsc::UnboundedSender<Chord>) -> bool;
-    /// Take chords now, or let them be.
-    fn arm(&self, on: bool);
+    /// Take chords now, or let them be: which go.
+    fn arm(&self, on: bool) -> Taking;
     /// Ask the person for what tapping needs (Accessibility).
     fn ask(&self);
 }
 
 /// A chord taken off this Mac.
 pub type Chord = slopty_platform::system_keys::Chord;
+
+/// Which of the system's shortcuts the tap takes.
+pub type Taking = slopty_platform::system_keys::Taking;
 
 /// The session tap, made the first time the person turns system shortcuts on.
 #[cfg(target_os = "macos")]
@@ -62,10 +68,8 @@ impl KeyPort for SessionTap {
         self.0.is_some()
     }
 
-    fn arm(&self, on: bool) {
-        if let Some(tap) = &self.0 {
-            tap.arm(on);
-        }
+    fn arm(&self, on: bool) -> Taking {
+        self.0.as_ref().map_or(Taking::Off, |tap| tap.arm(on))
     }
 
     fn ask(&self) {
@@ -143,6 +147,9 @@ pub(super) struct Desktop {
     tapping: Option<Task<()>>,
     /// The tap takes chords now.
     armed: bool,
+    /// Disarms the tap the moment the workspace's window stops being the key window, rather than
+    /// at its next frame, which an inactive window may never draw.
+    deactivated: Option<gpui::Subscription>,
     /// A tile whose view went while it had the keyboard: its next view takes it.
     refocus: Option<ItemId>,
 }
@@ -153,7 +160,15 @@ impl Default for Desktop {
         let keys: Option<Box<dyn KeyPort>> = Some(Box::new(SessionTap::default()));
         #[cfg(not(target_os = "macos"))]
         let keys: Option<Box<dyn KeyPort>> = None;
-        Self { key: None, wake: None, keys, tapping: None, armed: false, refocus: None }
+        Self {
+            key: None,
+            wake: None,
+            keys,
+            tapping: None,
+            armed: false,
+            deactivated: None,
+            refocus: None,
+        }
     }
 }
 
@@ -333,10 +348,19 @@ impl WorkspaceView {
     }
 
     /// Arm the tap while a remote tile that sends system shortcuts has the keyboard in the
-    /// active window, and nothing is over it; disarm it the moment one of those ends.
-    pub(super) fn arm_system_keys(&mut self, window: &Window, cx: &gpui::App) {
+    /// active window, and nothing is over it; disarm it the moment one of those ends. The
+    /// window going inactive disarms it as it happens; the tap itself lets the shortcuts be as
+    /// soon as another app is in front. Armed with only the tap's own list (macOS kept its
+    /// hotkeys), a notice says which go.
+    pub(super) fn arm_system_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.desktop.tapping.is_none() {
             return;
+        }
+        if self.desktop.deactivated.is_none() {
+            let observed = cx.observe_window_activation(window, |this, window, cx| {
+                this.arm_system_keys(window, cx);
+            });
+            self.desktop.deactivated = Some(observed);
         }
         let armed = window.is_window_active()
             && self.palette.is_none()
@@ -344,16 +368,19 @@ impl WorkspaceView {
                 let view = view.read(cx);
                 view.system_keys() && view.focus_handle(cx).is_focused(window)
             });
-        if armed != self.desktop.armed {
-            self.desktop.armed = armed;
-            if let Some(keys) = &self.desktop.keys {
-                keys.arm(armed);
-            }
+        if armed == self.desktop.armed {
+            return;
+        }
+        self.desktop.armed = armed;
+        let taking = self.desktop.keys.as_ref().map_or(Taking::Off, |keys| keys.arm(armed));
+        if taking == Taking::Chords {
+            self.show_notice(ONLY_CHORDS.to_owned(), cx);
         }
     }
 
-    /// "Type the clipboard": this device's clipboard text typed into the focused remote tile
-    /// key by key, the first [`TYPE_MAX`] bytes of it.
+    /// "Type the clipboard": this device's clipboard text typed into the focused remote tile in
+    /// paced bursts, the first [`TYPE_MAX`] bytes of it. Named keys (Return, Tab) go as keys and
+    /// the rest as text, so any script arrives as written.
     pub fn type_clipboard(
         &mut self,
         _: &TypeClipboard,

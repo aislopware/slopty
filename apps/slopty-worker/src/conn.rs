@@ -1467,7 +1467,7 @@ mod tests {
     use super::{Heard, Input, InputOrder, Route, ScreenOrder, StreamId, route};
 
     fn key(code: KeyCode, mods: Mods) -> ScreenInput {
-        ScreenInput::Key { code, action: KeyAction::Press, mods, text: None }
+        ScreenInput::Key { code, action: KeyAction::Press, mods }
     }
 
     fn opened(id: SessionId) -> WorkerMsg {
@@ -1868,7 +1868,8 @@ mod lossy {
         let (out, mut told) = mpsc::channel(64);
         tokio::spawn(async move { while told.recv().await.is_some() {} });
         let serving = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commanded, &out, None).await;
+            let claim = crate::screens::fake::unsourced();
+            serve(&mut stream, ClientId::new(), &mut commanded, &out, None, &claim).await;
             stream.close().await;
         });
 

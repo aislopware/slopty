@@ -6,16 +6,41 @@
 //! injector makes can be asserted in a unit test without Accessibility access and without a
 //! single real event reaching the desktop.
 
-use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+use objc2_app_kit::{
+    NSApplicationActivationOptions, NSEvent, NSEventModifierFlags, NSEventType,
+    NSRunningApplication,
+};
 use objc2_core_foundation::{CFRetained, CGPoint};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventType, CGKeyCode, CGMouseButton,
-    CGScrollEventUnit,
+    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
+    CGEventType, CGKeyCode, CGMouseButton, CGScrollEventUnit,
 };
+use objc2_foundation::NSPoint;
 use slopty_capture::Rect;
-use slopty_proto::screen::{CaptureTarget, ScrollPhase};
+use slopty_platform::keyboard::nx;
+use slopty_proto::screen::{CaptureTarget, MediaKey, ScrollPhase};
 
 use crate::InputError;
+use crate::injector::SharedCaps;
+
+/// What every event this worker posts carries in `kCGEventSourceUserData`, so the worker can
+/// tell its own events from the person's at its desk ("SLOP").
+pub const SLOPTY_EVENT: i64 = 0x534c_4f50;
+
+/// `kVK_Space` (`<HIToolbox/Events.h>`): the key committed text rides on, as Chrome Remote
+/// Desktop's does. Never keycode 0, which some input methods read as the A key.
+const TEXT_CARRIER: CGKeyCode = 0x31;
+
+/// A media key's `data1`: the key in bits 16–31, its state in bits 8–15.
+#[must_use]
+pub const fn media_data1(key: MediaKey, down: bool) -> isize {
+    let key = match key {
+        MediaKey::PlayPause => nx::KEYTYPE_PLAY,
+        MediaKey::Next => nx::KEYTYPE_NEXT,
+        MediaKey::Previous => nx::KEYTYPE_PREVIOUS,
+    };
+    (key << 16) | ((if down { nx::KEYDOWN } else { nx::KEYUP }) << 8)
+}
 
 /// `CGScrollPhase` values (`IOKit/hidsystem/IOLLEvent.h`).
 mod scroll_phase {
@@ -74,7 +99,8 @@ pub enum Event {
         /// Momentum phase.
         momentum: ScrollPhase,
     },
-    /// Key press, repeat or release.
+    /// Key press, repeat or release, by position only: the target's layout makes the
+    /// character.
     Key {
         /// Virtual keycode.
         vk: CGKeyCode,
@@ -84,8 +110,21 @@ pub enum Event {
         modifier: bool,
         /// Auto-repeat.
         repeat: bool,
-        /// The client's text for the key, attached with `CGEventKeyboardSetUnicodeString`.
-        text: Option<String>,
+    },
+    /// Committed text, at most [`crate::text::MOST_UNITS`] UTF-16 units, on the Space key's
+    /// press or release with `CGEventKeyboardSetUnicodeString`.
+    Text {
+        /// The text.
+        text: String,
+        /// The press (`true`) or the release.
+        down: bool,
+    },
+    /// A media key: a system-defined event (`NSSystemDefined`, subtype 8).
+    Media {
+        /// Which.
+        key: MediaKey,
+        /// Pressed, or let go.
+        down: bool,
     },
 }
 
@@ -100,7 +139,8 @@ pub struct Post {
     pub event: Event,
 }
 
-/// The worker-side services an injector needs: window geometry, app activation, posting.
+/// The worker-side services an injector needs: window geometry, app activation, posting, and
+/// the Caps Lock state.
 pub trait Backend {
     /// The pid owning a window target; `None` for displays or unknown windows.
     fn owner_pid(&self, target: CaptureTarget) -> Option<i32>;
@@ -112,11 +152,39 @@ pub trait Backend {
     fn activate(&mut self, pid: i32) -> Result<(), InputError>;
     /// Post one event.
     fn post(&mut self, post: Post) -> Result<(), InputError>;
+    /// Whether Caps Lock is on; `None` when the HID system would not say, as a stand-in that
+    /// keeps no lock answers.
+    fn caps_lock(&mut self) -> Option<bool> {
+        None
+    }
+    /// Set Caps Lock's state, the lock itself rather than a key. A stand-in that keeps no lock
+    /// takes it and does nothing.
+    fn set_caps_lock(&mut self, _on: bool) -> Result<(), InputError> {
+        Ok(())
+    }
+    /// The streams holding this backend's Caps Lock: the worker's one lock, shared by every
+    /// injector.
+    fn caps_claims(&self) -> SharedCaps {
+        std::sync::Arc::clone(&WORKER_CAPS)
+    }
 }
 
+/// The worker's Caps Lock claim ([`crate::CapsClaims`]).
+static WORKER_CAPS: std::sync::LazyLock<SharedCaps> = std::sync::LazyLock::new(SharedCaps::default);
+
 /// The real thing: CoreGraphics events, AppKit activation, the WindowServer's window list.
+///
+/// Its events come from a `CGEventSource` with its own private state, one per input thread (so
+/// one per stream): the modifiers the client holds never mix with the keys the person at the
+/// worker holds, and theirs never leak into the client's.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct System;
+
+thread_local! {
+    /// This thread's event source, made on its first post.
+    static SOURCE: Option<CFRetained<CGEventSource>> =
+        CGEventSource::new(CGEventSourceStateID::Private);
+}
 
 impl Backend for System {
     fn owner_pid(&self, target: CaptureTarget) -> Option<i32> {
@@ -144,21 +212,36 @@ impl Backend for System {
     }
 
     fn post(&mut self, post: Post) -> Result<(), InputError> {
-        let event = build(&post)?;
+        let event = SOURCE.with(|source| build(&post, source.as_deref()))?;
         match post.route {
             Route::Pid(pid) => CGEvent::post_to_pid(pid, Some(&event)),
             Route::Hid => CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event)),
         }
         Ok(())
     }
+
+    fn caps_lock(&mut self) -> Option<bool> {
+        hid::caps_lock()
+    }
+
+    fn set_caps_lock(&mut self, on: bool) -> Result<(), InputError> {
+        hid::set_caps_lock(on)
+    }
 }
 
-/// Build the `CGEvent` for a [`Post`].
-fn build(post: &Post) -> Result<CFRetained<CGEvent>, InputError> {
+/// Build the `CGEvent` for a [`Post`] from `source`, tagged [`SLOPTY_EVENT`].
+///
+/// # Errors
+///
+/// CoreGraphics or AppKit would not make the event.
+pub fn build(
+    post: &Post,
+    source: Option<&CGEventSource>,
+) -> Result<CFRetained<CGEvent>, InputError> {
     let event = match &post.event {
         Event::Mouse { kind, at, button, number, clicks } => {
             let event =
-                CGEvent::new_mouse_event(None, *kind, *at, *button).ok_or(InputError::Create)?;
+                CGEvent::new_mouse_event(source, *kind, *at, *button).ok_or(InputError::Create)?;
             CGEvent::set_integer_value_field(
                 Some(&event),
                 CGEventField::MouseEventButtonNumber,
@@ -176,7 +259,7 @@ fn build(post: &Post) -> Result<CFRetained<CGEvent>, InputError> {
         Event::Scroll { at, dx, dy, precise, phase, momentum } => {
             let units = if *precise { CGScrollEventUnit::Pixel } else { CGScrollEventUnit::Line };
             let (wheel1, wheel2) = (round(*dy), round(*dx));
-            let event = CGEvent::new_scroll_wheel_event2(None, units, 2, wheel1, wheel2, 0)
+            let event = CGEvent::new_scroll_wheel_event2(source, units, 2, wheel1, wheel2, 0)
                 .ok_or(InputError::Create)?;
             CGEvent::set_location(Some(&event), *at);
             let set = |field: CGEventField, value: i64| {
@@ -201,8 +284,9 @@ fn build(post: &Post) -> Result<CFRetained<CGEvent>, InputError> {
             set(CGEventField::ScrollWheelEventMomentumPhase, momentum_phase_value(*momentum));
             event
         }
-        Event::Key { vk, down, modifier, repeat, text } => {
-            let event = CGEvent::new_keyboard_event(None, *vk, *down).ok_or(InputError::Create)?;
+        Event::Key { vk, down, modifier, repeat } => {
+            let event =
+                CGEvent::new_keyboard_event(source, *vk, *down).ok_or(InputError::Create)?;
             if *modifier {
                 CGEvent::set_type(Some(&event), CGEventType::FlagsChanged);
             }
@@ -213,20 +297,134 @@ fn build(post: &Post) -> Result<CFRetained<CGEvent>, InputError> {
                     1,
                 );
             }
-            if let Some(text) = text {
-                let utf16: Vec<u16> = text.encode_utf16().collect();
-                let len = u64::try_from(utf16.len()).unwrap_or(u64::MAX);
-                // SAFETY: `utf16` outlives the call and `len` is its exact length, as the
-                // function requires; the event copies the string.
-                unsafe {
-                    CGEvent::keyboard_set_unicode_string(Some(&event), len, utf16.as_ptr());
-                }
+            event
+        }
+        Event::Text { text, down } => {
+            let event = CGEvent::new_keyboard_event(source, TEXT_CARRIER, *down)
+                .ok_or(InputError::Create)?;
+            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let len = u64::try_from(utf16.len()).map_err(|_too_long| InputError::Create)?;
+            // SAFETY: `utf16` outlives the call and `len` is its exact length, as the function
+            // requires; the event copies the string.
+            unsafe {
+                CGEvent::keyboard_set_unicode_string(Some(&event), len, utf16.as_ptr());
             }
             event
         }
+        Event::Media { key, down } => {
+            let flags = NSEventModifierFlags(
+                usize::try_from(post.flags.0).map_err(|_too_wide| InputError::Create)?,
+            );
+            NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(
+                NSEventType::SystemDefined,
+                NSPoint::ZERO,
+                flags,
+                0.0,
+                0,
+                None,
+                nx::SUBTYPE_AUX_CONTROL_BUTTONS,
+                media_data1(*key, *down),
+                -1,
+            )
+            .and_then(|ns| ns.CGEvent())
+            .map(CFRetained::from)
+            .ok_or(InputError::Create)?
+        }
     };
-    CGEvent::set_flags(Some(&event), post.flags);
+    if !matches!(post.event, Event::Media { .. }) {
+        CGEvent::set_flags(Some(&event), post.flags);
+    }
+    CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, SLOPTY_EVENT);
     Ok(event)
+}
+
+/// Caps Lock through the HID system's parameter connection (`IOHIDSetModifierLockState`,
+/// `<IOKit/hidsystem/IOHIDLib.h>`): the lock itself, as a real key's press would leave it, and
+/// its light.
+mod hid {
+    use objc2_core_foundation::{CFDictionary, CFRetained};
+    use objc2_io_kit::{
+        IOHIDGetModifierLockState, IOHIDSetModifierLockState, IOObjectRelease,
+        IOServiceGetMatchingService, IOServiceMatching, IOServiceOpen, io_connect_t,
+        kIOHIDCapsLockState, kIOHIDParamConnectType, kIOMainPortDefault,
+    };
+
+    use crate::InputError;
+
+    /// `kIOHIDCapsLockState` as the selector argument, an `int` in `IOHIDLib.h`.
+    const CAPS_LOCK: i32 = kIOHIDCapsLockState.cast_signed();
+
+    /// The process's parameter connection to the HID system, opened on first use and kept for
+    /// the process's life, so a Caps Lock change costs its call alone. A failed open is tried
+    /// again next time.
+    static CONNECTION: parking_lot::Mutex<Option<io_connect_t>> = parking_lot::const_mutex(None);
+
+    /// Open a parameter connection to the HID system.
+    fn open() -> Result<io_connect_t, InputError> {
+        // SAFETY: a NUL-terminated class name; the answer is a +1 dictionary or none.
+        let matching = unsafe { IOServiceMatching(c"IOHIDSystem".as_ptr()) };
+        // SAFETY: `kIOMainPortDefault` is IOKit's constant, written once at load.
+        let main_port = unsafe { kIOMainPortDefault };
+        // SAFETY: a mutable dictionary is a dictionary (CoreFoundation's own subtyping).
+        let matching = matching.map(|m| unsafe { CFRetained::cast_unchecked::<CFDictionary>(m) });
+        // SAFETY: the matching dictionary is consumed by the call, as IOKit documents; none
+        // matches nothing.
+        let service = unsafe { IOServiceGetMatchingService(main_port, matching) };
+        if service == 0 {
+            return Err(InputError::Create);
+        }
+        let mut connect = 0;
+        #[expect(deprecated, reason = "libc points at the mach2 crate for this one call")]
+        // SAFETY: reads this task's own port, which the kernel set at process start.
+        let task = unsafe { libc::mach_task_self() };
+        // SAFETY: a live service, this task's own port, and an out pointer that outlives the
+        // call.
+        let opened =
+            unsafe { IOServiceOpen(service, task, kIOHIDParamConnectType, &raw mut connect) };
+        // The service reference `IOServiceGetMatchingService` handed over, released once; the
+        // connection keeps what it needs.
+        IOObjectRelease(service);
+        if opened != 0 {
+            return Err(InputError::Create);
+        }
+        Ok(connect)
+    }
+
+    /// The kept connection, opened now if it is not yet. The lock covers the open only; the
+    /// calls on the connection, Mach messages, need none.
+    fn connection() -> Result<io_connect_t, InputError> {
+        let mut kept = CONNECTION.lock();
+        let connect = match *kept {
+            Some(connect) => connect,
+            None => *kept.insert(open()?),
+        };
+        drop(kept);
+        Ok(connect)
+    }
+
+    /// Run `f` on the kept connection.
+    fn with_connection<T>(
+        f: impl FnOnce(io_connect_t) -> Result<T, InputError>,
+    ) -> Result<T, InputError> {
+        f(connection()?)
+    }
+
+    pub(super) fn caps_lock() -> Option<bool> {
+        with_connection(|connect| {
+            let mut on = false;
+            // SAFETY: an open parameter connection and an out pointer that outlives the call.
+            let got = unsafe { IOHIDGetModifierLockState(connect, CAPS_LOCK, &raw mut on) };
+            if got == 0 { Ok(on) } else { Err(InputError::Create) }
+        })
+        .ok()
+    }
+
+    pub(super) fn set_caps_lock(on: bool) -> Result<(), InputError> {
+        with_connection(|connect| {
+            let set = IOHIDSetModifierLockState(connect, CAPS_LOCK, on);
+            if set == 0 { Ok(()) } else { Err(InputError::Create) }
+        })
+    }
 }
 
 /// A fake backend for tests: fixed geometry, an activation counter, every post kept.
@@ -234,7 +432,7 @@ fn build(post: &Post) -> Result<CFRetained<CGEvent>, InputError> {
 /// Nothing here touches CoreGraphics or AppKit, so the injector's whole decision path —
 /// point mapping, drag tracking, routing, activation, text — runs under `cargo nextest`
 /// with no permissions and no side effects.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone)]
 pub struct Recorder {
     /// What [`Backend::bounds`] answers.
     pub bounds: Option<Rect>,
@@ -250,6 +448,12 @@ pub struct Recorder {
     pub activations: Vec<i32>,
     /// Everything posted, in order.
     pub posts: Vec<Post>,
+    /// Caps Lock as it stands; `None`, the HID system would not say.
+    pub caps: Option<bool>,
+    /// Every Caps Lock state set, in order.
+    pub locks: Vec<bool>,
+    /// The Caps Lock claim this recorder's injectors share: its own, and its clones'.
+    pub caps_claims: SharedCaps,
 }
 
 impl Recorder {
@@ -304,6 +508,20 @@ impl Backend for Recorder {
         self.posts.push(post);
         Ok(())
     }
+
+    fn caps_lock(&mut self) -> Option<bool> {
+        self.caps
+    }
+
+    fn set_caps_lock(&mut self, on: bool) -> Result<(), InputError> {
+        self.locks.push(on);
+        self.caps = Some(on);
+        Ok(())
+    }
+
+    fn caps_claims(&self) -> SharedCaps {
+        std::sync::Arc::clone(&self.caps_claims)
+    }
 }
 
 /// `ScrollPhase` → `CGScrollPhase`.
@@ -339,6 +557,84 @@ const fn round(v: f32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The string an event carries.
+    fn unicode(event: &CGEvent) -> String {
+        let mut units = [0_u16; 32];
+        let mut len = 0;
+        // SAFETY: `units` holds the 32 units the call may write, `len` outlives the call.
+        unsafe {
+            CGEvent::keyboard_get_unicode_string(Some(event), 32, &raw mut len, units.as_mut_ptr());
+        }
+        String::from_utf16_lossy(&units[..usize::try_from(len).unwrap()])
+    }
+
+    fn post(event: Event, flags: CGEventFlags) -> Post {
+        Post { route: Route::Hid, flags, event }
+    }
+
+    fn private() -> CFRetained<CGEventSource> {
+        CGEventSource::new(CGEventSourceStateID::Private).unwrap()
+    }
+
+    /// A key is its position, its press or release, its repeat and its flags, and carries no
+    /// string, so the target's layout, dead keys and input method make the character; every
+    /// event is tagged as the worker's own. Built, never posted.
+    #[test]
+    fn keys_carry_no_unicode_string() {
+        let source = private();
+        let flags = CGEventFlags::MaskCommand | CGEventFlags::MaskSecondaryFn;
+        let key = Event::Key { vk: 0x0c, down: true, modifier: false, repeat: true };
+        let event = build(&post(key, flags), Some(&source)).unwrap();
+        let field = |f| CGEvent::integer_value_field(Some(&event), f);
+        assert_eq!(field(CGEventField::KeyboardEventKeycode), 0x0c, "kVK_ANSI_Q");
+        assert_eq!(field(CGEventField::KeyboardEventAutorepeat), 1);
+        assert_eq!(field(CGEventField::EventSourceUserData), SLOPTY_EVENT);
+        assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::KeyDown);
+        assert_eq!(CGEvent::flags(Some(&event)), flags);
+        assert_eq!(unicode(&event), "", "no string: the layout decides");
+
+        let shift = Event::Key { vk: 0x3c, down: false, modifier: true, repeat: false };
+        let event = build(&post(shift, CGEventFlags::empty()), Some(&source)).unwrap();
+        assert_eq!(CGEvent::r#type(Some(&event)), CGEventType::FlagsChanged);
+        let code = CGEvent::integer_value_field(Some(&event), CGEventField::KeyboardEventKeycode);
+        assert_eq!(code, 0x3c, "the right shift key");
+    }
+
+    /// Committed text rides on the Space key's press and release, carrying the whole piece.
+    #[test]
+    fn text_rides_on_space_with_its_string() {
+        for (text, down) in [("tiếng Việt", true), ("日本語", false), ("🇻🇳", true)] {
+            let piece = Event::Text { text: text.to_owned(), down };
+            let event = build(&post(piece, CGEventFlags::empty()), None).unwrap();
+            let code =
+                CGEvent::integer_value_field(Some(&event), CGEventField::KeyboardEventKeycode);
+            assert_eq!(code, 0x31, "kVK_Space, never keycode 0");
+            let kind = if down { CGEventType::KeyDown } else { CGEventType::KeyUp };
+            assert_eq!(CGEvent::r#type(Some(&event)), kind);
+            assert_eq!(unicode(&event), text);
+        }
+    }
+
+    /// A media key is a system-defined event of subtype 8 whose `data1` names the key and its
+    /// state, as AppKit reads it back.
+    #[test]
+    fn media_keys_post_system_defined_subtype_8() {
+        for (key, nx) in [(MediaKey::PlayPause, 16), (MediaKey::Next, 17), (MediaKey::Previous, 18)]
+        {
+            for (down, state) in [(true, 0x0a), (false, 0x0b)] {
+                let event =
+                    build(&post(Event::Media { key, down }, CGEventFlags::empty()), None).unwrap();
+                let ns = NSEvent::eventWithCGEvent(&event).unwrap();
+                assert_eq!(ns.r#type(), NSEventType::SystemDefined);
+                assert_eq!(ns.subtype().0, 8);
+                assert_eq!(ns.data1(), (nx << 16) | (state << 8), "{key:?} {down}");
+                let tag =
+                    CGEvent::integer_value_field(Some(&event), CGEventField::EventSourceUserData);
+                assert_eq!(tag, SLOPTY_EVENT);
+            }
+        }
+    }
 
     #[test]
     fn phases_use_the_iokit_values() {

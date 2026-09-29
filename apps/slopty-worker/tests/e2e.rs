@@ -3796,12 +3796,8 @@ mod tests {
         settled(&mut worker).await;
         assert_eq!(board.0.data(&text).unwrap(), b"copied on the worker", "announced, not pushed");
         // ⌘V aimed at a stream that does not exist: no event is posted anywhere.
-        let chord = ScreenInput::Key {
-            code: KeyCode::V,
-            action: KeyAction::Press,
-            mods: Mods::SUPER,
-            text: None,
-        };
+        let chord =
+            ScreenInput::Key { code: KeyCode::V, action: KeyAction::Press, mods: Mods::SUPER };
         let input = ScreenRequest::Input { stream: slopty_core::StreamId(77), input: chord };
         worker.tx.send(&ClientMsg::Screen(input)).await.unwrap();
         let (generation, format) = next_msg(&mut worker, |m| match m {

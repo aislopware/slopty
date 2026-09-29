@@ -21,6 +21,7 @@ udid = "udid"   # Apple device identifier (simctl/devicectl)
 rin = "rin"       # scroll back n lines
 kend = "kend"     # the End key
 WRONLY = "WRONLY" # the POSIX open(2) flag
+ue = "ue"         # ue(v), the H.26x unsigned exp-Golomb code (`slopty_codec::conformance`)
 
 [files]
 extend-exclude = [

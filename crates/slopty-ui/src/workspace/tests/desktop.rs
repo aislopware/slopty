@@ -12,7 +12,8 @@ use slopty_proto::screen::{DisplayKey, ScreenInput, VideoCodec, VirtualDisplay};
 
 use super::*;
 use crate::workspace::desktop::{
-    BACK_TO_PHYSICAL, Chord, KeyPort, OPEN_SIZED, SEND_SYSTEM_KEYS, TYPE_CLIPBOARD,
+    BACK_TO_PHYSICAL, Chord, KeyPort, ONLY_CHORDS, OPEN_SIZED, SEND_SYSTEM_KEYS, TYPE_CLIPBOARD,
+    Taking,
 };
 
 /// `target` streams as `stream` on `fake`'s worker, `width` × `height`.
@@ -54,14 +55,17 @@ fn sent(fake: &mut Fake, cx: &VisualTestContext) -> Vec<ClientMsg> {
     all
 }
 
-/// The keys the worker was sent, as presses: their code and text.
-fn presses(msgs: &[ClientMsg]) -> Vec<(KeyCode, Option<String>)> {
+/// What the worker was sent to type: text as it stands, a key press by its code.
+fn typed(msgs: &[ClientMsg]) -> Vec<String> {
     msgs.iter()
         .filter_map(|m| match m {
-            ClientMsg::Screen(ScreenRequest::Input {
-                input: ScreenInput::Key { code, action: KeyAction::Press, text, .. },
-                ..
-            }) => Some((*code, text.clone())),
+            ClientMsg::Screen(ScreenRequest::Input { input, .. }) => match input {
+                ScreenInput::Text { text } => Some(text.clone()),
+                ScreenInput::Key { code, action: KeyAction::Press, .. } => {
+                    Some(format!("{code:?}"))
+                }
+                _ => None,
+            },
             _ => None,
         })
         .collect()
@@ -71,8 +75,8 @@ fn palette_has(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, label: 
     view.update(cx, |v, cx| v.palette_lines(cx).iter().any(|l| l.label == label))
 }
 
-/// "Type the clipboard" types this device's clipboard into the focused window key by key, a
-/// line break as one ↩; a clipboard past 1 KB is cut there and says so, and one with no text
+/// "Type the clipboard" types this device's clipboard into the focused window as text, a line
+/// break as one ↩; a clipboard past 1 KB is cut there and says so, and one with no text
 /// types nothing and says that.
 #[gpui::test]
 fn the_clipboard_is_typed_into_the_focused_window(cx: &mut TestAppContext) {
@@ -92,27 +96,18 @@ fn the_clipboard_is_typed_into_the_focused_window(cx: &mut TestAppContext) {
     };
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("ok\r\nA".to_owned()));
     type_it(cx);
-    let typed = presses(&sent(&mut fake, cx));
-    assert_eq!(
-        typed,
-        [
-            (KeyCode::O, Some("o".to_owned())),
-            (KeyCode::K, Some("k".to_owned())),
-            (KeyCode::Enter, None),
-            (KeyCode::A, Some("A".to_owned())),
-        ]
-    );
+    assert_eq!(typed(&sent(&mut fake, cx)), ["ok", "Enter", "A"]);
 
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("é".repeat(600)));
     type_it(cx);
-    let typed = presses(&sent(&mut fake, cx));
-    assert_eq!(typed.len(), 512, "1 KB of two-byte characters, none cut in half");
+    let all = typed(&sent(&mut fake, cx)).concat();
+    assert_eq!(all, "é".repeat(512), "1 KB of two-byte characters, none cut in half");
     let said = view.read_with(cx, WorkspaceView::toast_text);
     assert_eq!(said.as_deref(), Some("Typed the first 1 KB of the clipboard"));
 
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
     type_it(cx);
-    assert!(presses(&sent(&mut fake, cx)).is_empty());
+    assert!(typed(&sent(&mut fake, cx)).is_empty());
     let said = view.read_with(cx, WorkspaceView::toast_text);
     assert_eq!(said.as_deref(), Some("The clipboard holds no text"));
 }
@@ -253,6 +248,8 @@ fn a_display_made_for_this_device_follows_its_tile(cx: &mut TestAppContext) {
 #[derive(Default)]
 struct Keys {
     denied: bool,
+    /// macOS keeps its hotkeys: only the tap's list goes.
+    chords_only: bool,
     asked: Rc<RefCell<bool>>,
     armed: Rc<RefCell<Vec<bool>>>,
     chords: Rc<RefCell<Option<mpsc::UnboundedSender<Chord>>>>,
@@ -267,8 +264,13 @@ impl KeyPort for Keys {
         true
     }
 
-    fn arm(&self, on: bool) {
+    fn arm(&self, on: bool) -> Taking {
         self.armed.borrow_mut().push(on);
+        match (on, self.chords_only) {
+            (false, _) => Taking::Off,
+            (true, false) => Taking::Every,
+            (true, true) => Taking::Chords,
+        }
     }
 
     fn ask(&self) {
@@ -360,4 +362,54 @@ fn system_shortcuts_go_to_the_remote_mac_per_tile(cx: &mut TestAppContext) {
     let said = view.read_with(cx, WorkspaceView::toast_text);
     assert_eq!(said.as_deref(), Some("System shortcuts stay on this Mac"));
     assert_eq!(armed.borrow().last(), Some(&false));
+}
+
+/// A remote window of `fake`'s Mac with the keyboard, system shortcuts on through `keys`: the
+/// tile, and what `keys` was armed to.
+fn armed_window(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    keys: Keys,
+) -> (TileRef, Rc<RefCell<Vec<bool>>>) {
+    cx.update(|window, _| window.activate_window());
+    let fake = connect(view, cx, 1, "studio");
+    let one = WindowId(7);
+    let tile = arrives(view, cx, &fake, ItemKind::Window { window: one }, 1);
+    opened(view, cx, &fake, 1, CaptureTarget::Window(one), (1280, 800));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.update(|window, cx| {
+        let screen = view.read(cx).screen(tile.item).cloned().expect("streaming");
+        window.focus(&screen.read(cx).focus_handle(cx), cx);
+    });
+    let armed = Rc::clone(&keys.armed);
+    view.update(cx, |v, _| v.set_key_port(Box::new(keys)));
+    view.update_in(cx, |v, window, cx| v.toggle_system_keys(&ToggleSystemKeys, window, cx));
+    cx.run_until_parked();
+    (tile, armed)
+}
+
+/// The window losing the key status lets the shortcuts be as it happens, and taking it back
+/// takes them again.
+#[gpui::test]
+fn the_window_going_inactive_lets_the_shortcuts_be(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (_tile, armed) = armed_window(&view, cx, Keys::default());
+    assert_eq!(armed.borrow().as_slice(), [true]);
+    cx.deactivate_window();
+    assert_eq!(armed.borrow().as_slice(), [true, false], "let be with the window");
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert_eq!(armed.borrow().as_slice(), [true, false, true], "taken again on the way back");
+}
+
+/// When macOS keeps its hotkeys and only the tap's own list goes, a notice says so rather
+/// than promising every shortcut.
+#[gpui::test]
+fn a_notice_says_when_only_the_chord_list_goes(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let keys = Keys { chords_only: true, ..Keys::default() };
+    let (_tile, armed) = armed_window(&view, cx, keys);
+    assert_eq!(armed.borrow().as_slice(), [true]);
+    let said = view.read_with(cx, WorkspaceView::toast_text);
+    assert_eq!(said.as_deref(), Some(ONLY_CHORDS));
 }

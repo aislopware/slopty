@@ -49,6 +49,9 @@ const MOVES_AT_ONCE: usize = 256;
 #[cfg(target_os = "macos")]
 const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long a daemon going down waits for the worker's own input source to be selected back.
+const SOURCE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Command line.
 #[derive(Parser, Debug)]
 #[command(name = "slopty-worker", version, about)]
@@ -181,6 +184,9 @@ pub struct Daemon {
     /// The displays made for clients, on the main thread; `None` where none can be made, and
     /// every `OpenDisplay` then streams a physical display.
     pub displays: Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>,
+    /// The keyboard input sources the streams' clients asked for, one claim each, and the
+    /// worker's own kept beside the data to come back even after a crash.
+    pub sources: slopty_input::sources::Sources,
 }
 
 impl Daemon {
@@ -344,16 +350,19 @@ fn main() -> Result<()> {
 }
 
 /// macOS: the main thread serves the run loop the displays made for clients live on
-/// (`CGVirtualDisplay` refuses every other thread), and the daemon runs on a thread beside it,
-/// ending the process when it ends.
+/// (`CGVirtualDisplay` refuses every other thread) and the input-source switches are heard on,
+/// and the daemon runs on a thread beside it, ending the process when it ends.
 #[cfg(target_os = "macos")]
 fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
     let displays = slopty_worker::screen::sized::on_main_queue();
+    let sources = slopty_input::sources::Sources::system();
+    // Lives as long as the main thread's run loop, which never returns.
+    let _heard = hear_switches(&sources);
     std::thread::Builder::new()
         .name("slopty-worker".to_owned())
         .spawn(move || {
             slopty_platform::user_interactive_thread();
-            let ended = runtime.block_on(run(displays));
+            let ended = runtime.block_on(run(displays, sources));
             drop(runtime);
             if let Err(e) = &ended {
                 tracing::error!(error = ?e, "worker stopped");
@@ -368,15 +377,35 @@ fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
     slopty_worker::screen::sized::park_main()
 }
 
+/// Every keyboard input-source switch on this Mac, told to `sources` as `HIToolbox` announces
+/// it, until the answer is dropped: a stream whose client's source another client took hears
+/// it, and an answer waits for its own switch. Made on the main thread, whose run loop
+/// delivers the notification.
+#[cfg(target_os = "macos")]
+fn hear_switches(
+    sources: &slopty_input::sources::Sources,
+) -> Option<slopty_platform::input_source::Watch> {
+    use slopty_platform::input_source;
+    let heard = sources.clone();
+    let watch = input_source::Watch::new(Box::new(move || heard.heard(input_source::current())));
+    if watch.is_some() {
+        sources.hearing();
+        sources.heard(input_source::current());
+    } else {
+        tracing::warn!("input-source switches unheard; a claim is answered as it is made");
+    }
+    watch
+}
+
 /// Elsewhere no display is made, and the daemon runs on the main thread.
 #[cfg(not(target_os = "macos"))]
 fn serve(runtime: tokio::runtime::Runtime) -> Result<()> {
-    let ended = runtime.block_on(run(None));
+    let ended = runtime.block_on(run(None, slopty_input::sources::Sources::system()));
     drop(runtime);
     ended
 }
 
-async fn run(displays: Displays) -> Result<()> {
+async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -393,6 +422,11 @@ async fn run(displays: Displays) -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let id = paths::worker_id(&data_dir)?;
+    // A run that ended with a client's source still selected puts the worker's own back first.
+    sources.keep_at(data_dir.join("input-source"));
+    // And the Caps Lock such a run left set, unless it was changed since.
+    #[cfg(target_os = "macos")]
+    slopty_input::keep_caps(data_dir.join("caps-lock"), &mut slopty_input::System);
     let local = args.bind.map_or_else(
         || slopty_net::endpoint::any(args.port),
         |ip| std::net::SocketAddr::new(ip, args.port),
@@ -458,6 +492,7 @@ async fn run(displays: Displays) -> Result<()> {
         follows: Arc::default(),
         claude_mod,
         displays,
+        sources,
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {
@@ -583,6 +618,10 @@ async fn run(displays: Displays) -> Result<()> {
     .await;
     // Last, so nothing a client sent before the close is posted after it.
     let_go().await;
+    // The worker's own input source back, and what it turned on for clients off.
+    if tokio::time::timeout(SOURCE_WAIT, daemon.sources.release_all()).await.is_err() {
+        tracing::warn!("the input source was not put back in time");
+    }
     ended
 }
 

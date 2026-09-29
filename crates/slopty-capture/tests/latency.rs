@@ -182,6 +182,7 @@ mod tests {
         CaptureConfig {
             width: size.0,
             height: size.1,
+            align: 16,
             fps: 60,
             format: PixelFormat::Nv12Full,
             queue_depth: depth,
@@ -324,6 +325,68 @@ mod tests {
             inner_mean < 2.0,
             "the crop shows a different picture: interior mean |Δ| {inner_mean:.3}"
         );
+    }
+
+    /// A padded surface carries the picture pixel for pixel, at its top-left, over black, on the
+    /// Retina panel where a point is two pixels. `destinationRect` is documented in pixels; were
+    /// it read in points the picture would cover the padding, and were it placed or scaled
+    /// differently the picture would not match the unpadded capture's. The picture is sized even
+    /// but off 16 on both sides, so each side gets padding. The window is its own Ghostty with a
+    /// white background, so the padding's black has something to stand against.
+    #[test]
+    fn a_live_padded_capture_is_the_bare_picture_over_black() {
+        if !gated() {
+            return;
+        }
+        let (_white, id, content) =
+            launch(&["sh", "-c", "printf '\\033[107m\\033[2J\\033[?25l'; exec sleep 600"]);
+        let window = Target::resolve(&content, CaptureTarget::Window(id)).expect("window target");
+        assert!(
+            (window.point_scale() - 2.0).abs() < f32::EPSILON,
+            "a Retina panel, where points and pixels differ: scale {}",
+            window.point_scale()
+        );
+        let off_16 = |side: u32| if side.is_multiple_of(16) { side - 2 } else { side };
+        let (pw, ph) = window.pixel_size();
+        let picture = (off_16(pw), off_16(ph));
+        let at = |align: u32| CaptureConfig { align, ..config(picture, 2, None) };
+        let (bare, bare_size) = one_frame(&window, &at(1));
+        let (padded, padded_size) = one_frame(&window, &at(16));
+        let (w, h) = (picture.0 as usize, picture.1 as usize);
+        assert_eq!(bare_size, (w, h), "an align of 1 pads nothing");
+        assert_eq!(padded_size, (w.next_multiple_of(16), h.next_multiple_of(16)), "padded to 16");
+        let surface_w = padded_size.0;
+
+        // The window's rounded corners are transparent and so black on both; 16 px in from every
+        // edge is the picture proper.
+        let (mut delta, mut lit, mut samples) = (0_u64, 0_u64, 0_u64);
+        for y in 16..h - 16 {
+            for x in 16..w - 16 {
+                let (was, is) = (bare[y * w + x], padded[y * surface_w + x]);
+                delta += u64::from(was.abs_diff(is));
+                lit += u64::from(was);
+                samples += 1;
+            }
+        }
+        let (delta, lit) = (delta as f64 / samples as f64, lit as f64 / samples as f64);
+        // The padding: every column right of the picture, and every row below it.
+        let padding: Vec<u8> = (0..padded_size.1)
+            .flat_map(|y| (0..surface_w).map(move |x| (x, y)))
+            .filter(|&(x, y)| x >= w || y >= h)
+            .map(|(x, y)| padded[y * surface_w + x])
+            .collect();
+        let brightest = padding.iter().copied().max().unwrap_or(0);
+        let dark = padding.iter().map(|&l| u64::from(l)).sum::<u64>() as f64 / padding.len() as f64;
+        eprintln!(
+            "{w}×{h} in {}×{}: picture mean |Δluma| {delta:.3}, luma {lit:.1}; padding {} px, \
+             mean luma {dark:.2}, max {brightest}",
+            padded_size.0,
+            padded_size.1,
+            padding.len()
+        );
+        assert!(delta < 2.0, "the padded picture differs from the bare one: mean |Δ| {delta:.3}");
+        assert!(lit > 32.0, "the window is lit against the black: mean luma {lit:.1}");
+        assert!(brightest <= 4, "the padding is black (full-range 0): brightest {brightest}");
     }
 
     /// What moving the crop costs: `updateConfiguration` with a shifted `sourceRect` on the

@@ -813,6 +813,46 @@ mod golden {
         );
     }
 
+    /// The keyboard of a remote window: a key by its position with its side, committed text,
+    /// Caps Lock's state, a media key, the client's input source and the worker's answer.
+    #[test]
+    fn screen_keyboard() {
+        use slopty_proto::screen::MediaKey;
+        let input = |input| ClientMsg::Screen(ScreenRequest::Input { stream: StreamId(7), input });
+        snap(
+            "client_screen_key",
+            &input(ScreenInput::Key {
+                code: KeyCode::Q,
+                action: KeyAction::Press,
+                mods: Mods::SUPER | Mods::SUPER_RIGHT | Mods::FN,
+            }),
+        );
+        snap(
+            "client_screen_text",
+            &input(ScreenInput::Text { text: "tiếng Việt 日本".to_owned() }),
+        );
+        snap("client_screen_lock", &input(ScreenInput::Lock { caps: true }));
+        snap(
+            "client_screen_media",
+            &input(ScreenInput::Media { key: MediaKey::PlayPause, down: true }),
+        );
+        snap(
+            "client_screen_keyboard_source",
+            &input(ScreenInput::KeyboardSource {
+                source: "com.apple.inputmethod.VietnameseIM.VietnameseSimpleTelex".to_owned(),
+            }),
+        );
+        snap("client_screen_keyboard_released", &input(ScreenInput::KeyboardReleased));
+        snap(
+            "worker_screen_keyboard_source",
+            &WorkerMsg::Screen(ScreenEvent::KeyboardSource {
+                stream: StreamId(7),
+                source: "com.apple.keylayout.French".to_owned(),
+                applied: true,
+            }),
+        );
+    }
+
     /// A quality that asks for colour at every pixel.
     #[test]
     fn screen_quality_full_chroma() {

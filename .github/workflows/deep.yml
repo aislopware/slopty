@@ -35,11 +35,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri, rust-src, rustfmt
-      # sccache holds the compiled units; this keeps only the registry and git checkouts, so the
-      # two do not store every unit twice in the repository's cache quota.
+      # sccache holds the compiled units; this keeps only the registry, git checkouts and the
+      # installed tools, so the two do not store every unit twice in the repository's cache
+      # quota. One per check, kept on failure: a finding is no reason to download it all again.
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ matrix.check }}
           cache-targets: false
+          cache-on-failure: true
       - uses: cargo-bins/cargo-binstall@main
       - run: brew install zig
       - run: cargo xtask setup

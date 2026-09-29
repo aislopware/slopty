@@ -14,22 +14,35 @@ workspace = true
 slopty-capture.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
-# The pointer a cursor loop waits on (`pointer`).
+# The pointer a cursor loop waits on (`pointer`), and the input source's answers (`sources`).
 tokio.workspace = true
+# The input-source claims every stream shares (`sources`), and the Caps Lock claim.
+parking_lot.workspace = true
+tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The input source is selected on the main queue (`sources`).
+dispatch2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 # A copied file named by reference resolved to its path (`pasteboard`).
 objc2-foundation = { workspace = true, features = [ "NSURL" ] }
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
-parking_lot.workspace = true
-# The input thread's QoS class (`thread`).
+# Caps Lock through the HID system (`backend`).
+objc2-io-kit.workspace = true
+libc.workspace = true
+# The input thread's QoS class (`thread`), the input sources (`sources`), the key constants.
 slopty-platform.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 slopty-core.workspace = true
 slopty-proto.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = [ "macros", "rt-multi-thread", "test-util", "time" ] }
+
+# A measurement with a real `NSApplication` on the main thread, which libtest does not give a
+# test; opt-in (`SLOPTY_MEASURE=1`), and it lists no test to a runner.
+[[test]]
+name = "key_path"
+harness = false

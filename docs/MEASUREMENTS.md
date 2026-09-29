@@ -8239,7 +8239,10 @@ ms, on a 60 / 120 fps beat):
 | 2000 × 1234 | 9.3 | 9.4 | 41.5 |
 | 2000 × 1232 | 8.5 | 7.9 | 7.5 |
 
-Ruling: `docs/decisions/video.md`, "A stream's sides should be multiples of 16".
+Ruling: `docs/decisions/video.md`, "Stream sides padded to 16, cropped by the SPS conformance
+window". The same day's follow-up ("Stream sides padded to 16", below) found that an aligned
+session does not overlap frames: it encodes inside the submit call, which held the beat loop's
+next submit back, so the aligned rows' "120 fps beat" ran at the encoder's own rate.
 
 ## 2026-09-29 — compression presets and the low-latency encoder's keys
 
@@ -8495,3 +8498,294 @@ then. This is the transport under load, not the screen path, and is left to its 
 
 Ruling: `docs/decisions/video.md`, "A stream recovers with a keyframe until a reference is
 acknowledged".
+
+## 2026-09-29 — Stream sides padded to 16
+
+Mac Studio M1 Max, macOS 27.0, other sessions building in the same checkout (load average
+printed per row, 5–23). A stream's capture surface and encoder session are now its picture's
+sides rounded up to 16, the picture at the top-left and black around it, and the worker rewrites
+each keyframe's SPS conformance window so decoders output the picture's own size
+(`docs/decisions/video.md`, "Stream sides padded to 16"). Every probe ran from a copy of its
+binary under `/tmp`.
+
+```sh
+cargo test -p slopty-codec --release --test chroma444 --no-run   # target/release/deps/chroma444-<hash>
+cp target/release/deps/chroma444-<hash> /tmp/slopty-probe/chroma444 && cd /tmp/slopty-probe
+nice -n 10 ./chroma444 --ignored --nocapture --exact tests::conformance_window
+SLOPTY_PROBE_ALIGN=16 nice -n 10 ./chroma444 --ignored --nocapture --test-threads=1 --exact tests::encode_time_by_size
+SLOPTY_PROBE_SIZES=3024x1964,3456x2234,2880x1800,2000x1234 nice -n 10 ./chroma444 --ignored --nocapture --exact tests::encode_time_by_size
+nice -n 10 ./chroma444 --ignored --nocapture --exact tests::submit_blocking_and_pictures_held
+cargo test -p slopty-codec --release --lib --no-run && ./slopty_codec-<hash> --ignored --nocapture --exact conformance::tests::keyframe_crop_time
+cargo test -p slopty-worker --lib --no-run      # target/debug/deps/slopty_worker-<hash>
+cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-pad/slopty_worker && cd /tmp/slopty-pad
+TMPDIR=/tmp nice ./slopty_worker --ignored --exact screen::synthetic::tests::capture_to_glass_padded_against_even --nocapture
+```
+
+**Probe P1: the rewritten window is the encoder's own.** `conformance_window` encodes the
+scrolling code-editor picture on the worker's session (`slopty_codec::Encoder`) twice: at its
+true size, and drawn at the top-left of the size padded to 16 with the SPS rewritten by
+`slopty_codec::conformance::crop_access_unit`. Both go through the client's decoder
+(`slopty_codec::Decoder`, hardware).
+
+| stream | SPS rewritten from the padded session = the encoder's own at the true size | decoded | luma PSNR | chroma PSNR | edge error |
+| --- | --- | --- | --- | --- | --- |
+| 3024 × 1964 Main 4:2:0, native | (reference) | 3024 × 1964 | 41.39 dB | 28.39 dB | 2.48 |
+| 3024 × 1964 coded 3024 × 1968 | bit for bit | 3024 × 1964 | 42.07 dB | 28.40 dB | 2.48 |
+| 3456 × 2234 Main 4:4:4 10, native | (reference) | 3456 × 2234 | 36.20 dB | 38.96 dB | 5.36 |
+| 3456 × 2234 coded 3456 × 2240 | bit for bit | 3456 × 2234 | 36.22 dB | 39.45 dB | 5.28 |
+
+"Edge error" is the mean absolute luma difference, 0–255, between the decoded picture's last
+row and last column and the source's; a band of padding that showed would be the black
+against the picture's own level there. VideoToolbox's decoder crops by the window, so the
+client's buffers, the GPUI surface and pointer mapping see the true size with no change. The
+encoder itself already codes 3024 × 1964 as a 3024 × 1968 picture with a two-unit bottom window;
+the rewrite writes the same window over the padded session's SPS. `CleanAperture` on a 3024 ×
+1968 session is accepted (status 0) and writes no window: the SPS still shows 3024 × 1968.
+
+**Encode time, padded, against the same sizes as they were.** The size sweep with
+`SLOPTY_PROBE_ALIGN=16` (load 5–8), then the sizes off 16 as they were (load 6–7), p50 ms:
+
+| size | coded | as it was: one at a time / 60 beat / 120 beat | padded: one at a time / 60 beat / 120 beat |
+| --- | --- | --- | --- |
+| 3024 × 1964 | 3024 × 1968 | 17.6 / 17.7 / **76.0** | 15.2 / 15.2 / 15.2 |
+| 3456 × 2234 | 3456 × 2240 | 22.3 / **95.6** / **95.6** | 19.2 / 19.1 / 19.1 |
+| 2880 × 1800 | 2880 × 1808 | 15.9 / 15.8 / **68.1** | 13.6 / 14.9 / 13.8 |
+| 2000 × 1234 | 2000 × 1248 | 8.6 / 8.8 / 8.9 (p95 14.6) | 7.3 / 7.4 / 7.3 |
+| 1920 × 1080 | 1920 × 1088 | | 6.2 / 6.4 / 6.2 |
+| 1728 × 1118 | 1728 × 1120 | | 6.3 / 6.4 / 6.0 |
+| 1500 × 946 | 1504 × 960 | | 4.9 / 5.2 / 4.9 |
+| 1282 × 802 | 1296 × 816 | | 3.9 / 4.2 / 4.1 |
+| 3840 × 2160 | (aligned) | | 20.5 / 20.5 / 20.5 |
+
+No row dropped a frame. Every padded size runs at its one-at-a-time time on either beat, and
+that time is itself 12–15 % shorter than the same picture's off 16: the encoder's own padding
+step was costing it on every frame. The 3024 × 1964 row at 60 did not queue this time (17.7 ms,
+just over the period at a lower load than the table above it) and did at 120.
+
+**The submit encodes the frame when the sides are multiples of 16.**
+`submit_blocking_and_pictures_held` times `VTCompressionSessionEncodeFrame` itself on a
+real-time beat and counts the source pictures the session retains before each submit (load
+16–23):
+
+| session | fps | submit call p50 / p95 / max | pictures held p50 / max |
+| --- | --- | --- | --- |
+| 3024 × 1964 | 60 | 0.16 / 15.55 / 24.0 | 1 / 2 |
+| 3024 × 1964 | 120 | 15.4 / 18.6 / 37.2 | 2 / 2 |
+| 3024 × 1968 | 60 | 15.3 / 15.4 / 15.6 | 0 / 0 |
+| 3024 × 1968 | 120 | 15.3 / 15.4 / 15.6 | 0 / 0 |
+| 1920 × 1088 | 60 | 6.7 / 12.1 / 21.4 | 0 / 0 |
+| 1920 × 1080 | 60 | 0.04 / 0.06 / 0.38 | 0 / 0 |
+
+This corrects the reading of "encode time against frame size" above: an aligned session does
+not overlap frames. It encodes inside the submit call (the header allows it: "The
+kVTEncodeInfo_Asynchronous bit may be set if the encode ran asynchronously") and keeps no
+source picture after it returns. A session off 16 returns at once, copies the picture into its
+own padded buffer, and queues it; that queue is the 77–111 ms. The aligned rows "kept a 120 beat"
+only because the beat loop's submits were themselves held back by the call. The rate an aligned
+session sustains is one frame per encode time. The sweep now prints the rate it managed to
+submit at: 3024 × 1968 60.0 frames a second on the 60 beat and 65.2 on the 120 beat, and
+3840 × 2160 48.5 on either, where the table above read "keeps a 120 fps beat at 23.6 ms". A 4K
+stream on this encoder is a 48 fps stream.
+
+So the worker no longer submits on the capture's queue. The capture leaves each frame in a
+one-frame mailbox for the stream's encode thread (`start_encode_thread` in
+`crates/slopty-worker/src/screen.rs`), and a capture that arrives while the encoder is busy
+replaces the one waiting. The repair loop submits from the blocking pool. Without that, the
+first glass run below captured the drawn display at 30 frames a second: 1.6–2.4 ms of drawing
+plus a 15.5 ms submit is more than a 60 Hz period.
+
+**Rewriting a keyframe's SPS** (`keyframe_crop_time`, release): 12.5 µs for a 160 kB 3024 ×
+1964 keyframe, of which 2.7 µs is copying the unit; once per keyframe.
+
+**Capture to the glass, in one binary.** `capture_to_glass_padded_against_even` streams
+`Synthetic`'s 3024 × 1964 display at native scale through the real encoder, packetizer, QUIC-less
+router, reassembler and decoder, painted on a 60 Hz pacer, 20 s a run, alternating the stream as
+it was (the picture's even size) with the padded one (each run's own `pad_to`). Two rounds with the
+encode thread, load 12–16, p50 / p95 ms:
+
+| run | frames encoded / s | worker encode | capture → decoded | decoded → painted | capture → painted |
+| --- | --- | --- | --- | --- | --- |
+| even, round 1 | 54.1 | 19.5 / 33.4 | 24.9 / 47.9 | 8.9 / 16.5 | 32.5 / 57.8 |
+| padded, round 1 | 53.7 | 15.5 / 21.6 | 21.2 / 41.5 | 11.8 / 16.5 | 32.7 / 52.9 |
+| even, round 2 | 58.0 | 17.7 / 20.9 | 21.8 / 37.0 | 10.0 / 13.0 | 32.4 / 47.7 |
+| padded, round 2 | 59.7 | 15.2 / 15.3 | 19.0 / 20.4 | 13.0 / 15.1 | 32.1 / 34.5 |
+
+No frame was lost, NACKed, refreshed or failed to decode in any run. Padded, the encoder is
+2–4 ms faster at p50 and its p95 stays at its p50 (15.3 against 20.9 in the quieter round), and
+capture → decoded p95 falls from 37 to 20 ms. At this load the unpadded stream did not queue at
+60 (its 17.7 ms is just over the period), so both sides encoded 54–60 frames a second. Capture
+→ painted p50 is the same 32 ms on both: the pacer paints on its own 60 Hz tick, and a frame
+decoded 19–22 ms after its capture waits for the second tick after the capture either way
+(decoded → painted takes up the difference). What padding bought on this path is the tail and
+the rate headroom; the p50 needs capture → decoded under one period, or a paint on decode (the
+VideoLayer, rank 2 of the plan).
+
+**Drawn frames to the glass, over loopback QUIC.** The app-level instrument of "Drawn frames to
+the glass" above, same command, one run after the change (load 10–14), against that section's
+three runs from the same morning:
+
+```sh
+cargo xtask e2e smooth --filter 'test(drawn_frames_reach_the_glass_on_loopback)'
+```
+
+| scale 1, 3024×1964 HEVC | capture → arrival | capture → decoded | capture → painted p50 / p95 / p99 / max | frames timed in 20 s | worker encode p50 / p95 |
+| --- | --- | --- | --- | --- | --- |
+| before (3 runs) | 23.1 | 25.3 | 32.8–33.8 / 36.0–48.8 / 49.1–81.8 / 69.1–85.9 | about 30 a second encoded (327–329 of 600 captured) | 18 / 49–51 |
+| padded, encode thread | 17.1 | 18.9 | 32.7 / 34.4 / 35.3 / 36.0 | 1180 (59 a second) | 15.2 / 15.4 |
+
+At 0.5 (1512×982, coded 1520×992) the same run gave capture → painted 16.5 / 18.2 / 19.1 /
+22.3 ms, against 15.8–17.0 p50 before, with encode p50 5.3 ms against 6.4. Nothing was lost,
+refreshed or failed to decode. The acceptance the design set (at least 58 frames painted a
+second, capture → painted p50 at most 27 and p95 at most 34 ms) holds for the rate and the p95;
+the p50 does not move on a 60 Hz paint for the reason given in the in-process runs.
+
+## 2026-09-29 — a taken key's hop and the input-source answer
+
+Mac Studio M1 Max, macOS 27.0.1, release build under `nice`, other sessions building in the same
+checkout (load average 4–6). Two runs of one opt-in binary: a real `NSApplication` on its main
+thread with no window and no Dock icon, the real key monitor (`slopty_platform::keyboard::take_keys`),
+and the real input sources (`slopty_input::sources::Sources::system`). Keys are made in the
+process and posted into its own event queue (`-[NSApplication postEvent:atStart:]`), nothing
+through `CGEventPost`; the monitor's wake hops to the main queue as GPUI's foreground executor
+does when the view's task wakes, and the drain there is where the view sends the key
+(`docs/decisions/input.md`, "Keys go by position").
+
+```sh
+SLOPTY_MEASURE=1 nice cargo test -p slopty-input --release --test key_path
+```
+
+| | p50 | p90 | p99 | max |
+| --- | --- | --- | --- | --- |
+| monitor to drain, 2 × 2000 keys: what the taken path adds | 124–141 µs | 284–327 µs | 0.95–2.0 ms | 2.7–13.1 ms |
+| the answer for the source the worker already has, 2 × 300 | 6.5–23.7 µs | 8.7–36.8 µs | 13–102 µs | 27–379 µs |
+| `TISCopyCurrentKeyboardInputSource` and its id, 2 × 300 | 0.3–0.7 µs | 0.3–0.8 µs | 0.4–0.8 µs | 0.5–1.7 µs |
+
+A key GPUI dispatched went to the worker inside `sendEvent:`; a taken key goes one main-queue
+turn later, a tenth of a millisecond at the median and under 2 ms at p99 on a loaded machine,
+against a frame of 8.3 ms at 120 Hz. The binary also prints the time from `postEvent:` to the
+monitor (p50 8 ms); that is AppKit handing an event posted in-process back to `nextEvent`, which
+real keys from the WindowServer do not take, and is not in either path.
+
+The answer to an ask for the source the worker already has goes at once, and the input behind
+it waits for nothing: a round trip through the main queue, tens of microseconds. A switch is no
+longer answered after a fixed 50 ms that was chosen and never measured: the answer goes as the
+worker hears the switch (`kTISNotifySelectedKeyboardInputSourceChanged`, the notification the
+target app reads it by), bounded at 100 ms, and the stream holds the keys behind it at most
+150 ms. How long that takes was not measured here: timing it switches the input source of
+whoever uses this Mac, and the user was on it. The same binary times it on a Mac nobody is
+typing on, 20 switches each way:
+
+```sh
+SLOPTY_MEASURE=1 SLOPTY_MEASURE_SWITCH=com.apple.keylayout.French cargo test -p slopty-input --release --test key_path
+```
+
+## 2026-09-29 — taking the keyboard back: what reclaiming the input source costs
+
+Same machine and binary as the entry above, rerun after claims became per-stream tokens and
+the worker's input holding was narrowed to keys and text (`docs/decisions/input.md`, "Keys go
+by position", "How long a claim holds"). Load average about 8, other sessions building.
+
+```sh
+SLOPTY_MEASURE=1 nice cargo test -p slopty-input --release --test key_path
+```
+
+| | p50 | p90 | p99 | max |
+| --- | --- | --- | --- | --- |
+| monitor to drain, 2000 keys | 168 µs | 373 µs | 1.2 ms | 5.4 ms |
+| the answer for the source the worker already has, 300 | 26 µs | 50 µs | 110 µs | 507 µs |
+| `TISCopyCurrentKeyboardInputSource` and its id, 300 | 0.7 µs | 0.7 µs | 0.8 µs | 1.9 µs |
+
+A tile that takes the keyboard back within 10 s (`RELEASE_AFTER`) still holds its claim, so its
+ask is the second row: a main-queue round trip, and nothing typed waits on it. After a longer
+absence the claim was released and the worker went back to its own source, so the ask is a real
+switch, and the keys and text typed meanwhile wait until the worker hears it, at most 150 ms
+(`HOLD_MOST`); the pointer no longer waits unless a key is held ahead of it. The switch itself
+is not measured here: timing it switches the input source of whoever is using this Mac, so it
+stays opt-in for a Mac nobody is typing on, `SLOPTY_MEASURE=1
+SLOPTY_MEASURE_SWITCH=com.apple.keylayout.French cargo test -p slopty-input --release --test
+key_path`.
+
+## 2026-09-29 — the encoder watch behind the mailbox
+
+Mac Studio M1 Max, macOS 27.0, other sessions building in the same checkout (load average per
+row). A follow-up to "Stream sides padded to 16" above: an aligned session codes the frame
+inside the submit, and the mailbox in front of it replaces a capture the encoder is busy for, so
+frames are lost rather than late and the late-run rule saw nothing. `EncoderWatch` now weighs
+windows of 30 due captures: the share of the rung's slots the encoder took, capped at one frame
+per mean encode time (`docs/decisions/video.md`, "Stream sides padded to 16"). "Before" is the
+padded tree with the mailbox and the watch blind to it, one binary each, both run from `/tmp`.
+
+```sh
+cargo test -p slopty-worker --lib --no-run      # target/debug/deps/slopty_worker-<hash>
+cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-video/after/slopty_worker && cd /tmp/slopty-video/after
+TMPDIR=/tmp ./slopty_worker --ignored --exact screen::synthetic::tests::capture_to_glass_at_120_past_the_encoder --nocapture
+TMPDIR=/tmp ./slopty_worker --ignored --exact screen::synthetic::tests::capture_and_input_to_glass_at_120 --nocapture
+cargo test -p slopty-codec --test chroma444 --no-run && cp target/debug/deps/chroma444-<hash> /tmp/slopty-video/run/chroma444
+cd /tmp/slopty-video/run && ./chroma444 --ignored --nocapture --exact tests::the_scaler_is_opened_only_off_16
+```
+
+**3024 × 1964 on a 120 Hz display, 120 asked, 20 s a run** (`capture_to_glass_at_120_past_the_encoder`,
+the drawn display at native scale coded as 3024 × 1968, painted on a 120 Hz pacer). The middle
+rows are the two rules tried on the way, kept for why the rule is what it is. p50 / p95 ms:
+
+| loopback | load | rung / ceiling | encoded / s | worker encode | capture → decoded | capture → painted p50 / p95 / max | captures replaced |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| before | 10–7 | 120 / 120 | 65.8 | 15.10 / 15.24 | 22.41 / 26.51 | 27.06 / 28.39 / 36.76 | not counted |
+| every replaced due capture a lost slot | 7–5 | 36 / 36 | 36.0 | 15.56 / 19.63 | 20.31 / 28.62 | 27.13 / 36.36 / 51.79 | 253 |
+| a slot lost only to the next slot's capture | 16–10 | 55 / 55 | 54.7 | 16.33 / 16.97 | 23.11 / 32.04 | 26.40 / 37.36 / 59.66 | 629 |
+| after: the ceiling also rises | 7–6 | 65 / 65 | 65.0 | 15.15 / 15.27 | 21.54 / 25.62 | 26.12 / 28.18 / 35.49 | 896 |
+
+| tailnet-shaped (5 ms, 3 %) | rung / ceiling | encoded / s | worker encode | capture → decoded | capture → painted p50 / p95 / max |
+| --- | --- | --- | --- | --- | --- |
+| before | 120 / 120 | 66.2 | 15.03 / 15.18 | 28.80 / 33.23 | 33.88 / 35.33 / 43.51 |
+| every replaced due capture a lost slot | 32 / 32 | 32.6 | 16.77 / 19.11 | 29.96 / 34.42 | 34.35 / 42.63 / 59.46 |
+| a slot lost only to the next slot's capture | 53 / 53 | 52.9 | 16.51 / 17.48 | 29.63 / 37.51 | 34.36 / 42.90 / 56.99 |
+| after | 65 / 65 | 65.0 | 15.07 / 15.27 | 27.60 / 32.24 | 33.72 / 35.11 / 42.93 |
+
+No run lost a frame, refreshed or failed to decode. Counting every replaced due capture as a
+lost slot was wrong below the capture rate: at a 66 rung on 120 Hz captures, a due capture
+replaced by one 8.3 ms newer still has its slot filled by the newer one, and the ratchet took
+the rung to 36 and then 32 over a run. Counted only when the newer capture falls in the next
+slot, one slow window under load (encode p95 17–20 ms) still took the ceiling to 55, and the
+ceiling only ever fell. It now rises again when the mean encode time allows over eight sevenths
+of the rung. After the change, the encoder is told 65 frames a second where it was told 120
+and fed 66. On this light synthetic picture rate control never reached its cap (3.9 KiB a
+frame, where a 120th of 30 Mbit/s is 31 KiB), so latency and rate match the before run within
+noise. What changes is what each frame is budgeted from, in the encoder and in the congestion
+guard, once the rate is what limits the picture.
+
+**1080p on a 120 Hz display** (`capture_and_input_to_glass_at_120`, 60 and 120 asked, before and
+after alternated twice at load 8–12, then once more): capture → painted p50 moved within 1 ms
+either way in every pairing (loopback 60 asked 10.1–10.6 before against 9.3–10.1 after, 120
+asked 8.5–8.8 against 8.3–9.1; tailnet 17.2–17.3 against 16.8–19.8), and the p95 and max
+followed the load, not the build. An encoder that keeps its rung loses no slot, the watch
+changes nothing there, and every window read "fed 60" or "fed 120".
+
+**The deadlock, before the fix.** `a_rebuild_beside_a_cadence_change_finishes` on the tree
+before (four rebuilds lined up on the frame whose output callback moved the rung, real
+1920 × 1088 sessions, from `/tmp`) never finished: five runs in five hit the test's 10 s bound.
+After the fix it takes 0.4–0.9 s from `/tmp` and 12–20 s from the repo volume, which is
+mounted `noowners`, so each VideoToolbox session revalidates the binary's signature.
+
+**What the hosted runner's refresh was.** `quality_changes_decode_without_a_refresh` failed on
+the GitHub macOS runner (tree before the padding) with one refresh, nothing lost and no decode
+error. The worker counted the refresh and answered it with neither a keyframe nor a refresh
+frame, which is what it does for an ask that arrives while a keyframe is in flight. With
+nothing lost, the only ask the client makes is the new stream's repeat after
+`FIRST_KEYFRAME_WAIT` (400 ms) with no datagram yet, so that keyframe came late. The guest
+logs `IOServiceMatching failed for: AppleM2ScalerParavirtDriver`. Here, a session opens the M2
+scaler for a picture off 16 and never for one on it (`the_scaler_is_opened_only_off_16`, five
+frames each, user clients of `AppleM2ScalerCSCDriver` counted by `ioreg` after them):
+
+| size | scaler user clients | five frames |
+| --- | --- | --- |
+| 3024 × 1964 | 2 | 197.8 ms |
+| 3024 × 1968 | 0 | 121.4 ms |
+| 1512 × 982 | 2 | 68.1 ms |
+| 1520 × 992 | 0 | 62.3 ms |
+| 756 × 492 | 2 | 51.6 ms |
+| 768 × 496 | 0 | 45.4 ms |
+
+These are the sizes that test codes, as the stream was and padded. A padded stream never asks
+for the scaler that the guest lacks. Whether the guest's first padded keyframe then comes
+within 400 ms can only be read on the runner itself; this Mac has the scaler.

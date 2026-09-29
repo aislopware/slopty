@@ -51,17 +51,84 @@ const LANES: [(&str, u8); 5] =
 /// The nextest profile of the gate's tests lane (`.config/nextest.toml`).
 const NEXTEST_PROFILE: &str = "gate";
 
-/// A shell in `tree` on lane `name`'s target dir with its share of the cores.
-fn lane_shell(tree: &Utf8Path, gate_dir: &Utf8Path, name: &str) -> Result<Shell> {
-    let jobs = LANES.iter().find(|(n, _)| *n == name).map_or(4, |(_, j)| *j);
+/// The nextest profile of the tests lane on a hosted runner: `gate`'s, less the tests that read
+/// hardware a runner's virtual Mac does not have.
+const NEXTEST_CI_PROFILE: &str = "ci";
+
+/// A lane as `--lane` names it. The tools lane carries the fmt check with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum LaneId {
+    Tools,
+    ClippyHost,
+    ClippyIos,
+    Tests,
+    Rustdoc,
+}
+
+impl LaneId {
+    /// Its name in [`LANES`], the log and the pass records.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Tools => "tools",
+            Self::ClippyHost => "clippy host",
+            Self::ClippyIos => "clippy ios",
+            Self::Tests => "tests",
+            Self::Rustdoc => "rustdoc",
+        }
+    }
+
+    /// The crates of the tools it runs (`cargo xtask setup --lane`).
+    #[must_use]
+    pub const fn tools(self) -> &'static [&'static str] {
+        match self {
+            Self::Tools => &[
+                "cargo-deny",
+                "cargo-hakari",
+                "cargo-shear",
+                "typos-cli",
+                "taplo-cli",
+                "committed",
+            ],
+            Self::Tests => &["cargo-nextest"],
+            Self::ClippyHost | Self::ClippyIos | Self::Rustdoc => &[],
+        }
+    }
+}
+
+/// Which lanes a gate runs, and where.
+#[derive(Clone, Debug, Default)]
+pub struct Only {
+    /// The lanes to run; every lane when empty. CI runs each on a runner of its own.
+    pub lanes: Vec<LaneId>,
+    /// On a hosted runner: the tests lane uses [`NEXTEST_CI_PROFILE`].
+    pub ci: bool,
+}
+
+impl Only {
+    fn wants(&self, lane: LaneId) -> bool {
+        self.lanes.is_empty() || self.lanes.contains(&lane)
+    }
+}
+
+/// A shell in `tree` on lane `name`'s target dir. With `share` it runs beside other lanes and
+/// gets its share of the cores; alone, cargo takes them all.
+fn lane_shell(tree: &Utf8Path, gate_dir: &Utf8Path, name: &str, share: bool) -> Result<Shell> {
     let sh = Shell::new()?;
     sh.change_dir(tree);
     sh.set_var("CARGO_TARGET_DIR", gate_dir.join(name.replace(' ', "-")));
-    sh.set_var("CARGO_BUILD_JOBS", jobs.to_string());
+    if share {
+        let jobs = LANES.iter().find(|(n, _)| *n == name).map_or(4, |(_, j)| *j);
+        sh.set_var("CARGO_BUILD_JOBS", jobs.to_string());
+    }
     Ok(sh)
 }
 
 pub fn run(sh: &Shell, opts: Options) -> Result<()> {
+    run_only(sh, opts, &Only::default())
+}
+
+/// [`run`] on the lanes `only` names.
+pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
     let started = Instant::now();
     crate::upstream::warn_if_stale();
     let root = repo_root()?;
@@ -92,7 +159,8 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
         (tree, Some(inputs))
     };
     let inputs = inputs.as_ref();
-    let lane = |name: &str| lane_shell(&tree, &gate_dir, name);
+    let share = only.lanes.len() != 1;
+    let lane = |name: &str| lane_shell(&tree, &gate_dir, name, share);
     let checkout = || -> Result<Shell> {
         let sh = Shell::new()?;
         sh.change_dir(&root);
@@ -102,12 +170,14 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     // Seconds of tool checks, then minutes of compiles: a tool failure stops the gate first.
     let quick = opts.quick;
     let first: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
-        let fmt_check = scope.spawn(|| -> Result<()> {
-            let sh = Shell::new()?;
-            sh.change_dir(&tree);
-            fmt(&sh, false)
+        let fmt_check = only.wants(LaneId::Tools).then(|| {
+            scope.spawn(|| -> Result<()> {
+                let sh = Shell::new()?;
+                sh.change_dir(&tree);
+                fmt(&sh, false)
+            })
         });
-        let tools = (!quick).then(|| {
+        let tools = (!quick && only.wants(LaneId::Tools)).then(|| {
             scope.spawn(|| {
                 let tools = Lane {
                     name: "tools",
@@ -118,7 +188,10 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
                 cached(inputs, &tree, &tools, |_| tools_lane(|| lane("tools"), &checkout()?))
             })
         });
-        let mut results = vec![("fmt", join(fmt_check))];
+        let mut results = Vec::new();
+        if let Some(fmt_check) = fmt_check {
+            results.push(("fmt", join(fmt_check)));
+        }
         if let Some(tools) = tools {
             results.push(("tools", join(tools)));
         }
@@ -129,13 +202,17 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
     let build = |name| Lane { name, scope: Scope::Build, extra: String::new(), since_pass: false };
     let second: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        handles.push((
-            "clippy host",
-            scope.spawn(|| {
-                cached(inputs, &tree, &build("clippy host"), |_| lint_host(&lane("clippy host")?))
-            }),
-        ));
-        if !quick {
+        if only.wants(LaneId::ClippyHost) {
+            handles.push((
+                "clippy host",
+                scope.spawn(|| {
+                    cached(inputs, &tree, &build("clippy host"), |_| {
+                        lint_host(&lane("clippy host")?)
+                    })
+                }),
+            ));
+        }
+        if !quick && only.wants(LaneId::ClippyIos) {
             handles.push((
                 "clippy ios",
                 scope.spawn(|| {
@@ -147,21 +224,24 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
                 }),
             ));
         }
-        handles.push((
-            "tests",
-            scope.spawn(|| {
-                let tests = Lane {
-                    name: "tests",
-                    scope: Scope::Build,
-                    extra: pass::tool_id("cargo-nextest"),
-                    since_pass: opts.since_pass,
-                };
-                cached(inputs, &tree, &tests, |only| {
-                    test_lane(&lane("tests")?, lane("tests")?, only)
-                })
-            }),
-        ));
-        if !quick {
+        if only.wants(LaneId::Tests) {
+            let profile = if only.ci { NEXTEST_CI_PROFILE } else { NEXTEST_PROFILE };
+            handles.push((
+                "tests",
+                scope.spawn(|| {
+                    let tests = Lane {
+                        name: "tests",
+                        scope: Scope::Build,
+                        extra: pass::tool_id("cargo-nextest"),
+                        since_pass: opts.since_pass,
+                    };
+                    cached(inputs, &tree, &tests, |packages| {
+                        test_lane(&lane("tests")?, lane("tests")?, profile, packages)
+                    })
+                }),
+            ));
+        }
+        if !quick && only.wants(LaneId::Rustdoc) {
             handles.push((
                 "rustdoc",
                 scope.spawn(|| {
@@ -172,7 +252,12 @@ pub fn run(sh: &Shell, opts: Options) -> Result<()> {
         handles.into_iter().map(|(name, handle)| (name, join(handle))).collect()
     });
     report(&second, started)?;
-    println!("✔ gate passed ({:.1?})", started.elapsed());
+    if only.lanes.is_empty() {
+        println!("✔ gate passed ({:.1?})", started.elapsed());
+    } else {
+        let lanes: Vec<&str> = only.lanes.iter().map(|l| l.name()).collect();
+        println!("✔ gate passed on {} ({:.1?})", lanes.join(", "), started.elapsed());
+    }
     Ok(())
 }
 
@@ -272,10 +357,10 @@ fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> R
     if errors.is_empty() { Ok(()) } else { bail!("{}", errors.join("; ")) }
 }
 
-/// The gate's tests: build every test binary, then run nextest (on `only`'s packages when
-/// given) and the doctests side by side. Cargo holds the target dir's lock only while it
-/// builds, and the build is done, so neither waits for the other.
-fn test_lane(sh: &Shell, doc_sh: Shell, only: Option<&[String]>) -> Result<()> {
+/// The gate's tests: build every test binary, then run nextest's `profile` (on `only`'s
+/// packages when given) and the doctests side by side. Cargo holds the target dir's lock only
+/// while it builds, and the build is done, so neither waits for the other.
+fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) -> Result<()> {
     quiet_step("nextest build", cmd!(sh, "cargo nextest run --workspace --no-run"))?;
     let filter: Vec<String> = only.map_or_else(Vec::new, |packages| {
         let expr = packages.iter().map(|p| format!("package(={p})")).collect::<Vec<_>>();
@@ -286,7 +371,7 @@ fn test_lane(sh: &Shell, doc_sh: Shell, only: Option<&[String]>) -> Result<()> {
             .spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test --workspace --doc")));
         let tests = quiet_step(
             "nextest",
-            cmd!(sh, "cargo nextest run --workspace --profile {NEXTEST_PROFILE} {filter...}"),
+            cmd!(sh, "cargo nextest run --workspace --profile {profile} {filter...}"),
         );
         let doctests = join(doctests);
         tests.and(doctests)

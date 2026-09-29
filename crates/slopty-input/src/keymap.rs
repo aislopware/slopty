@@ -1,8 +1,9 @@
 //! W3C key codes → macOS virtual key codes (`kVK_*`, ANSI layout positions).
 //!
-//! Virtual key codes name *positions*, so a `KeyCode::A` press lands as whatever the worker's
-//! keyboard layout puts there; the client also sends the text it produced, which the worker
-//! attaches with `CGEventKeyboardSetUnicodeString` so layouts do not have to agree.
+//! Virtual key codes name *positions*: a `KeyCode::A` press lands as whatever the worker's
+//! keyboard layout puts there, which is the client's own once the worker has taken its input
+//! source (`crate::sources`). The table is `slopty-proto`'s, shared with the client that reads
+//! positions off its keyboard.
 
 use objc2_core_graphics::CGKeyCode;
 use slopty_proto::input::KeyCode;
@@ -11,131 +12,7 @@ use slopty_proto::input::KeyCode;
 /// browser keys are system-defined events, not key presses).
 #[must_use]
 pub const fn virtual_key(code: KeyCode) -> Option<CGKeyCode> {
-    use KeyCode as K;
-    let vk: u16 = match code {
-        K::A => 0x00,
-        K::S => 0x01,
-        K::D => 0x02,
-        K::F => 0x03,
-        K::H => 0x04,
-        K::G => 0x05,
-        K::Z => 0x06,
-        K::X => 0x07,
-        K::C => 0x08,
-        K::V => 0x09,
-        K::IntlBackslash => 0x0a,
-        K::B => 0x0b,
-        K::Q => 0x0c,
-        K::W => 0x0d,
-        K::E => 0x0e,
-        K::R => 0x0f,
-        K::Y => 0x10,
-        K::T => 0x11,
-        K::Digit1 => 0x12,
-        K::Digit2 => 0x13,
-        K::Digit3 => 0x14,
-        K::Digit4 => 0x15,
-        K::Digit6 => 0x16,
-        K::Digit5 => 0x17,
-        K::Equal => 0x18,
-        K::Digit9 => 0x19,
-        K::Digit7 => 0x1a,
-        K::Minus => 0x1b,
-        K::Digit8 => 0x1c,
-        K::Digit0 => 0x1d,
-        K::BracketRight => 0x1e,
-        K::O => 0x1f,
-        K::U => 0x20,
-        K::BracketLeft => 0x21,
-        K::I => 0x22,
-        K::P => 0x23,
-        K::Enter => 0x24,
-        K::L => 0x25,
-        K::J => 0x26,
-        K::Quote => 0x27,
-        K::K => 0x28,
-        K::Semicolon => 0x29,
-        K::Backslash => 0x2a,
-        K::Comma => 0x2b,
-        K::Slash => 0x2c,
-        K::N => 0x2d,
-        K::M => 0x2e,
-        K::Period => 0x2f,
-        K::Tab => 0x30,
-        K::Space => 0x31,
-        K::Backquote => 0x32,
-        K::Backspace => 0x33,
-        K::Escape => 0x35,
-        K::MetaRight => 0x36,
-        K::MetaLeft => 0x37,
-        K::ShiftLeft => 0x38,
-        K::CapsLock => 0x39,
-        K::AltLeft => 0x3a,
-        K::ControlLeft => 0x3b,
-        K::ShiftRight => 0x3c,
-        K::AltRight => 0x3d,
-        K::ControlRight => 0x3e,
-        K::Fn => 0x3f,
-        K::F17 => 0x40,
-        K::NumpadDecimal => 0x41,
-        K::NumpadMultiply => 0x43,
-        K::NumpadAdd => 0x45,
-        K::NumpadClear | K::NumLock => 0x47,
-        K::AudioVolumeUp => 0x48,
-        K::AudioVolumeDown => 0x49,
-        K::AudioVolumeMute => 0x4a,
-        K::NumpadDivide => 0x4b,
-        K::NumpadEnter => 0x4c,
-        K::NumpadSubtract => 0x4e,
-        K::F18 => 0x4f,
-        K::F19 => 0x50,
-        K::NumpadEqual => 0x51,
-        K::Numpad0 => 0x52,
-        K::Numpad1 => 0x53,
-        K::Numpad2 => 0x54,
-        K::Numpad3 => 0x55,
-        K::Numpad4 => 0x56,
-        K::Numpad5 => 0x57,
-        K::Numpad6 => 0x58,
-        K::Numpad7 => 0x59,
-        K::F20 => 0x5a,
-        K::Numpad8 => 0x5b,
-        K::Numpad9 => 0x5c,
-        K::IntlYen => 0x5d,
-        K::IntlRo => 0x5e,
-        K::NumpadComma => 0x5f,
-        K::F5 => 0x60,
-        K::F6 => 0x61,
-        K::F7 => 0x62,
-        K::F3 => 0x63,
-        K::F8 => 0x64,
-        K::F9 => 0x65,
-        K::Convert => 0x66,
-        K::F11 => 0x67,
-        K::KanaMode => 0x68,
-        K::F13 | K::PrintScreen => 0x69,
-        K::F16 => 0x6a,
-        K::F14 | K::ScrollLock => 0x6b,
-        K::F10 => 0x6d,
-        K::ContextMenu => 0x6e,
-        K::F12 => 0x6f,
-        K::F15 | K::Pause => 0x71,
-        K::Help | K::Insert => 0x72,
-        K::Home => 0x73,
-        K::PageUp => 0x74,
-        K::Delete => 0x75,
-        K::F4 => 0x76,
-        K::End => 0x77,
-        K::F2 => 0x78,
-        K::PageDown => 0x79,
-        K::F1 => 0x7a,
-        K::ArrowLeft => 0x7b,
-        K::ArrowRight => 0x7c,
-        K::ArrowDown => 0x7d,
-        K::ArrowUp => 0x7e,
-        _ => return None,
-    };
-    Some(vk)
+    code.to_mac_vk()
 }
 
 /// Keys that only change modifier state; they post as `FlagsChanged`, not `KeyDown`.
@@ -159,90 +36,6 @@ pub const fn is_modifier(code: KeyCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Everything macOS cannot express as a keyboard event, spelled out so a new `KeyCode`
-    /// variant fails this test until someone decides where it goes.
-    const UNMAPPED: &[KeyCode] = &[
-        KeyCode::Unidentified,
-        KeyCode::NonConvert,
-        KeyCode::NumpadBackspace,
-        KeyCode::NumpadClearEntry,
-        KeyCode::NumpadMemoryAdd,
-        KeyCode::NumpadMemoryClear,
-        KeyCode::NumpadMemoryRecall,
-        KeyCode::NumpadMemoryStore,
-        KeyCode::NumpadMemorySubtract,
-        KeyCode::NumpadParenLeft,
-        KeyCode::NumpadParenRight,
-        KeyCode::NumpadSeparator,
-        KeyCode::NumpadUp,
-        KeyCode::NumpadDown,
-        KeyCode::NumpadRight,
-        KeyCode::NumpadLeft,
-        KeyCode::NumpadBegin,
-        KeyCode::NumpadHome,
-        KeyCode::NumpadEnd,
-        KeyCode::NumpadInsert,
-        KeyCode::NumpadDelete,
-        KeyCode::NumpadPageUp,
-        KeyCode::NumpadPageDown,
-        KeyCode::F21,
-        KeyCode::F22,
-        KeyCode::F23,
-        KeyCode::F24,
-        KeyCode::F25,
-        KeyCode::FnLock,
-        KeyCode::BrowserBack,
-        KeyCode::BrowserFavorites,
-        KeyCode::BrowserForward,
-        KeyCode::BrowserHome,
-        KeyCode::BrowserRefresh,
-        KeyCode::BrowserSearch,
-        KeyCode::BrowserStop,
-        KeyCode::Eject,
-        KeyCode::LaunchApp1,
-        KeyCode::LaunchApp2,
-        KeyCode::LaunchMail,
-        KeyCode::MediaPlayPause,
-        KeyCode::MediaSelect,
-        KeyCode::MediaStop,
-        KeyCode::MediaTrackNext,
-        KeyCode::MediaTrackPrevious,
-        KeyCode::Power,
-        KeyCode::Sleep,
-        KeyCode::WakeUp,
-        KeyCode::Copy,
-        KeyCode::Cut,
-        KeyCode::Paste,
-    ];
-
-    #[test]
-    fn every_key_is_mapped_or_listed() {
-        for &code in KeyCode::ALL {
-            let mapped = virtual_key(code).is_some();
-            let listed = UNMAPPED.contains(&code);
-            assert!(mapped != listed, "{code:?}: mapped={mapped} listed={listed}");
-        }
-    }
-
-    #[test]
-    fn distinct_keys_get_distinct_codes() {
-        // Only the documented aliases may share a position.
-        let aliases = [
-            (KeyCode::NumpadClear, KeyCode::NumLock),
-            (KeyCode::F13, KeyCode::PrintScreen),
-            (KeyCode::F14, KeyCode::ScrollLock),
-            (KeyCode::F15, KeyCode::Pause),
-            (KeyCode::Help, KeyCode::Insert),
-        ];
-        let mut seen = std::collections::HashMap::new();
-        for &code in KeyCode::ALL {
-            let Some(vk) = virtual_key(code) else { continue };
-            let Some(prev) = seen.insert(vk, code) else { continue };
-            let allowed = aliases.contains(&(prev, code)) || aliases.contains(&(code, prev));
-            assert!(allowed, "{prev:?} and {code:?} share {vk:#x}");
-        }
-    }
 
     #[test]
     fn modifiers_have_codes() {

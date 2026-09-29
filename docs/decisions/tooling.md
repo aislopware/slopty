@@ -365,3 +365,39 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   above that the tests' features stay out of shipped builds. The ctl goldens instead sort every
   object's keys before encoding (`sorted` in `tests/golden.rs`), so both runs write the same
   line.
+
+- ✅ **CI runs the gate one lane per runner, and skips only what a runner's hardware lacks**
+  (2026-09-29). CI had failed on every push since at least 2026-09-13. Until 7b0e09a0 the
+  runner had no sccache for the rustc wrapper, so every run died within minutes, at the first
+  `rustc -vV`. The first run with sccache, 36533060670 (68fe132a), ran the whole gate on one
+  `macos-26` runner (three cores, 7 GB) for 79 minutes. The five lanes compiled side by side there, each on its own
+  target dir: nextest build 53 min, host clippy 59, the iOS and Linux clippy 66 and rustdoc 68.
+  Its tests then failed. sccache hit 2 of 3 490 compiles because the Actions cache was empty.
+  The second run, 36558264642 (79734c2a), took 67 minutes and hit 894 (25.6 %). The zed and
+  gpui-kit forks had moved between the two commits, so their crates and everything above them
+  missed. The hits are what did not change. The cache works; a gate that sits on the zed fork
+  misses whenever the fork moves.
+  - Each lane runs on a runner of its own: a matrix job per lane runs
+    `cargo xtask setup --lane <lane>` (that lane's tools only; the tools lane alone builds taplo,
+    which has no binary for binstall) and `cargo xtask gate --ci --lane <lane>`. A lane alone
+    sets no `CARGO_BUILD_JOBS` and takes every core. It keeps its target dir name, and sccache
+    leaves `CARGO_BUILD_JOBS` out of its key, so local lanes and CI lanes keep their cache
+    entries. `--ci` checks in place and gives the tests lane nextest's `ci` profile. With no
+    `--lane` the local gate is what it was. `rust-cache` is keyed per lane and saved on failure
+    too, so the registry and the installed tools survive a red test.
+  - The `ci` profile's `default-filter` leaves out three tests the runner's virtual Mac cannot
+    pass. `slopty-testkit`'s `a_series_reports_per_operation_and_as_json` and
+    `this_process_reads_back` read retired instructions, and the guest has no performance
+    counters (`Usage { instructions: 0, cycles: 0, … }` in both runs).
+    `this_mac_says_whether_it_wakes_on_lan` reads `womp` from `pmset -g`, which the guest does
+    not have. They are listed as skipped there and still run in every local gate. Only missing
+    hardware earns a place on that list, never timing, and no test gets a retry for CI.
+  - Found on the runner and left to their owners, since they are not missing hardware.
+    `a_full_chroma_stream_arrives_as_444_and_follows_the_rate` streams the host's first
+    display at a quarter scale. The runner's display is 1024 × 768, so the stream is 256 × 192,
+    whose leave line (`full_chroma_band`) is under the 1.2 Mbit/s that eight cuts from 12 Mbit/s
+    reach, and 4:4:4 never falls back. `quality_changes_decode_without_a_refresh` saw one
+    refresh with nothing lost or broken (the guest has no `AppleM2ScalerParavirtDriver`). In the
+    first run, `shell_round_trip_over_quic` took a `Caps` before `SessionOpened` (fixed in
+    79734c2a) and `viewers_joining_a_busy_session_never_make_the_others_resync` missed its 10 s
+    deadline under the five lanes' load; it passed in the second run.

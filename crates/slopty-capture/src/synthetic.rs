@@ -4,7 +4,8 @@
 //! A worker a test starts from a shell has no Screen Recording grant, and nothing may ask for
 //! one. [`Canvas`] stands in for every active display (CoreGraphics lists them without a grant).
 //! On the display's beat it hands the stream an `IOSurface`-backed full-range picture of the
-//! size and format asked for (NV12, or 10-bit 4:4:4 for a full-chroma stream), stamped on the
+//! size and format asked for (NV12, or 10-bit 4:4:4 for a full-chroma stream), in a surface
+//! padded as a capture's is ([`CaptureConfig::surface`], black past the picture), stamped on the
 //! host time clock ScreenCaptureKit stamps with, into the same sink a real capture feeds. Nothing
 //! in the product names it: only a stream built on it draws.
 //!
@@ -44,6 +45,8 @@ use crate::stream::host_now_us;
 pub const MARK_BITS: u32 = 16;
 /// The desktop behind the window.
 const DESKTOP: u8 = 40;
+/// A padded surface past the picture: the black a capture's background paints it.
+const PADDING: u8 = 0;
 /// The window's page and its text.
 const PAPER: u8 = 24;
 const INK: u8 = 225;
@@ -244,6 +247,8 @@ struct Slot {
 /// What the beat draws with.
 struct Painter {
     layout: Layout,
+    /// The size of each picture's surface, the layout at its top-left.
+    surface: (usize, usize),
     samples: Samples,
     /// The page's text, twice the window's height, scrolled through at [`SCROLL_PX_PER_S`].
     text: Vec<u8>,
@@ -255,12 +260,15 @@ struct Painter {
 }
 
 impl Painter {
-    fn new(width: u32, height: u32, format: PixelFormat) -> Option<Self> {
-        let layout = Layout::new(usize::try_from(width).ok()?, usize::try_from(height).ok()?)?;
+    fn new(config: &CaptureConfig) -> Option<Self> {
+        let size = |side: u32| usize::try_from(side).ok();
+        let layout = Layout::new(size(config.width)?, size(config.height)?)?;
+        let (surface_w, surface_h) = config.surface();
         let (_, _, page_w, page_h) = layout.page;
         Some(Self {
             layout,
-            samples: Samples::of(format),
+            surface: (size(surface_w)?, size(surface_h)?),
+            samples: Samples::of(config.format),
             text: text(page_w, page_h.checked_mul(2)?),
             slots: Vec::new(),
             origin_us: None,
@@ -285,7 +293,7 @@ impl Painter {
             return None;
         }
         if !slot.ready {
-            fill_plane(&buffer, self.samples, 0, DESKTOP);
+            fill_luma(&buffer, self.samples, &self.layout);
             fill_plane(&buffer, self.samples, 1, GREY);
             slot.ready = true;
         }
@@ -305,7 +313,7 @@ impl Painter {
         if self.slots.len() >= SLOTS {
             return None;
         }
-        let (width, height) = (self.layout.width, self.layout.height);
+        let (width, height) = self.surface;
         let buffer = PixelBuffer::from_retained(surface(width, height, self.samples)?);
         self.slots.push(Slot { buffer, ready: false });
         Some(self.slots.len().saturating_sub(1))
@@ -400,6 +408,19 @@ fn with_plane<R>(
 
 fn fill_plane(buffer: &CVPixelBuffer, samples: Samples, plane: usize, level: u8) {
     let _filled = with_plane(buffer, plane, |bytes, _stride| samples.fill(bytes, level));
+}
+
+/// The desktop over the layout's picture, and black past it to the surface's edges.
+fn fill_luma(buffer: &CVPixelBuffer, samples: Samples, layout: &Layout) {
+    let _filled = with_plane(buffer, 0, |bytes, stride| {
+        let picture = layout.width.saturating_mul(samples.width());
+        for (y, row) in bytes.chunks_exact_mut(stride).enumerate() {
+            let desktop = if y < layout.height { picture.min(row.len()) } else { 0 };
+            let (inside, outside) = row.split_at_mut(desktop);
+            samples.fill(inside, DESKTOP);
+            samples.fill(outside, PADDING);
+        }
+    });
 }
 
 /// The painter's page scrolled to its time, and the strip spelling `inputs`. `false` when the
@@ -596,7 +617,7 @@ impl CaptureSource for Canvas {
         let period_us = (1e6 / hz.clamp(1.0, 240.0)).round() as u64;
         let beat = Arc::new(Beat {
             stopped: AtomicBool::new(false),
-            painter: Mutex::new(Painter::new(config.width, config.height, config.format)),
+            painter: Mutex::new(Painter::new(config)),
             period_us,
             sink: Box::new(sink),
         });
@@ -622,9 +643,9 @@ impl CaptureSource for Canvas {
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) {
         let beat = Arc::clone(&stream.beat);
-        let (width, height, format) = (config.width, config.height, config.format);
+        let config = *config;
         stream.queue.exec_async(move || {
-            *beat.painter.lock() = Painter::new(width, height, format);
+            *beat.painter.lock() = Painter::new(&config);
             done(Ok(()));
         });
     }
@@ -725,12 +746,25 @@ impl CaptureSource for Canvas {
 mod tests {
     use super::*;
 
+    fn config(width: u32, height: u32, format: PixelFormat) -> CaptureConfig {
+        CaptureConfig {
+            width,
+            height,
+            align: 16,
+            fps: 60,
+            format,
+            queue_depth: 3,
+            audio: false,
+            crop: None,
+        }
+    }
+
     /// A picture spells the input count in its strip, and the reader gets it back, in either
     /// format the canvas draws; a picture too small for a strip reads as none.
     #[test]
     fn the_strip_reads_back_what_was_drawn() {
         for format in [PixelFormat::Nv12Full, PixelFormat::Yuv444Full10] {
-            let mut painter = Painter::new(640, 360, format).unwrap();
+            let mut painter = Painter::new(&config(640, 360, format)).unwrap();
             for inputs in [0_u64, 1, 0x5a5a, 0xffff, 0x1_0003] {
                 let picture = painter.paint(inputs, 0).unwrap();
                 assert_eq!(
@@ -753,7 +787,7 @@ mod tests {
     /// and once all are held the beat drops its frame instead of tearing one.
     #[test]
     fn a_held_picture_is_never_drawn_over() {
-        let mut painter = Painter::new(320, 180, PixelFormat::Nv12Full).unwrap();
+        let mut painter = Painter::new(&config(320, 180, PixelFormat::Nv12Full)).unwrap();
         let first = painter.paint(1, 0).unwrap();
         let second = painter.paint(2, 0).unwrap();
         assert!(!ptr::eq(first.as_cv(), second.as_cv()), "the held picture was reused");
@@ -767,12 +801,42 @@ mod tests {
         assert!(painter.paint(4, 0).is_some(), "a picture let go of is drawn into again");
     }
 
+    /// A picture whose sides are off 16 comes in a surface padded to 16, black past the
+    /// picture's right and bottom edges and the desktop inside them, as a capture's does.
+    #[test]
+    fn a_picture_off_16_is_drawn_into_a_padded_surface() {
+        for format in [PixelFormat::Nv12Full, PixelFormat::Yuv444Full10] {
+            let mut painter = Painter::new(&config(1000, 590, format)).unwrap();
+            let picture = painter.paint(0, 0).unwrap();
+            assert_eq!((picture.width(), picture.height()), (1008, 592), "{format:?}");
+            let samples = Samples::of(format);
+            let image = picture.as_cv();
+            // SAFETY: CoreVideo rule: read between a lock and its unlock.
+            let locked =
+                unsafe { CVPixelBufferLockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+            assert_eq!(locked, 0);
+            let level = |x: usize, y: usize| {
+                with_plane(image, 0, |plane, stride| {
+                    let at = y * stride + x * samples.width();
+                    samples.level(&plane[at..at + samples.width()])
+                })
+                .flatten()
+            };
+            let corners = [level(999, 589), level(1000, 589), level(999, 590), level(1007, 591)];
+            // SAFETY: matches the lock above.
+            let _unlocked =
+                unsafe { CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+            let (inside, padding) = (Some(DESKTOP), Some(PADDING));
+            assert_eq!(corners, [inside, padding, padding, padding], "{format:?}");
+        }
+    }
+
     /// The scrolling page changes every frame, as a scrolling window does, so the encoder sees
     /// motion on every beat rather than a still desktop; the scroll is set in time, so a
     /// 120 Hz beat moves it half as far a frame as a 60 Hz one.
     #[test]
     fn the_page_moves_every_frame() {
-        let mut painter = Painter::new(320, 180, PixelFormat::Nv12Full).unwrap();
+        let mut painter = Painter::new(&config(320, 180, PixelFormat::Nv12Full)).unwrap();
         let row = |p: &CVPixelBuffer| {
             // SAFETY: CoreVideo rule: read between a lock and its unlock.
             let locked =

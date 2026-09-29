@@ -30,6 +30,10 @@ pub mod drag;
 pub mod file_drop;
 pub mod fs;
 pub mod hotkey;
+#[cfg(target_os = "macos")]
+pub mod input_source;
+#[cfg(target_vendor = "apple")]
+pub mod keyboard;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_vendor = "apple")]

@@ -4897,6 +4897,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7178,16 +7188,20 @@ dependencies = [
 name = "slopty-input"
 version = "0.1.0"
 dependencies = [
+ "dispatch2",
+ "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "objc2-io-kit",
  "parking_lot",
  "slopty-capture",
  "slopty-core",
  "slopty-platform",
  "slopty-proto",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

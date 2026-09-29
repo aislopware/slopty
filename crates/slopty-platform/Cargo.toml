@@ -47,6 +47,8 @@ objc2-foundation = { workspace = true, features = [
     "NSUndoManager",
     # Whether the app runs from a bundle, which the notification centre needs (`notify`).
     "NSBundle",
+    # The hotkey layer follows this app in and out of the front (`system_keys`).
+    "NSNotification",
 ] }
 # Local notifications, their taps and the icon badge (`notify`).
 objc2-user-notifications = { workspace = true, features = [
@@ -68,7 +70,12 @@ objc2-user-notifications = { workspace = true, features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 # The session tap that takes system shortcuts for a remote Mac (`system_keys`).
 objc2-core-graphics = { workspace = true, features = [ "CGEvent", "CGEventTypes" ] }
-objc2-core-foundation = { workspace = true, features = [ "CFMachPort", "CFRunLoop" ] }
+objc2-core-foundation = { workspace = true, features = [
+    "CFMachPort",
+    "CFRunLoop",
+    # The input source's changes, heard from HIToolbox (`input_source`).
+    "CFNotificationCenter",
+] }
 objc2-app-kit = { workspace = true, features = [
     "NSPasteboardItem",
     "NSFilePromiseProvider",
@@ -82,6 +89,10 @@ objc2-app-kit = { workspace = true, features = [
     "NSScreen",
     # System shortcuts are taken only while this app is frontmost (`system_keys`).
     "NSRunningApplication",
+    # A remote tile's keys, taken before the text system composes them (`keyboard`), and the
+    # media keys the tap reads (`system_keys`).
+    "NSEvent",
+    "NSApplication",
     "block2",
     # The browser tile (`web`): its first responder, the key and click watch, the snapshot.
     "NSBitmapImageRep",

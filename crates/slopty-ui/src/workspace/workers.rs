@@ -855,6 +855,13 @@ impl WorkspaceView {
                     }
                 }
             }
+            ScreenEvent::KeyboardSource { stream, source, applied } => {
+                for id in self.streams_of(key, stream, cx) {
+                    if let Some(view) = self.screens.get(&id) {
+                        view.update(cx, |v, _| v.set_keyboard_source(&source, applied));
+                    }
+                }
+            }
             ScreenEvent::Cursor { stream, shape } => {
                 for id in self.streams_of(key, stream, cx) {
                     if let Some(view) = self.screens.get(&id) {

@@ -1572,29 +1572,116 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     encoded); it would need a public key first.
   - Test: `compression_presets` in `crates/slopty-codec/tests/chroma444.rs`, ignored.
 
-- 🔬 **A stream's sides should be multiples of 16: otherwise the encoder takes one frame at a
-  time** (2026-09-29, M1 Max, macOS 27.0; MEASUREMENTS "encode time against frame size";
+- ✅ **Stream sides padded to 16, cropped by the SPS conformance window** (2026-09-29, M1 Max,
+  macOS 27.0; MEASUREMENTS "encode time against frame size" and "Stream sides padded to 16";
   settles the follow-up in "The stream follows the screen's refresh"). The low-latency encoder
-  takes about the same time per frame at any size for its pixels (3024 × 1964, 3024 × 1968 and
-  3024 × 1952 all 18.2–18.4 ms one at a time). What differs is overlap. With both sides
-  multiples of 16 it works on the next frame before the last is out: 3840 × 2160 at 23.5 ms a
-  frame keeps up with 120 fps at 23.6 ms p50, and 3024 × 1968 and 3024 × 1952 hold 18.2–18.4 ms
-  at 60 and 120. With either side off 16 it does not overlap. Any frame that takes longer than
-  the period then queues to a steady 77–109 ms: 3024 × 1964, 1962 and 1960 (h % 16 = 12, 10, 8)
-  81–88 ms at 60 and at 120, 3020 × 1968 (width off) 85–88 ms, 3456 × 2234 107–109 ms against
-  22 ms at 3456 × 2240, 2880 × 1800 77 ms at 120 against 17.8 at 60, and 2000 × 1234 43 ms at
-  120. A size off 16 whose frame fits the period does not queue (1920 × 1080, 1500 × 946,
-  1282 × 802). So it is alignment, and 16 rather than 8: 1960 and 1800 are multiples of 8 and
-  queue too.
-  - The fix, not built (it lives in `slopty-capture`, the worker and the client, not here):
-    size the capture and the encoder session to the next multiples of 16. ScreenCaptureKit
-    draws the target at its true size into the top-left of that surface
-    (`SCStreamConfiguration.destinationRect` = the true pixel size, `backgroundColor` black),
-    so nothing is scaled. `Opened` keeps the true size, and the client crops the decoded
-    picture to it. The padding is at most 15 still black rows and columns, under 1 % of the
-    pixels and almost no bits.
-  - Until then the worker's `EncoderWatch` takes such a stream down a rung, which is what it
-    was built for, at the price of the rate.
+  handles a picture whose sides are both multiples of 16 inside the submit call, one at a time,
+  and keeps nothing after it. Given any other size it returns at once, copies the picture into a
+  padded buffer of its own and queues it, and every size whose frame takes longer than the
+  period queues to a steady 68–111 ms: 3024 × 1964 (a 14-inch MacBook Pro's panel) 76–88 ms,
+  3456 × 2234 96–111 ms, 2880 × 1800 68–77 ms at 120. Sixteen, not eight: 1960 and 1800 queue
+  too. The copy also costs every frame: 3024 × 1964 takes 17.6 ms one at a time, the same
+  picture coded as 3024 × 1968 15.2 ms.
+  - HEVC streams are coded padded. `configs` keeps the picture at the quality's scale with even
+    sides, as before, and sets `CaptureConfig::align` to 16 (`HEVC_ALIGN`). The capture surface
+    and the encoder session are `CaptureConfig::surface()`, each side rounded up to 16, and
+    ScreenCaptureKit draws the picture at its top-left at its own size
+    (`SCStreamConfiguration.destinationRect`, "specified in pixels", `SCStream.h`) over a black
+    `backgroundColor` (the header's default is clear, which a Y′CbCr surface has no value for).
+    The drawn canvas pads its pictures the same way, so the glass tests take this path.
+  - The worker rewrites each keyframe's SPS (`slopty_codec::conformance::crop_access_unit`, on
+    the encoder's output thread in `start_encoder`): `conformance_window_flag` and a right and
+    bottom offset in chroma units (2 for 4:2:0, 1 for 4:4:4), every other bit copied, trailing
+    bits and emulation prevention redone. The result is bit for bit the SPS the encoder writes
+    when given the true size itself, which already carries such a window, for Main at 3024 ×
+    1964 and Main 4:4:4 10 at 3456 × 2234 (probe P1). VideoToolbox's decoder crops by it, so the
+    client's buffers are the true size with PSNR and edges equal to the unpadded stream's, and
+    nothing past the worker changes: no wire field, no client crop, pointer mapping as it was.
+    12.5 µs a keyframe. Each new encoder session (resize, quality, chroma) is built with the
+    picture size it shows, so the rewrite follows the parameter sets through rebuilds and their
+    session generations.
+  - `kVTCompressionPropertyKey_CleanAperture` is not the fix: it is accepted and writes no
+    window into the SPS (the header puts it on the output's format description), and an Annex B
+    stream carries only the SPS.
+  - H.264 streams keep the even size until its encoder is measured for the same.
+  - Because an aligned submit encodes the frame (15.3 ms at 3024 × 1968), captures are no
+    longer submitted on the capture's queue: each stream has an encode thread fed through a
+    one-frame mailbox, where a newer capture replaces one the encoder has not taken, and the
+    repair loop submits from the blocking pool. On the capture's queue, drawing plus the submit
+    ran past a 60 Hz period and the display was captured at 30.
+  - An aligned submit runs the encoder's output callback on the encoding thread before it
+    returns, inside whatever the encode holds. The callback used to take the session's lock to
+    tell it a new frame rate, while a rebuild waited to write that lock. `parking_lot` lets no
+    reader past a waiting writer, so the encode, the callback and the rebuild waited on each
+    other for good (five runs in five). The callback now touches the session not at all:
+    `apply_bitrate` and `apply_cadence` only store what is wanted, and the next encode tells the
+    session (`Shared::tell`) under the lock it already holds. A rebuild no longer writes the
+    session either: `install` leaves it staged, and the next encode puts it in (`put_in`). The
+    lock order is written in the module doc of `crates/slopty-worker/src/screen.rs` ("Locks").
+  - Nothing but an encode waits on one. The encode holds the held capture and the session for
+    15 ms at 3024 × 1968 and 38 ms at 5K, and a runtime worker waiting that long answers no
+    input. The repair loop's clock reads the held capture's time from an atomic, `install` and
+    the mailbox take only their own short locks, and the one path that drops the held capture
+    (`forget_held`) is called only from an encode.
+  - The encoder's watch sees behind the mailbox. An aligned session never queues, so no frame
+    comes back late for the late-run rule to count; frames are replaced in the mailbox instead,
+    and a 120 rung was fed 66 a second while the gate, the congestion guard and the encoder
+    each budgeted a frame at a 120th of the rate. Each window of 30 due captures is now weighed
+    (`EncoderWatch::fed` in `slopty-media`). The delivered rate is the rung times the share of
+    its slots the encoder took; a slot is lost only when a due capture was replaced by one that
+    falls in the next slot, since a newer capture within the same slot fills it. That rate is
+    capped at one frame per mean encode time, keyframes aside. Under seven eighths of the rung,
+    the ceiling comes down to it. Over eight sevenths, the ceiling rises back towards what the
+    client asked for, so one slow stretch does not cost the rest of the session. The guard
+    budgets a frame at the lower of the rung and the fed rate (`frame_fits`). Replacements are
+    counted (`superseded`) and logged at close. `ScreenStats` has no field for them, so showing
+    them to the client is a proto change.
+  - A capture of the old size never reaches a rebuilt session. `Encoder::encode` refuses a
+    picture whose size is not the session's (`CodecError::WrongSize`). The worker then drops
+    that capture and keeps the session's keyframe pending for the first capture of its own
+    size, and `install` empties the mailbox.
+  - Each pipeline carries its own padding (`Pipeline::open_padded`'s `pad_to`), so a
+    measurement of the even size no longer changes every other stream in the process.
+  - On a hosted runner's virtual Mac the stream as it was asked VideoToolbox for the M2 scaler,
+    which the guest does not have (`IOServiceMatching failed for: AppleM2ScalerParavirtDriver`).
+    Locally, a session opens two scaler user clients on its first frames at 3024 × 1964,
+    1512 × 982 and 756 × 492, and none at the padded 3024 × 1968, 1520 × 992 and 768 × 496
+    (`the_scaler_is_opened_only_off_16`). On
+    that VM the first keyframe came after the client's 400 ms first wait, and the client asked
+    again (the one refresh in `quality_changes_decode_without_a_refresh`). A padded stream
+    never takes that path.
+  - Measured over loopback QUIC (`drawn_frames_reach_the_glass_on_loopback`), 3024 × 1964 at
+    60 Hz: 59 frames a second reach the glass where 30 did, encode p50 / p95 15.2 / 15.4 ms
+    against 18 / 49–51, capture → decoded 18.9 ms against 25.3, capture → painted p95 / p99
+    34.4 / 35.3 ms against 36–49 / 49–82. In one binary against the stream as it was: encode
+    15.2 / 15.3 against 17.7 / 20.9, capture → decoded p95 20 against 37. Capture → painted p50
+    stays 32–33 ms on a 60 Hz paint: a frame decoded 19 ms after its capture waits for the
+    second tick either way. That p50 needs a paint on decode (the VideoLayer) or an encode
+    under about 12 ms (stripes).
+  - Tests: `conformance::tests` in `slopty-codec` (exp-Golomb and emulation prevention round
+    trips, the encoder's own SPSs bit for bit, refusals), `a_padded_surface_holds_the_picture_at_its_top_left`
+    and `a_picture_off_16_is_drawn_into_a_padded_surface` in `slopty-capture`,
+    `hevc_codes_a_surface_padded_to_16_around_the_even_picture`, and
+    `a_drawn_window_streams_at_its_own_size` (854 × 534 coded as 864 × 544, decoded at 854 × 534
+    with the desktop at its edges) and `quality_changes_decode_without_a_refresh` in
+    `slopty-worker`. The locks: `a_rebuild_beside_a_cadence_change_finishes` (real sessions)
+    and `nothing_but_an_encode_waits_on_one`. The watch:
+    `a_rung_the_encoder_cannot_feed_follows_what_it_was_fed`,
+    `a_seldom_fed_encoder_is_capped_only_by_its_encode_time` and
+    `a_ceiling_the_encoder_outgrew_rises_to_what_it_codes` in `slopty-media`, and
+    `a_rung_the_encoder_cannot_feed_comes_down_to_what_it_was_fed`,
+    `a_capture_replaced_within_its_slot_costs_the_rung_nothing`,
+    `a_ceiling_the_encoder_outgrew_rises_back` and
+    `the_guard_budgets_a_frame_at_the_rate_the_encoder_is_fed` in the worker. The size:
+    `a_picture_of_another_size_is_refused` in `slopty-codec` and
+    `a_capture_of_the_old_size_never_reaches_a_rebuilt_session` in the worker. The padding
+    parameter: `a_streams_padding_is_its_own`. On the live window server,
+    `a_live_padded_capture_is_the_bare_picture_over_black` in
+    `crates/slopty-capture/tests/latency.rs` (opt-in, `SLOPTY_SCREEN_E2E=1`). The ignored
+    probes `conformance_window`, `encode_time_by_size` (`SLOPTY_PROBE_ALIGN=16`) and
+    `submit_blocking_and_pictures_held` in `crates/slopty-codec/tests/chroma444.rs`, and
+    `capture_to_glass_padded_against_even` and `capture_to_glass_at_120_past_the_encoder` in
+    the worker.
 
 - ⏸ **The encoder writes every frame as a reference; half of them need not be** (2026-09-29,
   M1 Max, macOS 27.0; MEASUREMENTS "temporal layers on the low-latency encoder"). The SPS

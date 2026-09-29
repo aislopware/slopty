@@ -131,10 +131,15 @@ pub enum PixelFormat {
 /// Stream settings.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct CaptureConfig {
-    /// Output width in pixels (even).
+    /// Width of the picture in pixels (even).
     pub width: u32,
-    /// Output height in pixels (even).
+    /// Height of the picture in pixels (even).
     pub height: u32,
+    /// The surface's sides are the picture's rounded up to a multiple of this; the picture is
+    /// drawn at its top-left and the rest is black ([`Self::surface`]). The low-latency HEVC
+    /// encoder queues any picture whose sides are not multiples of 16
+    /// (`docs/decisions/video.md`, "Stream sides padded to 16"). 1 or 0 pads nothing.
+    pub align: u32,
     /// Frame rate ceiling; 0 captures at the display's own refresh, whatever it is
     /// (`minimumFrameInterval` = `kCMTimeZero`).
     pub fps: u16,
@@ -148,6 +153,23 @@ pub struct CaptureConfig {
     /// Sample only this part of the target (a window's frame on a display target); the
     /// whole target when `None`.
     pub crop: Option<Crop>,
+}
+
+impl CaptureConfig {
+    /// The size of the surface each frame is delivered in: the picture's sides rounded up to
+    /// [`Self::align`].
+    #[must_use]
+    pub const fn surface(&self) -> (u32, u32) {
+        (pad(self.width, self.align), pad(self.height, self.align))
+    }
+}
+
+/// `side` rounded up to a multiple of `align`; `side` itself when that would overflow.
+const fn pad(side: u32, align: u32) -> u32 {
+    match side.checked_next_multiple_of(align) {
+        Some(padded) => padded,
+        None => side,
+    }
 }
 
 /// Audio sample rate ScreenCaptureKit is asked for.

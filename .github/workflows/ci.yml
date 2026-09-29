@@ -17,33 +17,47 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  # `cargo gate`, one lane per runner. A hosted Mac has three cores and 7 GB: the five lanes
+  # side by side on one of them took 80 minutes cold, each lane compiling the world on its own
+  # target dir while swapping. Here each lane takes the whole runner (docs/decisions/tooling.md).
   gate:
-    name: gate
+    name: gate (${{ matrix.lane }})
     runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [ tools, clippy-host, clippy-ios, tests, rustdoc ]
     steps:
       - uses: actions/checkout@v5
         with:
           submodules: recursive
-          fetch-depth: 0
+          # `committed` lints every commit since the last tag; the other lanes read the tree.
+          fetch-depth: ${{ matrix.lane != 'tools' && 1 || 0 }}
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
           targets: aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim
-      - uses: dtolnay/rust-toolchain@nightly
+      # The canonical formatter is nightly rustfmt; only the tools lane formats.
+      - if: matrix.lane == 'tools'
+        uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      # sccache holds the compiled units; this keeps only the registry and git checkouts, so the
-      # two do not store every unit twice in the repository's cache quota.
+      # sccache holds the compiled units; this keeps only the registry, git checkouts and the
+      # installed tools, so the two do not store every unit twice in the repository's cache
+      # quota. Kept on failure too: a red test is no reason to download it all again.
       - uses: Swatinem/rust-cache@v2
         with:
+          key: ${{ matrix.lane }}
           cache-targets: false
+          cache-on-failure: true
       - uses: cargo-bins/cargo-binstall@main
-      - run: brew install zig
-      - run: cargo xtask setup
-      # The runner's tree is the commit: check it in place rather than snapshotting the index.
-      - run: cargo xtask gate --in-place
+      # libghostty-vt-sys builds its library with zig in every lane that compiles.
+      - if: matrix.lane != 'tools'
+        run: brew install zig
+      - run: cargo xtask setup --lane ${{ matrix.lane }}
+      - run: cargo xtask gate --ci --lane ${{ matrix.lane }}
 
   # Unsigned, un-notarized artifacts for now; Developer-ID signing + notarization land with
   # `cargo xtask dist`.

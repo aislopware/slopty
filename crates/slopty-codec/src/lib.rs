@@ -1,6 +1,8 @@
 //! Hardware video codecs behind a small, callback-driven API.
 //!
 //! * [`annexb`] — pure NAL unit framing, used by both halves and on every platform.
+//! * [`conformance`] — the SPS conformance window that shows a picture coded at a padded size at
+//!   its true one.
 //! * [`video`] — the worker's encoder seam, [`VideoEncoder`] and [`AudioEncoder`], on every
 //!   platform; `VideoToolbox` and `Opus` implement it on macOS.
 //! * `Encoder` (macOS) — a `VTCompressionSession` tuned for interactive streaming: low-latency rate
@@ -22,6 +24,7 @@
 pub mod annexb;
 #[cfg(target_vendor = "apple")]
 pub mod audio;
+pub mod conformance;
 pub mod video;
 
 #[cfg(target_vendor = "apple")]
@@ -75,6 +78,15 @@ pub enum CodecError {
     /// the hardware would have encoded it as 4:2:0.
     #[error("a 4:4:4 session needs xf44 pictures, got {0:#010x}")]
     NotFullChroma(u32),
+    /// A session was handed a picture of another size than its own: a capture from before a
+    /// resize, which the encoder would have coded into the session's size.
+    #[error("a {session:?} session was handed a {image:?} picture")]
+    WrongSize {
+        /// The picture's width and height.
+        image: (usize, usize),
+        /// The session's.
+        session: (usize, usize),
+    },
     /// This platform has no audio encoder (`docs/decisions/platform.md`, "Linux seams").
     #[error("no audio encoder on this platform")]
     NoAudio,

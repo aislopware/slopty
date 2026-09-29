@@ -20,6 +20,19 @@ inherits = "gate"
 slow-timeout = { period = "60s", terminate-after = 3, grace-period = "10s" }
 fail-fast = false
 status-level = "fail"
+# The tests that read hardware a hosted runner's virtual Mac does not have. nextest lists them
+# as skipped here, and every local gate runs them. Each is named with what it lacks; only
+# missing hardware puts a test here, never timing and never a pattern.
+# - The guest has no performance counters: `proc_pid_rusage` reads 0 instructions and 0 cycles.
+# - The guest has no wake-on-LAN: `pmset -g` gives no `womp` setting.
+default-filter = '''
+not (
+    (package(slopty-testkit) & (
+        test(=bench::tests::a_series_reports_per_operation_and_as_json)
+        | test(=process::tests::this_process_reads_back)))
+    | (package(slopty-worker) & test(=caps::tests::this_mac_says_whether_it_wakes_on_lan))
+)
+'''
 
 [profile.ci.junit]
 path = "junit.xml"
@@ -66,7 +79,10 @@ slow-timeout = { period = "60s", terminate-after = 3, grace-period = "5s" }
 max-threads = 2
 
 [[profile.default.overrides]]
-filter = 'package(slopty-codec) & !test(player_starts_and_drains)'
+filter = '''
+(package(slopty-codec) & !test(player_starts_and_drains))
+| (package(slopty-worker) & test(=screen::tests::a_rebuild_beside_a_cadence_change_finishes))
+'''
 test-group = 'videotoolbox'
 
 # The gate's tests lane (`cargo gate`): the default profile, plus retries for the tests named

@@ -364,6 +364,7 @@ mod encoder_rate_control {
         let config = CaptureConfig {
             width: w,
             height: h,
+            align: 1,
             fps: 60,
             format: PixelFormat::Nv12Full,
             queue_depth: 2,

@@ -217,36 +217,90 @@ pub const fn slower_rung(fps: u16) -> u16 {
     }
 }
 
+/// Captures due at the rung that the encoder is judged over: a quarter of a second at 120, half
+/// a second at 60. Long enough that the beat's jitter averages out, short enough that a rung
+/// the encoder cannot feed stands for a fraction of a second.
+pub(crate) const ENCODER_WINDOW: u32 = 30;
+
+/// How the rate the encoder was fed compares with the rung, in eighths: under seven eighths of
+/// the rung, the rung follows the rate. A window that ran a little short (one slow frame, the
+/// beat's jitter against the gate) keeps the rung.
+const ENCODER_SHORT_EIGHTHS: u64 = 7;
+
+/// How the rate the encoder can code compares with the rung, in sevenths: over eight sevenths of
+/// it, the ceiling rises to that rate. The mirror of [`ENCODER_SHORT_EIGHTHS`], so that one
+/// window's noise moves the ceiling neither way, and one slow window (another process on the
+/// media engine) does not hold it down for the rest of the session.
+const ENCODER_ROOM_SEVENTHS: u64 = 8;
+
 /// Whether the encoder keeps up with the rung in force.
 ///
 /// A rung the link carries can still be one the encoder cannot: a frame a period is only a
-/// frame a period if the encoder turns one out that fast. When it cannot, frames queue inside
-/// VideoToolbox and every one of them waits behind the others, so the picture falls behind by
-/// the queue, tens of milliseconds, for as long as the rung stands. Dropping to the next rung is
-/// the cheaper loss (`docs/decisions/video.md`, "The stream follows the screen's refresh").
+/// frame a period if the encoder turns one out that fast. It falls short in one of two ways.
+///
+/// A session that queues inside VideoToolbox returns every frame later than the one before, so
+/// the picture falls behind by the queue, tens of milliseconds, for as long as the rung stands:
+/// a run of frames back late ([`Self::returned`]) drops the ceiling to the next rung
+/// (`docs/decisions/video.md`, "The stream follows the screen's refresh").
+///
+/// A session that codes each frame inside the submit (sides that are multiples of 16) queues
+/// nothing: the worker's mailbox in front of it replaces a capture the encoder is still busy
+/// for, so frames are lost rather than late, and nothing comes back late to count. At 3024 ×
+/// 1968 it codes a frame in 15 ms, 66 a second, and a 120 rung was fed 66 of its 120 due
+/// captures while the gate, the congestion guard and the encoder's own rate control all
+/// budgeted each frame at a 120th of the rate. Here each window of `ENCODER_WINDOW` due
+/// captures is weighed: the share of them the encoder took ([`Self::fed`] against
+/// [`Self::superseded`]), capped at one frame per encode time. That is the rate the encoder is
+/// fed, and a ceiling for the rung when it falls well under it. The same window lifts that
+/// ceiling again when the encoder codes well over the rung, so a slow stretch (another stream or
+/// process on the media engine) costs the rung only while it lasts
+/// (`docs/decisions/video.md`, "Stream sides padded to 16").
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct EncoderWatch {
     /// Late frames in a row.
     late: u32,
+    /// The rung the window is weighing; a new rung starts a new window.
+    rung: u16,
+    /// Due captures in the window that reached the encoder.
+    taken: u32,
+    /// Due captures in the window that a newer capture replaced while the encoder was busy.
+    lost: u32,
+    /// Encode time of the window's frames back, keyframes aside, and how many there were.
+    encode_us: u64,
+    encoded: u32,
+}
+
+/// A window's verdict ([`EncoderWatch::fed`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Fed {
+    /// Frames a second the encoder was fed: what each of its frames is budgeted from.
+    pub fps: u16,
+    /// Where the rung's ceiling moves: down to what the encoder was fed when that fell well
+    /// short of the rung, or up to what it can code when that is well over the rung.
+    pub ceiling: Option<u16>,
 }
 
 impl EncoderWatch {
-    /// Pick the watch back up with `late` frames late in a row.
-    #[must_use]
-    pub const fn resume(late: u32) -> Self {
-        Self { late }
-    }
+    const DEFAULT: Self = Self { late: 0, rung: 0, taken: 0, lost: 0, encode_us: 0, encoded: 0 };
 
-    /// Late frames in a row, to store and [`Self::resume`] from.
-    #[must_use]
-    pub const fn late(self) -> u32 {
-        self.late
+    /// Weigh the window at the rung `fps`: a new rung starts a new one.
+    const fn weigh(&mut self, fps: u16) {
+        if fps != self.rung {
+            *self = Self { late: self.late, rung: fps, ..Self::DEFAULT };
+        }
     }
 
     /// A frame came back from the encoder `encode_us` after it went in, at `fps`. The ceiling
     /// the encoder can keep when this frame ends a run of twelve late ones: the
     /// rung under `fps`. The run starts again from there.
-    pub const fn returned(&mut self, encode_us: u64, fps: u16) -> Option<u16> {
+    ///
+    /// A keyframe's time is not a frame's: a session's first one takes 50–130 ms at 3024 × 1964,
+    /// and counted it would cap a window at 52 frames a second.
+    pub const fn returned(&mut self, encode_us: u64, fps: u16, keyframe: bool) -> Option<u16> {
+        if !keyframe {
+            self.encode_us = self.encode_us.saturating_add(encode_us);
+            self.encoded = self.encoded.saturating_add(1);
+        }
         if encode_us <= period_us(fps).saturating_mul(ENCODER_LATE_PERIODS) {
             self.late = 0;
             return None;
@@ -258,6 +312,52 @@ impl EncoderWatch {
         self.late = 0;
         let slower = slower_rung(fps);
         if slower < fps { Some(slower) } else { None }
+    }
+
+    /// A slot of the rung `fps` went unfilled: a due capture never reached the encoder, as a
+    /// newer one due only in the slot after replaced it while the encoder was busy. A capture
+    /// replaced within its own slot is no loss, and the caller does not tell it.
+    pub const fn superseded(&mut self, fps: u16) {
+        self.weigh(fps);
+        self.lost = self.lost.saturating_add(1);
+    }
+
+    /// A capture went into the encoder at `fps`. The window's verdict once it holds
+    /// `ENCODER_WINDOW` due captures; the next window starts with the next capture.
+    pub const fn fed(&mut self, fps: u16) -> Option<Fed> {
+        self.weigh(fps);
+        self.taken = self.taken.saturating_add(1);
+        let due = self.taken.saturating_add(self.lost);
+        if due < ENCODER_WINDOW {
+            return None;
+        }
+        let rung = fps as u64;
+        let delivered = match rung.saturating_mul(self.taken as u64).checked_div(due as u64) {
+            Some(fps) => fps,
+            None => rung,
+        };
+        let capacity =
+            match 1_000_000_u64.saturating_mul(self.encoded as u64).checked_div(self.encode_us) {
+                Some(fps) => fps,
+                None => rung,
+            };
+        let fed = if delivered < capacity { delivered } else { capacity };
+        let fed = if fed < rung { fed } else { rung };
+        let short = fed.saturating_mul(8) < rung.saturating_mul(ENCODER_SHORT_EIGHTHS);
+        let room = self.encoded > 0
+            && capacity.saturating_mul(7) > rung.saturating_mul(ENCODER_ROOM_SEVENTHS);
+        *self = Self { late: self.late, rung: fps, ..Self::DEFAULT };
+        #[expect(clippy::cast_possible_truncation, reason = "at most the rung, a u16")]
+        let fed = if fed == 0 { 1 } else { fed as u16 };
+        let ceiling = if short {
+            Some(fed)
+        } else if room {
+            #[expect(clippy::cast_possible_truncation, reason = "clamped to a u16 first")]
+            Some(if capacity < u16::MAX as u64 { capacity as u16 } else { u16::MAX })
+        } else {
+            None
+        };
+        Some(Fed { fps: fed, ceiling })
     }
 }
 
@@ -1132,27 +1232,131 @@ mod tests {
     fn an_encoder_that_falls_behind_takes_the_ceiling_down_a_rung() {
         let period_120 = period_us(120);
         let late = period_120 * ENCODER_LATE_PERIODS + 1;
+        let almost = |fps| {
+            let mut w = EncoderWatch::default();
+            for _ in 1..ENCODER_LATE_RUN {
+                assert_eq!(w.returned(1_000_000, fps, false), None);
+            }
+            w
+        };
         let mut w = EncoderWatch::default();
-        assert_eq!(w.returned(97_000, 120), None, "a lone slow first frame");
-        assert_eq!(w.returned(8_000, 120), None, "back in time: the run is over");
-        assert_eq!(w.late(), 0);
+        assert_eq!(w.returned(97_000, 120, true), None, "a lone slow first frame");
+        assert_eq!(w.returned(8_000, 120, false), None, "back in time: the run is over");
+        assert_eq!(w.late, 0);
         for _ in 1..ENCODER_LATE_RUN {
-            assert_eq!(w.returned(late, 120), None);
+            assert_eq!(w.returned(late, 120, false), None);
         }
-        assert_eq!(w.returned(80_000, 120), Some(60), "80 ms at 3024 × 1964 and 120 fps");
-        assert_eq!(w.late(), 0, "the run starts again at the new rung");
+        assert_eq!(w.returned(80_000, 120, false), Some(60), "80 ms at 3024 × 1964 and 120 fps");
+        assert_eq!(w.late, 0, "the run starts again at the new rung");
         // 25 ms is late at 120 and on time at 60.
-        let mut w = EncoderWatch::resume(ENCODER_LATE_RUN - 1);
-        assert_eq!(w.returned(late, 60), None, "three 120 fps periods is one and a half at 60");
-        assert_eq!(w.late(), 0);
+        let mut w = almost(60);
+        assert_eq!(w.returned(late, 60, false), None, "three 120 fps periods: 1.5 at 60");
+        assert_eq!(w.late, 0);
         for _ in 0..ENCODER_LATE_RUN {
-            let _step = w.returned(60_000, 60);
+            let _step = w.returned(60_000, 60, false);
         }
-        assert_eq!(w.late(), 0, "a run at 60 went to 30 and started over");
-        let mut w = EncoderWatch::resume(ENCODER_LATE_RUN - 1);
-        assert_eq!(w.returned(1_000_000, 15), None, "nothing under the bottom rung");
+        assert_eq!(w.late, 0, "a run at 60 went to 30 and started over");
+        let mut w = almost(15);
+        assert_eq!(w.returned(1_000_000, 15, false), None, "nothing under the bottom rung");
         assert_eq!([slower_rung(120), slower_rung(75), slower_rung(60)], [60, 60, 30]);
         assert_eq!([slower_rung(30), slower_rung(15), slower_rung(10)], [15, 15, 10]);
+    }
+
+    /// A window of an encoder fed at `fps` on a beat `beat_us` apart, each frame coded in
+    /// `encode_us` inside the submit with a one-frame mailbox in front of it: the watch's verdict
+    /// when the window closes. Every capture is due at the rung (the rung is the beat or above).
+    fn fed_through_the_mailbox(beat_us: u64, encode_us: u64, fps: u16) -> Fed {
+        let mut w = EncoderWatch::default();
+        let (mut busy_until, mut waiting) = (0_u64, false);
+        for i in 0_u64..1_000 {
+            let at = i.saturating_mul(beat_us);
+            // The encoder takes the capture left for it as soon as it is free.
+            if waiting && busy_until <= at {
+                if let Some(verdict) = w.fed(fps) {
+                    return verdict;
+                }
+                let _late = w.returned(encode_us, fps, false);
+                busy_until = busy_until.saturating_add(encode_us);
+                waiting = false;
+            }
+            if at >= busy_until {
+                if let Some(verdict) = w.fed(fps) {
+                    return verdict;
+                }
+                let _late = w.returned(encode_us, fps, false);
+                busy_until = at.saturating_add(encode_us);
+                continue;
+            }
+            if waiting {
+                w.superseded(fps);
+            }
+            waiting = true;
+        }
+        panic!("no verdict");
+    }
+
+    /// An encoder that turns a frame out in 15 ms cannot feed a 120 rung however the link does:
+    /// the mailbox replaces half of the due captures while it is busy, and nothing comes back
+    /// late (15 ms is under three 120 fps periods) for the late watch to count. The window says
+    /// the encoder was fed one frame per encode time, 66, and the rung follows. At 60 it keeps up,
+    /// and a 4K encoder at 23 ms is capped at its own 43.
+    #[test]
+    fn a_rung_the_encoder_cannot_feed_follows_what_it_was_fed() {
+        let at_120 = fed_through_the_mailbox(8_333, 15_000, 120);
+        assert_eq!(at_120, Fed { fps: 66, ceiling: Some(66) }, "3024 × 1968 on a 120 Hz beat");
+        let at_60 = fed_through_the_mailbox(16_667, 15_200, 60);
+        assert_eq!(at_60, Fed { fps: 60, ceiling: None }, "the same encoder at 60 keeps up");
+        let four_k = fed_through_the_mailbox(16_667, 23_000, 60);
+        assert_eq!(four_k.ceiling, Some(four_k.fps), "{four_k:?}");
+        assert!((40..=43).contains(&four_k.fps), "4K at 23 ms a frame: {four_k:?}");
+    }
+
+    /// Frames that come seldom (a still screen, typing) lose nothing in the mailbox, so the rung
+    /// stands as long as the encoder could code it; a slow encoder caps it all the same, and a
+    /// keyframe's time is left out of that. A new rung starts a new window.
+    #[test]
+    fn a_seldom_fed_encoder_is_capped_only_by_its_encode_time() {
+        let window = |encode_us, keyframes| {
+            let mut w = EncoderWatch::default();
+            let mut verdict = None;
+            for i in 0..ENCODER_WINDOW {
+                verdict = w.fed(60);
+                let _late =
+                    w.returned(if i < keyframes { 130_000 } else { encode_us }, 60, i < keyframes);
+            }
+            verdict.expect("a verdict")
+        };
+        assert_eq!(window(15_200, 0), Fed { fps: 60, ceiling: None });
+        assert_eq!(window(15_200, 2), Fed { fps: 60, ceiling: None }, "two first keyframes");
+        assert_eq!(window(23_000, 0), Fed { fps: 43, ceiling: Some(43) }, "4K");
+        assert_eq!(window(17_500, 0), Fed { fps: 57, ceiling: None }, "an eighth short at most");
+
+        let mut w = EncoderWatch::default();
+        assert_eq!(w.fed(120), None);
+        w.superseded(120);
+        w.superseded(120);
+        assert_eq!(w.fed(60), None, "the rung moved: the 120 window is gone");
+        assert_eq!((w.taken, w.lost), (1, 0));
+    }
+
+    /// A ceiling a slow stretch brought down comes back up once the encoder codes well over it:
+    /// a window of 18 ms frames took a 66 rung to 55, and the same session at its 15.2 ms codes
+    /// 65 a second. Within an eighth of the rung either way it stays where it is.
+    #[test]
+    fn a_ceiling_the_encoder_outgrew_rises_to_what_it_codes() {
+        let window = |fps, encode_us| {
+            let mut w = EncoderWatch::default();
+            let mut verdict = None;
+            for _ in 0..ENCODER_WINDOW {
+                let _late = w.returned(encode_us, fps, false);
+                verdict = w.fed(fps);
+            }
+            verdict.expect("a verdict")
+        };
+        assert_eq!(window(66, 18_000), Fed { fps: 55, ceiling: Some(55) }, "a slow stretch");
+        assert_eq!(window(55, 15_200), Fed { fps: 55, ceiling: Some(65) }, "back to its own");
+        assert_eq!(window(60, 15_200), Fed { fps: 60, ceiling: None }, "65 is within an eighth");
+        assert_eq!(window(60, 12_000), Fed { fps: 60, ceiling: Some(83) }, "a smaller picture");
     }
 
     /// The encoded frames a steady stream of captures `beat_us` apart makes through the gate at

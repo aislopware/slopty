@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use slopty_core::{ClientId, StreamId};
+use slopty_input::sources::Claim;
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
 use slopty_worker::platform::{Native, Platform};
@@ -21,6 +22,21 @@ use slopty_worker::screen::{
 use tokio::sync::mpsc;
 
 use crate::Daemon;
+
+/// The most a stream holds its client's keys and text behind an input-source switch it asked
+/// for. The switch is answered once the worker hears it (`sources::SETTLE_MOST` bounds that),
+/// and the keys typed meanwhile wait so they are read under the source they were typed for; a
+/// main queue busy elsewhere (a display being made) lets them go under whatever source is
+/// current. Tests hold far longer, so a loaded machine cannot let a key go before the answer a
+/// test waits on.
+const HOLD_MOST: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_secs(10)
+} else {
+    std::time::Duration::from_millis(150)
+};
+
+/// Whether the worker types under the source a stream asked for, once it is known.
+type Answer = std::pin::Pin<Box<dyn Future<Output = bool> + Send>>;
 
 /// How often a stream's target is probed while it has something to follow
 /// ([`Pipeline::geometry_quiet`]): a window served as a crop, a source that draws, a change
@@ -195,7 +211,9 @@ async fn serve_opened<P: Platform>(
         }
     };
 
-    let by_client = serve(&mut stream, client, &mut commands, &out, sized.as_mut()).await;
+    // Dropped however the task ends, a panic included, so the claim never outlives the stream.
+    let claim = daemon.sources.claimant();
+    let by_client = serve(&mut stream, client, &mut commands, &out, sized.as_mut(), &claim).await;
     if by_client {
         tracing::info!(
             %client,
@@ -205,8 +223,10 @@ async fn serve_opened<P: Platform>(
         );
     }
     // Whatever the client still holds down on the worker is let go now, not after the close has
-    // waited on ScreenCaptureKit; a lost connection ends here too.
+    // waited on ScreenCaptureKit; a lost connection ends here too. The input source it asked
+    // for goes back, after its ask: both are queued in order.
     stream.release_input();
+    drop(claim);
     stream.close().await;
     drop(sized);
     daemon.screens.remove(&client, id);
@@ -229,12 +249,21 @@ async fn serve_opened<P: Platform>(
 /// A display made for the client (`sized`) takes the stream's resizes, and the stream follows
 /// it to the display it switches to; that switch waits on ScreenCaptureKit (a filter update,
 /// ~20 ms), once per rescale or remake.
+///
+/// The client's input source is asked through `claim` from here, in the command's order, so the
+/// claim's release is queued after it. Keys and text after the ask wait for its answer (at most
+/// [`HOLD_MOST`]) so they are read under it; the pointer does not, since no source changes what
+/// a click or a scroll does, unless a key is already held ahead of it and order must hold. An
+/// ask for the source the worker is under already is answered at once and holds nothing. A
+/// switch another stream makes is heard here too, and the client is told whether the worker
+/// still types under its source.
 pub async fn serve<P: Platform>(
     stream: &mut Pipeline<P>,
     client: ClientId,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     out: &mpsc::Sender<WorkerMsg>,
     mut sized: Option<&mut sized::Sized>,
+    claim: &Claim,
 ) -> bool {
     let woken = stream.geometry_wake();
     let mut next_probe = tokio::time::Instant::now();
@@ -243,11 +272,39 @@ pub async fn serve<P: Platform>(
     // The geometry is not probed again until the new encoder is in.
     let mut rebuilding: Option<Rebuild<P>> = None;
     let mut telling = Telling::default();
+    let mut heard = claim.subscribe();
+    heard.mark_unchanged();
+    // The source the client asked for, and whether it was last told the worker types under it.
+    let mut claimed: Option<(String, bool)> = None;
+    // The client's input source being selected: the ask and its answer to come.
+    let mut sourcing: Option<(String, Answer)> = None;
+    // Keys and text the client sent after its ask, and whatever came after them, held until the
+    // answer or the deadline.
+    let mut held = std::collections::VecDeque::new();
+    let mut hold_until: Option<tokio::time::Instant> = None;
     let by_client = loop {
         tokio::select! {
             command = commands.recv() => match command {
                 None => break false,
                 Some(Command::Close) => break true,
+                // The newest ask wins: the main queue selects in order, and only its answer goes.
+                Some(Command::Input(ScreenInput::KeyboardSource { source })) => {
+                    let answer = Box::pin(claim.ask(source.clone()));
+                    sourcing = Some((source, answer));
+                    let now = tokio::time::Instant::now();
+                    hold_until.get_or_insert_with(|| now.checked_add(HOLD_MOST).unwrap_or(now));
+                }
+                // The tile has been idle: the worker's own source comes back unless another
+                // stream asks, and what waited on the ask goes under it.
+                Some(Command::Input(ScreenInput::KeyboardReleased)) => {
+                    claim.release();
+                    sourcing = None;
+                    claimed = None;
+                    hold_until = None;
+                    for command in std::mem::take(&mut held) {
+                        take_command(stream, client, command, &mut input_at, &mut next_probe);
+                    }
+                }
                 // Applied on top of a resize's build under way, not under it.
                 Some(Command::SetQuality(quality)) => {
                     rebuilding = stream.set_quality(&quality, rebuilding.take());
@@ -257,20 +314,62 @@ pub async fn serve<P: Platform>(
                         (sized.resize)(width, height, scale);
                     }
                 }
+                Some(command @ (Command::Input(_) | Command::Focus))
+                    if hold_until.is_some() && (!held.is_empty() || typed(&command)) =>
+                {
+                    held.push_back(command);
+                }
                 Some(command) => {
-                    if matches!(command, Command::Input(_)) {
-                        // Input maps through the probe's bounds, which the injector reads again
-                        // itself, in front of the event, once they are older than its
-                        // `BOUNDS_TTL`: a stream that takes input follows at the period.
-                        let now = tokio::time::Instant::now();
-                        input_at = Some(now);
-                        if next_probe > now.checked_add(GEOMETRY_PERIOD).unwrap_or(now) {
-                            next_probe = now;
-                        }
-                    }
-                    apply(stream, client, command);
+                    take_command(stream, client, command, &mut input_at, &mut next_probe);
                 }
             },
+            applied = async {
+                match sourcing.as_mut() {
+                    Some((_, answer)) => answer.await,
+                    None => std::future::pending().await,
+                }
+            }, if sourcing.is_some() => {
+                if let Some((source, _)) = sourcing.take() {
+                    let event = ScreenEvent::KeyboardSource {
+                        stream: stream.id(),
+                        source: source.clone(),
+                        applied,
+                    };
+                    telling.push(event);
+                    claimed = Some((source, applied));
+                }
+                hold_until = None;
+                for command in std::mem::take(&mut held) {
+                    take_command(stream, client, command, &mut input_at, &mut next_probe);
+                }
+            }
+            () = async {
+                match hold_until {
+                    Some(until) => tokio::time::sleep_until(until).await,
+                    None => std::future::pending().await,
+                }
+            }, if hold_until.is_some() => {
+                tracing::debug!(stream = %stream.id(), "input source switch unanswered; typing on");
+                hold_until = None;
+                for command in std::mem::take(&mut held) {
+                    take_command(stream, client, command, &mut input_at, &mut next_probe);
+                }
+            }
+            changed = heard.changed(), if claimed.is_some() && sourcing.is_none() => {
+                if changed.is_err() {
+                    claimed = None;
+                    continue;
+                }
+                let now = heard.borrow_and_update().clone();
+                if let Some((source, told)) = claimed.as_mut() {
+                    let applied = now.as_deref() == Some(source.as_str());
+                    if applied != *told {
+                        *told = applied;
+                        let source = source.clone();
+                        telling.push(ScreenEvent::KeyboardSource { stream: stream.id(), source, applied });
+                    }
+                }
+            }
             switch = async { sized.as_deref_mut()?.switches.recv().await }, if sized.is_some() => {
                 let key = sized.as_deref().map(|s| s.key);
                 let (Some((display, told)), Some(key)) = (switch, key) else {
@@ -377,6 +476,31 @@ impl Telling {
     fn clear(&mut self) {
         self.0.clear();
     }
+}
+
+/// Apply `command`; input also keeps the geometry probe at its period. Input maps through the
+/// probe's bounds, which the injector reads again itself, in front of the event, once they are
+/// older than its `BOUNDS_TTL`: a stream that takes input follows at the period.
+/// Whether `command` is read under the worker's input source: a key or text.
+const fn typed(command: &Command) -> bool {
+    matches!(command, Command::Input(ScreenInput::Key { .. } | ScreenInput::Text { .. }))
+}
+
+fn take_command<P: Platform>(
+    stream: &mut Pipeline<P>,
+    client: ClientId,
+    command: Command,
+    input_at: &mut Option<tokio::time::Instant>,
+    next_probe: &mut tokio::time::Instant,
+) {
+    if matches!(command, Command::Input(_)) {
+        let now = tokio::time::Instant::now();
+        *input_at = Some(now);
+        if *next_probe > now.checked_add(GEOMETRY_PERIOD).unwrap_or(now) {
+            *next_probe = now;
+        }
+    }
+    apply(stream, client, command);
 }
 
 fn apply<P: Platform>(stream: &mut Pipeline<P>, client: ClientId, command: Command) {
@@ -962,6 +1086,32 @@ pub mod fake {
         }
     }
 
+    /// A claim on input sources no stream can take: the client composes.
+    pub fn unsourced() -> slopty_input::sources::Claim {
+        slopty_input::sources::Sources::new(slopty_input::sources::Unsupported).claimant()
+    }
+
+    /// A worker's input sources as a test plays them: every source selectable, run at once.
+    #[derive(Clone, Default)]
+    pub struct Selectable(pub std::sync::Arc<Mutex<Option<String>>>);
+
+    impl slopty_input::sources::Tis for Selectable {
+        fn on_main(&self, job: Box<dyn FnOnce() + Send>) {
+            job();
+        }
+
+        fn current(&self) -> Option<String> {
+            self.0.lock().clone()
+        }
+
+        fn select(&self, id: &str) -> Result<bool, String> {
+            *self.0.lock() = Some(id.to_owned());
+            Ok(false)
+        }
+
+        fn disable(&self, _id: &str) {}
+    }
+
     /// Datagrams that go nowhere.
     pub struct Nowhere;
 
@@ -1007,7 +1157,7 @@ mod serving {
     use slopty_worker::screen::Pipeline;
     use tokio::sync::mpsc;
 
-    use super::fake::{BUILT, Fake, Gated, Nowhere, Plain, Queued, Toolbox, note};
+    use super::fake::{BUILT, Fake, Gated, Nowhere, Plain, Queued, Toolbox, note, unsourced};
     use super::{Command, serve};
 
     /// A stream of display `display` on `P`, served on a task of its own: its command queue, the
@@ -1033,7 +1183,7 @@ mod serving {
         let (out, events) = mpsc::channel(depth);
         while full && out.try_send(filler()).is_ok() {}
         let task = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commands, &out, None).await;
+            serve(&mut stream, ClientId::new(), &mut commands, &out, None, &unsourced()).await;
             stream.close().await;
         });
         (commands_tx, events, queued, task)
@@ -1199,7 +1349,7 @@ mod serving {
         let (out, mut events) = mpsc::channel(1024);
         tokio::spawn(async move { while events.recv().await.is_some() {} });
         let task = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commands, &out, None).await;
+            serve(&mut stream, ClientId::new(), &mut commands, &out, None, &unsourced()).await;
             stream.close().await;
         });
         (commands_tx, wake, task)
@@ -1313,7 +1463,7 @@ mod made {
     };
     use tokio::sync::mpsc;
 
-    use super::fake::{Fake, Gated, LISTED, Nowhere};
+    use super::fake::{Fake, Gated, LISTED, Nowhere, unsourced};
     use super::{Command, serve};
 
     /// Displays numbered from 101 that settle at once and hold up to `max` pixels a side; what
@@ -1487,7 +1637,15 @@ mod made {
         let (commands_tx, mut commands) = mpsc::unbounded_channel();
         let (out, mut events) = mpsc::channel(64);
         let task = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commands, &out, Some(&mut sized)).await;
+            serve(
+                &mut stream,
+                ClientId::new(),
+                &mut commands,
+                &out,
+                Some(&mut sized),
+                &unsourced(),
+            )
+            .await;
             let target = stream.target();
             stream.close().await;
             drop(sized);
@@ -1511,5 +1669,223 @@ mod made {
         let target = task.await.unwrap();
         assert_eq!(target, CaptureTarget::Display(DisplayId(102)));
         until("the remade display outlived its stream", || alive.lock().is_empty()).await;
+    }
+}
+
+/// A stream's keyboard input source: the ask queued in order, the input after it held until
+/// the switch is heard, and a client told when another client's ask took its source.
+#[cfg(test)]
+#[cfg(target_vendor = "apple")]
+mod sourcing {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use slopty_core::{ClientId, StreamId};
+    use slopty_input::sources::Sources;
+    use slopty_net::WorkerMsg;
+    use slopty_proto::input::{KeyAction, KeyCode, Mods};
+    use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
+    use slopty_worker::screen::Pipeline;
+    use tokio::sync::mpsc;
+
+    use super::fake::{Fake, Nowhere, Plain, Queued, Selectable, note};
+    use super::{Command, serve};
+
+    const US: &str = "com.apple.keylayout.US";
+    const FRENCH: &str = "com.apple.keylayout.French";
+    const TELEX: &str = "com.apple.inputmethod.VietnameseIM.VietnameseSimpleTelex";
+
+    /// A stream served for `client` as `stream` over display `display`: its commands, what it
+    /// tells the client, and what its input sink queued. It claims as the stream's task does, and
+    /// lets go as it ends.
+    struct Served {
+        commands: mpsc::UnboundedSender<Command>,
+        events: mpsc::Receiver<WorkerMsg>,
+        queued: mpsc::UnboundedReceiver<Queued>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    async fn served(display: u32, client: ClientId, stream: StreamId, sources: &Sources) -> Served {
+        let queued = note(display);
+        let target = CaptureTarget::Display(slopty_core::DisplayId(display));
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let (mut pipeline, _opened) =
+            Pipeline::<Fake<Plain>>::open(stream, target, Quality::default(), sink, |_event| {})
+                .await
+                .unwrap();
+        let (commands, mut commanded) = mpsc::unbounded_channel();
+        let (out, events) = mpsc::channel(64);
+        let claim = sources.claimant();
+        let task = tokio::spawn(async move {
+            serve(&mut pipeline, client, &mut commanded, &out, None, &claim).await;
+            drop(claim);
+            pipeline.close().await;
+        });
+        Served { commands, events, queued, task }
+    }
+
+    fn ask(source: &str) -> Command {
+        Command::Input(ScreenInput::KeyboardSource { source: source.to_owned() })
+    }
+
+    fn key() -> Command {
+        Command::Input(ScreenInput::Key {
+            code: KeyCode::A,
+            action: KeyAction::Press,
+            mods: Mods::empty(),
+        })
+    }
+
+    /// The next input-source answer the stream tells its client.
+    async fn told(events: &mut mpsc::Receiver<WorkerMsg>) -> (String, bool) {
+        let wait = async {
+            loop {
+                if let Some(WorkerMsg::Screen(ScreenEvent::KeyboardSource {
+                    source,
+                    applied,
+                    ..
+                })) = events.recv().await
+                {
+                    break (source, applied);
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), wait).await.unwrap()
+    }
+
+    fn sources_on(current: &str) -> (Sources, Selectable) {
+        let tis = Selectable::default();
+        *tis.0.lock() = Some(current.to_owned());
+        (Sources::new(tis.clone()), tis)
+    }
+
+    fn moved() -> Command {
+        Command::Input(ScreenInput::Move { x: 1.0, y: 2.0 })
+    }
+
+    async fn next(queued: &mut mpsc::UnboundedReceiver<Queued>) -> Queued {
+        tokio::time::timeout(Duration::from_secs(5), queued.recv()).await.unwrap().unwrap()
+    }
+
+    /// A key typed after the ask for a new source waits for the switch to be heard, so the
+    /// worker reads it under that source; then it goes, after the answer. The order is what is
+    /// checked, not a time: the key reaches the sink after the switch was reported.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_after_a_switch_waits_for_it_to_be_heard() {
+        let (sources, _tis) = sources_on(US);
+        sources.hearing();
+        let mut s = served(31, ClientId::new(), StreamId(1), &sources).await;
+        s.commands.send(ask(FRENCH)).unwrap();
+        s.commands.send(key()).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let heard_at = std::time::Instant::now();
+        sources.heard(Some(FRENCH.to_owned()));
+        assert_eq!(told(&mut s.events).await, (FRENCH.to_owned(), true));
+        let queued = next(&mut s.queued).await;
+        assert!(matches!(queued.input, ScreenInput::Key { code: KeyCode::A, .. }));
+        assert!(queued.at >= heard_at, "held until the switch was heard");
+        drop(s.commands);
+        s.task.await.unwrap();
+    }
+
+    /// The pointer is not held behind a switch: no source changes what it does. Once a key is
+    /// held, the pointer after it waits behind it, so the worker sees them in the order sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pointer_waits_only_behind_a_held_key() {
+        let (sources, _tis) = sources_on(US);
+        sources.hearing();
+        let mut s = served(35, ClientId::new(), StreamId(1), &sources).await;
+        s.commands.send(ask(FRENCH)).unwrap();
+        s.commands.send(moved()).unwrap();
+        let first = next(&mut s.queued).await;
+        assert!(matches!(first.input, ScreenInput::Move { .. }), "the pointer went unheld");
+        s.commands.send(key()).unwrap();
+        s.commands.send(moved()).unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let heard_at = std::time::Instant::now();
+        sources.heard(Some(FRENCH.to_owned()));
+        let key = next(&mut s.queued).await;
+        let after = next(&mut s.queued).await;
+        assert!(matches!(key.input, ScreenInput::Key { .. }) && key.at >= heard_at);
+        assert!(matches!(after.input, ScreenInput::Move { .. }), "behind the key, in order");
+        drop(s.commands);
+        s.task.await.unwrap();
+    }
+
+    /// A client that reconnects opens its stream again as `StreamId(1)` before the old stream
+    /// has ended; the old stream ending leaves the new one's claim, and the source, in place.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reconnected_streams_source_outlives_the_old_stream() {
+        let (sources, tis) = sources_on(US);
+        let client = ClientId::new();
+        let mut old = served(36, client, StreamId(1), &sources).await;
+        old.commands.send(ask(FRENCH)).unwrap();
+        assert_eq!(told(&mut old.events).await, (FRENCH.to_owned(), true));
+        let mut new = served(37, client, StreamId(1), &sources).await;
+        new.commands.send(ask(FRENCH)).unwrap();
+        assert_eq!(told(&mut new.events).await, (FRENCH.to_owned(), true));
+        drop(old.commands);
+        old.task.await.unwrap();
+        assert_eq!(tis.0.lock().as_deref(), Some(FRENCH), "the new stream still asks");
+        drop(new.commands);
+        new.task.await.unwrap();
+        assert_eq!(tis.0.lock().as_deref(), Some(US));
+    }
+
+    /// A tile idle long enough lets its claim go: the worker's own source is back while the
+    /// stream goes on, a key after it is not held, and asking again claims anew.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_released_keyboard_gives_the_source_back() {
+        let (sources, tis) = sources_on(US);
+        let mut s = served(38, ClientId::new(), StreamId(1), &sources).await;
+        s.commands.send(ask(FRENCH)).unwrap();
+        assert_eq!(told(&mut s.events).await, (FRENCH.to_owned(), true));
+        s.commands.send(Command::Input(ScreenInput::KeyboardReleased)).unwrap();
+        s.commands.send(key()).unwrap();
+        assert!(matches!(next(&mut s.queued).await.input, ScreenInput::Key { .. }));
+        assert_eq!(tis.0.lock().as_deref(), Some(US), "the worker's own is back");
+        s.commands.send(ask(FRENCH)).unwrap();
+        assert_eq!(told(&mut s.events).await, (FRENCH.to_owned(), true));
+        assert_eq!(tis.0.lock().as_deref(), Some(FRENCH));
+        drop(s.commands);
+        s.task.await.unwrap();
+    }
+
+    /// Asking for the source the worker is under holds nothing: the answer and the key go at
+    /// once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn asking_for_the_current_source_holds_nothing() {
+        let (sources, _tis) = sources_on(US);
+        sources.hearing();
+        let mut s = served(32, ClientId::new(), StreamId(1), &sources).await;
+        let sent = std::time::Instant::now();
+        s.commands.send(ask(US)).unwrap();
+        s.commands.send(key()).unwrap();
+        assert!(next(&mut s.queued).await.at.duration_since(sent) < super::HOLD_MOST / 2);
+        assert_eq!(told(&mut s.events).await, (US.to_owned(), true));
+        drop(s.commands);
+        s.task.await.unwrap();
+    }
+
+    /// Two clients' first streams, both `StreamId(1)`: the second client's ask takes the
+    /// source, and the first client is told it lost it; once the second leaves, the first's
+    /// comes back and it is told so.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_whose_source_another_took_is_told() {
+        let (sources, tis) = sources_on(US);
+        let mut a = served(33, ClientId::new(), StreamId(1), &sources).await;
+        let mut b = served(34, ClientId::new(), StreamId(1), &sources).await;
+        a.commands.send(ask(TELEX)).unwrap();
+        assert_eq!(told(&mut a.events).await, (TELEX.to_owned(), true));
+        b.commands.send(ask(FRENCH)).unwrap();
+        assert_eq!(told(&mut b.events).await, (FRENCH.to_owned(), true));
+        assert_eq!(told(&mut a.events).await, (TELEX.to_owned(), false), "taken by B");
+        b.commands.send(Command::Close).unwrap();
+        b.task.await.unwrap();
+        assert_eq!(tis.0.lock().as_deref(), Some(TELEX), "A's claim held through B's");
+        assert_eq!(told(&mut a.events).await, (TELEX.to_owned(), true), "A's is back");
+        drop(a.commands);
+        a.task.await.unwrap();
+        assert_eq!(tis.0.lock().as_deref(), Some(US), "none asks: the worker's own");
     }
 }

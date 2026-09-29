@@ -17,6 +17,33 @@ pub fn mods(m: Modifiers) -> Mods {
     out
 }
 
+/// Map GPUI modifiers for a remote window: [`mods`] and the fn key, which the worker sets on
+/// its events (fn-click, fn-drag). The terminal's encoder never sees fn.
+#[must_use]
+pub fn screen_mods(m: Modifiers) -> Mods {
+    let mut out = mods(m);
+    out.set(Mods::FN, m.function);
+    out
+}
+
+/// Whether the text system makes something of `keystroke` on this device.
+///
+/// A character key (or Space) without ⌘ or ⌃ types, or starts a dead key or an input method's
+/// composition. A named key (↩, ⇥, an arrow, an F key) or a chord does not.
+#[must_use]
+pub fn composes(keystroke: &Keystroke) -> bool {
+    let m = keystroke.modifiers;
+    if m.control || m.platform {
+        return false;
+    }
+    let mut chars = keystroke.key.chars();
+    match (chars.next(), chars.next()) {
+        // AppKit spells function keys in the private-use area (`NSUpArrowFunctionKey`…).
+        (Some(c), None) => !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c),
+        _ => keystroke.key == "space",
+    }
+}
+
 /// Map GPUI's key name (lowercase, unshifted) to a physical key.
 #[must_use]
 pub fn key_code(key: &str) -> KeyCode {
@@ -61,6 +88,24 @@ pub fn key_code(key: &str) -> KeyCode {
         "f18" => KeyCode::F18,
         "f19" => KeyCode::F19,
         "f20" => KeyCode::F20,
+        // The keypad's own names (the gpui-fast fork's; GPUI before it says `5`, `+`, `enter`).
+        "kp0" => KeyCode::Numpad0,
+        "kp1" => KeyCode::Numpad1,
+        "kp2" => KeyCode::Numpad2,
+        "kp3" => KeyCode::Numpad3,
+        "kp4" => KeyCode::Numpad4,
+        "kp5" => KeyCode::Numpad5,
+        "kp6" => KeyCode::Numpad6,
+        "kp7" => KeyCode::Numpad7,
+        "kp8" => KeyCode::Numpad8,
+        "kp9" => KeyCode::Numpad9,
+        "kpadd" => KeyCode::NumpadAdd,
+        "kpsubtract" => KeyCode::NumpadSubtract,
+        "kpmultiply" => KeyCode::NumpadMultiply,
+        "kpdivide" => KeyCode::NumpadDivide,
+        "kpdecimal" => KeyCode::NumpadDecimal,
+        "kpequal" => KeyCode::NumpadEqual,
+        "kpenter" => KeyCode::NumpadEnter,
         _ => KeyCode::Unidentified,
     }
 }
@@ -255,6 +300,29 @@ mod tests {
         assert!(!key_event(5, &plain, false, true).option_as_alt);
     }
 
+    /// Character keys and Space compose, with ⇧ or ⌥ too (⌥E starts a dead key); chords and
+    /// named keys do not.
+    #[test]
+    fn character_keys_compose_and_chords_do_not() {
+        let key = |key: &str, modifiers: Modifiers| Keystroke {
+            modifiers,
+            key: key.to_owned(),
+            key_char: None,
+        };
+        let alt = Modifiers { alt: true, ..Modifiers::default() };
+        let cmd = Modifiers { platform: true, ..Modifiers::default() };
+        let ctrl = Modifiers { control: true, ..Modifiers::default() };
+        assert!(composes(&key("e", alt)), "a dead key");
+        assert!(composes(&key("a", Modifiers::default())));
+        assert!(composes(&key("é", Modifiers::default())));
+        assert!(composes(&key("space", Modifiers::default())));
+        assert!(!composes(&key("q", cmd)));
+        assert!(!composes(&key("c", ctrl)));
+        for named in ["enter", "tab", "backspace", "escape", "left", "f5", "\u{f700}"] {
+            assert!(!composes(&key(named, Modifiers::default())), "{named}");
+        }
+    }
+
     #[test]
     fn names_map_to_codes() {
         assert_eq!(key_code("a"), KeyCode::A);
@@ -313,8 +381,25 @@ mod tests {
         for (name, code) in punctuation {
             assert_eq!(key_code(name), code, "{name}");
         }
-        for name in ["é", "!", "f21", "fn"] {
+        for name in ["é", "!", "f21", "fn", "kp"] {
             assert_eq!(key_code(name), KeyCode::Unidentified, "{name}");
+        }
+        // The keypad by its own names, and by the main row's where GPUI gives those.
+        for d in 0..=9 {
+            assert_eq!(format!("{:?}", key_code(&format!("kp{d}"))), format!("Numpad{d}"));
+        }
+        let keypad = [
+            ("kpadd", KeyCode::NumpadAdd),
+            ("kpsubtract", KeyCode::NumpadSubtract),
+            ("kpmultiply", KeyCode::NumpadMultiply),
+            ("kpdivide", KeyCode::NumpadDivide),
+            ("kpdecimal", KeyCode::NumpadDecimal),
+            ("kpequal", KeyCode::NumpadEqual),
+            ("kpenter", KeyCode::NumpadEnter),
+            ("5", KeyCode::Digit5),
+        ];
+        for (name, code) in keypad {
+            assert_eq!(key_code(name), code, "{name}");
         }
     }
 

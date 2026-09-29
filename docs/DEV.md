@@ -78,8 +78,9 @@ out at the commit the index pins, under `target/gate/modules`) and checked in pa
 `target/gate/*` target dirs. Several agents edit this one checkout at once, so stage exactly
 the change you mean to land (`git add <paths>`), gate it, and commit it; the tree stays free to
 edit meanwhile. `--quick` is fmt + host clippy + tests; `--fix` runs the fixers on the tree
-first (stage what they changed); `--in-place` checks the tree itself (CI). Per-lane times are
-in the log.
+first (stage what they changed); `--in-place` checks the tree itself; `--lane <name>` (repeat
+for several: `tools`, which carries fmt, `clippy-host`, `clippy-ios`, `tests`, `rustdoc`) runs
+only those lanes, and a lane that runs alone takes every core. Per-lane times are in the log.
 
 fmt and the tool checks (deny, hakari, shear, typos, taplo, `committed`) take seconds, so they
 run first, side by side, and a failure among them ends the gate before any compile. Then the
@@ -108,6 +109,16 @@ there as timing-sensitive, which have failed under the gate's load and pass alon
 A pass on a retry shows as FLAKY in the log. Only a named test gets retries, never a pattern.
 The `ci` profile inherits `gate` (the same named retries and no others) and adds a runner's
 longer timeouts and a JUnit report.
+
+CI (`.github/workflows/ci.yml`) is the same gate, one lane per hosted runner: a matrix job per
+lane runs `cargo xtask setup --lane <lane>` (only that lane's tools) and
+`cargo xtask gate --ci --lane <lane>`. `--ci` checks in place, since the runner's tree is the
+commit, and gives the tests lane the `ci` profile. That profile's `default-filter` leaves out
+the tests that read hardware a runner's virtual Mac lacks, each named with the reason; nextest
+lists them as skipped and every local gate still runs them. Only missing hardware puts a test
+there, never timing and never a pattern. Compiled units come from sccache on the Actions cache
+(`SCCACHE_GHA_ENABLED`); `rust-cache` keeps the registry, git checkouts and installed tools
+per lane, failures included. The job's post step prints sccache's hit rate.
 
 `cargo xtask check -p <crate>…` runs the same steps on named crates only, on the working tree:
 what an agent that owns those crates runs before it reports. Its builds name `workspace-hack`

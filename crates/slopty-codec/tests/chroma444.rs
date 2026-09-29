@@ -16,6 +16,13 @@
 //! against frame size (`encode_time_by_size`), the compression presets and the keys the
 //! low-latency encoder lists (`compression_presets`), and which frames it marks as references
 //! (`temporal_layers`).
+//!
+//! Stream sides padded to 16 (MEASUREMENTS, 2026-09-29): the SPS conformance window rewritten on
+//! a padded session against the encoder's own SPS for the true size, and what the decoder makes
+//! of it (`conformance_window`, probe P1); the size sweep on padded sessions
+//! (`SLOPTY_PROBE_ALIGN=16`); and what a submit costs the calling thread and how many source
+//! pictures the session holds (`submit_blocking_and_pictures_held`), and whether a session
+//! opens the M2 scaler for a picture off 16 (`the_scaler_is_opened_only_off_16`).
 
 #![cfg(target_os = "macos")]
 
@@ -53,6 +60,8 @@ mod tests {
         CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRow,
         CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetPixelFormatType,
         CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        kCVImageBufferCleanApertureHeightKey, kCVImageBufferCleanApertureHorizontalOffsetKey,
+        kCVImageBufferCleanApertureVerticalOffsetKey, kCVImageBufferCleanApertureWidthKey,
         kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVPixelBufferIOSurfacePropertiesKey,
         kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_32BGRA,
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -70,8 +79,9 @@ mod tests {
         kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AllowOpenGOP,
         kVTCompressionPropertyKey_AverageBitRate,
         kVTCompressionPropertyKey_BaseLayerFrameRateFraction,
-        kVTCompressionPropertyKey_DataRateLimits, kVTCompressionPropertyKey_EnableLTR,
-        kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxFrameDelayCount,
+        kVTCompressionPropertyKey_CleanAperture, kVTCompressionPropertyKey_DataRateLimits,
+        kVTCompressionPropertyKey_EnableLTR, kVTCompressionPropertyKey_ExpectedFrameRate,
+        kVTCompressionPropertyKey_MaxFrameDelayCount,
         kVTCompressionPropertyKey_MaxKeyFrameInterval,
         kVTCompressionPropertyKey_MaximumRealTimeFrameRate,
         kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
@@ -1440,6 +1450,9 @@ mod tests {
         bytes: usize,
         /// The samples it kept, each with the index of the picture it was made from.
         samples: Vec<(usize, Sample)>,
+        /// Frames submitted a second: below the beat's rate when a submit blocks for longer
+        /// than a period, as VideoToolbox's does when it encodes inside the call.
+        submitted_fps: f64,
     }
 
     /// Submit `frames` pictures at the session's rate, each on its beat whether or not the last
@@ -1472,6 +1485,7 @@ mod tests {
                 back.push(got);
             }
         }
+        let submitted_fps = frames as f64 / start.elapsed().as_secs_f64();
         while back.len() < frames {
             match session.rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(got) => back.push(got),
@@ -1495,7 +1509,7 @@ mod tests {
             .enumerate()
             .filter_map(|(i, (_, s))| s.map(|s| ((i * stride) % images.len(), s)))
             .collect();
-        Beat { times, dropped, bytes, samples }
+        Beat { times, dropped, bytes, samples, submitted_fps }
     }
 
     /// Submit → callback with one frame in flight, over `frames` pictures after `settle`.
@@ -1513,6 +1527,13 @@ mod tests {
             .skip(settle)
             .collect();
         Spread::of_durations(&times).unwrap_or_default()
+    }
+
+    /// The multiple the size sweep pads each side to as the worker does (`SLOPTY_PROBE_ALIGN=16`):
+    /// the session codes the padded size, the picture at its top-left and black around it.
+    /// 1 (the default) codes each size as it is.
+    fn probe_align() -> usize {
+        std::env::var("SLOPTY_PROBE_ALIGN").ok().and_then(|a| a.parse().ok()).unwrap_or(1).max(1)
     }
 
     /// The sizes the size sweep times, `SLOPTY_PROBE_SIZES=3024x1964,3024x1968` to pick some.
@@ -1551,10 +1572,16 @@ mod tests {
             (1282, 802),
             (2000, 1234),
         ]);
+        let align = probe_align();
         for (w, h) in sizes {
-            let (_, images) = scrolling(w, h);
+            let (cw, ch) = (w.next_multiple_of(align), h.next_multiple_of(align));
+            let pictures: Vec<Picture> = (0..12).map(|i| picture(w, h, i * 8)).collect();
+            let images: Vec<_> = pictures
+                .iter()
+                .map(|p| fill(&padded(p, cw, ch), kCVPixelFormatType_420YpCbCr8BiPlanarFullRange))
+                .collect();
             for fps in [60_i32, 120] {
-                let Ok(session) = Session::worker(w, h, 32_000_000, fps) else {
+                let Ok(session) = Session::worker(cw, ch, 32_000_000, fps) else {
                     eprintln!("MEASURE size {w}x{h} fps={fps} refused");
                     continue;
                 };
@@ -1564,9 +1591,10 @@ mod tests {
                 let spread = Spread::of_durations(&beat.times).unwrap_or_default();
                 let spent = (beat.bytes * 8) as f64 / (SECONDS - 1) as f64 / 1e6;
                 eprintln!(
-                    "MEASURE size {w}x{h} w%16={} h%16={} fps={fps} load={} hardware={:?} \
-                     one_in_flight p50={:.2}ms p95={:.2}ms | on_beat p50={:.2}ms p95={:.2}ms \
-                     max={:.2}ms dropped={}/{frames} spent={spent:.2}Mbit/s",
+                    "MEASURE size {w}x{h} coded={cw}x{ch} w%16={} h%16={} fps={fps} load={} \
+                     hardware={:?} one_in_flight p50={:.2}ms p95={:.2}ms | on_beat p50={:.2}ms \
+                     p95={:.2}ms max={:.2}ms dropped={}/{frames} submitted={:.1}fps \
+                     spent={spent:.2}Mbit/s",
                     w % 16,
                     h % 16,
                     load_average(),
@@ -1577,6 +1605,7 @@ mod tests {
                     ms(spread.p95),
                     ms(spread.max),
                     beat.dropped,
+                    beat.submitted_fps,
                 );
             }
         }
@@ -1798,6 +1827,346 @@ mod tests {
                     "MEASURE temporal fraction={fraction:?} {count} frames, {} B mean: {class}",
                     bytes / count.max(1)
                 );
+            }
+        }
+    }
+
+    // ---- Stream sides padded to 16: the conformance window (probe P1) ------------------------
+
+    /// `p` drawn at the top-left of a `w × h` picture, the rest black: what ScreenCaptureKit
+    /// renders into a padded surface under a `destinationRect` and a black background.
+    fn padded(p: &Picture, w: usize, h: usize) -> Picture {
+        let black = ycbcr([0, 0, 0]);
+        let mut out = Picture {
+            w,
+            h,
+            y: vec![black[0]; w * h],
+            cb: vec![black[1]; w * h],
+            cr: vec![black[2]; w * h],
+            rgb: vec![[0, 0, 0]; w * h],
+        };
+        for row in 0..p.h {
+            let (from, to) = (row * p.w, row * w);
+            out.y[to..to + p.w].copy_from_slice(&p.y[from..from + p.w]);
+            out.cb[to..to + p.w].copy_from_slice(&p.cb[from..from + p.w]);
+            out.cr[to..to + p.w].copy_from_slice(&p.cr[from..from + p.w]);
+            out.rgb[to..to + p.w].copy_from_slice(&p.rgb[from..from + p.w]);
+        }
+        out
+    }
+
+    /// Mean absolute luma difference, 0–255, between the decoded picture's last row and last
+    /// column and the source's: a band of padding that showed would be the black against the
+    /// picture's own edge.
+    fn edge_error(p: &Picture, image: &CVPixelBuffer) -> f64 {
+        let format = CVPixelBufferGetPixelFormatType(image);
+        let (_, _, bits) = layout(format);
+        let mut sum = 0.0_f64;
+        let mut n = 0_usize;
+        with_planes(image, true, |plane, base, stride| {
+            if plane != 0 {
+                return;
+            }
+            let read = |x: usize, y: usize| -> f64 {
+                let width = if bits == 8 { 1 } else { 2 };
+                // SAFETY: the plane is locked and `(x, y)` is inside the picture.
+                let cell = unsafe { base.add(y * stride + x * width) };
+                let mut b = [0_u8; 2];
+                // SAFETY: `width` readable bytes of the locked plane.
+                unsafe { ptr::copy_nonoverlapping(cell, b.as_mut_ptr(), width) }
+                if bits == 8 {
+                    f64::from(b[0])
+                } else {
+                    f64::from(u16::from_le_bytes(b) >> 6) / 4.0
+                }
+            };
+            let edge = (0..p.w).map(|x| (x, p.h - 1)).chain((0..p.h).map(|y| (p.w - 1, y)));
+            for (x, y) in edge {
+                sum += (read(x, y) - f64::from(p.y[y * p.w + x])).abs();
+                n += 1;
+            }
+        });
+        sum / n.max(1) as f64
+    }
+
+    /// The first SPS NAL unit of an Annex B unit.
+    fn sps_in(data: &[u8]) -> Option<Vec<u8>> {
+        slopty_codec::annexb::nal_units(data)
+            .find(|nal| hevc::nal_type(nal) == Some(hevc::SPS))
+            .map(<[u8]>::to_vec)
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        use std::fmt::Write as _;
+        bytes.iter().fold(String::new(), |mut out, b| {
+            let _written: std::fmt::Result = write!(out, "{b:02x}");
+            out
+        })
+    }
+
+    /// What one path of the probe gave: the keyframe's SPS as the encoder wrote it, the last
+    /// decoded picture's size, its PSNR `(luma, chroma)` and edge error against the source.
+    struct Path {
+        sps: Vec<u8>,
+        size: (usize, usize),
+        psnr: (f64, f64),
+        edge: f64,
+    }
+
+    /// Encode `pictures` on the worker's own session at `coded`, each drawn at the top-left
+    /// with black around it, crop the stream to the pictures' size when `coded` is larger, and
+    /// decode it on the client's decoder.
+    fn through(pictures: &[Picture], coded: (usize, usize), chroma: slopty_codec::Chroma) -> Path {
+        use slopty_codec::{Decoder, Encoder, EncoderConfig, FrameOptions};
+        use slopty_proto::screen::VideoCodec;
+
+        let (w, h) = (pictures[0].w, pictures[0].h);
+        let format = slopty_codec::pixel_format(chroma);
+        let (tx, rx) = mpsc::channel();
+        let encoder = Encoder::new(
+            EncoderConfig {
+                width: coded.0 as u32,
+                height: coded.1 as u32,
+                codec: VideoCodec::Hevc,
+                fps: 60,
+                bitrate_bps: 32_000_000,
+                chroma,
+            },
+            move |packet| {
+                let _gone = tx.send(packet);
+            },
+        )
+        .expect("the worker's session");
+        let images: Vec<_> =
+            pictures.iter().map(|p| fill(&padded(p, coded.0, coded.1), format)).collect();
+        let mut packets = Vec::new();
+        for (i, image) in images.iter().enumerate() {
+            let options = FrameOptions { force_keyframe: i == 0, ..FrameOptions::default() };
+            encoder.encode(image, (i as u64 + 1) * 16_667, &options).expect("encode");
+            packets.push(rx.recv_timeout(Duration::from_secs(10)).expect("a packet"));
+        }
+        let sps = sps_in(&packets[0].data).expect("an SPS in front of the keyframe");
+        if coded != (w, h) {
+            slopty_codec::conformance::crop_access_unit(&mut packets[0].data, (w as u32, h as u32))
+                .expect("the window fits");
+        }
+        let (dtx, drx) = mpsc::channel();
+        let mut decoder = Decoder::new(VideoCodec::Hevc, move |frame| {
+            let _gone = dtx.send(frame);
+        });
+        let mut last = None;
+        for packet in &packets {
+            decoder.decode(&packet.data, packet.pts_us).expect("decode");
+            last = Some(drx.recv_timeout(Duration::from_secs(10)).expect("a picture"));
+        }
+        let last = last.expect("a picture");
+        let source = &pictures[pictures.len() - 1];
+        Path {
+            sps,
+            size: (last.image.width(), last.image.height()),
+            psnr: psnr(source, last.image.as_cv()),
+            edge: edge_error(source, last.image.as_cv()),
+        }
+    }
+
+    /// Probe P1 (`docs/decisions/video.md`, "Stream sides padded to 16"): a picture coded at a
+    /// padded size with the SPS's conformance window rewritten decodes to the true size, with
+    /// the same SPS the encoder writes for that size itself and the same quality, 4:2:0 and
+    /// 4:4:4. Then whether `CleanAperture` on a session writes a window of its own.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn conformance_window() {
+        use slopty_codec::Chroma;
+
+        for ((w, h), chroma) in
+            [((3024_usize, 1964_usize), Chroma::Subsampled), ((3456, 2234), Chroma::Full)]
+        {
+            let coded = (w.next_multiple_of(16), h.next_multiple_of(16));
+            let pictures: Vec<Picture> = (0..8).map(|i| picture(w, h, i * 8)).collect();
+            let native = through(&pictures, (w, h), chroma);
+            let padded = through(&pictures, coded, chroma);
+            let cropped = slopty_codec::conformance::crop_sps(&padded.sps, (w as u32, h as u32))
+                .expect("the window fits");
+            eprintln!(
+                "MEASURE p1 {w}x{h} {chroma:?} coded={}x{} native_sps={} padded_sps={} \
+                 cropped_sps={} cropped==native:{} shown(native)={:?} shown(cropped)={:?}",
+                coded.0,
+                coded.1,
+                hex(&native.sps),
+                hex(&padded.sps),
+                hex(&cropped),
+                cropped == native.sps,
+                hevc::shown_size(&native.sps),
+                hevc::shown_size(&cropped),
+            );
+            for (name, path) in [("native", &native), ("padded+window", &padded)] {
+                eprintln!(
+                    "MEASURE p1 {w}x{h} {chroma:?} {name}: decoded={}x{} psnr_y={:.3}dB \
+                     psnr_c={:.3}dB edge_error={:.2}",
+                    path.size.0, path.size.1, path.psnr.0, path.psnr.1, path.edge
+                );
+            }
+        }
+
+        // 5. CleanAperture on a padded session: does the encoder write a window from it?
+        let (w, h) = (3024_usize, 1968_usize);
+        let session = Session::worker(w, h, 32_000_000, 60).expect("session");
+        // SAFETY: framework-provided constant strings.
+        let aperture = unsafe {
+            dict(&[
+                (kCVImageBufferCleanApertureWidthKey, &CFNumber::new_i64(3024)),
+                (kCVImageBufferCleanApertureHeightKey, &CFNumber::new_i64(1964)),
+                (kCVImageBufferCleanApertureHorizontalOffsetKey, &CFNumber::new_i64(0)),
+                (kCVImageBufferCleanApertureVerticalOffsetKey, &CFNumber::new_i64(-2)),
+            ])
+        };
+        // SAFETY: framework-provided constant string.
+        let status =
+            set(&session.vt, unsafe { kVTCompressionPropertyKey_CleanAperture }, &aperture);
+        let image = fill(&picture(w, h, 0), kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+        let (_, sample) = session.encode(&image, 0);
+        // SAFETY: a valid sample buffer.
+        let format = sample.and_then(|s| unsafe { s.0.format_description() });
+        let sps = format.as_deref().and_then(sps_nal);
+        eprintln!(
+            "MEASURE p1 clean_aperture set_status={status} sps={} shown={:?}",
+            sps.as_deref().map(hex).unwrap_or_default(),
+            sps.as_deref().and_then(hevc::shown_size),
+        );
+    }
+
+    /// What a submit costs the thread that makes it, and how many source pictures the worker's
+    /// session holds, while it encodes on a real-time beat. A capture callback submits on the
+    /// capture's own queue, so a submit that blocks holds the next capture back; and a capture's
+    /// pool must have every picture the encoder holds and one more to render into. Each
+    /// submitted picture is a fresh one of a pool of 24, and before each submit the pictures
+    /// whose retain count is above the pool's own are counted.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn submit_blocking_and_pictures_held() {
+        for (w, h, cw, ch) in [
+            (3024, 1964, 3024, 1964),
+            (3024, 1964, 3024, 1968),
+            (1920, 1080, 1920, 1088),
+            (1920, 1080, 1920, 1080),
+        ] {
+            for fps in [60_i32, 120] {
+                let session = Session::worker(cw, ch, 32_000_000, fps).expect("session");
+                let pictures: Vec<Picture> = (0..24).map(|i| picture(w, h, i * 8)).collect();
+                let images: Vec<_> = pictures
+                    .iter()
+                    .map(|p| {
+                        fill(&padded(p, cw, ch), kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+                    })
+                    .collect();
+                let period = Duration::from_secs(1) / fps as u32;
+                let start = Instant::now();
+                let mut held = Vec::new();
+                let mut blocked = Vec::new();
+                let frames = fps as usize * 3;
+                for i in 0..frames {
+                    let due = start + period * i as u32;
+                    if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "a measurement's real-time beat"
+                        )]
+                        std::thread::sleep(wait);
+                    }
+                    held.push(images.iter().filter(|b| b.retain_count() > 1).count());
+                    let submitting = Instant::now();
+                    assert_eq!(session.submit(&images[i % images.len()], i as i64), 0, "submit");
+                    blocked.push(submitting.elapsed());
+                    while session.rx.try_recv().is_ok() {}
+                }
+                let submit = Spread::of_durations(&blocked[fps as usize..]).unwrap_or_default();
+                let settled = &mut held[fps as usize..];
+                settled.sort_unstable();
+                eprintln!(
+                    "MEASURE held {w}x{h} coded={cw}x{ch} fps={fps} load={}: submit call p50={:.2}ms p95={:.2}ms max={:.2}ms; pictures held before a submit p50={} p95={} max={}",
+                    load_average(),
+                    ms(submit.p50),
+                    ms(submit.p95),
+                    ms(submit.max),
+                    settled[settled.len() / 2],
+                    settled[settled.len() * 95 / 100],
+                    settled[settled.len() - 1],
+                );
+            }
+        }
+    }
+
+    /// User clients of the M2 scaler (`AppleM2ScalerCSCDriver`) this process has open, as
+    /// `ioreg` lists them.
+    fn scaler_clients() -> usize {
+        let out = std::process::Command::new("/usr/sbin/ioreg")
+            .args(["-r", "-c", "AppleM2ScalerCSCDriver", "-l", "-w0"])
+            .output()
+            .expect("ioreg");
+        let ours = format!("pid {},", std::process::id());
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains("IOUserClientCreator") && l.contains(&ours))
+            .count()
+    }
+
+    /// Whether a session reaches for the M2 scaler: one fed pictures off 16 copies each into a
+    /// padded buffer of its own, and a hosted runner's virtual Mac, which has no scaler
+    /// (`IOServiceMatching failed for: AppleM2ScalerParavirtDriver`), was slow to the first
+    /// keyframe of such a stream. Five frames each at the sizes the quality-change test codes,
+    /// off 16 and padded; the scaler's user clients are counted after them.
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn the_scaler_is_opened_only_off_16() {
+        for (w, h) in [(3024, 1964), (3024, 1968), (1512, 982), (1520, 992), (756, 492), (768, 496)]
+        {
+            let before = scaler_clients();
+            let session = Session::worker(w, h, 20_000_000, 60).expect("session");
+            let image = buffer(w, h, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            let start = Instant::now();
+            for i in 0..5_i64 {
+                assert_eq!(session.submit(&image, i), 0, "submit");
+            }
+            for _ in 0..5 {
+                let _frame = session.rx.recv_timeout(Duration::from_secs(5)).expect("a frame");
+            }
+            eprintln!(
+                "MEASURE scaler {w}x{h}: user clients before {before}, after five frames {}; {:.1} ms",
+                scaler_clients(),
+                start.elapsed().as_secs_f64() * 1e3,
+            );
+        }
+    }
+
+    /// The SPS NAL unit of a format description.
+    fn sps_nal(format: &CMFormatDescription) -> Option<Vec<u8>> {
+        let mut count = 0_usize;
+        let mut index = 0_usize;
+        loop {
+            let mut ptr: *const u8 = ptr::null();
+            let mut size = 0_usize;
+            // SAFETY: valid out pointers; the bytes are owned by `format`.
+            let status = unsafe {
+                CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    format,
+                    index,
+                    &raw mut ptr,
+                    &raw mut size,
+                    &raw mut count,
+                    ptr::null_mut(),
+                )
+            };
+            if status != 0 || ptr.is_null() {
+                return None;
+            }
+            // SAFETY: CoreMedia returned `size` readable bytes at `ptr`.
+            let nal = unsafe { std::slice::from_raw_parts(ptr, size) };
+            if hevc::nal_type(nal) == Some(hevc::SPS) {
+                return Some(nal.to_vec());
+            }
+            index += 1;
+            if index >= count {
+                return None;
             }
         }
     }

@@ -197,16 +197,17 @@ pub enum ScreenInput {
         /// Modifiers.
         mods: Mods,
     },
-    /// Key.
+    /// A key by its position on the keyboard, never by its character: the worker posts the
+    /// position and its own keyboard layout, the client's when it took it
+    /// ([`Self::KeyboardSource`]), makes the character, composing dead keys and input methods
+    /// in the remote app (`docs/decisions/input.md`, "Keys go by position").
     Key {
         /// Physical key.
         code: KeyCode,
         /// Action.
         action: KeyAction,
-        /// Modifiers.
+        /// Modifiers, with their side when the client knows it.
         mods: Mods,
-        /// Text, for keys the worker cannot reproduce from the code alone (IME, dead keys).
-        text: Option<String>,
     },
     /// Pinch (magnify) gesture.
     Magnify {
@@ -219,12 +220,62 @@ pub enum ScreenInput {
         /// Position.
         y: f32,
     },
+    /// Text the client composed and committed: an input method's or a dead key's result while
+    /// the worker has not taken the client's input source, dictation, "Type the clipboard".
+    /// The worker types it as it stands, whatever its own layout.
+    Text {
+        /// The text; any length, the worker splits it.
+        text: String,
+    },
+    /// Caps Lock's state on the client: the worker sets its own lock to it. Sent when the tile
+    /// takes the keyboard and whenever it changes, never as a key.
+    Lock {
+        /// Caps Lock is on.
+        caps: bool,
+    },
+    /// A media key: the worker's Now Playing app takes it. Volume keys stay on the client,
+    /// where the stream's sound plays.
+    Media {
+        /// Which.
+        key: MediaKey,
+        /// Pressed, or let go.
+        down: bool,
+    },
+    /// The client's keyboard input source (a TIS id, `com.apple.keylayout.French`): the worker
+    /// selects it, so positions mean what they mean on the client. The stream's claim on it
+    /// lasts until [`Self::KeyboardReleased`] or the stream's end; the worker is under the
+    /// newest claim still held, by any stream of any client, and the source goes back to the
+    /// worker's own when none is, unless the person at the worker picked one by hand since.
+    /// Answered with [`ScreenEvent::KeyboardSource`]. Sent in the input's order, and the stream
+    /// holds the keys and text after it, and whatever follows a held one, until the switch is
+    /// answered (at once for the source the worker already has, at most 150 ms otherwise), so
+    /// they are read under it.
+    KeyboardSource {
+        /// The input source id.
+        source: String,
+    },
+    /// The client's tile has gone a while without the keyboard: this stream's claim from
+    /// [`Self::KeyboardSource`] goes, as at the stream's end. A later `KeyboardSource` claims
+    /// anew.
+    KeyboardReleased,
+}
+
+/// A media key the worker takes (`NX_KEYTYPE_*`, `<IOKit/hidsystem/ev_keymap.h>`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum MediaKey {
+    /// Play or pause.
+    PlayPause,
+    /// Next track.
+    Next,
+    /// Previous track.
+    Previous,
 }
 
 impl ScreenInput {
     /// Whether this input applies only in its turn. A move sets where the pointer is, so a
     /// newer one may overtake an older one that has not arrived; everything else is an event
-    /// the target sees once, in order (a key, a button, a scroll's delta, a pinch's).
+    /// the target sees once, in order (a key, a button, a scroll's delta, a pinch's, text, the
+    /// input source the keys after it are read under).
     #[must_use]
     pub const fn in_order(&self) -> bool {
         !matches!(self, Self::Move { .. })
@@ -535,5 +586,17 @@ pub enum ScreenEvent {
         key: DisplayKey,
         /// The display it got.
         display: VirtualDisplay,
+    },
+    /// The answer to [`ScreenInput::KeyboardSource`]: whether the worker now types under the
+    /// client's input source. Until it has, the client composes text itself and sends it as
+    /// [`ScreenInput::Text`]. Sent again unasked whenever that changes: another client's
+    /// stream took the worker's source (`applied: false`), or gave it back.
+    KeyboardSource {
+        /// Stream.
+        stream: StreamId,
+        /// The input source asked for.
+        source: String,
+        /// The worker selected it.
+        applied: bool,
     },
 }

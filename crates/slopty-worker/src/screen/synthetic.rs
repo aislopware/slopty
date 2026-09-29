@@ -108,6 +108,11 @@ impl Platform for Synthetic {
 pub const DISPLAY: DisplayInfo =
     DisplayInfo { id: DisplayId(1), w: 1512.0, h: 982.0, scale: 2.0, hz: 60.0 };
 
+/// [`DISPLAY`] as [`StudioAt`] lists and draws it, refreshing at `HZ`.
+fn shown_display<const HZ: u16>() -> DisplayInfo {
+    DisplayInfo { hz: f32::from(HZ), ..DISPLAY }
+}
+
 /// The application every [`Synthetic`] window belongs to.
 pub const APP: &str = "Slopty synthetic";
 
@@ -191,10 +196,14 @@ pub struct Scene {
 
 /// The capture of [`Synthetic`]: [`Canvas`] pictures of [`DISPLAY`] and the windows, at each
 /// one's size and at the display's beat, with a window list only it keeps.
-#[derive(Clone, Copy, Debug)]
-pub enum Studio {}
+pub type Studio = StudioAt<60>;
 
-impl CaptureSource for Studio {
+/// [`Studio`] on a display refreshing at `HZ`: a measurement's 120 Hz panel, whatever the
+/// panels of the Mac it runs on.
+#[derive(Clone, Copy, Debug)]
+pub enum StudioAt<const HZ: u16> {}
+
+impl<const HZ: u16> CaptureSource for StudioAt<HZ> {
     type Content = Scene;
     type HideWatch = ();
     type Image = PixelBuffer;
@@ -214,7 +223,7 @@ impl CaptureSource for Studio {
     }
 
     fn displays(_content: &Scene) -> Vec<DisplayInfo> {
-        vec![DISPLAY]
+        vec![shown_display::<HZ>()]
     }
 
     fn resolve(content: &Scene, kind: CaptureTarget) -> Result<CanvasTarget, CaptureError> {
@@ -256,11 +265,9 @@ impl CaptureSource for Studio {
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<CanvasStream, CaptureError> {
-        // The display's beat is [`DISPLAY`]'s, not that of whichever panel shares its id here.
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "60")]
-        let beat = DISPLAY.hz as u16;
+        // The beat is the listed display's, not that of whichever panel shares its id here.
         let config =
-            CaptureConfig { fps: if config.fps == 0 { beat } else { config.fps }, ..*config };
+            CaptureConfig { fps: if config.fps == 0 { HZ } else { config.fps }, ..*config };
         Canvas::start(target, &config, sink, audio, on_stop, done)
     }
 
@@ -296,7 +303,7 @@ impl CaptureSource for Studio {
     }
 
     fn refresh_hz(_target: CaptureTarget) -> Option<f64> {
-        Some(f64::from(DISPLAY.hz))
+        Some(f64::from(HZ))
     }
 
     fn window_state(id: WindowId) -> Option<WindowState> {
@@ -388,6 +395,7 @@ impl CaptureSource for Studio {
 mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use bytes::Bytes;
@@ -450,7 +458,7 @@ mod tests {
         }
 
         fn bytes(&self) -> u64 {
-            self.bytes.load(std::sync::atomic::Ordering::Relaxed)
+            self.bytes.load(Ordering::Relaxed)
         }
     }
 
@@ -458,7 +466,7 @@ mod tests {
         fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused> {
             let now = Instant::now();
             let sent: usize = datagrams.iter().map(Bytes::len).sum();
-            self.bytes.fetch_add(sent as u64, std::sync::atomic::Ordering::Relaxed);
+            self.bytes.fetch_add(sent as u64, Ordering::Relaxed);
             match &self.line {
                 None => self.router.route_many(datagrams.iter().cloned(), now),
                 Some(line) => {
@@ -529,10 +537,28 @@ mod tests {
     /// reassembler and decoder at `fps` frames a second at most, `one_way` each way with
     /// `loss_permille` of the datagrams lost, a click every 80–150 ms, and a paint on the
     /// display's beat.
+    async fn run<P: Platform>(
+        label: &str,
+        fps: u16,
+        one_way: Duration,
+        loss_permille: u32,
+        seconds: u64,
+    ) {
+        run_padded::<P>(label, fps, one_way, loss_permille, seconds, None).await;
+    }
+
+    /// [`run`] with the stream's sides padded to `pad_to` in place of its codec's own multiple,
+    /// when that is given ([`Pipeline::open_padded`]).
     #[expect(clippy::too_many_lines, reason = "one measurement, read top to bottom")]
-    async fn run(label: &str, fps: u16, one_way: Duration, loss_permille: u32, seconds: u64) {
-        let ScreenEvent::Listing { displays, .. } = Pipeline::<Drawn>::listing().await.unwrap()
-        else {
+    async fn run_padded<P: Platform>(
+        label: &str,
+        fps: u16,
+        one_way: Duration,
+        loss_permille: u32,
+        seconds: u64,
+        pad_to: Option<u32>,
+    ) {
+        let ScreenEvent::Listing { displays, .. } = Pipeline::<P>::listing().await.unwrap() else {
             panic!("no listing")
         };
         let display = displays.first().expect("a display");
@@ -547,12 +573,13 @@ mod tests {
             delay_line(one_way, move |datagrams: Vec<Bytes>, at| router.route_many(datagrams, at))
         });
         let wire = Arc::new(Wire::new(router.clone(), line));
-        let (mut stream, opened) = Pipeline::<Drawn>::open(
+        let (mut stream, opened) = Pipeline::<P>::open_padded(
             STREAM,
             CaptureTarget::Display(display.id),
             Quality { fps, ..Quality::default() },
             Arc::<Wire>::clone(&wire),
             |_event| {},
+            pad_to,
         )
         .await
         .unwrap();
@@ -766,6 +793,13 @@ mod tests {
             wire_bytes * 8.0 / measured / 1e6,
             wire_bytes / encoded.max(1.0) / 1024.0,
         );
+        eprintln!(
+            "  cadence: rung {} under a ceiling of {}, encoder fed {} a second at the last window, {} captures replaced in the mailbox",
+            stream.shared.fps.load(Ordering::Relaxed),
+            stream.shared.fps_ceiling.load(Ordering::Relaxed),
+            stream.shared.fed_fps.load(Ordering::Relaxed),
+            stream.shared.counters.superseded.load(Ordering::Relaxed),
+        );
         assert!(glass.capture.count > 0, "no frame was timed from its capture");
         assert!(glass.input.count > 0, "no input reached the glass");
         drop(handle);
@@ -808,19 +842,15 @@ mod tests {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
         runtime.unwrap().block_on(async {
-            let ScreenEvent::Listing { displays, .. } = Pipeline::<Drawn>::listing().await.unwrap()
-            else {
-                panic!("no listing")
-            };
-            let display = displays.first().expect("a display");
             let router = ScreenRouter::new();
             let wire = Arc::new(Wire::new(router.clone(), None));
-            // A quarter of any display up to 6K is smaller than 1080p, whose enter line is
-            // under the 12 Mbit/s a stream opens at.
+            // A quarter of the drawn 3024 × 1964 panel, whatever display this Mac has: its enter
+            // line is under the 12 Mbit/s a stream opens at, and eight cuts reach under its
+            // leave line. A quarter of a 1024 × 768 panel (a CI runner's) never falls that far.
             let quality = Quality { scale: 0.25, chroma: Chroma::Full, ..Quality::default() };
-            let (mut stream, opened) = Pipeline::<Drawn>::open(
+            let (mut stream, opened) = Pipeline::<Synthetic>::open(
                 STREAM,
-                CaptureTarget::Display(display.id),
+                CaptureTarget::Display(DISPLAY.id),
                 quality,
                 wire,
                 |_event| {},
@@ -944,17 +974,56 @@ mod tests {
         });
     }
 
+    /// Mean luma, 0–255, of a decoded NV12 picture's last row and last column: the drawn
+    /// desktop is at [`DESKTOP_LEVEL`] there, and a band of padding that showed would be black.
+    fn edge_luma(image: &objc2_core_video::CVPixelBuffer) -> f64 {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+            CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let (w, h) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+        // SAFETY: CoreVideo rule: the planes are read between a lock and its unlock.
+        let locked =
+            unsafe { CVPixelBufferLockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+        assert_eq!(locked, 0, "lock");
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
+        let base = CVPixelBufferGetBaseAddressOfPlane(image, 0).cast::<u8>();
+        // SAFETY: the buffer is locked, so its luma plane is mapped for `stride * h` bytes.
+        let plane = unsafe { std::slice::from_raw_parts(base, stride * h) };
+        let edge = (0..w).map(|x| (x, h - 1)).chain((0..h).map(|y| (w - 1, y)));
+        let (sum, n) = edge.fold((0_u64, 0_u64), |(sum, n), (x, y)| {
+            (sum + u64::from(plane[y * stride + x]), n + 1)
+        });
+        // SAFETY: matches the lock above.
+        let _unlocked =
+            unsafe { CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+        sum as f64 / n.max(1) as f64
+    }
+
+    /// The level the canvas draws its desktop at, around its page.
+    const DESKTOP_LEVEL: f64 = 40.0;
+
     /// A window of the drawn screen streams as a canvas of its own size through the real
-    /// encoder, and the client decodes it with its strip readable. Drawn, never captured.
+    /// encoder, and the client decodes it at that size with its strip readable, whether or not
+    /// the size is a multiple of 16: at a third of its size the editor's 854 × 534 is coded as
+    /// 864 × 544 and its SPS crops it back, and its edges are the desktop, not the padding.
+    /// Drawn, never captured.
     #[test]
     fn a_drawn_window_streams_at_its_own_size() {
+        for (scale, size) in [(0.25, (640, 400)), (1.0 / 3.0, (854, 534))] {
+            a_drawn_window_streams_at(scale, size);
+        }
+    }
+
+    fn a_drawn_window_streams_at(scale: f32, size: (u32, u32)) {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
         runtime.unwrap().block_on(async {
-            let Placed { id: editor, size: (w, h), .. } = WINDOWS[0];
+            let Placed { id: editor, .. } = WINDOWS[0];
             let router = ScreenRouter::new();
             let wire = Arc::new(Wire::new(router.clone(), None));
-            let quality = Quality { scale: 0.25, ..Quality::default() };
+            let quality = Quality { scale, ..Quality::default() };
             let (stream, opened) = Pipeline::<Synthetic>::open(
                 STREAM,
                 CaptureTarget::Window(editor),
@@ -967,9 +1036,7 @@ mod tests {
             let ScreenEvent::Opened { codec, width, height, .. } = opened else {
                 panic!("{opened:?}")
             };
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "points")]
-            let quarter = |points: f32| (points * DISPLAY.scale / 4.0) as u32;
-            assert_eq!((width, height), (quarter(w), quarter(h)));
+            assert_eq!((width, height), size, "at {scale}");
             let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
             let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
             let control = stream.control();
@@ -995,6 +1062,8 @@ mod tests {
                 ),
                 (usize::try_from(width).unwrap(), usize::try_from(height).unwrap())
             );
+            let edge = edge_luma(image);
+            assert!((edge - DESKTOP_LEVEL).abs() < 8.0, "{width}×{height}: edge luma {edge:.1}");
             drop(handle);
             drain.abort();
             stream.close().await;
@@ -1254,14 +1323,13 @@ mod tests {
             .await
             .unwrap();
             slopty_capture::synthetic::set_beat(None);
-            let ceiling = |stream: &Pipeline<Drawn>| {
-                stream.shared.fps_ceiling.load(std::sync::atomic::Ordering::Relaxed)
-            };
+            let ceiling =
+                |stream: &Pipeline<Drawn>| stream.shared.fps_ceiling.load(Ordering::Relaxed);
             assert_eq!(ceiling(&stream), 60);
             let rebuild = stream.set_quality(&Quality { fps: 120, ..quality }, None);
             assert!(rebuild.is_none(), "a new rate alone builds nothing");
             assert_eq!(ceiling(&stream), 120);
-            assert_eq!(stream.shared.fps.load(std::sync::atomic::Ordering::Relaxed), 120);
+            assert_eq!(stream.shared.fps.load(Ordering::Relaxed), 120);
             let sent = wire.bytes();
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert!(wire.bytes() > sent, "the stream keeps flowing");
@@ -1285,8 +1353,8 @@ mod tests {
         let seconds: u64 =
             std::env::var("SLOPTY_GLASS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
         runtime.block_on(async {
-            run("loopback", 60, Duration::ZERO, 0, seconds).await;
-            run("tailnet-shaped", 60, Duration::from_millis(5), 30, seconds).await;
+            run::<Drawn>("loopback", 60, Duration::ZERO, 0, seconds).await;
+            run::<Drawn>("tailnet-shaped", 60, Duration::from_millis(5), 30, seconds).await;
         });
     }
 
@@ -1308,11 +1376,71 @@ mod tests {
         let seconds: u64 =
             std::env::var("SLOPTY_GLASS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
         runtime.block_on(async {
-            run("loopback", 60, Duration::ZERO, 0, seconds).await;
-            run("loopback", 120, Duration::ZERO, 0, seconds).await;
-            run("tailnet-shaped", 60, Duration::from_millis(5), 30, seconds).await;
-            run("tailnet-shaped", 120, Duration::from_millis(5), 30, seconds).await;
+            run::<Drawn>("loopback", 60, Duration::ZERO, 0, seconds).await;
+            run::<Drawn>("loopback", 120, Duration::ZERO, 0, seconds).await;
+            run::<Drawn>("tailnet-shaped", 60, Duration::from_millis(5), 30, seconds).await;
+            run::<Drawn>("tailnet-shaped", 120, Duration::from_millis(5), 30, seconds).await;
         });
         slopty_capture::synthetic::set_beat(None);
+    }
+
+    /// Capture → glass on [`Synthetic`]'s 3024 × 1964 display at native scale on a 120 Hz beat,
+    /// asked for 120, on loopback and tailnet-shaped. The padded encoder turns a frame out in
+    /// about 15 ms, so it cannot keep 120 however the link does (`docs/MEASUREMENTS.md`, "the
+    /// encoder watch behind the mailbox"). `SLOPTY_GLASS_SECONDS` sets each run's length.
+    #[test]
+    #[ignore = "measurement"]
+    fn capture_to_glass_at_120_past_the_encoder() {
+        /// [`Synthetic`] on a 120 Hz panel.
+        enum Synthetic120 {}
+
+        impl Platform for Synthetic120 {
+            type Audio = slopty_codec::Opus;
+            type Capture = StudioAt<120>;
+            type Input = Poke;
+            type Video = slopty_codec::VideoToolbox;
+        }
+
+        slopty_platform::user_interactive_thread();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let seconds: u64 =
+            std::env::var("SLOPTY_GLASS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+        runtime.block_on(async {
+            run::<Synthetic120>("loopback", 120, Duration::ZERO, 0, seconds).await;
+            let shaped = Duration::from_millis(5);
+            run::<Synthetic120>("tailnet-shaped", 120, shaped, 30, seconds).await;
+        });
+    }
+
+    /// Capture → glass on [`Synthetic`]'s 3024 × 1964 display at native scale, on loopback,
+    /// with the stream's sides padded to 16 and, alternately, at the picture's even size as
+    /// before (`docs/MEASUREMENTS.md`, "Stream sides padded to 16"). `SLOPTY_GLASS_SECONDS`
+    /// sets each run's length (default 20), `SLOPTY_GLASS_ROUNDS` the pairs (default 2).
+    #[test]
+    #[ignore = "measurement"]
+    fn capture_to_glass_padded_against_even() {
+        slopty_platform::user_interactive_thread();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let knob = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+        };
+        let (seconds, rounds) = (knob("SLOPTY_GLASS_SECONDS", 20), knob("SLOPTY_GLASS_ROUNDS", 2));
+        runtime.block_on(async {
+            for _ in 0..rounds {
+                for (label, pad_to) in [("even (before)", Some(2)), ("padded to 16", None)] {
+                    run_padded::<Synthetic>(label, 60, Duration::ZERO, 0, seconds, pad_to).await;
+                }
+            }
+        });
     }
 }

@@ -13,8 +13,9 @@ use objc2_core_media::{
     kCMTimeInvalid, kCMVideoCodecType_H264, kCMVideoCodecType_HEVC,
 };
 use objc2_core_video::{
-    CVPixelBuffer, CVPixelBufferGetPixelFormatType, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
+    kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVPixelBufferPixelFormatTypeKey,
+    kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
 };
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionCopySupportedPropertyDictionary,
@@ -481,6 +482,14 @@ impl Encoder {
         let format = CVPixelBufferGetPixelFormatType(image);
         if self.config.chroma == Chroma::Full && format != pixel_format(Chroma::Full) {
             return Err(CodecError::NotFullChroma(format));
+        }
+        let size = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+        let session = (
+            usize::try_from(self.config.width).unwrap_or(usize::MAX),
+            usize::try_from(self.config.height).unwrap_or(usize::MAX),
+        );
+        if size != session {
+            return Err(CodecError::WrongSize { image: size, session });
         }
         let mut keys: Vec<&CFString> = Vec::new();
         let mut values: Vec<&CFType> = Vec::new();
@@ -1218,6 +1227,46 @@ mod tests {
             matches!(err, CodecError::NotFullChroma(f) if f == pixel_format(Chroma::Subsampled)),
             "{err}"
         );
+    }
+
+    /// A picture of another size than the session's is refused, not coded: VideoToolbox takes
+    /// one quietly and codes it into the session's size, which is what a capture still at the
+    /// size before a resize would have become.
+    #[test]
+    fn a_picture_of_another_size_is_refused() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let encoder = encoder(tx);
+        let small = {
+            let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+            // SAFETY: CoreVideo rule: a valid out-pointer and no attributes.
+            let status = unsafe {
+                objc2_core_video::CVPixelBufferCreate(
+                    None,
+                    W / 2,
+                    H,
+                    objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                    None,
+                    NonNull::from(&mut raw),
+                )
+            };
+            assert_eq!(status, 0);
+            // SAFETY: +1 reference from the create call.
+            unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) }
+        };
+        let keyframe = FrameOptions { force_keyframe: true, ..FrameOptions::default() };
+        let err = encoder.encode(&small, 1, &keyframe).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CodecError::WrongSize { image, session }
+                    if image == (160, 180) && session == (320, 180)
+            ),
+            "{err}"
+        );
+        encoder.encode(&frame(0), 2, &keyframe).unwrap();
+        encoder.flush().unwrap();
+        let out = collect(&rx, 1);
+        assert_eq!(out.iter().map(|p| (p.pts_us, p.keyframe)).collect::<Vec<_>>(), [(2, true)]);
     }
 
     /// 4:4:4 is an HEVC profile; H.264 has none on this encoder.

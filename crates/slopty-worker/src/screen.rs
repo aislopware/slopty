@@ -1,7 +1,8 @@
 //! Remote window streaming: one pipeline per open stream.
 //!
 //! ```text
-//! ScreenCaptureKit queue ──frame──▶ encoder.encode ──VideoToolbox thread──▶ packetize ──▶ sink
+//! ScreenCaptureKit queue ──frame──▶ mailbox ──encode thread──▶ encoder.encode
+//!     ──VideoToolbox callback (often inside the submit)──▶ packetize ──▶ sink
 //! ```
 //!
 //! The pipeline ([`Pipeline`]) is generic over the worker's [`Platform`]: capture, encoders and
@@ -21,6 +22,30 @@
 //! [`synthetic::Drawn`] and [`synthetic::Synthetic`] are platforms whose pictures are drawn
 //! instead of captured: the first times this path end to end where ScreenCaptureKit cannot run,
 //! the second is the whole screen a worker serves under test ([`synthetic_screen`]).
+//!
+//! # Locks
+//!
+//! An encode (`Shared::try_encode`) holds `held` and then `encoder` from reading the requests
+//! to the end of the submit, and tells the session its bitrate and frame rate under them. A
+//! session whose sides are multiples of 16 codes the frame inside the submit and runs its
+//! output callback there, on the encoding thread, before the submit returns. So the callback
+//! path (`on_session_packet` → `on_packet`) takes nothing an encode holds, and nothing whose
+//! holder waits on an encode: it takes `counters.in_flight`, `counters.encode`, `watch`,
+//! `rate` and `ltr` one at a time, then `packetizer` → `lane` → the sink. It moves the rung
+//! in atomics; the next encode tells the session.
+//!
+//! Nothing but an encode takes `held` or `encoder`, so no runtime task waits on one (15 ms at
+//! 3024 × 1968, about 38 at 5K). The runtime reads the held capture's time from `held_us`,
+//! leaves a new session in `staged` for the next encode to put in, and leaves the bitrate and
+//! the rung in atomics for the next encode to tell the session. The capture leaves frames in
+//! the mailbox. A rebuild that waited on the session behind an encode, while that encode's
+//! callback waited to tell the session a new rung, was a deadlock (MEASUREMENTS.md, "Stream
+//! sides padded to 16").
+//!
+//! Where two are held together the order is `held` → `encoder` → any of `staged`, `ltr` →
+//! `pending`, `rate`, `watch`, `counters.*` and `packetizer` → `lane`. `rate` is never held
+//! while another is taken, nor while anything is asked of the session. Every other lock is
+//! taken alone.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -28,7 +53,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 #[cfg(all(test, target_vendor = "apple"))]
 use slopty_capture::host_now_us;
 use slopty_capture::{
@@ -37,13 +62,15 @@ use slopty_capture::{
 };
 use slopty_codec::{
     AudioEncoder as _, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _,
+    conformance,
 };
 use slopty_core::{DisplayId, StreamId};
 use slopty_input::{InputError, InputSink as _, Pointer, PointerChanges, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, HEARTBEAT_AFTER, MediaError, Pace,
-    Packetizer, RateController, Redundancy, audio_datagram, cursor_datagram, heartbeat_datagram,
+    Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, Fed, HEARTBEAT_AFTER, MediaError,
+    Pace, Packetizer, RateController, Redundancy, audio_datagram, cursor_datagram,
+    heartbeat_datagram,
 };
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::MAX_DATAGRAM;
@@ -173,6 +200,9 @@ pub enum ScreenError {
     /// Only a display stream moves to another display.
     #[error("not a display stream")]
     NotDisplay,
+    /// The stream's encode thread could not be started.
+    #[error("the encode thread would not start: {0}")]
+    EncodeThread(std::io::Error),
 }
 
 /// Frames' worth of bytes (at the current target rate) QUIC may hold before a captured frame
@@ -776,6 +806,15 @@ pub async fn listing() -> Result<ScreenEvent, ScreenError> {
     ScreenStream::listing().await
 }
 
+/// The encoder session in force, and what it was last told ([`Shared::tell`]).
+struct Live<V> {
+    session: Option<V>,
+    /// The bitrate it was last set to; 0 for the one it was built with.
+    bps: u32,
+    /// The frame rate it was last set to; 0 for the one it was built with.
+    fps: u16,
+}
+
 /// Requests folded into the next encoded frame.
 #[derive(Default)]
 struct Pending {
@@ -787,6 +826,8 @@ struct Pending {
 struct Counters {
     audio_packets: AtomicU64,
     captured: AtomicU64,
+    /// Captures a newer one replaced in the mailbox before the encode thread took them.
+    superseded: AtomicU64,
     dropped: AtomicU64,
     withheld: AtomicU64,
     suspected: AtomicU64,
@@ -831,6 +872,7 @@ impl Counters {
         Self {
             audio_packets: AtomicU64::new(0),
             captured: AtomicU64::new(0),
+            superseded: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             withheld: AtomicU64::new(0),
             suspected: AtomicU64::new(0),
@@ -1050,7 +1092,15 @@ struct AudioState<A> {
 
 struct Shared<P: Platform = Native> {
     id: StreamId,
-    encoder: RwLock<Option<P::Video>>,
+    /// The encoder session in force and what it was last told. Only an encode takes it, across
+    /// the submit ([`Self::try_encode`]; the module's "Locks").
+    encoder: Mutex<Live<P::Video>>,
+    /// A session built for the stream and not yet put in: the next encode puts it in, in place
+    /// of the one in force ([`Self::install`]).
+    staged: Mutex<Option<(P::Video, u64)>>,
+    /// The newest capture, left by ScreenCaptureKit's queue for the encode thread
+    /// ([`start_encode_thread`]).
+    mailbox: Mailbox<Frame<P>>,
     audio: Mutex<AudioState<P::Audio>>,
     pending: Mutex<Pending>,
     packetizer: Mutex<Packetizer>,
@@ -1064,13 +1114,21 @@ struct Shared<P: Platform = Native> {
     /// `host_now_us()` when the last datagram was queued; the heartbeat clock.
     last_push_us: AtomicU64,
     /// The cadence rung in force: how many of the captures reach the encoder, and the frame rate
-    /// the held-bytes limit is computed from.
+    /// the encoder is told (at its next frame).
     fps: std::sync::atomic::AtomicU16,
     /// The cadence the client asked for, or the rung the encoder was seen to keep up with when
-    /// that is lower ([`Shared::watch_encoder`]); the ladder never climbs past it.
+    /// that is lower ([`Shared::watch_encoder`], [`Shared::fed`]); the ladder never climbs past
+    /// it.
     fps_ceiling: std::sync::atomic::AtomicU16,
-    /// Frames in a row the encoder returned late for the rung in force ([`EncoderWatch`]).
-    encoder_late: std::sync::atomic::AtomicU32,
+    /// The cadence the client asked for: the ceiling rises back to it and no further.
+    fps_asked: std::sync::atomic::AtomicU16,
+    /// Whether the encoder keeps up with the rung in force ([`EncoderWatch`]).
+    watch: Mutex<EncoderWatch>,
+    /// Frames a second the encoder was fed over the last window at the rung in force, `0` until
+    /// one closes ([`Fed`]): what the congestion guard budgets a frame from.
+    fed_fps: std::sync::atomic::AtomicU16,
+    /// The bitrate the encoder is to be told at its next frame ([`Self::apply_bitrate`]).
+    encoder_bps: std::sync::atomic::AtomicU32,
     /// The presentation time of the last frame handed to the encoder; the next must be later.
     last_encoded_us: AtomicU64,
     /// The cadence gate's next slot ([`Pace::next_us`]); read and moved under `held`.
@@ -1095,8 +1153,10 @@ struct Shared<P: Platform = Native> {
     /// nothing while the picture is still, so this is the only picture a skipped frame, a
     /// refresh or a keyframe asked for on a still screen can be answered with
     /// ([`repair_loop`]). Every encode goes through this lock, which also keeps the
-    /// presentation timestamps the encoder sees in order.
+    /// presentation timestamps the encoder sees in order; so the runtime never takes it.
     held: Mutex<Option<Frame<P>>>,
+    /// The held capture's time, `0` while none is held: what the runtime reads of it.
+    held_us: AtomicU64,
     /// The held capture has not reached the encoder.
     owed: AtomicBool,
     /// Wakes [`repair_loop`]: a capture was held back, or a request came in.
@@ -1162,7 +1222,9 @@ impl<P: Platform> Shared<P> {
     ) -> Self {
         Self {
             id,
-            encoder: RwLock::new(None),
+            encoder: Mutex::new(Live { session: None, bps: 0, fps: 0 }),
+            staged: Mutex::new(None),
+            mailbox: Mailbox::default(),
             audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
             pending: Mutex::new(Pending { keyframe: true, ..Pending::default() }),
             packetizer: Mutex::new(Packetizer::new(id)),
@@ -1173,7 +1235,10 @@ impl<P: Platform> Shared<P> {
             last_push_us: AtomicU64::new(now::<P>()),
             fps: std::sync::atomic::AtomicU16::new(fps),
             fps_ceiling: std::sync::atomic::AtomicU16::new(fps),
-            encoder_late: std::sync::atomic::AtomicU32::new(0),
+            fps_asked: std::sync::atomic::AtomicU16::new(fps),
+            watch: Mutex::new(EncoderWatch::default()),
+            fed_fps: std::sync::atomic::AtomicU16::new(0),
+            encoder_bps: std::sync::atomic::AtomicU32::new(0),
             last_encoded_us: AtomicU64::new(0),
             pace_us: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
@@ -1183,6 +1248,7 @@ impl<P: Platform> Shared<P> {
             session: AtomicU64::new(0),
             sessions: AtomicU64::new(0),
             held: Mutex::new(None),
+            held_us: AtomicU64::new(0),
             owed: AtomicBool::new(false),
             repair: tokio::sync::Notify::new(),
             lane: Mutex::new(Lane::default()),
@@ -1257,49 +1323,74 @@ impl<P: Platform> Shared<P> {
         self.chroma.lock().ask(asked, (config.width, config.height), target)
     }
 
-    /// Point the live encoder at the share of `target` the parity leaves it ([`encoder_bps`]);
-    /// a rebuild picks the controller's target up again. `target` stays the rate the guards
-    /// read: the bytes they weigh are frames and their parity together.
+    /// Point the encoder at the share of `target` the parity leaves it ([`encoder_bps`]), at its
+    /// next frame ([`Self::tell`]); a rebuild picks the controller's target up again. `target`
+    /// stays the rate the guards read, from now: the bytes they weigh are frames and their parity
+    /// together.
     fn apply_bitrate(&self, target: u32) {
         let parity = self.packetizer.lock().parity_permille();
         let bps = encoder_bps(target, parity);
-        let result = self.encoder.read().as_ref().map(|e| e.set_bitrate(bps));
-        match result {
-            Some(Ok(())) => {
-                self.counters.bitrate_bps.store(u64::from(target), Ordering::Relaxed);
-                self.counters.encoder_bps.store(u64::from(bps), Ordering::Relaxed);
-                tracing::debug!(stream = %self.id, target, bps, parity, "bitrate");
-            }
-            Some(Err(e)) => tracing::warn!(stream = %self.id, bps, error = %e, "set bitrate"),
-            None => {}
-        }
+        self.counters.bitrate_bps.store(u64::from(target), Ordering::Relaxed);
+        self.encoder_bps.store(bps, Ordering::Relaxed);
+        tracing::debug!(stream = %self.id, target, bps, parity, "bitrate");
     }
 
-    /// Put a new encoder session in, in place of the old one, and reset what described the old
-    /// one ([`Self::rebuilt`]) before the encoder's write lock goes. An encode holds the read
-    /// lock from taking its requests to submitting the frame, so no frame reaches the new
-    /// session with the old one's requests, and none of the new session's packets can be filed
-    /// in the old book. The old session is invalidated in the swap, which ends its callbacks,
-    /// so none of its packets lands after the reset either. The held capture is the old size.
+    /// Leave a new encoder session for the next encode to put in, in place of the one in force
+    /// ([`Self::put_in`]). The swap and the reset of what described the old session happen
+    /// there, under the encode's own lock, before it reads its requests: no frame reaches the
+    /// new session with the old one's requests, and none of the new session's packets can be
+    /// filed in the old book. Nothing here waits on an encode, which may be coding a frame inside
+    /// its submit for tens of milliseconds (the module's "Locks").
     ///
-    /// Returns the old session for the caller to drop off the runtime: invalidating it waits for
-    /// its callbacks to finish.
+    /// Captures waiting in the mailbox were taken for the old session and are dropped. One held
+    /// already is left to the encode, which drops it if it is not the new session's size; the
+    /// repair loop is woken so a still picture of the right size answers the new keyframe.
     ///
-    /// `session` is the number the new session was built under ([`Self::next_session`]): from
-    /// here on only its packets are the stream's. The old session is invalidated off the
-    /// runtime, after the swap, and a frame it was still encoding comes out after the new
-    /// session's keyframe; sent, it would be decoded against the new session and fail
-    /// (MEASUREMENTS.md, "an old session's frame after the new keyframe").
-    #[must_use = "the old session is dropped off the runtime"]
+    /// Returns a session left here before and never put in, for the caller to drop off the
+    /// runtime: invalidating one waits for its callbacks.
+    ///
+    /// `session` is the number the new session was built under ([`Self::next_session`]): once
+    /// it is put in, only its packets are the stream's. A frame the old session was still
+    /// encoding comes out after the new session's keyframe; sent, it would be decoded against
+    /// the new session and fail (MEASUREMENTS.md, "an old session's frame after the new
+    /// keyframe").
+    #[must_use = "a session never put in is dropped off the runtime"]
     fn install(&self, encoder: P::Video, session: u64) -> Option<P::Video> {
-        let mut slot = self.encoder.write();
-        let old = slot.replace(encoder);
-        self.session.store(session, Ordering::Relaxed);
+        let unused = self.staged.lock().replace((encoder, session)).map(|(unused, _)| unused);
+        self.mailbox.clear();
+        self.repair.notify_one();
+        unused
+    }
+
+    /// Put the session [`Self::install`] left in, if there is one; `live` is the encode's lock.
+    /// The old session is dropped on a thread of its own ([`retire`]).
+    fn put_in(&self, live: &mut Live<P::Video>) {
+        let Some((session, number)) = self.staged.lock().take() else { return };
+        let old = live.session.replace(session);
+        (live.bps, live.fps) = (0, 0);
+        self.session.store(number, Ordering::Relaxed);
         self.rebuilt();
-        drop(slot);
-        // Outside the write lock: an encode takes the held capture's lock before the encoder's.
-        self.forget_held();
-        old
+        retire(old);
+    }
+
+    /// Tell the session in force the bitrate and the frame rate asked of it since it was last
+    /// told; `live` is the encode's lock. Once each: a refusal is logged, not retried per frame.
+    fn tell(&self, live: &mut Live<P::Video>, fps: u16) {
+        let Some(session) = live.session.as_ref() else { return };
+        let bps = self.encoder_bps.load(Ordering::Relaxed);
+        if bps != 0 && bps != live.bps {
+            live.bps = bps;
+            match session.set_bitrate(bps) {
+                Ok(()) => self.counters.encoder_bps.store(u64::from(bps), Ordering::Relaxed),
+                Err(e) => tracing::warn!(stream = %self.id, bps, error = %e, "set bitrate"),
+            }
+        }
+        if fps != live.fps {
+            live.fps = fps;
+            if let Err(e) = session.set_frame_rate(fps) {
+                tracing::warn!(stream = %self.id, fps, error = %e, "set frame rate");
+            }
+        }
     }
 
     /// A new encoder session replaced the old one: its references, the acknowledgements still
@@ -1322,10 +1413,15 @@ impl<P: Platform> Shared<P> {
     }
 
     /// Drop the held capture: it is not a picture of the target any more (hidden, suspected, or
-    /// another size).
+    /// another size). Only an encode path calls it: the lock may be held across an encode.
     fn forget_held(&self) {
-        *self.held.lock() = None;
+        let forgotten = {
+            let mut held = self.held.lock();
+            self.held_us.store(0, Ordering::Relaxed);
+            held.take()
+        };
         self.owed.store(false, Ordering::Relaxed);
+        drop(forgotten);
     }
 
     /// Bytes waiting to leave: what QUIC holds plus what waits in the lane.
@@ -1333,7 +1429,7 @@ impl<P: Platform> Shared<P> {
         self.sink.held().saturating_add(self.lane.lock().bytes)
     }
 
-    /// Move the cadence to the rung `bps` affords, and tell the encoder it did.
+    /// Move the cadence to the rung `bps` affords; the encoder is told at its next frame.
     ///
     /// Capture is left at the ceiling either way: a change on screen is still seen within a display
     /// beat, only fewer of those captures are encoded, so the picture that does go out is worth its
@@ -1343,28 +1439,96 @@ impl<P: Platform> Shared<P> {
         let mut cadence = Cadence::resume(ceiling, self.fps.load(Ordering::Relaxed));
         let Some(fps) = cadence.update(bps) else { return };
         self.fps.store(fps, Ordering::Relaxed);
-        let result = self.encoder.read().as_ref().map(|e| e.set_frame_rate(fps));
-        if let Some(Err(e)) = result {
-            tracing::warn!(stream = %self.id, fps, error = %e, "set frame rate");
-        }
+        // What the encoder was fed at the old rung says nothing of the new one.
+        self.fed_fps.store(0, Ordering::Relaxed);
         tracing::debug!(stream = %self.id, fps, bps, "cadence");
+    }
+
+    /// Start the ladder over under `ceiling`, the rate the stream asked for: a new quality, or
+    /// a new session, which the watch has not seen yet.
+    fn reset_rate(&self, ceiling: u16) {
+        self.fps_asked.store(ceiling, Ordering::Relaxed);
+        self.fps_ceiling.store(ceiling, Ordering::Relaxed);
+        self.fps.store(ceiling, Ordering::Relaxed);
+        self.fed_fps.store(0, Ordering::Relaxed);
+        *self.watch.lock() = EncoderWatch::default();
+    }
+
+    /// The encoder cannot keep the rung in force: the ceiling comes down to `ceiling` and the
+    /// cadence with it, until the next encoder session or until the encoder shows room again
+    /// ([`Self::raise_ceiling`]). The output callback calls it inside an encode, so it touches
+    /// the session not at all (the module's "Locks").
+    fn lower_ceiling(&self, ceiling: u16, why: &'static str) {
+        let fps = self.fps.load(Ordering::Relaxed);
+        let ceiling = ceiling.min(self.fps_ceiling.load(Ordering::Relaxed));
+        self.fps_ceiling.store(ceiling, Ordering::Relaxed);
+        let target = self.rate.lock().target_bps();
+        self.apply_cadence(target);
+        tracing::info!(stream = %self.id, fps, ceiling, why);
     }
 
     /// A frame spent `encode_us` in the encoder. After a run of frames queueing inside it at
     /// the rung in force, the ceiling steps down a rung and the cadence with it: the encoder
     /// cannot turn frames out that fast, and a queue in it is latency on every frame
-    /// ([`EncoderWatch`]). The ceiling stays down until the next encoder session.
-    fn watch_encoder(&self, encode_us: u64) {
+    /// ([`EncoderWatch`]).
+    fn watch_encoder(&self, encode_us: u64, keyframe: bool) {
         let fps = self.fps.load(Ordering::Relaxed);
-        let mut watch = EncoderWatch::resume(self.encoder_late.load(Ordering::Relaxed));
-        let slower = watch.returned(encode_us, fps);
-        self.encoder_late.store(watch.late(), Ordering::Relaxed);
-        let Some(ceiling) = slower else { return };
-        let ceiling = ceiling.min(self.fps_ceiling.load(Ordering::Relaxed));
+        let slower = self.watch.lock().returned(encode_us, fps, keyframe);
+        if let Some(ceiling) = slower {
+            self.lower_ceiling(ceiling, "encoder queueing: fewer frames");
+        }
+    }
+
+    /// A capture went into the encoder at the rung `fps`: at the end of a window, the rate the
+    /// encoder was fed. The rung follows it down when the mailbox had to replace many of the
+    /// captures the rung asked for, and the ceiling rises back towards what the client asked
+    /// for when the encoder codes well over the rung ([`EncoderWatch::fed`]).
+    fn fed(&self, fps: u16) {
+        let verdict = self.watch.lock().fed(fps);
+        let Some(Fed { fps: fed, ceiling }) = verdict else { return };
+        match ceiling {
+            Some(ceiling) if ceiling < fps => {
+                self.lower_ceiling(ceiling, "encoder busy: the rung follows what it was fed");
+            }
+            Some(ceiling) => {
+                self.fed_fps.store(fed, Ordering::Relaxed);
+                self.raise_ceiling(ceiling);
+            }
+            None => self.fed_fps.store(fed, Ordering::Relaxed),
+        }
+    }
+
+    /// The encoder codes well over the rung: the ceiling rises to `ceiling`, no further than the
+    /// client asked, and the cadence climbs under it as the rate allows.
+    fn raise_ceiling(&self, ceiling: u16) {
+        let ceiling = ceiling.min(self.fps_asked.load(Ordering::Relaxed));
+        let was = self.fps_ceiling.load(Ordering::Relaxed);
+        if ceiling <= was {
+            return;
+        }
         self.fps_ceiling.store(ceiling, Ordering::Relaxed);
         let target = self.rate.lock().target_bps();
         self.apply_cadence(target);
-        tracing::info!(stream = %self.id, fps, ceiling, encode_us, "encoder behind: fewer frames");
+        tracing::info!(stream = %self.id, was, ceiling, "encoder has room: the ceiling rises");
+    }
+
+    /// ScreenCaptureKit delivered a frame: leave it for the encode thread. One still waiting
+    /// there is replaced and counted, and told to the watch when it cost the rung a slot: it was
+    /// due, and the capture replacing it falls in the slot after the one it would have claimed.
+    /// One replaced within its own slot costs nothing, as the newer capture fills that slot.
+    fn post(&self, frame: Frame<P>) {
+        let newer_us = frame.capture_ts_us;
+        let Some(superseded) = self.mailbox.post(frame) else { return };
+        self.counters.superseded.fetch_add(1, Ordering::Relaxed);
+        let mut pace = Pace::resume(self.pace_us.load(Ordering::Relaxed));
+        let fps = self.fps.load(Ordering::Relaxed);
+        if pace.due(superseded.capture_ts_us, fps) {
+            pace.sent(superseded.capture_ts_us, fps);
+            if pace.due(newer_us, fps) {
+                self.watch.lock().superseded(fps);
+            }
+        }
+        drop(superseded);
     }
 
     /// Hand `datagrams` to the transport now, in one call; what it took.
@@ -1403,15 +1567,18 @@ impl<P: Platform> Shared<P> {
 
     /// Whether the transport can take another frame now ([`frame_fits`]). The window is only
     /// asked for when something is held: with nothing held any frame fits.
+    ///
+    /// A frame is budgeted at the rate the encoder is fed, when the last window found that
+    /// under the rung: the encoder sizes its frames from their timestamps, so a 120 rung fed 60
+    /// makes frames of a 60th of the rate (16.0 KB at 8 Mbit/s, against the 8.3 KB a 120th
+    /// allows), and two frames' worth at 120 was one frame of them.
     fn frame_fits(&self) -> bool {
         let held = self.held_bytes();
         let cwnd = if held == 0 { 0 } else { self.sink.cwnd() };
-        frame_fits(
-            held,
-            cwnd,
-            self.counters.bitrate_bps.load(Ordering::Relaxed),
-            self.fps.load(Ordering::Relaxed),
-        )
+        let rung = self.fps.load(Ordering::Relaxed);
+        let fed = self.fed_fps.load(Ordering::Relaxed);
+        let fps = if fed == 0 { rung } else { rung.min(fed) };
+        frame_fits(held, cwnd, self.counters.bitrate_bps.load(Ordering::Relaxed), fps)
     }
 
     /// What the accessibility watch heard of the target's application: a suspicion, a sibling
@@ -1461,10 +1628,12 @@ impl<P: Platform> Shared<P> {
             return;
         }
         let mut held = self.held.lock();
-        *held = Some(frame);
+        self.held_us.store(frame.capture_ts_us.max(1), Ordering::Relaxed);
+        let replaced = held.replace(frame);
         self.owed.store(true, Ordering::Relaxed);
-        let attempt = self.try_encode(held.as_ref(), true, now::<P>());
+        let attempt = self.try_encode(&mut held, true, now::<P>());
         drop(held);
+        drop(replaced);
         if attempt != Attempt::Sent {
             self.repair.notify_one();
         }
@@ -1498,12 +1667,18 @@ impl<P: Platform> Shared<P> {
     }
 
     /// Encode the held capture if the gates let it through. `fresh` is a capture that just
-    /// arrived; otherwise it is [`repair_loop`] sending the held one again at `now`.
-    fn try_encode(&self, held: Option<&Frame<P>>, fresh: bool, now: u64) -> Attempt {
-        let Some(frame) = held else { return Attempt::Nothing };
-        // Held from reading the requests to submitting the frame, so a rebuild is wholly before
+    /// arrived; otherwise it is [`repair_loop`] sending the held one again at `now`. `held` is
+    /// the held capture's lock, which the caller holds throughout.
+    ///
+    /// A capture of another size than the session's (one taken before a rebuild) is dropped,
+    /// not coded: VideoToolbox would take it and code it into the session's size. The session's
+    /// keyframe stays wanted for the first capture of its own size.
+    fn try_encode(&self, held: &mut Option<Frame<P>>, fresh: bool, now: u64) -> Attempt {
+        let Some(frame) = held.as_ref() else { return Attempt::Nothing };
+        // Held from reading the requests to the end of the submit, so a rebuild is wholly before
         // or wholly after them ([`Self::install`]).
-        let encoder = self.encoder.read();
+        let mut live = self.encoder.lock();
+        self.put_in(&mut live);
         let owed = self.owed.load(Ordering::Relaxed);
         let (want_keyframe, want_refresh) = {
             let pending = self.pending.lock();
@@ -1576,24 +1751,38 @@ impl<P: Platform> Shared<P> {
         if !fresh {
             self.counters.repaired.fetch_add(1, Ordering::Relaxed);
         }
+        self.tell(&mut live, fps);
         self.counters.submitted(pts, now);
-        let outcome = encoder.as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
+        let outcome =
+            live.session.as_ref().map(|encoder| encoder.encode(&frame.image, pts, &options));
         if let Some(Err(e)) = outcome {
             let _failed = self.counters.returned(pts, Source::<P>::now_us());
-            if matches!(e, CodecError::NotFullChroma(_)) {
+            let stale = matches!(e, CodecError::WrongSize { .. });
+            match e {
                 // The 4:4:4 session went in before ScreenCaptureKit switched to `xf44`; the
                 // capture is on its way ([`Pipeline::start_rebuild`]).
-                tracing::debug!(stream = %self.id, error = %e, "a 4:2:0 capture ahead of the switch");
-            } else {
-                tracing::warn!(stream = %self.id, error = %e, "encode failed");
+                CodecError::NotFullChroma(_) => {
+                    tracing::debug!(stream = %self.id, error = %e, "a 4:2:0 capture ahead of the switch");
+                }
+                // The session was rebuilt for a size the capture has not switched to yet.
+                CodecError::WrongSize { .. } => {
+                    tracing::debug!(stream = %self.id, error = %e, "a capture of the old size dropped");
+                }
+                _ => tracing::warn!(stream = %self.id, error = %e, "encode failed"),
             }
-            self.owed.store(true, Ordering::Relaxed);
             let mut pending = self.pending.lock();
             pending.keyframe |= options.force_keyframe;
             pending.refresh |= options.force_ltr_refresh;
             pending.acked.extend(options.acked_ltr);
             drop(pending);
-            drop(encoder);
+            drop(live);
+            if stale {
+                self.held_us.store(0, Ordering::Relaxed);
+                self.owed.store(false, Ordering::Relaxed);
+                *held = None;
+                return Attempt::Nothing;
+            }
+            self.owed.store(true, Ordering::Relaxed);
             return Attempt::Failed;
         }
         if options.force_keyframe {
@@ -1602,18 +1791,26 @@ impl<P: Platform> Shared<P> {
         if standalone {
             self.counters.refreshes_idr.fetch_add(1, Ordering::Relaxed);
         }
-        drop(encoder);
+        if fresh {
+            self.fed(fps);
+        }
+        drop(live);
         Attempt::Sent
     }
 
     /// When [`repair_loop`] should next look at the held capture; `None` while nothing is owed
     /// or asked for.
     fn repair_at(&self) -> Option<u64> {
-        let captured = self.held.lock().as_ref()?.capture_ts_us;
+        let captured = self.held_us.load(Ordering::Relaxed);
+        if captured == 0 {
+            return None;
+        }
         let (keyframe, refresh) = {
             let pending = self.pending.lock();
             (pending.keyframe, pending.refresh)
         };
+        // A session waiting to be put in wants its keyframe from whatever is held.
+        let keyframe = keyframe || self.staged.lock().is_some();
         repair_at(
             Asks { owed: self.owed.load(Ordering::Relaxed), refresh, keyframe },
             captured,
@@ -1633,8 +1830,8 @@ impl<P: Platform> Shared<P> {
             self.forget_held();
             return Attempt::Nothing;
         }
-        let held = self.held.lock();
-        self.try_encode(held.as_ref(), false, now)
+        let mut held = self.held.lock();
+        self.try_encode(&mut held, false, now)
     }
 
     /// ScreenCaptureKit delivered PCM: encode and send unless the source has gone quiet.
@@ -1754,7 +1951,7 @@ impl<P: Platform> Shared<P> {
     fn on_packet(&self, packet: &EncodedPacket) {
         let now = now::<P>();
         if let Some(took) = self.counters.returned(packet.pts_us, now) {
-            self.watch_encoder(took);
+            self.watch_encoder(took, packet.keyframe);
         }
         let latency = now.saturating_sub(packet.pts_us);
         let encoded = self.counters.encoded.fetch_add(1, Ordering::Relaxed);
@@ -1875,8 +2072,10 @@ impl<P: Platform> Shared<P> {
         let decision = self.rate.lock().on_report(report, sent, path);
         let Some(decision) = decision else {
             if parity_moved {
-                // The parity's share of the target moved, so the encoder's did too.
-                self.apply_bitrate(self.rate.lock().target_bps());
+                // The parity's share of the target moved, so the encoder's did too. Read first:
+                // nothing is held while the encoder is asked for anything.
+                let target = self.rate.lock().target_bps();
+                self.apply_bitrate(target);
             }
             return None;
         };
@@ -2027,9 +2226,10 @@ const fn send_ms_lo(now_us: u64) -> u8 {
 async fn build_encoder<P: Platform>(
     shared: &Weak<Shared<P>>,
     config: EncoderConfig,
+    shown: (u32, u32),
     session: u64,
 ) -> Result<P::Video, ScreenError> {
-    start_encoder(shared, config, session)
+    start_encoder(shared, config, shown, session)
         .await
         .map_err(|_cancelled| ScreenError::Closed)?
         .map_err(Into::into)
@@ -2037,18 +2237,39 @@ async fn build_encoder<P: Platform>(
 
 /// [`build_encoder`] without waiting for it: the build runs on the blocking pool from here on.
 /// Its packets are the stream's once it is installed as `session` ([`Shared::install`]).
+///
+/// The session codes the capture's padded surface ([`CaptureConfig::surface`]); each keyframe's
+/// SPS is rewritten to show the picture's own `shown` size, so the client decodes that size and
+/// never sees the padding ([`slopty_codec::conformance`]).
 fn start_encoder<P: Platform>(
     shared: &Weak<Shared<P>>,
     config: EncoderConfig,
+    shown: (u32, u32),
     session: u64,
 ) -> JoinHandle<Result<P::Video, CodecError>> {
     let weak = Weak::clone(shared);
-    tokio::task::spawn_blocking(move || {
-        P::Video::new(config, move |packet| {
-            if let Some(shared) = weak.upgrade() {
-                shared.on_session_packet(session, &packet);
-            }
-        })
+    tokio::task::spawn_blocking(move || open_session(&weak, config, shown, session))
+}
+
+/// [`start_encoder`]'s session, made on the calling thread, which it holds for as long as
+/// VideoToolbox takes.
+fn open_session<P: Platform>(
+    shared: &Weak<Shared<P>>,
+    config: EncoderConfig,
+    shown: (u32, u32),
+    session: u64,
+) -> Result<P::Video, CodecError> {
+    let weak = Weak::clone(shared);
+    let padded = shown != (config.width, config.height);
+    P::Video::new(config, move |mut packet| {
+        let Some(shared) = weak.upgrade() else { return };
+        if padded
+            && packet.keyframe
+            && let Err(e) = conformance::crop_access_unit(&mut packet.data, shown)
+        {
+            tracing::warn!(stream = %shared.id, error = %e, ?shown, "keyframe shows its padding");
+        }
+        shared.on_session_packet(session, &packet);
     })
 }
 
@@ -2095,10 +2316,85 @@ impl<P: Platform> Rebuild<P> {
     }
 }
 
-/// Drop a replaced encoder session on the blocking pool ([`Shared::install`]).
+/// The newest capture, waiting for the stream's encode thread ([`start_encode_thread`]).
+struct Mailbox<F> {
+    slot: Mutex<Option<F>>,
+    wake: parking_lot::Condvar,
+}
+
+impl<F> Default for Mailbox<F> {
+    fn default() -> Self {
+        Self { slot: Mutex::new(None), wake: parking_lot::Condvar::new() }
+    }
+}
+
+impl<F> Mailbox<F> {
+    /// Leave `frame` for the encode thread, in place of any it has not taken yet: the encoder
+    /// is behind, and the newer capture is the one worth its time. Returns the one replaced.
+    fn post(&self, frame: F) -> Option<F> {
+        let superseded = self.slot.lock().replace(frame);
+        self.wake.notify_one();
+        superseded
+    }
+
+    /// The frame left for the encode thread, waiting up to `patience` for one.
+    fn take(&self, patience: Duration) -> Option<F> {
+        let mut slot = self.slot.lock();
+        if slot.is_none() {
+            let _timed_out = self.wake.wait_for(&mut slot, patience);
+        }
+        slot.take()
+    }
+
+    /// Drop the frame waiting, if any.
+    fn clear(&self) {
+        let dropped = self.slot.lock().take();
+        drop(dropped);
+    }
+}
+
+/// How long the encode thread waits for a capture before it looks whether its stream is gone.
+const ENCODE_THREAD_IDLE: Duration = Duration::from_millis(500);
+
+/// The thread a stream's captures are encoded on, taking them from its mailbox
+/// ([`Shared::post`]).
+///
+/// VideoToolbox may encode a frame inside `VTCompressionSessionEncodeFrame`
+/// (`VTCompressionSession.h`: "The `kVTEncodeInfo_Asynchronous` bit may be set if the encode ran
+/// asynchronously"), and the low-latency encoder does whenever the picture's sides are multiples
+/// of 16: the call returns once the frame is out, 15.3 ms at 3024 × 1968 (MEASUREMENTS.md,
+/// "Stream sides padded to 16"). On the capture's own queue that held back the next capture, so
+/// a 60 Hz display at that size was captured at 30. Here the capture only leaves its frame; a
+/// capture that arrives while the encoder is still busy replaces the one waiting, so the encoder
+/// always takes the newest picture and nothing queues behind it.
+///
+/// The thread ends once the stream's [`Shared`] is gone.
+fn start_encode_thread<P: Platform>(shared: &Arc<Shared<P>>) -> Result<(), ScreenError> {
+    let weak = Arc::downgrade(shared);
+    std::thread::Builder::new()
+        .name(format!("slopty-encode-{}", shared.id))
+        .spawn(move || {
+            slopty_platform::user_interactive_thread();
+            while let Some(shared) = weak.upgrade() {
+                if let Some(frame) = shared.mailbox.take(ENCODE_THREAD_IDLE) {
+                    shared.on_frame(frame);
+                }
+            }
+        })
+        .map(drop)
+        .map_err(ScreenError::EncodeThread)
+}
+
+/// Drop a replaced encoder session on a thread of its own: invalidating it waits for its
+/// callbacks, and the thread that replaced it is an encode's, about to code the new session's
+/// keyframe ([`Shared::put_in`]), or the runtime's ([`Shared::install`]).
 fn retire<V: Send + 'static>(old: Option<V>) {
-    if let Some(old) = old {
-        drop(tokio::task::spawn_blocking(move || drop(old)));
+    let Some(old) = old else { return };
+    let spawned = std::thread::Builder::new()
+        .name("slopty-retire-encoder".to_owned())
+        .spawn(move || drop(old));
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "no thread to retire an encoder session on: dropped in place");
     }
 }
 
@@ -2353,18 +2649,49 @@ impl ResizeDebounce {
 /// 1.48 against 2.35 — the same within the run-to-run spread the table records.
 const QUEUE_DEPTH: u8 = 3;
 
+/// The multiple an HEVC stream's sides are padded to: the low-latency encoder copies any other
+/// size into a padded buffer of its own and queues it, and a Retina panel's size then waits
+/// 68–111 ms (MEASUREMENTS.md, "encode time against frame size" and "Stream sides padded to
+/// 16"). H.264 keeps the picture's even size until its encoder is measured for the same.
+const HEVC_ALIGN: u32 = 16;
+
+/// The multiple a stream of `codec` pads its sides to.
+const fn align(codec: VideoCodec) -> u32 {
+    match codec {
+        VideoCodec::Hevc => HEVC_ALIGN,
+        VideoCodec::H264 => 2,
+    }
+}
+
+/// [`configs_padded`] with the codec's own padding, as every stream but a measurement's has it.
+#[cfg(test)]
+fn configs(
+    native: (u32, u32),
+    quality: &Quality,
+    refresh_hz: Option<f64>,
+) -> (CaptureConfig, EncoderConfig) {
+    configs_padded(native, quality, refresh_hz, None)
+}
+
 /// Capture and encoder settings for a target at a requested quality, on a display refreshing at
 /// `refresh_hz` when that is known.
+///
+/// The capture's picture is the target at the quality's scale, sides even; the encoder codes
+/// the capture's surface, the picture padded to [`HEVC_ALIGN`] for HEVC ([`start_encoder`]
+/// crops the stream back to the picture). `pad_to` pads to another multiple in its place: a
+/// measurement's A/B, one stream padded and one not in one process
+/// ([`Pipeline::open_padded`]).
 ///
 /// A display draws no faster than it refreshes, so the frame rate is the one asked for or the
 /// display's, whichever is lower. The capture runs at the display's own beat: the cadence gate
 /// ([`Pace`]) picks the rung's frames from it, which a capture throttled to the rung's interval
 /// cannot give it on a display whose beat does not divide that interval (MEASUREMENTS.md,
 /// "capture on a 75 Hz display").
-fn configs(
+fn configs_padded(
     native: (u32, u32),
     quality: &Quality,
     refresh_hz: Option<f64>,
+    pad_to: Option<u32>,
 ) -> (CaptureConfig, EncoderConfig) {
     let scale =
         if quality.scale.is_finite() { f64::from(quality.scale).clamp(0.05, 1.0) } else { 1.0 };
@@ -2374,6 +2701,7 @@ fn configs(
         v.next_multiple_of(2)
     };
     let (width, height) = (side(native.0), side(native.1));
+    let align = pad_to.unwrap_or_else(|| align(quality.codec));
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
     let display =
         refresh_hz.filter(|hz| hz.is_finite()).map(|hz| hz.round().clamp(1.0, 240.0) as u16);
@@ -2382,12 +2710,14 @@ fn configs(
     let capture = CaptureConfig {
         width,
         height,
+        align,
         fps: if display.is_some() { 0 } else { fps },
         format,
         queue_depth: QUEUE_DEPTH,
         audio: true,
         crop: None,
     };
+    let (width, height) = capture.surface();
     let encoder = EncoderConfig {
         width,
         height,
@@ -2399,7 +2729,7 @@ fn configs(
     (capture, encoder)
 }
 
-/// [`configs`] for a stream carrying `chroma`: a 4:4:4 session is fed the one 4:4:4 format
+/// `configs` for a stream carrying `chroma`: a 4:4:4 session is fed the one 4:4:4 format
 /// ScreenCaptureKit delivers.
 const fn carrying(
     chroma: Chroma,
@@ -2460,8 +2790,11 @@ pub struct Pipeline<P: Platform> {
     point_scale: f64,
     /// Last requested quality; re-applied when the target changes size.
     quality: Quality,
-    /// The refresh rate of the target's display when the stream opened ([`configs`]).
+    /// The refresh rate of the target's display when the stream opened ([`configs_padded`]).
     refresh_hz: Option<f64>,
+    /// The multiple the stream's sides are padded to in place of its codec's own; `None` but
+    /// for a measurement's A/B ([`Self::open_padded`]).
+    pad_to: Option<u32>,
     /// What the client has been told about the source, and the frame history it follows.
     source: SourceTracker,
     /// The enumeration the target was resolved from; filters for a path switch come from it.
@@ -2542,6 +2875,7 @@ impl<P: Platform> Pipeline<P> {
         let config = CaptureConfig {
             width: 64,
             height: 64,
+            align: align(VideoCodec::Hevc),
             fps: 1,
             format: PixelFormat::Nv12Full,
             queue_depth: 1,
@@ -2621,6 +2955,19 @@ impl<P: Platform> Pipeline<P> {
         sink: Arc<dyn DatagramSink>,
         on_event: impl Fn(StreamEvent) + Send + Sync + 'static,
     ) -> Result<(Self, ScreenEvent), ScreenError> {
+        Self::open_padded(id, target, quality, sink, on_event, None).await
+    }
+
+    /// [`Self::open`], the stream's sides padded to `pad_to` in place of its codec's own
+    /// multiple when that is given ([`configs_padded`]).
+    pub(crate) async fn open_padded(
+        id: StreamId,
+        target: CaptureTarget,
+        quality: Quality,
+        sink: Arc<dyn DatagramSink>,
+        on_event: impl Fn(StreamEvent) + Send + Sync + 'static,
+        pad_to: Option<u32>,
+    ) -> Result<(Self, ScreenEvent), ScreenError> {
         let on_event: Arc<dyn Fn(StreamEvent) + Send + Sync> = Arc::new(on_event);
         let on_stop: Arc<dyn Fn(CaptureError) + Send + Sync> = {
             let on_event = Arc::clone(&on_event);
@@ -2632,7 +2979,7 @@ impl<P: Platform> Pipeline<P> {
         let (resolved, path) = resolve::<P>(&content, target)?;
         let native = Source::<P>::pixel_size(&resolved);
         let refresh_hz = Source::<P>::refresh_hz(target);
-        let sized = configs(native, &quality, refresh_hz);
+        let sized = configs_padded(native, &quality, refresh_hz, pad_to);
         let shared = Arc::new(Shared::new(
             id,
             sink,
@@ -2647,16 +2994,18 @@ impl<P: Platform> Pipeline<P> {
         shared.set_zoom(zoom);
         let t_encoder = Instant::now();
         let session = shared.next_session();
-        let encoder = match build_encoder(&Arc::downgrade(&shared), encoder_config, session).await {
-            Err(e) if chroma == Chroma::Full => {
-                tracing::warn!(stream = %id, error = %e, "no 4:4:4 session here: 4:2:0");
-                shared.chroma.lock().refuse();
-                (capture_config, encoder_config) =
-                    carrying(Chroma::Subsampled, (capture_config, encoder_config));
-                build_encoder(&Arc::downgrade(&shared), encoder_config, session).await?
-            }
-            built => built?,
-        };
+        let shown = (capture_config.width, capture_config.height);
+        let encoder =
+            match build_encoder(&Arc::downgrade(&shared), encoder_config, shown, session).await {
+                Err(e) if chroma == Chroma::Full => {
+                    tracing::warn!(stream = %id, error = %e, "no 4:4:4 session here: 4:2:0");
+                    shared.chroma.lock().refuse();
+                    (capture_config, encoder_config) =
+                        carrying(Chroma::Subsampled, (capture_config, encoder_config));
+                    build_encoder(&Arc::downgrade(&shared), encoder_config, shown, session).await?
+                }
+                built => built?,
+            };
         let encoder_built = t_encoder.elapsed();
         retire(shared.install(encoder, session));
         let start = shared.rate.lock().target_bps();
@@ -2664,12 +3013,12 @@ impl<P: Platform> Pipeline<P> {
         shared.apply_cadence(start);
 
         let (started_tx, started_rx) = oneshot::channel();
-        let sink = Arc::clone(&shared);
-        let audio_sink = Arc::clone(&shared);
+        start_encode_thread(&shared)?;
+        let (sink, audio_sink) = (Arc::clone(&shared), Arc::clone(&shared));
         let capture = Source::<P>::start(
             &resolved,
             &capture_config,
-            move |frame| sink.on_frame(frame),
+            move |frame| sink.post(frame),
             Some(Box::new(move |chunk| audio_sink.on_audio(&chunk))),
             {
                 let on_stop = Arc::clone(&on_stop);
@@ -2737,6 +3086,7 @@ impl<P: Platform> Pipeline<P> {
             point_scale,
             quality,
             refresh_hz,
+            pad_to,
             source: SourceTracker::new(Instant::now()),
             content,
             path,
@@ -2807,7 +3157,7 @@ impl<P: Platform> Pipeline<P> {
     ) -> Option<Rebuild<P>> {
         self.quality = *quality;
         let native = pending.as_ref().map_or(self.native, |rebuild| rebuild.native);
-        let sized = configs(native, quality, self.refresh_hz);
+        let sized = configs_padded(native, quality, self.refresh_hz, self.pad_to);
         let chroma = self.shared.ask_chroma(asked(quality), &sized.1);
         let (capture_config, encoder_config) = carrying(chroma, sized);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
@@ -2870,14 +3220,8 @@ impl<P: Platform> Pipeline<P> {
             rate.target_bps()
         };
         self.shared.apply_bitrate(target);
-        self.shared.fps_ceiling.store(encoder_config.fps, Ordering::Relaxed);
-        self.shared.fps.store(encoder_config.fps, Ordering::Relaxed);
-        self.shared.encoder_late.store(0, Ordering::Relaxed);
-        let result =
-            self.shared.encoder.read().as_ref().map(|e| e.set_frame_rate(encoder_config.fps));
-        if let Some(Err(e)) = result {
-            tracing::warn!(stream = %self.shared.id, error = %e, "set frame rate");
-        }
+        // The session is told the new rate at its next frame ([`Shared::tell`]).
+        self.shared.reset_rate(encoder_config.fps);
         self.shared.apply_cadence(target);
         self.encoder_config = encoder_config;
     }
@@ -2916,7 +3260,7 @@ impl<P: Platform> Pipeline<P> {
             return None;
         };
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
-        let sized = configs(native, &self.quality, self.refresh_hz);
+        let sized = configs_padded(native, &self.quality, self.refresh_hz, self.pad_to);
         let asked = self.shared.chroma.lock().asked();
         let chroma = self.shared.ask_chroma(asked, &sized.1);
         let (capture_config, encoder_config) = carrying(chroma, sized);
@@ -2973,7 +3317,8 @@ impl<P: Platform> Pipeline<P> {
             self.apply_desired();
         }
         let session = self.shared.next_session();
-        let encoder = start_encoder(&Arc::downgrade(&self.shared), config, session);
+        let shown = (desired.width, desired.height);
+        let encoder = start_encoder(&Arc::downgrade(&self.shared), config, shown, session);
         Rebuild { encoder, session, native, desired, config, resized: false }
     }
 
@@ -3223,9 +3568,7 @@ impl<P: Platform> Pipeline<P> {
         self.shared.apply_bitrate(target);
         // A new quality sets a new ceiling, and the ladder starts from it again: the rung that was
         // in force answered a bitrate the client has just replaced.
-        self.shared.fps_ceiling.store(encoder_config.fps, Ordering::Relaxed);
-        self.shared.fps.store(encoder_config.fps, Ordering::Relaxed);
-        self.shared.encoder_late.store(0, Ordering::Relaxed);
+        self.shared.reset_rate(encoder_config.fps);
         self.shared.apply_cadence(target);
         self.map_at(desired.width, native.0);
         self.desired = desired;
@@ -3376,7 +3719,9 @@ impl<P: Platform> Pipeline<P> {
         }
         let stats = self.stats();
         let cursor_wakes = self.shared.cursor_wakes.load(Ordering::Relaxed);
-        tracing::info!(stream = %self.id, ?stats, cursor_wakes, "screen stream closed");
+        // Not in `ScreenStats` (a wire type): captures the encoder was too busy to take.
+        let superseded = self.shared.counters.superseded.load(Ordering::Relaxed);
+        tracing::info!(stream = %self.id, ?stats, superseded, cursor_wakes, "screen stream closed");
     }
 }
 
@@ -3505,7 +3850,13 @@ async fn repair_loop<P: Platform>(shared: Arc<Shared<P>>) {
             continue;
         }
         let period = period_us(shared.fps.load(Ordering::Relaxed));
-        let wait = match shared.repair_now(now) {
+        // Off the runtime: VideoToolbox may encode inside the submit ([`start_encode_thread`]).
+        let repairing = Arc::clone(&shared);
+        let Ok(attempt) = tokio::task::spawn_blocking(move || repairing.repair_now(now)).await
+        else {
+            break;
+        };
+        let wait = match attempt {
             Attempt::Sent | Attempt::Nothing => continue,
             // A keyframe put off for a refresh waits for the cadence like any frame.
             Attempt::NotDue => shared.due_at().saturating_sub(now).max(1_000),
@@ -3844,16 +4195,44 @@ mod tests {
         assert_eq!(capture.fps, 240, "fps clamped");
         assert_eq!(capture.format, PixelFormat::Nv12Full, "full range, what the client samples");
         assert_eq!(encoder.bitrate_bps, 100_000, "bitrate floor");
-        assert_eq!((encoder.width, encoder.height, encoder.fps), (334, 260, 240));
+        assert_eq!((encoder.width, encoder.height, encoder.fps), (336, 272, 240), "padded to 16");
 
         let nan = Quality { scale: f32::NAN, codec: VideoCodec::H264, ..q };
         let (capture, encoder) = configs((100, 100), &nan, None);
         assert_eq!((capture.width, capture.height), (100, 100), "a NaN scale is native");
         assert_eq!(encoder.codec, VideoCodec::H264, "the codec asked for");
+        assert_eq!((encoder.width, encoder.height), (100, 100), "H.264 is not padded");
 
         let tiny = Quality { scale: 0.0001, ..q };
         let (capture, _encoder) = configs((10, 10), &tiny, None);
         assert_eq!((capture.width, capture.height), (2, 2), "never below two pixels");
+    }
+
+    /// An HEVC stream's encoder codes the capture's surface, each side the picture's rounded up
+    /// to 16, and the picture keeps today's even size: the client is told that size, input maps
+    /// through it, and the stream's SPS crops the surface back to it.
+    #[test]
+    fn hevc_codes_a_surface_padded_to_16_around_the_even_picture() {
+        let at = |scale| Quality { scale, ..Quality::default() };
+        for (native, scale, picture, coded) in [
+            ((3024, 1964), 1.0, (3024, 1964), (3024, 1968)),
+            ((3456, 2234), 1.0, (3456, 2234), (3456, 2240)),
+            ((2880, 1800), 1.0, (2880, 1800), (2880, 1808)),
+            ((1920, 1080), 1.0, (1920, 1080), (1920, 1088)),
+            ((2560, 1440), 1.0, (2560, 1440), (2560, 1440)),
+            ((3024, 1964), 0.5, (1512, 982), (1520, 992)),
+            ((1001, 777), 1.0, (1002, 778), (1008, 784)),
+        ] {
+            for chroma in [Chroma::Subsampled, Chroma::Full] {
+                let quality = Quality { chroma, ..at(scale) };
+                let (capture, encoder) = carrying(chroma, configs(native, &quality, Some(60.0)));
+                assert_eq!((capture.width, capture.height), picture, "{native:?} at {scale}");
+                assert_eq!(capture.surface(), coded, "{native:?} at {scale}");
+                assert_eq!((encoder.width, encoder.height), coded, "{native:?} at {scale}");
+                assert!(coded.0 % 16 == 0 && coded.1 % 16 == 0, "{coded:?}");
+                assert!(picture.0 % 2 == 0 && picture.1 % 2 == 0, "{picture:?}");
+            }
+        }
     }
 
     /// A 4:4:4 stream captures `xf44` into a 4:4:4 session; 4:4:4 is only ever HEVC.
@@ -3924,18 +4303,31 @@ mod tests {
     /// One 16x16 frame. The contents do not matter: with no encoder nothing reads them, and
     /// what is being tested is whether `on_frame` gets that far at all.
     fn a_frame() -> CapturedFrame {
+        a_frame_of(16, 16)
+    }
+
+    /// A blank `width` × `height` capture.
+    /// `IOSurface`-backed and full range, as ScreenCaptureKit's are: VideoToolbox copies any
+    /// other buffer and codes the copy off the submit.
+    fn a_frame_of(width: usize, height: usize) -> CapturedFrame {
         use std::ptr::{self, NonNull};
 
+        use objc2_core_foundation::{CFDictionary, CFString, CFType};
+
+        // SAFETY: framework-provided constant string.
+        let key = unsafe { objc2_core_video::kCVPixelBufferIOSurfacePropertiesKey };
+        let none = CFDictionary::<CFString, CFType>::from_slices(&[], &[]);
+        let attributes = CFDictionary::<CFString, CFType>::from_slices(&[key], &[&*none]);
         let mut raw: *mut objc2_core_video::CVPixelBuffer = ptr::null_mut();
-        // SAFETY: the out-pointer is valid and no attributes dictionary is passed
-        // (CoreVideo, `CVPixelBufferCreate`).
+        // SAFETY: CoreVideo rule for `CVPixelBufferCreate`: a valid out-pointer, and an
+        // attributes dictionary of `kCVPixelBuffer*` keys.
         let status = unsafe {
             objc2_core_video::CVPixelBufferCreate(
                 None,
-                16,
-                16,
-                objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                None,
+                width,
+                height,
+                objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                Some(attributes.as_opaque()),
                 NonNull::from(&mut raw),
             )
         };
@@ -4089,16 +4481,16 @@ mod tests {
         shared.fps_ceiling.store(120, Ordering::Relaxed);
         shared.apply_cadence(30_000_000);
         assert_eq!(shared.fps.load(Ordering::Relaxed), 120);
-        shared.watch_encoder(97_000);
-        shared.watch_encoder(8_000);
+        shared.watch_encoder(97_000, false);
+        shared.watch_encoder(8_000, false);
         assert_eq!(shared.fps.load(Ordering::Relaxed), 120, "a lone slow frame");
         for _ in 0..12 {
-            shared.watch_encoder(80_000);
+            shared.watch_encoder(80_000, false);
         }
         assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 60);
         assert_eq!(shared.fps.load(Ordering::Relaxed), 60);
         for _ in 0..12 {
-            shared.watch_encoder(25_000);
+            shared.watch_encoder(25_000, false);
         }
         assert_eq!(shared.fps.load(Ordering::Relaxed), 60, "25 ms is on time at 60");
         shared.apply_cadence(30_000_000);
@@ -4642,6 +5034,8 @@ mod tests {
 
         shared.on_packet(&packet(900, false, Some(7), false));
         shared.report(&acking(&[7]), None);
+        // The report moved the parity, and with it the target to the controller's own.
+        shared.counters.bitrate_bps.store(1_000_000, Ordering::Relaxed);
         assert!(!shared.keyframe_admitted(1_000_000), "now a refresh is a picture");
         assert_eq!(shared.stats().keyframes_deferred, 1);
 
@@ -4953,6 +5347,13 @@ mod tests {
     struct Recorder {
         session: u64,
         log: Log,
+        /// The pictures it takes; any other size is refused, as VideoToolbox's session is.
+        size: (usize, usize),
+    }
+
+    /// A [`Recorder`] session numbered `session`, logging to `log`, of [`a_frame`]'s size.
+    fn recorder(session: u64, log: Log) -> Recorder {
+        Recorder { session, log, size: (16, 16) }
     }
 
     impl slopty_codec::VideoEncoder for Recorder {
@@ -4962,15 +5363,19 @@ mod tests {
             _config: EncoderConfig,
             _sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
         ) -> Result<Self, CodecError> {
-            Ok(Self { session: 0, log: Log::default() })
+            Ok(recorder(0, Log::default()))
         }
 
         fn encode(
             &self,
-            _image: &Self::Image,
+            image: &Self::Image,
             _pts_us: u64,
             options: &FrameOptions,
         ) -> Result<(), CodecError> {
+            let size = (image.width(), image.height());
+            if size != self.size {
+                return Err(CodecError::WrongSize { image: size, session: self.size });
+            }
             self.log.lock().push((self.session, options.force_keyframe));
             Ok(())
         }
@@ -4984,61 +5389,50 @@ mod tests {
         }
     }
 
+    /// Hand `shared` the capture `frame` as the repair loop would, a second after the last one
+    /// so the cadence never holds it back.
+    fn encode_held(
+        shared: &Shared<Recording>,
+        frame: CapturedFrame,
+        at: &std::cell::Cell<u64>,
+    ) -> Attempt {
+        at.set(at.get().saturating_add(1_000_000));
+        let mut held = shared.held.lock();
+        shared.held_us.store(frame.capture_ts_us, Ordering::Relaxed);
+        *held = Some(frame);
+        shared.owed.store(true, Ordering::Relaxed);
+        let attempt = shared.try_encode(&mut held, false, at.get());
+        drop(held);
+        attempt
+    }
+
     /// A rebuild swaps the encoder and resets what described the old session in one step. An
     /// encode caught between the two reached the new session with the old one's requests (no
-    /// keyframe), and the rebuild's keyframe then went out as a second IDR. Here the rebuild is
-    /// held where it resets the book, and an encode is tried beside it.
+    /// keyframe), and the rebuild's keyframe then went out as a second IDR. The next encode now
+    /// puts the new session in and resets the book under its own lock, before it reads a
+    /// request: an acknowledgement queued for the old session after the rebuild never reaches
+    /// the new one, and the new session starts on one keyframe.
     #[test]
-    fn a_rebuild_is_one_step_for_an_encode_beside_it() {
+    fn a_rebuild_is_one_step_for_the_next_encode() {
         let wire = Wire::new();
         let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
         let log = Log::default();
-        let _none = shared.install(Recorder { session: 1, log: Arc::clone(&log) }, 1);
-        shared.pending.lock().keyframe = false;
-        *shared.held.lock() = Some(a_frame());
-        shared.owed.store(true, Ordering::Relaxed);
+        let at = std::cell::Cell::new(host_now_us());
+        drop(shared.install(recorder(1, Arc::clone(&log)), 1));
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        shared.on_session_packet(1, &packet(40_000, true, None, false));
+        shared.on_session_packet(1, &packet(900, false, Some(7), false));
 
-        let book = shared.ltr.lock();
-        let rebuild = std::thread::spawn({
-            let shared = Arc::clone(&shared);
-            let log = Arc::clone(&log);
-            move || drop(shared.install(Recorder { session: 2, log }, 2))
-        });
-        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
-        let swapping = || {
-            shared.encoder.is_locked_exclusive()
-                || shared
-                    .encoder
-                    .try_read()
-                    .is_some_and(|e| e.as_ref().is_some_and(|e| e.session == 2))
-        };
-        while !swapping() {
-            assert!(Instant::now() < deadline, "the rebuild never started");
-            std::thread::yield_now();
-        }
-        let (done_tx, done) = std::sync::mpsc::channel();
-        let encode = std::thread::spawn({
-            let shared = Arc::clone(&shared);
-            move || {
-                let held = shared.held.lock();
-                let attempt = shared.try_encode(held.as_ref(), false, 1_000_000);
-                drop(held);
-                let _sent = done_tx.send(attempt);
-            }
-        });
-        // Finished while the rebuild is held: it ran between the swap and the reset.
-        let between = done.recv_timeout(Duration::from_millis(200)).is_ok();
-        drop(book);
-        rebuild.join().unwrap();
-        encode.join().unwrap();
-        assert!(!between, "an encode ran between the swap and the reset: {:?}", log.lock());
-        assert_eq!(
-            *log.lock(),
-            vec![(2, true)],
-            "the new session starts on the rebuild's keyframe"
-        );
-        assert!(!shared.pending.lock().keyframe, "and no second one is pending");
+        drop(shared.install(recorder(2, Arc::clone(&log)), 2));
+        let _decision = shared.report(&acking(&[7]), None);
+        assert_eq!(shared.pending.lock().acked, vec![7], "the old session is still in force");
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+        assert_eq!(*log.lock(), vec![(1, true), (2, true)], "the new session's keyframe, once");
+        let pending = shared.pending.lock();
+        let clean = pending.acked.is_empty() && !pending.keyframe;
+        drop(pending);
+        assert!(clean, "nothing of the old session left");
     }
 
     /// A platform whose next encoder session takes as long as the test says: its build takes the
@@ -5089,14 +5483,17 @@ mod tests {
         let wire = Wire::new();
         let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let at = std::cell::Cell::new(host_now_us());
         let old = shared.next_session();
-        drop(shared.install(Recorder { session: old, log: Log::default() }, old));
+        drop(shared.install(recorder(old, Log::default()), old));
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent, "puts it in");
         shared.on_session_packet(old, &packet(900, true, Some(0), false));
         assert!(!wire.drain().is_empty(), "the session in force is the stream's");
 
         let new = shared.next_session();
         assert_ne!(new, old);
-        drop(shared.install(Recorder { session: new, log: Log::default() }, new));
+        drop(shared.install(recorder(new, Log::default()), new));
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent, "puts it in");
         shared.on_session_packet(new, &packet(900, true, Some(0), false));
         let keyframe = wire.drain();
         assert!(!keyframe.is_empty());
@@ -5116,15 +5513,15 @@ mod tests {
         let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
         let log = Log::default();
-        drop(shared.install(Recorder { session: 1, log: Arc::clone(&log) }, 1));
+        drop(shared.install(recorder(1, Arc::clone(&log)), 1));
         let at = std::cell::Cell::new(host_now_us());
         // A second apart, so the cadence never holds one back.
         let encode = |shared: &Shared<Recording>| {
             *shared.held.lock() = Some(a_frame());
             shared.owed.store(true, Ordering::Relaxed);
             at.set(at.get() + 1_000_000);
-            let held = shared.held.lock();
-            let attempt = shared.try_encode(held.as_ref(), false, at.get());
+            let mut held = shared.held.lock();
+            let attempt = shared.try_encode(&mut held, false, at.get());
             drop(held);
             assert_eq!(attempt, Attempt::Sent);
             let (keyframe, refresh) = {
@@ -5159,12 +5556,12 @@ mod tests {
         let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
         let log = Log::default();
-        drop(shared.install(Recorder { session: 1, log: Arc::clone(&log) }, 1));
+        drop(shared.install(recorder(1, Arc::clone(&log)), 1));
         *shared.held.lock() = Some(a_frame());
         shared.owed.store(true, Ordering::Relaxed);
         let now = host_now_us();
-        let held = shared.held.lock();
-        assert_eq!(shared.try_encode(held.as_ref(), true, now), Attempt::Sent);
+        let mut held = shared.held.lock();
+        assert_eq!(shared.try_encode(&mut held, true, now), Attempt::Sent);
         drop(held);
         assert_eq!(*log.lock(), vec![(1, true)], "the session's keyframe went in");
 
@@ -5200,7 +5597,7 @@ mod tests {
         let shared = Arc::new(Shared::<Slow>::new(StreamId(1), sink, 8_000_000, 60, false));
         let (capture, config) = configs((1280, 800), &Quality::default(), None);
         let started = Instant::now();
-        let encoder = start_encoder(&Arc::downgrade(&shared), config, 1);
+        let encoder = start_encoder(&Arc::downgrade(&shared), config, (1280, 800), 1);
         let mut rebuild = Rebuild::<Slow> {
             encoder,
             session: 1,
@@ -5270,5 +5667,257 @@ mod tests {
             fast_done <= fast_fifo_done + 3,
             "a fast link: {fast_done} against {fast_fifo_done} ms"
         );
+    }
+
+    /// A rebuild beside an encode whose frame moves the rung finishes. An aligned session codes
+    /// the frame inside the submit, so the encoder's output callback runs while the encode holds
+    /// the session. The callback used to take the session to tell it the new rung, and a rebuild
+    /// waiting for the session behind that encode (`parking_lot` lets no reader past a waiting
+    /// writer) made the three wait on each other for good: five runs in five before the fix.
+    /// Real VideoToolbox sessions. Every frame is back late by the encode's clock, so the twelfth
+    /// ends a run and moves the rung, while the last rebuild waits on that frame's encode.
+    #[test]
+    fn a_rebuild_beside_a_cadence_change_finishes() {
+        use synthetic::Synthetic;
+
+        const REBUILDS: usize = 2;
+        const FRAMES: usize = 16;
+        const RUNG_MOVES_AT: usize = 12;
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Synthetic>::new(StreamId(1), sink, 20_000_000, 60, false));
+        shared.apply_bitrate(20_000_000);
+        let config = EncoderConfig {
+            width: 1920,
+            height: 1088,
+            codec: VideoCodec::Hevc,
+            fps: 60,
+            bitrate_bps: 20_000_000,
+            chroma: Chroma::Subsampled,
+        };
+        let weak = Arc::downgrade(&shared);
+        let mut sessions: VecDeque<_> = std::iter::repeat_with(|| {
+            let n = shared.next_session();
+            (open_session(&weak, config, (1920, 1088), n).unwrap(), n)
+        })
+        .take(REBUILDS + 1)
+        .collect();
+        let (first, n) = sessions.pop_front().unwrap();
+        drop(shared.install(first, n));
+        let picture = a_frame_of(1920, 1088);
+
+        let (go_tx, go) = std::sync::mpsc::channel::<usize>();
+        let (done_tx, done) = std::sync::mpsc::channel::<&str>();
+        let _encodes = std::thread::spawn({
+            let (shared, done_tx) = (Arc::clone(&shared), done_tx.clone());
+            move || {
+                let base = host_now_us();
+                for i in 1..=FRAMES {
+                    let mut held = shared.held.lock();
+                    let at =
+                        base.saturating_add(u64::try_from(i).unwrap().saturating_mul(1_000_000));
+                    *held = Some(CapturedFrame { capture_ts_us: at, ..again(&picture) });
+                    shared.owed.store(true, Ordering::Relaxed);
+                    let _gone = go_tx.send(i);
+                    // Handed over a tenth of a second ago as far as the encode's clock goes: every
+                    // frame is back late at 60, however quickly this picture codes.
+                    let now = host_now_us().saturating_sub(100_000);
+                    let attempt = shared.try_encode(&mut held, true, now);
+                    drop(held);
+                    assert_eq!(attempt, Attempt::Sent, "frame {i}");
+                }
+                let _gone = done_tx.send("encodes");
+            }
+        });
+        let _rebuilds = std::thread::spawn({
+            let shared = Arc::clone(&shared);
+            move || {
+                for (session, n) in sessions {
+                    // The rebuilds line up on the frames up to the one that moves the rung.
+                    while go.recv().is_ok_and(|i| i <= RUNG_MOVES_AT - REBUILDS) {}
+                    // Into the submit, which takes the session several milliseconds to return from.
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "a test thread lining up a race"
+                    )]
+                    std::thread::sleep(Duration::from_millis(1));
+                    retire(shared.install(session, n));
+                }
+                let _gone = done_tx.send("rebuilds");
+            }
+        });
+        for _ in 0..2 {
+            let finished = done.recv_timeout(Duration::from_secs(30));
+            assert!(finished.is_ok(), "the rebuilds and the encodes wait on each other");
+        }
+        assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 30, "the rung moved");
+        assert_eq!(shared.stats().encoded, u64::try_from(FRAMES).unwrap(), "every frame came out");
+    }
+
+    /// Nothing the stream's owner, its runtime tasks or the capture's queue call waits on an
+    /// encode. An aligned session codes the frame inside the submit, 15 ms at 3024 × 1968 and
+    /// about 38 ms at 5K, and a runtime worker waiting that long is one not answering input, the
+    /// pointer or the link. Here the test holds what an encode holds across its submit.
+    #[test]
+    fn nothing_but_an_encode_waits_on_one() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let at = std::cell::Cell::new(host_now_us());
+        drop(shared.install(recorder(1, Log::default()), 1));
+        assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
+
+        let held = shared.held.lock();
+        let encoder = shared.encoder.lock();
+        let (tx, answered) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn({
+            let shared = Arc::clone(&shared);
+            move || {
+                let _at = shared.repair_at();
+                retire(shared.install(recorder(2, Log::default()), 2));
+                shared.apply_bitrate(4_000_000);
+                shared.apply_cadence(1_000_000);
+                let _decision = shared.report(&acking(&[]), None);
+                shared.request_refresh(0, true);
+                shared.post(a_frame());
+                let _stats = shared.stats();
+                let _gone = tx.send(());
+            }
+        });
+        let answered = answered.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(encoder);
+        drop(held);
+        caller.join().unwrap();
+        assert!(answered, "a call off the encode path waited on the encode");
+    }
+
+    /// A capture still at the size before a rebuild never reaches the new session: one waiting
+    /// in the mailbox is dropped with the rebuild, one already held is dropped by the encode, not
+    /// repaired, and the session's keyframe waits for the first capture of its own size.
+    #[test]
+    fn a_capture_of_the_old_size_never_reaches_a_rebuilt_session() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let log = Log::default();
+        shared.post(a_frame());
+        let resized = Recorder { size: (32, 32), ..recorder(1, Arc::clone(&log)) };
+        drop(shared.install(resized, 1));
+        assert!(shared.mailbox.take(Duration::ZERO).is_none(), "the mailbox is cleared");
+        shared.on_frame(a_frame());
+        assert!(log.lock().is_empty(), "the old size was coded: {:?}", log.lock());
+        assert!(shared.pending.lock().keyframe, "the keyframe is still wanted");
+        assert_eq!(shared.repair_at(), None, "the old capture is gone, not owed");
+        shared.on_frame(a_frame_of(32, 32));
+        assert_eq!(*log.lock(), vec![(1, true)], "the first capture of the new size");
+    }
+
+    /// A measurement's padding is its own stream's: the stream beside it keeps 16. It was a
+    /// process-wide knob, which every test running beside the measurement read.
+    #[test]
+    fn a_streams_padding_is_its_own() {
+        let quality = Quality::default();
+        let (_capture, measured) = configs_padded((3024, 1964), &quality, Some(60.0), Some(2));
+        let (_capture, beside) = configs((3024, 1964), &quality, Some(60.0));
+        assert_eq!((measured.width, measured.height), (3024, 1964), "the even size asked for");
+        assert_eq!((beside.width, beside.height), (3024, 1968), "the codec's own 16");
+    }
+
+    /// Two captures a beat apart reach the mailbox while the encoder is busy with the one before,
+    /// on a 120 rung: the first is replaced every time, and it was due. Half the rung is what the
+    /// encoder was fed, and the rung comes down to it, as the gate, the guard and the encoder's
+    /// own rate control budget a frame from it.
+    #[test]
+    fn a_rung_the_encoder_cannot_feed_comes_down_to_what_it_was_fed() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 30_000_000, 120, false));
+        shared.apply_bitrate(30_000_000);
+        drop(shared.install(recorder(1, Log::default()), 1));
+        let base = host_now_us();
+        let beat = |k: u64| base.saturating_add(k.saturating_mul(8_333));
+        let mut pairs = 0_u64;
+        while shared.fps_ceiling.load(Ordering::Relaxed) == 120 && pairs < 40 {
+            shared.post(CapturedFrame { capture_ts_us: beat(2 * pairs), ..a_frame() });
+            shared.post(CapturedFrame { capture_ts_us: beat(2 * pairs + 1), ..a_frame() });
+            let frame = shared.mailbox.take(Duration::ZERO).expect("the newer capture");
+            shared.on_frame(frame);
+            pairs = pairs.saturating_add(1);
+        }
+        assert_eq!(
+            shared.counters.superseded.load(Ordering::Relaxed),
+            pairs,
+            "one replaced a pair"
+        );
+        assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 60, "fed half of 120");
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 60);
+    }
+
+    /// A due capture replaced by one a millisecond newer, in the same slot of a 60 rung, costs
+    /// the rung nothing: the newer capture fills the slot. Counted as lost, it took a 66 rung on
+    /// 120 Hz captures down to 36 and then 32 (MEASUREMENTS.md, "the encoder watch behind the
+    /// mailbox").
+    #[test]
+    fn a_capture_replaced_within_its_slot_costs_the_rung_nothing() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 30_000_000, 60, false));
+        shared.apply_bitrate(30_000_000);
+        drop(shared.install(recorder(1, Log::default()), 1));
+        let base = host_now_us();
+        let slot = |k: u64| base.saturating_add(k.saturating_mul(16_667));
+        for i in 0..40_u64 {
+            shared.post(CapturedFrame { capture_ts_us: slot(i), ..a_frame() });
+            shared
+                .post(CapturedFrame { capture_ts_us: slot(i).saturating_add(1_000), ..a_frame() });
+            let frame = shared.mailbox.take(Duration::ZERO).expect("the newer capture");
+            shared.on_frame(frame);
+        }
+        assert_eq!(shared.counters.superseded.load(Ordering::Relaxed), 40, "one replaced a pair");
+        assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 60, "the rung kept");
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 60);
+        assert_eq!(shared.fed_fps.load(Ordering::Relaxed), 60, "fed every slot");
+    }
+
+    /// A ceiling a slow stretch took down rises again once the encoder codes well over it, and
+    /// no further than the client asked: 15.2 ms frames are 65 a second.
+    #[test]
+    fn a_ceiling_the_encoder_outgrew_rises_back() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 30_000_000, 120, false));
+        shared.apply_bitrate(30_000_000);
+        shared.lower_ceiling(55, "a slow stretch");
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 55);
+        let window = |encode_us| {
+            let fps = shared.fps.load(Ordering::Relaxed);
+            // One window of the watch: thirty due captures.
+            for _ in 0..30 {
+                shared.watch_encoder(encode_us, false);
+                shared.fed(fps);
+            }
+        };
+        window(15_200);
+        assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 65, "what the encoder codes");
+        assert_eq!(shared.fps.load(Ordering::Relaxed), 65);
+        window(4_000);
+        assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 120, "what the client asked");
+    }
+
+    /// The guard budgets a frame at the rate the encoder is fed when that is under the rung:
+    /// at 8 Mbit/s a 120 rung allows two frames of 8.3 KB, and an encoder fed 60 makes frames
+    /// of 16.7 KB, one of which already filled that.
+    #[test]
+    fn the_guard_budgets_a_frame_at_the_rate_the_encoder_is_fed() {
+        let (shared, wire) = shared_for_frames();
+        shared.counters.bitrate_bps.store(8_000_000, Ordering::Relaxed);
+        shared.fps.store(120, Ordering::Relaxed);
+        wire.held.store(17_000, Ordering::Relaxed);
+        assert!(
+            !shared.frame_fits(),
+            "two frames at 120 fps are 16.7 KB, less than the 17 KB held"
+        );
+        shared.fed_fps.store(60, Ordering::Relaxed);
+        assert!(shared.frame_fits(), "two frames at the fed 60 fps are 33.3 KB");
     }
 }

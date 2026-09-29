@@ -2825,6 +2825,17 @@ pub fn open_workspace(
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
     slopty_client::warm_up_decoder();
+    // ⌘Q drops no view and no tap, so the hotkey mode a focused remote tile pushed is popped
+    // here, as the app terminates. macOS would revert it as the process exits anyway
+    // (`CarbonEvents.h`); popping it first leaves nothing to that.
+    #[cfg(target_os = "macos")]
+    cx.on_app_quit(|_cx| {
+        if slopty_platform::system_keys::hotkeys_back_on() {
+            tracing::info!("system shortcuts back on this Mac as the app quits");
+        }
+        async {}
+    })
+    .detach();
     if let Err(e) = slopty_ui::fonts::install(cx) {
         tracing::error!(error = %e, "bundled fonts");
     }

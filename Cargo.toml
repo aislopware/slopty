@@ -294,6 +294,12 @@ objc2-ui-kit = { version = "=0.3.2", default-features = false, features = [
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 # Local notifications and the icon badge (`slopty_platform::notify`). Features are per crate.
 objc2-user-notifications = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+# Caps Lock through the HID system's parameter connection (`slopty_input::backend`).
+objc2-io-kit = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "hidsystem",
+    "libc",
+] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 

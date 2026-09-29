@@ -109,7 +109,10 @@ mod tests {
         for (posted, post) in posts {
             let (at, release) = match post.event {
                 Event::Mouse { at, kind, .. } => (Some(at), kind == CGEventType::LeftMouseUp),
-                Event::Key { .. } | Event::Scroll { .. } => (None, false),
+                Event::Key { .. }
+                | Event::Scroll { .. }
+                | Event::Text { .. }
+                | Event::Media { .. } => (None, false),
             };
             let Some((handed_at, _)) = next.by_ref().find(|(_, want)| match (want, at) {
                 (Some(want), Some(at)) => {
@@ -187,7 +190,6 @@ mod tests {
                 code: KeyCode::A,
                 action: KeyAction::Press,
                 mods: Mods::empty(),
-                text: Some("a".into()),
             }));
             keys.push(started.elapsed().as_secs_f64() * 1e6);
             handed.push((Instant::now(), None));
@@ -195,7 +197,6 @@ mod tests {
                 code: KeyCode::A,
                 action: KeyAction::Release,
                 mods: Mods::empty(),
-                text: None,
             }));
             pace(started, KEY_EVERY);
         }

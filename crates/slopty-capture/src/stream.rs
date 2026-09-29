@@ -14,7 +14,7 @@ use objc2_core_audio_types::{
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
-use objc2_core_graphics::kCGDisplayStreamYCbCrMatrix_ITU_R_709_2;
+use objc2_core_graphics::{CGColor, kCGColorBlack, kCGDisplayStreamYCbCrMatrix_ITU_R_709_2};
 use objc2_core_media::{
     CMAudioFormatDescriptionGetStreamBasicDescription, CMBlockBuffer, CMClock, CMSampleBuffer,
     CMTime, CMTimeFlags, kCMTimeZero,
@@ -683,13 +683,38 @@ fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguratio
     } else {
         CMTime { value: 1, timescale: i32::from(config.fps), flags: CMTimeFlags::Valid, epoch: 0 }
     };
+    let (width, height) = config.surface();
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
-        c.setWidth(usize::try_from(config.width).unwrap_or(usize::MAX));
+        c.setWidth(usize::try_from(width).unwrap_or(usize::MAX));
     }
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
-        c.setHeight(usize::try_from(config.height).unwrap_or(usize::MAX));
+        c.setHeight(usize::try_from(height).unwrap_or(usize::MAX));
+    }
+    // The picture at the surface's top-left, at its own size; `scalesToFit` and
+    // `preservesAspectRatio` act inside this rectangle. `SCStream.h`: "The rectangle is specified
+    // in pixels".
+    let picture = CGRect {
+        origin: CGPoint { x: 0.0, y: 0.0 },
+        size: CGSize { width: f64::from(config.width), height: f64::from(config.height) },
+    };
+    // SAFETY: plain property write on the fresh configuration object.
+    unsafe {
+        c.setDestinationRect(picture);
+    }
+    // The padding, and any letterbox, is black: "By default the background color is clear"
+    // (`SCStream.h`), which a Y′CbCr surface has no value for.
+    // SAFETY: framework-provided constant string.
+    let name = unsafe { kCGColorBlack };
+    // `CGColorGetConstantColor` (CGColor.h) returns a colour the system owns and never frees,
+    // which the setter's unretained (`assign`) property needs.
+    if let Some(black) = CGColor::constant_color(Some(name)) {
+        // SAFETY: plain property write on the fresh configuration object; the colour outlives
+        // it (above).
+        unsafe {
+            c.setBackgroundColor(&black);
+        }
     }
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
@@ -782,6 +807,7 @@ mod tests {
             let config = CaptureConfig {
                 width: 64,
                 height: 64,
+                align: 16,
                 fps: 60,
                 format: asked,
                 queue_depth: 2,
@@ -797,6 +823,45 @@ mod tests {
             // SAFETY: framework-provided constant string.
             let bt709 = unsafe { kCGDisplayStreamYCbCrMatrix_ITU_R_709_2 };
             assert_eq!(matrix.to_string(), bt709.to_string(), "{asked:?}");
+        }
+    }
+
+    /// A 3024 × 1964 picture is captured into a 3024 × 1968 surface, drawn at its top-left at
+    /// its own size over black; one already aligned fills its surface.
+    #[test]
+    fn a_padded_surface_holds_the_picture_at_its_top_left() {
+        for ((width, height), surface) in
+            [((3024, 1964), (3024_usize, 1968_usize)), ((1920, 1088), (1920, 1088))]
+        {
+            let config = CaptureConfig {
+                width,
+                height,
+                align: 16,
+                fps: 0,
+                format: PixelFormat::Nv12Full,
+                queue_depth: 3,
+                audio: false,
+                crop: None,
+            };
+            let c = stream_configuration(&config);
+            // SAFETY: plain getter on a valid configuration object.
+            let w = unsafe { c.width() };
+            // SAFETY: as above.
+            let h = unsafe { c.height() };
+            // SAFETY: as above.
+            let rect = unsafe { c.destinationRect() };
+            assert_eq!((w, h), surface, "the surface");
+            assert_eq!(
+                (rect.origin.x, rect.origin.y, rect.size.width, rect.size.height),
+                (0.0, 0.0, f64::from(width), f64::from(height)),
+                "the picture"
+            );
+            // SAFETY: plain getter; the colour is the system's constant black.
+            let background = unsafe { c.backgroundColor() };
+            // SAFETY: framework-provided constant string.
+            let name = unsafe { kCGColorBlack };
+            let black = CGColor::constant_color(Some(name)).unwrap();
+            assert!(CGColor::equal_to_color(Some(&background), Some(&black)), "black");
         }
     }
 }

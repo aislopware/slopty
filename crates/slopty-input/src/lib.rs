@@ -15,6 +15,10 @@
 //! activates its owner before a click or key press when it is not active; the
 //! worker's own desktop sees that app come to the front, which is the price of typing into it.
 //!
+//! Keys go by position and carry no text: the target's layout makes the character, the
+//! client's own once the worker has taken the client's input source ([`sources`]). Text the
+//! client composed itself goes as its own event, in pieces a key event can carry ([`text`]).
+//! Caps Lock is set as a lock, and media keys go to the system as system-defined events.
 //! Magnify gestures have no public `CGEvent` constructor and are ignored.
 //!
 //! [`InputSink`] is the worker's input seam, compiled on every target; [`CgEvents`] is the
@@ -38,6 +42,9 @@ mod injector;
 pub mod keymap;
 pub mod pasteboard;
 mod pointer;
+pub mod sources;
+#[cfg(target_os = "macos")]
+pub mod text;
 #[cfg(target_os = "macos")]
 mod thread;
 
@@ -46,7 +53,10 @@ use std::time::Instant;
 #[cfg(target_os = "macos")]
 pub use backend::{Backend, Event, Post, Recorder, Route, System};
 #[cfg(target_os = "macos")]
-pub use injector::{Injector, can_post, flags_for, request_post, to_point};
+pub use injector::{
+    CapsClaims, CapsKept, Injector, SharedCaps, can_post, flags_for, keep_caps, request_post,
+    to_point,
+};
 #[cfg(target_os = "macos")]
 pub use pasteboard::MacBoard;
 pub use pasteboard::{Board, ClipFormat, board_type, format_of};

@@ -487,3 +487,226 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the committed-text path does: one press and release per character, a line break as one ↩.
   It stops at `screen::TYPE_MAX` bytes on a character boundary, as Jump caps it, and a notice
   says so. Test: `desktop::the_clipboard_is_typed_into_the_focused_window`.
+
+- ✅ **Private input APIs are looked up at run time, pinned and tested per macOS version**
+  (2026-09-29). The user allows private APIs for input where they are the only route. This
+  overrides the no-private-API rule of `decisions/video.md` for input only, on the pattern
+  `slopty-vdisplay` set: each symbol is found with `dlsym` at run time, checked before use,
+  and a missing one degrades to the public path instead of failing to load or crashing.
+  Nothing private is linked, so notarization sees nothing. Every private number is spelled
+  once, next to its use, naming the header or project it comes from. Each path carries a
+  gated test that needs no permission and posts nothing, plus an opt-in live test for what
+  only real delivery shows, and the OS builds a hardware check passed on are recorded here.
+  A public route, where one exists, comes first: the WindowServer's hotkey layer, the first
+  candidate, turned out to have one (below), so no private call is made yet. Research and
+  staging: `.research/design-input-fidelity.md`.
+
+- ✅ **Keys go by position; the worker types under the client's input source** (2026-09-29).
+  Supersedes the 2026-09-04 text-on-every-key path and the 2026-09-28 key-by-key typing of
+  "Type the clipboard". Every character outside ASCII was lost on the way to a remote window:
+  the client named a key by the character it typed, anything else became `Unidentified`, and
+  the worker dropped the event with the text on it. So é, Cyrillic, every Vietnamese, Japanese
+  or Chinese commit and a non-ASCII clipboard never arrived. ⌘ chords also landed wrong when
+  layouts differed (a US ⌘Q became ⌘A on an AZERTY worker), and the text attached to every key
+  kept the worker's dead keys and input methods from ever composing.
+  - *The wire.* `ScreenInput::Key { code, action, mods }` carries no text. `code` is a
+    position, the one `kVK_*` table in `slopty-proto` (`KeyCode::to_mac_vk` and
+    `from_mac_vk`), which the client and the worker share, and `mods` keep the side of each
+    modifier and fn (`Mods::FN`). New: `Text` (committed text), `Lock { caps }`,
+    `Media { key, down }`, `KeyboardSource { source }`, and the answer
+    `ScreenEvent::KeyboardSource { stream, source, applied }`. The source ask rides with the
+    input rather than as a `ScreenRequest`, so the keys after it are read in order under it,
+    and the connection's request routing did not change.
+  - *The client, Mac.* A key's position comes off the event AppKit is dispatching
+    (`NSApp.currentEvent.keyCode`, `slopty_platform::keyboard::current`): GPUI's `Keystroke`
+    has no physical code, and reading the event beside it needs no fork change. When the tile
+    takes the keyboard, and whenever the person switches source (HIToolbox's distributed
+    notification), the view sends its TIS input-source id. Until the worker answers `applied`,
+    the text system here composes. Characters, dead keys and input methods go to it, and what
+    it commits goes as `Text`, while named keys go by position. A ⌘ or ⌃ chord goes by its
+    character's place on a US keyboard while the worker is not under this device's source: the
+    worker matches it by character under its own layout, and the US place is where every Latin
+    QWERTY layout, and the ASCII layout macOS matches ⌘ against under a non-Latin one, puts
+    that character, so ⌘A typed on AZERTY stays ⌘A there instead of quitting as ⌘Q. The
+    client does not know the worker's layout, so an AZERTY or QWERTZ worker that refused the
+    client's source still reads a few letters elsewhere; its release goes to the key its press
+    went as. Under the client's source the key's own place is right. Once the worker
+    answers, a local `NSEvent` monitor takes every key without ⌘ or ⌃ off
+    `-[NSApplication sendEvent:]`, ahead of the window and the input method, and the view
+    sends it as it is, so the remote app composes inline. The chords still reach GPUI, whose
+    bindings (⌃Tab out of the tile, the workspace's ⌘ chords) come first. A key the monitor
+    took has its release taken too, and taken keys are drained before anything else the view
+    sends, so a chord or a click never overtakes one. ⌘⌥⎋ and ⌃⌘Q stay on this Mac.
+  - *The client, iPad.* An iPad names neither positions nor a source a Mac can select, so it
+    always composes: UIKit's text system types, its commits go as `Text`, and chords go by
+    their character's place on a US keyboard. `UIKey.keyCode` needs the fork change the design
+    names, which this change does not make.
+  - *The worker.* A key is `CGEventCreateKeyboardEvent` with the position and the flags, the
+    side's device bit included, and no Unicode string. Events come from a private-state
+    `CGEventSource`, one per input thread, and carry `kCGEventSourceUserData` = `SLOPTY_EVENT`.
+    `Text` goes in pieces of at most 20 UTF-16 units (`CGEventKeyboardSetUnicodeString` cuts
+    there, Chrome Remote Desktop found), cut only between the composed character sequences
+    CoreFoundation reports. Each piece rides a Space press and release (never keycode 0) with
+    no modifier but Caps Lock. `Lock` sets the lock through `IOHIDSetModifierLockState` and
+    never posts the key. The lock is the worker's, so every stream that sets it shares one
+    claim (`slopty_input::CapsClaims`): the worker's own state is read as the first stream sets
+    it and comes back when the last lets go, only if the lock is still as the streams last set
+    it, so a change the person at the worker made meanwhile stays. The worker's own state and
+    the one set are kept in `caps-lock` in the data directory while a stream holds the lock,
+    and a start that finds the file puts the lock back under the same rule. The HID parameter
+    connection is opened once and kept, and it is never called under the shared claim, so a
+    `Lock` waits on no other stream's HID call. `Media` posts `NSSystemDefined` subtype 8 to the
+    HID tap for play/pause, next and previous.
+  - *Several clients.* The input source is the worker's for all its windows, so the last
+    stream to ask wins: the person typing last is the one looking. A claim is a token drawn
+    once per stream task (`sources::Claim`, a process-wide counter), not the client and stream
+    ids: a client that reconnects opens `StreamId(1)` again under the same `ClientId` before
+    its old stream has ended, and the old stream's release must not take the new one's claim.
+    The token is a guard, so a stream task that ends any way, a panic included, queues its
+    release. When a stream ends, the source of the latest
+    stream still asking comes back, then the worker's own once none asks, and every source the
+    worker turned on for a claim (`TISEnableInputSource`) goes off again. A source the worker
+    cannot select is answered `applied: false`, and that client composes. The worker restores
+    only what claims selected: it remembers the source they last selected (in memory and in
+    `input-source`), puts the worker's own back only while that one is still current, and
+    never turns off the current source, so a source the person at the worker picked by hand
+    stays, at the last release, at `SIGTERM` and at the next start alike. TIS runs on the
+    worker's main queue, since HIToolbox asserts it; a stream queues its ask from its own
+    loop, so the release as it ends is queued behind it and no claim is left behind.
+  - *Who is typing under the source.* Every switch on the worker is heard
+    (`kTISNotifySelectedKeyboardInputSourceChanged` on the worker's main run loop,
+    `Sources::heard`), and each stream compares it with its client's source: a client whose
+    source another client took is told `applied: false` and goes back to composing, and is
+    told `applied: true` when its source comes back.
+  - *The answer and the keys behind it.* An ask for the source the worker already has is
+    answered at once. A switch is answered once the worker hears a switch to it reported after
+    the selection (the ask subscribes to the reports on the main queue right after selecting,
+    so a report from before, of the same source, cannot answer it), the same distributed
+    notification that tells the target app, at most 100 ms (`SETTLE_MOST`) after it; that
+    replaces a fixed 50 ms that was chosen and never measured. The stream holds the keys and
+    text that came after the ask until the answer, at most 150 ms (`HOLD_MOST`), so the keys
+    typed right after focus are read under the source they were typed for, ⌘ chords included
+    (a position means another chord under another layout). The pointer is not held, since no
+    source changes what a click, a move or a scroll does, unless a key is already held ahead
+    of it, where order must hold. How long a real switch takes on the worker cannot be
+    measured here without switching this Mac's source; the bound is kept, and the opt-in
+    `SLOPTY_MEASURE=1 SLOPTY_MEASURE_SWITCH=<source id> cargo test -p slopty-input --test
+    key_path` measures it on a machine where switching is fine. The other way, answering the
+    wire's promise by changing it, costs nothing on the keys but lets the first chords after a
+    switch land under the old layout; the hold costs latency only while a switch is under way.
+  - *How long a claim holds.* From the ask until the stream ends or the client sends
+    `KeyboardReleased`, which it does once its tile has gone 10 s without the keyboard
+    (`RELEASE_AFTER`). Letting go at every blur was rejected: hopping between tiles or opening
+    the palette would cost a real switch and a hold on the first keys each time back, while a
+    claim kept for a tile left alone keeps the person at the worker off their own source for
+    as long as the stream is open. Coming back after the release asks again: the client keeps
+    taking keys at once, and the worker holds them until its switch back is heard (the cost is
+    that switch; an ask for the source still current is answered in tens of microseconds,
+    MEASUREMENTS).
+  - *A worker that stops.* The worker's own source, those it turned on and the one claims last
+    selected are kept in `input-source` in its data directory while a claim holds; `SIGTERM`
+    puts them back before the daemon exits, and a start that finds the file (a crash,
+    `SIGKILL`) puts them back before it serves anyone, each under the rule above.
+  - *The client while the answer is coming.* A tile taking the keyboard again under the
+    source the worker already took keeps taking keys: nothing waits for the answer. Keys are
+    never taken while a composition is marked here: a word under way when the worker answers
+    finishes here and goes as text, and the next key is taken. GPUI reports no modifier
+    change that leaves the modifiers as they were (both ⇧ down, one let go), so every held
+    modifier key whose modifier is off at the next change is let go.
+  - *Terminals are untouched.* Their keys go through `keys::key_event` and the engine's
+    encoder as before. `Mods::FN` is set only on screen input.
+  - *Not yet.* The remote caret for the candidate window (`ScreenEvent::Caret`), the iPad's
+    `lang:` sources, a worker setting to turn syncing off, the HID-usage table, and the stage 5
+    virtual keyboard. `ScreenInput::is_paste_chord` still reads the V position, which misses
+    ⌘V on a Dvorak client.
+  - Tests: proto `every_mac_vk_round_trips`, `every_key_has_a_mac_position_or_is_listed`,
+    goldens `client_screen_{key,text,lock,media,keyboard_source}` and
+    `worker_screen_keyboard_source`. UI (`screen::keyboard::tests`):
+    `a_non_ascii_character_reaches_the_worker` (stage 0's pin, which fails on the old path),
+    `a_dead_key_composes_here_until_the_worker_takes_the_source`,
+    `a_dead_key_goes_raw_once_the_worker_took_the_source`,
+    `a_vietnamese_ime_commit_goes_as_text` (Telex and VNI), `a_japanese_ime_commit_goes_as_text`,
+    `a_key_goes_by_position_not_by_character` (⌘Q, AZERTY),
+    `taken_keys_go_before_what_follows_them`, `right_modifiers_keep_their_side`,
+    `caps_lock_state_follows_focus_and_changes`,
+    `the_source_is_told_on_focus_and_on_every_switch`,
+    `overlapping_modifiers_are_all_let_go`,
+    `a_composition_under_way_when_the_worker_answers_finishes_here` (Telex straight after
+    focus), `the_keyboard_taken_again_under_the_same_source_takes_keys_at_once`,
+    `a_source_the_worker_lost_is_composed_here_again`,
+    `a_chord_the_worker_reads_under_its_own_source_goes_by_character`,
+    `a_tile_left_a_while_lets_the_source_go`. Worker, built and never posted:
+    `backend::tests::keys_carry_no_unicode_string`, `text_rides_on_space_with_its_string`,
+    `media_keys_post_system_defined_subtype_8`, `text::tests::text_goes_in_graphemes_of_at_most_20_units`,
+    `injector::tests::{text_goes_in_pieces_without_modifiers, caps_lock_sets_the_lock_not_a_key,
+    caps_lock_goes_back_when_the_last_stream_lets_go (and never under the shared claim),
+    caps_lock_the_person_changed_is_left_as_they_set_it,
+    caps_lock_is_kept_and_put_back_at_the_next_start, media_keys_go_to_the_system}`,
+    `sources::tests::{every_stream_draws_its_own_claimant,
+    a_reconnected_streams_claim_outlives_the_old_streams_release,
+    a_source_already_current_is_answered_at_once, a_switch_is_answered_once_heard,
+    a_stale_report_of_the_source_does_not_answer_a_switch,
+    sources_turned_on_go_off_once_none_asks, a_source_picked_by_hand_is_left_as_it_is,
+    a_release_runs_after_the_claim_before_it, a_claim_dropped_by_a_panic_is_released,
+    the_original_source_is_kept_and_restored_at_the_next_start,
+    a_restore_at_start_leaves_a_source_picked_since, stopping_lets_every_claim_go}`;
+    the stream (`slopty-worker` `screens::sourcing`):
+    `a_key_after_a_switch_waits_for_it_to_be_heard` (checked by order, not by a time),
+    `the_pointer_waits_only_behind_a_held_key`,
+    `a_reconnected_streams_source_outlives_the_old_stream`,
+    `a_released_keyboard_gives_the_source_back`, `asking_for_the_current_source_holds_nothing`,
+    `a_client_whose_source_another_took_is_told`. Tests hold for 10 s rather than 150 ms, so a
+    loaded machine cannot let a key through before the answer the test waits on. Platform:
+    `keyboard::tests::plain_keys_are_taken_and_chords_pass`. The cost of the taken path and of
+    the answer: MEASUREMENTS, "a taken key's hop and the input-source answer".
+
+- ✅ **System shortcuts: the WindowServer's hotkey layer goes off while a tile has the
+  keyboard** (2026-09-29). Amends the 2026-09-28 tap entry. The tap took a fixed list, so
+  customised symbolic hotkeys, the Mission Control and Launchpad keys, ⌃1…⌃9 and the
+  input-source keys stayed on the client. While the tap is armed (same conditions as before)
+  and the app is frontmost, HIToolbox's public `PushSymbolicHotKeyMode` turns every symbolic
+  hotkey off but the Accessibility ones (`kHIHotKeyModeAllDisabledExceptUniversalAccess`, the
+  mode VirtualBox picks), and `PopSymbolicHotKeyMode` turns them back on. Every other symbolic
+  hotkey then reaches the app as an ordinary key and goes to the worker by position. The
+  tap's chord list (⌘Tab, ⌘Space, ⌃ arrows and screenshots) is taken as well, whether or not
+  the layer went off: `PushSymbolicHotKeyMode` hands back a token whenever the app has
+  Accessibility, and the WindowServer can still decline to apply the mode (the app not
+  frontmost as it pushed), which the app cannot see. Gating the list on the token left it
+  dead exactly when it was needed. A chord the tap takes is swallowed there, so it never
+  also reaches the app and goes twice. When macOS refuses the push outright, a notice says
+  only the list goes.
+  - *Scope.* The mode is stored on the app's WindowServer connection, but while that
+    connection lives it holds for the whole session: the WindowServer ORs every connection's
+    mode into one session field that hotkey matching reads (SkyLight on macOS 27.0.1:
+    `_XSetGlobalHotKeyOperatingMode` writes the connection's field,
+    `CGXUpdateGlobalHotKeyOperatingMode` ORs them, `CGXCheckForHotKey` reads the session's).
+    A mode flagged as the foreground app's counts only while that connection is in front, and
+    a connection that dies is taken out and the mode worked out again. The private
+    `CGSSetGlobalHotKeyOperatingMode` that SDL, UTM and VirtualBox call sets no such flag, so
+    a tile armed through it held the person's ⌘Tab off in every other app until the view
+    noticed. `PushSymbolicHotKeyMode` sets it when the app is frontmost, as `CarbonEvents.h`
+    says: the mode is active only while the app stays frontmost and reverts when the app is
+    deactivated or exits without popping it. That settles hardware check H5 without posting
+    anything, so the launch-time repair is dropped: no run can leave the mode behind.
+  - *Restoring.* A guard (`HotkeysOff`) holds the mode: disarming, dropping the tap and
+    unwinding from a panic pop it. The tap pops it as `NSApplicationDidResignActive` is posted
+    and pushes it again on the way back while armed (`system_keys::Hotkeys`), the view
+    disarms as its window stops being the key window rather than at its next frame, and the
+    app pops what is left as it terminates (GPUI's `on_app_quit`; ⌘Q drops no view).
+    Per-hotkey `CGSSetSymbolicHotKeyEnabled` was rejected because its effect outlives the
+    process.
+  - *The ways out.* In this mode SkyLight's hotkey table keeps Force Quit (⌘⌥⎋, and ⌘⌥⇧⎋)
+    among the hotkeys that still fire, with the power, eject and Accessibility keys, so ⌘⌥⎋
+    stays on this Mac as ruled; ⌘⇥, Spotlight, screenshots and ⇧⌃⌥⌘Q go to the worker. ⌃⌘Q is
+    no WindowServer hotkey at all but AppKit's Apple menu in this process, which the mode does
+    not touch.
+  - *Media keys.* The armed tap also takes `NX_SYSDEFINED` subtype 8 events for play/pause,
+    next and previous (`FAST` and `REWIND` too, which an Apple keyboard sends). They go to the
+    worker as `ScreenInput::Media`. Volume, mute and brightness stay on this Mac, where the
+    stream's sound plays.
+  - Tests: `system_keys::tests::the_hotkey_mode_is_restored_on_disarm_and_drop` (the guard
+    over a recording seam, including the unwind and a refusal),
+    `leaving_the_app_turns_the_layer_back_on_at_once`,
+    `a_refused_layer_falls_back_to_the_chord_list`, `media_keys_go_and_volume_stays`; the
+    workspace's `the_window_going_inactive_lets_the_shortcuts_be` and
+    `a_notice_says_when_only_the_chord_list_goes`.
