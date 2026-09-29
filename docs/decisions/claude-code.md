@@ -1871,6 +1871,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - `slopty-workerd` `a_status_lines_pull_request_reaches_every_client`, where a later
       client gets it in its greeting.
     - Golden: `worker_agent_branch`.
+  - The app wears it on the agent's header (ui.md, "What a shell hands over shows beside it,
+    and a page not asked for waits for a yes").
 
 - ✅ **Claude Code's phone pushes are held while a client is focused on the agent**
   (2026-09-30). Since 2.1.181, Claude Code skips its Remote Control push notifications while

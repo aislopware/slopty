@@ -53,6 +53,10 @@ impl WorkspaceView {
         w.name = name;
         w.status = WorkerStatus::Connected;
         w.link = Some(link);
+        // The worker hands pages and files only to a client that said it takes them.
+        self.declare_handoffs(key);
+        self.focus_link_reset(key);
+        let Some(w) = self.workers.get_mut(&key) else { return };
         w.home = (!home.is_empty()).then_some(home);
         w.caps = Some(caps);
         w.load = Some(load);
@@ -115,6 +119,7 @@ impl WorkspaceView {
             }
             self.terminals.remove(session);
             self.agents.remove(session);
+            self.handoff.forget_session(*session);
         }
         for item in &items {
             self.screens.remove(item);
@@ -479,6 +484,7 @@ impl WorkspaceView {
             w.sessions.remove(&session);
         }
         self.agents.remove(&session);
+        self.handoff.forget_session(session);
         // Its "finished" badge has no tile to clear it by looking: the bell must not keep it.
         self.finished.remove(&session);
         self.update_awake(cx);
@@ -1062,6 +1068,7 @@ impl WorkspaceView {
                     let command = crate::file::terminal_command(line);
                     this.open_session_on(worker, dir.filter(|d| !d.is_empty()), command, None, cx);
                 }
+                FileViewEvent::Edited { id, outcome } => this.file_edited(worker, *id, *outcome),
             }
             cx.notify();
         })
@@ -1077,6 +1084,9 @@ impl WorkspaceView {
         .detach();
         if let Some(line) = self.file_focus.remove(&id) {
             view.update(cx, |v, cx| v.focus_line(Some(line), cx));
+        }
+        if let Some(waits) = self.take_file_wait(id) {
+            view.update(cx, |v, cx| v.set_waiting(Some(waits), cx));
         }
         self.files.insert(id, view);
         if let Some(w) = self.workers.get(&worker) {

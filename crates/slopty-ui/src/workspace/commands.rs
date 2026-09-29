@@ -661,7 +661,18 @@ impl WorkspaceView {
         line: Option<u32>,
         cx: &mut Context<Self>,
     ) {
-        let Some(key) = key.or_else(|| self.context_worker()) else { return };
+        let _shown = self.show_file(key, path, line, cx);
+    }
+
+    /// [`Self::open_file_on`], saying which item shows the file.
+    pub(super) fn show_file(
+        &mut self,
+        key: Option<WorkerKey>,
+        path: &str,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> Option<ItemId> {
+        let key = key.or_else(|| self.context_worker())?;
         let existing = self.workers.get(&key).and_then(|w| {
             w.doc.items().find_map(|i| match &i.kind {
                 ItemKind::File { path: p } if p == path => Some(i.id),
@@ -694,6 +705,7 @@ impl WorkspaceView {
             }
         }
         cx.notify();
+        Some(id)
     }
 
     /// A file tile on the context worker (the self-test socket's and the palette's way).
@@ -788,8 +800,12 @@ impl WorkspaceView {
             }
             // A file's edit lives in its editor, not in the registry: the editor waits with the
             // closed tile, so ⌘Z brings back the edit and not the disk's text.
+            // A program waiting on the file is answered as "Done" would: saved, then told.
             ItemKind::File { .. } => {
                 let file = self.files.get(&tile.item).cloned();
+                if let Some(view) = &file {
+                    view.update(cx, crate::file::FileView::finish_edit);
+                }
                 self.remember_closed(tile, item, None, cx);
                 if let Some(closed) = self.closed.last_mut() {
                     closed.file = file;

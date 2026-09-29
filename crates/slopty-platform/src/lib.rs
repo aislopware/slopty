@@ -57,7 +57,7 @@ pub mod system_keys;
 pub mod web;
 
 #[cfg(target_os = "linux")]
-pub use linux::{Activity, open_url, user_interactive_thread};
+pub use linux::{Activity, open_url, open_url_behind, user_interactive_thread};
 #[cfg(target_vendor = "apple")]
 use objc2::rc::Retained;
 #[cfg(target_vendor = "apple")]
@@ -391,6 +391,28 @@ pub fn open_url(url: &str) {
             app.openURL_options_completionHandler(&url, &options, None);
         }
     }
+}
+
+/// Open `url` in the default browser without bringing it forward.
+///
+/// The person keeps watching what they were (a remote display), and the page waits behind. As
+/// [`open_url`] on iOS, which opens in front or not at all.
+#[cfg(target_vendor = "apple")]
+pub fn open_url_behind(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(ns_url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(url)) else {
+            tracing::warn!(url, "not a URL");
+            return;
+        };
+        let config = objc2_app_kit::NSWorkspaceOpenConfiguration::configuration();
+        config.setActivates(false);
+        objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .openURL_configuration_completionHandler(&ns_url, &config, None);
+        tracing::debug!("open url behind");
+    }
+    #[cfg(target_os = "ios")]
+    open_url(url);
 }
 
 /// The name a person gave this machine, as a client lists it: the computer name on macOS

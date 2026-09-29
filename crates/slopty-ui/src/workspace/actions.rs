@@ -28,6 +28,8 @@ actions!(
         OpenFolder,
         /// Open a web page in a tile (the palette, ready for an address).
         OpenUrl,
+        /// Open the page a shell last asked to open that was held back in a notice.
+        OpenLastOffer,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
         /// on the Mac, the Files export sheet on iPhone and iPad.
         SaveCopy,
@@ -228,8 +230,10 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Open folder…", IconName::FolderOpen, Box::new(OpenFolder)),
         w("Enclosing folder", IconName::ArrowUp, Box::new(crate::folder::OpenParent)),
         w("Save file", IconName::Save, Box::new(crate::file::SaveFile)),
+        w("Done with this file", IconName::Check, Box::new(crate::file::FinishEdit)),
         w(SAVE_A_COPY, IconName::Download, Box::new(SaveCopy)),
         w("Open URL…", IconName::Globe, Box::new(OpenUrl)),
+        w("Open last offered page", IconName::ExternalLink, Box::new(OpenLastOffer)),
         w("Edit page address", IconName::Link, Box::new(EditAddress)),
         w("Page back", IconName::ArrowLeft, Box::new(PageBack)),
         w("Page forward", IconName::ArrowRight, Box::new(PageForward)),

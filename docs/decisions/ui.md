@@ -3901,3 +3901,52 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `slopty-worker`'s `session_actor`,
   `terminal::view::tests::a_paste_the_worker_holds_back_waits_for_a_confirmation`, and
   `a_paste_is_safe_by_the_mode_as_it_is_now` in `slopty-engine`.
+- ✅ **What a shell hands over shows beside it, and a page not asked for waits for a yes**
+  (2026-09-30). The worker wave's handoffs reach the app (`workspace/handoffs.rs`, over
+  `slopty_client::handoff`; the rulings are terminal.md, "A shell's browser and editor are the
+  client's").
+  - **Declared first.** Every link starts with `HandoffCaps { open: true, edit: true }` before
+    anything else goes out on it, since the worker hands nothing to a client that has not said
+    what it takes. Files are always taken: the workspace is the window.
+  - **A page.** One the person just asked for opens in the default browser. It opens behind
+    (`slopty_platform::open_url_behind`, `NSWorkspaceOpenConfiguration.activates = false`)
+    when a remote window or display is in front, so the stream keeps the screen. Any other
+    page is held back in a notice: "{shell's title} wants to open **{host}**", the host in the
+    medium weight, or in the warn tone and semibold for an address built to deceive (a user
+    name before the host, a look-alike international name). Under it, muted, why it was held
+    back and how long ago it was asked. The full address is in the notice's hint, in the
+    monospace face, since it is read character by character to judge it: the mono face's
+    third use (`kit::tests::the_mono_face_is_for_ports_and_the_settings_file`). "Open" and
+    "Dismiss" are its actions, and it stays 20 s (a word stays 6 s), since it waits on a
+    choice. The palette's "Open last offered page" opens it after the notice went.
+  - **A file.** It opens in a file tile right of the shell that asked, focused, at its line.
+    One asked again after a reconnect is the same tile, brought forward. While a program waits
+    on it, a line under the header says so, in the accent's wash under the shell glyph, with
+    "Done" (secondary) and "Give up" (ghost). Done saves and answers the program only once the
+    worker has written it; text typed meanwhile is saved first; a conflict or a failed save
+    leaves the program waiting until the person settles it and asks again. Closing the tile is
+    Done. Give up answers at once, unsaved. ⌘↩ is Done: bound in the file's context and over
+    the editor's own ⌘↩ (a new line), with a handler only while a program waits, so the
+    editor's ⌘↩ is back as soon as none does.
+  - **The shell in front.** The app tells each worker which of its shells is in front of the
+    person (`TermRequest::Focus`): one `true` as its tile takes the focus while the window is
+    key, one `false` as the focus leaves it, the window resigns or the tile closes, nothing
+    for a change that keeps the same shell in front, and the report again on every new link.
+    It runs where the clipboard watch runs, on every change of the workspace.
+  - **A paused agent and its pull request.** A `Waiting` agent says what it waits on ("Waiting
+    on cargo test", "Waiting on 2 tasks", "Looping: {prompt}") under the working mark, calm
+    and not attention. Its pull request rides on its header as words, not a chip (the
+    header's one fill is the state's): the pull request glyph and `#1234` (`!1234` for a
+    merge request), green when approved, red when changes are asked, muted as a draft, else
+    secondary; a click opens its page. The worktree's name follows, muted, its branch and
+    path in the hint. Both go with the agent.
+  - Tests: `workspace::tests::handoffs` (the declaration on every link, an edit beside its
+    shell answered once its save lands, Give up and a refused save, closing a waiting tile, a
+    withdrawn edit and one asked again, a page opened or offered by its host until withdrawn,
+    the focus reports each way and after a reconnect, the pull request on the header),
+    `file::tests` (`done_on_an_unchanged_file_answers_at_once`,
+    `text_typed_while_done_saves_is_saved_before_the_answer`,
+    `a_save_lost_with_the_link_leaves_the_program_waiting`),
+    `workspace::agents::tests::a_paused_turn_says_what_it_waits_on`, and the app self-test
+    `a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request` (golden
+    `agent-waiting-pull-request`).

@@ -77,6 +77,8 @@ gpui_kit::assets::icon_assets!(
         FolderOpen,
         FolderSearch,
         GitBranch,
+        GitPullRequest,
+        GitPullRequestDraft,
         Globe,
         Hand,
         Image,
@@ -190,8 +192,8 @@ pub enum Status {
     Idle,
     /// Busy on its own: an agent thinking or running a tool, a remote picture on its way.
     Working,
-    /// A shell's command running for a while: busy, but nothing to watch for. The neutral
-    /// tone and the calm mark, beside how long it has run.
+    /// A shell's command running for a while, or an agent's turn paused on work in the
+    /// background: busy, but nothing to watch for. The neutral tone and the calm mark.
     Running,
     /// Waiting on the human: a permission, a question, an elicitation.
     NeedsYou,
@@ -209,9 +211,9 @@ impl Status {
     pub const fn of_agent(agent: &AgentEvent) -> Option<Self> {
         Some(match &agent.status {
             AgentStatus::None => return None,
-            AgentStatus::Idle
-            | AgentStatus::Blocked(BlockReason::IdlePrompt)
-            | AgentStatus::Waiting { .. } => Self::Idle,
+            AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt) => Self::Idle,
+            // Work runs in the background and nothing is asked: busy, calmly.
+            AgentStatus::Waiting { .. } => Self::Running,
             AgentStatus::Working | AgentStatus::Tool { .. } => Self::Working,
             AgentStatus::Blocked(_) => Self::NeedsYou,
             AgentStatus::Done => Self::Done,

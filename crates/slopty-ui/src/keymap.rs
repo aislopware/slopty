@@ -242,6 +242,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "open_file", ws::OpenFile, &[], W),
         c(Workspace, "open_folder", ws::OpenFolder, &[], W),
         c(Workspace, "open_url", ws::OpenUrl, &[], W),
+        c(Workspace, "open_last_offer", ws::OpenLastOffer, &[], W),
         c(Workspace, "save_copy", ws::SaveCopy, &[], W),
         c(Workspace, "close_tile", ws::CloseItem, &["cmd-w"], W),
         c(Workspace, "undo_close", ws::UndoClose, &["cmd-z"], W),
@@ -360,6 +361,8 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),
         c(Conversation, "find", t::Find, &["cmd-f"], &[FACE, FACE_INPUT]),
         c(File, "save", crate::file::SaveFile, &["cmd-s"], &[FILE]),
+        // In the editor too, over its own ⌘↩ (a new line), only while a program waits.
+        c(File, "finish_edit", crate::file::FinishEdit, &["cmd-enter"], &[FILE, FILE_INPUT]),
         c(File, "find", t::Find, &["cmd-f"], &[FILE_INPUT]),
         c(File, "close_find", t::CloseFind, &["escape"], &[FILE_SEARCH]),
         c(File, "find_next", t::FindNext, &["cmd-g"], &[FILE_SEARCH]),

@@ -416,6 +416,65 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
     stack.shutdown().await;
 }
 
+/// An agent whose turn ended with a background command still running says what it waits on,
+/// not that it needs the person; and its status line's pull request and worktree ride on its
+/// header: the request's number toned by its review, a click from its page, and the
+/// worktree's name beside it. Played through the worker's control socket and the real relay.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    let session = dump.terminals[0].session.clone();
+    stack.play_hook(&session, "SessionStart", r#","source":"startup""#).await.unwrap();
+    let running = r#","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"cargo test"}],"session_crons":[]"#;
+    stack.play_hook(&session, "Stop", running).await.unwrap();
+    stack
+        .driver
+        .wait_for("the agent waiting on its task", STEP, |d| {
+            d.terminal(&session).is_some_and(|t| t.agent.as_deref() == Some("waiting:1:0"))
+                && d.a11y.iter().any(|n| n.label.as_deref() == Some("Waiting on cargo test"))
+        })
+        .await
+        .unwrap();
+    let status = serde_json::json!({
+        "session_id": "e2e",
+        "transcript_path": stack.transcript_path(),
+        "model": { "id": "claude-opus-5-5", "display_name": "Opus 5.5" },
+        "pr": {
+            "number": 1234,
+            "url": "https://github.com/aislopware/slopty/pull/1234",
+            "review_state": "approved",
+        },
+        "worktree": {
+            "name": "fix-build",
+            "path": stack.path("home").join(".claude/worktrees/fix-build"),
+            "branch": "worktree-fix-build",
+            "original_cwd": stack.path("home"),
+            "original_branch": "main",
+        },
+    });
+    let line = stack.relay_hook(&session, &["statusline", "--command", "true"], &status).unwrap();
+    assert!(line.wait_with_output().await.unwrap().status.success(), "the status line ran");
+    let drv = &mut stack.driver;
+    let dump = drv
+        .wait_for("the pull request on the header", STEP, |d| {
+            d.a11y_node("Link", Some("Pull request 1234, approved")).is_some()
+                && d.a11y_node("Label", Some("Worktree fix-build on worktree-fix-build")).is_some()
+        })
+        .await
+        .unwrap();
+    assert!(
+        !dump.a11y.iter().any(|n| n.label.as_deref() == Some("1 new")),
+        "a paused turn asks nothing of the person: {:#?}",
+        dump.a11y
+    );
+    golden(drv, &dir, "agent-waiting-pull-request").await;
+    stack.shutdown().await;
+}
+
 /// A port a shell listens on, and a file on its way up: the chip and the upload on the
 /// tiles they belong to.
 #[tokio::test]

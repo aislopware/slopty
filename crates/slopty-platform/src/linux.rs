@@ -99,6 +99,11 @@ fn reap(
 /// have, so the keystroke path runs at the default class.
 pub const fn user_interactive_thread() {}
 
+/// Open `url` as [`open_url`] does: `xdg-open` has no way to leave the browser behind.
+pub fn open_url_behind(url: &str) {
+    open_url(url);
+}
+
 /// Open `url` with the desktop's handler (`xdg-open`), off the calling thread.
 ///
 /// A URL that begins with `-` is refused: `xdg-open` would read it as an option.

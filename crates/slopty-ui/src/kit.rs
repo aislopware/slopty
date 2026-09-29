@@ -935,6 +935,8 @@ pub struct Hint {
     what: SharedString,
     key: SharedString,
     theme: Rc<Theme>,
+    /// `what` is text to read exactly (an address), set in the monospace face.
+    mono: bool,
 }
 
 impl Hint {
@@ -945,7 +947,14 @@ impl Hint {
         key: impl Into<SharedString>,
         theme: Rc<Theme>,
     ) -> Self {
-        Self { what: what.into(), key: key.into(), theme }
+        Self { what: what.into(), key: key.into(), theme, mono: false }
+    }
+
+    /// `what` in the monospace face: an address or a path, read character by character.
+    #[must_use]
+    pub const fn mono(mut self) -> Self {
+        self.mono = true;
+        self
     }
 }
 
@@ -962,8 +971,15 @@ impl Render for Hint {
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
             .font_family(theme.typography.ui_family.clone())
-            .child(div().text_color(hsla(s.text)).child(self.what.clone()))
-            .child(div().text_color(hsla(s.text_muted)).child(self.key.clone()));
+            .child(
+                div()
+                    .text_color(hsla(s.text))
+                    .when(self.mono, |el| el.font_family(crate::palette::mono_family(theme)))
+                    .child(self.what.clone()),
+            )
+            .when(!self.key.is_empty(), |el| {
+                el.child(div().text_color(hsla(s.text_muted)).child(self.key.clone()))
+            });
         fade_in(hint, "hint", cx)
     }
 }
@@ -1638,8 +1654,9 @@ mod tests {
     }
 
     /// Chrome context (a header's directory, the status bar's path, the palette's column, a
-    /// row's second line) is in the UI face. The mono face is for a port's number and the
-    /// settings file, and nothing else calls for it.
+    /// row's second line) is in the UI face. The mono face is for a port's number, the
+    /// settings file, and an address read to judge it (a held-back page's hint), and nothing
+    /// else calls for it.
     #[test]
     fn the_mono_face_is_for_ports_and_the_settings_file() {
         let uses: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
@@ -1651,12 +1668,16 @@ mod tests {
             .map(|(file, line_no, _)| format!("{file}:{line_no}"))
             .collect();
         let allowed = |at: &String| {
-            ["slopty-ui/src/workspace/tile.rs", "slopty-ui/src/settings_editor.rs"]
-                .iter()
-                .any(|file| at.contains(file))
+            [
+                "slopty-ui/src/workspace/tile.rs",
+                "slopty-ui/src/settings_editor.rs",
+                "slopty-ui/src/kit.rs",
+            ]
+            .iter()
+            .any(|file| at.contains(file))
         };
         assert!(uses.iter().all(allowed), "mono outside ports and settings: {uses:#?}");
-        assert_eq!(uses.len(), 2, "the port pill and the settings field: {uses:#?}");
+        assert_eq!(uses.len(), 3, "the port pill, the settings field, the address: {uses:#?}");
     }
 
     /// A list typed at (the palette, a picker) floats on the bare [`anchor`]; the modals that

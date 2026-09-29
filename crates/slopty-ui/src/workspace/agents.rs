@@ -82,7 +82,13 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
         AgentStatus::Done => {
             detail.map_or_else(|| "Turn finished".to_owned(), |d| format!("Done: {d}"))
         }
-        AgentStatus::Waiting { .. } => "Waiting on its tasks".to_owned(),
+        // The turn ended with work still out: the first task's or the loop's own words.
+        AgentStatus::Waiting { tasks: 1, .. } if let Some(d) = detail => format!("Waiting on {d}"),
+        AgentStatus::Waiting { tasks: 0, .. } => {
+            detail.map_or_else(|| "Looping".to_owned(), |d| format!("Looping: {d}"))
+        }
+        AgentStatus::Waiting { tasks: 1, .. } => "Waiting on a task".to_owned(),
+        AgentStatus::Waiting { tasks, .. } => format!("Waiting on {tasks} tasks"),
     }
 }
 
@@ -699,6 +705,28 @@ mod tests {
         assert_eq!(agent_ask_text(&asking(question, None)), None);
         let working = asking(AgentStatus::Working, Some("Editing src/main.rs"));
         assert_eq!(agent_ask_text(&working), None, "working asks nothing");
+    }
+
+    /// A turn paused on work in the background says what it waits on: the one task's words, a
+    /// count when there are more or no words, and a loop's own prompt. It is busy, calmly: not
+    /// at rest, and nothing asked.
+    #[test]
+    fn a_paused_turn_says_what_it_waits_on() {
+        let waiting = |tasks, crons, detail| asking(AgentStatus::Waiting { tasks, crons }, detail);
+        let cases = [
+            (waiting(1, 0, Some("npm test")), "Waiting on npm test"),
+            (waiting(2, 0, Some("npm test")), "Waiting on 2 tasks"),
+            (waiting(1, 0, None), "Waiting on a task"),
+            (waiting(3, 1, None), "Waiting on 3 tasks"),
+            (waiting(0, 1, Some("check the deploy")), "Looping: check the deploy"),
+            (waiting(0, 2, None), "Looping"),
+        ];
+        for (agent, text) in cases {
+            assert_eq!(agent_status_text(&agent), text);
+            assert_eq!(agent_status_word(&agent), "Waiting");
+            assert_eq!(Status::of_agent(&agent), Some(Status::Running));
+            assert!(!needs_human(&agent) && agent_ask_text(&agent).is_none());
+        }
     }
 
     /// The word for a state never carries the detail, so a chip, a pill and a row read one

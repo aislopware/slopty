@@ -2470,8 +2470,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         with the old save task.
       - `an_editor_given_up_withdraws_the_edit`
       - `an_editor_with_no_client_to_show_it_is_vi_here`
-  - **Pending, UI side** (`.research/ui-followups-worker-wave.md`): declaring the caps; the
-    open, offer and edit handling; focus reports; the file card's "edit" pill.
+  - **The app's side** is in ui.md, "What a shell hands over shows beside it, and a page not
+    asked for waits for a yes": the declaration on every link, the page opened or held back in
+    a notice, the file tile beside its shell with Done and Give up, and the focus reports.
 
 - ✅ **The libghostty-rs PR stack is taken whole, our commits on top; frames read a row's cells
   at once** (2026-09-30). Upstream opened twelve stacked PRs (#84–#95, on #83, #98 and #99). A

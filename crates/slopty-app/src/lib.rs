@@ -2636,16 +2636,17 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Permission(event)) => {
             view.update(cx, |v, cx| v.permission_event(event, cx));
         }
+        LinkEvent::Control(WorkerMsg::Handoff(event)) => {
+            view.update(cx, |v, cx| v.handoff_event(key, event, cx));
+        }
+        LinkEvent::Control(WorkerMsg::AgentBranch(branch)) => {
+            view.update(cx, |v, cx| v.agent_branch(branch, cx));
+        }
         // The handshake's ack was read when the link connected; the tick pings to draw a
-        // restarted worker's reset, so the pong carries nothing; the app's link forwards ports
-        // itself (`LinkEvent::Ports`); and the pull request chip and the handoff pages come with
-        // the worker wave's UI (`.research/ui-followups-worker-wave.md`).
+        // restarted worker's reset, so the pong carries nothing; and the app's link forwards
+        // ports itself (`LinkEvent::Ports`).
         LinkEvent::Control(
-            WorkerMsg::HelloAck(_)
-            | WorkerMsg::Pong { .. }
-            | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_)
-            | WorkerMsg::AgentBranch(_),
+            WorkerMsg::HelloAck(_) | WorkerMsg::Pong { .. } | WorkerMsg::Ports { .. },
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));

@@ -1485,6 +1485,7 @@ mod facts;
 mod focus_cache;
 mod folders;
 mod frame;
+mod handoffs;
 mod leaks;
 mod measure;
 mod miniatures;

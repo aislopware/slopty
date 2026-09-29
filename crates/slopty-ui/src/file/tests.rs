@@ -468,3 +468,69 @@ fn timing_of_a_large_file(cx: &mut TestAppContext) {
         );
     }
 }
+
+fn edited(events: &Events) -> Vec<(HandoffId, EditOutcome)> {
+    events
+        .borrow()
+        .iter()
+        .filter_map(|e| match e {
+            FileViewEvent::Edited { id, outcome } => Some((*id, *outcome)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn saves(events: &Events) -> usize {
+    events.borrow().iter().filter(|e| matches!(e, FileViewEvent::Save { .. })).count()
+}
+
+/// "Done" on a file nothing changed answers the program at once; with nothing waiting it is
+/// nothing at all.
+#[gpui::test]
+fn done_on_an_unchanged_file_answers_at_once(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/r/.git/COMMIT_EDITMSG");
+    arrives(&view, cx, text_read("message", true, 1_000));
+    view.update(cx, FileView::finish_edit);
+    assert!(edited(&events).is_empty(), "no program waits");
+    view.update(cx, |v, cx| v.set_waiting(Some(9), cx));
+    view.update(cx, FileView::finish_edit);
+    assert_eq!(edited(&events), [(9, EditOutcome::Done)]);
+    assert_eq!(saves(&events), 0, "nothing to save");
+    assert_eq!(view.read_with(cx, |v, _| v.waiting()), None);
+}
+
+/// What is typed while Done's save is out is saved too, and the program is answered only when
+/// the disk has all of it.
+#[gpui::test]
+fn text_typed_while_done_saves_is_saved_before_the_answer(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/r/.git/COMMIT_EDITMSG");
+    arrives(&view, cx, text_read("", true, 1_000));
+    view.update(cx, |v, cx| v.set_waiting(Some(2), cx));
+    types(&view, cx, "Fix");
+    view.update(cx, FileView::finish_edit);
+    assert_eq!(saves(&events), 1);
+    assert!(view.read_with(cx, |v, _| v.finishing()));
+    types(&view, cx, "ed: ");
+    let saved = |ms| WriteResult::Saved { size: 4, modified_ms: WallMs::from_millis(ms) };
+    view.update(cx, |v, cx| v.written(saved(2_000), cx));
+    assert_eq!(saves(&events), 2, "the rest goes after it");
+    assert!(edited(&events).is_empty(), "not answered yet");
+    view.update(cx, |v, cx| v.written(saved(3_000), cx));
+    assert_eq!(edited(&events), [(2, EditOutcome::Done)]);
+    assert_eq!(text(&view, cx), "ed: Fix");
+}
+
+/// A save lost with the link stops the finishing: the program keeps waiting, and the person
+/// asks again once the worker is back.
+#[gpui::test]
+fn a_save_lost_with_the_link_leaves_the_program_waiting(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/r/.git/COMMIT_EDITMSG");
+    arrives(&view, cx, text_read("", true, 1_000));
+    view.update(cx, |v, cx| v.set_waiting(Some(4), cx));
+    types(&view, cx, "Fix");
+    view.update(cx, FileView::finish_edit);
+    view.update(cx, FileView::link_lost);
+    assert!(!view.read_with(cx, |v, _| v.finishing()), "no longer finishing");
+    assert_eq!(view.read_with(cx, |v, _| v.waiting()), Some(4), "still waiting");
+    assert!(edited(&events).is_empty());
+}

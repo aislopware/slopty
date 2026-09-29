@@ -325,7 +325,12 @@ a local or deceptive address, it is offered in a notice. The client answers
 `ClientMsg::Handoff`, and `slopty_client::handoff` decides what to do. An editor waits on the
 socket until the person is done with the file tile, whose saves then go into the file in
 place. With no client that takes it, the program falls back at once to this machine's opener
-or `vi` (decisions, "A shell's browser and editor are the client's").
+or `vi` (decisions, "A shell's browser and editor are the client's"). In the app,
+`slopty-ui::workspace::handoffs` declares the caps first on every link, keeps one
+`Handoffs` per worker across its links, opens a page (behind, while a remote window or display
+is in front) or holds it in a notice by its host, opens an edit as a file tile beside its
+shell (`FileView::set_waiting`, answered by `FileViewEvent::Edited`), and reports the shell in
+front of the person to its worker as `TermRequest::Focus` on every change of the workspace.
 
 **Deployment.** `slopty worker install` writes two LaunchAgents (`dev.aislopware.slopty.ptyd`,
 `dev.aislopware.slopty.worker`; `KeepAlive`, `RunAtLoad`, `ProcessType Interactive`) with the

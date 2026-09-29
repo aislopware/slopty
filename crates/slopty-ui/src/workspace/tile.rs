@@ -7,16 +7,16 @@ use std::collections::HashMap;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnimationExt as _, App, Context, Div, ElementId, Entity, ExternalPaths, FontWeight,
-    InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent, ParentElement as _,
-    Render, SharedString, Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled as _,
-    Window, div, px,
+    AnimationExt as _, App, AppContext as _, Context, Div, ElementId, Entity, ExternalPaths,
+    FontWeight, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
+    ParentElement as _, Render, SharedString, Stateful, StatefulInteractiveElement as _,
+    StyleRefinement, Styled as _, Window, div, px,
 };
 use gpui_kit::component::input::Input;
 use slopty_client::layout::{Placed, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus};
+use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, Review};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::{SessionState, SessionSummary, TermRequest};
 use slopty_theme::{Theme, Typography};
@@ -988,6 +988,8 @@ impl WorkspaceView {
         });
         let (upload, progress) = upload.unzip();
         let ports = self.port_pills(tile, item, chrome, cx);
+        let branch =
+            agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
         let actions = self.header_actions(tile, item, chrome, cx);
         let face = agent.and_then(|(session, _)| self.face_toggle(tile, session, chrome, cx));
         // The kind's own actions stay out of sight until the tile is hovered or focused: a wall
@@ -1141,6 +1143,7 @@ impl WorkspaceView {
                 .pr(px(theme.spacing.inset() * k))
                 .border_b_1()
                 .border_color(hsla(s.border_subtle))
+                .children(branch)
                 .children(ports)
                 .when_some(upload, gpui::ParentElement::child)
                 .when_some(hooks, gpui::ParentElement::child)
@@ -1183,6 +1186,7 @@ impl WorkspaceView {
                 .children(place)
                 .when(!renaming, |el| el.child(div().flex_1()))
                 .when_some(worker, gpui::ParentElement::child)
+                .children(branch)
                 .children(ports)
                 .when_some(upload, gpui::ParentElement::child)
                 .when_some(hooks, gpui::ParentElement::child)
@@ -1495,6 +1499,90 @@ impl WorkspaceView {
 
     /// The ports a shell listens on, served here, each one pill of the header's form: the
     /// number opens the page in a tile, the arrow at its end in the default browser.
+    /// An agent's pull request and worktree, as the worker last said: the request's number
+    /// in words toned by its review (green approved, red changes asked, muted draft), a click
+    /// away from its page; and the worktree's name, quiet, its branch in the hint. Words, not
+    /// chips: the header's one fill is the state's.
+    fn branch_chips(
+        &self,
+        id: ItemId,
+        session: SessionId,
+        chrome: Chrome,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(branch) = self.branch_of(session) else { return Vec::new() };
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = chrome.k;
+        let hint_theme = std::rc::Rc::new(theme.clone());
+        let pr = branch.pr.as_ref().map(|pr| {
+            let (tone, icon) = match pr.review {
+                Some(Review::Approved) => (s.success, IconName::GitPullRequest),
+                Some(Review::ChangesRequested) => (s.error, IconName::GitPullRequest),
+                Some(Review::Draft) => (s.text_muted, IconName::GitPullRequestDraft),
+                Some(Review::Pending) | None => (s.text_secondary, IconName::GitPullRequest),
+            };
+            let url = pr.url.clone();
+            let chip = kit::pill_frame(theme, k)
+                .id("pr")
+                .debug_selector(move || format!("pr-{}", id.as_uuid()))
+                .role(Role::Link)
+                .aria_label(SharedString::from(super::handoffs::pr_said(pr)))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xxs * k))
+                .text_color(hsla(tone))
+                .cursor_pointer()
+                .hover(|el| el.bg(hsla(s.raised)))
+                .active(|el| el.bg(hsla(s.overlay)))
+                .child(
+                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
+                        .size(px(theme.typography.small() * k)),
+                )
+                .child(
+                    ChromeText::new(super::handoffs::pr_label(pr), px(theme.typography.small()), k)
+                        .zooming(chrome.zooming),
+                );
+            tab_stop(chip, s.accent)
+                .on_click(move |_ev, _window, cx| cx.open_url(&url))
+                .into_any_element()
+        });
+        let worktree = branch.worktree.as_ref().map(|tree| {
+            let muted = hsla(s.text_muted);
+            let hint = tree.branch.as_ref().map_or_else(
+                || format!("Worktree {}", tree.name),
+                |b| format!("Worktree {} on {b}", tree.name),
+            );
+            let (hint, path, hint_theme) =
+                (SharedString::from(hint), SharedString::from(tree.path.clone()), hint_theme);
+            div()
+                .id("worktree")
+                .debug_selector(move || format!("worktree-{}", id.as_uuid()))
+                .role(Role::Label)
+                .aria_label(hint.clone())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xxs * k))
+                .text_color(muted)
+                .tooltip(move |_window, cx| {
+                    let (hint, path) = (hint.clone(), path.clone());
+                    let theme = std::rc::Rc::clone(&hint_theme);
+                    cx.new(|_| kit::Hint::new(hint, path, theme)).into()
+                })
+                .child(
+                    crate::icons::icon(theme, IconName::GitBranch, IconSize::Inline, muted)
+                        .size(px(theme.typography.small() * k)),
+                )
+                .child(
+                    ChromeText::new(tree.name.clone(), px(theme.typography.small()), k)
+                        .zooming(chrome.zooming),
+                )
+                .into_any_element()
+        });
+        pr.into_iter().chain(worktree).collect()
+    }
+
     fn port_pills(
         &self,
         tile: TileRef,

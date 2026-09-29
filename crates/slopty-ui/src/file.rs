@@ -29,6 +29,7 @@ use gpui_kit::component::input::{
 };
 use slopty_core::{ItemId, WallMs};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
+use slopty_proto::handoff::{EditOutcome, HandoffId};
 use slopty_theme::{Theme, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
@@ -44,10 +45,12 @@ mod actions {
         [
             /// Save the file tile's text to the worker.
             SaveFile,
+            /// Answer the program waiting on this file tile: saved, and done with.
+            FinishEdit,
         ]
     );
 }
-pub use actions::SaveFile;
+pub use actions::{FinishEdit, SaveFile};
 
 /// The key context of a file tile; ⌘S is bound in it.
 pub const CTX: &str = "FileEditor";
@@ -79,6 +82,12 @@ pub(crate) const OPEN_IN_EDITOR: &str = "Open in editor";
 pub(crate) const OPEN_IN_PAGER: &str = "Open in pager";
 /// Why a save has no answer, after "Not saved: ".
 pub(crate) const LINK_LOST: &str = "the link dropped before the worker answered";
+/// What the bar of a file a program waits on says.
+pub(crate) const PROGRAM_WAITS: &str = "A program is waiting for this file";
+/// The bar's way to answer the waiting program once the file is saved.
+pub(crate) const DONE: &str = "Done";
+/// The bar's way to answer the waiting program without saving.
+pub(crate) const GIVE_UP: &str = "Give up";
 
 /// What a file tile tells the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +106,14 @@ pub enum FileViewEvent {
     /// A file too large to edit here: run this shell line in a terminal on the file's worker
     /// ([`terminal_command`] makes the program to run it).
     Run(String),
+    /// The person is done with the file a program waits on (handoff `id`): saved and answered
+    /// by the worker for [`EditOutcome::Done`], dropped for [`EditOutcome::Cancelled`].
+    Edited {
+        /// The handoff.
+        id: HandoffId,
+        /// How it ended.
+        outcome: EditOutcome,
+    },
 }
 
 impl EventEmitter<FileViewEvent> for FileView {}
@@ -131,6 +148,15 @@ pub enum Trouble {
     Conflict,
     /// The worker could not write the file; its word.
     Failed(String),
+}
+
+/// A program waiting on the tile's file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Waiting {
+    /// Its handoff.
+    id: HandoffId,
+    /// "Done" was asked: it is answered once the text is on disk.
+    finishing: bool,
 }
 
 /// The open find bar of a file tile.
@@ -242,6 +268,9 @@ pub struct FileView {
     theme: Theme,
     /// The find bar, while open.
     search: Option<FileSearch>,
+    /// The program in a shell that waits for this file (`$EDITOR` handed it here), until the
+    /// person is done with it or the program goes away.
+    waiting: Option<Waiting>,
     /// The grammar the path (or first line) names; none for a file the bundle cannot colour.
     syntax: Option<Syntax>,
     /// The editor's events, and its every change marking this view dirty: the tile draws
@@ -305,6 +334,7 @@ impl FileView {
             text_size: 13.0,
             theme,
             search: None,
+            waiting: None,
             syntax: None,
             _editor_events: [events, redraw],
         }
@@ -560,8 +590,72 @@ impl FileView {
         if self.saving.take().is_some() {
             tracing::info!(path = %self.path, "save unanswered: link lost");
             self.trouble = Some(Trouble::Failed(LINK_LOST.to_owned()));
+            self.settle_finish(cx);
             cx.notify();
         }
+    }
+
+    /// A program in a shell waits on this file (handoff `id`, which `$EDITOR` handed here), or
+    /// no longer does (`None`: it went away, and the tile stays an ordinary file tile).
+    pub fn set_waiting(&mut self, id: Option<HandoffId>, cx: &mut Context<Self>) {
+        if self.waiting.map(|w| w.id) != id {
+            self.waiting = id.map(|id| Waiting { id, finishing: false });
+            cx.notify();
+        }
+    }
+
+    /// The handoff of the program waiting on this file, if one does.
+    #[must_use]
+    pub fn waiting(&self) -> Option<HandoffId> {
+        self.waiting.map(|w| w.id)
+    }
+
+    /// Whether "Done" was asked and the tile is waiting on its save to answer the program.
+    #[must_use]
+    pub fn finishing(&self) -> bool {
+        self.waiting.is_some_and(|w| w.finishing)
+    }
+
+    /// "Done" (⌘↩), or the tile closing: save the edit and, once the worker has written it,
+    /// tell the waiting program ([`FileViewEvent::Edited`]). A conflict is settled first
+    /// ("Reload" or "Overwrite"), and a save that fails leaves the program waiting.
+    pub fn finish_edit(&mut self, cx: &mut Context<Self>) {
+        if self.trouble == Some(Trouble::Conflict) {
+            return;
+        }
+        let Some(waiting) = self.waiting.as_mut() else { return };
+        waiting.finishing = true;
+        self.save(cx);
+        self.settle_finish(cx);
+    }
+
+    /// "Give up": tell the waiting program the edit is dropped, without saving (`git commit`
+    /// then aborts). The text stays in the tile as it is.
+    pub fn give_up(&mut self, cx: &mut Context<Self>) {
+        let Some(waiting) = self.waiting.take() else { return };
+        cx.emit(FileViewEvent::Edited { id: waiting.id, outcome: EditOutcome::Cancelled });
+        cx.notify();
+    }
+
+    /// After "Done", each time a save settles: answer the program once the disk has the text,
+    /// save again what was typed while the last save was out, and stop finishing when a save
+    /// did not land, so the person settles it and asks again.
+    fn settle_finish(&mut self, cx: &mut Context<Self>) {
+        let Some(waiting) = self.waiting.filter(|w| w.finishing) else { return };
+        if self.saving.is_some() {
+            return;
+        }
+        if self.trouble.is_some() {
+            self.waiting = Some(Waiting { finishing: false, ..waiting });
+            return;
+        }
+        if self.dirty {
+            self.save(cx);
+            return;
+        }
+        self.waiting = None;
+        cx.emit(FileViewEvent::Edited { id: waiting.id, outcome: EditOutcome::Done });
+        cx.notify();
     }
 
     /// ⌘S: send the edit, based on the version it started from. Nothing when there is
@@ -621,6 +715,7 @@ impl FileView {
                 self.trouble = Some(Trouble::Failed(error));
             }
         }
+        self.settle_finish(cx);
         cx.notify();
     }
 
@@ -870,6 +965,9 @@ impl FileView {
                 if !self.changed.is_empty() {
                     parts.push(format!("{} changed", self.changed.len()));
                 }
+                if self.waiting.is_some() {
+                    parts.push("a program waits".to_owned());
+                }
                 parts.join(", ")
             }
             Some(FileRead::Binary { size }) => format!("binary, {}", size_label(*size)),
@@ -957,13 +1055,11 @@ impl FileView {
     /// tone's mark where there is trouble; "Reload" is the small secondary button and
     /// "Overwrite", the way that loses the disk's text, the quieter ghost.
     fn render_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let k = self.zoom;
+        let s = &self.theme.surfaces;
         let (text, mark, actions): (SharedString, _, Vec<AnyElement>) = match &self.trouble {
             Some(Trouble::Conflict) => (
                 CHANGED_ON_DISK.into(),
-                Some((IconName::CircleAlert, s.warn, s.warn_fill)),
+                (IconName::CircleAlert, s.warn, s.warn_fill),
                 vec![
                     self.bar_button(
                         "file-reload",
@@ -985,48 +1081,75 @@ impl FileView {
             ),
             Some(Trouble::Failed(error)) => (
                 format!("Not saved: {error}").into(),
-                Some((IconName::CircleX, s.error, s.error_fill)),
+                (IconName::CircleX, s.error, s.error_fill),
                 Vec::new(),
             ),
             None => return None,
         };
+        Some(self.bar_line("file-bar", text, mark, actions))
+    }
+
+    /// The line under the header while a program waits on the file: what waits, "Done" (the
+    /// secondary button: it saves) and "Give up" (the ghost). Under the trouble's line when
+    /// there is one, since that is settled first.
+    fn render_waiting(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.waiting?;
+        let s = &self.theme.surfaces;
+        let actions = vec![
+            self.bar_button(
+                "file-done",
+                DONE,
+                ButtonKind::Secondary,
+                cx.listener(|this, _ev, _w, cx| this.finish_edit(cx)),
+            ),
+            self.bar_button(
+                "file-give-up",
+                GIVE_UP,
+                ButtonKind::Ghost,
+                cx.listener(|this, _ev, _w, cx| this.give_up(cx)),
+            ),
+        ];
+        let mark = (IconName::SquareTerminal, s.accent, s.accent_fill);
+        Some(self.bar_line("file-waiting", PROGRAM_WAITS.into(), mark, actions))
+    }
+
+    /// One line under the header: the tone's mark, what is so, and its ways out, on a faint
+    /// wash of the tone.
+    fn bar_line(
+        &self,
+        part: &'static str,
+        text: SharedString,
+        (icon, tone, fill): (IconName, slopty_theme::Rgb, slopty_theme::Rgb),
+        actions: Vec<AnyElement>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = self.zoom;
         let id = self.id.as_uuid();
-        let wash = mark.map_or_else(
-            || hsla_alpha(s.text_muted, alpha::FAINT),
-            |(_, _, fill)| hsla_alpha(fill, alpha::FAINT),
-        );
-        Some(
-            div()
-                .id("file-bar")
-                .debug_selector(move || format!("file-bar-{id}"))
-                .role(Role::Status)
-                .aria_label(text.clone())
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.sm * k))
-                .px(px(theme.spacing.inset() * k))
-                .py(px(theme.spacing.xs * k))
-                .border_b_1()
-                .border_color(hsla(s.border))
-                .bg(wash)
-                .text_size(px(theme.typography.small() * k))
-                .font_family(theme.typography.ui_family.clone())
-                .children(mark.map(|(icon, tone, _)| {
-                    crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
-                        .size(px(theme.typography.icon() * k))
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_color(hsla(if mark.is_some() { s.text } else { s.text_muted }))
-                        .child(text),
-                )
-                .children(actions)
-                .into_any_element(),
-        )
+        let wash = hsla_alpha(fill, alpha::FAINT);
+        div()
+            .id(part)
+            .debug_selector(move || format!("{part}-{id}"))
+            .role(Role::Status)
+            .aria_label(text.clone())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.sm * k))
+            .px(px(theme.spacing.inset() * k))
+            .py(px(theme.spacing.xs * k))
+            .border_b_1()
+            .border_color(hsla(s.border))
+            .bg(wash)
+            .text_size(px(theme.typography.small() * k))
+            .font_family(theme.typography.ui_family.clone())
+            .child(
+                crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
+                    .size(px(theme.typography.icon() * k)),
+            )
+            .child(div().flex_1().min_w_0().overflow_hidden().text_color(hsla(s.text)).child(text))
+            .children(actions)
+            .into_any_element()
     }
 
     /// One of the bar's ways out on the kit's pill frame, as tall as a header's words that act:
@@ -1193,6 +1316,7 @@ impl Render for FileView {
         let id = *self.id.as_uuid();
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let bar = self.render_bar(cx);
+        let waiting = self.render_waiting(cx);
         let theme = &self.theme;
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
@@ -1233,6 +1357,9 @@ impl Render for FileView {
             .aria_label(SharedString::from(format!("File {}", self.path)))
             .aria_value(SharedString::from(self.summary(cx)))
             .on_action(cx.listener(|this, _: &SaveFile, _window, cx| this.save(cx)))
+            .when(self.waiting.is_some(), |el| {
+                el.on_action(cx.listener(|this, _: &FinishEdit, _window, cx| this.finish_edit(cx)))
+            })
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find(window, cx)))
             .relative()
             .size_full()
@@ -1242,6 +1369,7 @@ impl Render for FileView {
             .font_family(mono)
             .text_size(px(text_size))
             .children(bar)
+            .children(waiting)
             .child(body)
             .children(search)
     }

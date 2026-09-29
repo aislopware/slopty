@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use gpui::accesskit::Role;
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, Context, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -67,6 +66,8 @@ pub(super) enum ToastKind {
     },
     /// A word to this client alone.
     Said(String),
+    /// A page a program in a shell asked to open, held back: "Open" opens it.
+    Offered(Box<super::handoffs::Offer>),
 }
 
 impl WorkspaceView {
@@ -153,6 +154,7 @@ impl WorkspaceView {
             }
             ToastKind::Closed { title, .. } => format!("Closed {title}"),
             ToastKind::Said(text) => text.clone(),
+            ToastKind::Offered(offer) => offer.line(),
         })
     }
 
@@ -207,7 +209,8 @@ impl WorkspaceView {
                 .child(label);
             tab_stop(el, s.accent)
         };
-        let (part, icon, action) = match &shown.what {
+        let mut body = None;
+        let (part, icon, actions) = match &shown.what {
             ToastKind::Pointed { tile, .. } => {
                 let tile = *tile;
                 let go =
@@ -215,7 +218,7 @@ impl WorkspaceView {
                         this.dismiss_pointed(tile);
                         this.focus_tile(tile, cx);
                     }));
-                ("pointed", Some(IconName::MousePointer2), Some(go))
+                ("pointed", Some(IconName::MousePointer2), vec![go])
             }
             ToastKind::Closed { seq, .. } => {
                 let seq = *seq;
@@ -227,10 +230,25 @@ impl WorkspaceView {
                     .map_or(IconName::X, |c| super::tile::kind_icon(&c.item, false));
                 let undo = action("toast-undo", "Undo")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)));
-                ("closed", Some(icon), Some(undo))
+                ("closed", Some(icon), vec![undo])
             }
             // A word needs no mark: an info glyph on every notice says nothing the line does not.
-            ToastKind::Said(_) => ("said", None, None),
+            ToastKind::Said(_) => ("said", None, Vec::new()),
+            ToastKind::Offered(offer) => {
+                let (worker, id, url) = offer.target();
+                let open =
+                    action("toast-open", "Open").on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.open_offered(worker, id, &url, cx);
+                    }));
+                let dismiss = action("toast-dismiss", "Dismiss")
+                    .text_color(hsla(s.text_secondary))
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.dismiss_offer(worker, id);
+                        cx.notify();
+                    }));
+                body = Some(self.offer_body(offer));
+                ("offered", Some(IconName::Globe), vec![open, dismiss])
+            }
         };
         let line = SharedString::from(line);
         let notice = crate::kit::elevate(div(), theme)
@@ -245,7 +263,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(theme.spacing.sm))
             .pl(px(theme.spacing.inset()))
-            .pr(px(if action.is_some() { theme.spacing.xs } else { theme.spacing.inset() }))
+            .pr(px(if actions.is_empty() { theme.spacing.inset() } else { theme.spacing.xs }))
             .py(px(theme.spacing.xs))
             .rounded(px(theme.radii.lg))
             .text_color(hsla(s.text))
@@ -254,16 +272,17 @@ impl WorkspaceView {
             .children(icon.map(|icon| {
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))
             }))
-            .child(
+            .child(body.unwrap_or_else(|| {
                 div()
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(line),
-            )
-            .when_some(action, gpui::ParentElement::child);
+                    .child(line)
+                    .into_any_element()
+            }))
+            .children(actions);
         if !self.chrome_moves(cx) {
             return Some(notice.into_any_element());
         }
@@ -284,6 +303,11 @@ impl WorkspaceView {
             crate::kit::Pace::Fade,
             cx,
         ))
+    }
+
+    /// Take down the held-back pages `which` picks.
+    pub(super) fn drop_offers(&mut self, which: impl Fn(&super::handoffs::Offer) -> bool) {
+        self.drop_toasts(|shown| matches!(&shown.what, ToastKind::Offered(offer) if which(offer)));
     }
 
     /// A pointing at `tile` has been followed.
@@ -334,6 +358,20 @@ impl WorkspaceView {
 
 #[cfg(test)]
 impl WorkspaceView {
+    /// The hosts of the held-back pages up now, oldest first.
+    #[must_use]
+    pub(super) fn offered_hosts(&self) -> Vec<String> {
+        self.toast
+            .iter()
+            .flat_map(|t| &t.shown)
+            .filter(|s| !s.leaving)
+            .filter_map(|s| match &s.what {
+                ToastKind::Offered(offer) => Some(offer.host().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The texts of every notice up now, oldest first.
     #[must_use]
     pub(super) fn toast_texts(&self) -> Vec<String> {

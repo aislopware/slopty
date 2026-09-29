@@ -35,6 +35,7 @@ mod desktop;
 mod faces;
 mod facts;
 mod folders;
+mod handoffs;
 mod inbox;
 mod marks;
 mod miniature;
@@ -362,6 +363,9 @@ struct Worker {
     /// What the human did to this worker's items while it was out of reach (or before its
     /// first snapshot): replayed over the next snapshot and sent, in order.
     queued: Vec<ClientMsg>,
+    /// The edits its programs wait on; kept across links, since the worker asks again under
+    /// the same number after a reconnect.
+    handoffs: slopty_client::handoff::Handoffs,
 }
 
 /// The most a worker out of reach holds for its return: far more than a human closes, names
@@ -391,6 +395,7 @@ impl Worker {
             sized: None,
             awaiting_snapshot: false,
             queued: Vec::new(),
+            handoffs: slopty_client::handoff::Handoffs::default(),
         }
     }
 
@@ -716,6 +721,9 @@ pub struct WorkspaceView {
     quick: quick::Quick,
     /// Workers told this client wants their clipboard.
     watching: std::collections::HashSet<WorkerKey>,
+    /// Agents' pull requests, programs waiting on file tiles, and the shell told it has the
+    /// focus.
+    handoff: handoffs::HandoffState,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
     /// The landing of the drop being handed to the tiles, for the tile that takes it to upload
@@ -884,6 +892,7 @@ impl WorkspaceView {
             popouts: popout::PopOuts::default(),
             quick: quick::Quick::default(),
             watching: std::collections::HashSet::new(),
+            handoff: handoffs::HandoffState::default(),
             uploads: HashMap::new(),
             drop_landing: None,
             #[cfg(target_os = "macos")]
@@ -1291,6 +1300,7 @@ impl WorkspaceView {
         self.prune_facts();
         self.drawn_waiting = self.needs_you();
         self.sync_clipboard_watch();
+        self.sync_focus_report();
         self.sync_approvals(cx);
         self.chrome.notify(cx);
         self.chrome_due.set(true);
@@ -1373,6 +1383,7 @@ impl WorkspaceView {
         ]
         .into_iter()
         .chain(self.facts.lens())
+        .chain(self.handoff.sizes())
         .collect()
     }
 
@@ -1616,6 +1627,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::open_file_palette))
             .on_action(cx.listener(Self::open_folder_palette))
             .on_action(cx.listener(Self::open_url_palette))
+            .on_action(cx.listener(Self::open_last_offer))
             .on_action(cx.listener(Self::list_workers))
             .on_action(cx.listener(Self::list_ports))
             .on_action(cx.listener(Self::close_item))
