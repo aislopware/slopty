@@ -82,14 +82,32 @@ impl Fixture {
         stamp(&unit, self.ago(built));
     }
 
-    /// An incremental cache whose last session was compiled `compiled` seconds ago.
-    fn cache(&self, profile: &Utf8Path, name: &str, compiled: u64) {
+    /// An incremental cache whose last session was compiled `compiled` seconds ago, named and
+    /// locked as rustc leaves one. Returns its lock file.
+    fn cache(&self, profile: &Utf8Path, name: &str, compiled: u64) -> Utf8PathBuf {
+        self.session(profile, name, SESSION, Some(SESSION_LOCK), compiled).unwrap()
+    }
+
+    /// A session directory of a MiB in a crate's cache, with its lock file if `lock` is named.
+    fn session(
+        &self,
+        profile: &Utf8Path,
+        name: &str,
+        session: &str,
+        lock: Option<&str>,
+        compiled: u64,
+    ) -> Option<Utf8PathBuf> {
         let cache = profile.join("incremental").join(name);
-        let session = cache.join("s-session");
-        std::fs::create_dir_all(&session).unwrap();
-        write(&session.join("dep-graph.bin"), MIB, self.ago(compiled), self.ago(compiled));
-        stamp(&session, self.ago(compiled));
+        let dir = cache.join(session);
+        std::fs::create_dir_all(&dir).unwrap();
+        write(&dir.join("dep-graph.bin"), MIB, self.ago(compiled), self.ago(compiled));
+        stamp(&dir, self.ago(compiled));
+        let lock = lock.map(|l| cache.join(l));
+        if let Some(lock) = &lock {
+            write(lock, 0, self.ago(compiled), self.ago(compiled));
+        }
         stamp(&cache, self.ago(compiled));
+        lock
     }
 
     fn opts() -> Options {
@@ -136,6 +154,10 @@ const A: &str = "0123456789abcdef";
 const B: &str = "fedcba9876543210";
 const C: &str = "00112233445566ff";
 const D: &str = "aabbccddeeff0011";
+
+/// A finished session of an incremental cache and its lock file, named as rustc names them.
+const SESSION: &str = "s-hmr8xe0qn1-0nvpiz2-b2u4rz5npeowc56h09c99rqrg";
+const SESSION_LOCK: &str = "s-hmr8xe0qn1-0nvpiz2.lock";
 
 /// Everything the old layout keeps: a unit last read three days ago goes with its artifacts,
 /// one read an hour ago stays and its access times go back to the epoch so the next read stamps
@@ -373,26 +395,213 @@ fn under_the_floor_the_least_recently_used_go_then_the_gate_refuses() {
     assert!(error.contains(&format!("{}/debug", fx.root)), "names the largest: {error}");
 }
 
-/// A directory a build holds is left alone, whichever of cargo's two locks it holds.
+/// A directory a build holds keeps its units, whichever of cargo's two locks it holds, even when
+/// the budget reaches them, and says what it held back.
 #[test]
-fn a_directory_a_build_holds_is_skipped() {
+fn a_directory_a_build_holds_keeps_its_units() {
     for lock in [".cargo-lock", ".cargo-build-lock"] {
         let fx = Fixture::new("busy");
         let debug = fx.profile("debug");
         fx.ledger(&debug, HOUR);
         fx.old_unit(&debug, "idle", A, 72 * HOUR, 80 * HOUR);
+        let ledger = std::fs::read_to_string(debug.join(".xtask-prune")).unwrap();
         let held = File::options().write(true).open(debug.join(lock)).unwrap();
         held.lock_shared().unwrap();
 
         let report =
             fx.prune(Options { limits: Limits { budget: 1, floor: 0 }, ..Fixture::opts() });
 
-        assert_eq!(report.busy, ["debug"], "{lock}");
+        let dirs: Vec<&str> = report.busy.iter().map(|b| b.dir.as_str()).collect();
+        assert_eq!(dirs, ["debug"], "{lock}");
         assert!(alive(&debug, "idle", A), "{lock}");
+        assert_eq!(report.idle.units + report.budget.units, 0, "{lock}");
+        assert!(report.busy[0].held_back >= unit_bytes(&debug, "idle", A), "{lock}");
+        assert_eq!(std::fs::read_to_string(debug.join(".xtask-prune")).unwrap(), ledger, "{lock}");
+        assert_ne!(accessed(&debug.join(format!(".fingerprint/idle-{A}/lib-idle"))), UNIX_EPOCH);
         drop(held);
         let report = fx.prune(Fixture::opts());
         assert_eq!(report.idle.units, 1, "{lock}");
+        assert!(report.busy.is_empty(), "{lock}");
     }
+}
+
+/// A child process holding a session's lock as rustc 1.98 does on macOS: `fcntl(F_SETLK)`, a
+/// write lock. Another process, because a process drops its `fcntl` locks on a file when it
+/// closes any descriptor of it, which the pass does in this one. Released when dropped.
+struct FcntlHolder(std::process::Child);
+
+impl FcntlHolder {
+    fn hold(lock: &Utf8Path) -> Self {
+        use std::io::BufRead as _;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "prune::tests::hold_an_fcntl_lock", "--ignored", "--nocapture"])
+            .env(HOLD, lock)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let held = stdout.lines().map_while(Result::ok).any(|line| line == "held");
+        assert!(held, "the child took the lock");
+        Self(child)
+    }
+}
+
+impl Drop for FcntlHolder {
+    fn drop(&mut self) {
+        drop(self.0.stdin.take());
+        let _status = self.0.wait();
+    }
+}
+
+const HOLD: &str = "XTASK_PRUNE_TEST_HOLD";
+
+/// Not a test: the child [`FcntlHolder`] runs, which holds the lock until its stdin closes.
+#[test]
+#[ignore = "the child process of FcntlHolder"]
+fn hold_an_fcntl_lock() {
+    use std::io::{Read as _, Write as _};
+    let Ok(lock) = std::env::var(HOLD) else { return };
+    let file = File::options().read(true).write(true).open(lock).unwrap();
+    rustix::fs::fcntl_lock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "\nheld").unwrap();
+    stdout.flush().unwrap();
+    let _eof = std::io::stdin().read_to_end(&mut Vec::new());
+    drop(file);
+}
+
+/// Holds a session's lock as a later rustc reading a finished session does: `flock`, shared.
+fn flock_shared(lock: &Utf8Path) -> File {
+    let file = File::open(lock).unwrap();
+    file.try_lock_shared().unwrap();
+    file
+}
+
+/// In a directory a build holds, an idle cache still goes, a session at a time under rustc's
+/// own lock: a finished session and a `-working` one with their lock files, a lock file whose
+/// session is gone and a session whose lock file is. A session a compile holds stays, locked
+/// either way rustc locks, and so does a cache used two hours ago and every unit.
+#[test]
+fn a_busy_directory_sweeps_its_idle_caches_session_by_session() {
+    let fx = Fixture::new("busy-caches");
+    let debug = fx.profile("debug");
+    fx.ledger(&debug, HOUR);
+    fx.old_unit(&debug, "idle", A, 72 * HOUR, 80 * HOUR);
+    let idle = debug.join("incremental/idle-0abc");
+    let finished = fx.cache(&debug, "idle-0abc", 30 * HOUR);
+    let working = fx
+        .session(
+            &debug,
+            "idle-0abc",
+            "s-hmr8y232qz-0h00y2h-working",
+            Some("s-hmr8y232qz-0h00y2h.lock"),
+            30 * HOUR,
+        )
+        .unwrap();
+    fx.session(&debug, "idle-0abc", "s-hmr8a0000a-1aaaaaa-svh", None, 30 * HOUR);
+    write(&idle.join("s-hmr8b0000b-0bbbbbb.lock"), 0, fx.ago(30 * HOUR), fx.ago(30 * HOUR));
+    stamp(&idle, fx.ago(30 * HOUR));
+    let read = fx.cache(&debug, "read-0def", 30 * HOUR);
+    let wrote = fx.cache(&debug, "wrote-0aaa", 30 * HOUR);
+    fx.cache(&debug, "used-0bbb", 2 * HOUR);
+    let build = File::options().write(true).open(debug.join(".cargo-lock")).unwrap();
+    build.lock_shared().unwrap();
+    let reader = flock_shared(&read);
+    let writer = FcntlHolder::hold(&wrote);
+
+    let dry = fx.prune(Options { dry_run: true, ..Fixture::opts() });
+    assert_eq!((dry.busy[0].swept.caches, dry.busy[0].sessions_held), (1, 2));
+    assert!(finished.exists() && working.exists(), "a dry run deletes nothing");
+
+    let report = fx.prune(Fixture::opts());
+
+    let left: Vec<String> =
+        idle.read_dir_utf8().unwrap().map(|e| e.unwrap().file_name().to_owned()).collect();
+    assert!(left.is_empty(), "every session and lock file of the idle cache went: {left:?}");
+    for kept in ["read-0def", "wrote-0aaa"] {
+        let cache = debug.join("incremental").join(kept);
+        assert!(cache.join(SESSION).exists(), "{kept}");
+        assert!(cache.join(SESSION_LOCK).exists(), "{kept}");
+    }
+    assert!(debug.join("incremental/used-0bbb").exists());
+    assert!(alive(&debug, "idle", A), "a unit stays under cargo's lock");
+    let [busy] = report.busy.as_slice() else { panic!("{:?}", report.busy) };
+    assert_eq!(busy.dir, "debug");
+    assert_eq!((busy.swept.caches, busy.sessions_held), (1, 2));
+    assert!(busy.swept.bytes >= 3 * MIB as u64, "{busy:?}");
+    assert!(busy.held_back >= 2 * MIB as u64, "{busy:?}");
+    assert_eq!((report.idle.caches, report.idle.units), (1, 0));
+    assert_eq!(report.idle.bytes, busy.swept.bytes);
+
+    drop((reader, writer, build));
+    let report = fx.prune(Fixture::opts());
+    assert!(report.busy.is_empty());
+    // The idle cache emptied above was written to just now, so it is not idle yet.
+    assert_eq!((report.idle.caches, report.idle.units), (2, 1), "{:?}", report.idle);
+    assert!(!debug.join("incremental/read-0def").exists());
+}
+
+/// Under the floor, a busy directory's caches go for the budget session by session, its units
+/// stay, and the gate's refusal names it as what a build held.
+#[test]
+fn under_the_floor_a_busy_directory_gives_its_caches_and_is_named() {
+    let (fx, debug) = lru_fixture("busy-floor");
+    let limits = Limits { budget: u64::MAX, floor: u64::MAX / 4 };
+    let opts = Options { limits, ..Fixture::opts() };
+    let build = File::options().write(true).open(debug.join(".cargo-build-lock")).unwrap();
+    build.lock_shared().unwrap();
+
+    let report = prune(&fx.root, opts, fx.now, &|_| Ok(0)).unwrap();
+
+    assert!(debug.join("incremental/cache-0abc").exists(), "its directory stays");
+    assert!(!debug.join("incremental/cache-0abc").join(SESSION_LOCK).exists());
+    assert_eq!((report.budget.caches, report.budget.units), (1, 0));
+    assert!(["u1", "u2", "u3", "u4"].iter().zip([A, B, C, D]).all(|(n, h)| alive(&debug, n, h)));
+    let error = check_room(&fx.root, &report, limits).unwrap_err().to_string();
+    assert!(error.contains("held by a build") && error.contains("debug ("), "{error}");
+}
+
+/// What rustc does not write in `incremental/` (a file, a crate cache it may not read, a session
+/// name without three dashes, a lock file it may not open) stays and the pass goes on, busy or
+/// not.
+#[test]
+fn odd_entries_in_incremental_leave_the_pass_going() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fx = Fixture::new("odd");
+    let debug = fx.profile("debug");
+    fx.ledger(&debug, HOUR);
+    let incremental = debug.join("incremental");
+    fx.cache(&debug, "plain-0aaa", 30 * HOUR);
+    fx.cache(&debug, "sealed-0bbb", 30 * HOUR);
+    let sealed = incremental.join("sealed-0bbb");
+    let unopenable = fx.cache(&debug, "unopenable-0ccc", 30 * HOUR);
+    let odd = fx.session(&debug, "odd-0ddd", "s-odd", None, 30 * HOUR);
+    assert!(odd.is_none());
+    write(&incremental.join("stray"), 64, fx.ago(30 * HOUR), fx.ago(30 * HOUR));
+    let mode = |path: &Utf8Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(&unopenable, 0o000);
+    mode(&sealed, 0o000);
+    let build = File::options().write(true).open(debug.join(".cargo-lock")).unwrap();
+    build.lock_shared().unwrap();
+
+    let report = fx.prune(Fixture::opts());
+
+    assert!(!incremental.join("plain-0aaa").join(SESSION_LOCK).exists());
+    assert!(incremental.join("odd-0ddd/s-odd").exists());
+    assert!(incremental.join("stray").exists() && sealed.exists());
+    assert!(unopenable.parent().unwrap().join(SESSION).exists());
+    assert_eq!((report.busy[0].swept.caches, report.busy[0].sessions_held), (1, 1));
+
+    drop(build);
+    let report = fx.prune(Fixture::opts());
+    assert!(report.busy.is_empty());
+    assert!(incremental.join("stray").exists(), "not a cache");
+    assert!(!incremental.join("odd-0ddd").exists(), "under cargo's lock a cache goes whole");
+    assert!(!unopenable.exists(), "under cargo's lock no session lock is taken");
+    mode(&sealed, 0o755);
 }
 
 /// A dry run reports and changes nothing: no file, no access time, no ledger.

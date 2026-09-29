@@ -171,6 +171,7 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
                             | Effect::ClipboardWrite(_)
                             | Effect::Matches { .. }
                             | Effect::SearchInvalid { .. }
+                            | Effect::PasteHeld(_)
                             | Effect::CommandStarted(_)
                             | Effect::CommandFinished { .. } => {}
                         }

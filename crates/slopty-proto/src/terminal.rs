@@ -188,7 +188,15 @@ pub enum TermRequest {
     /// Pointer event.
     Mouse(MouseEvent),
     /// Paste text (worker applies bracketed paste if the mode is on).
-    Paste(String),
+    Paste {
+        /// What to paste.
+        text: String,
+        /// The person has seen it and wants it pasted as it is. Unconfirmed, the worker writes
+        /// it only when it cannot run anything under the program's mode as it is now (no line
+        /// break outside bracketed paste, no end of the bracket inside it); otherwise it sends
+        /// it back as [`TermEvent::PasteHeld`] for the client to ask about.
+        confirmed: bool,
+    },
     /// Raw bytes to the PTY (tooling, tests).
     Raw(#[serde(with = "serde_bytes")] Vec<u8>),
     /// ⌘K: drop the history and repaint the prompt at the top. The worker erases the
@@ -258,7 +266,7 @@ impl PasteChord {
     #[must_use]
     pub fn into_request(self) -> TermRequest {
         match self {
-            Self::Command => TermRequest::Paste(String::new()),
+            Self::Command => TermRequest::Paste { text: String::new(), confirmed: true },
             Self::Control(key) => TermRequest::Key(key),
         }
     }
@@ -273,7 +281,7 @@ impl TermRequest {
         match self {
             Self::Key(_)
             | Self::Mouse(_)
-            | Self::Paste(_)
+            | Self::Paste { .. }
             | Self::Raw(_)
             | Self::Clear
             | Self::Focus { .. }
@@ -585,6 +593,12 @@ pub enum TermEvent {
     /// The program asked for another pointer shape over the grid (`OSC 22`). Sent on attach
     /// while it is not the I-beam, like the title.
     Pointer(PointerShape),
+    /// An unconfirmed `TermRequest::Paste` that would run something under the program's mode
+    /// as it stands, sent back unwritten to the client that pasted it, which asks the person.
+    PasteHeld {
+        /// The text, as it was pasted.
+        text: String,
+    },
 }
 
 /// The pointer a program asks for over the grid with `OSC 22`, by its W3C cursor name.

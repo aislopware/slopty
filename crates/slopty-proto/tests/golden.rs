@@ -144,6 +144,10 @@ mod golden {
             },
         );
         snap(
+            "worker_paste_held",
+            &TermEvent::PasteHeld { text: "make\nrm -rf build\n".to_owned() },
+        );
+        snap(
             "worker_search_invalid",
             &TermEvent::SearchInvalid {
                 needle: "(".to_owned(),
@@ -1317,6 +1321,13 @@ mod golden {
     #[test]
     fn paste_picture() {
         use slopty_proto::terminal::PasteChord;
+        snap(
+            "client_term_paste",
+            &ClientMsg::Term {
+                session: session(),
+                req: TermRequest::Paste { text: "ls\n".to_owned(), confirmed: false },
+            },
+        );
         snap(
             "client_term_paste_picture_command",
             &ClientMsg::Term {

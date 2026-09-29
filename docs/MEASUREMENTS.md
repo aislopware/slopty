@@ -9256,6 +9256,46 @@ for r in 1 2 3; do for ret in 1 0; do GPUI_VIEW_RETENTION=$ret target/debug/deps
 
 Log: `target/logs/ui-retention-ab.log`.
 
+## 2026-09-30 — the fork owner's five retention changes, A/B
+
+Mac Studio M1 Max, macOS 27.0, the dev profile, headless (GPUI's test window: build, layout,
+prepaint and paint on the main thread, no GPU). Load average 28–46: a gate and other sessions
+were building, so the p95 column is noise and only p50 is compared. 60 shells and 60 notes with
+the navigator docked. "Before" is the same tree with only the change under test undone, built
+as its own binary; the runs alternate, three of each.
+
+```sh
+cargo test -p slopty-ui --lib --no-run          # target/debug/deps/slopty_ui-<hash>, copied per variant
+for r in 1 2 3; do for b in before after; do target/ab/$b --ignored --exact --nocapture \
+  --test-threads 1 workspace::tests::chrome::measure_a_pointer_frame_beside_the_chrome \
+  workspace::tests::chrome::measure_a_frame_of_motion_beside_the_chrome \
+  workspace::tests::chrome::measure_the_keyboard_moving_beside_the_chrome \
+  workspace::tests::chrome::measure_an_echo_frame_beside_the_chrome; done; done
+```
+
+| change | frame | before, p50 ms | after, p50 ms |
+|---|---|---|---|
+| a shell reads no pointer and updates only on news | the pointer crossing a dense shell, the strip built each frame | 0.323, 0.323, 0.317 (the shell built 420 times) | 0.236, 0.236, 0.237 (built once, on entering) |
+| a spring's frame builds a shell once | a frame of the overview's spring | 0.932, 0.848, 0.830 | 0.509, 0.500, 0.502 |
+| the focus moved in a build notifies the views it touches, not a refresh | the keyboard moving between two shells, both frames | 1.860, 1.860, 2.065 | 2.777, 1.840, 1.735 |
+| the row cache shared with the element, not lent through the view | a frame of motion; the pointer frame; a neighbour's echo | 0.456 / 0.226 / 0.101, 0.449 / 0.222 / 0.102, 0.431 / 0.220 / 0.101 | 0.456 / 0.224 / 0.102, 0.441 / 0.222 / 0.102, 0.429 / 0.221 / 0.101 |
+
+- The shell under a moving pointer was built with every frame: its element read the pointer in
+  prepaint, and its move listener updated the view on every move. Both are gone, and the frame
+  costs a quarter less.
+- A frame of a spring costs 40 % less: each moving shell was built twice, the second time for
+  the grid its element had measured moving or zooming.
+- The two others are within the noise. The focus change still builds a shell the focus never
+  touched: something in GPUI rebuilds it in prepaint, whether or not Slopty notifies it, so
+  targeted notifies save nothing until the fork treats focus as a read it can track. The row
+  cache lent through two view updates a frame costs nothing measurable. Neither landed.
+- The other two recommendations (tile headers and readouts as views of their own, plain inner
+  divs for element retention) can save at most the strip's own build when nothing moves:
+  0.22 ms, the pointer frame above, and only on a header's change. In motion every tile is built
+  again at its new place anyway. Not done.
+
+Logs: `target/logs/ui-retention-ab2.log`, `target/logs/ui-rowcache-ab.log`.
+
 ## 2026-09-30 — a keystroke's parse in the file tile
 
 Mac Studio M1 Max, macOS 27.0, load average 23–29 (other sessions building). The file tile's
@@ -9408,6 +9448,21 @@ are 36 GB. The budget is 160 GB and the floor 50 GB.
 sweep and 4.5 s to size `target/` when no lock is held. A pass that has to look at every unit's
 objects (the first, or one after a ledger is lost) takes 26–53 s to sweep.
 
+**A busy `debug`, later the same day.** The gate refused on the floor with `debug: busy,
+skipped`. `target/debug/incremental` held 70 GB of caches untouched for over three hours, and
+deleting them by hand freed 62 GB. The pass now deletes a busy directory's idle caches one
+session at a time under rustc's session locks. A dry run with `target/debug/.cargo-lock` held
+shared from another process, which is how cargo 1.98 holds it while it builds, and with the
+pass not waiting (as the gate runs it), after the hand deletion:
+
+| idle window | `debug` line of the report | sweep | size walk |
+|---|---|---|---|
+| 24 h | `debug: busy, units kept; 0 caches would be swept, 0.0 GB` | 2.1 s | 6.0 s |
+| 3 h | `debug: busy, units kept; 94 caches would be swept, 3.4 GB` | 1.6 s | 3.4 s |
+
+No session was held by a compile in either run. `target/` was 90–93 GB, of which `debug` was
+76 GB, with 57 GB used in the last hour and 41–44 GB in the last six.
+
 **One test binary, `slopty-codec`'s `hevc_encode_then_decode`**, wall time of the process:
 
 | where the binary is | run 1 | run 2 | run 3 |
@@ -9447,6 +9502,9 @@ CARGO_TARGET_DIR=<dir> cargo nextest run -p slopty-codec
 CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="$PWD/target/xtask/debug/xtask-runner test-runner" \
   CARGO_TARGET_DIR=<dir> cargo nextest run -p slopty-codec
 cargo xtask prune --dry-run
+# the busy rows: hold target/debug/.cargo-lock shared (flock, LOCK_SH) from another process,
+# then call prune::prune on target/ with wait: false, dry_run: true and the idle window, and
+# print its report (a scratch #[ignore] test in xtask/src/prune/tests.rs, not kept)
 ```
 
 ## 2026-09-30 — first launch of a new binary; RealtimeSanitizer on the render callback

@@ -616,7 +616,9 @@ async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentF
         None => false,
     };
     tracing::info!(%session, ready = waited, "typing the agent's first prompt");
-    if let Err(e) = handle.request(ORCHESTRATOR, TermRequest::Paste(prompt)) {
+    if let Err(e) =
+        handle.request(ORCHESTRATOR, TermRequest::Paste { text: prompt, confirmed: true })
+    {
         tracing::warn!(%session, error = %e, "first prompt not typed");
         return;
     }
@@ -641,7 +643,7 @@ async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentF
 pub async fn send_input(handle: &SessionHandle, input: &Input) -> Result<(), Failure> {
     let requests: Vec<TermRequest> = match input {
         Input::Text(text) => text_requests(text),
-        Input::Paste(text) => vec![TermRequest::Paste(text.clone())],
+        Input::Paste(text) => vec![TermRequest::Paste { text: text.clone(), confirmed: true }],
         Input::Keys(names) => names
             .iter()
             .map(|name| keys::parse(name, 0).map(TermRequest::Key))

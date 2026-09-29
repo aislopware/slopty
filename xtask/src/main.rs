@@ -114,6 +114,10 @@ enum Cmd {
         /// Show what would go without deleting it.
         #[arg(long)]
         dry_run: bool,
+        /// Skip a dir a build holds instead of waiting for it: its idle caches still go, under
+        /// rustc's own session locks, and only its units stay.
+        #[arg(long)]
+        no_wait: bool,
     },
     /// The slow checks that run on a schedule, not per commit: Miri, sanitizers, the feature
     /// powerset, coverage, mutation testing, a fuzz smoke.
@@ -250,7 +254,7 @@ fn main() -> Result<()> {
             prune::auto();
             gated
         }
-        Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run } => {
+        Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run, no_wait } => {
             let mut limits = prune::Limits::from_env()?;
             if let Some(gb) = budget_gb {
                 limits.budget = gb.saturating_mul(1_000_000_000);
@@ -261,7 +265,7 @@ fn main() -> Result<()> {
             prune::run(prune::Options {
                 idle: std::time::Duration::from_secs(idle_hours.saturating_mul(3600)),
                 limits,
-                wait: true,
+                wait: !no_wait,
                 dry_run,
             })
         }

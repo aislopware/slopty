@@ -2045,7 +2045,16 @@ impl Actor {
                 self.engine.encode_key(&event, &mut bytes)
             }
             TermRequest::Mouse(m) => self.engine.encode_mouse(&m, &mut bytes),
-            TermRequest::Paste(text) => self.engine.encode_paste(&text, &mut bytes),
+            // Judged against the program's mode as it is now, not the one the client last saw
+            // in a frame: a paste that would run something goes back to be asked about.
+            TermRequest::Paste { text, confirmed } => match self.engine.paste_is_safe(&text) {
+                Ok(false) if !confirmed => {
+                    self.send_to(client, &TermEvent::PasteHeld { text });
+                    Ok(())
+                }
+                Ok(_) => self.engine.encode_paste(&text, &mut bytes),
+                Err(e) => Err(e),
+            },
             TermRequest::Raw(raw) => {
                 bytes = raw;
                 Ok(())

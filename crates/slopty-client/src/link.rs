@@ -543,7 +543,7 @@ impl ScreenNumbers {
 /// Input too large for one datagram: a long paste or raw write.
 fn too_long(req: &TermRequest) -> bool {
     let long = |len: usize| len > slopty_proto::media::MAX_DATAGRAM;
-    matches!(req, TermRequest::Paste(text) if long(text.len()))
+    matches!(req, TermRequest::Paste { text, .. } if long(text.len()))
         || matches!(req, TermRequest::Raw(bytes) if long(bytes.len()))
 }
 
@@ -930,7 +930,7 @@ mod tests {
         let seqs: Vec<Option<(SessionId, u64)>> = [
             term(a, TermRequest::Raw(b"x".to_vec())),
             term(a, TermRequest::Resize(TermSize::default())),
-            term(b, TermRequest::Paste("p".to_owned())),
+            term(b, TermRequest::Paste { text: "p".to_owned(), confirmed: false }),
             ClientMsg::Ping { sent_at: slopty_core::MonoTime::from_nanos(1) },
             term(a, TermRequest::Clear),
             term(a, TermRequest::Reached { marker: 3 }),
@@ -1013,7 +1013,10 @@ mod tests {
         let copy = input_copy(session, 7, &req).unwrap();
         let decoded = ClientDatagram::decode(&copy).unwrap();
         assert_eq!(decoded, ClientDatagram::Input { session, seq: 7, req });
-        let long = TermRequest::Paste("x".repeat(slopty_proto::media::MAX_DATAGRAM + 1));
+        let long = TermRequest::Paste {
+            text: "x".repeat(slopty_proto::media::MAX_DATAGRAM + 1),
+            confirmed: false,
+        };
         assert!(too_long(&long), "paced");
         assert_eq!(input_copy(session, 8, &long), None);
     }

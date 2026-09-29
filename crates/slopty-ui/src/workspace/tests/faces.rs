@@ -103,7 +103,10 @@ fn the_composer_types_into_the_same_pty(cx: &mut TestAppContext) {
     cx.simulate_input("Fix the flaky test");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert_eq!(sent(&mut studio), [TermRequest::Paste("Fix the flaky test".into())]);
+    assert_eq!(
+        sent(&mut studio),
+        [TermRequest::Paste { text: "Fix the flaky test".into(), confirmed: true }]
+    );
     cx.executor().advance_clock(crate::conversation::composer::SUBMIT_PAUSE);
     cx.run_until_parked();
     let enter = sent(&mut studio);

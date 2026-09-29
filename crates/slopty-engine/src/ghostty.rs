@@ -2306,6 +2306,21 @@ impl GhosttyEngine {
         }
     }
 
+    /// Whether `text` pasted now could not run anything by itself (ghostty's
+    /// `clipboard-paste-protection`): outside bracketed paste a line break runs what precedes
+    /// it, and inside it the bracket's end closes the paste and the rest is typed.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn paste_is_safe(&self, text: &str) -> Result<bool, EngineError> {
+        Ok(if self.term.mode(Mode::BRACKETED_PASTE)? {
+            !text.contains("\x1b[201~")
+        } else {
+            !text.contains(['\n', '\r'])
+        })
+    }
+
     /// Encode pasted text, bracketed when the program asked for it. Unsafe control characters
     /// are stripped when not bracketed.
     ///
@@ -3087,6 +3102,18 @@ mod tests {
             e.encode_key(&key(text, consumed, option_as_alt), &mut out).unwrap();
             assert_eq!(out, want, "{text:?} {option_as_alt}");
         }
+    }
+
+    #[test]
+    fn a_paste_is_safe_by_the_mode_as_it_is_now() {
+        let mut e = engine(10, 3);
+        assert!(e.paste_is_safe("ls").unwrap() && !e.paste_is_safe("ls\n").unwrap());
+        assert!(!e.paste_is_safe("ls\r").unwrap(), "a carriage return runs it too");
+        e.write(b"\x1b[?2004h");
+        assert!(e.paste_is_safe("make\nrm -rf build\n").unwrap(), "bracketed: a paste");
+        assert!(!e.paste_is_safe("a\x1b[201~rm\n").unwrap(), "unless it ends the bracket");
+        e.write(b"\x1b[?2004l");
+        assert!(!e.paste_is_safe("make\n").unwrap(), "the mode off again");
     }
 
     #[test]

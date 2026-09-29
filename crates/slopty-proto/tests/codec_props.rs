@@ -18,7 +18,7 @@ mod props {
             }),
             ".{0,64}".prop_map(|s| ClientMsg::Term {
                 session: slopty_core::SessionId::nil(),
-                req: TermRequest::Paste(s),
+                req: TermRequest::Paste { text: s, confirmed: false },
             }),
         ]
     }

@@ -118,9 +118,10 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
 - The client keeps a **line cache** (absolute line numbers) so scrollback scrolls locally; missing
   ranges are fetched, prefetched around the viewport; the cache indexes its prompt rows, so a
   block's prompt is a range query, not a walk. Mouse selection is client-side too
-  (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`, held for a
-  confirmation strip first when it holds a newline and the program has not asked for
-  bracketed paste (`paste_is_safe`, `[terminal] paste_protection`); drag, ⌥-drag for a
+  (absolute line indices, ⌘C copies from the cache, ⌘V sends `Paste`, which the worker
+  sends back as `PasteHeld` for a confirmation strip when it holds a newline and the program,
+  as it is when the paste arrives, has not asked for bracketed paste (`Engine::paste_is_safe`,
+  `[terminal] paste_protection`); drag, ⌥-drag for a
   rectangle, double/triple click, ⇧-click to move the near end, or long-press on touch; a drag past the grid's top or bottom
   keeps scrolling through the cache at a pace set by the distance); nothing reaches the worker,
   except a plain click on the shell's input line, which becomes the arrow keys that put the

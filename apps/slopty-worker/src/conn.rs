@@ -1809,7 +1809,8 @@ mod tests {
         let (a, b) = (SessionId::new(), SessionId::new());
         let picture = |s| Input::Term(s, TermRequest::PastePicture(PasteChord::Command));
         let raw = |s, text: &str| Input::Term(s, TermRequest::Raw(text.as_bytes().to_vec()));
-        let text = |s| Input::Term(s, TermRequest::Paste("words".to_owned()));
+        let text =
+            |s| Input::Term(s, TermRequest::Paste { text: "words".to_owned(), confirmed: false });
         let mut held = None;
 
         assert_eq!(route(&mut held, text(a)), Route::Now(text(a)), "text pastes at once");

@@ -3883,3 +3883,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   before the frame, and asks again only when the grid's own size changed or a still pointer now
   hovers another block. Test:
   `workspace::tests::retained::a_frame_of_the_spring_builds_each_shell_once`.
+- ❌ **A focus change still draws every view again** (2026-09-30). Notifying only the views a
+  focus change touches (the strip, the chrome, the overlays, the bodies the focus left and
+  entered) instead of refreshing the window measured no faster: GPUI builds a shell the focus
+  never touched in the same frame whether it is notified or not. Worth doing once gpui-fast
+  records a read of the focus as it records a read of the pointer (MEASUREMENTS, "the fork
+  owner's five retention changes").
+- ✅ **A paste is judged by the mode when it arrives** (2026-09-30). Paste protection judged a
+  paste by the bracketed-paste mode of the last frame the client had, and the program may have
+  turned the mode off since, so a line break could run a command unasked. The worker, which
+  alone has the mode as it is, now judges it (`Engine::paste_is_safe`): `TermRequest::Paste`
+  carries `confirmed`, and an unconfirmed paste that would run something comes back unwritten
+  as `TermEvent::PasteHeld`, which puts up the confirmation strip; ↩ sends it again confirmed.
+  The client's own check is gone. With `[terminal] paste_protection` off, and for what the
+  person composed (the conversation face's composer, an agent's first prompt), a paste goes
+  out confirmed. Tests: `a_paste_that_would_run_under_the_mode_now_comes_back_unwritten` in
+  `slopty-worker`'s `session_actor`,
+  `terminal::view::tests::a_paste_the_worker_holds_back_waits_for_a_confirmation`, and
+  `a_paste_is_safe_by_the_mode_as_it_is_now` in `slopty-engine`.

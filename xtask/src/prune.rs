@@ -31,6 +31,11 @@
 //! `build/<package>/<hash>/` with the fingerprint inside (from Cargo 1.100). A profile directory
 //! in neither is an error, not an empty pass. Each directory is pruned under cargo's own locks, so
 //! no build runs in it meanwhile.
+//!
+//! A directory a build holds keeps its units and object files, since the build may link any
+//! unit's rlib. Its incremental caches still go, one session at a time under the session's own
+//! lock, as rustc's collector deletes them: with several agents building in `target/debug` all
+//! day, its lock is almost never free, and its idle caches are most of what it holds.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, FileTimes};
@@ -155,8 +160,8 @@ pub struct Report {
     pub free_after: u64,
     /// Bytes still over the budget or under the floor: nothing old enough was left to delete.
     pub short: u64,
-    /// Profile directories a build held, relative to the target directory.
-    pub busy: Vec<String>,
+    /// Profile directories a build held, so their units stayed, by name.
+    pub busy: Vec<Busy>,
     /// Bytes per top-level entry of the target directory, largest first.
     pub largest: Vec<(String, u64)>,
     /// Bytes of units and caches by time since last use: under 1 h, 6 h, 24 h, 3 days, older.
@@ -164,6 +169,33 @@ pub struct Report {
     /// How long the sweep of the profile directories and the size walk took.
     pub sweep: Duration,
     pub walk: Duration,
+}
+
+/// A profile directory a build held during the pass: its units stayed, and its caches went
+/// session by session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Busy {
+    /// Relative to the target directory.
+    pub dir: String,
+    /// The caches swept whole (idle or for the budget), and the bytes of every session that went.
+    pub swept: Freed,
+    /// Sessions a compile held, left for a later pass.
+    pub sessions_held: usize,
+    /// Bytes the pass would have deleted but the build held: units the budget or the floor
+    /// reached, and sessions in use.
+    pub held_back: u64,
+}
+
+impl Report {
+    fn on_busy(&mut self, dir: &str, record: impl FnOnce(&mut Busy)) {
+        if let Some(busy) = self.busy.iter_mut().find(|b| b.dir == dir) {
+            record(busy);
+        } else {
+            let mut busy = Busy { dir: dir.to_owned(), ..Busy::default() };
+            record(&mut busy);
+            self.busy.push(busy);
+        }
+    }
 }
 
 /// `cargo xtask prune`: every profile directory, waiting for busy ones if asked, with a report.
@@ -237,10 +269,17 @@ fn check_room(target: &Utf8Path, report: &Report, limits: Limits) -> Result<()> 
         .take(6)
         .map(|(name, bytes)| format!("  {target}/{name}  {}", gb(*bytes)))
         .collect();
-    let busy = if report.busy.is_empty() {
+    let held: Vec<String> = report
+        .busy
+        .iter()
+        .filter(|b| b.held_back > 0)
+        .map(|b| format!("{} ({})", b.dir, gb(b.held_back)))
+        .collect();
+    // Only when a build held what the pass would have deleted is "busy" why it fell short.
+    let busy = if held.is_empty() {
         String::new()
     } else {
-        format!("\nbusy, so not pruned: {}", report.busy.join(", "))
+        format!("\nbusy, held by a build and so not pruned: {}", held.join(", "))
     };
     bail!(
         "only {} free on the volume of {target}, under the {} floor, after pruning everything \
@@ -264,8 +303,19 @@ fn print(target: &Utf8Path, report: &Report, dry_run: bool) {
         .map(|(name, bytes)| format!("{name} {}", gb(*bytes)))
         .collect();
     println!("  largest: {}", largest.join(", "));
-    for dir in &report.busy {
-        println!("  {dir}: busy, skipped");
+    let swept = if dry_run { "would be swept" } else { "swept" };
+    for busy in &report.busy {
+        let held = if busy.sessions_held > 0 {
+            format!(", {} sessions in use kept", busy.sessions_held)
+        } else {
+            String::new()
+        };
+        println!(
+            "  {}: busy, units kept; {} caches {swept}, {}{held}",
+            busy.dir,
+            busy.swept.caches,
+            gb(busy.swept.bytes)
+        );
     }
     let [hour, six, day, three, older] = report.ages.map(gb);
     println!(
@@ -298,8 +348,13 @@ pub fn free_space(path: &Utf8Path) -> Result<u64> {
     Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
 }
 
-/// A profile directory's sweep: what it freed and what is left, or `None` when it was busy.
-type Swept = Result<Option<(Freed, Vec<Item>)>>;
+/// A profile directory's sweep: what it freed and what is left for the budget. `busy` is set
+/// when a build held it, and then no item of kind [`Kind::Unit`] may go.
+struct Swept {
+    freed: Freed,
+    items: Vec<Item>,
+    busy: Option<Busy>,
+}
 
 /// One pass over `target`: the idle sweep in every profile directory, then the budget and the
 /// floor. `free` reads a volume's free space.
@@ -313,12 +368,15 @@ pub fn prune(
     let mut report = Report::default();
     let dirs = profile_dirs(target)?;
     // Side by side: most of a sweep is waiting on the file system, a directory at a time.
-    let swept: Vec<Swept> = std::thread::scope(|scope| {
+    let swept: Vec<Result<Swept>> = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(dirs.len());
         for dir in &dirs {
-            handles.push(scope.spawn(move || {
-                let Some(_locks) = Locks::take(dir, opts.wait)? else { return Ok(None) };
-                sweep(dir, opts, now).map(Some)
+            handles.push(scope.spawn(move || match Locks::take(dir, opts.wait)? {
+                Some(_locks) => {
+                    let (freed, items) = sweep(dir, opts, now)?;
+                    Ok(Swept { freed, items, busy: None })
+                }
+                None => Ok(sweep_busy(dir, rel(target, dir), opts, now)),
             }));
         }
         handles
@@ -326,15 +384,13 @@ pub fn prune(
             .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("a prune thread panicked"))))
             .collect()
     });
-    let mut surveyed: Vec<(Utf8PathBuf, Vec<Item>)> = Vec::new();
+    let mut surveyed: Vec<Surveyed> = Vec::new();
     for (dir, result) in dirs.iter().zip(swept) {
-        match result? {
-            Some((freed, items)) => {
-                report.idle.add(freed);
-                surveyed.push((dir.clone(), items));
-            }
-            None => report.busy.push(rel(target, dir).to_owned()),
-        }
+        let Swept { freed, items, busy } = result?;
+        report.idle.add(freed);
+        let was_busy = busy.is_some();
+        report.busy.extend(busy);
+        surveyed.push(Surveyed { dir: dir.clone(), busy: was_busy, items });
     }
 
     report.sweep = started.elapsed();
@@ -347,7 +403,7 @@ pub fn prune(
     report.free_before = free(target)?.saturating_add(pending);
     report.largest = census.largest;
     let mut candidates: Vec<(usize, usize, SystemTime, u64)> = Vec::new();
-    for (d, (_, items)) in surveyed.iter().enumerate() {
+    for (d, Surveyed { items, .. }) in surveyed.iter().enumerate() {
         for (i, item) in items.iter().enumerate() {
             let bytes: u64 = item.paths.iter().filter_map(|p| census.sizes.get(p)).sum();
             let age = now.duration_since(item.last_use).unwrap_or_default().as_secs();
@@ -382,36 +438,57 @@ pub fn prune(
             if planned >= excess || last_use > guard {
                 break;
             }
+            let Some(Surveyed { dir, busy, items }) = surveyed.get(d) else { continue };
+            if *busy && items.get(i).is_some_and(|item| item.kind == Kind::Unit) {
+                report.on_busy(rel(target, dir), |b| {
+                    b.held_back = b.held_back.saturating_add(bytes);
+                });
+                continue;
+            }
             planned = planned.saturating_add(bytes);
             cutoff = cutoff.max(last_use);
             chosen.entry(d).or_default().push(i);
         }
     }
     for (d, picks) in &chosen {
-        let Some((dir, items)) = surveyed.get(*d) else { continue };
-        let Some(_locks) = Locks::take(dir, opts.wait)? else {
-            report.busy.push(rel(target, dir).to_owned());
-            continue;
-        };
+        let Some(Surveyed { dir, items, .. }) = surveyed.get(*d) else { continue };
+        let locks = Locks::take(dir, opts.wait)?;
+        let name = rel(target, dir);
         for item in picks.iter().filter_map(|i| items.get(*i)) {
             // A build since the sweep read it: it is in use after all.
             if item.last_use_now() > cutoff {
                 continue;
             }
             let bytes: u64 = item.paths.iter().filter_map(|p| census.sizes.get(p)).sum();
-            item.remove(opts.dry_run)?;
-            report.budget.bytes = report.budget.bytes.saturating_add(bytes);
-            match item.kind {
-                Kind::Unit => report.budget.units = report.budget.units.saturating_add(1),
-                Kind::Cache => report.budget.caches = report.budget.caches.saturating_add(1),
+            match (&locks, item.kind) {
+                (Some(_), Kind::Unit) => {
+                    item.remove(opts.dry_run)?;
+                    report.budget.bytes = report.budget.bytes.saturating_add(bytes);
+                    report.budget.units = report.budget.units.saturating_add(1);
+                }
+                // As in the sweep, a cache that cannot go stays and the pass goes on.
+                (Some(_), Kind::Cache) => {
+                    if item.remove(opts.dry_run).is_ok() {
+                        report.budget.bytes = report.budget.bytes.saturating_add(bytes);
+                        report.budget.caches = report.budget.caches.saturating_add(1);
+                    }
+                }
+                (None, Kind::Cache) => {
+                    let swept = item.paths.first().map(|c| sweep_sessions(c, opts.dry_run));
+                    let swept = swept.unwrap_or_default();
+                    report.budget.add(swept.freed());
+                    report.on_busy(name, |b| b.record(swept));
+                }
+                (None, Kind::Unit) => report.on_busy(name, |b| {
+                    b.held_back = b.held_back.saturating_add(bytes);
+                }),
             }
         }
-        if !opts.dry_run {
+        if locks.is_some() && !opts.dry_run {
             remove_empty_packages(dir)?;
         }
     }
-    report.busy.sort();
-    report.busy.dedup();
+    report.busy.sort_by(|a, b| a.dir.cmp(&b.dir));
     report.size_after = report.size_before.saturating_sub(report.budget.bytes);
     report.free_after = if opts.dry_run {
         report.free_before.saturating_add(report.budget.bytes)
@@ -502,6 +579,14 @@ impl Locks {
             drop(build);
         }
     }
+}
+
+/// A profile directory after its sweep, as the budget sees it.
+struct Surveyed {
+    dir: Utf8PathBuf,
+    /// A build held it: its units stay.
+    busy: bool,
+    items: Vec<Item>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -612,6 +697,23 @@ struct Found {
     objects: Vec<Utf8PathBuf>,
 }
 
+impl Found {
+    /// Its last use (the ledger's, its fingerprint files' reads, its writes) and its last write.
+    fn last_use(&self, ledger: &Ledger) -> (SystemTime, SystemTime) {
+        let mut last_use = ledger.get(&self.key);
+        let mut written = UNIX_EPOCH;
+        for path in self.paths.iter().take(1) {
+            written = written.max(modified(path));
+        }
+        for file in &self.evidence {
+            let (accessed, modified) = times(file);
+            written = written.max(modified);
+            last_use = last_use.max(accessed);
+        }
+        (last_use.max(written), written)
+    }
+}
+
 /// The idle sweep of one profile directory, under its locks: delete the idle units and caches
 /// and the leftovers, record the evidence, reset the access times, and return what is left.
 fn sweep(dir: &Utf8Path, opts: Options, now: SystemTime) -> Result<(Freed, Vec<Item>)> {
@@ -624,17 +726,7 @@ fn sweep(dir: &Utf8Path, opts: Options, now: SystemTime) -> Result<(Freed, Vec<I
     let mut reset = Vec::new();
     let mut leftovers = orphans;
     for unit in units {
-        let mut last_use = ledger.get(&unit.key);
-        let mut written = UNIX_EPOCH;
-        for path in unit.paths.iter().take(1) {
-            written = written.max(modified(path));
-        }
-        for file in &unit.evidence {
-            let (accessed, modified) = times(file);
-            written = written.max(modified);
-            last_use = last_use.max(accessed);
-        }
-        last_use = last_use.max(written);
+        let (last_use, written) = unit.last_use(&ledger);
         // Without a ledger the access times were never reset: no evidence of idleness yet.
         if ledger.since.is_some() && last_use < idle_since {
             freed.bytes = freed.bytes.saturating_add(size_all(&unit.paths));
@@ -663,11 +755,14 @@ fn sweep(dir: &Utf8Path, opts: Options, now: SystemTime) -> Result<(Freed, Vec<I
             remove(path)?;
         }
     }
-    for cache in caches(dir)? {
+    for cache in caches(dir) {
         if cache.last_use < idle_since {
-            freed.bytes = freed.bytes.saturating_add(size_all(&cache.paths));
-            freed.caches = freed.caches.saturating_add(1);
-            cache.remove(opts.dry_run)?;
+            let bytes = size_all(&cache.paths);
+            // One that cannot go (a directory it may not read) stays; the pass goes on.
+            if cache.remove(opts.dry_run).is_ok() {
+                freed.bytes = freed.bytes.saturating_add(bytes);
+                freed.caches = freed.caches.saturating_add(1);
+            }
         } else {
             items.push(cache);
         }
@@ -757,20 +852,171 @@ fn units(dir: &Utf8Path) -> Result<(Vec<Found>, Vec<Utf8PathBuf>)> {
 
 /// The incremental caches of a profile directory. rustc starts a new session directory inside a
 /// crate's cache on every compile, so the newest modification among the cache and its sessions
-/// is its last compile.
-fn caches(dir: &Utf8Path) -> Result<Vec<Item>> {
+/// is its last compile. Only directories are caches: rustc writes nothing else there, and an
+/// entry it cannot have written (a file, a name that is not UTF-8) is left alone.
+fn caches(dir: &Utf8Path) -> Vec<Item> {
     let mut out = Vec::new();
-    let Ok(entries) = dir.join("incremental").read_dir_utf8() else { return Ok(out) };
-    for entry in entries {
-        let cache = entry?.into_path();
-        let evidence: Vec<Utf8PathBuf> = cache
-            .read_dir_utf8()
-            .map(|it| it.flatten().map(camino::Utf8DirEntry::into_path).collect())
-            .unwrap_or_default();
+    let Ok(entries) = dir.join("incremental").read_dir_utf8() else { return out };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let cache = entry.into_path();
+        let evidence = files_in(&cache);
         let last_use = evidence.iter().map(|p| modified(p)).fold(modified(&cache), SystemTime::max);
         out.push(Item { kind: Kind::Cache, paths: vec![cache], evidence, last_use });
     }
-    Ok(out)
+    out
+}
+
+/// The sweep of a profile directory a build holds. Its units and object files stay, since the
+/// build may link any unit's rlib, and cargo's locks are what guard them. Its idle caches go
+/// session by session under rustc's own locks ([`sweep_sessions`]). Its units are read for the
+/// budget, which counts what the build held back, and nothing of theirs is written: no ledger,
+/// no access time.
+fn sweep_busy(dir: &Utf8Path, name: &str, opts: Options, now: SystemTime) -> Swept {
+    let idle_since = now.checked_sub(opts.idle).unwrap_or(UNIX_EPOCH);
+    let mut busy = Busy { dir: name.to_owned(), ..Busy::default() };
+    let mut items = Vec::new();
+    for cache in caches(dir) {
+        match cache.paths.first() {
+            Some(path) if cache.last_use < idle_since => {
+                busy.record(sweep_sessions(path, opts.dry_run));
+            }
+            _ => items.push(cache),
+        }
+    }
+    let ledger = Ledger::read(dir);
+    // Without a ledger no unit's idleness is known, so none is one the budget could have taken.
+    // A layout mid-write reads as an error here, and then only the count of what was held is
+    // lower; the sweep under the lock is where a layout it does not know stops the pass.
+    if ledger.since.is_some()
+        && let Ok((units, _)) = units(dir)
+    {
+        for unit in units {
+            let (last_use, _) = unit.last_use(&ledger);
+            let Found { paths, evidence, .. } = unit;
+            items.push(Item { kind: Kind::Unit, paths, evidence, last_use });
+        }
+    }
+    Swept { freed: busy.swept, items, busy: Some(busy) }
+}
+
+impl Busy {
+    fn record(&mut self, sessions: Sessions) {
+        self.swept.add(sessions.freed());
+        self.sessions_held = self.sessions_held.saturating_add(sessions.held);
+        self.held_back = self.held_back.saturating_add(sessions.held_bytes);
+    }
+}
+
+/// What [`sweep_sessions`] did with one cache.
+#[derive(Clone, Copy, Debug, Default)]
+struct Sessions {
+    /// Session directories and stray lock files that went.
+    removed: usize,
+    bytes: u64,
+    /// Sessions a compile held, and their bytes.
+    held: usize,
+    held_bytes: u64,
+}
+
+impl Sessions {
+    /// A cache counts once it lost something and kept nothing in use.
+    fn freed(self) -> Freed {
+        let whole = self.removed > 0 && self.held == 0;
+        Freed { caches: usize::from(whole), bytes: self.bytes, ..Freed::default() }
+    }
+}
+
+/// Deletes an incremental cache's sessions without cargo's lock, as rustc's own collector does
+/// (`rustc_incremental::persist::fs`, `garbage_collect_session_directories`). A session
+/// `s-<time>-<random>-<svh>` (or `-working` while a compile writes it) has its lock file
+/// `s-<time>-<random>.lock` beside it. A compile holds that lock exclusively while it writes the
+/// session and shared while it reads one; the collector deletes a session only under the lock
+/// taken exclusively without waiting, then its lock file, and leaves one it cannot lock. rustc
+/// creates and locks a lock file before its session, so a session without one is debris and
+/// goes outright, and a lock file without a session goes under its lock. rustc spares a
+/// `-working` session younger than ten seconds, the moment between creating its lock file and
+/// locking it; every cache here was untouched for an hour at least. Anything else (a name rustc
+/// does not write, a directory it may not read) stays, and the pass goes on. The cache's own
+/// directory stays even when empty: rustc creates it, then its lock file inside, and a
+/// directory removed between the two fails that compile.
+fn sweep_sessions(cache: &Utf8Path, dry_run: bool) -> Sessions {
+    let mut out = Sessions::default();
+    let Ok(entries) = cache.read_dir_utf8() else { return out };
+    let mut sessions = Vec::new();
+    let mut locks = HashSet::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.starts_with("s-") {
+            continue;
+        }
+        if Utf8Path::new(name).extension() == Some("lock") {
+            locks.insert(name.to_owned());
+        } else if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            sessions.push(name.to_owned());
+        }
+    }
+    let mut matched = HashSet::new();
+    for session in &sessions {
+        let Some(lock) = session_lock(session) else { continue };
+        let path = cache.join(session);
+        let has_lock = locks.contains(&lock);
+        if has_lock {
+            matched.insert(lock.clone());
+        }
+        let guard = match has_lock.then(|| claim(&cache.join(&lock))) {
+            Some(None) => {
+                out.held = out.held.saturating_add(1);
+                out.held_bytes = out.held_bytes.saturating_add(size(&path));
+                continue;
+            }
+            claimed => claimed.flatten(),
+        };
+        let bytes = size(&path);
+        if !dry_run {
+            if remove(&path).is_err() {
+                out.bytes = out.bytes.saturating_add(bytes.saturating_sub(size(&path)));
+                continue;
+            }
+            if guard.is_some() {
+                let _gone = remove(&cache.join(&lock));
+            }
+        }
+        // Held until the session and its lock file are gone, as rustc holds it.
+        drop(guard);
+        out.removed = out.removed.saturating_add(1);
+        out.bytes = out.bytes.saturating_add(bytes);
+    }
+    for lock in locks.difference(&matched) {
+        let path = cache.join(lock);
+        let Some(guard) = claim(&path) else { continue };
+        if dry_run || remove(&path).is_ok() {
+            out.removed = out.removed.saturating_add(1);
+        }
+        drop(guard);
+    }
+    out
+}
+
+/// A session's lock file, as rustc names it (`lock_file_path`): the session's name up to its
+/// third dash, then `.lock`. `None` for a name without three dashes, which rustc never writes.
+fn session_lock(session: &str) -> Option<String> {
+    let dashes: Vec<usize> = session.match_indices('-').map(|(i, _)| i).collect();
+    let [_, _, third] = dashes.as_slice() else { return None };
+    Some(format!("{}.lock", session.get(..*third)?))
+}
+
+/// A session's lock, taken exclusively without waiting and never creating the file, or `None`
+/// when a compile holds it (or the file cannot be opened). rustc 1.98 locks with
+/// `fcntl(F_SETLK)` on macOS and with `flock` on Linux; later ones lock with `flock` (std's
+/// `File::try_lock`) everywhere. Darwin keeps both kinds in one lock list, so either blocks this
+/// `flock`; a test holds each.
+fn claim(lock: &Utf8Path) -> Option<File> {
+    let file = File::open(lock).ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 
 /// `build/<package>/` directories whose last unit went.
@@ -923,10 +1169,10 @@ struct Census {
     largest: Vec<(String, u64)>,
 }
 
-fn census(target: &Utf8Path, surveyed: &[(Utf8PathBuf, Vec<Item>)]) -> Census {
+fn census(target: &Utf8Path, surveyed: &[Surveyed]) -> Census {
     let tracked: HashSet<&Utf8Path> = surveyed
         .iter()
-        .flat_map(|(_, items)| items.iter().flat_map(|i| i.paths.iter().map(Utf8PathBuf::as_path)))
+        .flat_map(|s| s.items.iter().flat_map(|i| i.paths.iter().map(Utf8PathBuf::as_path)))
         .collect();
     let mut above: HashSet<&Utf8Path> = HashSet::new();
     for path in &tracked {

@@ -859,8 +859,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the bracket's end sequence (`ESC [ 201 ~`) is, so an editor or a shell with mode 2004
   (zsh, fish, bash 5.1+) takes a multi-line paste straight, as ghostty does. Deliberate
   pastes (`run_text`: Rerun, the agent's typed command) bypass it. `[terminal]
-  paste_protection` turns it off (`Theme::behaviour.paste_protection`, default on). Test:
-  `a_paste_that_would_run_waits_for_a_confirmation`.
+  paste_protection` turns it off (`Theme::behaviour.paste_protection`, default on). Since
+  2026-09-30 the worker applies the rule to the mode as it is when the paste arrives (ui.md,
+  "A paste is judged by the mode when it arrives"). Test:
+  `a_paste_the_worker_holds_back_waits_for_a_confirmation`.
 
 - ✅ **Bold is bright, ligatures, pointer hiding and the scroll multiplier are settings**
   (2026-09-15). Four small ghostty/Terminal.app conveniences the views had fixed: `[terminal] bold_is_bright`
@@ -2535,8 +2537,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **#89, `Terminal::paste`: taken in the binding, not used.** It chooses between a kitty paste
     event and bracketed text from the terminal's modes; without #86 it is `paste::encode` with
     its output routed through the pty-write callback, so `encode_paste` keeps `encode`. Its
-    injection check is done by the client before it sends the paste
-    (`slopty_ui::terminal::view::paste_is_safe`), against the modes of the last frame it had.
+    injection check is the worker's, against the modes as they are when the paste arrives
+    (`Engine::paste_is_safe`; see "A paste is judged by the mode when it arrives" in ui.md).
   - **#88, search wrapper: taken in the binding, not used.** The 2026-09-12 ruling on native
     search holds: its matching still folds ASCII case only.
   - **#92, unsupported-sequence callbacks: taken in the binding, still rejected** for the

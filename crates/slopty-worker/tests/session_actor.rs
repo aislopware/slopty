@@ -1331,10 +1331,43 @@ done"#
         session.attach(me, size(40, 6), tx).unwrap();
         let mut paste = format!("{}\n", "x".repeat(99)).repeat(2_600);
         paste.push_str("end\n");
-        session.request(me, TermRequest::Paste(paste)).unwrap();
+        session.request(me, TermRequest::Paste { text: paste, confirmed: true }).unwrap();
         let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("END")).await;
         assert!(text(&screen).contains("END"), "{}", text(&screen));
         assert_eq!(session.snapshot().await.unwrap().viewers, 1, "the actor answers");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A paste is judged by the program's mode when it arrives, not the one the client last saw
+    /// in a frame: bracketed paste on in the frame, off by the time the paste comes, and the
+    /// unconfirmed paste of a line that would run comes back unwritten. Confirmed, it is written.
+    #[tokio::test]
+    async fn a_paste_that_would_run_under_the_mode_now_comes_back_unwritten() {
+        use slopty_grid::TermModes;
+
+        let script = r"printf '\033[?2004hON'; sleep 0.5; printf '\033[?2004lOFF'; exec cat";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let me = ClientId::new();
+        let (tx, mut rx) = viewer(256);
+        session.attach(me, size(40, 6), tx).unwrap();
+        wait_for(&mut rx, |_, s| text(s).contains("ON")).await;
+        assert!(rx.state.modes().contains(TermModes::BRACKETED_PASTE), "the frame said so");
+        wait_for(&mut rx, |_, s| text(s).contains("OFF")).await;
+
+        let line = "echo hi\n".to_owned();
+        session.request(me, TermRequest::Paste { text: line.clone(), confirmed: false }).unwrap();
+        let (events, _) = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::PasteHeld { text } if *text == line))
+        })
+        .await;
+        assert!(!events.is_empty());
+        session.request(me, TermRequest::Raw(b"MARK\n".to_vec())).unwrap();
+        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("MARK")).await;
+        assert!(!text(&screen).contains("echo hi"), "not written: {}", text(&screen));
+
+        session.request(me, TermRequest::Paste { text: line, confirmed: true }).unwrap();
+        wait_for(&mut rx, |_, s| text(s).contains("echo hi")).await;
         session.close();
         let _killed = child.kill().await;
     }

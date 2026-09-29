@@ -432,7 +432,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   was 98 % full: `debug/incremental` alone held 161 GB in 3 887 caches and `debug/deps` 95 GB.
   The one-day idle sweep above could not keep up with several agents and five gate lanes
   building all day, and `cargo xtask prune --idle-hours 6` freed 274 GB by hand. `xtask prune`
-  now does five things, still under cargo's locks:
+  now does the following, under cargo's locks except for a busy directory's caches:
   - **The budget and the floor.** After the idle sweep, when `target/` holds more than the
     budget (160 GB, `SLOPTY_TARGET_BUDGET_GB`) or its volume has less than the floor free
     (50 GB, `SLOPTY_DISK_FLOOR_GB`), it deletes units and incremental caches least recently used
@@ -443,10 +443,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     GB keeps a day's work with room for one toolchain or fork bump. A cold full gate writes
     about 36 GB, so a gate that starts above 50 GB free finishes. Numbers: MEASUREMENTS
     "target/ under a budget".
-  - **The gate refuses to start under the floor.** It first runs the budget pass (skipping busy
-    directories); if the volume is still under the floor, it stops and prints the free space,
-    the floor and the largest entries under `target/`, with what to delete. A full disk would
-    otherwise fail a lane halfway.
+  - **The gate refuses to start under the floor.** It first runs the budget pass (without
+    waiting on busy directories); if the volume is still under the floor, it stops and prints
+    the free space, the floor and the largest entries under `target/`, with what to delete. It
+    names a busy directory only when that build held something the pass would have deleted, so
+    "busy" in the refusal is the reason it fell short. A full disk would otherwise fail a lane
+    halfway.
+  - **A busy directory still loses its caches.** Agents build in `target/debug` all day, so its
+    cargo lock was almost never free and the pass skipped it whole. On 2026-09-30 the gate
+    refused on the floor with `debug: busy, skipped` while `debug/incremental` held 70 GB
+    untouched for over three hours; deleting them by hand freed 62 GB. In a directory a build
+    holds, the pass now keeps the units and object files (the build may link any unit's rlib)
+    but deletes idle caches, and caches the budget picks, one session at a time as rustc's own
+    collector does (`rustc_incremental::persist::fs`, `garbage_collect_session_directories`).
+    Each session `s-<time>-<random>-<svh>` (`-working` while a compile writes it) has a lock
+    file `s-<time>-<random>.lock` beside it. A compile holds it exclusively while it writes and
+    shared while it reads. The pass takes it exclusively without waiting, deletes the session
+    and then the lock file, and skips and counts a session it cannot lock. As in rustc, a
+    session with no lock file is debris and goes, and so does a lock file with no session,
+    under its lock. rustc 1.98 locks with `fcntl(F_SETLK)` on macOS; beta and nightly lock with
+    `flock` (std's `File::try_lock`). Darwin keeps both kinds in one lock list, so one `flock`
+    attempt sees either (checked on this Mac across two processes; a test holds each kind).
+    The crate's cache directory stays even when empty, because rustc creates it and then its
+    lock file inside, and a directory removed between the two fails that compile. Names rustc
+    does not write, and directories the pass may not read, stay without stopping the pass. The
+    busy directory's units are only read, to count what the build held back for the refusal;
+    its ledger and access times are left alone. The report reads `debug: busy, units kept; 94
+    caches swept, 3.4 GB`, and "busy" now means only that the units were not pruned. By hand,
+    `cargo xtask prune` still waits for a busy directory.
   - **The evidence is a ledger.** Each pass records every unit's last use in `.xtask-prune`
     and sets the fingerprint files' access times back to the epoch, so the next read stamps them
     again (APFS stamps an access time only while it is older than the modification time; a test
@@ -479,7 +503,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `xtask/src/prune/tests.rs` builds fixture profile directories in both layouts with
     staged times. It covers the idle sweep, the first pass, the objects, the budget's order and
     its one-hour guard, the floor and the gate's refusal, a held lock of either kind, a dry run
-    and an unknown layout. No test runs cargo.
+    and an unknown layout. In a busy directory it covers the session-by-session sweep, including
+    a session locked by `flock` and one locked by `fcntl` from a child process (a process drops
+    its own `fcntl` locks on a file when it closes any descriptor of it). It also covers the
+    budget taking a busy directory's caches while its units stay, and odd entries in
+    `incremental/` that stay without stopping the pass. No test runs cargo.
   - Not done: moving the gate's lanes to the internal disk (next entry).
 
 - ✅ **A test binary's directory, not the volume, is what slowed `VideoToolbox`; the gate's lanes

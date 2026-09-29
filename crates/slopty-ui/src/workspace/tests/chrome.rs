@@ -764,3 +764,86 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.hosts_open()), "Workers opens the hosts");
     assert!(cx.debug_bounds("status-workers").is_none(), "with every worker up");
 }
+
+/// What a frame costs while the pointer moves over a shell and the strip is built for
+/// something else in the same frame (a spring, a hover on its chrome): 60 shells and 60 notes
+/// with the navigator docked, the pointer crossing the focused shell's grid a cell at a time.
+/// Run by hand (it prints, it does not judge); `docs/MEASUREMENTS.md` has the numbers and the
+/// command.
+#[gpui::test]
+#[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+fn measure_a_pointer_frame_beside_the_chrome(cx: &mut TestAppContext) {
+    const FRAMES: usize = 400;
+    const WARM: usize = 20;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let sessions = crowd(&view, cx, &studio, 60, 60);
+    let last = *sessions.last().expect("a shell");
+    let tile = view.read_with(cx, |v, _| v.tile_of_session(last)).expect("its tile");
+    let dense = dense_screen(DENSE_ROWS);
+    let dense: Vec<&str> = dense.iter().map(String::as_str).collect();
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(last, frame(&dense), cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    let body = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
+    let strip = view.read_with(cx, |v, _| v.strip_host.entity_id());
+    let terminal = view.read_with(cx, |v, _| v.terminal(last).cloned()).expect("attached");
+    let mut took = Vec::with_capacity(FRAMES);
+    let drawn = terminal.read_with(cx, |t, _| t.renders());
+    for n in 0..WARM + FRAMES {
+        let step = f32::from(u16::try_from(n % 200).unwrap_or(0));
+        let at = body.origin + point(px(20.0 + step * 2.0), body.size.height / 2.0);
+        let start = Instant::now();
+        cx.simulate_mouse_move(at, None, Modifiers::default());
+        cx.update(|_w, cx| cx.notify(strip));
+        cx.run_until_parked();
+        if n >= WARM {
+            took.push(start.elapsed());
+        }
+    }
+    took.sort_unstable();
+    let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+    let built = terminal.read_with(cx, |t, _| t.renders()).saturating_sub(drawn);
+    println!(
+        "MEASURE pointer frame beside the chrome, 60 shells + 60 notes, {FRAMES} frames: p50 \
+         {:.3} ms p95 {:.3} ms; the shell under the pointer built {built} times",
+        pct(50),
+        pct(95)
+    );
+}
+
+/// What the keyboard moving between two shells costs, the frame that moves it and the one
+/// after, over 60 shells and 60 notes with the navigator docked. Run by hand (it prints, it
+/// does not judge); `docs/MEASUREMENTS.md` has the numbers and the command.
+#[gpui::test]
+#[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+fn measure_the_keyboard_moving_beside_the_chrome(cx: &mut TestAppContext) {
+    const MOVES: usize = 200;
+    const WARM: usize = 10;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let sessions = crowd(&view, cx, &studio, 60, 60);
+    let pair: Vec<SessionId> = sessions.iter().rev().take(2).copied().collect();
+    let mut took = Vec::with_capacity(MOVES);
+    for n in 0..WARM + MOVES {
+        let start = Instant::now();
+        view.update_in(cx, |v, _w, cx| {
+            v.pending_focus = Some(pair[n % 2]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        if n >= WARM {
+            took.push(start.elapsed());
+        }
+    }
+    took.sort_unstable();
+    let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+    println!(
+        "MEASURE the keyboard moving beside the chrome, 60 shells + 60 notes, {MOVES} moves: \
+         p50 {:.3} ms p95 {:.3} ms",
+        pct(50),
+        pct(95)
+    );
+}

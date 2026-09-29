@@ -127,7 +127,9 @@ fn link_remote(
 fn pasted(sent: Vec<ClientMsg>, shell: SessionId) -> Vec<String> {
     sent.into_iter()
         .filter_map(|m| match m {
-            ClientMsg::Term { session, req: TermRequest::Paste(text) } if session == shell => {
+            ClientMsg::Term { session, req: TermRequest::Paste { text, .. } }
+                if session == shell =>
+            {
                 Some(text)
             }
             _ => None,
@@ -635,7 +637,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
         .drain()
         .into_iter()
         .filter_map(|m| match m {
-            ClientMsg::Term { req: TermRequest::Paste(text), .. } => Some(text),
+            ClientMsg::Term { req: TermRequest::Paste { text, .. }, .. } => Some(text),
             _ => None,
         })
         .collect();
@@ -724,7 +726,9 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
         .drain()
         .into_iter()
         .filter_map(|m| match m {
-            ClientMsg::Term { session, req: TermRequest::Paste(text) } if session == shell => {
+            ClientMsg::Term { session, req: TermRequest::Paste { text, .. } }
+                if session == shell =>
+            {
                 Some(text)
             }
             _ => None,

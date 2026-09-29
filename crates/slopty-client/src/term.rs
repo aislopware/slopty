@@ -56,6 +56,9 @@ pub enum Effect {
         /// The newest hits, oldest first.
         matches: Vec<SearchMatch>,
     },
+    /// The worker sent back a paste that would run something under the program's mode as it
+    /// is now, unwritten, for the person to confirm.
+    PasteHeld(String),
     /// The regex in a search did not compile.
     SearchInvalid {
         /// The needle it answers.
@@ -472,6 +475,7 @@ impl TermState {
             TermEvent::SearchInvalid { needle, message } => {
                 vec![Effect::SearchInvalid { needle, message }]
             }
+            TermEvent::PasteHeld { text } => vec![Effect::PasteHeld(text)],
             TermEvent::Marker { id } => {
                 vec![Effect::Request(TermRequest::Reached { marker: id })]
             }

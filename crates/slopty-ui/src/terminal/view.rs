@@ -47,14 +47,6 @@ const SEARCH_REFRESH: Duration = Duration::from_millis(300);
 /// How often a selection dragged past the grid's edge scrolls, and the most lines one tick
 /// moves (the pointer's distance past the edge picks the pace, one line per row of distance).
 const AUTOSCROLL_TICK: Duration = Duration::from_millis(50);
-/// Whether a paste can go straight to the program (ghostty's `clipboard-paste-protection`):
-/// outside bracketed paste a newline runs whatever precedes it, inside it the end sequence
-/// closes the bracket and the rest is typed. Either waits for a confirmation.
-#[must_use]
-pub(super) fn paste_is_safe(text: &str, bracketed: bool) -> bool {
-    if bracketed { !text.contains("\x1b[201~") } else { !text.contains(['\n', '\r']) }
-}
-
 /// Half a blink: the cursor (and SGR 5 text) shows for this long, then hides for as long.
 /// Ghostty's cadence.
 const BLINK_HALF: Duration = Duration::from_millis(600);
@@ -621,7 +613,7 @@ impl TerminalView {
         reason = "the composer's paste; the inherent method wins over `EntityInputHandler::paste`"
     )]
     pub fn paste(&mut self, text: String, cx: &Context<Self>) {
-        self.send(TermRequest::Paste(text), cx);
+        self.send(TermRequest::Paste { text, confirmed: true }, cx);
     }
 
     /// The worker's word on the agent in this session (`None`: no agent).
@@ -1935,12 +1927,10 @@ impl TerminalView {
         let Some(text) = text else { return };
         self.selection = None;
         self.state.scroll_to_bottom();
-        let bracketed = self.state.modes().contains(TermModes::BRACKETED_PASTE);
-        if self.theme.behaviour.paste_protection && !paste_is_safe(&text, bracketed) {
-            self.pending = Some(Pending::Paste(text));
-        } else {
-            self.send(TermRequest::Paste(text), cx);
-        }
+        // Whether it could run something is the worker's to judge, by the program's mode as it
+        // is when the paste arrives (`TermEvent::PasteHeld`); the last frame's may be stale.
+        let confirmed = !self.theme.behaviour.paste_protection;
+        self.send(TermRequest::Paste { text, confirmed }, cx);
         cx.notify();
     }
 
@@ -1960,7 +1950,9 @@ impl TerminalView {
     /// close is confirmed to the workspace.
     pub fn confirm_pending(&mut self, cx: &mut Context<Self>) {
         match self.pending.take() {
-            Some(Pending::Paste(text)) => self.send(TermRequest::Paste(text), cx),
+            Some(Pending::Paste(text)) => {
+                self.send(TermRequest::Paste { text, confirmed: true }, cx);
+            }
             Some(Pending::Close(_)) => cx.emit(TerminalViewEvent::CloseConfirmed),
             None => return,
         }
@@ -2399,6 +2391,10 @@ impl TerminalView {
                 }
                 Effect::SearchInvalid { needle, message } => {
                     self.search_invalid(&needle, message, cx);
+                }
+                Effect::PasteHeld(text) => {
+                    self.pending = Some(Pending::Paste(text));
+                    cx.notify();
                 }
                 Effect::CommandStarted(command) => {
                     tracing::info!(session = %self.session, %command, "command started");
@@ -2872,8 +2868,10 @@ impl TerminalView {
     fn send(&mut self, req: TermRequest, cx: &Context<Self>) {
         // Bytes the predictor never saw as keys (a line-editing chord, a paste) move the
         // cursor where its guesses cannot follow.
-        if matches!(req, TermRequest::Raw(_) | TermRequest::Paste(_) | TermRequest::PastePicture(_))
-        {
+        if matches!(
+            req,
+            TermRequest::Raw(_) | TermRequest::Paste { .. } | TermRequest::PastePicture(_)
+        ) {
             self.predictor.interrupt();
         }
         self.post(req, cx);
@@ -4008,7 +4006,7 @@ struct BlockMenu {
 /// What waits on a confirmation at the tile's foot.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Pending {
-    /// A paste held back by paste protection until ↩ or the Paste button sends it.
+    /// A paste the worker held back (paste protection) until ↩ or the Paste button sends it.
     Paste(String),
     /// The close of a shell whose command (the first line of it) is still running.
     Close(String),
@@ -4910,91 +4908,69 @@ mod tests {
         assert!(phase(cx).1, "always: a steady program's cursor blinks");
     }
 
-    /// Paste protection: a newline into a shell without bracketed paste waits (↩ sends it,
-    /// Esc drops it, another key drops it and types), a bracketed paste goes straight
-    /// unless it holds the bracket's end, and the setting turns the wait off.
+    /// Paste protection is the worker's to judge, by the program's mode when the paste
+    /// arrives: every paste goes out unconfirmed, whatever the last frame said. One the worker
+    /// sends back waits at the tile's foot: ↩ sends it again confirmed, Esc drops it, another
+    /// key drops it and types. With the setting off a paste goes out confirmed.
     #[gpui::test]
-    fn a_paste_that_would_run_waits_for_a_confirmation(cx: &mut TestAppContext) {
-        assert!(paste_is_safe("ls\n", true) && !paste_is_safe("ls\n", false));
-        assert!(paste_is_safe("ls", false) && !paste_is_safe("ls\r", false));
-        assert!(!paste_is_safe("a\x1b[201~rm\n", true));
-
+    fn a_paste_the_worker_holds_back_waits_for_a_confirmation(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
-        let frame = |seq, modes| {
-            TermEvent::Frame(Frame {
-                seq,
-                full: true,
-                epoch: 0,
-                cols: 10,
-                rows: 3,
-                cursor: Cursor::default(),
-                modes,
-                oldest_line: LineIndex(0),
-                first_visible_line: LineIndex(0),
-                total_lines: 3,
-                input_ack: 0,
-                images: Vec::new(),
-                updates: vec![RowUpdate {
-                    row: 0,
-                    line: Line::from_text("$ ", 10, Style::DEFAULT).into(),
-                }],
-            })
+        let bracketed = match history_frame(0, &["$ "]) {
+            TermEvent::Frame(mut f) => {
+                f.modes = TermModes::BRACKETED_PASTE;
+                TermEvent::Frame(f)
+            }
+            other => other,
         };
         let pastes = |rx: &mut mpsc::Receiver<ClientMsg>| {
             std::iter::from_fn(|| rx.try_recv().ok())
                 .filter_map(|msg| match msg {
-                    ClientMsg::Term { req: TermRequest::Paste(text), .. } => Some(text),
+                    ClientMsg::Term { req: TermRequest::Paste { text, confirmed }, .. } => {
+                        Some((text, confirmed))
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>()
         };
-        let put = |cx: &mut VisualTestContext, text: &str| {
-            cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.into())));
+        let pending = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, _| v.pending_paste().map(str::to_owned))
         };
-        view.update_in(cx, |view, _window, cx| view.apply(frame(1, TermModes::empty()), cx));
+        let held = |cx: &mut VisualTestContext, text: &str| {
+            let back = TermEvent::PasteHeld { text: text.to_owned() };
+            view.update_in(cx, |view, _window, cx| view.apply(back, cx));
+            cx.run_until_parked();
+        };
+        let run = "make\nrm -rf build\n".to_owned();
+        cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(run.clone())));
+        // The last frame says bracketed paste is on; the program may have turned it off since.
+        view.update_in(cx, |view, _window, cx| view.apply(bracketed, cx));
         cx.run_until_parked();
+        drop(pastes(&mut rx));
 
-        put(cx, "make\nrm -rf build\n");
         cx.simulate_keystrokes("cmd-v");
         cx.run_until_parked();
-        assert!(pastes(&mut rx).is_empty(), "held back");
-        assert_eq!(
-            view.read_with(cx, |v, _| v.pending_paste().map(str::to_owned)).as_deref(),
-            Some("make\nrm -rf build\n")
-        );
+        assert_eq!(pastes(&mut rx), [(run.clone(), false)], "out, for the worker to judge");
+        assert_eq!(pending(cx), None, "nothing asked on the last frame's word");
+
+        held(cx, &run);
+        assert_eq!(pending(cx).as_deref(), Some(run.as_str()), "the held paste waits");
+        assert!(cx.debug_bounds("paste-confirm").is_some(), "at the tile's foot");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        assert_eq!(pastes(&mut rx), ["make\nrm -rf build\n"], "\u{21a9} sends it whole");
-        assert!(view.read_with(cx, |v, _| v.pending_paste().is_none()));
+        assert_eq!(pastes(&mut rx), [(run.clone(), true)], "\u{21a9} sends it confirmed");
+        assert_eq!(pending(cx), None);
 
-        cx.simulate_keystrokes("cmd-v");
+        held(cx, &run);
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        assert!(
-            pastes(&mut rx).is_empty() && view.read_with(cx, |v, _| v.pending_paste().is_none()),
-            "Esc drops it"
-        );
+        assert!(pastes(&mut rx).is_empty() && pending(cx).is_none(), "Esc drops it");
 
-        cx.simulate_keystrokes("cmd-v");
+        held(cx, &run);
         cx.simulate_keystrokes("x");
         cx.run_until_parked();
         assert!(pastes(&mut rx).is_empty(), "another key drops it");
-        assert!(view.read_with(cx, |v, _| v.pending_paste().is_none()));
+        assert_eq!(pending(cx), None);
 
-        put(cx, "one line");
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        assert_eq!(pastes(&mut rx), ["one line"], "nothing to run: straight through");
-
-        view.update_in(cx, |view, _window, cx| {
-            view.apply(frame(2, TermModes::BRACKETED_PASTE), cx);
-        });
-        put(cx, "make\nrm -rf build\n");
-        cx.simulate_keystrokes("cmd-v");
-        cx.run_until_parked();
-        assert_eq!(pastes(&mut rx).len(), 1, "bracketed: the program sees a paste, not keys");
-
-        view.update_in(cx, |view, _window, cx| view.apply(frame(3, TermModes::empty()), cx));
         view.update_in(cx, |view, _window, cx| {
             let mut theme = Theme::new(slopty_theme::Variant::Dark);
             theme.behaviour.paste_protection = false;
@@ -5002,7 +4978,7 @@ mod tests {
         });
         cx.simulate_keystrokes("cmd-v");
         cx.run_until_parked();
-        assert_eq!(pastes(&mut rx).len(), 1, "protection off: straight through");
+        assert_eq!(pastes(&mut rx), [(run, true)], "protection off: confirmed as sent");
     }
 
     /// A picture copied here with no text reaches the worker's pasteboard ahead of ⌘V and ⌃V:
@@ -5047,7 +5023,7 @@ mod tests {
                     ClientMsg::Term { req: TermRequest::Key(key), .. } => {
                         format!("key {:?}-{:?}", key.mods, key.code)
                     }
-                    ClientMsg::Term { req: TermRequest::Paste(text), .. } => {
+                    ClientMsg::Term { req: TermRequest::Paste { text, .. }, .. } => {
                         format!("paste {text}")
                     }
                     other => other.kind().to_owned(),
@@ -6660,7 +6636,7 @@ mod tests {
                     }
                     out.push(name);
                 }
-                ClientMsg::Term { req: TermRequest::Paste(text), .. } => {
+                ClientMsg::Term { req: TermRequest::Paste { text, .. }, .. } => {
                     out.push(format!("paste:{text}"));
                 }
                 _ => {}
@@ -8260,7 +8236,7 @@ mod tests {
         let pasted = |rx: &mut mpsc::Receiver<ClientMsg>| {
             std::iter::from_fn(|| rx.try_recv().ok())
                 .filter_map(|msg| match msg {
-                    ClientMsg::Term { req: TermRequest::Paste(text), .. } => Some(text),
+                    ClientMsg::Term { req: TermRequest::Paste { text, .. }, .. } => Some(text),
                     ClientMsg::Term { req: TermRequest::Key(key), .. } => {
                         Some(format!("{:?}", key.code))
                     }
@@ -8296,7 +8272,7 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             out.push(match msg {
                 ClientMsg::Term { req: TermRequest::Key(_), .. } => "key".to_owned(),
-                ClientMsg::Term { req: TermRequest::Paste(_), .. } => "paste".to_owned(),
+                ClientMsg::Term { req: TermRequest::Paste { .. }, .. } => "paste".to_owned(),
                 ClientMsg::Term { req: TermRequest::Clear, .. } => "clear".to_owned(),
                 // Resizes and the like: not what these tests are about.
                 _ => continue,

@@ -265,7 +265,7 @@ impl WorkspaceView {
                             let paths: Vec<String> =
                                 paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
                             let text = paste_paths(&paths);
-                            let paste = TermRequest::Paste(text);
+                            let paste = TermRequest::Paste { text, confirmed: false };
                             this.send_session(session, ClientMsg::Term { session, req: paste });
                         }
                         _ => this.show_notice("The copied files are gone".to_owned(), cx),
@@ -644,7 +644,10 @@ impl WorkspaceView {
                         let text = paste_paths(&paths);
                         self.send_session(
                             session,
-                            ClientMsg::Term { session, req: TermRequest::Paste(text) },
+                            ClientMsg::Term {
+                                session,
+                                req: TermRequest::Paste { text, confirmed: false },
+                            },
                         );
                     }
                     Some(_) => {}
