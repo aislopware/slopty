@@ -692,8 +692,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_promise_is_kept_when_read`, `a_capped_read_of_a_big_copy_copies_nothing`; and the worker e2e
     `pbpaste_on_the_worker_sees_the_focused_clients_copy` (a real cross-process promise read
     on a named pasteboard, the worker's board holding a copy from before it started and the
-    client's copy half a minute old) and `a_copy_reaches_a_watching_client_within_a_poll`. Numbers in
-    `docs/MEASUREMENTS.md`, "Clipboard v2".
+    client's copy half a minute old) and `a_copy_reaches_a_watching_client_within_a_poll`. The
+    app e2e (`tests/app/clipboard.rs`, named pasteboards only) drives the app's own half:
+    `text_copied_on_one_worker_is_ready_to_paste_in_another_workers_window` (a second worker
+    behind a relay, its drawn window focused, and its pasteboard read through the promise that
+    fetches via the app from the first worker),
+    `a_multi_item_copy_arrives_as_its_items` and
+    `the_focused_clients_copy_is_on_the_workers_pasteboard` (copied while a note had the focus,
+    mirrored as the shell takes it back). Numbers in `docs/MEASUREMENTS.md`, "Clipboard v2".
   - Not in this stage: files as File Provider placeholders (S2 on), and the exception for a
     copy made in a streamed window just before its client switched tiles, which is still not
     announced to that client.

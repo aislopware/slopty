@@ -6,6 +6,10 @@
 //! `--screen-recording`.
 
 #[cfg(test)]
+#[path = "app/clipboard.rs"]
+mod clipboard;
+
+#[cfg(test)]
 #[path = "app/conversation.rs"]
 mod conversation;
 

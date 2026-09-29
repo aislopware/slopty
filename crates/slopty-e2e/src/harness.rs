@@ -1459,7 +1459,21 @@ impl SecondWorker {
     ///
     /// When a binary is missing, a daemon does not come up or the relay cannot bind.
     pub async fn launch(name: &str, link: slopty_shape::Link) -> Result<Self> {
-        Self::launch_with(name, link, None).await
+        Self::launch_with(name, link, None, &[]).await
+    }
+
+    /// [`Self::launch`] with `env` on top of the daemons' own (such as the drawn screen,
+    /// `SLOPTY_SYNTHETIC_SCREEN`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_env(
+        name: &str,
+        link: slopty_shape::Link,
+        env: &[(&str, &str)],
+    ) -> Result<Self> {
+        Self::launch_with(name, link, None, env).await
     }
 
     /// [`Self::launch`] with the worker registered with `server`, so the app finds it in the
@@ -1478,13 +1492,14 @@ impl SecondWorker {
         link: slopty_shape::Link,
         server: &ServerDaemon,
     ) -> Result<Self> {
-        Self::launch_with(name, link, Some(server)).await
+        Self::launch_with(name, link, Some(server), &[]).await
     }
 
     async fn launch_with(
         name: &str,
         link: slopty_shape::Link,
         server: Option<&ServerDaemon>,
+        extra: &[(&str, &str)],
     ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-second-")?;
         let root = dir.path();
@@ -1496,6 +1511,7 @@ impl SecondWorker {
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
         let home_env = home.to_string_lossy();
         let mut env = vec![("HOME", &*home_env)];
+        env.extend_from_slice(extra);
         let server = server.map(ServerDaemon::address_v6);
         if server.is_some() {
             env.push(("SLOPTY_BIND", "127.0.0.1"));
@@ -1529,6 +1545,12 @@ impl SecondWorker {
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    /// The named pasteboard it keeps its clipboard on ([`pasteboard_name`]).
+    #[must_use]
+    pub fn pasteboard(&self) -> String {
+        pasteboard_name(self.dir.path(), "worker")
     }
 
     /// What the relay has carried and dropped each way so far.
