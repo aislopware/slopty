@@ -256,4 +256,46 @@ mod crash {
             "the thread's closure faulted: {first:?}"
         );
     }
+
+    /// A shipped build: this test binary with its debug info stripped (`strip -S`, as the dist
+    /// profile's `strip = "debuginfo"` does), alone in a directory and then with its dSYM
+    /// beside it, as a bundle ships it. Alone, the report still names every frame from the
+    /// symbol table, without file or line; with the dSYM, the frames have them again.
+    #[test]
+    fn a_shipped_build_resolves_through_its_dsym_and_names_frames_without_it() {
+        let exe = std::env::current_exe().unwrap();
+        let shipped = tempfile::tempdir().unwrap();
+        let copy = shipped.path().join("crash");
+        std::fs::copy(&exe, &copy).unwrap();
+        assert!(Command::new("strip").arg("-S").arg(&copy).status().unwrap().success(), "strip");
+        let run = |label: &str| {
+            let data = tempfile::tempdir().unwrap();
+            let args = ["--exact", "crash::child", "--nocapture"];
+            let crashed = probe::run(&copy, &args, Trigger::Panic, data.path()).unwrap();
+            eprintln!("{label}:");
+            let report = only(&crashed).clone();
+            let first = report.frames.first().unwrap();
+            assert!(
+                first
+                    .function
+                    .as_deref()
+                    .is_some_and(|f| f.starts_with("slopty_crash::probe::panic")),
+                "{label}: named where the panic was raised: {:#?}",
+                report.frames
+            );
+            report
+        };
+
+        let bare = run("without its debug info");
+        let child = find(&bare, "crash::crash::child");
+        assert_eq!((&child.file, child.line), (&None, None), "no line table left: {child:?}");
+        find(&bare, "slopty_crash::install");
+
+        let dsym = shipped.path().join("crash.dSYM");
+        let made = Command::new("dsymutil").arg(&exe).arg("-o").arg(&dsym).output().unwrap();
+        assert!(made.status.success(), "dsymutil: {}", String::from_utf8_lossy(&made.stderr));
+        let resolved = run("with its dSYM");
+        assert_resolved(find(&resolved, "crash::crash::child"), "tests/crash.rs");
+        assert_resolved(find(&resolved, "slopty_crash::install"), "src/lib.rs");
+    }
 }

@@ -58,6 +58,16 @@ jobs:
         run: brew install zig
       - run: cargo xtask setup --lane ${{ matrix.lane }}
       - run: cargo xtask gate --ci --lane ${{ matrix.lane }}
+      # What a slow run is read from afterwards: each test's time, and how much of the build the
+      # compile cache served.
+      - if: always() && matrix.lane == 'tests'
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: target/**/nextest/ci/junit.xml
+          if-no-files-found: ignore
+      - if: always() && matrix.lane != 'tools'
+        run: $SCCACHE_PATH --show-stats
 
   # Unsigned, un-notarized artifacts for now; Developer-ID signing + notarization land with
   # `cargo xtask dist`.
@@ -88,9 +98,11 @@ jobs:
       - run: cargo binstall --no-confirm git-cliff@2.14.1
       - run: brew install zig
       - run: cargo build --profile dist -p slopty-workerd -p slopty-ptyd
+      # Each binary's dSYM goes beside it, where crash reports resolve their frames from it. Cargo
+      # leaves `<bin>.dSYM` as a link into `deps`, so `-h` stores what it points at.
       - run: |
           mkdir -p dist
-          tar -C target/dist -czf dist/slopty-worker-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz slopty-worker slopty-ptyd
+          tar -C target/dist -h -czf dist/slopty-worker-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz slopty-worker slopty-worker.dSYM slopty-ptyd slopty-ptyd.dSYM
           git cliff --latest --strip all > dist/notes.md
       - uses: softprops/action-gh-release@v2
         with:

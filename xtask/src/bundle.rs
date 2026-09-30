@@ -5,6 +5,12 @@
 //! `Contents/MacOS/slopty worker install` (or `server install`) to turn the machine into a worker
 //! (or the server). `Info.plist` is generated from the workspace version; signing is ad hoc unless
 //! `--sign` names a Developer ID identity.
+//!
+//! A shipping bundle is built with the `dist` profile, and each binary's dSYM sits beside it in
+//! `Contents/MacOS`: that is where a crash report's frames are resolved (`backtrace` looks for a
+//! `*.dSYM` with the executable's UUID in the executable's own directory), so a user's report
+//! has file, line and inlined frames. `docs/decisions/crashes.md`, "Shipped builds carry their
+//! dSYMs".
 
 use anyhow::{Result, bail};
 use camino::Utf8PathBuf;
@@ -26,7 +32,8 @@ const BINARIES: [&str; 5] =
 /// `xtask bundle` options.
 #[derive(Args, Debug, Clone)]
 pub struct BundleOpts {
-    /// Build with `--release` (default); `--debug` for a dev bundle.
+    /// Build with the `dist` profile (default); `--debug` for a dev bundle, whose debug info
+    /// stays in this checkout's object files.
     #[arg(long)]
     debug: bool,
     /// Code-signing identity (`Developer ID Application: …`); ad hoc when omitted.
@@ -39,8 +46,8 @@ pub struct BundleOpts {
 
 pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
     let root = repo_root()?;
-    let profile = if opts.debug { "debug" } else { "release" };
-    let flags: &[&str] = if opts.debug { &[] } else { &["--release"] };
+    let profile = if opts.debug { "debug" } else { "dist" };
+    let flags: &[&str] = if opts.debug { &[] } else { &["--profile", "dist"] };
     step(
         &format!("cargo build ({profile})"),
         &cmd!(
@@ -65,6 +72,16 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
             bail!("missing {from}");
         }
         sh.copy_file(&from, macos.join(bin))?;
+        if !opts.debug {
+            let dsym = format!("{bin}.dSYM");
+            let from = built.join(&dsym);
+            if !from.exists() {
+                bail!("missing {from}: the dist profile packs each binary's debug info");
+            }
+            let to = macos.join(&dsym);
+            // Cargo leaves `<bin>.dSYM` as a link into `deps`: copy what it points at.
+            cmd!(sh, "cp -RL {from} {to}").run()?;
+        }
     }
     let version = crate::release::current_version(sh)?;
     sh.write_file(contents.join("Info.plist"), info_plist(&version))?;
@@ -73,8 +90,16 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
     crate::icon::compile_macos(sh, &icon, &resources)?;
     sh.write_file(contents.join("PkgInfo"), "APPL????")?;
     let identity = opts.sign.as_deref().unwrap_or("-");
-    // Sign the nested binaries first, then the bundle; `--deep` is deprecated for a reason.
+    // Sign the nested code first, then the bundle; `--deep` is deprecated for a reason. A dSYM
+    // is signed as a bundle, which leaves its DWARF file as it is.
     for bin in BINARIES.iter().rev() {
+        let dsym = macos.join(format!("{bin}.dSYM"));
+        if dsym.exists() {
+            step(
+                &format!("codesign {bin}.dSYM"),
+                &cmd!(sh, "codesign --force --timestamp=none --sign {identity} {dsym}"),
+            )?;
+        }
         let path = macos.join(bin);
         step(
             &format!("codesign {bin}"),

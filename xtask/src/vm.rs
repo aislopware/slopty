@@ -1063,10 +1063,87 @@ fn archive(dir: &Utf8Path, packages: &[String], tests: &[String]) -> Result<Utf8
     }
     let started = Instant::now();
     println!("▶ archive the tests of {}", packages.join(", "));
-    let status = archiving.current_dir(repo_root()?).status().context("cargo nextest archive")?;
+    let root = repo_root()?;
+    let status = archiving.current_dir(&root).status().context("cargo nextest archive")?;
     ensure!(status.success(), "cargo nextest archive: {status}");
     println!("  ✓ archived in {:.1?}", started.elapsed());
+    debug_info(&debug_dir(&archive), &root, &test_binaries(&root, packages, tests)?)?;
     Ok(archive)
+}
+
+/// Where [`debug_info`] puts the dSYMs of `archive`'s binaries: beside it, laid out as under
+/// the checkout.
+fn debug_dir(archive: &Utf8Path) -> Utf8PathBuf {
+    archive.with_file_name("debug")
+}
+
+/// What `cargo nextest list --message-format json` says, of what [`test_binaries`] reads.
+#[derive(serde::Deserialize)]
+struct TestList {
+    #[serde(rename = "rust-binaries")]
+    binaries: std::collections::BTreeMap<String, ListedBinary>,
+}
+
+/// One test binary of a [`TestList`].
+#[derive(serde::Deserialize)]
+struct ListedBinary {
+    #[serde(rename = "binary-path")]
+    path: Utf8PathBuf,
+}
+
+/// The test binaries `cargo nextest archive` takes for `packages` (and `tests`).
+fn test_binaries(
+    root: &Utf8Path,
+    packages: &[String],
+    tests: &[String],
+) -> Result<Vec<Utf8PathBuf>> {
+    let mut listing = Command::new("cargo");
+    listing.args(["nextest", "list", "--list-type", "binaries-only", "--message-format", "json"]);
+    for package in packages {
+        listing.args(["-p", package]);
+    }
+    for test in tests {
+        listing.args(["--test", test]);
+    }
+    let out =
+        listing.current_dir(root).stderr(Stdio::inherit()).output().context("nextest list")?;
+    ensure!(out.status.success(), "cargo nextest list: {}", out.status);
+    let listed: TestList = serde_json::from_slice(&out.stdout).context("nextest's list")?;
+    Ok(listed.binaries.into_values().map(|binary| binary.path).collect())
+}
+
+/// A dSYM of each of `binaries` under `dir`, at its path below `root`. The debug info of a test
+/// build stays in this checkout's object files (`split-debuginfo = "unpacked"`), which the
+/// archive does not carry: in the guest a frame would have its name and no file or line.
+/// `backtrace` finds a `*.dSYM` beside the executable by its UUID.
+fn debug_info(dir: &Utf8Path, root: &Utf8Path, binaries: &[Utf8PathBuf]) -> Result<()> {
+    let started = Instant::now();
+    println!("▶ dsymutil {} test binaries", binaries.len());
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).with_context(|| format!("remove {dir}"))?;
+    }
+    let children = binaries
+        .iter()
+        .map(|binary| {
+            let below =
+                binary.strip_prefix(root).with_context(|| format!("{binary} is outside {root}"))?;
+            let dsym = dir.join(format!("{below}.dSYM"));
+            std::fs::create_dir_all(dsym.parent().context("a dSYM with no directory")?)?;
+            let child = Command::new("dsymutil")
+                .args([binary.as_str(), "-o", dsym.as_str()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .spawn()
+                .context("dsymutil")?;
+            Ok((binary, child))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for (binary, mut child) in children {
+        let status = child.wait().context("dsymutil")?;
+        ensure!(status.success(), "dsymutil {binary}: {status}");
+    }
+    println!("  ✓ dsymutil in {:.1?}", started.elapsed());
+    Ok(())
 }
 
 /// Run `archive` in the session's guest with `args`, and bring nextest's reports and `target/e2e`
@@ -1101,6 +1178,15 @@ fn run_archive(
     let mut sources = vec![root.join(".config"), root.join("Cargo.toml")];
     sources.extend(dirs);
     sync_up(home, ip, &root, &sources)?;
+    // Each binary's dSYM beside where the archive puts it.
+    let status = Command::new("rsync")
+        .args(["-a", "-e", &ssh_for_copy(home)?])
+        .arg(format!("{}/", debug_dir(archive)))
+        .arg(format!("{ip}:{root}/"))
+        .stdin(Stdio::null())
+        .status()
+        .context("rsync")?;
+    ensure!(status.success(), "rsync the dSYMs to the guest: {status}");
 
     let archive_name = archive.file_name().context("the archive's name")?;
     // insta finds the workspace with `cargo metadata`, and the guest has no cargo.

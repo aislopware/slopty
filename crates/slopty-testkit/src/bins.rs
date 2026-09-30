@@ -15,8 +15,17 @@ use std::sync::OnceLock;
 pub const FRESH: &str = "SLOPTY_BINS_FRESH";
 
 /// The packages whose binaries a test may spawn. `cargo xtask` builds the same list (`--bins`).
-pub const PACKAGES: [&str; 5] =
-    ["slopty-ptyd", "slopty-workerd", "slopty-serverd", "slopty-cli", "slopty-testkit"];
+///
+/// `workspace-hack` spawns nothing: without it the build resolves features without the tests'
+/// dev-dependencies and builds some 150 crates a second time, differently.
+pub const PACKAGES: [&str; 6] = [
+    "slopty-ptyd",
+    "slopty-workerd",
+    "slopty-serverd",
+    "slopty-cli",
+    "slopty-testkit",
+    "workspace-hack",
+];
 
 /// The binary `name` from this build, beside `anchor`: a binary of the calling test's own
 /// package, as `env!("CARGO_BIN_EXE_<bin>")` names it.

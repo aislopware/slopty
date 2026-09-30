@@ -367,7 +367,7 @@ fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> R
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
 /// `slopty_testkit::bins::PACKAGES`, each after its `-p`.
-const SPAWNED_PACKAGES: [&str; 10] = [
+const SPAWNED_PACKAGES: [&str; 12] = [
     "-p",
     "slopty-ptyd",
     "-p",
@@ -378,6 +378,8 @@ const SPAWNED_PACKAGES: [&str; 10] = [
     "slopty-cli",
     "-p",
     "slopty-testkit",
+    "-p",
+    "workspace-hack",
 ];
 
 /// The gate's tests: build every test binary, then run nextest's `profile` (on `only`'s
@@ -769,8 +771,11 @@ mod tests {
         let testkit = include_str!("../../crates/slopty-testkit/src/bins.rs");
         assert!(testkit.contains(&format!("pub const FRESH: &str = \"{BINS_FRESH}\";")));
         let packages: Vec<&str> = SPAWNED_PACKAGES.iter().copied().filter(|a| *a != "-p").collect();
-        let listed = format!("[\"{}\"]", packages.join("\", \""));
-        assert!(testkit.contains(&listed), "{listed} is not bins::PACKAGES");
+        let count = format!("PACKAGES: [&str; {}]", packages.len());
+        assert!(testkit.contains(&count), "bins::PACKAGES is not {} long", packages.len());
+        for p in packages {
+            assert!(testkit.contains(&format!("\"{p}\",")), "{p} is not in bins::PACKAGES");
+        }
     }
 
     const FORK: &str = "git+https://github.com/aislopware/gpui-fast.git#58fb4674";

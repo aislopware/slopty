@@ -44,7 +44,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `debug = "line-tables-only"`, whose debug info names a function without its module (`fire`,
     `{closure#0}`). For each address, the outermost frame takes its name from the executable's
     own `LC_SYMTAB`, read in place in `__LINKEDIT` and demangled (`slopty_crash::probe::fire`).
-    Inlined frames keep the short names, with their file and line.
+    Inlined frames keep the short names, with their file and line. Shipped builds have whole
+    paths on inlined frames too (below, "Shipped builds carry their dSYMs").
   - **macOS's reports.** `reports` also parses `~/Library/Logs/DiagnosticReports/<process>-*.ips`
     of Slopty's processes (`bug_type` 309). Native crashes inside VideoToolbox, AppKit or the
     Objective-C runtime show up there with every thread. An `.ips` with the same pid and process
@@ -97,6 +98,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `symbolize/gimli/macho.rs` `search_object_map`: when the exact name is absent, take the
     object symbol named `<name>.llvm.<digits>`. It is a candidate for a vendored patch and an
     upstream pull request. The panic report's `location` does not depend on it.
+    A shipped build reads its dSYM, not the debug map, and has no such gap: `probe::panic`
+    resolves to its line there.
   - **`slopty crashes`** lists the latest reports (`--last`, `--all-frames`, `--json`), each with
     its first frames, its file and any `.ips` beside it. It resolves the CLI's own pending
     records first.
@@ -142,3 +145,46 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     journal costs a frame is in `docs/MEASUREMENTS.md`, "hang reports".
   - `MXMetricManager` still sees what this cannot: a hang the system measured from outside,
     and CPU exceptions.
+
+- ✅ **Shipped builds carry their dSYMs, with limited debug info** (2026-10-01). The `dist`
+  profile builds with `debug = "limited"`, and cargo packs each binary's debug info into
+  `<bin>.dSYM` and strips the binary. `cargo xtask bundle` builds `dist` and copies each dSYM
+  into `Contents/MacOS` beside its binary, signed as a bundle before the binaries (which leaves
+  the DWARF file as it is; `codesign --verify --strict` passes). The worker's release tarball
+  carries `slopty-worker.dSYM` and `slopty-ptyd.dSYM` the same way.
+  - **Why beside the binary.** The reports are resolved on the user's machine by the process's
+    own build (entry above), through `backtrace`. It looks for a `*.dSYM` in the executable's
+    own directory whose DWARF file has the executable's UUID, and otherwise only the object
+    files an unstripped binary's debug map names: no Spotlight lookup, no `DBGFileServer`. Nothing leaves the machine, so there is no symbol
+    server to resolve against later either.
+  - **Why `limited`.** With `line-tables-only` the debug info has no linkage names, so an
+    inlined frame is named by its bare name (`install`, `{closure#0}`, `call_once<…>`), and under
+    fat LTO a crashing address resolves to about six inlined frames besides its own. With
+    `limited`, 100 % of the app's inlined frames and 95.5 % of the worker's have their whole
+    path, against 22 % before. It leaves the shipped binary the same size (packed split debug
+    info keeps all of it in the dSYM), costs a rebuild 3–7 % more CPU, and grows the dSYM
+    by 41 % in the app (191 to 269 MiB, 41 to 61 MB compressed) and 48 % in the worker. The
+    rule was that whole paths on inlined frames are worth a modest cost; this is one. MEASUREMENTS
+    2026-10-01, "debug info for shipped builds". `dev`, `test` and `release` keep
+    `line-tables-only`: they are built many times a day, and their reports are read on the
+    machine that built them.
+  - **Without its dSYM** a shipped binary still names every frame: the strip (`strip -S`) keeps
+    the local symbol table, which the reporter reads for the outermost frame of each address.
+    Such a report has no file, no line and no inlined frames.
+  - **The cost of shipping the dSYMs at all** is the download: with `limited`, 61 MB compressed
+    beside the app's 17 MB, and 29 MB beside the worker's 6 MB. Accepted for now: a crash report
+    that names its frames is what makes a user's crash fixable, and nothing else can resolve
+    them later. Revisit if the download size starts to matter; the alternative is a dSYM fetched
+    on the first crash.
+  - **The VM live lane** runs test binaries without this checkout's object files, where their
+    debug info lives (`split-debuginfo = "unpacked"`). `cargo xtask vm live` now makes a dSYM
+    of each archived test binary with `dsymutil` and puts it beside the binary in the guest, so a
+    report there has files and lines as here.
+  - **Pending.** A worker installed from outside a bundle, or deployed to another Mac, is copied
+    into `<data dir>/bin` binary by binary (`slopty-platform` `copy_binaries`, `slopty worker
+    deploy`), and its dSYMs stay behind. Notarization with a Developer ID has not been tried with
+    the dSYMs in the bundle.
+  - Tests: `tests/crash.rs`
+    `a_shipped_build_resolves_through_its_dsym_and_names_frames_without_it` strips a copy of
+    the test binary as the `dist` profile does, panics it alone and then with a dSYM beside it,
+    and checks the frames are named without it and resolved to their lines with it.

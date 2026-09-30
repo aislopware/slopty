@@ -602,9 +602,13 @@ split-debuginfo = "unpacked"
 strip = "none"
 overflow-checks = true
 
-# Shipping builds: symbols packed into dSYMs by xtask, then stripped.
+# Shipping builds. `limited` debug info keeps each function's whole path, so an inlined frame in
+# a user's crash report is `slopty_crash::install`, not `install`; it costs the dSYM 41-48 % and
+# the binary nothing (MEASUREMENTS 2026-10-01, "debug info for shipped builds"). Cargo packs it
+# into `<bin>.dSYM` and strips the binary; `cargo xtask bundle` ships each dSYM beside its binary.
 [profile.dist]
 inherits = "release"
+debug = "limited"
 split-debuginfo = "packed"
 strip = "debuginfo"
 

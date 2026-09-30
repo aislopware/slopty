@@ -43,6 +43,13 @@ report-name = "slopty"
 store-success-output = false
 store-failure-output = true
 
+# The icon test compiles with `actool` and renders with `ictool`, whose services start cold on a
+# fresh runner: 124 s there against 7 s here (run 36765252672). Started last, as its binary
+# sorts, it ran alone at the end of a 318 s run; started first, it runs beside the rest.
+[[profile.ci.overrides]]
+filter = 'package(xtask) & test(=icon::tests::compiles_and_the_prompt_reads_at_every_size_and_appearance)'
+priority = 100
+
 [[profile.default.overrides]]
 filter = 'test(/^(proptest|fuzz|slow)_/)'
 slow-timeout = { period = "120s", terminate-after = 2 }

@@ -11681,3 +11681,76 @@ for i in 1 2 3; do ROUNDS=200000 TASKS=32 cargo test -p slopty-net --release --t
 cargo test -p slopty-net --test sim a_path_that_delivers_every_datagram_twice_still_connects
 cargo test --manifest-path vendor/noq-proto/Cargo.toml --target-dir target/noq-proto --lib packet_crypto
 ```
+
+## 2026-10-01 — debug info for shipped builds: `limited` against `line-tables-only`
+
+Mac Studio M1 Max (10 cores), macOS 27.0, rustc 1.98.1. The `dist` profile (fat LTO, one codegen
+unit, `split-debuginfo = "packed"`, `strip = "debuginfo"`) with its `debug` set per arm by
+`CARGO_PROFILE_DIST_DEBUG`, sccache off, one target directory per arm and binary, the arms one
+after the other. Other sessions were building throughout (load average 11–95), so wall time is
+noise; the build columns compare CPU time (user + sys of cargo and every rustc and linker under
+it).
+
+```sh
+export RUSTC_WRAPPER=
+for arm in line-tables-only limited; do
+  CARGO_PROFILE_DIST_DEBUG=$arm cargo build --profile dist --target-dir target/dbg-measure/$arm-app \
+    -p slopty --bin slopty-app
+  CARGO_PROFILE_DIST_DEBUG=$arm cargo build --profile dist --target-dir target/dbg-measure/$arm-worker \
+    -p slopty-workerd --bin slopty-worker
+done
+# incremental: both arms caught up to one tree, then `touch crates/slopty-app/src/lib.rs`
+# (`apps/slopty-worker/src/main.rs`) and each arm rebuilt
+# sizes: `stat -f %z <bin>`, `du -skL <bin>.dSYM`, `tar -h -czf - <bin>.dSYM | wc -c`
+```
+
+Inlined frames: one address every 4 KiB of `__text`, symbolized with its inlined frames by `atos
+-i` against the arm's dSYM, and each inlined frame (every one but the outermost) counted as named
+with a path (`a::b`, or a mangled `_R` name) or bare (`install`, `{closure#0}`, `poll<…>`).
+
+```sh
+otool -l <bin>     # __TEXT,__text: addr, size
+awk -v s=<addr> -v n=<size> 'BEGIN{for(a=s;a<s+n;a+=4096) printf "0x%x\n", a}' |
+  xargs atos -o <bin>.dSYM/Contents/Resources/DWARF/<name> -arch arm64 -l 0x100000000 -i
+```
+
+| | slopty-app, line-tables-only | slopty-app, limited | slopty-worker, line-tables-only | slopty-worker, limited |
+|---|---|---|---|---|
+| shipped binary | 40 217 120 B | 40 237 872 B (+0.05 %) | 16 194 720 B | 16 193 520 B (−0.01 %) |
+| binary, gzip | 17.41 MB | 17.42 MB | 6.39 MB | 6.40 MB |
+| dSYM | 191 MiB | 269 MiB (+41 %) | 81 MiB | 119 MiB (+48 %) |
+| dSYM, tar + gzip | 41.0 MB | 61.1 MB | 19.8 MB | 28.6 MB |
+| clean build, CPU | 1108 + 105 s | 1062 + 57 s | 476 + 28 s | 481 + 33 s |
+| rebuild after touching one file, CPU | 441 + 14 s | 453 + 15 s (+3 %) | 143 + 3 s | 152 + 4 s (+7 %) |
+| inlined frames named with a path | 6 991 of 31 352 (22.3 %) | 31 141 of 31 147 (100.0 %) | 3 340 of 15 265 (21.9 %) | 14 752 of 15 452 (95.5 %) |
+| local symbols left after the strip | 30 976 | 30 994 | 14 563 | 14 564 |
+
+The report a panic leaves (`SLOPTY_CRASH_TEST=panic`, the dSYM beside the binary), the same
+in both binaries:
+
+| line-tables-only | limited |
+|---|---|
+| `slopty_crash::probe::panic` (probe.rs:85) | `slopty_crash::probe::panic` (probe.rs:85) |
+| `slopty_crash::probe::fire` (probe.rs:75) | `slopty_crash::probe::fire` (probe.rs:75) |
+| `install` (lib.rs:135) | `slopty_crash::install` (lib.rs:135) |
+| `slopty_app::main` (main.rs:113) | `slopty_app::main` (main.rs:113) |
+| `call_once<fn() -> …, ()>` (function.rs:250) | `<fn() -> … as core::ops::function::FnOnce<()>>::call_once` (function.rs:250) |
+
+What it says:
+
+- **The shipped binary does not change.** Packed split debug info leaves every byte of DWARF in
+  the dSYM, and the strip leaves the symbol table, so a binary without its dSYM names its
+  outermost frames the same way in both arms.
+- **Inlined frames get their paths.** Under fat LTO most frames of a crash are inlined: an
+  address resolves to its own function and about six inlined into it (5.8 in the app over 5 410
+  addresses, 6.4 in the worker over 2 401). With `line-tables-only` four in five of those are
+  bare names; the fifth has a path only because std's own objects were built with linkage
+  names. With `limited` all of the app's have one, and 95.5 % of the worker's (the rest
+  are C and Zig code linked in, whose debug info is their own).
+- **The dSYM grows by two fifths**, 20 MB compressed for the app and 9 MB for the worker.
+- **Build time barely moves.** The clean builds' CPU time is within the noise of a loaded
+  machine (the app's came out lower with `limited`). A rebuild after one file, which is fat
+  LTO's link of the whole binary, costs 3 % more CPU in the app and 7 % in the worker.
+- Decided: `debug = "limited"` for `dist` (`docs/decisions/crashes.md`, "Shipped builds carry
+  their dSYMs, with limited debug info").
+
