@@ -18,7 +18,11 @@
 //!   cross-session messages: a Unix socket named to its hooks in `CLAUDE_CODE_MESSAGING_SOCKET`,
 //!   with a token in `CLAUDE_CODE_MESSAGING_TOKEN`. Each user message posted there (one JSON
 //!   document a line, an optional `{"type":"auth","token":…}` first) is appended to the file as one
-//!   JSON line: its text, its priority, and whether its connection showed the token.
+//!   JSON line: its text, its priority, and whether its connection showed the token. Then, as an
+//!   idle Claude Code does, it takes a turn: the message goes into its transcript
+//!   (`STUB_TRANSCRIPT`, a JSONL file) and its `Stop` hooks fire, their outputs kept on the line as
+//!   `turn`. With `STUB_INBOX_HOLD` it holds every message instead, as a session does under
+//!   `crossSessionInbound: "hold"`, and the line says `held`.
 //! - With `STUB_TITLE`, it paints that terminal title first (OSC 2), as Claude Code paints `✳
 //!   Claude Code` at its prompt: what the worker reads as the agent's title.
 //! - It shows a prompt and takes what is typed at it, a line at a time.
@@ -111,11 +115,11 @@ fn run(args: &[String]) -> Fallible<()> {
         typed: Vec::new(),
         hook_env: Vec::new(),
     };
+    let settings = settings(args);
     if let Some(file) = std::env::var_os("STUB_INBOX") {
-        record.hook_env = inbox(PathBuf::from(file))?;
+        record.hook_env = inbox(PathBuf::from(file), settings.clone())?;
     }
 
-    let settings = settings(args);
     let script = match std::env::var("STUB_HOOKS") {
         Ok(text) => serde_json::from_str(&text)?,
         Err(_) => json!([{ "hook_event_name": "SessionStart", "source": "startup" }]),
@@ -159,9 +163,24 @@ fn run(args: &[String]) -> Fallible<()> {
     Ok(())
 }
 
-/// Bind an inbox and serve it on a thread of its own, appending each user message posted to it
-/// to `file`; the variables that name it to the hooks.
-fn inbox(file: PathBuf) -> Fallible<Vec<(String, String)>> {
+/// What an inbox does with the messages posted to it.
+struct Inbox {
+    /// Where each message is noted.
+    file: PathBuf,
+    /// The token a connection shows to prove it is the session's own.
+    token: String,
+    /// Hold every message rather than take a turn with it.
+    hold: bool,
+    /// The transcript a message goes into when it is taken.
+    transcript: Option<PathBuf>,
+    /// The settings whose `Stop` hooks a turn fires, and the variables they are given.
+    settings: Value,
+    hook_env: Vec<(String, String)>,
+}
+
+/// Bind an inbox and serve it on a thread of its own ([`Inbox`]); the variables that name it to
+/// the hooks.
+fn inbox(file: PathBuf, settings: Value) -> Fallible<Vec<(String, String)>> {
     let socket = std::env::temp_dir().join(format!("stub-claude-{}.sock", std::process::id()));
     match std::fs::remove_file(&socket) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
@@ -169,40 +188,87 @@ fn inbox(file: PathBuf) -> Fallible<Vec<(String, String)>> {
     }
     let listener = std::os::unix::net::UnixListener::bind(&socket)?;
     let token = format!("stub-{}-{}", std::process::id(), VERSION.len());
-    let expected = token.clone();
+    let hook_env = vec![
+        ("CLAUDE_CODE_MESSAGING_SOCKET".to_owned(), socket.to_string_lossy().into_owned()),
+        ("CLAUDE_CODE_MESSAGING_TOKEN".to_owned(), token.clone()),
+    ];
+    let inbox = Inbox {
+        file,
+        token,
+        hold: std::env::var_os("STUB_INBOX_HOLD").is_some(),
+        transcript: std::env::var_os("STUB_TRANSCRIPT").map(PathBuf::from),
+        settings,
+        hook_env: hook_env.clone(),
+    };
     std::thread::spawn(move || {
         for stream in listener.incoming().map_while(Result::ok) {
-            if let Err(e) = read_inbox(stream, &expected, &file) {
+            if let Err(e) = read_inbox(stream, &inbox) {
                 eprintln!("stub claude: inbox: {e}");
             }
         }
     });
-    Ok(vec![
-        ("CLAUDE_CODE_MESSAGING_SOCKET".to_owned(), socket.to_string_lossy().into_owned()),
-        ("CLAUDE_CODE_MESSAGING_TOKEN".to_owned(), token),
-    ])
+    Ok(hook_env)
 }
 
-/// Read one connection to the inbox: an optional auth line, then user messages, each appended
-/// to `file`.
-fn read_inbox(stream: std::os::unix::net::UnixStream, token: &str, file: &Path) -> Fallible<()> {
+/// Read one connection to the inbox: an optional auth line, then user messages, each noted in
+/// the inbox's file after it is held or taken as a turn.
+fn read_inbox(stream: std::os::unix::net::UnixStream, inbox: &Inbox) -> Fallible<()> {
     let mut authed = false;
     for line in BufReader::new(stream).lines() {
         let doc: Value = serde_json::from_str(&line?)?;
         match doc.get("type").and_then(Value::as_str) {
-            Some("auth") => authed = doc.get("token").and_then(Value::as_str) == Some(token),
+            Some("auth") => authed = doc.get("token").and_then(Value::as_str) == Some(&inbox.token),
             Some("user") => {
                 let content = doc.pointer("/message/content").and_then(Value::as_str);
                 let content = content.filter(|c| !c.is_empty()).ok_or("a message with no text")?;
                 let priority = doc.get("priority").and_then(Value::as_str).unwrap_or("next");
-                let got = json!({ "content": content, "priority": priority, "authed": authed });
-                let mut out = std::fs::OpenOptions::new().create(true).append(true).open(file)?;
-                writeln!(out, "{got}")?;
+                let taken = if inbox.hold {
+                    ("held", Value::Bool(true))
+                } else {
+                    ("turn", Value::Array(turn(inbox, content)?))
+                };
+                let mut got = serde_json::Map::new();
+                got.insert("content".to_owned(), json!(content));
+                got.insert("priority".to_owned(), json!(priority));
+                got.insert("authed".to_owned(), json!(authed));
+                got.insert(taken.0.to_owned(), taken.1);
+                let got = Value::Object(got);
+                let mut out =
+                    std::fs::OpenOptions::new().create(true).append(true).open(&inbox.file)?;
+                // One write per line, so a reader never sees half of one.
+                out.write_all(format!("{got}\n").as_bytes())?;
             }
             _ => return Err(format!("not a line the inbox takes: {doc}").into()),
         }
     }
     Ok(())
+}
+
+/// Take a turn with a message: into the transcript as Claude Code writes a message from another
+/// session, then the `Stop` hooks; what they printed.
+fn turn(inbox: &Inbox, content: &str) -> Fallible<Vec<Value>> {
+    let mut payload = serde_json::Map::new();
+    payload.insert("hook_event_name".to_owned(), json!("Stop"));
+    payload.insert("stop_hook_active".to_owned(), json!(false));
+    if let Some(transcript) = &inbox.transcript {
+        let entry = json!({
+            "type": "user",
+            "message": { "role": "user", "content": content },
+            "origin": { "kind": "peer" },
+        });
+        let mut out = std::fs::OpenOptions::new().create(true).append(true).open(transcript)?;
+        out.write_all(format!("{entry}\n").as_bytes())?;
+        let path = transcript.to_string_lossy().into_owned();
+        payload.insert("transcript_path".to_owned(), Value::String(path));
+    }
+    let payload = Value::Object(payload);
+    let hooks = registered(&inbox.settings, "Stop");
+    let printed =
+        hooks.iter().filter_map(|(command, rest)| fire(command, rest, &inbox.hook_env, &payload));
+    Ok(printed
+        .filter(|out| !out.trim().is_empty())
+        .map(|out| serde_json::from_str(&out).unwrap_or(Value::String(out)))
+        .collect())
 }
 
 /// Wait for the file at `gate` to exist, up to [`MCP_PATIENCE`].

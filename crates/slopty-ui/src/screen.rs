@@ -299,6 +299,9 @@ pub struct ScreenView {
     host: Option<Host>,
     /// Where a striped picture's lower stripe's layer is placed from, in that window.
     lower_host: Option<Host>,
+    /// Where the stripes meet in the layout the last paint placed the layers for, as the glass
+    /// was told it ([`glass::Glass::place`]); `None` before the first.
+    laid_out: Rc<std::cell::Cell<Option<glass::Placed>>>,
     /// Stream size in pixels as opened.
     size: (u32, u32),
     /// Native pixel size of the target (stream size at scale 1).
@@ -944,6 +947,7 @@ impl ScreenView {
             layer_at: Rc::default(),
             #[cfg(test)]
             lower_at: Rc::default(),
+            laid_out: Rc::default(),
             mapped: size,
             out: Outbox::new(out, cx),
             theme,
@@ -2775,6 +2779,7 @@ impl Render for ScreenView {
                 let lower_native = self.lower_host.as_ref().map(|host| host.native.clone());
                 let zoom = self.zoom;
                 let captured = capturing(cx).then(|| self.glass.last()).flatten();
+                let (glass, laid_out) = (Arc::clone(&self.glass), Rc::clone(&self.laid_out));
                 #[cfg(test)]
                 let (layer_at, lower_at) = (Rc::clone(&self.layer_at), Rc::clone(&self.lower_at));
                 // The layer goes where the picture is drawn, from the body as this frame lays
@@ -2785,6 +2790,12 @@ impl Render for ScreenView {
                     |_bounds, _window, _cx| {},
                     move |body, (), window, _cx| {
                         let at = picture_bounds(body, shape.size, zoom);
+                        // Pictures of another seam wait until the layers are placed for them.
+                        let placed = glass::Placed { seam: shape.seam };
+                        if laid_out.get() != Some(placed) {
+                            laid_out.set(Some(placed));
+                            glass.place(placed);
+                        }
                         let Some([top, lower]) = stripe_places(at, shape) else {
                             window.paint_native(&native, at, gpui::Corners::default(), None);
                             #[cfg(test)]

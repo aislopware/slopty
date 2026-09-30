@@ -262,6 +262,10 @@ pub struct Hook {
     /// transcript. `StopFailure`: the API error as shown.
     #[serde(default)]
     pub last_assistant_message: Option<String>,
+    /// `Stop`/`SubagentStop`: a `Stop` hook held this turn's end already, so it continues
+    /// because of a hook.
+    #[serde(default)]
+    pub stop_hook_active: Option<bool>,
     /// `SubagentStart`/`SubagentStop`: the subagent, its thread's key
     /// ([`conversation::ThreadId::Agent`]).
     #[serde(default)]
@@ -671,6 +675,21 @@ pub struct Tracker {
     argv: Vec<String>,
     /// The permission mode the hooks last reported.
     permission_mode: Option<String>,
+    /// What in `argv` loosens the agent's permissions ([`loosening::loosening`]), once judged.
+    loosened: Option<Vec<String>>,
+}
+
+/// `found` cut to what one [`AgentReport::Loosened`] carries.
+fn bounded_loosening(mut found: Vec<String>) -> Vec<String> {
+    use slopty_proto::project::{LOOSENED_ITEM_MAX, LOOSENED_MAX};
+    found.truncate(LOOSENED_MAX);
+    for item in &mut found {
+        if item.len() > LOOSENED_ITEM_MAX {
+            let cut = (0..=LOOSENED_ITEM_MAX).rev().find(|&i| item.is_char_boundary(i));
+            item.truncate(cut.unwrap_or(0));
+        }
+    }
+    found
 }
 
 /// The part of a status an elapsed time runs across: a tool call inside a turn is still the
@@ -703,6 +722,7 @@ impl Default for Tracker {
             since_ms: WallMs::ZERO,
             argv: Vec::new(),
             permission_mode: None,
+            loosened: None,
         }
     }
 }
@@ -830,8 +850,9 @@ impl Tracker {
             }
             self.process = Some(process);
         }
-        if !program.argv.is_empty() {
+        if !program.argv.is_empty() && program.argv != self.argv {
             self.argv.clone_from(&program.argv);
+            self.loosened = None;
         }
         self.absent = 0;
         if self.first_seen.is_none() {
@@ -1140,6 +1161,11 @@ pub struct AgentTable {
     ended: HashSet<SessionId>,
     /// The permission mode last reported for each session ([`Self::permission_mode_report`]).
     reported_modes: HashMap<SessionId, String>,
+    /// What loosens each session's agent, as last reported ([`Self::loosening_report`]).
+    reported_loosened: HashMap<SessionId, Vec<String>>,
+    /// What the worker adds to the agents it starts, which loosens nothing
+    /// ([`Self::set_own`]).
+    own: loosening::Own,
 }
 
 impl AgentTable {
@@ -1246,6 +1272,35 @@ impl AgentTable {
         Some(AgentReport::PermissionMode { session, mode: mode.clone() })
     }
 
+    /// Name what the worker adds to the agents it starts (its `slopty` for the hooks, the status
+    /// line and the tools, its mod's plugin directory), so [`Self::loosening_report`] tells them
+    /// from the same flags an agent passed itself.
+    pub fn set_own(&mut self, own: loosening::Own) {
+        self.own = own;
+    }
+
+    /// What loosens the permissions of the agent the worker sees in `session`'s foreground,
+    /// when it is not what was last reported for the session. Call it after [`Self::observe`].
+    /// A session whose agent is gone reports nothing more; one whose next agent loosens nothing
+    /// reports that once.
+    pub fn loosening_report(&mut self, session: SessionId) -> Option<AgentReport> {
+        let own = &self.own;
+        let tracker = self.sessions.get_mut(&session)?;
+        if tracker.loosened.is_none() {
+            // Judged once per command line: a `--settings` file is read only then.
+            let cwd = tracker.cwd.as_deref().unwrap_or_else(|| Path::new("/"));
+            let found = loosening::loosening(&tracker.argv, cwd, own);
+            tracker.loosened = Some(bounded_loosening(found));
+        }
+        let found = tracker.loosened.clone().unwrap_or_default();
+        let before = self.reported_loosened.get(&session);
+        if before.map_or(found.is_empty(), |before| *before == found) {
+            return None;
+        }
+        self.reported_loosened.insert(session, found.clone());
+        Some(AgentReport::Loosened { session, found })
+    }
+
     /// Take the pull request and worktree a status line named in `session`; what every client
     /// is told when either changed. Anything but a `Statusline` hook is passed over, and so is
     /// a session with no agent: the branch lives and goes with its agent, so apply the hook
@@ -1312,6 +1367,7 @@ impl AgentTable {
         self.branches.retain(|session, _branch| live.contains(session));
         self.ended.retain(|session| live.contains(session));
         self.reported_modes.retain(|session, _mode| live.contains(session));
+        self.reported_loosened.retain(|session, _found| live.contains(session));
         self.sessions.retain(|session, _tracker| {
             if live.contains(session) {
                 return true;
@@ -1366,6 +1422,7 @@ impl AgentTable {
         self.branches.remove(&session);
         self.ended.remove(&session);
         self.reported_modes.remove(&session);
+        self.reported_loosened.remove(&session);
     }
 
     /// The agent's process in `session`, once the worker has seen it in the foreground.
@@ -2612,5 +2669,43 @@ mod tests {
         let edits =
             r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"acceptEdits"}"#;
         assert_eq!(heard(edits), mode("acceptEdits"));
+    }
+
+    /// What loosens the agent in the foreground is reported when its command line first says
+    /// so, however `claude` was wrapped, and again only when that changes: a later agent in
+    /// the same terminal that loosens nothing clears it once.
+    #[test]
+    fn what_loosens_the_agent_in_the_foreground_is_reported_when_it_changes() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        let loosened = |found: &[&str]| {
+            let found = found.iter().map(|f| (*f).to_owned()).collect();
+            Some(AgentReport::Loosened { session: sid, found })
+        };
+        table.observe(sid, &claude("--model opus"));
+        assert_eq!(table.loosening_report(sid), None, "nothing loosens, nothing to say");
+
+        let wrapped = Observation {
+            program: Some(Program {
+                name: "bash".into(),
+                argv: ["/bin/sh", "-c", "cd ~/w && claude --allowedTools Bash"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            }),
+            ..process("bash", None, 99)
+        };
+        table.observe(sid, &wrapped);
+        assert_eq!(table.loosening_report(sid), loosened(&["--allowedTools"]));
+        table.observe(sid, &wrapped);
+        assert_eq!(table.loosening_report(sid), None, "said once");
+
+        table.observe(sid, &Observation { pid: Some(100), ..claude("-c") });
+        assert_eq!(table.loosening_report(sid), loosened(&[]), "the next agent loosens nothing");
+        assert_eq!(table.loosening_report(sid), None);
+        let many = "--allowedTools ".repeat(40);
+        table.observe(sid, &Observation { pid: Some(101), ..claude(&many) });
+        let Some(AgentReport::Loosened { found, .. }) = table.loosening_report(sid) else {
+            panic!("reported")
+        };
+        assert_eq!(found.len(), slopty_proto::project::LOOSENED_MAX, "bounded for the wire");
     }
 }

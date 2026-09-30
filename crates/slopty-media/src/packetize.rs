@@ -135,6 +135,8 @@ pub struct Packetizer {
     /// The last frame cut was [`flags::DISCARDABLE`]: the next one carries
     /// [`flags::PREV_DISCARDABLE`].
     previous_discardable: bool,
+    /// The build of the sessions whose frames are cut now ([`FramePrefix::build`]).
+    build: u8,
 }
 
 impl std::fmt::Debug for Packetizer {
@@ -161,6 +163,7 @@ impl Packetizer {
             history: VecDeque::with_capacity(HISTORY_FRAMES),
             datagrams_sent: 0,
             previous_discardable: false,
+            build: 0,
         }
     }
 
@@ -181,6 +184,12 @@ impl Packetizer {
     /// worker reads the connection's budget before every frame.
     pub const fn set_max_datagram(&mut self, bytes: usize) {
         self.max_payload = bytes.saturating_sub(HEADER_BYTES);
+    }
+
+    /// The frames cut from here on come from the sessions of `build` ([`FramePrefix::build`]).
+    /// A retransmission is of a frame as it was cut, under its own build.
+    pub const fn set_build(&mut self, build: u8) {
+        self.build = build;
     }
 
     /// The number the next frame will get.
@@ -227,7 +236,8 @@ impl Packetizer {
             capture_ts_us: U32::new(frame.capture_ts_us),
             ltr_token: U64::new(frame.ltr_token.unwrap_or(0)),
             stripes: frame.stripes,
-            reserved: [0; 3],
+            build: self.build,
+            reserved: [0; 2],
         };
         let mut header = MediaHeader {
             channel: Channel::Media as u8,
@@ -579,6 +589,7 @@ mod tests {
     #[test]
     fn the_datagrams_share_one_buffer_and_rebuild_the_frame() {
         let mut p = Packetizer::new(StreamId(9));
+        p.set_build(4);
         let data: Vec<u8> = (0..4000_u32).map(|i| u8::try_from(i % 253).unwrap()).collect();
         let frame = EncodedFrame {
             data: &data,
@@ -587,7 +598,7 @@ mod tests {
             ltr_refresh: true,
             discardable: false,
             capture_ts_us: 5,
-            stripes: 0,
+            stripes: 0b10,
         };
         let sent = p.packetize(&frame, 3, |_| {}).unwrap().clone();
         let stride = HEADER_BYTES + sent.layout.shard_bytes;
@@ -607,6 +618,7 @@ mod tests {
             (prefix.len.get(), prefix.capture_ts_us.get(), prefix.ltr_token.get()),
             (4000, 5, 7)
         );
+        assert_eq!((prefix.stripes, prefix.build), (0b10, 4), "the stripes and the build");
         assert_eq!(&rest[..4000], data.as_slice());
         assert!(rest[4000..].iter().all(|&b| b == 0), "zero padded");
 

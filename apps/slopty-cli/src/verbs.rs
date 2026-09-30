@@ -584,11 +584,16 @@ pub async fn run(
 }
 
 /// Who this CLI speaks for: inside a Slopty terminal the server decides by what runs there
-/// (an agent's shell never speaks for the person); outside one, the person.
+/// (an agent's shell never speaks for the person); outside one, the person. A terminal's
+/// variables that do not name one (a session id that does not parse, a token without its
+/// session) are no proof of being outside, so they speak for an agent.
 fn role() -> Role {
     let name = format!("slopty @ {}", crate::client::machine_name());
     match session() {
         Some(session) => Role::Shell { name, session, token: token() },
+        None if std::env::var_os(slopty_proto::ctl::SESSION_ENV).is_some() || token().is_some() => {
+            Role::Agent { name, vouch: None }
+        }
         None => Role::Client { name },
     }
 }

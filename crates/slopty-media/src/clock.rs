@@ -35,6 +35,10 @@ impl ClockAnchor {
     }
 }
 
+/// How much shorter than the worker's hold inside it a round trip may read: each end reads
+/// whole microseconds, truncated.
+const STAMP_SLACK_US: u64 = 2;
+
 /// How long the probes a [`ClockSync`] fits its estimate to are kept.
 ///
 /// Long enough to hold probes that met an empty path on a busy link, and to see two clocks
@@ -191,12 +195,18 @@ impl ClockSync {
 
     /// The echo of the probe stamped `sent_us` arrived `arrived`; the worker's clock read
     /// `received_us` when the probe came and `echoed_us` when the echo left. An echo that
-    /// cannot be one (it arrived before it was sent, or left the worker before the probe came)
-    /// is ignored.
+    /// cannot be one is ignored: it arrived before it was sent, left the worker before the probe
+    /// came, or the worker held it longer than the whole round trip took. That last one would
+    /// read as a probe that met an empty path, the one the fit trusts most, with an offset off by
+    /// half the difference.
     #[expect(clippy::cast_precision_loss, reason = "microseconds stay far below 2^53")]
     pub fn observe(&mut self, sent_us: u64, received_us: u64, echoed_us: u64, arrived: Instant) {
         let arrived_us = self.stamp(arrived);
         if arrived_us < sent_us || echoed_us < received_us {
+            return;
+        }
+        let held = echoed_us.saturating_sub(received_us);
+        if held > arrived_us.saturating_sub(sent_us).saturating_add(STAMP_SLACK_US) {
             return;
         }
         let (sent, arrived) = (sent_us as f64, arrived_us as f64);
@@ -557,5 +567,11 @@ mod tests {
         sync.observe(9_000_000, 1, 2, link.epoch + Duration::from_secs(8));
         sync.observe(4_000_000, 20, 10, link.epoch + Duration::from_secs(5));
         assert_eq!(sync.counts().0, probes, "arrived before it left, or left before it came");
+        // Back 10 µs after it left, from a worker that says it held it 30.
+        let arrived = link.epoch + Duration::from_micros(9_000_010);
+        sync.observe(9_000_000, 50_000_000, 50_000_030, arrived);
+        assert_eq!(sync.counts().0, probes, "held longer than the round trip");
+        sync.observe(9_000_000, 50_000_000, 50_000_012, arrived);
+        assert_eq!(sync.counts().0, probes + 1, "a hold a truncated stamp longer is one");
     }
 }

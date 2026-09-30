@@ -283,11 +283,13 @@ impl Worker {
         *self.inner.presence.lock() = Some(dir);
     }
 
-    /// What session `id` is spawned with: every session's variables, then the request's
-    /// `extra`, then its own id and presence file.
+    /// What session `id` is spawned with: the request's `extra`, then every session's
+    /// variables, then its own id and presence file. The later wins, so no request moves what
+    /// the worker tells its sessions (its control socket, its server, its mod): a hook relay
+    /// pointed at another socket would ask a stranger to answer its permissions.
     fn env_for(&self, id: SessionId, extra: &[(String, String)]) -> Vec<(String, String)> {
-        let mut env = self.inner.session_env.lock().clone();
-        env.extend(extra.iter().cloned());
+        let mut env = extra.to_vec();
+        env.extend(self.inner.session_env.lock().iter().cloned());
         // Programs in the session (the `slopty hook` relay above all) learn which session they
         // run in from the environment.
         env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));

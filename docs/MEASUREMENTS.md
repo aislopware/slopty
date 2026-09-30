@@ -11342,3 +11342,191 @@ cd crates/slopty-ui && for r in 1 2 3; do for b in before after; do
   ../../target/ab-focus/$b measure_the_keyboard_moving --ignored --nocapture | grep MEASURE
 done; done
 ```
+
+## 2026-09-30 — ghostty on 76895d97b, libghostty-rs fixes, and a frame's dirty flags in one call
+
+Before: `vendor/ghostty` `9f8e1b28a` (the fork on ghostty `acf1209ee`), libghostty-rs
+`eb3a963`. After: `89c9624f0` (the fork on ghostty `76895d97b`, plus the render state's row
+dirty view) and libghostty-rs `2f8b499` (the view as `Snapshot::dirty_rows`, and the fixes in
+decisions/terminal.md, "ghostty on 76895d97b"). The engine reads each row's dirty flag from the
+view instead of one call per row. Release build, retired instructions per op, one run each
+(mac-studio, other lanes building):
+
+```sh
+SLOPTY_BENCH_OUT=target/bench/engine-after.jsonl nice -n 10 cargo nextest run --release \
+  -p slopty-engine --run-ignored only -E 'test(/_cost$/)' --no-capture --no-fail-fast
+```
+
+| series | before | after | change |
+| --- | --- | --- | --- |
+| `frame_cost.write` (one typed byte into the terminal) | 829 | 779 | −6.0 % |
+| `frame_cost.take_frame` (that byte's frame, 200×60) | 45 807 | 45 119 | −1.5 % |
+| `frame_cost.take_frame_unchanged` | 1 013 | 983 | −3.0 % |
+| `scroll_frame_cost.80x24` (an Enter at a bottom prompt) | 125 123 | 122 850 | −1.8 % |
+| `scroll_frame_cost.200x60` | 365 921 | 361 927 | −1.1 % |
+| `osc_write_cost.per_osc` (links, titles, marks) | 7 108 | 7 108 | 0 |
+| `osc_write_cost.per_osc_raw_vt` | 6 930 | 6 941 | +0.2 % |
+| `checkpoint_cost.fill_engine` (651 560 bytes of coloured lines, n = 1) | 31 108 672 | 31 919 661 | +2.6 % |
+| `checkpoint_cost.fill_raw_vt` (the same bytes, bare `vt_write`, n = 1) | 26 970 583 | 27 242 697 | +1.0 % |
+
+Plain output and OSC-heavy output cost what they did. The two fill series are one sample
+each: three more runs of the after build gave `fill_engine` 31 743 537, 30 969 022 and
+31 425 283, and `fill_raw_vt` 27 058 712, 27 292 761 and 27 017 066, so a single run moves by
+±1.5 % and the before number sits inside that spread. The scroll frames gain from the
+dirty view: they visit every row, and each clean row cost a call to learn it was clean. Every
+other `_cost` series moved by less than 0.4 %.
+
+**`frame_cost.take_frame` against its budget of 21 899: a bigger screen, not a regression.**
+The uncommitted change that added the sparse frame path (only the rows libghostty marks dirty
+are visited) also moved `frame_cost` from 60×12 to 200×60 and kept the series name, so the
+new number was compared with a budget taken at the old size. The engine was bisected from
+`e7146b59` in a throwaway worktree (`target/bisect-engine`, its own target dir):
+
+| build | 60×12 | 200×60 |
+| --- | --- | --- |
+| `e7146b59`: engine, libghostty-rs `8a45222`, ghostty `741a800e8` | 21 899 | 61 366 |
+| the same with ghostty `89c9624f0` | 21 899 | — |
+| `e7146b59` engine on libghostty-rs `eb3a963` and ghostty `9f8e1b28a` | 21 876 | — |
+| this tree | 18 887 (−13.8 %) | 45 061 (−26.6 %) |
+
+`take_frame` after a typed byte, instructions per op. The ghostty and libghostty-rs moves
+leave the frame's cost where it was. The engine's changes (the sparse path, one flag read per
+row) make it cheaper at either size. `frame_cost` now measures both sizes and names them:
+`take_frame.60x12`, `take_frame.200x60`, `take_frame_unchanged.60x12` (901),
+`take_frame_unchanged.200x60` (1 047), and `write` (795, timed at 60×12). The budgets need
+`cargo xtask bench --update-budgets` for the new names.
+
+The two sets of `frame_cost`, `scroll_frame_cost` and `fetch_lines_cost` lines in the
+`engine-before.jsonl` and `engine-after.jsonl` files above were one run each, appended to
+files that an earlier session's measurement of those three series had already written:
+`slopty_testkit::bench` appends to `SLOPTY_BENCH_OUT`. `cargo xtask bench` writes a fresh
+`target/bench/measured.jsonl` and reads only that. A fresh file (`dup-probe.jsonl`) holds
+one line per series. Only the logs' `BENCH` lines are quoted in this entry.
+
+Logs: `target/logs/engine-bench-before.log`, `target/logs/engine-bench-after.log`.
+
+## 2026-09-30 — the remote pointer as the system cursor, and the cursor seed
+
+Gap-audit items 1 and 7 (`docs/decisions/input.md`, "The remote pointer is the system cursor;
+its shape follows the window server's seed"). Mac Studio M1 Max, macOS 27.0.1 (26A434), one
+1920 × 1080 display at 1×, load average 28–39 from other sessions, debug builds.
+
+**Pointer motion.** Before, the view drew the worker's picture at the pointer, so every move
+over a remote tile was one app frame, 19 ms notify → glass ("a remote pointer drawn where the
+client put it", above). As the system cursor, the picture moves on the window server's cursor
+path with the hand, as a local pointer does, and the app draws nothing. The glass time of the
+cursor plane cannot be read without a camera, so the claim is structural and the test counts
+frames: in the fork, a tile styled `CursorStyle::Image` takes the picture as the entering move
+is dispatched, and 21 moves over it build the tile 0 times
+(`the_pointer_takes_the_picture_as_it_enters_and_moving_over_it_draws_nothing`). In Slopty's
+view (waiting in `target/wip-cursor/ui.patch`), a window stream's moves, new pictures and
+late echoes draw no frame; a display stream draws one frame when the hold starts or ends.
+
+**A shape change on the client** (fork, `a_shape_change_is_built_once_and_set_in_microseconds`,
+32 pictures of 64 × 64 at 2×, twenty rounds; four runs, p50 / p99):
+
+| step | p50 | p99 |
+| --- | --- | --- |
+| build the `NSCursor` (first time a picture is seen) | 12–40 µs | 35–372 µs |
+| point the id at a picture built before | 0.63–0.83 µs | 2.6–10.8 µs |
+| `-[NSCursor set]` | 56–129 µs | 0.2–7.7 ms |
+
+`NSCursor.currentCursor` is the cursor set as soon as `set` returns: no frame and no run-loop
+turn stand between the picture arriving and the system cursor taking it.
+
+**Seeing the change on the worker** (`slopty-capture`,
+`the_global_cursor_is_the_system_cursors_picture_and_its_seed_costs_nanoseconds`, 200 reads
+each; four runs, p50 / p99):
+
+| read | p50 | p99 |
+| --- | --- | --- |
+| `CGSCurrentCursorSeed` | 83–417 ns | 0.7–1.3 µs |
+| `CursorWatch::poll`, cursor unchanged (10 000 polls, 0 reads) | 0–42 ns | 42–84 ns |
+| `CGSGetGlobalCursorData`, the picture | 42–219 µs | 0.2–14.9 ms |
+| before: `currentSystemCursor` and its picture, every tick | 193–474 µs | 0.5–13.5 ms |
+
+- **Latency.** The worker looked at the picture every 33 ms, so a new shape waited up to 33 ms
+  (16.7 ms on average) before it was even read. With the seed polled every 8.3 ms, it waits up
+  to 8.3 ms (4.2 ms on average), and the one round trip happens only on a change.
+- **Cost.** A tick with the cursor unchanged was a 0.2–0.5 ms window-server round trip plus a
+  picture copy; it is now a seed read of tens of nanoseconds. The first read in a process
+  connects to the window server: 0.7–0.9 s here, against the 11 s AppKit's first
+  `currentSystemCursor` took.
+- **Wakeups** (with `worker.patch`). The shape loop ticked 30 times a second whether or not
+  the pointer was over the target. It now waits for the pointer to come over the target (1/s
+  backstop) and ticks 120 times a second only while it is there.
+- **Layout pinned.** On this macOS the global data is the same picture, pixel for pixel, as the
+  1× representation of `currentSystemCursor`: 28 × 40 pixels at 1×, hotspot (5, 5). The arrow
+  is grey, so the equality cannot tell blue from red; that order rests on `OSXvnc`'s reading
+  (blue at shift 0 of a host-order word). A Retina display is still to be checked.
+
+```sh
+# fork (.research/gpui-fast, branch cursor-image)
+cargo test -p gpui --lib fast::tests::cursor
+cargo test -p gpui_macos --lib fast::cursor -- --nocapture | grep MEASURE
+# worker: reads the cursor, never the screen; changes nothing, posts nothing
+SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-capture --no-capture -E 'test(/cursor/)' | grep MEASURE
+```
+
+## 2026-09-30 — two stripes, capture to glass
+
+Mac Studio M1 Max (two `ave2` encode engines), macOS 27.0, the `dev` profile (optimized), run
+from `/tmp` under `nice`. The machine was busy with other sessions' builds and tests throughout:
+load 42–121, and their tests code on the same engines, so these read as a loaded machine, not a
+quiet one. The question: what the built stripes (`docs/decisions/video.md`, "Two stripes, as
+built") do to a stream's encode and to capture → glass, against the same stream coded whole.
+`capture_to_glass_striped_against_whole` streams the drawn display through the worker's real
+pipeline (capture stand-in, `VideoToolbox` sessions, packetizer, loopback) into the client's
+reassemblers, decoders, stitch and pacer, 15 s a run after a second's warm-up, a click every
+80–150 ms, 60 frames a second asked, stripes forced with `Knob::On` and off with `Knob::Off`,
+two interleaved rounds. "Encode" is submit → the capture's last stripe back, as the worker's
+`ScreenStats::encode` counts it (the slower stripe's). `stripes_copy_cost` times the gate
+(`slopty_codec::stripes::side_by_side`) and both stripes' copies alone.
+
+```sh
+cargo test -p slopty-worker --lib --no-run      # target/debug/deps/slopty_worker-<hash>
+mkdir -p /tmp/slopty-stripes && /bin/rm -f /tmp/slopty-stripes/slopty_worker
+cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-stripes/slopty_worker && cd /tmp/slopty-stripes
+SLOPTY_GLASS_SECONDS=15 SLOPTY_GLASS_ROUNDS=2 TMPDIR=/tmp nice ./slopty_worker --ignored --exact screen::synthetic::tests::capture_to_glass_striped_against_whole --nocapture
+cargo test -p slopty-codec --lib --no-run       # target/debug/deps/slopty_codec-<hash>
+nice ./codec_lib --ignored --nocapture --exact stripes::imp::tests::stripes_copy_cost
+```
+
+**Encode per frame, one picture → two stripes** (p50 / p95 ms, rounds 1 and 2), and the frames
+a second the encoder made:
+
+| size | one picture | two stripes | frames a second: one → two |
+| --- | --- | --- | --- |
+| Retina 3024 × 1964 | 15.5 / 23.8, 15.8 / 25.1 | **9.5 / 13.8, 9.8 / 23.5** | 49.3 → 56.1, 43.6 → 49.2 |
+| 4K 3840 × 2160 | 20.6 / 26.3, 21.0 / 30.4 | **12.3 / 15.2, 12.7 / 23.3** | 42.6 → 56.9, 36.7 → 42.3 |
+| 5K 5120 × 2880 | 35.3 / 38.8, 35.8 / 51.2 | 38.0 / 43.2, **23.1 / 55.9** | 25.4 → 24.3, 21.4 → 19.6 |
+
+**Capture → painted** (p50 / p95 ms), the same runs: Retina 35.8 / 56.0 → 17.6 / 40.0 and
+36.7 / 75.6 → 23.2 / 56.4; 4K 38.7 / 62.2 → 29.3 / 46.3 and 49.5 / 77.0 → 35.1 / 67.6; 5K
+67.7 / 75.6 → 61.8 / 82.3 and 75.3 / 137.4 → 63.3 / 127.5. No frame was lost, NACKed or
+refreshed in any run, and no decode failed.
+
+**Seam tears** (a capture that went up with one stripe's previous picture, the late one past the
+stitch's 16.7 ms wait): Retina 6 and 10, 4K 4 and 21, in 750–880 captures a run; 5K 205 and 22
+in 300–375.
+
+**The gate and the copies alone** (`stripes_copy_cost`, load 100): whole against striped with
+both copies, 3024 × 1968 15.8 → 9.8 ms (4:4:4 15.9 → 10.6), 3840 × 2160 20.9 → 12.5 (21.1 →
+13.7), 5120 × 2880 35.2 → 21.3 (35.9 → 23.0); both copies at p50 0.42, 0.55 and 0.96 ms at
+4:2:0 and 1.7, 2.1 and 3.2 ms at 4:4:4, about twice what the quiet machine measured.
+
+What it says:
+
+- **Retina and 4K get the ruling's halving on the real pipeline.** The encode falls 38–40 % at
+  both sizes, the encoder keeps up with 56–57 captures a second where the whole picture made
+  37–49, and capture → glass falls 7–19 ms at the median. The 4K stripes are inside the
+  ruling's 14 ms bar at p50 in both rounds; their p95 is not, on this load.
+- **5K is where the load shows.** In the first round the two stripes took longer than the
+  whole picture (38.0 against 35.3 ms), the tears went to 205, and the encoder made fewer
+  frames. The second round's stripes were back to 23.1 ms at the median, with a p95 of 56. Two
+  stripes only pay while both engines are free for them: other processes coding on the same
+  engines, as the other sessions' tests were, put the stripes behind their frames. The gate's
+  timing is taken once per size and process, so a machine that becomes busy later keeps
+  stripes it no longer gains from; the spend half of the gate does not see it.
+- **The copies cost more under load** but stay under a millisecond for both 4:2:0 stripes up to
+  5K, on the stripes' own threads, beside a 9–23 ms encode.

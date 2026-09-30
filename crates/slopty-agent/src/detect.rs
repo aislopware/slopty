@@ -106,10 +106,127 @@ pub fn agent_args(argv: &[String]) -> &[String] {
     &[]
 }
 
-/// Whether the command a shell was handed (`sh -c '<command>'`) starts the agent: its first
-/// word, so `sh -c 'echo claude'` is an echo.
+/// The command a shell runs, when `argv` is a shell handed one (`sh -c '<command>'`).
+#[must_use]
+pub fn shell_command(argv: &[String]) -> Option<&str> {
+    let (argv0, rest) = argv.split_first()?;
+    if !SHELLS.contains(&base(argv0)) {
+        return None;
+    }
+    let mut words = rest.iter();
+    while let Some(flags) = words.next()?.strip_prefix('-') {
+        if flags.contains('c') {
+            return words.next().map(String::as_str);
+        }
+    }
+    None
+}
+
+/// Whether the command a shell was handed (`sh -c '<command>'`) starts the agent.
 fn is_claude_command(command: &str) -> bool {
-    command.split_whitespace().next().is_some_and(|word| base(word) == "claude")
+    shell_agent_args(command).is_some()
+}
+
+/// The arguments the agent gets from a shell command line (`sh -c '<command>'`).
+///
+/// They are the words after `claude` where it is the program of one of the line's simple
+/// commands, split and unquoted as a POSIX shell splits them. `cd repo && FOO=1 exec claude --x`
+/// gives `--x`; `echo claude` gives none, since there `claude` is an argument.
+///
+/// Expansions (`$VAR`, `$(…)`, globs) are not performed, so a flag spelled through one is not
+/// seen: this reads what a person or an agent wrote, not what a shell would compute.
+#[must_use]
+pub fn shell_agent_args(command: &str) -> Option<Vec<String>> {
+    let words = shell_split(command);
+    words.split(|w| matches!(w, Word::Operator)).find_map(|simple| {
+        let mut plain = simple.iter().map(|w| match w {
+            Word::Plain(text) => text.as_str(),
+            Word::Operator => "",
+        });
+        let program = plain.find(|w| !is_assignment(w) && !PREFIXES.contains(w))?;
+        (base(program) == "claude").then(|| plain.map(str::to_owned).collect())
+    })
+}
+
+/// The words of `line` when it is one simple command, split and unquoted as a shell does;
+/// none when it chains or pipes several.
+#[must_use]
+pub fn simple_command(line: &str) -> Option<Vec<String>> {
+    shell_split(line)
+        .into_iter()
+        .map(|word| match word {
+            Word::Plain(text) => Some(text),
+            Word::Operator => None,
+        })
+        .collect()
+}
+
+/// Words that run the command after them: `exec claude`, `env FOO=1 claude`.
+const PREFIXES: [&str; 5] = ["exec", "command", "env", "nohup", "builtin"];
+
+/// `NAME=value` before a program sets its environment.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+    })
+}
+
+/// A word of a shell line, or an operator between simple commands.
+#[derive(Debug, PartialEq, Eq)]
+enum Word {
+    Plain(String),
+    Operator,
+}
+
+/// Split `line` into words as a POSIX shell does: blanks separate, single quotes keep
+/// everything, double quotes keep all but `\` before `"`, `\`, `$` or `` ` ``, a backslash
+/// outside quotes keeps the next character, and an unquoted `;`, `&`, `|` or newline ends a
+/// simple command.
+fn shell_split(line: &str) -> Vec<Word> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                let text = word.get_or_insert_with(String::new);
+                text.extend(chars.by_ref().take_while(|&c| c != '\''));
+            }
+            '"' => {
+                let text = word.get_or_insert_with(String::new);
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' if chars
+                            .peek()
+                            .is_some_and(|n| matches!(n, '"' | '\\' | '$' | '`')) =>
+                        {
+                            text.extend(chars.next());
+                        }
+                        other => text.push(other),
+                    }
+                }
+            }
+            '\\' => {
+                // A backslash before a newline joins the lines; before anything else it quotes.
+                if let Some(next) = chars.next().filter(|&n| n != '\n') {
+                    word.get_or_insert_with(String::new).push(next);
+                }
+            }
+            ';' | '&' | '|' | '\n' => {
+                words.extend(word.take().map(Word::Plain));
+                if words.last() != Some(&Word::Operator) {
+                    words.push(Word::Operator);
+                }
+            }
+            c if c.is_whitespace() => words.extend(word.take().map(Word::Plain)),
+            other => word.get_or_insert_with(String::new).push(other),
+        }
+    }
+    words.extend(word.map(Word::Plain));
+    words
 }
 
 /// Whether a script path is Claude Code's entry point.
@@ -202,6 +319,29 @@ mod tests {
         );
         assert!(agent_args(&words("/bin/zsh -lic claude")).is_empty());
         assert!(agent_args(&words("node server.js --model x")).is_empty());
+    }
+
+    /// A shell's command starts the agent when `claude` is the program of any of its simple
+    /// commands, after assignments or `exec`; quoting is undone as the shell undoes it.
+    #[test]
+    fn a_shell_line_runs_the_agent_wherever_it_is_a_program() {
+        let args = |line: &str| shell_agent_args(line);
+        let owned = |words: &[&str]| Some(words.iter().map(|w| (*w).to_owned()).collect());
+        assert_eq!(args("claude --resume"), owned(&["--resume"]));
+        assert_eq!(args("cd ~/w && FOO=1 exec claude -c"), owned(&["-c"]));
+        assert_eq!(
+            args("true; env A=b claude 'two words' \"x\\\"y\""),
+            owned(&["two words", "x\"y"])
+        );
+        assert_eq!(args("make|/usr/bin/claude a\\ b"), owned(&["a b"]));
+        assert_eq!(args("echo claude"), None);
+        assert_eq!(args("cat ~/.claude/local/claude"), None);
+        assert_eq!(args("'claude'"), owned(&[]), "a quoted program is still the program");
+        assert!(is_claude("bash", &argv(&["/bin/sh", "-c", "cd x && claude"])));
+        assert!(!is_claude("bash", &argv(&["/bin/sh", "-c", "cd x && echo claude"])));
+        assert_eq!(shell_command(&argv(&["/bin/zsh", "-lic", "claude"])), Some("claude"));
+        assert_eq!(shell_command(&argv(&["claude", "-c", "x"])), None, "not a shell");
+        assert_eq!(shell_command(&argv(&["-zsh"])), None);
     }
 
     #[test]

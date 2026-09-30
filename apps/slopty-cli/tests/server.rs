@@ -195,6 +195,7 @@ mod tests {
             .args(args)
             .env_remove("SLOPTY_SERVER")
             .env_remove("SLOPTY_SESSION")
+            .env_remove("SLOPTY_AGENT_TOKEN")
             .env("RUST_LOG", "warn")
             .kill_on_drop(true);
         cmd
@@ -258,6 +259,35 @@ mod tests {
         assert!(verbs.contains(&Verb::ListTerminals { worker: None }), "{verbs:?}");
         assert!(verbs.contains(&Verb::WorkerFacts { worker: None }), "{verbs:?}");
         assert!(fake.verbs.try_recv().is_err(), "no status request per terminal");
+    }
+
+    /// The CLI speaks for the person only outside every Slopty terminal: in one it says which,
+    /// and a terminal's variables that name none (a session id that does not parse, a token
+    /// alone) speak for an agent, never the person.
+    #[tokio::test]
+    async fn the_cli_speaks_for_the_person_only_outside_every_terminal() {
+        let mut fake = Fake::start();
+        let data = tempfile::tempdir().unwrap();
+        let session = shell().to_string();
+        for (env, expect) in [
+            (vec![("SLOPTY_SESSION", session.as_str())], "a shell"),
+            (vec![("SLOPTY_SESSION", "not-a-session")], "an agent"),
+            (vec![("SLOPTY_AGENT_TOKEN", "t0ken")], "an agent"),
+            (Vec::new(), "the person"),
+        ] {
+            let mut cmd = slopty(&data, &fake.address(), &["--json", "workers"]);
+            cmd.envs(env.iter().copied());
+            let out = tokio::time::timeout(PATIENCE, cmd.output()).await.unwrap().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            let role = fake.next_role().await;
+            let seen = match &role {
+                Role::Shell { session: s, .. } if s.to_string() == session => "a shell",
+                Role::Agent { vouch: None, .. } => "an agent",
+                Role::Client { .. } => "the person",
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(seen, expect, "{env:?}");
+        }
     }
 
     #[tokio::test]

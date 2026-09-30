@@ -4,11 +4,16 @@
 //! A task's agent reports to the node that split its task off: its parent task's agent, or the
 //! project's orchestrator. The reports wait here per node, and go when their kind says:
 //!
-//! - a need ([`ReportKind::NeedsInput`]) at once;
+//! - a need ([`ReportKind::NeedsInput`]) at once, but at most once per task every [`NEED_EVERY`];
 //! - a block ([`ReportKind::Stuck`]) at once, but at most once per task every [`STUCK_EVERY`];
 //! - a finish ([`ReportKind::Done`]) once it has settled for [`DONE_SETTLE`], so the agent hears
 //!   the last word and not a flurry: a later report of the task replaces it;
 //! - a checkpoint with whatever goes next, or after [`CHECKPOINT_WAIT`].
+//!
+//! A task's later report of a kind replaces its earlier one still waiting, so what waits for a
+//! node is bounded by its tasks, and an agent that reports in a loop costs its parent one turn
+//! per pacing interval, not one per report. Every report is on the timeline at once whatever
+//! waits here.
 //!
 //! A batch goes to the node's live terminal, whose worker hands it to the agent through its
 //! hooks and says so ([`Deliveries::acked`]). Until then it stays outstanding: sent again when
@@ -31,6 +36,8 @@ pub(crate) const DONE_SETTLE: Duration = Duration::from_mins(2);
 pub(crate) const CHECKPOINT_WAIT: Duration = Duration::from_hours(1);
 /// How often one task's block may interrupt.
 pub(crate) const STUCK_EVERY: Duration = Duration::from_mins(3);
+/// How often one task's need may interrupt.
+pub(crate) const NEED_EVERY: Duration = Duration::from_mins(1);
 /// The longest batch, in bytes: Claude Code takes up to 10 000 characters of a hook's
 /// context.
 pub(crate) const CONTEXT_MAX: usize = 9_000;
@@ -48,15 +55,26 @@ struct Item {
 }
 
 impl Item {
-    /// When it falls due, given when its task's block last went.
-    fn due(&self, stuck_last: Option<Instant>) -> Instant {
+    /// The pacing it goes under: its task's needs, or its task's blocks.
+    fn paced(&self) -> Option<(TaskId, bool)> {
+        let stuck = match self.report.kind {
+            ReportKind::NeedsInput => false,
+            ReportKind::Stuck => true,
+            ReportKind::Done | ReportKind::Checkpoint => return None,
+        };
+        self.task.map(|task| (task, stuck))
+    }
+
+    /// When it falls due, given when its task's last report of its kind went.
+    fn due(&self, last: Option<Instant>) -> Instant {
         let after = |wait: Duration| self.at.checked_add(wait).unwrap_or(self.at);
+        let paced = |every: Duration| {
+            let next = last.and_then(|last| last.checked_add(every));
+            next.map_or(self.at, |next| next.max(self.at))
+        };
         match self.report.kind {
-            ReportKind::NeedsInput => self.at,
-            ReportKind::Stuck => {
-                let next = stuck_last.and_then(|last| last.checked_add(STUCK_EVERY));
-                next.map_or(self.at, |next| next.max(self.at))
-            }
+            ReportKind::NeedsInput => paced(NEED_EVERY),
+            ReportKind::Stuck => paced(STUCK_EVERY),
             ReportKind::Done => after(DONE_SETTLE),
             ReportKind::Checkpoint => after(CHECKPOINT_WAIT),
         }
@@ -75,7 +93,8 @@ struct Outstanding {
 struct Queue {
     waiting: Vec<Item>,
     outstanding: Option<Outstanding>,
-    stuck_last: HashMap<TaskId, Instant>,
+    /// When each task's last need and block went, for their pacing.
+    paced_last: HashMap<(TaskId, bool), Instant>,
     /// A report came since the last batch went: what waits may go before that one is read.
     fresh: bool,
     /// Its node had no live terminal when it fell due: it waits for one ([`Deliveries::unpark`]).
@@ -89,8 +108,8 @@ impl Queue {
         if self.parked || (self.outstanding.is_some() && !self.fresh) {
             return None;
         }
-        let stuck_last = |i: &Item| i.task.and_then(|t| self.stuck_last.get(&t).copied());
-        self.waiting.iter().map(|i| i.due(stuck_last(i))).min()
+        let last = |i: &Item| i.paced().and_then(|key| self.paced_last.get(&key).copied());
+        self.waiting.iter().map(|i| i.due(last(i))).min()
     }
 }
 
@@ -118,11 +137,13 @@ pub(crate) struct Deliveries {
 
 impl Deliveries {
     /// A report of `task` for `node`: it replaces the task's checkpoint and finish still
-    /// waiting, and waits with its needs and blocks.
+    /// waiting, and its need or block when it is one; it waits with the task's others.
     pub(crate) fn add(&mut self, node: Node, task: Option<TaskId>, report: Report, at: Instant) {
         let queue = self.queues.entry(node).or_default();
+        let kind = report.kind;
         queue.waiting.retain(|i| {
-            i.task != task || !matches!(i.report.kind, ReportKind::Checkpoint | ReportKind::Done)
+            let settles = matches!(i.report.kind, ReportKind::Checkpoint | ReportKind::Done);
+            i.task != task || !(settles || (task.is_some() && i.report.kind == kind))
         });
         queue.waiting.push(Item { task, report, at });
         queue.fresh = true;
@@ -143,7 +164,7 @@ impl Deliveries {
     ) -> Vec<Batch> {
         let mut out = Vec::new();
         for queue in self.queues.values_mut() {
-            queue.stuck_last.retain(|_, last| now.duration_since(*last) < STUCK_EVERY);
+            queue.paced_last.retain(|_, last| now.duration_since(*last) < STUCK_EVERY);
         }
         for (node, queue) in &mut self.queues {
             if queue.due().is_none_or(|due| due > now) {
@@ -159,10 +180,8 @@ impl Deliveries {
             // What did not fit waits for the next batch, due as it was.
             queue.waiting = left;
             queue.fresh = false;
-            for item in &items {
-                if let (Some(task), ReportKind::Stuck) = (item.task, item.report.kind) {
-                    queue.stuck_last.insert(task, now);
-                }
+            for key in items.iter().filter_map(Item::paced) {
+                queue.paced_last.insert(key, now);
             }
             self.next_batch = self.next_batch.wrapping_add(1);
             let batch = self.next_batch;
@@ -216,12 +235,15 @@ impl Deliveries {
     }
 
     /// `term` closed: what it was sent and never handed over waits for the node's next
-    /// terminal, due as it was.
+    /// terminal, due at once, since no agent read it.
     pub(crate) fn closed(&mut self, term: TermRef) {
         for queue in self.queues.values_mut() {
             if queue.outstanding.as_ref().is_some_and(|o| o.term == term)
                 && let Some(o) = queue.outstanding.take()
             {
+                for key in o.items.iter().filter_map(Item::paced) {
+                    queue.paced_last.remove(&key);
+                }
                 let mut items = o.items;
                 items.append(&mut queue.waiting);
                 queue.waiting = items;
@@ -232,7 +254,7 @@ impl Deliveries {
     /// Drop queues with nothing in them and no block's clock still running.
     fn prune(&mut self) {
         self.queues.retain(|_, q| {
-            !q.waiting.is_empty() || q.outstanding.is_some() || !q.stuck_last.is_empty()
+            !q.waiting.is_empty() || q.outstanding.is_some() || !q.paced_last.is_empty()
         });
     }
 
@@ -315,8 +337,9 @@ fn block(item: &Item) -> String {
 }
 
 /// `text` with the block's own tag name, in any case, spelled apart: an agent's words that
-/// read as `</slopty-reports>` would end the block and pass as the server's.
-fn plain(text: &str) -> String {
+/// read as `</slopty-reports>` would end the block and pass as the server's. Every word an agent
+/// wrote goes through it, in the server's own words too (a project's title, its rules).
+pub(crate) fn plain(text: &str) -> String {
     const TAG: &str = "slopty-reports";
     let mut out = String::with_capacity(text.len());
     let mut rest = text;

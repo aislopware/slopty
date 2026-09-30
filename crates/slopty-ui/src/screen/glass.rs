@@ -200,6 +200,27 @@ struct Slot {
     /// `last` has not been put up on a layer yet.
     waiting: bool,
     generations: u64,
+    /// Where the stripes meet in the layout the view last placed the layers for; `None` before
+    /// it has placed them. A picture whose stripes meet elsewhere, or that has none where the
+    /// layout has, waits for the view to place the layers for it ([`Glass::place`]): shown
+    /// before, the top stripe would fill the whole picture's place for a frame, or the whole
+    /// picture be clipped at a seam it does not have.
+    placed: Option<Placed>,
+}
+
+/// How the view placed the layers: for pictures whose stripes meet at `seam`, or for pictures
+/// of one piece.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Placed {
+    pub seam: Option<Seam>,
+}
+
+impl Slot {
+    /// Whether `last` can go up on the layers as the view placed them.
+    fn fits(&self) -> bool {
+        let Some(picture) = &self.last else { return false };
+        self.placed.is_none_or(|placed| placed.seam == Shape::of(picture).seam)
+    }
 }
 
 /// A picture on its way to the glass.
@@ -304,6 +325,9 @@ impl Glass {
     /// Put `slot`'s newest picture up on its layer, if it has one: a striped picture's top
     /// stripe there and its lower one on the lower layer, back to back.
     fn present(&self, slot: &mut Slot) {
+        if !slot.fits() {
+            return;
+        }
         let Slot { layer: Some(layer), lower, last: Some(picture), waiting, .. } = slot else {
             return;
         };
@@ -393,6 +417,16 @@ impl Glass {
         slot.lower = Some(Layer { video, generation, next: 0 });
         self.present(&mut slot);
         Ok(())
+    }
+
+    /// The view placed the layers as `placed` says: a picture that waited for it goes up now.
+    /// Main thread, when it changes.
+    pub(super) fn place(&self, placed: Placed) {
+        let mut slot = self.slot.lock();
+        let was = slot.placed.replace(placed);
+        if was.is_some_and(|was| was != placed) && slot.waiting {
+            self.present(&mut slot);
+        }
     }
 
     /// Let go of the layers: pictures wait here until another is attached.
@@ -592,6 +626,35 @@ mod tests {
             Some(Seam { top: 1152, top_rows: 1088, lower: 1136, lower_from: 64 })
         );
         assert_eq!(Shape::of(&picture(800, 600)).seam, None);
+    }
+
+    /// A picture goes up only on layers placed for where its stripes meet: before the view has
+    /// placed any, anything goes; after, a whole picture waits for a layout without a seam, a
+    /// striped one for its own seam, and a resize that moves the seam waits too.
+    #[test]
+    fn a_picture_waits_for_layers_placed_for_its_seam() {
+        let striped = |h_top, top_rows, h_lower| {
+            Picture::striped(picture(64, h_top).top, top_rows, picture(64, h_lower).top, 64)
+        };
+        let mut slot = Slot { last: Some(striped(576, 512, 560)), ..Slot::default() };
+        assert!(slot.fits(), "nothing placed yet");
+        slot.placed = Some(Placed { seam: None });
+        assert!(!slot.fits(), "laid out for one picture");
+        slot.placed = Some(Placed { seam: Shape::of(&striped(576, 512, 560)).seam });
+        assert!(slot.fits());
+        slot.last = Some(striped(640, 576, 560));
+        assert!(!slot.fits(), "the seam moved");
+        slot.last = Some(picture(64, 1024));
+        assert!(!slot.fits(), "a whole picture on striped layers");
+        slot.placed = Some(Placed { seam: None });
+        assert!(slot.fits());
+
+        let glass = Glass::new();
+        glass.place(Placed { seam: Shape::of(&striped(576, 512, 560)).seam });
+        glass.offer(picture(64, 1024), test_stamp(0));
+        assert!(glass.slot.lock().waiting, "held for the layout");
+        glass.place(Placed { seam: None });
+        assert!(glass.slot.lock().waiting, "and still for a layer");
     }
 
     /// A capture whose two stripes the layers showed within [`SPLIT_AFTER`] of each other went

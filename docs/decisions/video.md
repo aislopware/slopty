@@ -1934,8 +1934,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (ignored), with the knobs for stripes, overlap, declared rate, target and encoder in its
     doc. The build plan is the next entry.
 
-- ⏸ **Two stripes, built: the wire, the worker and the client** (designed 2026-09-29, not
-  built; the ruling above).
+- ✅ **Two stripes, built: the wire, the worker and the client** (designed 2026-09-29, built
+  2026-09-30; the ruling above). The plan as it was written; "Two stripes, as built" below says
+  where the build departs from it.
   - Build only behind the gate in the ruling. Two stripes, never more.
   - Geometry, one function both ends call (built: `slopty_codec::stripes::layout`, see "A
     large stream takes both encode engines while it has them"). The seam is the multiple of 64
@@ -1998,6 +1999,87 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     of each other and under 14 ms, from `/tmp`; `Stitch` with both stripes, one late past a
     refresh, and one stripe's refresh; an e2e on the drawn 4K display with stripes forced on,
     the seam rows' PSNR in the golden.
+
+- ✅ **Two stripes, as built** (2026-09-30, M1 Max, macOS 27.0; MEASUREMENTS "two stripes,
+  capture to glass"). Wire changes: `Stripe`, `Opened.stripes`, `Geometry.stripes`, and a frame
+  prefix of 20 bytes carrying the stripes' mask and the sessions' build.
+  - *Numbers, on a loaded machine.* The encode falls from 15.5 to 9.5 ms at 3024 × 1964 and
+    from 20.6 to 12.3 ms at 4K (p50), the encoder keeps 56–57 captures a second where the whole
+    picture made 37–49, and capture → glass falls 7–19 ms at the median. At 5K one round's
+    stripes came back slower than the whole picture while other processes coded on the same
+    engines: stripes pay only while both engines are theirs.
+  - *Media streams.* The top stripe's media stream is the stream's own id; the lower one's is
+    that id with its top bit set (`Stripe::media_of`, `Stripe::stream_of`). The client's router
+    and the worker's connection route a lower stripe's datagrams and feedback by the id alone,
+    before `Opened` has named it; a stream's first datagrams often beat that event.
+  - *The prefix* carries `stripes`, the mask of the stripes coded from the capture, and `build`,
+    the low byte of the number of the sessions' build (`Shared::put_in` stamps it on both
+    stripes' packetizers). The build was not in the plan. Without it the client could not tell a
+    stripe of the sessions a resize or a chroma switch replaced from one of the new sessions,
+    when one stripe's keyframe comes late: it put the new top stripe beside the old lower one,
+    a picture of neither size, for as long as the late keyframe took.
+  - *Worker.* One encode thread and one mailbox, as for one picture, and a helper thread
+    (`Helper`) that submits the lower stripe while the encode thread submits the top one; the
+    encode waits for both before it lets its locks go. Each stripe is a `Coder` with its own
+    packetizer, redundancy, LTR book, pending requests, refinement and keyframe estimate, and
+    a refresh or NACK on a stripe's media stream is answered by that stripe alone
+    (`StreamControl::of_media`). A capture counts once, when its last stripe is back, with the
+    slower stripe's encode (`Join`); a code of one stripe alone (a refresh) counts on its own.
+    The rate controller, the audio copies and the layer gate take the top stripe's reports only:
+    the lower one's carry the same link, and counted twice they would cut twice. Each stripe gets
+    the encoder's rate times its shown rows over the picture's.
+  - *The stripe's picture.* `VideoToolbox::stripe` makes a session whose submit copies its rows
+    of the capture into an `IOSurface`-backed picture of its own (`StripeCopy`), on the thread
+    that submits it, so the two copies run at once. A capture of any other size than the one the
+    stripes were laid out for is refused (`WrongSize`), a taller one too, which the first cut
+    copied from; the worker drops it as it drops a whole picture of the old size. A 4:2:0
+    stripe takes a 4:4:4 capture, as the whole picture's session does: ScreenCaptureKit goes on
+    delivering 4:4:4 for a few frames after a switch back, and the first cut refused every one
+    of them.
+  - *The gate.* `SLOPTY_STRIPES=on|off` forces it (the tests and the measurements); otherwise
+    `stripes::pays` times `side_by_side` once per size and process off the runtime and requires
+    it to pay and the whole picture to take over 12 ms, and the spend gate (`stripes::Gate`)
+    turns them on under 45 % of the target and off over 70 %, each after 3 s. A size too small
+    to take over 12 ms is never timed.
+  - *Client.* The stream's task keeps a lane (reassembler and decoder) per stripe, the lower one
+    opened by its first datagram and closed by the first frame of one picture; a lower
+    datagram after that opens nothing unless it is a keyframe's. The `Stitch` puts a capture up
+    once every stripe its mask names has decoded it. Where the plan left it open:
+    - the wait of one display refresh runs from the first stripe that came out and was not
+      shown. A newer capture replaces the one waited on but keeps that clock, and a stripe of a
+      capture the other stripe has already gone past completes nothing and is kept only as its
+      stripe's newest picture. The first cut restarted the wait on every stripe that came out,
+      so a stripe running a capture behind the other (behind a retransmission, on a 120 Hz beat)
+      kept any picture from going up;
+    - a stripe waiting for its refresh holds nothing up, and a capture that goes up with a
+      stripe's previous picture counts as a seam tear (`ScreenStats::seam_tears`);
+    - stripes of two builds never go up together, not even past the wait.
+  - *The view.* Each stripe goes to a `VideoLayer` of its own, not two quads in one layer: the
+    glass presents a capture's two pictures back to back, and the view places the two layers
+    each clipped to its rows (`stripe_places`). The glass counts captures whose stripes the two
+    layers showed more than 4 ms apart (`Seams`); one drawable for both would be the only way to
+    make that impossible, and that is `VideoLayer`'s to offer. A picture whose stripes meet
+    elsewhere than the layers were last placed for (stripes turned on or off, a resize that
+    moved the seam) waits for the view's next paint to place them (`Glass::place`); shown
+    before, the top stripe filled the whole picture's place for a frame.
+  - Open: `ScreenStats` does not carry `refined`, `superseded` or `layered` yet (the plan's
+    wire list); the gate's timing is not taken again when the engines become busy later; the
+    e2e on the drawn 4K display with stripes forced on, with the seam's PSNR in its golden, is
+    not written.
+  - Tests: `the_seam_falls_on_a_coding_tree_unit_near_half`, `a_stripe_holds_its_rows_of_the_capture`,
+    `a_capture_that_does_not_fit_is_refused`, `a_subsampled_stripe_codes_a_full_chroma_capture`
+    and `the_gate_times_both_ways` (`slopty-codec`); `screen_stripes` (goldens) and the units in
+    `slopty-proto`; `a_frame_s_stripes_and_build_survive_its_recovery` (`slopty-media`);
+    `a_striped_capture_codes_both_and_a_refresh_only_its_stripe`,
+    `both_stripes_frames_name_the_build_they_came_from`,
+    `a_striped_capture_counts_when_its_last_stripe_is_back`,
+    `the_spend_moves_the_stripes_only_after_the_hold` and, through the real sessions,
+    `two_stripes_meet_at_the_seam_row_for_row` (`slopty-worker`); the `stitch_tests`
+    (`slopty-client`); `a_striped_pictures_shape_is_its_shown_rows`,
+    `a_picture_waits_for_layers_placed_for_its_seam`,
+    `a_capture_counts_its_stripes_together_or_split` and
+    `a_striped_pictures_layers_meet_at_the_seam` (`slopty-ui`). Measurements:
+    `capture_to_glass_striped_against_whole` (worker) and `stripes_copy_cost` (codec).
 
 - ✅ **Every interactive session declares 120 until its first frame, so streams get an encode
   engine each** (2026-09-30, M1 Max with two `ave2` engines, macOS 27.0; MEASUREMENTS "several
@@ -2333,8 +2415,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (both planes, both chromas), `a_capture_that_does_not_fit_is_refused`,
     `the_gate_times_both_ways`; the measurements `concurrent_encode` (`tests/streams.rs`) and
     `stripes_copy_cost`.
-  - *Left for the build plan below.* The wire (a stripe's media stream, the frame prefix's
-    mask), the worker's two encode threads, packetizers and watch, and the client's stitch.
+  - *Left for the build plan above* and built since ("Two stripes, as built"): the wire (a
+    stripe's media stream, the frame prefix's mask), the worker's two submitting threads,
+    packetizers and watch, and the client's stitch.
     At 4:4:4 the copy is over the 0.5 ms the plan set for trying a Metal blit; it is
     26.5 MB a stripe at about 46 GB/s, the memory's rate, so a blit saves CPU (0.04 of a core
     a stripe at 60) rather than time, and waits for a measurement on the worker's path.

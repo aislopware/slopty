@@ -32,20 +32,79 @@ pub const SERVER_ENV: &str = "SLOPTY_SERVER";
 pub const PROJECT_ENV: &str = "SLOPTY_PROJECT";
 /// The variable naming the task, in the session of an agent spawned for it.
 pub const TASK_ENV: &str = "SLOPTY_TASK";
-/// Flags that loosen what Claude Code asks a person before it acts, unless the person allows
-/// them for a project (`[server.projects] permission_flags`).
-pub const LOOSENING_FLAGS: [&str; 6] = [
-    "--dangerously-skip-permissions",
-    "--allow-dangerously-skip-permissions",
-    "--allowedTools",
-    "--allowed-tools",
-    "--permission-prompt-tool",
-    "--settings",
+/// Claude Code's flags known to give an agent nothing the person would be asked for.
+///
+/// From the CLI reference, checked against 2.1.285. Any other flag loosens, or may, and is refused
+/// unless the person allows it for a project (`[server.projects] permission_flags`): a new flag is
+/// judged before it is let through, never after. [`PERMISSION_MODE_FLAG`], `--settings` and
+/// `--mcp-config` are judged by their values instead.
+pub const SAFE_FLAGS: [&str; 56] = [
+    "--advisor",
+    "--append-subagent-system-prompt",
+    "--append-subagent-system-prompt-file",
+    "--append-system-prompt",
+    "--append-system-prompt-file",
+    "--autocompact",
+    "--ax-screen-reader",
+    "--betas",
+    "--chrome",
+    "--continue",
+    "-c",
+    "--debug",
+    "--disable-slash-commands",
+    "--disallowedTools",
+    "--disallowed-tools",
+    "--effort",
+    "--exclude-dynamic-system-prompt-sections",
+    "--fallback-model",
+    "--fork-session",
+    "--forward-subagent-text",
+    "--from-pr",
+    "--ide",
+    "--include-hook-events",
+    "--include-partial-messages",
+    "--init",
+    "--init-only",
+    "--input-format",
+    "--json-schema",
+    "--maintenance",
+    "--max-budget-usd",
+    "--max-turns",
+    "--model",
+    "--name",
+    "-n",
+    "--no-chrome",
+    "--no-session-persistence",
+    "--output-format",
+    "--print",
+    "-p",
+    "--prompt-suggestions",
+    "--replay-user-messages",
+    "--restricted",
+    "--resume",
+    "-r",
+    "--session-id",
+    "--strict-mcp-config",
+    "--system-prompt-snapshot",
+    "--teammate-mode",
+    "--tools",
+    "--verbose",
+    "--version",
+    "-v",
+    "--worktree",
+    "-w",
+    "--help",
+    "-h",
 ];
 /// The flag that names Claude Code's permission mode.
 pub const PERMISSION_MODE_FLAG: &str = "--permission-mode";
-/// The permission modes that ask the person no less than `default` does.
-pub const SAFE_MODES: [&str; 3] = ["default", "plan", "dontAsk"];
+/// The permission modes that ask the person no less than `default` does (`manual` is
+/// `default`'s other name).
+pub const SAFE_MODES: [&str; 4] = ["default", "manual", "plan", "dontAsk"];
+/// The most items one [`AgentReport::Loosened`] names.
+pub const LOOSENED_MAX: usize = 16;
+/// The longest item of an [`AgentReport::Loosened`], in bytes.
+pub const LOOSENED_ITEM_MAX: usize = 256;
 
 /// The variable holding the token the server gives a task's terminal at its start.
 ///
@@ -1179,6 +1238,17 @@ pub enum AgentReport {
         /// The batch.
         batch: u64,
     },
+    /// What in the command line of the agent running in a session loosens its permissions
+    /// (flags, or a `--settings` that allows tools or adds a deciding hook), read off the
+    /// process however it was started: bare, through a runtime, or inside a shell's line. Sent
+    /// when it changes; empty once nothing does. At most [`LOOSENED_MAX`] items, each at most
+    /// [`LOOSENED_ITEM_MAX`] bytes.
+    Loosened {
+        /// The session.
+        session: SessionId,
+        /// Each thing that loosens, as a reader would name it.
+        found: Vec<String>,
+    },
 }
 
 impl AgentReport {
@@ -1190,6 +1260,7 @@ impl AgentReport {
             Self::SubagentStarted { session, .. }
             | Self::SubagentStopped { session, .. }
             | Self::PermissionMode { session, .. }
+            | Self::Loosened { session, .. }
             | Self::NativeTask { session, .. }
             | Self::Delivered { session, .. } => *session,
         }

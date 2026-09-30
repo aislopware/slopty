@@ -516,6 +516,13 @@ mod golden_project {
                 mode: "bypassPermissions".to_owned(),
             }),
         );
+        snap(
+            "report_loosened",
+            &ToServer::Report(AgentReport::Loosened {
+                session,
+                found: vec!["--allowedTools".to_owned()],
+            }),
+        );
         snap("report_delivered", &ToServer::Report(AgentReport::Delivered { session, batch: 7 }));
         snap(
             "deliver",

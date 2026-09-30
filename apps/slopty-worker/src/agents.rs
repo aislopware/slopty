@@ -81,8 +81,13 @@ pub async fn watch(daemon: Daemon) -> ! {
         {
             let mut agents = daemon.agents.lock();
             let mut events = Vec::new();
+            let mut loosened = Vec::new();
             for (session, probe) in live {
                 events.extend(agents.observe(session, &observation(probe)));
+                loosened.extend(agents.loosening_report(session));
+            }
+            for report in loosened {
+                let _sent = daemon.reports.send(report);
             }
             events.extend(agents.retain(&ids));
             // Sent before anything is awaited: a hook arriving on the control socket while we

@@ -508,6 +508,10 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             None
         }
     };
+    agents.lock().set_own(slopty_agent::loosening::Own {
+        slopty: slopty_agent::hooks::relay_beside_this_binary(),
+        plugin_dir: claude_mod.as_ref().map(|installed| installed.dir.clone()),
+    });
     let presence_dir = data_dir.join("presence");
     let (presence, presence_changes) = tokio::sync::mpsc::unbounded_channel();
     let (reports, _none) = broadcast::channel(EVENT_BUFFER);

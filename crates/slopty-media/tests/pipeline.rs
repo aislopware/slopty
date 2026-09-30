@@ -173,6 +173,34 @@ mod tests {
         assert!(h.tick().is_empty());
     }
 
+    /// A striped frame's mask and build reach the receiver with it, parity-protected like the
+    /// bitstream: a frame rebuilt from its parity still says which stripes its capture coded
+    /// and which build of the sessions coded it.
+    #[test]
+    fn a_frame_s_stripes_and_build_survive_its_recovery() {
+        let mut h = Harness::new();
+        h.tx.set_build(7);
+        let key = frame_bytes(1, 6_000);
+        let frame = EncodedFrame {
+            data: &key,
+            keyframe: true,
+            ltr_token: None,
+            ltr_refresh: false,
+            discardable: false,
+            capture_ts_us: 1_000,
+            stripes: 0b10,
+        };
+        let stamp = h.send_ms_lo();
+        let sent = h.tx.packetize(&frame, stamp, |_| {}).unwrap().clone();
+        assert!(sent.layout.parity_count > 0, "{:?}", sent.layout);
+        h.deliver_except(&sent, &[0]);
+        let out = h.drain();
+        assert_eq!(out.len(), 1);
+        assert!(out[0].info.recovered, "the prefix's fragment came back through the parity");
+        assert_eq!((out[0].info.stripes, out[0].info.build), (0b10, 7));
+        assert_eq!(out[0].data, key);
+    }
+
     /// A keyframe that crosses slower than the loss deadline is not given up on while its
     /// fragments are still coming in: a connection whose window is still opening paces a
     /// 60 kB first keyframe out over 100 ms, and it arrives whole, with no NACK and no refresh.

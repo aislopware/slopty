@@ -188,6 +188,9 @@ pub struct FrameInfo {
     /// The stripes coded from this capture, bit `i` for stripe `i`; zero for one picture
     /// ([`slopty_proto::media::FramePrefix::stripes`]).
     pub stripes: u8,
+    /// The build of the worker's sessions that coded it
+    /// ([`slopty_proto::media::FramePrefix::build`]).
+    pub build: u8,
     /// Needed parity or a retransmission.
     pub recovered: bool,
 }
@@ -1545,6 +1548,7 @@ fn assemble(
             discardable: partial.discardable,
             capture_ts_us: prefix.capture_ts_us.get(),
             stripes: prefix.stripes,
+            build: prefix.build,
             recovered: fec || partial.retransmitted,
         },
         data,

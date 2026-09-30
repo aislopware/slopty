@@ -177,29 +177,22 @@ async fn reports(data_dir: &Path) {
     {
         tracing::debug!(error = %e, "the session's inbox not noted");
     }
-    if let Some((output, batch)) = hand_over(&reports::dir(&socket), session, &payload) {
-        println!("{output}");
-        if let Err(e) = post(&socket, session, reports::delivered_payload(batch)).await {
-            tracing::debug!(error = %e, batch, "reports handed over, not acknowledged");
-        }
-    }
-}
-
-/// What to print for the hook whose payload is `payload` to hand over the batch kept for
-/// `session` in `dir`, and the batch; none when nothing waits or the event takes nothing.
-fn hand_over(dir: &Path, session: SessionId, payload: &str) -> Option<(serde_json::Value, u64)> {
-    let event = slopty_agent::Hook::parse(payload).ok()?.event;
-    if !reports::EVENTS.contains(&event) {
-        return None;
-    }
-    let batch = match reports::take(dir, session) {
-        Ok(batch) => batch?,
-        Err(e) => {
-            tracing::debug!(error = %e, "reports not read");
-            return None;
-        }
+    let Ok(hook) = slopty_agent::Hook::parse(&payload) else { return };
+    let turn = reports::Turn {
+        prompt: hook.prompt.as_deref(),
+        transcript: hook.transcript_path.as_deref().map(Path::new),
+        held: hook.stop_hook_active == Some(true),
     };
-    Some((reports::output(event, &batch.context)?, batch.batch))
+    let Some(handed) = reports::hand_over(&reports::dir(&socket), session, hook.event, turn) else {
+        return;
+    };
+    if let Some(output) = handed.print {
+        println!("{output}");
+    }
+    let batch = handed.batch;
+    if let Err(e) = post(&socket, session, reports::delivered_payload(batch)).await {
+        tracing::debug!(error = %e, batch, "reports handed over, not acknowledged");
+    }
 }
 
 /// The part of a hook payload the daemon reads, and the event it names. The payload is read

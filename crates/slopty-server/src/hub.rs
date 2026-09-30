@@ -206,20 +206,39 @@ struct State {
 #[derive(Debug)]
 struct Keyed {
     key: IdempotencyKey,
-    digest: u64,
+    digest: blake3::Hash,
     answer: Remembered,
     at: tokio::time::Instant,
 }
 
 /// A start made under a key: what its caller sent, as a digest, and the start the hub
-/// forwarded for it with the terminal id it chose. A repeat forwards that start again, so the
-/// worker's own ledger answers it as it answered the first, and no second start is placed.
+/// forwarded for it with the terminal id it chose, until its worker answered. A repeat before
+/// the answer forwards that start again, so the worker's own ledger answers it as it answers
+/// the first; a repeat after it is given that answer. Either way no second start is placed, and
+/// a terminal closed since is never opened again uncounted.
 #[derive(Debug)]
 struct KeyedStart {
     key: IdempotencyKey,
-    digest: u64,
-    forwarded: Verb,
+    digest: blake3::Hash,
+    first: StartKept,
     at: tokio::time::Instant,
+}
+
+/// What a keyed start keeps for a repeat.
+#[derive(Debug)]
+enum StartKept {
+    /// The start as forwarded, not yet answered for sure.
+    Forwarded(Box<Verb>),
+    /// Its worker's answer.
+    Answered(Outcome),
+}
+
+/// What a repeat of a keyed start does.
+enum Again {
+    /// Forward the first start again.
+    Forward(Verb),
+    /// Answer as the first was answered.
+    Answer(Outcome),
 }
 
 /// What a keyed change answered, as a repeat of it answers.
@@ -622,6 +641,63 @@ impl Hub {
         }
     }
 
+    /// Whether an agent may type into `term`: a shell or a program, not another agent's TUI.
+    ///
+    /// Keys typed into Claude Code reach more than its prompt: `!` runs a command unasked,
+    /// `/permissions` and `/sandbox` add what it may do unasked, and shift-tab cycles its mode.
+    /// The TUI is the person's, so an agent speaks to another through reports and Claude
+    /// Code's own messages, which it reads as a peer's, never as the person's keys. The person
+    /// allows it per project (`[server.projects] permission_flags`).
+    fn types_into_shell(&self, term: TermRef) -> Result<(), Outcome> {
+        let state = self.inner.state.lock();
+        let agent = state
+            .workers
+            .get(&term.worker)
+            .and_then(|e| e.sessions.iter().find(|s| s.id == term.session))
+            .is_some_and(|s| s.agent.is_some());
+        let project = state.projects.working_on(term).map(|(project, _)| project);
+        let allowed = state.projects.policy().bounds_for(project.as_ref()).permission_flags;
+        drop(state);
+        if !agent || allowed {
+            return Ok(());
+        }
+        Err(error(
+            ErrorCode::Forbidden,
+            "an agent's TUI takes keys from the person only: an agent reaches another with \
+             task_report or Claude Code's own messages to its session",
+        ))
+    }
+
+    /// Whether an agent may start what `verb` starts with the environment it names. A variable
+    /// that moves what runs or what it may do (where programs and settings are found, what a
+    /// runtime loads, which worker socket answers its hooks, which server or task it speaks
+    /// for) would give the started program more than its starter has, so an agent names none
+    /// unless the person allows looser starts for the project (`[server.projects]
+    /// permission_flags`).
+    fn env_of_agent(&self, verb: &Verb) -> Result<(), Outcome> {
+        let (env, project) = match verb {
+            Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. } => (env, None),
+            Verb::TaskSpawn { project, launch, .. } => (&launch.env, Some(project)),
+            _ => return Ok(()),
+        };
+        let Some(name) = env.iter().map(|(name, _)| name.as_str()).find(|n| steers(n)) else {
+            return Ok(());
+        };
+        let allowed =
+            self.inner.state.lock().projects.policy().bounds_for(project).permission_flags;
+        if allowed {
+            return Ok(());
+        }
+        Err(error(
+            ErrorCode::Limit,
+            &format!(
+                "{name} in an agent's start may give what it starts more than the agent has; the \
+                 person allows that only in the server's settings.toml (`[server.projects] \
+                 permission_flags`)"
+            ),
+        ))
+    }
+
     /// Who `speaker` is now: the person or an agent.
     fn caller(&self, speaker: Speaker) -> Caller {
         match speaker {
@@ -657,11 +733,19 @@ impl Hub {
         if caller == Caller::Agent
             && let Verb::SendInput { term, .. } = &verb
         {
+            if let Err(refused) = self.types_into_shell(*term) {
+                return refused;
+            }
             self.inner.state.lock().driven.insert(term.session, tokio::time::Instant::now());
         }
         if caller == Caller::Agent
             && let Verb::TaskReport { project, task, .. } = &verb
             && let Err(refused) = self.reports_own(speaker, project, *task)
+        {
+            return refused;
+        }
+        if caller == Caller::Agent
+            && let Err(refused) = self.env_of_agent(&verb)
         {
             return refused;
         }
@@ -678,7 +762,7 @@ impl Hub {
                 self.project_status(&project, since, timeout_ms).await
             }
             Verb::TaskSpawn { project, task, launch } => {
-                self.task_spawn(key, project, task, launch).await
+                self.task_spawn(caller, key, project, task, launch).await
             }
             Verb::PlacementSuggest { project, task, placement } => {
                 self.placement_suggest(project.as_ref(), task, placement).await
@@ -1262,6 +1346,10 @@ impl Lease {
                     AgentReport::PermissionMode { mode, .. } => {
                         hub.permission_mode(&mut state, term, mode);
                     }
+                    AgentReport::Loosened { found, .. } => {
+                        hub.loosened(&mut state, term, found);
+                        return;
+                    }
                     AgentReport::SubagentStarted { .. }
                     | AgentReport::SubagentStopped { .. }
                     | AgentReport::NativeTask { .. } => {}
@@ -1278,21 +1366,35 @@ impl Lease {
     }
 }
 
-/// A verb's digest: equal verbs, equal digests.
-fn digest(verb: &Verb) -> u64 {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut hasher = std::hash::DefaultHasher::new();
-    slopty_proto::codec::encode_body(verb).unwrap_or_default().hash(&mut hasher);
-    hasher.finish()
+/// Whether the environment variable `name` moves what a started program runs or may do:
+/// where programs, shells' startup files and settings are found, what a runtime or the
+/// dynamic loader loads, and Slopty's, Claude Code's and Anthropic's own variables.
+fn steers(name: &str) -> bool {
+    const NAMES: [&str; 7] =
+        ["PATH", "HOME", "ZDOTDIR", "BASH_ENV", "ENV", "SHELL", "XDG_CONFIG_HOME"];
+    const PREFIXES: [&str; 8] =
+        ["SLOPTY_", "CLAUDE", "ANTHROPIC_", "NODE_", "BUN_", "DYLD_", "LD_", "GIT_CONFIG"];
+    let upper = name.to_ascii_uppercase();
+    NAMES.contains(&upper.as_str()) || PREFIXES.iter().any(|p| upper.starts_with(p))
+}
+
+/// A verb's digest as `caller` sent it: equal verbs from the same side, equal digests. A key is
+/// its caller's: an agent repeating the person's key is refused as a key used with other
+/// arguments, never given the person's answer or start.
+fn digest(caller: Caller, verb: &Verb) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[u8::from(caller == Caller::Agent)]);
+    hasher.update(&slopty_proto::codec::encode_body(verb).unwrap_or_default());
+    hasher.finalize()
 }
 
 /// The answer to a repeat of a keyed project change: the first one's (what it named, read
 /// again), or a refusal of the key used with other arguments; `None` for a key not used yet.
-fn keyed(state: &mut State, key: &IdempotencyKey, verb: &Verb) -> Option<Outcome> {
+fn keyed(state: &mut State, caller: Caller, key: &IdempotencyKey, verb: &Verb) -> Option<Outcome> {
     let now = tokio::time::Instant::now();
     state.project_keys.retain(|k| now.duration_since(k.at) < KEY_LIFETIME);
     let first = state.project_keys.iter().find(|k| k.key == *key)?;
-    if first.digest != digest(verb) {
+    if first.digest != digest(caller, verb) {
         return Some(key.reused());
     }
     Some(match &first.answer {
@@ -1312,7 +1414,13 @@ fn keyed(state: &mut State, key: &IdempotencyKey, verb: &Verb) -> Option<Outcome
 }
 
 /// Keep what a keyed project change answered, for a repeat of it.
-fn remember(state: &mut State, key: IdempotencyKey, verb: &Verb, outcome: &Outcome) {
+fn remember(
+    state: &mut State,
+    caller: Caller,
+    key: IdempotencyKey,
+    verb: &Verb,
+    outcome: &Outcome,
+) {
     if state.project_keys.len() >= PROJECT_KEYS_KEPT {
         state.project_keys.pop_front();
     }
@@ -1331,30 +1439,57 @@ fn remember(state: &mut State, key: IdempotencyKey, verb: &Verb, outcome: &Outco
         (other, _) => Remembered::Outcome(other.clone()),
     };
     let at = tokio::time::Instant::now();
-    state.project_keys.push_back(Keyed { key, digest: digest(verb), answer, at });
+    state.project_keys.push_back(Keyed { key, digest: digest(caller, verb), answer, at });
 }
 
-/// A repeat of a keyed start: the start the first one forwarded, or a refusal of the key used
-/// with other arguments; `None` for a key not used yet. `sent` is what the caller sent, before
-/// the hub chose anything.
+/// A repeat of a keyed start: what the first start was answered, or the start it forwarded
+/// while its answer is not sure, or a refusal of the key used with other arguments; `None` for
+/// a key not used yet. `sent` is the digest of what the caller sent, before the hub chose
+/// anything.
 fn start_again(
     state: &mut State,
     key: &IdempotencyKey,
-    sent: &Verb,
-) -> Option<Result<Verb, Outcome>> {
+    sent: blake3::Hash,
+) -> Option<Result<Again, Outcome>> {
     let now = tokio::time::Instant::now();
     state.start_keys.retain(|k| now.duration_since(k.at) < KEY_LIFETIME);
     let first = state.start_keys.iter().find(|k| k.key == *key)?;
-    Some(if first.digest == digest(sent) { Ok(first.forwarded.clone()) } else { Err(key.reused()) })
+    if first.digest != sent {
+        return Some(Err(key.reused()));
+    }
+    Some(Ok(match &first.first {
+        StartKept::Forwarded(verb) => Again::Forward((**verb).clone()),
+        StartKept::Answered(outcome) => Again::Answer(outcome.clone()),
+    }))
 }
 
 /// Keep what a keyed start forwarded for `sent`, for a repeat of it.
-fn keep_start(state: &mut State, key: IdempotencyKey, sent: u64, forwarded: &Verb) {
+fn keep_start(state: &mut State, key: IdempotencyKey, sent: blake3::Hash, forwarded: &Verb) {
     if state.start_keys.len() >= PROJECT_KEYS_KEPT {
         state.start_keys.pop_front();
     }
     let at = tokio::time::Instant::now();
-    state.start_keys.push_back(KeyedStart { key, digest: sent, forwarded: forwarded.clone(), at });
+    let first = StartKept::Forwarded(Box::new(forwarded.clone()));
+    state.start_keys.push_back(KeyedStart { key, digest: sent, first, at });
+}
+
+/// Keep the answer a keyed start was given, in place of the start, when it is sure: an
+/// answer that may have been lost on the way leaves the start to forward again.
+fn start_answered(state: &mut State, key: &IdempotencyKey, outcome: &Outcome) {
+    if maybe_lost(outcome) {
+        return;
+    }
+    if let Some(kept) = state.start_keys.iter_mut().find(|k| k.key == *key) {
+        kept.first = StartKept::Answered(outcome.clone());
+    }
+}
+
+/// An answer that says only that the verb may or may not have been done.
+const fn maybe_lost(outcome: &Outcome) -> bool {
+    matches!(
+        outcome,
+        Outcome::Error { code: ErrorCode::Interrupted | ErrorCode::WorkerUnreachable, .. }
+    )
 }
 
 /// The terminal `session` names, on whichever worker runs it.

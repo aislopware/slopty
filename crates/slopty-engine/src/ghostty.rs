@@ -892,7 +892,7 @@ impl GhosttyEngine {
         let mut render = render.borrow_mut();
         // During a hold the render state keeps the frame captured when it began.
         let snapshot =
-            if hold.is_some() { render.snapshot() } else { render.update(&self.term)? };
+            if hold.is_some() { render.snapshot()? } else { render.update(&self.term)? };
         let dirty = snapshot.dirty()?;
         let cols = snapshot.cols()?;
         let rows = snapshot.rows()?;
@@ -952,6 +952,8 @@ impl GhosttyEngine {
             && !self.shown.placeholders;
 
         let layout = CellLayout::linked();
+        // Each row's flag in one call, read in place as the rows are visited.
+        let dirty_rows = snapshot.dirty_rows()?;
         let mut row_iter = self.rows_iter.update(&snapshot)?;
         let mut y: u16 = 0;
         // Placeholder cells of virtual kitty placements, gathered from every row (a run that
@@ -979,7 +981,8 @@ impl GhosttyEngine {
                 } else {
                     self.remarked_rows.remove(&abs)
                 };
-            let build = rebuild || row.dirty()? || forced || remarked;
+            let build =
+                rebuild || dirty_rows.get(usize::from(y)) == Some(true) || forced || remarked;
             if !build && take != Take::Joiner {
                 shown.push(if known { self.shown.take(abs) } else { None });
                 // Not dirty: the row reads as it did when its print was taken.
@@ -1896,8 +1899,9 @@ fn install_callbacks(
     term.on_bell(move |_| for_bell.borrow_mut().push(EngineEvent::Bell))?;
     let for_notify = Rc::clone(events);
     term.on_desktop_notification(move |_, n| {
-        let title = n.title().chars().take(NOTIFICATION_CHARS).collect();
-        let body = n.body().chars().take(NOTIFICATION_CHARS).collect();
+        // The program's bytes, which libghostty passes on unchecked.
+        let title = String::from_utf8_lossy(n.title()).chars().take(NOTIFICATION_CHARS).collect();
+        let body = String::from_utf8_lossy(n.body()).chars().take(NOTIFICATION_CHARS).collect();
         for_notify.borrow_mut().push(EngineEvent::Notification { title, body });
     })?;
     let for_title = Rc::clone(events);
@@ -2868,6 +2872,39 @@ mod tests {
         assert!(e.term.viewport_active().unwrap());
     }
 
+    /// libghostty turns synchronized output off on every resize, one that keeps the grid and
+    /// changes only the cell size included (ghostty #14482), and reports the hold's end. A
+    /// resize to the size the engine already has never reaches it, so it ends nothing.
+    #[test]
+    fn a_resize_ends_a_render_hold_and_the_same_size_does_not() {
+        let at = |cols, cell_width| TermSize {
+            cols,
+            rows: 3,
+            metrics: CellMetrics { cell_width, cell_height: 16 },
+        };
+        let mut e = engine(10, 3);
+        let _first = e.full_frame(0).unwrap();
+        e.write(b"\x1b[?2026h\x1b[Hcell");
+        e.resize(e.size()).unwrap();
+        assert!(e.hold_remaining().is_some(), "the same size is no resize");
+        assert!(e.take_frame(0).unwrap().is_none(), "still held");
+
+        e.resize(at(10, 9)).unwrap();
+        assert_eq!(e.hold_remaining(), None, "a new cell size ends the hold");
+        assert!(!e.modes().unwrap().contains(TermModes::SYNC_OUTPUT));
+        let f = e.take_frame(1).unwrap().expect("released");
+        let row0 = f.updates.iter().find(|u| u.row == 0).map(|u| u.line.text());
+        assert_eq!(row0.as_deref(), Some("cell"), "{f:?}");
+
+        e.write(b"\x1b[?2026h\x1b[Hgrid");
+        assert!(e.take_frame(2).unwrap().is_none(), "held again");
+        e.resize(at(12, 9)).unwrap();
+        assert_eq!(e.hold_remaining(), None, "a new grid ends the hold");
+        let f = e.full_frame(3).unwrap();
+        let row0 = f.updates.iter().find(|u| u.row == 0).map(|u| u.line.text());
+        assert_eq!(row0.as_deref(), Some("grid"), "{f:?}");
+    }
+
     /// A program that finishes a frame and starts the next inside one read: the finished frame
     /// goes out, not the half-drawn one after it, and not nothing until the hold ends.
     #[test]
@@ -3756,6 +3793,15 @@ mod tests {
             matches!(&ev[0], EngineEvent::Notification { body, .. } if body.len() == NOTIFICATION_CHARS),
             "{ev:?}"
         );
+        // Bytes that are not UTF-8 reach the banner as replacement characters.
+        e.write(b"\x1b]777;notify;t\xc3;\xffok\x07");
+        assert_eq!(
+            e.drain_events(),
+            [EngineEvent::Notification {
+                title: "t\u{fffd}".to_owned(),
+                body: "\u{fffd}ok".to_owned()
+            }]
+        );
     }
 
     fn progress_events(e: &GhosttyEngine) -> Vec<Progress> {
@@ -4498,34 +4544,43 @@ mod checkpoint_tests {
     }
 
     /// What one echoed keystroke costs inside the engine: `write` of one byte, then
-    /// `take_frame` for a 60×12 screen (the bench's size) — the "engine+frame" stage of the
-    /// keystroke trace (MEASUREMENTS.md, "the keystroke path, stage by stage").
+    /// `take_frame`, on the keystroke trace's 60×12 (the "engine+frame" stage of
+    /// MEASUREMENTS.md, "the keystroke path, stage by stage") and on a full-screen 200×60. The
+    /// size is in each frame series' name, since a frame's cost grows with the screen.
     /// `cargo xtask bench --filter frame_cost` runs it.
     #[test]
     #[ignore = "measurement, run by hand"]
     fn frame_cost() {
-        let mut e = engine(200, 60, 1_000);
-        e.write(b"$ ");
-        let _first = e.take_frame(0).unwrap();
         let bench = Bench::new("engine.frame_cost");
         let mut write = bench.series("write");
-        let mut take = bench.series("take_frame");
-        // The worker asks again with nothing new (a flush timer, an ack): no frame.
-        let mut unchanged = bench.series("take_frame_unchanged");
-        for i in 0..1_000_u32 {
-            let byte = if i % 2 == 0 { b"x" } else { b"y" };
-            write.time(|| e.write(byte));
-            let frame = take.time(|| e.take_frame(u64::from(i)).unwrap());
-            assert!(frame.is_some(), "a typed byte dirties the row");
-            let none = unchanged.time(|| e.take_frame(u64::from(i)).unwrap());
-            assert!(none.is_none(), "nothing changed");
-            if i % 50 == 49 {
-                e.write(b"\r\n");
+        for (cols, rows) in [(60_u16, 12_u16), (200, 60)] {
+            let mut e = engine(cols, rows, 1_000);
+            e.write(b"$ ");
+            let _first = e.take_frame(0).unwrap();
+            let mut take = bench.series(&format!("take_frame.{cols}x{rows}"));
+            // The worker asks again with nothing new (a flush timer, an ack): no frame.
+            let mut unchanged = bench.series(&format!("take_frame_unchanged.{cols}x{rows}"));
+            // One byte into the terminal costs the same at any size: timed on the first.
+            let timed_write = cols == 60;
+            for i in 0..1_000_u32 {
+                let byte = if i % 2 == 0 { b"x" } else { b"y" };
+                if timed_write {
+                    write.time(|| e.write(byte));
+                } else {
+                    e.write(byte);
+                }
+                let frame = take.time(|| e.take_frame(u64::from(i)).unwrap());
+                assert!(frame.is_some(), "a typed byte dirties the row");
+                let none = unchanged.time(|| e.take_frame(u64::from(i)).unwrap());
+                assert!(none.is_none(), "nothing changed");
+                if i % 50 == 49 {
+                    e.write(b"\r\n");
+                }
             }
+            take.report().unwrap();
+            unchanged.report().unwrap();
         }
         write.report().unwrap();
-        take.report().unwrap();
-        unchanged.report().unwrap();
     }
 
     /// What an Enter at a bottom prompt costs inside the engine: three lines of output and the

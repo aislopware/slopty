@@ -1792,10 +1792,11 @@ mod tests {
         });
     }
 
-    /// Capture → glass on a drawn 4K and 5K display at 60 Hz, native scale, loopback: the
-    /// picture coded whole on one engine against two stripes on both, alternated
-    /// (`docs/MEASUREMENTS.md`, "Two stripes, capture to glass"). `SLOPTY_GLASS_SECONDS` sets
-    /// each run's length (default 20), `SLOPTY_GLASS_ROUNDS` the rounds (default 2).
+    /// Capture → glass on a drawn Retina (3024 × 1964), 4K and 5K display at 60 Hz, native
+    /// scale, loopback: the picture coded whole on one engine against two stripes on both,
+    /// alternated (`docs/MEASUREMENTS.md`, "Two stripes, capture to glass").
+    /// `SLOPTY_GLASS_SECONDS` sets each run's length (default 20), `SLOPTY_GLASS_ROUNDS` the
+    /// rounds (default 2).
     #[test]
     #[ignore = "measurement"]
     fn capture_to_glass_striped_against_whole() {
@@ -1834,6 +1835,8 @@ mod tests {
             for _ in 0..rounds {
                 for (label, stripes) in [("one picture", Knob::Off), ("two stripes", Knob::On)] {
                     let knobs = Knobs { stripes, ..Knobs::default() };
+                    let retina = format!("Retina, {label}");
+                    run_padded::<Synthetic>(&retina, 60, Duration::ZERO, 0, seconds, knobs).await;
                     let label4 = format!("4K, {label}");
                     run_padded::<Uhd>(&label4, 60, Duration::ZERO, 0, seconds, knobs).await;
                     let label5 = format!("5K, {label}");

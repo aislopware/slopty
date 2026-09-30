@@ -1713,6 +1713,13 @@ impl<P: Platform> Shared<P> {
         lives.layout = layout;
         self.top.session.store(top_session, Ordering::Relaxed);
         self.lower.session.store(lower_session, Ordering::Relaxed);
+        // Both stripes' frames from here on name the build, so the client never puts one of
+        // these beside a stripe of the sessions they replace
+        // ([`slopty_proto::media::FramePrefix::build`]).
+        let [build, ..] = top_session.to_le_bytes();
+        for coder in [&self.top, &self.lower] {
+            coder.packetizer.lock().set_build(build);
+        }
         self.top.rebuilt();
         self.lower.rebuilt();
         *self.join.lock() = Join::default();
@@ -2210,7 +2217,7 @@ impl<P: Platform> Shared<P> {
         }
         let stripes = if count > 1 { coding } else { 0 };
         // Before the submits: an aligned session's callback runs inside them.
-        if stripes != 0 && !refining {
+        if stripes.count_ones() > 1 && !refining {
             *self.join.lock() = Join { pts, waiting: coding, took: None, keyframe: false };
         }
         for (i, coder) in self.coders(count) {
@@ -5660,12 +5667,30 @@ mod tests {
         assert_eq!(whole.returned(0, 8, Some(5), false), Some((Some(5), false)), "one picture");
     }
 
+    /// The media stream and frame prefix of each video datagram in `sent`, fragment 0 only.
+    fn prefixes(sent: &[Bytes]) -> Vec<(StreamId, u8, u8)> {
+        use slopty_proto::media::{FramePrefix, MediaHeader};
+        sent.iter()
+            .filter_map(|datagram| {
+                let (header, payload) = MediaHeader::parse(datagram)?;
+                if header.is_parity() || header.index.get() != 0 {
+                    return None;
+                }
+                let (prefix, _) = FramePrefix::parse(payload)?;
+                Some((StreamId(header.stream.get()), prefix.stripes, prefix.build))
+            })
+            .collect()
+    }
+
     /// A striped capture goes to both stripes' coders under one stamp, its prefix naming both;
-    /// a refresh the lower stripe's lane asks for codes that stripe alone, its prefix naming it
-    /// alone, and the top stripe is not coded again.
+    /// a refresh the lower stripe's lane asks for, on the lower stripe's media stream, codes
+    /// that stripe alone, its prefix naming it alone on that stream, and the top stripe is not
+    /// coded again. A NACK there is answered from that stripe's frames alone.
     #[test]
     fn a_striped_capture_codes_both_and_a_refresh_only_its_stripe() {
-        let (shared, _wire) = shared_for_frames();
+        let (shared, wire) = shared_for_frames();
+        let lower_media = Stripe::media_of(StreamId(1), 1);
+        let control = StreamControl { stream: Arc::<Shared>::clone(&shared), coder: 0 };
         shared.fps.store(30, Ordering::Relaxed);
         shared.encoder.lock().layout = slopty_codec::stripes::layout(1968);
         shared.lower.session.store(1, Ordering::Relaxed);
@@ -5680,14 +5705,72 @@ mod tests {
         assert_eq!(flight(&shared.top), [(base, 0b11)], "both stripes, one stamp");
         assert_eq!(flight(&shared.lower), [(base, 0b11)]);
 
-        shared.request_refresh(1, 3, false);
+        // The sessions return both stripes inside their submits.
+        let packet = |pts_us| EncodedPacket {
+            data: vec![7; 2000],
+            keyframe: false,
+            ltr_token: None,
+            ltr_refresh: false,
+            discardable: false,
+            mse: None,
+            pts_us,
+        };
+        shared.on_packet(0, &packet(base));
+        shared.on_packet(1, &packet(base));
+
+        control.of_media(lower_media).request_refresh(3, false);
+        assert!(!shared.top.pending.lock().refresh, "the top stripe was not asked");
         let at = shared.repair_at().expect("a refresh is owed");
         assert_eq!(shared.repair_now(at), Attempt::Sent);
         let pts = shared.last_encoded_us.load(Ordering::Relaxed);
         assert!(pts > base);
-        assert_eq!(flight(&shared.top), [(base, 0b11)], "the top stripe is not coded again");
-        assert_eq!(flight(&shared.lower), [(base, 0b11), (pts, 0b10)], "the lower one alone");
+        assert!(flight(&shared.top).is_empty(), "the top stripe is not coded again");
+        assert_eq!(flight(&shared.lower), [(pts, 0b10)], "the lower one alone");
         assert!(!shared.lower.pending.lock().refresh, "the refresh went out");
+        shared.on_packet(1, &packet(pts));
+        let sent: Vec<(StreamId, u8)> = prefixes(&wire.drain())
+            .into_iter()
+            .map(|(media, stripes, _)| (media, stripes))
+            .collect();
+        assert_eq!(sent, [(StreamId(1), 0b11), (lower_media, 0b11), (lower_media, 0b10)]);
+        assert_eq!(shared.stats().encoded, 2, "the capture once, the refresh once");
+
+        control.of_media(lower_media).nack(1, &[0]);
+        let answered = wire.drain();
+        assert_eq!(answered.len(), 1);
+        assert_eq!(prefixes(&answered), [(lower_media, 0b10, 0)], "the lower stripe's frame 1");
+    }
+
+    /// Sessions put in name their build on both stripes' frames from then on, and a later
+    /// build another: what keeps the client from putting a stripe of each together.
+    #[test]
+    fn both_stripes_frames_name_the_build_they_came_from() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let packet = |pts_us| EncodedPacket {
+            data: vec![3; 500],
+            keyframe: true,
+            ltr_token: None,
+            ltr_refresh: false,
+            discardable: false,
+            mse: None,
+            pts_us,
+        };
+        let mut builds = Vec::new();
+        for sessions in [[3, 4], [5, 6]] {
+            let built = Built::<Recording> {
+                top: recorder(sessions[0], Log::default()),
+                lower: Some(recorder(sessions[1], Log::default())),
+                layout: slopty_codec::stripes::layout(1968),
+            };
+            drop(shared.install(built, sessions));
+            shared.put_in(&mut shared.encoder.lock());
+            shared.on_packet(0, &packet(sessions[0]));
+            shared.on_packet(1, &packet(sessions[0]));
+            builds.extend(prefixes(&wire.drain()).into_iter().map(|(_, _, build)| build));
+        }
+        assert_eq!(builds, [3, 3, 5, 5]);
     }
 
     /// The sessions of a build for the whole picture.

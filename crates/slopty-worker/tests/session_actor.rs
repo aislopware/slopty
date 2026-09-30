@@ -721,18 +721,30 @@ mod actor {
         let started = std::time::Instant::now();
         let (session, mut child, _tap) =
             start_with(&["/bin/sh", "-c", script, "sh", &burst], Vec::new(), Some(moves));
+        let last = Progress { state: ProgressState::Set, percent: Some(77) };
         let mut told = Vec::new();
-        while let Ok(Some(id)) = tokio::time::timeout(Duration::from_secs(1), moved.recv()).await {
-            assert_eq!(id, session.id());
-            // What the daemon does with a move: read the summary as it stands now.
-            told.push(session.snapshot().await.unwrap().progress);
-        }
-        let elapsed = started.elapsed().saturating_sub(Duration::from_secs(1));
+        // Until the last value is told, however long a loaded machine takes to print it: a quiet
+        // spell alone cannot tell a lost value from a late one.
+        let reading = async {
+            while let Some(id) = moved.recv().await {
+                assert_eq!(id, session.id());
+                // What the daemon does with a move: read the summary as it stands now.
+                let now = session.snapshot().await.unwrap().progress;
+                told.push(now);
+                if now == Some(last) {
+                    return;
+                }
+            }
+        };
+        let seen = tokio::time::timeout(Duration::from_secs(30), reading).await;
+        assert!(seen.is_ok(), "the last value is told: {told:?}");
+        let elapsed = started.elapsed();
+        // Nothing moves after it: the report stands.
+        let after = tokio::time::timeout(session::PROGRESS_EVERY * 2, moved.recv()).await;
+        assert!(after.is_err(), "a move after the last value: {after:?}");
         let bound = elapsed.as_millis() / session::PROGRESS_EVERY.as_millis() + 3;
         eprintln!("10 000 reports over {elapsed:?}: {} moves", told.len());
         assert!(told.len() as u128 <= bound, "{} moves in {elapsed:?}", told.len());
-        let last = Progress { state: ProgressState::Set, percent: Some(77) };
-        assert_eq!(told.last().copied().flatten(), Some(last), "the last value is told");
         session.close();
         let _killed = child.kill().await;
     }

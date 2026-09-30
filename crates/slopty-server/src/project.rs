@@ -1373,6 +1373,38 @@ impl Projects {
         Ok(())
     }
 
+    /// Whether project `id` has room for the terminal `term` put on one of its tasks: one the
+    /// project counts already takes no more, any other takes a place under its
+    /// `live_per_project` and its `live_per_worker` on that worker, as a start would. So no
+    /// terminal opened outside the counts is assigned past them.
+    pub(crate) fn room_for(
+        &self,
+        id: &ProjectId,
+        term: TermRef,
+        running: &Running<'_>,
+    ) -> Result<(), Refused> {
+        let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
+        let occupied = record.occupied(running);
+        if occupied.contains(&term) {
+            return Ok(());
+        }
+        let limits = record.project.limits;
+        let live = count(occupied.len());
+        let here = count(occupied.iter().filter(|t| t.worker == term.worker).count());
+        if live >= limits.live_per_project || here >= limits.live_per_worker {
+            return Err(refuse(
+                ErrorCode::Limit,
+                format!(
+                    "project {id} runs {live} agents, {here} of them on that worker, at its \
+                     live_per_project of {} or live_per_worker of {}; a terminal put on a task \
+                     counts as a start does",
+                    limits.live_per_project, limits.live_per_worker
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Put the terminal `who` names on a task, taking up what its status line said of its
     /// branch and what Claude Code reported in it so far.
     pub(crate) fn assign(
@@ -1580,6 +1612,7 @@ impl Projects {
             report,
             AgentReport::Branch(_)
                 | AgentReport::PermissionMode { .. }
+                | AgentReport::Loosened { .. }
                 | AgentReport::Delivered { .. }
         );
         if !held && !leafless {
@@ -1633,7 +1666,7 @@ fn folded(path: &str) -> String {
 
 /// `text` cut to at most `max` bytes, at a character boundary: what a worker reports is kept
 /// to the bounds a card is held to.
-fn clipped(text: &str, max: usize) -> String {
+pub(crate) fn clipped(text: &str, max: usize) -> String {
     let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
@@ -1692,6 +1725,7 @@ fn leaf(report: &AgentReport, natives: &mut Natives, now: WallMs) -> Option<Nati
     let reported = match report {
         AgentReport::Branch(_)
         | AgentReport::PermissionMode { .. }
+        | AgentReport::Loosened { .. }
         | AgentReport::Delivered { .. } => return None,
         AgentReport::SubagentStarted { agent, kind, .. } => Native::Agent(NativeAgent {
             id: clipped(agent, REF_MAX),

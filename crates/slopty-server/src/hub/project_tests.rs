@@ -447,7 +447,9 @@ async fn flags_that_loosen_permissions_need_the_person_s_word() {
     let terminal = Verb::OpenTerminal {
         worker: linux,
         cwd: None,
-        command: ["/opt/bin/claude", "--settings={}"].map(str::to_owned).to_vec(),
+        command: ["/opt/bin/claude", r#"--settings={"permissions":{"allow":["Bash"]}}"#]
+            .map(str::to_owned)
+            .to_vec(),
         env: Vec::new(),
         name: None,
         size: None,
@@ -752,9 +754,10 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
 }
 
 /// A permission is the person's: an agent answering one is refused, as is an agent merging a
-/// task or recording its verifier. The CLI in a terminal speaks for an agent when an agent
-/// runs there, when it works on a project, when the server does not know it, and when an agent
-/// opened it or typed into it; in the person's own shell it speaks for the person.
+/// task, recording its verifier or naming a verifier at all. The CLI in a terminal speaks for an
+/// agent when an agent runs there, when it works on a project, when the server does not know it,
+/// and when an agent opened it or typed into it; in the person's own shell it speaks for the
+/// person.
 #[tokio::test]
 async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -795,6 +798,24 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     });
     let record = Verb::TaskUpdate { project: project(), task, change: verified };
     refused(&hub.dispatch_as(Speaker::Agent, None, record).await, ErrorCode::Forbidden);
+    let weaker = || Some("true".to_owned());
+    let own_verifier = Box::new(TaskChange { verifier: weaker(), ..TaskChange::default() });
+    let spec =
+        Box::new(TaskSpec { title: "x".to_owned(), verifier: weaker(), ..TaskSpec::default() });
+    for verb in [
+        Verb::TaskUpdate { project: project(), task, change: own_verifier },
+        Verb::TaskCreate { project: project(), spec },
+        Verb::ProjectSet {
+            project: project(),
+            orchestrator: None,
+            verifier: weaker(),
+            limits: LimitsChange::default(),
+            metadata: None,
+        },
+    ] {
+        let said = hub.dispatch_as(Speaker::Agent, None, verb).await;
+        assert!(refused(&said, ErrorCode::Forbidden).contains("verifier"), "{said:?}");
+    }
 
     let input = Verb::SendInput {
         term: TermRef { worker, session: typed_into },
@@ -894,6 +915,62 @@ async fn an_agent_looser_than_allowed_is_closed() {
     assert!(rx.try_recv().is_err(), "the person allowed looser modes for the project");
 }
 
+/// A `claude` inside a shell's line (`sh -c "cd x && claude --allowedTools Bash"`) is read as
+/// the shell runs it, so its start is refused like a bare one. What the start cannot see (a
+/// wrapper script, a `claude` typed later into a shell an agent opened) the worker reads off the
+/// agent's own command line: that closes its terminal, as a looser mode does, and says why; the
+/// person's own terminal and a clean command line stay.
+#[tokio::test]
+async fn an_agent_looser_by_its_command_line_is_refused_or_closed() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let own = SessionId::new();
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, vec![summary(own)]);
+    create(&hub, None).await;
+    let task = new_task(&hub, Placement::default()).await;
+    let line = "cd ~/src && claude --allowedTools Bash".to_owned();
+    let sh = |line: String| vec!["/bin/sh".to_owned(), "-c".to_owned(), line];
+    let launch = TaskLaunch { run: Runner::Command { argv: sh(line.clone()) }, ..claude(&[]) };
+    let wrapped = hub.dispatch(Verb::TaskSpawn { project: project(), task, launch }).await;
+    assert!(refused(&wrapped, ErrorCode::Limit).contains("--allowedTools"), "{wrapped:?}");
+    let opening = Verb::OpenTerminal {
+        worker: linux,
+        cwd: None,
+        command: sh(line),
+        env: Vec::new(),
+        name: None,
+        size: None,
+        session: None,
+    };
+    let by_agent = hub.dispatch_as(Speaker::Agent, None, opening).await;
+    assert!(refused(&by_agent, ErrorCode::Limit).contains("--allowedTools"), "{by_agent:?}");
+    assert!(rx.try_recv().is_err(), "neither reached the worker");
+
+    let shell = Verb::OpenTerminal {
+        worker: linux,
+        cwd: None,
+        command: Vec::new(),
+        env: Vec::new(),
+        name: None,
+        size: None,
+        session: None,
+    };
+    let asked = spawn_as(&hub, Speaker::Agent, shell);
+    let start = request(&mut rx).await;
+    let term = opened(&lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Opened(_)), "a plain shell opens");
+
+    let loosened = |term: TermRef, found: &[&str]| {
+        let found = found.iter().map(|f| (*f).to_owned()).collect();
+        ToServer::Report(AgentReport::Loosened { session: term.session, found })
+    };
+    lease.handle(loosened(term, &[]));
+    lease.handle(loosened(TermRef { worker: linux, session: own }, &["--allowedTools"]));
+    assert!(rx.try_recv().is_err(), "nothing loosens, and the person's own terminal stays");
+    lease.handle(loosened(term, &["--allowedTools"]));
+    let (_, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::Close { term }, "a claude typed into an agent's shell later");
+}
+
 /// A task's agent reports up its tree: a need reaches the orchestrator's terminal at once as a
 /// batch its hooks hand over, the worker's word that it did lands on the timeline, and the
 /// orchestrator is told its role once it is named. An agent reports only on its own task, from
@@ -986,10 +1063,11 @@ async fn keyed_request(
     }
 }
 
-/// A start repeated under its key with the same arguments reaches its worker as the very start
-/// the first was, terminal id and all, so the worker's ledger answers it with the first answer
-/// and nothing is placed or counted twice; under the same key with other arguments it is
-/// refused, and nothing reaches the worker.
+/// A start repeated under its key with the same arguments gets the first start's answer, and
+/// nothing is placed or counted twice; one whose answer may have been lost reaches its worker as
+/// the very start the first was, terminal id and all, so the worker's ledger answers it. Under
+/// the same key with other arguments, or from another side, it is refused and nothing reaches
+/// the worker: a key never hands one caller another's start.
 #[tokio::test]
 async fn a_start_repeated_under_its_key_is_the_first_start() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -1029,11 +1107,9 @@ async fn a_start_repeated_under_its_key_is_the_first_start() {
         assert_eq!(asked.await.unwrap(), Outcome::Opened(term));
         let fleet = hub.inner.state.lock().starting.len();
 
-        let again = keyed(first.clone());
-        let (id, sent_key, repeated) = keyed_request(&mut rx).await;
-        assert_eq!((sent_key.as_ref(), &repeated), (Some(&key), &forwarded), "the first start");
-        lease.handle(ToServer::Reply { id, outcome: Outcome::Opened(term) });
-        assert_eq!(again.await.unwrap(), Outcome::Opened(term), "the first answer");
+        let again = keyed(first.clone()).await.unwrap();
+        assert_eq!(again, Outcome::Opened(term), "the first answer");
+        assert!(rx.try_recv().is_err(), "answered here, not again by the worker");
         assert_eq!(hub.inner.state.lock().starting.len(), fleet, "placed once");
 
         let differing = keyed(other).await.unwrap();
@@ -1041,6 +1117,160 @@ async fn a_start_repeated_under_its_key_is_the_first_start() {
             matches!(differing, Outcome::Error { code: ErrorCode::Invalid, .. }),
             "{differing:?}"
         );
+        let (as_agent, key_again) = (hub.clone(), key.clone());
+        let borrowed = as_agent.dispatch_as(Speaker::Agent, Some(key_again), first).await;
+        assert!(
+            matches!(borrowed, Outcome::Error { code: ErrorCode::Invalid, .. }),
+            "another side's key: {borrowed:?}"
+        );
         assert!(rx.try_recv().is_err(), "a refused repeat reaches no worker");
     }
+
+    let key = IdempotencyKey::new("open-lost").unwrap();
+    let keyed = |verb: Verb| {
+        let (hub, key) = (hub.clone(), key.clone());
+        tokio::spawn(async move { hub.dispatch_keyed(Some(key), verb).await })
+    };
+    let asked = keyed(terminal("~/c"));
+    let (id, _, forwarded) = keyed_request(&mut rx).await;
+    let lost = Outcome::Error { code: ErrorCode::Interrupted, message: "lost".to_owned() };
+    lease.handle(ToServer::Reply { id, outcome: lost });
+    refused(&asked.await.unwrap(), ErrorCode::Interrupted);
+    let again = keyed(terminal("~/c"));
+    let (id, _, repeated) = keyed_request(&mut rx).await;
+    assert_eq!(repeated, forwarded, "a start maybe lost goes again as it was");
+    let term = opened(&lease, &(id, repeated));
+    assert_eq!(again.await.unwrap(), Outcome::Opened(term));
+}
+
+/// An agent starts nothing with more than it has through the environment either: a variable
+/// that moves what runs there, or whom it speaks for, is refused on each way to start, before
+/// anything reaches a worker. The person names what they like.
+#[tokio::test]
+async fn an_agent_names_no_environment_that_steers_what_it_starts() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (linux, _lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    create(&hub, None).await;
+    let task = new_task(&hub, Placement::default()).await;
+    let with = |name: &str| vec![(name.to_owned(), "/tmp/elsewhere".to_owned())];
+    let terminal = |env| Verb::OpenTerminal {
+        worker: linux,
+        cwd: None,
+        command: Vec::new(),
+        env,
+        name: None,
+        size: None,
+        session: None,
+    };
+    let agent = |env| Verb::SpawnAgent {
+        worker: linux,
+        agent: AgentKind::ClaudeCode,
+        cwd: "~".to_owned(),
+        prompt: None,
+        args: Vec::new(),
+        env,
+        size: None,
+        session: None,
+        permission_flags: false,
+    };
+    for (verb, name) in [
+        (terminal(with("PATH")), "PATH"),
+        (terminal(with("zdotdir")), "zdotdir"),
+        (terminal(with("DYLD_INSERT_LIBRARIES")), "DYLD_INSERT_LIBRARIES"),
+        (agent(with("CLAUDE_CONFIG_DIR")), "CLAUDE_CONFIG_DIR"),
+        (agent(with("NODE_OPTIONS")), "NODE_OPTIONS"),
+        (Verb::TaskSpawn { project: project(), task, launch: claude(&[]) }, "SLOPTY_TASK"),
+    ] {
+        let said = hub.dispatch_as(Speaker::Agent, None, verb).await;
+        assert!(refused(&said, ErrorCode::Limit).contains(name), "{name}: {said:?}");
+    }
+    assert!(rx.try_recv().is_err(), "nothing reached the worker");
+    let person = spawn(&hub, terminal(with("PATH")));
+    let (_, verb) = request(&mut rx).await;
+    assert!(matches!(verb, Verb::OpenTerminal { env, .. } if env == with("PATH")));
+    person.abort();
+}
+
+/// An agent reaches another through reports, never through its TUI's keys, where `!`, a slash
+/// command or a mode switch would act as the person: typing into a terminal where an agent
+/// runs is refused, typing into a shell goes.
+#[tokio::test]
+async fn an_agent_never_types_into_another_agent_s_tui() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (shell, tui) = (SessionId::new(), SessionId::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, vec![summary(shell)]);
+    announce(&lease, tui, true);
+    let input = |session| Verb::SendInput {
+        term: TermRef { worker, session },
+        input: slopty_proto::orchestration::Input::Text("/permissions\n".to_owned()),
+    };
+    let said = hub.dispatch_as(Speaker::Agent, None, input(tui)).await;
+    assert!(refused(&said, ErrorCode::Forbidden).contains("task_report"), "{said:?}");
+    assert!(rx.try_recv().is_err(), "no key reached the TUI");
+    let typed = spawn_as(&hub, Speaker::Agent, input(shell));
+    let (_, verb) = request(&mut rx).await;
+    assert_eq!(verb, input(shell), "a shell takes an agent's keys");
+    typed.abort();
+}
+
+/// A terminal an agent opens may run an agent, so it takes a place under the fleet bound from
+/// the moment it is asked for, and a second past the bound is refused before it reaches a
+/// worker. The person's own terminals are theirs and are not counted.
+#[tokio::test]
+async fn a_terminal_an_agent_opens_counts_against_the_fleet_bound() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (linux, _lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    hub.set_policy(Policy {
+        bounds: Bounds { live_agents: 1, ..Bounds::default() },
+        ..Policy::default()
+    });
+    let shell = || Verb::OpenTerminal {
+        worker: linux,
+        cwd: None,
+        command: Vec::new(),
+        env: Vec::new(),
+        name: None,
+        size: None,
+        session: None,
+    };
+    let first = spawn_as(&hub, Speaker::Agent, shell());
+    let _first_start = request(&mut rx).await;
+    let second = hub.dispatch_as(Speaker::Agent, None, shell()).await;
+    assert!(refused(&second, ErrorCode::Limit).contains("live_agents"), "{second:?}");
+    assert!(rx.try_recv().is_err(), "the second reached no worker");
+    let person = spawn(&hub, shell());
+    let _person_start = request(&mut rx).await;
+    person.abort();
+    first.abort();
+}
+
+/// A terminal put on a task takes a place under the project's limits as a start does, so an
+/// agent cannot run more than the project allows by assigning terminals opened elsewhere; one
+/// the project counts already takes no more. A terminal being started for one task is not
+/// taken by another.
+#[tokio::test]
+async fn an_assign_takes_a_place_under_the_project_s_limits() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    let one = LimitsChange { live_per_project: Some(1), ..LimitsChange::default() };
+    create_with(&hub, None, one).await;
+    let (first, second) =
+        (new_task(&hub, Placement::default()).await, new_task(&hub, Placement::default()).await);
+    let asked =
+        spawn(&hub, Verb::TaskSpawn { project: project(), task: first, launch: claude(&[]) });
+    let start = request(&mut rx).await;
+    let (_, starting) = chosen(&start.1);
+    let starting = TermRef { worker, session: starting };
+    let hijack = Verb::TaskAssign { project: project(), task: second, term: starting };
+    assert!(refused(&hub.dispatch(hijack).await, ErrorCode::Conflict).contains("being started"));
+    let counted = opened(&lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    let elsewhere = SessionId::new();
+    announce(&lease, elsewhere, true);
+    let elsewhere = TermRef { worker, session: elsewhere };
+    let past = Verb::TaskAssign { project: project(), task: second, term: elsewhere };
+    assert!(refused(&hub.dispatch(past).await, ErrorCode::Limit).contains("live_per_project"));
+    let again = Verb::TaskAssign { project: project(), task: first, term: counted };
+    assert!(matches!(hub.dispatch(again).await, Outcome::Task(_)), "counted already");
 }

@@ -320,8 +320,8 @@ struct Parked {
     restarts: bool,
     /// Nothing later refers to it: failing on it leaves every reference intact.
     discardable: bool,
-    /// The stripes coded from its capture ([`slopty_proto::media::FramePrefix::stripes`]).
-    stripes: u8,
+    /// How it was coded: its capture's stripes and the build of the sessions.
+    coded: Coded,
 }
 
 /// What the decoder callback leaves for the stream worker: the frames it is working on, the
@@ -363,12 +363,12 @@ impl Inflight {
         self.parked.drain(..=at).next_back()
     }
 
-    /// The decoder returned this frame's picture: its arrival and the stripes coded from its
-    /// capture, and its token is now held.
-    fn decoded(&mut self, pts_us: u64) -> Option<(Instant, u8)> {
+    /// The decoder returned this frame's picture: its arrival and how it was coded, and its
+    /// token is now held.
+    fn decoded(&mut self, pts_us: u64) -> Option<(Instant, Coded)> {
         let parked = self.take(pts_us)?;
         self.acks.extend(parked.ltr_token);
-        Some((parked.arrived, parked.stripes))
+        Some((parked.arrived, parked.coded))
     }
 
     /// The decoder returned no picture for this frame: its token is never acknowledged. A frame
@@ -742,6 +742,14 @@ pub fn spawn_screen(
 /// counted ([`ScreenStats::seam_tears`]), and the late stripe goes up when it comes.
 const STITCH_WAIT: Duration = Duration::from_micros(16_667);
 
+/// How a frame was coded, from its prefix: the stripes coded from its capture (zero for one
+/// picture) and the build of the worker's sessions that coded it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct Coded {
+    stripes: u8,
+    build: u8,
+}
+
 /// Where decoded pictures go, from every coded picture's decoder: the stitch, the present hook
 /// and the newest-picture channel.
 struct Output {
@@ -759,22 +767,23 @@ struct Output {
 
 impl Output {
     /// Coder `index`'s decoder returned `frame`, which the datagram that completed it brought
-    /// at `arrived`, one of the `stripes` coded from its capture (zero for one picture).
-    fn decoded(&self, index: usize, frame: DecodedFrame, arrived: Instant, stripes: u8) {
+    /// at `arrived`, coded as `coded` says.
+    fn decoded(&self, index: usize, frame: DecodedFrame, arrived: Instant, coded: Coded) {
         let decoded = Instant::now();
         self.first_decoded.lock().get_or_insert(decoded);
         let captured = self.anchor.lock().and_then(|anchor| anchor.captured(frame.pts_us));
         // Numbered as it goes up, in [`Self::show`]: the pacer reads a gap as a skipped picture,
         // and a capture's two stripes are one picture.
         let stamp = FrameStamp { pts_us: frame.pts_us, decode_seq: 0, arrived, decoded, captured };
-        let picture = if stripes == 0 {
+        let picture = if coded.stripes == 0 {
             if index != 0 {
                 return;
             }
             self.stitch.lock().whole();
             Some(Presentable { frame, stamp, stripes: None })
         } else {
-            self.stitch.lock().decoded(index, frame, stamp, stripes, decoded)
+            let joined = self.stitch.lock().decoded(index, frame, stamp, coded, decoded);
+            joined.map(Joined::presentable)
         };
         if let Some(picture) = picture {
             self.show(picture);
@@ -783,9 +792,9 @@ impl Output {
 
     /// A capture whose other stripe is late past [`STITCH_WAIT`] goes up at `now` without it.
     fn expire(&self, now: Instant) {
-        let picture = self.stitch.lock().expire(now);
-        if let Some(picture) = picture {
-            self.show(picture);
+        let joined = self.stitch.lock().settle(now);
+        if let Some(joined) = joined {
+            self.show(joined.presentable());
         }
     }
 
@@ -800,11 +809,48 @@ impl Output {
     }
 }
 
-/// A stripe's newest picture.
+/// A stripe's newest picture, and the build of the sessions that coded it.
 #[derive(Clone, Debug)]
-struct Shown {
-    frame: DecodedFrame,
+struct Shown<F> {
+    frame: F,
     stamp: FrameStamp,
+    build: u8,
+}
+
+/// The capture the stitch waits on.
+#[derive(Clone, Copy, Debug)]
+struct Waiting {
+    pts: u64,
+    coded: Coded,
+    /// When the first stripe not yet shown came out: the oldest wait, which a newer capture
+    /// that replaces this one keeps, so a stripe running behind never starves the picture.
+    since: Instant,
+}
+
+/// Two stripes' pictures to show as one.
+#[derive(Debug)]
+struct Joined<F> {
+    top: F,
+    lower: F,
+    stamp: FrameStamp,
+}
+
+impl Joined<DecodedFrame> {
+    /// The picture the view shows: the top stripe's rows above the seam, the lower one's from
+    /// the seam down. Each codes [`slopty_codec::stripes::OVERLAP`] rows past the seam.
+    fn presentable(self) -> Presentable {
+        let overlap = slopty_codec::stripes::OVERLAP;
+        let top_height = u32::try_from(self.top.image.height()).unwrap_or(u32::MAX);
+        Presentable {
+            frame: self.top,
+            stamp: self.stamp,
+            stripes: Some(Stitched {
+                lower: self.lower,
+                top_rows: top_height.saturating_sub(overlap),
+                lower_from: overlap,
+            }),
+        }
+    }
 }
 
 /// Puts the two stripes of a capture up together.
@@ -814,21 +860,31 @@ struct Shown {
 /// picture. A stripe it does not name keeps the picture it has (a refresh or a refinement
 /// codes only the stripe that needed it), and so does one whose media stream waits for a
 /// refresh ([`Self::set_stalled`]): the other stripe goes on without it. One that is merely
-/// late is waited for [`STITCH_WAIT`].
-#[derive(Debug, Default)]
-struct Stitch {
+/// late is waited for [`STITCH_WAIT`], counted from the first stripe that came out and was
+/// not shown: a newer capture replaces the one waited on but not its clock, and a stripe of a
+/// capture the other stripe has gone past is only kept as its stripe's newest picture.
+///
+/// Only stripes of one build of the worker's sessions go up together ([`Coded::build`]): a
+/// resize or a chroma switch codes both stripes anew at another size or in another format,
+/// and a stripe of the old build beside one of the new would be a picture of neither.
+#[derive(Debug)]
+struct Stitch<F = DecodedFrame> {
     /// Each stripe's newest picture, top first.
-    newest: [Option<Shown>; Stripe::MAX],
-    /// The capture waiting for a stripe: its stamp, the stripes still to decode it, and since
-    /// when.
-    waiting: Option<(u64, u8, Instant)>,
+    newest: [Option<Shown<F>>; Stripe::MAX],
+    waiting: Option<Waiting>,
     /// Stripes whose media stream waits for a refresh, bit `i` for stripe `i`.
     stalled: u8,
     /// Captures that went up with a stripe's previous picture.
     tears: u64,
 }
 
-impl Stitch {
+impl<F> Default for Stitch<F> {
+    fn default() -> Self {
+        Self { newest: [None, None], waiting: None, stalled: 0, tears: 0 }
+    }
+}
+
+impl<F: Clone> Stitch<F> {
     /// A picture of the whole stream came out: the stream is not striped (any more).
     fn whole(&mut self) {
         *self = Self { tears: self.tears, ..Self::default() };
@@ -840,59 +896,58 @@ impl Stitch {
         if stalled { self.stalled |= bit } else { self.stalled &= !bit }
     }
 
-    /// Stripe `index` decoded `frame`, of a capture `stripes` names: the picture to put up,
-    /// when this was the last stripe of it to come.
+    /// Stripe `index` decoded `frame`, of a capture coded as `coded` says, at `now`: the
+    /// picture to put up, when this completed the capture waited on.
     fn decoded(
         &mut self,
         index: usize,
-        frame: DecodedFrame,
+        frame: F,
         stamp: FrameStamp,
-        stripes: u8,
+        coded: Coded,
         now: Instant,
-    ) -> Option<Presentable> {
+    ) -> Option<Joined<F>> {
         let pts = stamp.pts_us;
+        // A stripe of a capture another stripe has already gone past completes nothing: it is
+        // only this stripe's newest picture, for the next capture to go up beside.
+        let behind = self.newest.iter().flatten().any(|shown| shown.stamp.pts_us > pts);
         if let Some(slot) = self.newest.get_mut(index) {
-            *slot = Some(Shown { frame, stamp });
+            *slot = Some(Shown { frame, stamp, build: coded.build });
         }
-        let missing = self.missing(pts, stripes);
-        if missing == 0 {
-            self.waiting = None;
-            return self.picture(stamp);
+        if !behind {
+            let since = self.waiting.map_or(now, |waiting| waiting.since);
+            self.waiting = Some(Waiting { pts, coded, since });
         }
-        let since = match self.waiting {
-            Some((waiting, _, since)) if waiting == pts => since,
-            _other => now,
-        };
-        self.waiting = Some((pts, missing, since));
-        None
+        self.settle(now)
     }
 
-    /// The stripes of `stripes` that have not decoded capture `pts`, less the ones waiting for
-    /// a refresh.
-    fn missing(&self, pts: u64, stripes: u8) -> u8 {
+    /// The capture waited on, once every stripe it names has decoded it, or the late ones
+    /// have stalled, or [`STITCH_WAIT`] has passed at `now`: shown with the other stripe's
+    /// newest picture, if that is of the same build.
+    fn settle(&mut self, now: Instant) -> Option<Joined<F>> {
+        let waiting = self.waiting?;
+        let late = self.missing(waiting) & !self.stalled;
+        if late != 0 && now.saturating_duration_since(waiting.since) < STITCH_WAIT {
+            return None;
+        }
+        self.waiting = None;
+        let joined = self.joined(waiting)?;
+        if self.missing(waiting) != 0 {
+            self.tears = self.tears.saturating_add(1);
+        }
+        Some(joined)
+    }
+
+    /// The stripes `waiting` names whose newest picture is not of its capture.
+    fn missing(&self, waiting: Waiting) -> u8 {
         let mut missing = 0;
         for (i, newest) in self.newest.iter().enumerate() {
             let bit = 1_u8 << i;
-            let has = newest.as_ref().is_some_and(|shown| shown.stamp.pts_us == pts);
-            if stripes & bit != 0 && self.stalled & bit == 0 && !has {
+            let has = newest.as_ref().is_some_and(|shown| shown.stamp.pts_us == waiting.pts);
+            if waiting.coded.stripes & bit != 0 && !has {
                 missing |= bit;
             }
         }
         missing
-    }
-
-    /// The capture waiting past [`STITCH_WAIT`] at `now`, with the late stripe's previous
-    /// picture, or the one whose late stripe has since stalled.
-    fn expire(&mut self, now: Instant) -> Option<Presentable> {
-        let (pts, missing, since) = self.waiting?;
-        let stalled = missing & !self.stalled == 0;
-        if !stalled && now.saturating_duration_since(since) < STITCH_WAIT {
-            return None;
-        }
-        let stamp = self.newest.iter().flatten().find(|shown| shown.stamp.pts_us == pts)?.stamp;
-        self.waiting = None;
-        self.tears = self.tears.saturating_add(1);
-        self.picture(stamp)
     }
 
     /// Whether a capture waits for a stripe.
@@ -900,25 +955,23 @@ impl Stitch {
         self.waiting.is_some()
     }
 
-    /// The two stripes' newest pictures as one, stamped `stamp`: arrived when the later of the
-    /// two did. `None` until both stripes have a picture.
-    fn picture(&self, stamp: FrameStamp) -> Option<Presentable> {
+    /// The two stripes' newest pictures as one, stamped as `waiting`'s capture: arrived when
+    /// the later of the two did. `None` until both stripes have a picture of its build.
+    fn joined(&self, waiting: Waiting) -> Option<Joined<F>> {
         let [Some(top), Some(lower)] = &self.newest else { return None };
-        let overlap = slopty_codec::stripes::OVERLAP;
-        let top_height = u32::try_from(top.frame.image.height()).unwrap_or(u32::MAX);
+        if top.build != waiting.coded.build || lower.build != waiting.coded.build {
+            return None;
+        }
+        let stamp = [top, lower].into_iter().find(|shown| shown.stamp.pts_us == waiting.pts)?.stamp;
         let arrived = if top.stamp.pts_us == lower.stamp.pts_us {
             top.stamp.arrived.max(lower.stamp.arrived)
         } else {
             stamp.arrived
         };
-        Some(Presentable {
-            frame: top.frame.clone(),
+        Some(Joined {
+            top: top.frame.clone(),
+            lower: lower.frame.clone(),
             stamp: FrameStamp { arrived, ..stamp },
-            stripes: Some(Stitched {
-                lower: lower.frame.clone(),
-                top_rows: top_height.saturating_sub(overlap),
-                lower_from: overlap,
-            }),
         })
     }
 }
@@ -968,8 +1021,8 @@ impl Lane {
             // that outlived the ring) is still shown; its timing simply does not enter the ring.
             let parked = parked.lock().decoded(frame.pts_us);
             left.store(true, Ordering::Release);
-            let (arrived, stripes) = parked.unwrap_or_else(|| (Instant::now(), 0));
-            output.decoded(index, frame, arrived, stripes);
+            let (arrived, coded) = parked.unwrap_or_else(|| (Instant::now(), Coded::default()));
+            output.decoded(index, frame, arrived, coded);
         });
         Self {
             media,
@@ -1307,7 +1360,7 @@ impl Worker {
                 ltr_token: frame.info.ltr_token,
                 restarts,
                 discardable,
-                stripes: frame.info.stripes,
+                coded: Coded { stripes: frame.info.stripes, build: frame.info.build },
             });
             if restarts {
                 lane.restart_pts = Some(pts);
@@ -1537,7 +1590,8 @@ mod arrival_tests {
         restarts: bool,
         discardable: bool,
     ) -> Parked {
-        Parked { pts_us, arrived, ltr_token, restarts, discardable, stripes: 0 }
+        let coded = Coded { stripes: 0, build: 0 };
+        Parked { pts_us, arrived, ltr_token, restarts, discardable, coded }
     }
 
     /// The decoder's callback finds the arrival its frame was parked under, and the frames
@@ -1550,9 +1604,9 @@ mod arrival_tests {
         for i in 0..4_u64 {
             arrivals.park(parked(i * 1_000, at(i * 16), None, false, false));
         }
-        assert_eq!(arrivals.decoded(2_000), Some((at(32), 0)));
+        assert_eq!(arrivals.decoded(2_000), Some((at(32), Coded::default())));
         assert_eq!(arrivals.decoded(1_000), None, "older frames went with it");
-        assert_eq!(arrivals.decoded(3_000), Some((at(48), 0)));
+        assert_eq!(arrivals.decoded(3_000), Some((at(48), Coded::default())));
         assert_eq!(arrivals.decoded(3_000), None, "taken once");
     }
 
@@ -1570,7 +1624,7 @@ mod arrival_tests {
         assert!(inflight.acks.is_empty(), "submitted is not decoded");
         let failure = |pts_us: u64, status: i32| DecodeFailure { pts_us, status };
         inflight.failed(failure(1, -12_909));
-        assert_eq!(inflight.decoded(2), Some((epoch, 0)));
+        assert_eq!(inflight.decoded(2), Some((epoch, Coded::default())));
         inflight.failed(failure(3, -12_903));
         assert_eq!(inflight.acks, vec![12], "only the frame that came back");
         assert_eq!(
@@ -1578,7 +1632,7 @@ mod arrival_tests {
             Some(Failed { pts_us: 3, session_lost: true, restart: false, count: 2 }),
             "the newest failure, and the session is gone"
         );
-        assert_eq!(inflight.decoded(4), Some((epoch, 0)));
+        assert_eq!(inflight.decoded(4), Some((epoch, Coded::default())));
         assert_eq!(inflight.acks, vec![12, 14]);
         assert!(inflight.parked.is_empty());
     }
@@ -1653,7 +1707,180 @@ mod arrival_tests {
         }
         assert_eq!(arrivals.parked.len(), ARRIVALS);
         assert_eq!(arrivals.decoded(0), None);
-        assert_eq!(arrivals.decoded(u64::try_from(ARRIVALS).unwrap()), Some((epoch, 0)));
+        assert_eq!(
+            arrivals.decoded(u64::try_from(ARRIVALS).unwrap()),
+            Some((epoch, Coded::default()))
+        );
+    }
+}
+
+#[cfg(test)]
+mod stitch_tests {
+    use super::*;
+
+    /// A stripe's picture, named by its capture and its stripe.
+    type Picture = (u64, usize);
+
+    const BOTH: u8 = 0b11;
+
+    struct Clock(Instant);
+
+    impl Clock {
+        fn at(&self, ms: f64) -> Instant {
+            self.0.checked_add(Duration::from_secs_f64(ms / 1000.0)).unwrap()
+        }
+    }
+
+    fn stamp(pts: u64, at: Instant) -> FrameStamp {
+        FrameStamp { pts_us: pts, decode_seq: 0, arrived: at, decoded: at, captured: None }
+    }
+
+    /// Stripe `index` decodes capture `pts`, coded as `stripes` of build `build`, at `at`:
+    /// the captures that went up, as the two pictures shown.
+    fn decode(
+        stitch: &mut Stitch<Picture>,
+        index: usize,
+        pts: u64,
+        (stripes, build): (u8, u8),
+        at: Instant,
+    ) -> Option<(Picture, Picture)> {
+        let coded = Coded { stripes, build };
+        stitch.decoded(index, (pts, index), stamp(pts, at), coded, at).map(|j| (j.top, j.lower))
+    }
+
+    /// A capture goes up once both its stripes have decoded it, stamped with the later
+    /// arrival, and the first alone waits.
+    #[test]
+    fn both_stripes_of_a_capture_go_up_together() {
+        let t = Clock(Instant::now());
+        let mut stitch = Stitch::default();
+        assert_eq!(decode(&mut stitch, 0, 10, (BOTH, 1), t.at(0.0)), None, "the lower is out");
+        assert!(stitch.waiting());
+        let joined = stitch.decoded(
+            1,
+            (10, 1),
+            stamp(10, t.at(3.0)),
+            Coded { stripes: BOTH, build: 1 },
+            t.at(3.0),
+        );
+        let joined = joined.expect("both in");
+        assert_eq!((joined.top, joined.lower), ((10, 0), (10, 1)));
+        assert_eq!((joined.stamp.pts_us, joined.stamp.arrived), (10, t.at(3.0)));
+        assert!(!stitch.waiting());
+        assert_eq!(stitch.settle(t.at(40.0)).map(|j| j.top), None, "shown once");
+        assert_eq!(stitch.tears, 0);
+    }
+
+    /// A stripe coded alone (a refresh, a refinement) goes up at once beside the other's
+    /// previous picture, and that is no tear.
+    #[test]
+    fn a_stripe_coded_alone_goes_up_beside_the_others_picture() {
+        let t = Clock(Instant::now());
+        let mut stitch = Stitch::default();
+        let _first = decode(&mut stitch, 0, 10, (BOTH, 1), t.at(0.0));
+        assert!(decode(&mut stitch, 1, 10, (BOTH, 1), t.at(1.0)).is_some());
+        assert_eq!(decode(&mut stitch, 1, 20, (0b10, 1), t.at(2.0)), Some(((10, 0), (20, 1))));
+        assert_eq!(stitch.tears, 0);
+    }
+
+    /// A stripe late past a display refresh: the capture goes up with its previous picture,
+    /// counted as a tear, and the late one goes up when it comes.
+    #[test]
+    fn a_late_stripe_leaves_the_capture_up_with_its_previous_picture() {
+        let t = Clock(Instant::now());
+        let mut stitch = Stitch::default();
+        let _first = decode(&mut stitch, 0, 10, (BOTH, 1), t.at(0.0));
+        let _both = decode(&mut stitch, 1, 10, (BOTH, 1), t.at(0.0));
+        assert_eq!(decode(&mut stitch, 0, 20, (BOTH, 1), t.at(10.0)), None);
+        assert!(stitch.settle(t.at(26.0)).is_none(), "within the wait");
+        let torn = stitch.settle(t.at(27.0)).map(|j| (j.top, j.lower, j.stamp.pts_us));
+        assert_eq!(torn, Some(((20, 0), (10, 1), 20)));
+        assert_eq!(stitch.tears, 1);
+        assert_eq!(decode(&mut stitch, 1, 20, (BOTH, 1), t.at(30.0)), Some(((20, 0), (20, 1))));
+        assert_eq!(stitch.tears, 1);
+    }
+
+    /// A stripe waiting for a refresh holds nothing up: the other goes on at once beside its
+    /// last picture, each a tear.
+    #[test]
+    fn a_stalled_stripe_holds_nothing_up() {
+        let t = Clock(Instant::now());
+        let mut stitch = Stitch::default();
+        let _first = decode(&mut stitch, 0, 10, (BOTH, 1), t.at(0.0));
+        let _both = decode(&mut stitch, 1, 10, (BOTH, 1), t.at(0.0));
+        stitch.set_stalled(1, true);
+        assert_eq!(decode(&mut stitch, 0, 20, (BOTH, 1), t.at(8.0)), Some(((20, 0), (10, 1))));
+        assert_eq!(decode(&mut stitch, 0, 30, (BOTH, 1), t.at(16.0)), Some(((30, 0), (10, 1))));
+        assert_eq!(stitch.tears, 2);
+        stitch.set_stalled(1, false);
+        assert_eq!(decode(&mut stitch, 1, 40, (0b10, 1), t.at(20.0)), Some(((30, 0), (40, 1))));
+    }
+
+    /// A stripe running a capture behind the other on a 120 Hz beat neither restarts the wait
+    /// nor takes it over: a newer capture replaces the one waited on and keeps its clock, an
+    /// older stripe that comes out after it is kept as that stripe's picture, and a picture
+    /// goes up at least once a wait.
+    #[test]
+    fn a_stripe_running_behind_never_starves_the_picture() {
+        let t = Clock(Instant::now());
+        let mut stitch = Stitch::default();
+        let _first = decode(&mut stitch, 0, 0, (BOTH, 1), t.at(0.0));
+        let _both = decode(&mut stitch, 1, 0, (BOTH, 1), t.at(0.0));
+        // What went up, and when: each step's picture, stamped with the step's time.
+        let mut shown: Vec<(f64, (Picture, Picture))> = vec![(0.0, ((0, 0), (0, 1)))];
+        let mut at = 0.0;
+        for capture in 1..=24_u64 {
+            at += 8.333;
+            let top = decode(&mut stitch, 0, capture * 10, (BOTH, 1), t.at(at));
+            // The lower stripe of the capture before, a beat late.
+            let lower = decode(&mut stitch, 1, (capture - 1) * 10, (BOTH, 1), t.at(at + 1.0));
+            let late = stitch.settle(t.at(at + 2.0)).map(|j| (j.top, j.lower));
+            shown.extend(top.map(|p| (at, p)));
+            shown.extend(lower.map(|p| (at + 1.0, p)));
+            shown.extend(late.map(|p| (at + 2.0, p)));
+        }
+        // The wait runs from the first stripe not shown, so a picture goes up at most a wait
+        // and a beat after the last, however far the lower stripe runs behind.
+        let gaps: Vec<f64> = shown.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        assert!(gaps.iter().all(|&gap| gap <= 16.667 + 8.333 + 2.0), "{gaps:?}: {shown:?}");
+        assert!(shown.len() >= 8, "{shown:?}");
+        let shown: Vec<(Picture, Picture)> = shown.into_iter().skip(1).map(|(_, p)| p).collect();
+        assert!(
+            shown.iter().all(|(top, lower)| top.0 >= lower.0 && top.0 - lower.0 <= 20),
+            "the newest top beside the lower that came: {shown:?}"
+        );
+        assert!(shown.windows(2).all(|w| w[0].0.0 < w[1].0.0), "captures go forward: {shown:?}");
+    }
+
+    /// Stripes of two builds never go up together, not even past the wait: a resize codes
+    /// both anew at another size, and a stripe of each would be a picture of neither.
+    #[test]
+    fn stripes_of_two_builds_never_go_up_together() {
+        let t = Clock(Instant::now());
+        let mut stitch = Stitch::default();
+        let _first = decode(&mut stitch, 0, 10, (BOTH, 1), t.at(0.0));
+        let _both = decode(&mut stitch, 1, 10, (BOTH, 1), t.at(0.0));
+        assert_eq!(decode(&mut stitch, 0, 20, (BOTH, 2), t.at(8.0)), None);
+        assert!(stitch.settle(t.at(40.0)).is_none(), "the lower is of the old build");
+        stitch.set_stalled(1, true);
+        assert_eq!(decode(&mut stitch, 0, 30, (BOTH, 2), t.at(48.0)), None, "stalled or not");
+        stitch.set_stalled(1, false);
+        assert_eq!(decode(&mut stitch, 1, 40, (0b10, 2), t.at(60.0)), Some(((30, 0), (40, 1))));
+    }
+
+    /// A picture of the whole stream ends the stripes: nothing of them is kept.
+    #[test]
+    fn a_whole_picture_forgets_the_stripes() {
+        let t = Clock(Instant::now());
+        let mut stitch = Stitch::default();
+        let _first = decode(&mut stitch, 0, 10, (BOTH, 1), t.at(0.0));
+        let _both = decode(&mut stitch, 1, 10, (BOTH, 1), t.at(0.0));
+        let _torn = decode(&mut stitch, 0, 20, (BOTH, 1), t.at(1.0));
+        stitch.tears = 3;
+        stitch.whole();
+        assert!(!stitch.waiting());
+        assert_eq!(stitch.tears, 3, "the count is the stream's");
+        assert_eq!(decode(&mut stitch, 1, 30, (0b10, 1), t.at(2.0)), None, "no top to join");
     }
 }
 
@@ -1847,9 +2074,9 @@ mod tests {
         arrivals.park(parked(10, t(1), None, false, false));
         arrivals.park(parked(20, t(2), None, false, false));
         arrivals.park(parked(30, t(3), None, false, false));
-        assert_eq!(arrivals.decoded(20), Some((t(2), 0)));
+        assert_eq!(arrivals.decoded(20), Some((t(2), Coded::default())));
         assert_eq!(arrivals.decoded(10), None, "older than the one taken: forgotten with it");
-        assert_eq!(arrivals.decoded(30), Some((t(3), 0)));
+        assert_eq!(arrivals.decoded(30), Some((t(3), Coded::default())));
         assert!(arrivals.parked.is_empty());
         for n in 0..u64::try_from(ARRIVALS).unwrap_or(u64::MAX).saturating_add(5) {
             arrivals.park(parked(n, t(n), None, false, false));
@@ -2428,6 +2655,10 @@ mod worker_tests {
         // so the worker reads the moment the probe left as its epoch-relative time plus that.
         let epoch_on_worker = 5_000_000 + sent_us;
         let echo = ClockEcho::new(sent_us, epoch_on_worker, epoch_on_worker + 30);
+        // The echo comes back a round trip later, longer than the 30 µs it says the worker
+        // held it: the report's timer can wake this thread within microseconds of the probe,
+        // and an echo sooner than its own hold is one the estimate throws away.
+        h.rt.block_on(async { tokio::time::sleep(Duration::from_millis(2)).await });
         let routed_at = Instant::now();
         h.route(echo.datagram(STREAM.0, 0));
         h.wait_for("the estimate", FOR_THE_MACHINE, |handle| handle.stats().clock.is_some());

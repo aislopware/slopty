@@ -275,6 +275,12 @@ impl Orchestrator {
                     return Ok(Outcome::Opened(TermRef { worker, session: running }));
                 }
                 let handle = self.open_as(session, &req, ORCHESTRATOR).await?;
+                // A command that runs Claude Code is guarded as a spawned agent is from the
+                // start: until its first hook a dialog of its own may be up, and typing would
+                // answer it.
+                if slopty_agent::detect::is_claude("", &req.command) {
+                    inner.agent_terms.lock().insert(handle.id());
+                }
                 Ok(Outcome::Opened(TermRef { worker, session: handle.id() }))
             }
             Verb::SpawnAgent {
@@ -587,9 +593,10 @@ impl Orchestrator {
             Some(relay) => slopty_agent::hooks::with_mcp(args, relay),
             None => args,
         };
+        // The mod's variables go last, so a request's cannot silence or redirect it.
         let (args, env) = match &launch.claude_mod {
             Some(installed) => {
-                (installed.args(args), installed.agent_env().into_iter().chain(env).collect())
+                (installed.args(args), env.into_iter().chain(installed.agent_env()).collect())
             }
             None => (args, env),
         };

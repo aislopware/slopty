@@ -927,3 +927,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_drag_s_escape_carries_no_modifier_but_caps_lock`, `a_press_at_a_window_gone_leaves_no_drag`,
     `a_drag_lets_go_of_a_press_on_its_own_route_first` and `a_stream_ending_mid_drag_cancels_it`.
     The worker's `DragIn` and the helper that use it are the rest of P2.
+
+- ✅ **The remote pointer is the system cursor; its shape follows the window server's seed**
+  (2026-09-30). Gap-audit items 1 and 7. The pointer over a remote tile was drawn by the view,
+  so every move cost one app frame (19 ms notify → glass) before the hand saw it, and the
+  worker read its picture from `NSCursor.currentSystemCursor` every 33 ms, which the header
+  says "will always be `nil` in a future version".
+  - *The client (fork).* gpui-fast gains `CursorStyle::Image(id)`: the application points an
+    id at a `CursorImage` (premultiplied BGRA, hotspot, pixels per point) with
+    `App::set_cursor_image`, and macOS shows it as an `NSCursor` in the view's cursor rect.
+    The window server moves that cursor with the hand, as it moves a local one, so a move
+    costs no frame. A new picture under an id that is showing is set at once, before any
+    frame; the last 64 cursors built are kept by content. No upstream pull request existed
+    (zed and longbridge searched for image or custom cursors). Branch `cursor-image` on
+    aislopware/gpui-fast.
+  - *The view.* On macOS the system pointer is the worker's picture whenever the pointer is
+    this client's own: always on a window stream, and for the hold after a move on a display.
+    The view draws the worker's picture only where the worker moves the pointer itself (its
+    own user, an app's warp, another client) and in trackpad mode, as the Chrome Remote
+    Desktop model has it (`design-input-fidelity.md` §4.1). The switch costs one frame at the
+    transition, none per move. The pointer keeps its size in points, as a local one does,
+    whatever the tile's zoom. iOS keeps the drawn pointer: `UIPointerShape` takes paths, not
+    pictures.
+  - *The worker.* `CGSCurrentCursorSeed`, polled at 120 Hz, says when the cursor changed; only
+    then is the picture read, with `CGSGetGlobalCursorDataSize`/`CGSGetGlobalCursorData`.
+    Both are private, CoreGraphics re-exports of SkyLight, found with `dlsym` under the rule
+    above. The deprecated reading is gone, not kept behind them: the floor has the calls, and
+    on a macOS without them the worker sends no picture and the client shows its own arrow.
+    The picture is the one the window server draws, at the scale of the display it is on,
+    which `CursorShape::scale` carries; a client on a Retina display shows a 1× worker's
+    cursor scaled up, as Parsec does. The data's layout (premultiplied, a host-order ARGB
+    word, hotspot and rect in points) is pinned by comparing it pixel for pixel with
+    `currentSystemCursor` while that still answers. The arrow is grey, so blue against red
+    rests on `OSXvnc`'s reading until a coloured cursor is compared.
+  - *Hardware checks.* The calls were found and read on macOS 27.0.1 (26A434), a 1× display.
+    Owed: a 2× display, to see the global data's scale and hotspot units there, a coloured
+    cursor (a drag's copy badge), and the pointer by hand over a window and a display tile.
+  - Numbers: MEASUREMENTS, "the remote pointer as the system cursor, and the cursor seed".
+    Tests: fork `the_pointer_takes_the_picture_as_it_enters_and_moving_over_it_draws_nothing`,
+    `an_id_is_pointed_at_pictures_and_forgotten_without_a_frame`,
+    `a_cursor_is_its_picture_in_points_with_the_hotspot_in_points`,
+    `an_id_pointed_back_at_a_picture_it_showed_builds_nothing`; `slopty-capture`
+    `this_macos_exports_the_window_servers_cursor_calls`,
+    `the_global_cursor_is_the_system_cursors_picture_and_its_seed_costs_nanoseconds`,
+    `the_global_data_is_read_at_its_displays_scale_with_the_hotspot_in_pixels`. The view and
+    worker halves wait in `target/wip-cursor/` for the files' owner, with the gpui pin.

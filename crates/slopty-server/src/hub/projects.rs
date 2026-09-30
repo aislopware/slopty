@@ -16,20 +16,22 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentKind;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    AGENT_TOKEN_ENV, Bounds, Fact, Facts, LOOSENING_FLAGS, PERMISSION_MODE_FLAG, PROJECT_ENV,
-    Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Report, ReportKind, Runner,
-    SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId, TaskLaunch, TimelineEntry, WorkerFacts,
+    AGENT_TOKEN_ENV, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
+    PROJECT_ENV, Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Report, ReportKind,
+    Runner, SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId, TaskLaunch, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
 
 use super::{
-    Entry, Hub, State, WAIT_CAP_MS, branch_of, digest, error, keep_start, keyed, known_term,
-    remember, start_again,
+    Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, digest, error, keep_start, keyed, known_term,
+    remember, start_again, start_answered,
 };
-use crate::deliver::Batch;
+use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Ranking};
-use crate::project::{Assignee, Caller, NewProject, Policy, ProjectChange, Running, Starting};
+use crate::project::{
+    Assignee, Caller, NewProject, Policy, ProjectChange, Running, Starting, clipped,
+};
 
 /// How long a start still counts once its worker answered (or its answer was lost), until its
 /// terminal counts on its own: past it, the terminal is gone or never came.
@@ -58,7 +60,9 @@ fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
         for s in &entry.sessions {
             let term = TermRef { worker: entry.info.worker, session: s.id };
             terminals.insert(term);
-            if s.agent.is_some() {
+            // A terminal an agent opened or typed into counts as an agent's whatever runs in
+            // it now: the agent may start one there at any moment, past every count.
+            if s.agent.is_some() || state.driven.contains_key(&s.id) {
                 agents.insert(term);
             }
         }
@@ -85,26 +89,13 @@ fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
     (terminals, agents)
 }
 
-/// The first argument of `args` that loosens Claude Code's permissions.
+/// The first thing in `args`, Claude Code's own arguments, that loosens its permissions
+/// ([`slopty_agent::loosening::args`]). The server reads no worker's disk and adds none of
+/// Slopty's own flags itself, so a settings file, a hook or a tools server an agent names
+/// loosens.
 fn loosening(args: &[String]) -> Option<String> {
-    let mut words = args.iter();
-    while let Some(word) = words.next() {
-        if word == "--" {
-            break;
-        }
-        let (flag, inline) =
-            word.split_once('=').map_or((word.as_str(), None), |(f, v)| (f, Some(v)));
-        if LOOSENING_FLAGS.contains(&flag) {
-            return Some(word.clone());
-        }
-        if flag == PERMISSION_MODE_FLAG {
-            let mode = inline.map(str::to_owned).or_else(|| words.next().cloned());
-            if !mode.as_deref().is_some_and(|m| SAFE_MODES.contains(&m)) {
-                return Some(format!("{PERMISSION_MODE_FLAG} {}", mode.unwrap_or_default()));
-            }
-        }
-    }
-    None
+    let own = slopty_agent::loosening::Own::default();
+    slopty_agent::loosening::args(args, None, &own).into_iter().next()
 }
 
 /// Whether `args` pick something themselves, among `flags`, before a `--`.
@@ -115,11 +106,30 @@ fn names(args: &[String], flags: &[&str]) -> bool {
     })
 }
 
-/// The arguments `claude` gets from a command line, when the command is `claude`.
-fn claude_args(argv: &[String]) -> Option<&[String]> {
-    let (program, args) = argv.split_first()?;
+/// Whether `verb` names a verifier, for a project or a task: what the merge queue will hold
+/// work to.
+fn names_verifier(verb: &Verb) -> bool {
+    match verb {
+        Verb::ProjectCreate { verifier, .. } | Verb::ProjectSet { verifier, .. } => {
+            verifier.is_some()
+        }
+        Verb::TaskCreate { spec, .. } => spec.verifier.is_some(),
+        Verb::TaskUpdate { change, .. } => change.verifier.is_some(),
+        _ => false,
+    }
+}
+
+/// The arguments `claude` gets from a command line that runs it: `claude …`, a runtime running
+/// its script, or a shell line with `claude` as one of its programs (`sh -c "cd x && claude
+/// --allowedTools Bash"`), read as the shell reads it ([`slopty_agent::detect`]).
+fn claude_args(argv: &[String]) -> Option<Vec<String>> {
+    use slopty_agent::detect;
+    if let Some(command) = detect::shell_command(argv) {
+        return detect::shell_agent_args(command);
+    }
+    let program = argv.first()?;
     let name = program.rsplit('/').next().unwrap_or(program);
-    (name == "claude").then_some(args)
+    detect::is_claude(name, argv).then(|| detect::agent_args(argv).to_vec())
 }
 
 fn loosened(flag: &str, project: Option<&ProjectId>) -> Outcome {
@@ -130,8 +140,9 @@ fn loosened(flag: &str, project: Option<&ProjectId>) -> Outcome {
     error(
         ErrorCode::Limit,
         &format!(
-            "{flag} would give the agent more than its starter has; the person allows that for \
-             {whose} only in the server's settings.toml (`[server.projects] permission_flags`)"
+            "{flag} may give the agent more than its starter has (only what is known to ask the \
+             person no less is let through); the person allows it for {whose} only in the \
+             server's settings.toml (`[server.projects] permission_flags`)"
         ),
     )
 }
@@ -250,7 +261,7 @@ fn rules(project: &Project, key: &str) -> Option<String> {
     while !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
-    Some(text.get(..end).unwrap_or_default().to_owned()).filter(|t| !t.is_empty())
+    Some(plain(text.get(..end).unwrap_or_default())).filter(|t| !t.is_empty())
 }
 
 /// What an agent started for `task` is told of its role, beside Claude Code's own prompt.
@@ -270,7 +281,11 @@ fn agent_role(project: &Project, task: &Task) -> String {
         format!(
             "You are the agent of task {} (\"{}\") of the Slopty project {} ({}, work lands \
              on {}). Your first prompt is its brief.",
-            task.id, task.title, project.id, project.repo, project.target
+            task.id,
+            plain(&task.title),
+            project.id,
+            plain(&project.repo),
+            plain(&project.target)
         ),
         "Slopty's tools are the `slopty` MCP server; with no project or task named they act on \
          your own."
@@ -300,7 +315,10 @@ fn orchestrator_role(project: &Project) -> String {
         format!(
             "You orchestrate the Slopty project {} (\"{}\", {}, work lands on {}), through the \
              `slopty` MCP server.",
-            project.id, project.title, project.repo, project.target
+            project.id,
+            plain(&project.title),
+            plain(&project.repo),
+            plain(&project.target)
         ),
         "- Split the goal into tasks that own disjoint paths (task_create), place and start \
          them (placement_suggest, task_spawn), and follow them with project_status. Reports \
@@ -458,10 +476,17 @@ impl Hub {
         key: Option<IdempotencyKey>,
         verb: &Verb,
     ) -> Outcome {
+        if caller == Caller::Agent && names_verifier(verb) {
+            return error(
+                ErrorCode::Forbidden,
+                "a verifier is the person's word on what counts as done, so only the person \
+                 names one; say in the task's brief what should be checked",
+            );
+        }
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
         if let Some(key) = &key
-            && let Some(answer) = keyed(state, key, verb)
+            && let Some(answer) = keyed(state, caller, key, verb)
         {
             return answer;
         }
@@ -522,9 +547,19 @@ impl Hub {
             Verb::TaskAssign { project, task: id, term } => {
                 // A terminal its worker has opened but not yet announced is live already: an
                 // orchestrator that starts an agent and assigns it at once is not refused.
-                let opening = state.starting.iter().any(|s| s.term == term);
-                let known = if opening { Ok(()) } else { known_term(state, Some(term)) };
-                known.and_then(|()| {
+                let opening = state.starting.iter().find(|s| s.term == term);
+                let theirs =
+                    opening.and_then(|s| s.task.as_ref()).filter(|t| **t != (project.clone(), id));
+                let known = match (opening, theirs) {
+                    (_, Some((p, t))) => Err(error(
+                        ErrorCode::Conflict,
+                        &format!("that terminal is being started for task {t} of {p}"),
+                    )),
+                    (Some(_), None) => Ok(()),
+                    (None, None) => known_term(state, Some(term)),
+                };
+                let room = state.projects.room_for(&project, term, &running);
+                known.and(room).and_then(|()| {
                     let branch = branch_of(state, term);
                     let who = Assignee {
                         term,
@@ -575,7 +610,7 @@ impl Hub {
             self.inner.deliver.notify_one();
         }
         if let Some(key) = key {
-            remember(state, key, verb, &outcome);
+            remember(state, caller, key, verb, &outcome);
         }
         drop(guard);
         outcome
@@ -733,10 +768,10 @@ impl Hub {
         key: Option<IdempotencyKey>,
         verb: Verb,
     ) -> Outcome {
-        if let Some(answer) = self.start_keyed(key.as_ref(), &verb).await {
+        let sent = digest(caller, &verb);
+        if let Some(answer) = self.start_keyed(key.as_ref(), sent).await {
             return answer;
         }
-        let sent = digest(&verb);
         let Verb::SpawnAgent { worker, agent, cwd, prompt, args, env, size, .. } = verb else {
             return error(ErrorCode::Invalid, "not an agent's start");
         };
@@ -774,12 +809,21 @@ impl Hub {
         if let Some(key) = &key {
             keep_start(&mut self.inner.state.lock(), key.clone(), sent, &start);
         }
+        self.forward_placed(id, key, start).await
+    }
+
+    /// Forward the start placed as `id`, detached from its caller: what the worker opens is
+    /// counted and its answer kept under `key` even when the caller is gone.
+    async fn forward_placed(&self, id: u64, key: Option<IdempotencyKey>, start: Verb) -> Outcome {
         let hub = self.clone();
         let started = tokio::spawn(async move {
             let placed = Placed { hub: &hub, id, settled: false };
-            let outcome = hub.forward(key, start).await;
+            let outcome = hub.forward(key.clone(), start).await;
             if matches!(outcome, Outcome::Opened(_)) || maybe_done(&outcome) {
                 placed.answered();
+            }
+            if let Some(key) = &key {
+                start_answered(&mut hub.inner.state.lock(), key, &outcome);
             }
             outcome
         });
@@ -815,25 +859,53 @@ impl Hub {
         key: Option<IdempotencyKey>,
         verb: Verb,
     ) -> Outcome {
-        if let Some(answer) = self.start_keyed(key.as_ref(), &verb).await {
+        let sent = digest(caller, &verb);
+        if let Some(answer) = self.start_keyed(key.as_ref(), sent).await {
             return answer;
         }
-        let sent = digest(&verb);
         let Verb::OpenTerminal { worker, cwd, command, env, name, size, .. } = verb else {
             return error(ErrorCode::Invalid, "not a terminal's start");
         };
         if let Some(args) = claude_args(&command) {
             let allowed =
                 self.inner.state.lock().projects.policy().bounds_for(None).permission_flags;
-            if let Some(flag) = loosening(args).filter(|_| !allowed) {
+            if let Some(flag) = loosening(&args).filter(|_| !allowed) {
                 return loosened(&flag, None);
             }
         }
-        let session = SessionId::new();
+        // An agent's terminal counts as an agent's start from now: it may run one there.
+        let placed = match caller {
+            Caller::Agent => {
+                let admitted = Self::admit_terminal(&mut self.inner.state.lock(), worker);
+                match admitted {
+                    Ok(placed) => Some(placed),
+                    Err(refused) => return refused,
+                }
+            }
+            Caller::Person => None,
+        };
+        let session = placed.map_or_else(SessionId::new, |(_, term)| term.session);
         let start =
             Verb::OpenTerminal { worker, cwd, command, env, name, size, session: Some(session) };
         Self::opening(&mut self.inner.state.lock(), caller, key.as_ref(), sent, &start);
-        self.forward(key, start).await
+        if let Some((id, _)) = placed {
+            return self.forward_placed(id, key, start).await;
+        }
+        let outcome = self.forward(key.clone(), start).await;
+        if let Some(key) = &key {
+            start_answered(&mut self.inner.state.lock(), key, &outcome);
+        }
+        outcome
+    }
+
+    /// Place an agent's terminal on `worker`, if the person's bounds allow another agent
+    /// there: its start's id and its terminal.
+    fn admit_terminal(state: &mut State, worker: WorkerId) -> Result<(u64, TermRef), Outcome> {
+        let bounds = state.projects.policy().bounds_for(None);
+        let (terminals, agents) = live(state);
+        let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
+        fleet_room(state, &running, bounds, Some(worker))?;
+        Ok(Self::place(state, worker, None, true))
     }
 
     /// Note a terminal's start about to be forwarded: an agent's is driven by it, and a keyed
@@ -842,7 +914,7 @@ impl Hub {
         state: &mut State,
         caller: Caller,
         key: Option<&IdempotencyKey>,
-        sent: u64,
+        sent: blake3::Hash,
         start: &Verb,
     ) {
         if caller == Caller::Agent
@@ -858,11 +930,20 @@ impl Hub {
     /// The answer to a repeat of a keyed start (`sent` as its caller sent it): the first
     /// start forwarded again, which its worker answers as it answered the first, or a refusal
     /// of the key used with other arguments; `None` when there is no key or it is new.
-    async fn start_keyed(&self, key: Option<&IdempotencyKey>, sent: &Verb) -> Option<Outcome> {
+    async fn start_keyed(
+        &self,
+        key: Option<&IdempotencyKey>,
+        sent: blake3::Hash,
+    ) -> Option<Outcome> {
         let key = key?;
         let again = start_again(&mut self.inner.state.lock(), key, sent)?;
         Some(match again {
-            Ok(start) => self.forward(Some(key.clone()), start).await,
+            Ok(Again::Forward(start)) => {
+                let outcome = self.forward(Some(key.clone()), start).await;
+                start_answered(&mut self.inner.state.lock(), key, &outcome);
+                outcome
+            }
+            Ok(Again::Answer(outcome)) => outcome,
             Err(refused) => refused,
         })
     }
@@ -896,6 +977,7 @@ impl Hub {
     /// counted and assigned.
     pub(super) async fn task_spawn(
         &self,
+        caller: Caller,
         key: Option<IdempotencyKey>,
         project: ProjectId,
         task: TaskId,
@@ -903,7 +985,7 @@ impl Hub {
     ) -> Outcome {
         let verb = Verb::TaskSpawn { project: project.clone(), task, launch: launch.clone() };
         if let Some(key) = &key
-            && let Some(answer) = keyed(&mut self.inner.state.lock(), key, &verb)
+            && let Some(answer) = keyed(&mut self.inner.state.lock(), caller, key, &verb)
         {
             return answer;
         }
@@ -911,7 +993,7 @@ impl Hub {
         let started = tokio::spawn(async move {
             let outcome = hub.start_task_once(key.clone(), &project, task, launch).await;
             if let Some(key) = key {
-                remember(&mut hub.inner.state.lock(), key, &verb, &outcome);
+                remember(&mut hub.inner.state.lock(), caller, key, &verb, &outcome);
             }
             outcome
         });
@@ -928,11 +1010,11 @@ impl Hub {
     ) -> Result<(Placement, bool), Outcome> {
         let bounds = state.projects.policy().bounds_for(Some(project));
         let args = match &launch.run {
-            Runner::Claude { args, .. } => Some(args.as_slice()),
+            Runner::Claude { args, .. } => Some(args.clone()),
             Runner::Command { argv } => claude_args(argv),
         };
         if !bounds.permission_flags
-            && let Some(flag) = args.and_then(loosening)
+            && let Some(flag) = args.as_deref().and_then(loosening)
         {
             return Err(loosened(&flag, Some(project)));
         }
@@ -1172,19 +1254,49 @@ impl Hub {
     /// well as the person, so its terminal is closed and the timeline says why, unless the
     /// person allows looser modes for its project.
     pub(super) fn permission_mode(&self, state: &mut State, term: TermRef, mode: &str) {
-        let project = state.projects.working_on(term).map(|(project, _)| project);
-        let allowed = state.projects.policy().bounds_for(project.as_ref()).permission_flags;
-        let watched = state.locked.contains(&term) || state.driven.contains_key(&term.session);
-        if !watched || allowed || SAFE_MODES.contains(&mode) {
+        if SAFE_MODES.contains(&mode) || !Self::held_to_asking(state, term) {
             return;
         }
         let why = format!(
             "its agent went into {mode} mode, looser than the person allows \
              (`[server.projects] permission_flags`), so its terminal was closed"
         );
-        tracing::warn!(session = %term.session, mode, "agent looser than allowed; closing");
+        self.close_looser(state, term, &why);
+    }
+
+    /// What the worker read off the command line of the agent in `term` that loosens its
+    /// permissions, however it was started: a `claude` inside a shell's line (`sh -c "cd x &&
+    /// claude --allowedTools Bash"`) passes the flag check at the start, which sees only the
+    /// program it was handed. Judged as a looser mode is ([`Self::permission_mode`]).
+    pub(super) fn loosened(&self, state: &mut State, term: TermRef, found: &[String]) {
+        if found.is_empty() || !Self::held_to_asking(state, term) {
+            return;
+        }
+        let shown: Vec<String> =
+            found.iter().take(LOOSENED_MAX).map(|f| clipped(f, LOOSENED_ITEM_MAX)).collect();
+        let why = format!(
+            "its agent runs with {}, more than the person allows (`[server.projects] \
+             permission_flags`), so its terminal was closed",
+            shown.join(", ")
+        );
+        self.close_looser(state, term, &why);
+    }
+
+    /// Whether the agent in `term` must stay in a mode that asks: the server started it
+    /// without looser permissions, or an agent opened or typed into its terminal, and the
+    /// person allows nothing looser for its project.
+    fn held_to_asking(state: &State, term: TermRef) -> bool {
+        let project = state.projects.working_on(term).map(|(project, _)| project);
+        let allowed = state.projects.policy().bounds_for(project.as_ref()).permission_flags;
+        let watched = state.locked.contains(&term) || state.driven.contains_key(&term.session);
+        watched && !allowed
+    }
+
+    /// Close `term`, whose agent is looser than allowed, saying `why` on its task.
+    fn close_looser(&self, state: &mut State, term: TermRef, why: &str) {
+        tracing::warn!(session = %term.session, why, "agent looser than allowed; closing");
         if let Some((project, task)) = state.projects.working_on(term) {
-            let updates = state.projects.note(&project, task, &why, WallMs::now());
+            let updates = state.projects.note(&project, task, why, WallMs::now());
             self.projects_moved(state, updates);
         }
         let hub = self.clone();
@@ -1217,7 +1329,10 @@ mod tests {
             "--permission-mode=acceptEdits",
             "--permission-mode",
             "--allowedTools Bash",
-            "--settings={\"permissions\":{}}",
+            "--settings={\"permissions\":{\"allow\":[\"Bash\"]}}",
+            "--mcp-config={}",
+            "--add-dir /",
+            "-- --dangerously-skip-permissions",
             "--permission-prompt-tool mcp__x__y",
         ] {
             assert!(loosening(&words(loose)).is_some(), "{loose}");
@@ -1227,12 +1342,25 @@ mod tests {
             "--permission-mode plan",
             "--permission-mode=default",
             "",
-            "-- --dangerously-skip-permissions",
+            "--resume abc --effort high",
+            "--settings={\"model\":\"opus\"}",
         ] {
             assert_eq!(loosening(&words(safe)), None, "{safe}");
         }
         let argv = words("/usr/local/bin/claude --dangerously-skip-permissions");
-        assert!(claude_args(&argv).and_then(loosening).is_some());
+        assert!(claude_args(&argv).as_deref().and_then(loosening).is_some());
+        let wrapped = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "cd x && claude --allowedTools Bash".to_owned(),
+        ];
+        assert!(
+            claude_args(&wrapped).as_deref().and_then(loosening).is_some(),
+            "inside a shell line"
+        );
+        let echoed =
+            vec!["/bin/sh".to_owned(), "-c".to_owned(), "echo claude --allowedTools".to_owned()];
+        assert_eq!(claude_args(&echoed), None, "claude only mentioned");
         assert_eq!(claude_args(&words("codex --yolo")), None, "only claude's flags are known");
     }
 

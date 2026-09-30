@@ -718,8 +718,9 @@ impl VideoEncoder for VideoToolbox {
         stripe: Stripe,
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError> {
-        let width = usize::try_from(config.width).unwrap_or(usize::MAX);
-        let copy = StripeCopy::new(width, stripe, config.chroma)?;
+        let side = |n: u32| usize::try_from(n).unwrap_or(usize::MAX);
+        let copy =
+            StripeCopy::new((side(config.width), side(config.height)), stripe, config.chroma)?;
         let config = EncoderConfig { height: stripe.coded_rows, ..config };
         Ok(Self { encoder: Encoder::new(config, sink)?, stripe: Some(copy) })
     }

@@ -11,7 +11,15 @@
 //! inbox, the socket Claude Code takes messages from other processes on
 //! (`CLAUDE_CODE_MESSAGING_SOCKET`, [`Inbox`]), and the worker posts a batch there as soon as it
 //! arrives ([`message`]): an idle agent starts a turn with it, a busy one reads it between tool
-//! calls. The file stays the way in when a session has no inbox or the post fails.
+//! calls.
+//!
+//! A post is a wake-up, never the hand-over itself. Claude Code may hold or drop what arrives on
+//! the socket (`crossSessionInbound`, or a session that bypasses permission prompts holding
+//! messages from one that does not), and it says nothing back. So the batch stays in its file,
+//! the post is noted beside it with a mark the message carries ([`Posted`]), and the next hook
+//! decides: when the mark is in the prompt or the transcript, the message reached the agent and
+//! the hook only acknowledges it; when it is not, the hook hands the batch over itself
+//! ([`reached`]). A report is therefore never acknowledged unread, and read twice at worst.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -75,21 +83,15 @@ pub fn take(dir: &Path, session: SessionId) -> io::Result<Option<Batch>> {
     serde_json::from_slice(&read?).map(Some).map_err(io::Error::other)
 }
 
-/// Keep `batch` for `session` unless another is kept already: a batch put back after a failed
-/// post never replaces a newer one, which holds its reports too.
+/// The batch kept for `session`, left where it is.
 ///
 /// # Errors
-/// The directory or the file cannot be written.
-pub fn put_back(dir: &Path, session: SessionId, batch: &Batch) -> io::Result<()> {
-    let spare = dir.join(format!("{session}.back-{}", std::process::id()));
-    let json = serde_json::to_vec(batch).map_err(io::Error::other)?;
-    slopty_platform::fs::replace(&spare, &json)?;
-    // A link, unlike a rename, fails where a file is: the newer batch stays.
-    let linked = std::fs::hard_link(&spare, file(dir, session));
-    std::fs::remove_file(&spare)?;
-    match linked {
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        other => other,
+/// A batch is there and cannot be read.
+pub fn peek(dir: &Path, session: SessionId) -> io::Result<Option<Batch>> {
+    match std::fs::read(file(dir, session)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(io::Error::other),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -160,22 +162,111 @@ pub fn forget_inbox(dir: &Path, session: SessionId) -> io::Result<()> {
     }
 }
 
+/// A batch posted to its session's inbox: its number, and the mark the message carried.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Posted {
+    /// The batch.
+    pub batch: u64,
+    /// A mark made for this one post, which only the message holds.
+    pub mark: String,
+}
+
+impl Posted {
+    /// A post of `batch` under a fresh mark.
+    #[must_use]
+    pub fn new(batch: u64) -> Self {
+        Self { batch, mark: uuid::Uuid::new_v4().simple().to_string() }
+    }
+}
+
+fn posted_file(dir: &Path, session: SessionId) -> PathBuf {
+    dir.join(format!("{session}.posted"))
+}
+
+/// Note that `posted` went to `session`'s inbox, beside its batch in `dir`.
+///
+/// # Errors
+/// The file cannot be written.
+pub fn note_posted(dir: &Path, session: SessionId, posted: &Posted) -> io::Result<()> {
+    let json = serde_json::to_vec(posted).map_err(io::Error::other)?;
+    slopty_platform::fs::replace(&posted_file(dir, session), &json)
+}
+
+/// Take the note of `session`'s last post, if there is one.
+///
+/// # Errors
+/// A note is there and cannot be read or removed.
+pub fn take_posted(dir: &Path, session: SessionId) -> io::Result<Option<Posted>> {
+    let path = posted_file(dir, session);
+    let read = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    std::fs::remove_file(&path)?;
+    Ok(serde_json::from_slice(&read).ok())
+}
+
+/// The note of `session`'s last post, left in place; none when it cannot be read.
+fn peek_posted(dir: &Path, session: SessionId) -> Option<Posted> {
+    serde_json::from_slice(&std::fs::read(posted_file(dir, session)).ok()?).ok()
+}
+
+/// How much of a transcript's end is read for a post's mark.
+///
+/// A message the agent took sits near the end by the next hook; one further back than this is
+/// handed over again, which costs a repeat and never a loss.
+pub const TRANSCRIPT_TAIL: u64 = 4 * 1024 * 1024;
+
+/// Whether the message that carried `mark` reached the agent.
+///
+/// It did when the mark is in the hook's `prompt` (the message started the turn), or in the
+/// last [`TRANSCRIPT_TAIL`] bytes of its `transcript`. The mark is hex, so JSON never escapes it.
+#[must_use]
+pub fn reached(mark: &str, prompt: Option<&str>, transcript: Option<&Path>) -> bool {
+    if mark.is_empty() {
+        return false;
+    }
+    if prompt.is_some_and(|p| p.contains(mark)) {
+        return true;
+    }
+    transcript.is_some_and(|path| tail_holds(path, mark.as_bytes()).unwrap_or(false))
+}
+
+fn tail_holds(path: &Path, needle: &[u8]) -> io::Result<bool> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TRANSCRIPT_TAIL)))?;
+    let mut tail = Vec::new();
+    file.take(TRANSCRIPT_TAIL).read_to_end(&mut tail)?;
+    Ok(tail.windows(needle.len()).any(|w| w == needle))
+}
+
+/// How the server's reports block opens.
+const OPEN: &str = "<slopty-reports";
+
 /// What the worker writes to an [`Inbox`] to hand `context` over, one JSON document a line.
 ///
 /// The session's token comes first when it gave one, then the message as a user turn Claude
 /// Code reads at its next chance (`priority: "next"`): at once when idle, between tool calls
-/// when busy. The shape is Claude Code's own (v2.1.224 and later); the stub claude speaks it,
-/// and the version is pinned with it.
+/// when busy. The message carries `mark` ([`Posted`]) in its reports block's opening tag, or
+/// on a line of its own after a context that has none. The shape is Claude Code's own
+/// (v2.1.224 and later); the stub claude speaks it, and the version is pinned with it.
 #[must_use]
-pub fn message(inbox: &Inbox, context: &str) -> String {
+pub fn message(inbox: &Inbox, context: &str, mark: &str) -> String {
     let mut lines = String::new();
     if let Some(token) = &inbox.token {
         lines.push_str(&json!({ "type": "auth", "token": token }).to_string());
         lines.push('\n');
     }
+    let content = match context.strip_prefix(OPEN) {
+        Some(rest) => format!("{OPEN} delivery=\"{mark}\"{rest}"),
+        None => format!("{context}\n(delivery {mark})"),
+    };
     let user = json!({
         "type": "user",
-        "message": { "role": "user", "content": context },
+        "message": { "role": "user", "content": content },
         "priority": "next",
     });
     lines.push_str(&user.to_string());
@@ -212,6 +303,61 @@ pub fn output(event: HookEvent, context: &str) -> Option<Value> {
     }
 }
 
+/// What the hook for `event` does with the batch kept for `session` in `dir`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Handed {
+    /// The batch, to acknowledge.
+    pub batch: u64,
+    /// What to print to hand it over; none when its post reached the agent already.
+    pub print: Option<Value>,
+}
+
+/// What a hook's payload says of the turn it fires in.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Turn<'a> {
+    /// The prompt that started it, for `UserPromptSubmit`.
+    pub prompt: Option<&'a str>,
+    /// The conversation's transcript.
+    pub transcript: Option<&'a Path>,
+    /// A `Stop` hook held this turn's end already (`stop_hook_active`).
+    pub held: bool,
+}
+
+/// Take the batch kept for `session` for a hook firing for `event` in `turn`, and say what to
+/// print for it ([`Handed`]).
+///
+/// None when nothing waits, it cannot be read, or the event takes no reports. A turn a `Stop`
+/// hook held already is let end: reports that keep coming would otherwise never let the agent
+/// rest, so they wait for its next prompt or its inbox. One its inbox brought is acknowledged
+/// there all the same.
+#[must_use]
+pub fn hand_over(
+    dir: &Path,
+    session: SessionId,
+    event: HookEvent,
+    turn: Turn<'_>,
+) -> Option<Handed> {
+    if !EVENTS.contains(&event) {
+        return None;
+    }
+    let Turn { prompt, transcript, held } = turn;
+    let reached_by = |batch: &Batch, posted: Option<&Posted>| {
+        posted.is_some_and(|p| p.batch == batch.batch && reached(&p.mark, prompt, transcript))
+    };
+    if event == HookEvent::Stop && held {
+        let waiting = peek(dir, session).ok()??;
+        let posted = peek_posted(dir, session);
+        if !reached_by(&waiting, posted.as_ref()) {
+            return None;
+        }
+    }
+    let batch = take(dir, session).ok()??;
+    let posted = take_posted(dir, session).ok().flatten();
+    let print =
+        if reached_by(&batch, posted.as_ref()) { None } else { output(event, &batch.context) };
+    Some(Handed { batch: batch.batch, print })
+}
+
 /// The hook `slopty hook reports` posts once it handed `batch` over, which the worker reports
 /// to the server ([`crate::Hook::report`]).
 #[must_use]
@@ -244,25 +390,92 @@ mod tests {
         clear(&dir).expect("nothing to clear");
     }
 
-    /// A batch put back after a failed post waits for the hooks, but never over a newer one.
+    /// A batch whose post reached the agent (its mark in the prompt or the transcript) is only
+    /// acknowledged by the next hook; one whose post was held, dropped or never made is
+    /// handed over by it. Either way it is taken once, with its note.
     #[test]
-    fn a_batch_put_back_never_replaces_a_newer_one() {
+    fn a_hook_hands_over_only_what_the_post_did_not() {
+        fn on(t: &Path) -> Turn<'_> {
+            Turn { transcript: Some(t), ..Turn::default() }
+        }
+
+        fn prompted(p: &str) -> Turn<'_> {
+            Turn { prompt: Some(p), ..Turn::default() }
+        }
+
         let root = tempfile::tempdir().expect("dir");
         let dir = dir(&root.path().join("worker.sock"));
         let session = SessionId::new();
-        let (older, newer) = (
-            Batch { batch: 1, context: "one".to_owned() },
-            Batch { batch: 2, context: "one\ntwo".to_owned() },
-        );
-        put(&dir, session, &older).expect("put");
-        let taken = take(&dir, session).expect("read").expect("kept");
-        put(&dir, session, &newer).expect("a newer batch meanwhile");
-        put_back(&dir, session, &taken).expect("put back");
-        assert_eq!(take(&dir, session).expect("read"), Some(newer), "the newer stays");
-        put_back(&dir, session, &taken).expect("put back");
-        assert_eq!(take(&dir, session).expect("read"), Some(taken), "back for the hooks");
-        let left: Vec<_> = std::fs::read_dir(&dir).expect("dir").collect();
-        assert!(left.is_empty(), "no spare left behind: {left:?}");
+        let transcript = root.path().join("t.jsonl");
+        let batch = Batch {
+            batch: 3,
+            context: "<slopty-reports project=\"p\">\nr\n</slopty-reports>".to_owned(),
+        };
+        let stop = HookEvent::Stop;
+
+        // Never posted: the hook hands it over.
+        put(&dir, session, &batch).expect("put");
+        let handed = hand_over(&dir, session, stop, Turn::default()).expect("taken");
+        assert_eq!(handed.batch, 3);
+        assert_eq!(handed.print.expect("printed")["reason"].as_str(), Some(batch.context.as_str()));
+        assert!(hand_over(&dir, session, stop, Turn::default()).is_none(), "taken once");
+
+        // Posted, and the message is in the transcript: acknowledged, not printed again.
+        put(&dir, session, &batch).expect("put");
+        let posted = Posted::new(3);
+        assert_eq!(peek(&dir, session).expect("read"), Some(batch.clone()), "a peek leaves it");
+        note_posted(&dir, session, &posted).expect("note");
+        let inbox = Inbox { socket: PathBuf::from("/s"), token: None };
+        let sent: Value =
+            serde_json::from_str(message(&inbox, &batch.context, &posted.mark).trim())
+                .expect("json");
+        let line = json!({ "type": "user", "message": sent["message"] }).to_string();
+        std::fs::write(&transcript, format!("{{\"type\":\"summary\"}}\n{line}\n")).expect("write");
+        let handed = hand_over(&dir, session, stop, on(&transcript)).expect("taken");
+        assert_eq!((handed.batch, handed.print), (3, None));
+        assert_eq!(take_posted(&dir, session).expect("read"), None, "the note went with it");
+
+        // Posted and held: the mark is nowhere, so the hook hands it over.
+        put(&dir, session, &batch).expect("put");
+        note_posted(&dir, session, &Posted::new(3)).expect("note");
+        let handed = hand_over(&dir, session, stop, on(&transcript)).expect("taken");
+        assert!(handed.print.is_some(), "held by Claude Code, so handed over here");
+
+        // The message started the turn: its mark is in the prompt.
+        put(&dir, session, &batch).expect("put");
+        let posted = Posted::new(3);
+        note_posted(&dir, session, &posted).expect("note");
+        let prompt = message(&inbox, &batch.context, &posted.mark);
+        let handed = hand_over(&dir, session, HookEvent::UserPromptSubmit, prompted(&prompt))
+            .expect("taken");
+        assert_eq!(handed.print, None);
+
+        // A note of an older batch's post says nothing of a newer batch.
+        put(&dir, session, &Batch { batch: 4, ..batch.clone() }).expect("put");
+        note_posted(&dir, session, &posted).expect("note");
+        let handed = hand_over(&dir, session, HookEvent::UserPromptSubmit, prompted(&prompt))
+            .expect("taken");
+        assert_eq!(handed.batch, 4);
+        assert!(handed.print.is_some());
+
+        // An event that takes no reports leaves the batch.
+        put(&dir, session, &batch).expect("put");
+        assert!(hand_over(&dir, session, HookEvent::PreToolUse, Turn::default()).is_none());
+        assert!(peek(&dir, session).expect("read").is_some());
+        // A turn a `Stop` hook held already ends: the batch waits for the next.
+        let held = Turn { held: true, ..on(&transcript) };
+        assert!(hand_over(&dir, session, stop, held).is_none());
+        assert!(peek(&dir, session).expect("read").is_some(), "still waiting");
+        // One the inbox brought is acknowledged there all the same, and nothing is printed.
+        let posted = Posted::new(3);
+        note_posted(&dir, session, &posted).expect("note");
+        let sent: Value =
+            serde_json::from_str(message(&inbox, &batch.context, &posted.mark).trim())
+                .expect("json");
+        let line = json!({ "type": "user", "message": sent["message"] }).to_string();
+        std::fs::write(&transcript, format!("{line}\n")).expect("write");
+        let handed = hand_over(&dir, session, stop, held).expect("acknowledged");
+        assert_eq!((handed.batch, handed.print), (3, None));
     }
 
     /// An inbox is noted per session and read back; a message is the token's line, when there
@@ -276,15 +489,24 @@ mod tests {
         let noted = Inbox { socket: PathBuf::from("/tmp/cc.sock"), token: Some("t0k".to_owned()) };
         keep_inbox(&dir, session, &noted).expect("keep");
         assert_eq!(inbox(&dir, session).expect("read"), Some(noted.clone()));
-        let text = message(&noted, "task 2: done");
+        let text = message(&noted, "task 2: done", "m1");
         let lines: Vec<Value> =
             text.lines().map(|l| serde_json::from_str(l).expect("json")).collect();
         assert_eq!(lines[0], json!({ "type": "auth", "token": "t0k" }));
         assert_eq!(lines[1]["type"], "user");
-        assert_eq!(lines[1]["message"]["content"], "task 2: done");
+        assert_eq!(lines[1]["message"]["content"], "task 2: done\n(delivery m1)");
         assert_eq!(lines[1]["priority"], "next");
+        let block = "<slopty-reports project=\"p\">\nr\n</slopty-reports>";
+        let marked: Value =
+            serde_json::from_str(message(&noted, block, "m2").lines().nth(1).expect("user"))
+                .expect("json");
+        assert_eq!(
+            marked["message"]["content"],
+            "<slopty-reports delivery=\"m2\" project=\"p\">\nr\n</slopty-reports>",
+            "the mark rides in the block's opening tag"
+        );
         let bare = Inbox { token: None, ..noted };
-        assert_eq!(message(&bare, "x").lines().count(), 1, "no token, no auth line");
+        assert_eq!(message(&bare, "x", "m").lines().count(), 1, "no token, no auth line");
         forget_inbox(&dir, session).expect("forget");
         assert_eq!(inbox(&dir, session).expect("read"), None);
         forget_inbox(&dir, session).expect("nothing to forget");

@@ -254,8 +254,7 @@ async fn session(
                             tracing::debug!(%session, batch, "reports kept for the hooks");
                             let (deliveries, inboxes) =
                                 (daemon.deliveries.clone(), daemon.inboxes.clone());
-                            let acks = daemon.reports.clone();
-                            tokio::spawn(hand_over(deliveries, inboxes, acks, session));
+                            tokio::spawn(hand_over(deliveries, inboxes, session));
                         }
                         Ok(Err(e)) => tracing::warn!(%session, error = %e, "reports not kept"),
                         Err(e) => tracing::warn!(%session, error = %e, "reports not kept"),
@@ -371,39 +370,45 @@ fn too_large(len: usize, max: usize) -> Outcome {
     }
 }
 
-/// How long posting to an agent's inbox may take before the batch waits for its hooks.
+/// How long posting to an agent's inbox may take before it is given up; the batch waits for the
+/// hooks either way.
 const INBOX_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Hand the batch kept for `session` to its agent's inbox at once, when it noted one: claimed
-/// first, so its hooks never hand it over too, then acknowledged to the server as they would.
-/// A post that fails puts the batch back for the hooks, and forgets an inbox whose socket is
-/// gone.
-async fn hand_over(
-    deliveries: PathBuf,
-    inboxes: PathBuf,
-    acks: broadcast::Sender<AgentReport>,
-    session: SessionId,
-) {
+/// Wake the agent in `session` with the batch kept for it, through its inbox when it noted one.
+/// The batch stays for its hooks, which acknowledge it: Claude Code may hold or drop what
+/// arrives on the inbox and says nothing back, so the post is noted with the mark its message
+/// carries, and the next hook hands the batch over itself unless the mark shows the agent read
+/// it ([`slopty_agent::reports::hand_over`]). An inbox whose socket is gone is forgotten.
+async fn hand_over(deliveries: PathBuf, inboxes: PathBuf, session: SessionId) {
     use slopty_agent::reports;
-    let claimed = tokio::task::spawn_blocking({
+    let found = tokio::task::spawn_blocking({
         let (deliveries, inboxes) = (deliveries.clone(), inboxes.clone());
         move || -> std::io::Result<Option<(reports::Inbox, reports::Batch)>> {
             let Some(inbox) = reports::inbox(&inboxes, session)? else { return Ok(None) };
-            Ok(reports::take(&deliveries, session)?.map(|batch| (inbox, batch)))
+            Ok(reports::peek(&deliveries, session)?.map(|batch| (inbox, batch)))
         }
     })
     .await;
-    let (inbox, batch) = match claimed {
-        Ok(Ok(Some(claimed))) => claimed,
+    let (inbox, batch) = match found {
+        Ok(Ok(Some(found))) => found,
         Ok(Ok(None)) => return,
-        Ok(Err(e)) => return tracing::warn!(%session, error = %e, "reports not claimed"),
-        Err(e) => return tracing::warn!(%session, error = %e, "reports not claimed"),
+        Ok(Err(e)) => return tracing::warn!(%session, error = %e, "reports not read"),
+        Err(e) => return tracing::warn!(%session, error = %e, "reports not read"),
     };
-    let text = reports::message(&inbox, &batch.context);
+    let posted = reports::Posted::new(batch.batch);
+    // Noted before the post: a hook the message sets off at once finds the note.
+    let noted = tokio::task::spawn_blocking({
+        let (deliveries, posted) = (deliveries.clone(), posted.clone());
+        move || reports::note_posted(&deliveries, session, &posted)
+    })
+    .await;
+    if let Ok(Err(e)) | Err(e) = noted.map_err(std::io::Error::other) {
+        return tracing::warn!(%session, error = %e, "post not noted, so not made");
+    }
+    let text = reports::message(&inbox, &batch.context, &posted.mark);
     match tokio::time::timeout(INBOX_PATIENCE, post(&inbox.socket, text.as_bytes())).await {
         Ok(Ok(())) => {
             tracing::debug!(%session, batch = batch.batch, "reports posted to the agent's inbox");
-            let _sent = acks.send(AgentReport::Delivered { session, batch: batch.batch });
         }
         failed => {
             let gone = matches!(&failed, Ok(Err(e)) if matches!(
@@ -411,14 +416,12 @@ async fn hand_over(
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
             ));
             tracing::debug!(%session, ?failed, gone, "reports wait for the agent's hooks");
-            let back = tokio::task::spawn_blocking(move || {
-                if gone {
-                    reports::forget_inbox(&inboxes, session)?;
+            if gone {
+                let forgot =
+                    tokio::task::spawn_blocking(move || reports::forget_inbox(&inboxes, session));
+                if let Ok(Err(e)) | Err(e) = forgot.await.map_err(std::io::Error::other) {
+                    tracing::warn!(%session, error = %e, "a gone inbox not forgotten");
                 }
-                reports::put_back(&deliveries, session, &batch)
-            });
-            if let Ok(Err(e)) | Err(e) = back.await.map_err(std::io::Error::other) {
-                tracing::warn!(%session, error = %e, "reports lost for the hooks");
             }
         }
     }

@@ -72,6 +72,28 @@ fn a_block_interrupts_at_most_every_few_minutes() {
     assert!(now[0].context.contains("still no disk"), "the held one rides along");
 }
 
+/// A task that asks in a loop interrupts its parent once a minute with its latest question,
+/// not once per report: what waits stays one item per task and kind.
+#[test]
+fn a_task_asking_in_a_loop_interrupts_once_a_minute() {
+    let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
+    let task = Some(TaskId(1));
+    d.add(orchestrator(), task, report(ReportKind::NeedsInput, "question 0"), t0);
+    let first = d.take(t0, |_| Some(to));
+    assert!(d.acked(to, first[0].number).is_some());
+    for n in 1..=500_u64 {
+        let at = t0.checked_add(Duration::from_millis(n)).unwrap();
+        d.add(orchestrator(), task, report(ReportKind::NeedsInput, &format!("question {n}")), at);
+        assert!(d.take(at, |_| Some(to)).is_empty(), "paced");
+    }
+    assert_eq!(d.len(), 1, "one waiting question, the latest");
+    assert_eq!(d.next_due(), t0.checked_add(NEED_EVERY));
+    let minute = t0.checked_add(NEED_EVERY).unwrap();
+    let next = d.take(minute, |_| Some(to));
+    assert!(next[0].context.contains("question 500"), "{}", next[0].context);
+    assert!(!next[0].context.contains("question 499"), "{}", next[0].context);
+}
+
 /// A node with no live terminal keeps its reports until one may have come; a batch not handed over
 /// is sent again with the next, goes again after its worker registers, and waits for the next
 /// terminal when its terminal closes. An old batch's word counts for nothing.

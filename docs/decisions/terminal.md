@@ -2829,3 +2829,63 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the pipe design failed it, and on macOS there is now no pipe to hold, so it stays as a
   guard against one coming back. The ignored control `std_command_aborts_when_its_parent_is_gone`,
   which writes a crash report, shows std's child dying of `SIGABRT` under the same harness.
+
+- ✅ **ghostty on 76895d97b; libghostty-rs takes the stack's refresh, fixes six soundness and
+  cost faults, and reads a frame's dirty flags in one call** (2026-09-30). The ghostty fork
+  (`aislopware/ghostty` `89c9624f0`) is our twelve commits rebased onto ghostty `76895d97b`,
+  eight commits past `dc3f73a69`. Our copy of #14480 (the palette reset on RIS) went in the
+  previous rebase, and only its test is still carried. #14481 (an OSC command's data with a
+  NULL command) and #14482 (a same-size resize is no no-op) came in clean. `zig build
+  test-lib-vt` passes. #14482 changes only the header's words: libghostty always did the rest
+  of a resize (pixel size, the in-band size report, synchronized output off) when the grid
+  size stayed, and it reports that the render hold ended. The engine never passes a resize
+  it already has to libghostty (`resize` returns when the `TermSize` is equal), so no frame
+  pays for one. A new cell size alone is still a resize, and it ends a hold, which
+  `a_resize_ends_a_render_hold_and_the_same_size_does_not` pins.
+  - **A frame's dirty flags in one call** (ghostty `89c9624f0`,
+    `GHOSTTY_RENDER_STATE_DATA_ROW_DIRTY`; libghostty-rs `Snapshot::dirty_rows`). It returns a
+    view of the render state's own per-row flags, indexed like the row iteration, overscan
+    included. Nothing is copied, and the flags are not read row by row through the C API. The
+    Rust view holds a pointer, not a `&[bool]`: `RowIteration::set_dirty` and
+    `Snapshot::clean` write the flags through `&self` while it lives, which a shared slice
+    would forbid. It borrows the render state as the snapshot does, so no update can move
+    them. `build_frame` reads it where it asked each row for its flag. That is the path a
+    scroll takes, since every row is visited there. The flags count only under
+    `Dirty::Partial`, as with `next_dirty`. What changed reaches the client as it did before,
+    as the rows a `Frame` carries.
+  - **The stack, refreshed.** Upstream force-pushed #92–#95. Their only change from what we
+    carried is a `cfg(not(miri))` on two counting-allocator tests. The fork is now rebased
+    onto `stack/ghostty-examples` `102f47f` and carries upstream's copies. The earlier head is
+    kept as `backup/master-2026-10-01-pre-stack-refresh` in `.research/libghostty-rs`. The
+    safe `format_vec` (in place of the unsafe `format_write`, for code that forbids unsafe)
+    is kept.
+  - **Found in review and fixed in the fork** (a line-by-line read of the stack and of our
+    commits; each fix has a test that fails without it):
+    - `DesktopNotification::title`/`body` built a `&str` without checking it. The OSC 9 and
+      777 parsers pass the program's bytes on as they are, so safe code could hold a string
+      that is not UTF-8. They are bytes now. The engine decodes them lossily, and a
+      malformed banner shows replacement characters (`desktop_notifications_are_events`).
+    - `RenderState::snapshot` read over an update that was begun and never ended (an
+      `Update` forgotten in safe code), so its styles were stale. It ends any pending update
+      first. With nothing pending that is one call, and it now returns `Result`.
+    - The callback table was a `Box` whose pointee C held as userdata. Moving the `Terminal`
+      retagged it (a Stacked Borrows violation, reproduced under Miri on a model of it). Every
+      callback also built a throwaway `Terminal` view that allocated and freed an empty table:
+      two allocations per synchronized-output frame, which Claude Code's TUI draws each
+      frame. The table is now a pointer from `Box::into_raw`, allocated with the first
+      callback, and the view holds none. `tests/callbacks.rs` counts 300 allocations before
+      the fix and 0 after.
+    - `From<A> for Allocator` pointed libghostty at its by-value parameter, which was gone
+      once `from` returned. It borrows `&A` now, and its vtable is an inline `const`.
+    - `to_reader` handed a `Read` a `&mut [u8]` over a buffer Zig may leave uninitialised.
+      The buffer is zeroed first (snapshot decoding only, off the frame path).
+    - `CellLayout` trusted the packed cell's enum fields to hold the C enums. It now requires
+      the manifest to name those types and number them as the bindings do, and it falls back
+      to the getters otherwise.
+  - **Left open.** The `*_get_multi` calls have no Rust wrappers. The per-row reads (`raw_row`,
+    `cells_raw`) would drop by one call per row. That is not worth it until a frame series
+    shows the calls. ghostty's `search.h` says `ghostty_search_tick` never touches the
+    terminal, but `c/search.zig` reads a pin the terminal tracks, so `Search` stays
+    non-`Send`. Numbers: MEASUREMENTS, "ghostty on 76895d97b, libghostty-rs fixes, and a
+    frame's dirty flags in one call". Plain output and OSC-heavy output cost what they did.
+    Scroll frames are 1–2 % cheaper.

@@ -239,6 +239,11 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - A project's orchestrator counts only while its terminal is live.
 - A terminal its worker has opened but not yet announced may be assigned at once, and counts
   for the task's project from then.
+- A terminal an agent opens counts against the fleet bound as a start does, and a terminal an
+  agent typed into counts as an agent from then, so a plain shell cannot carry an agent past
+  the bound. An assign is refused when the project is at its live or per-worker limit, unless
+  the terminal is already counted there. An assign cannot take a terminal whose start another
+  task still waits on.
 
 **An agent never has more than the person gave it.** ✅ 2026-09-30
 - Every link says whom it speaks for. A client is the person and an MCP surface is an agent.
@@ -246,36 +251,72 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   on a project, when an agent opened it or typed into it, or when the server does not know it.
   So an agent cannot borrow the person's word through a shell, its own or one it drives.
 - Only the person answers a permission (`answer_permission` from an agent is `Forbidden`),
-  merges a task or records its verifier. Only the person's read of a conversation holds its
+  merges a task, records its verifier, or names a verifier for a project or a task: a verifier
+  is the person's word on what counts as done. Only the person's read of a conversation holds its
   prompts, so an agent reading another's never hides a prompt from the TUI.
-- Every way to start `claude` (`spawn_agent`, `task_spawn`, and a terminal whose command is
-  `claude`) refuses these flags:
-  - `--dangerously-skip-permissions` and `--allow-dangerously-skip-permissions`;
-  - `--allowedTools` and `--allowed-tools`;
-  - `--permission-prompt-tool` and `--settings`;
-  - `--permission-mode`, other than `default`, `plan` or `dontAsk`.
+- Every way to start `claude` is judged by its arguments against an allowlist
+  (`slopty_proto::project::SAFE_FLAGS`): `spawn_agent`, `task_spawn`, and a terminal whose
+  command runs `claude`, directly, through a runtime (`node …/claude`) or anywhere in a shell
+  line (`sh -c "cd x && claude …"`, after assignments or `exec`/`env`/`nohup`). The shell line is
+  split as POSIX does, quotes and operators included (`slopty_agent::detect::shell_agent_args`).
+  - A flag not on the list loosens, and so does a bare `--`, after which Claude Code reads
+    anything. A new Claude Code flag is therefore refused until it is judged, instead of passing
+    until someone adds it to a denylist.
+  - Some flags are judged by their value: `--permission-mode` only as `default`, `plan`,
+    `dontAsk` or `manual`; `--settings` only with keys that cannot widen a permission (deny and
+    ask rules, the bypass lock, the model, the theme…), and hooks or a status line only when
+    they run this worker's own `slopty hook …`; `--mcp-config` only when it names nothing but
+    the `slopty mcp` server; `--plugin-dir` only as the worker's own mod.
+  - `--debug-file` is not on the list, since it writes wherever it is pointed.
 - They are allowed only for the projects the person names in `[server.projects]
   permission_flags`. No agent can start another with more than it has.
+- An agent's environment for a new terminal cannot steer what runs there: `PATH`, `HOME`,
+  `ZDOTDIR`, `SHELL`, `BASH_ENV`, `ENV`, `XDG_CONFIG_HOME` and anything starting `SLOPTY_`,
+  `CLAUDE`, `ANTHROPIC_`, `NODE_`, `BUN_`, `DYLD_`, `LD_` or `GIT_CONFIG` are refused with
+  `Limit`. The worker applies the request's environment first and its own last, so its hooks,
+  mod and session id always win.
 - Flags are one door. A settings file in the repository, which an agent may have written, is
   another, and keys typed into a TUI a third. So an agent the server starts also:
   - begins in `--permission-mode default` when its arguments name no mode;
   - has bypass mode locked off (`disableBypassPermissionsMode: "disable"` in the settings the
     worker adds, `slopty_agent::hooks::without_bypass`).
-- A backstop watches the mode each hook reports. A terminal the server started, or one an agent
-  opened or typed into, that reports a mode looser than those is closed, with a note on its task
-  saying why, unless the person allows looser modes for the project.
-- Nothing may type into an agent that waits on the person (a permission, a question) or whose
-  composer holds the person's unsent text (`AwaitsPerson`), nor into one no hook has yet
+- Two backstops watch what actually runs, on every terminal the server started or an agent
+  opened or typed into:
+  - The mode each hook reports: a mode looser than those closes the terminal, with a note on its
+    task saying why, unless the person allows looser modes for the project.
+  - The worker judges the argv of the agent in each terminal's foreground with the same
+    allowlist and reports what loosens it (`AgentReport::Loosened`, at most 16 items of 256
+    bytes, sent when it changes). So `claude` started inside a shell by any means, which no
+    start check sees, is closed the same way. The worker knows its own `slopty` and mod paths,
+    so it can accept its own hooks and MCP config by value; the server cannot and refuses them.
+- An agent may not type into another agent's TUI (`Forbidden`), except in the person's
+  `permission_flags` projects: what reaches an agent from another goes through reports and
+  hooks. Nothing may type into an agent that waits on the person (a permission, a question) or
+  whose composer holds the person's unsent text (`AwaitsPerson`), nor into one no hook has yet
   spoken from (`AgentNotReady`).
+- A report's hook ends its turn only once: at a `Stop` that a hook already held
+  (`stop_hook_active`), reports wait for the next prompt or the inbox, so reports that keep
+  coming never keep an agent from resting. A task that asks in a loop reaches its parent once a
+  minute with its latest question, not once per report.
+- The idempotency keys are scoped by caller and compared by a blake3 digest of the whole verb,
+  so one caller cannot learn or replay another's answer under the same key. A start whose
+  worker answered is replayed with that answer, and one that was lost in flight (interrupted,
+  worker unreachable) is not remembered, so its retry starts it.
 - What is left, known:
-  - `claude` wrapped in a shell line (`sh -c "claude --dangerously-skip-permissions"`) passes
-    the flag check; the backstop closes it only in a terminal the server started or an agent
-    drove.
-  - Allow rules in `.claude/settings.local.json` are Claude Code's to honour and are not read.
-  - Anything running as the person's user can reach the worker's socket and speak as a client.
-    Tailscale bounds who reaches a host; the uid is the boundary on it.
-  - `task_report` over MCP cannot prove that the caller works on the task it names beyond its
-    session's own record.
+  - An agent can name any live terminal as a project's orchestrator or a task's assignee. The
+    backstops above then watch it, but a person's own terminal can be drawn into a project.
+  - The CLI says it speaks for the person when it finds no Slopty variables in its
+    environment (a session id that does not parse, or a token alone, speaks for an agent); a
+    process outside Slopty's terminals that clears them is trusted as the person.
+  - Any agent that names a `permission_flags` project may use its allowance, not only the
+    agents the person started in it.
+  - Allow rules in `.claude/settings.local.json`, and `/permissions` typed into a TUI, are
+    Claude Code's to honour and are not read; the mode backstop still watches the result.
+  - Anything running as the person's user can reach the worker's socket and speak as a client,
+    or run `slopty hook reports` as another session. Tailscale bounds who reaches a host; the
+    uid is the boundary on it.
+  - The terminals an agent drove are remembered in memory only, so a server restart forgets
+    them.
 
 **Claims are prefixes at component granularity, compared as APFS compares names.** ✅ 2026-09-30
 - A path is normalised to `/`-separated components relative to the repository root, and to
@@ -359,7 +400,8 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   client must drop any `Project` event at or below it, since a replay after a lag would
   otherwise undo newer state.
 - Change verbs go through the hub's idempotency ledger (the last 1024 keys), so a retried
-  `task_spawn` never starts a second agent.
+  `task_spawn` or `slopty open` never starts a second terminal; the key is the caller's own
+  (above).
 - The snapshot carries each task as its card (no brief, no natives; `task_get` has the rest)
   and comes in parts of at most 8 MiB, marked first and last; a project too large for one part
   goes on in the next. So a large fleet never builds a frame over the wire's bound. It is
@@ -409,6 +451,28 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   person's back. Hooks are Claude Code's own door for context, and they reach an agent the
   moment it next thinks, at no cost while it is idle.
 
+**An idle agent is woken through its inbox, and the hooks still decide.** ✅ 2026-09-30
+- Claude Code takes messages from other processes on a socket it names in each session's
+  environment (`CLAUDE_CODE_MESSAGING_SOCKET`, 2.1.224; `CLAUDE_CODE_MESSAGING_TOKEN`, 2.1.228;
+  checked against 2.1.285). A message starts a turn in an idle session and is read between tool
+  calls in a busy one. The reports hook notes the session's socket and token on every run, and
+  the worker posts each batch there as it arrives, marked with a fresh nonce.
+- The post only wakes. Claude Code may hold or refuse what arrives (`crossSessionInbound`, or a
+  session that bypasses prompts holding messages from one that does not) and answers nothing.
+  So the batch stays in its file and the post is noted beside it. The next hook looks for the
+  mark in its prompt or the transcript's last 4 MiB: when it is there the message was read and
+  the hook only acknowledges it; when not, the hook hands the batch over itself. A report is
+  never acknowledged unread, and read twice at worst.
+- Rejected:
+  - **`asyncRewake`.** A hook that exits 2 wakes an idle session, but it must keep running
+    until a report comes, under the hook's own time limit, one process per agent.
+  - **Channels.** An MCP server pushing into a session is the research preview's door, gated
+    per account and started with a flag; the messaging socket is on in every session.
+  - **Typing the reports.** It drives the TUI behind the person's back.
+- `apps/slopty-worker/tests/server_link.rs` proves both paths against the stub `claude`, which
+  speaks the socket: a woken agent's turn acknowledges the batch without a second copy, and a
+  held message leaves the batch for the next prompt's hook.
+
 **Tests use a stub `claude`.** ✅ 2026-09-30
 - `slopty-stub-claude` (in `slopty-testkit`) records its argv, env and MCP configs. It fires
   every hook its `--settings` registers for each payload it is given, as Claude Code does, and
@@ -429,8 +493,11 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - The model (`slopty-server::project`), the placement (`slopty-server::placement`) and the hub
   (`hub/project_tests.rs`) test each ruling above at their own layer. The hub tests cover
   concurrent starts at the cap, a caller that leaves, a lost start adopted, the fleet bound,
-  the permission flags on every path, the mode backstop, a shell an agent drove speaking as an
-  agent, reports batched and parked, and a restart's reconcile. The store tests replay a log
+  the permission flags on every path (shell lines included), the mode and command-line
+  backstops, a shell an agent drove speaking as an agent, an agent's environment, typing into an
+  agent's TUI and naming a verifier refused, an agent's terminals under the fleet bound, an
+  assign under the project's limits, keyed starts replayed and scoped to their caller, reports
+  batched, paced and parked, and a restart's reconcile. The store tests replay a log
   past its snapshot, over a torn last line and a bad middle one.
 
 Not built in Phase 1:
@@ -438,8 +505,6 @@ Not built in Phase 1:
 - worktrees and mirrors, so a task's `cwd` must already exist on the placed worker;
 - mirror presence as a fact;
 - the verifier run and the merge queue;
-- waking an idle agent for a report (`asyncRewake`): an agent at rest reads its reports at its
-  next prompt or turn's end, while every report is on its task's timeline at once;
 - the known gaps under "An agent never has more than the person gave it".
 
 ## Phases

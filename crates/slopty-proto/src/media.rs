@@ -153,8 +153,13 @@ pub struct FramePrefix {
     /// capture once every stripe it names has decoded, and a stripe it does not name keeps the
     /// picture it has: a refresh or a refinement codes only the stripe that needs it.
     pub stripes: u8,
+    /// The worker's build of the stream's sessions that coded this frame, counted on from 0 and
+    /// wrapping. A resize, a chroma switch or the stripes turning on or off builds both stripes'
+    /// sessions anew, and the stripes of one build are the only ones that fit together: a
+    /// receiver never puts one build's stripe beside another's, whose size or seam may differ.
+    pub build: u8,
     /// Zero.
-    pub reserved: [u8; 3],
+    pub reserved: [u8; 2],
 }
 
 impl FramePrefix {
@@ -291,7 +296,8 @@ mod tests {
             capture_ts_us: U32::new(5),
             ltr_token: U64::new(0x0807_0605_0403_0201),
             stripes: 0b10,
-            reserved: [0; 3],
+            build: 9,
+            reserved: [0; 2],
         };
         let mut body = prefix.as_bytes().to_vec();
         body.push(0xcc);
@@ -300,7 +306,7 @@ mod tests {
         assert_eq!(rest, &[0xcc]);
         assert_eq!(&body[..4], &[4, 3, 2, 1]);
         assert_eq!(&body[8..16], &[1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(&body[16..20], &[2, 0, 0, 0], "the stripes after the token");
+        assert_eq!(&body[16..20], &[2, 9, 0, 0], "the stripes and the build after the token");
         assert!(FramePrefix::parse(&body[..FRAME_PREFIX_BYTES - 1]).is_none());
 
         let cursor = CursorUpdate { x: I32::new(-1), y: I32::new(2), visible: 1, reserved: [0; 3] };

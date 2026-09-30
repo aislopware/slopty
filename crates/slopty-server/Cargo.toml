@@ -25,6 +25,8 @@ rmcp = { workspace = true, features = [ "transport-streamable-http-server" ] }
 # The projects file's records (`project`).
 serde.workspace = true
 serde_json.workspace = true
+# What a `claude` command line gives the agent, however it is wrapped (`hub::projects`).
+slopty-agent.workspace = true
 slopty-core.workspace = true
 slopty-net.workspace = true
 # The data directory's platform rules (`store::default_data_dir`).

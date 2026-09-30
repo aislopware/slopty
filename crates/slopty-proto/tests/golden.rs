@@ -1117,7 +1117,8 @@ mod golden {
             capture_ts_us: U32::new(0x0102_0304),
             ltr_token: U64::new(0),
             stripes: 0b11,
-            reserved: [0; 3],
+            build: 5,
+            reserved: [0; 2],
         };
         insta::assert_snapshot!("frame_prefix_striped", hex(prefix.as_bytes()));
     }

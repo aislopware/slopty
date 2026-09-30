@@ -181,19 +181,26 @@ mod imp {
     /// submit and keeps nothing after it; given any other buffer it copies it and codes the copy
     /// behind a queue (MEASUREMENTS.md, "Stream sides padded to 16"). A stripe cannot be a view
     /// on the capture's surface, so its rows are copied, a plain copy of each plane's rows.
+    ///
+    /// A stripe takes the captures its session takes. A 4:4:4 session takes only 4:4:4. A 4:2:0
+    /// session takes 4:4:4 as well, as the whole picture's does: ScreenCaptureKit goes on
+    /// delivering 4:4:4 for a few frames after a stream switches back to 4:2:0, and the session
+    /// converts them.
     pub struct StripeCopy {
-        pool: CFRetained<CVPixelBufferPool>,
-        width: usize,
+        /// A pool for each capture format the stripe takes, its session's own first.
+        pools: Vec<(u32, CFRetained<CVPixelBufferPool>)>,
+        /// The captures' size.
+        size: (usize, usize),
         stripe: Stripe,
-        format: u32,
+        chroma: Chroma,
     }
 
     impl std::fmt::Debug for StripeCopy {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("StripeCopy")
-                .field("width", &self.width)
+                .field("size", &self.size)
                 .field("stripe", &self.stripe)
-                .field("format", &self.format)
+                .field("chroma", &self.chroma)
                 .finish_non_exhaustive()
         }
     }
@@ -203,32 +210,62 @@ mod imp {
     // sessions hand theirs to their callers' threads); nothing else here is shared.
     #[expect(clippy::non_send_fields_in_send_ty, reason = "CVPixelBufferPool is thread-safe")]
     unsafe impl Send for StripeCopy {}
-    // SAFETY: as above; `copy` only asks the pool for a new buffer.
+    // SAFETY: as above; `copy` only asks a pool for a new buffer.
     unsafe impl Sync for StripeCopy {}
 
+    /// A pool of `IOSurface`-backed pictures `width` × `rows` in `format`.
+    fn pool(
+        width: usize,
+        rows: usize,
+        format: u32,
+    ) -> Result<CFRetained<CVPixelBufferPool>, CodecError> {
+        let attributes = surface_attributes(width, rows, format);
+        let mut raw: *mut CVPixelBufferPool = ptr::null_mut();
+        // SAFETY: CoreVideo's rule for `CVPixelBufferPoolCreate`: a valid out-pointer and a
+        // dictionary of `kCVPixelBuffer*` keys; the pool comes back owned (+1).
+        let status = unsafe {
+            CVPixelBufferPool::create(
+                None,
+                None,
+                Some(attributes.as_opaque()),
+                NonNull::from(&mut raw),
+            )
+        };
+        check("CVPixelBufferPoolCreate", status)?;
+        let raw = NonNull::new(raw)
+            .ok_or(CodecError::Os { call: "CVPixelBufferPoolCreate", status: -1 })?;
+        // SAFETY: owned (+1), as above.
+        Ok(unsafe { CFRetained::from_raw(raw) })
+    }
+
     impl StripeCopy {
-        /// Pictures of `stripe`'s coded rows of `width`-wide captures carrying `chroma`.
-        pub fn new(width: usize, stripe: Stripe, chroma: Chroma) -> Result<Self, CodecError> {
-            let format = pixel_format(chroma);
+        /// Pictures of `stripe`'s coded rows of `width` × `height` captures, for a session
+        /// carrying `chroma`.
+        pub fn new(
+            (width, height): (usize, usize),
+            stripe: Stripe,
+            chroma: Chroma,
+        ) -> Result<Self, CodecError> {
             let rows = usize::try_from(stripe.coded_rows).unwrap_or(usize::MAX);
-            let attributes = surface_attributes(width, rows, format);
-            let mut raw: *mut CVPixelBufferPool = ptr::null_mut();
-            // SAFETY: CoreVideo's rule for `CVPixelBufferPoolCreate`: a valid out-pointer and a
-            // dictionary of `kCVPixelBuffer*` keys; the pool comes back owned (+1).
-            let status = unsafe {
-                CVPixelBufferPool::create(
-                    None,
-                    None,
-                    Some(attributes.as_opaque()),
-                    NonNull::from(&mut raw),
-                )
+            let top = usize::try_from(stripe.coded_top).unwrap_or(usize::MAX);
+            if top.saturating_add(rows) > height {
+                return Err(CodecError::WrongSize {
+                    image: (width, height),
+                    session: (width, top.saturating_add(rows)),
+                });
+            }
+            let formats: &[Chroma] = match chroma {
+                Chroma::Subsampled => &[Chroma::Subsampled, Chroma::Full],
+                Chroma::Full => &[Chroma::Full],
             };
-            check("CVPixelBufferPoolCreate", status)?;
-            let raw = NonNull::new(raw)
-                .ok_or(CodecError::Os { call: "CVPixelBufferPoolCreate", status: -1 })?;
-            // SAFETY: owned (+1), as above.
-            let pool = unsafe { CFRetained::from_raw(raw) };
-            Ok(Self { pool, width, stripe, format })
+            let pools = formats
+                .iter()
+                .map(|&chroma| {
+                    let format = pixel_format(chroma);
+                    Ok((format, pool(width, rows, format)?))
+                })
+                .collect::<Result<_, CodecError>>()?;
+            Ok(Self { pools, size: (width, height), stripe, chroma })
         }
 
         /// The stripe this copies.
@@ -244,23 +281,28 @@ mod imp {
             capture: &CVPixelBuffer,
         ) -> Result<CFRetained<CVPixelBuffer>, CodecError> {
             let format = CVPixelBufferGetPixelFormatType(capture);
-            if format != self.format {
-                return Err(CodecError::PixelFormat { expected: self.format, got: format });
-            }
+            let Some((_, pool)) = self.pools.iter().find(|(taken, _)| *taken == format) else {
+                return Err(match self.chroma {
+                    Chroma::Full => CodecError::NotFullChroma(format),
+                    Chroma::Subsampled => CodecError::PixelFormat {
+                        expected: pixel_format(Chroma::Subsampled),
+                        got: format,
+                    },
+                });
+            };
             let top = usize::try_from(self.stripe.coded_top).unwrap_or(usize::MAX);
             let rows = usize::try_from(self.stripe.coded_rows).unwrap_or(usize::MAX);
             let size = (CVPixelBufferGetWidth(capture), CVPixelBufferGetHeight(capture));
-            if size.0 != self.width || size.1 < top.saturating_add(rows) {
-                return Err(CodecError::WrongSize {
-                    image: size,
-                    session: (self.width, top.saturating_add(rows)),
-                });
+            // Exactly the size the stripes were laid out for: rows of a capture of another
+            // height are not this stripe's rows.
+            if size != self.size {
+                return Err(CodecError::WrongSize { image: size, session: self.size });
             }
             let mut raw: *mut CVPixelBuffer = ptr::null_mut();
             // SAFETY: CoreVideo's rule for `CVPixelBufferPoolCreatePixelBuffer`: a valid pool
             // and out-pointer; the buffer comes back owned (+1).
             let status = unsafe {
-                CVPixelBufferPool::create_pixel_buffer(None, &self.pool, NonNull::from(&mut raw))
+                CVPixelBufferPool::create_pixel_buffer(None, pool, NonNull::from(&mut raw))
             };
             check("CVPixelBufferPoolCreatePixelBuffer", status)?;
             let raw = NonNull::new(raw)
@@ -272,7 +314,7 @@ mod imp {
                 let to = Locked::new(&stripe, CVPixelBufferLockFlags::empty())?;
                 for plane in 0..2 {
                     // Both formats are bi-planar; 4:2:0 halves the chroma plane's rows.
-                    let (first, count) = match (plane, self.format == pixel_format(Chroma::Full)) {
+                    let (first, count) = match (plane, format == pixel_format(Chroma::Full)) {
                         (1, false) => (top / 2, rows / 2),
                         _ => (top, rows),
                     };
@@ -383,7 +425,7 @@ mod imp {
             .iter()
             .map(|&stripe| {
                 Ok((
-                    StripeCopy::new(w, stripe, chroma)?,
+                    StripeCopy::new((w, h), stripe, chroma)?,
                     Encoder::new(config(stripe.coded_rows), |_packet| {})?,
                 ))
             })
@@ -489,15 +531,21 @@ mod imp {
         use super::*;
 
         /// Each stripe's picture holds exactly its coded rows of the capture, in both planes
-        /// and both chroma formats, and the two stripes together cover every row.
+        /// and both chroma formats (a 4:2:0 session's 4:4:4 capture too), and the two stripes
+        /// together cover every row.
         #[test]
         fn a_stripe_holds_its_rows_of_the_capture() {
-            for chroma in [Chroma::Subsampled, Chroma::Full] {
+            let pairs = [
+                (Chroma::Subsampled, Chroma::Subsampled),
+                (Chroma::Full, Chroma::Full),
+                (Chroma::Subsampled, Chroma::Full),
+            ];
+            for (session, chroma) in pairs {
                 let (w, h) = (256_usize, 512_usize);
                 let capture = picture(w, h, 3, chroma).unwrap();
                 let stripes = layout(512).unwrap();
                 for stripe in stripes {
-                    let copy = StripeCopy::new(w, stripe, chroma).unwrap();
+                    let copy = StripeCopy::new((w, h), stripe, session).unwrap();
                     let out = copy.copy(&capture).unwrap();
                     assert_eq!(
                         (CVPixelBufferGetWidth(&out), CVPixelBufferGetHeight(&out)),
@@ -529,17 +577,54 @@ mod imp {
             }
         }
 
-        /// A capture of another size or format is refused, not coded wrong.
+        /// A capture of another size is refused, not coded wrong: a taller one of the same
+        /// width too, whose rows under the seam are not this stripe's (a resize the sessions
+        /// have not followed yet). A 4:4:4 session refuses 4:2:0 as the whole picture's does.
         #[test]
         fn a_capture_that_does_not_fit_is_refused() {
-            let stripe = layout(512).unwrap()[1];
-            let copy = StripeCopy::new(256, stripe, Chroma::Subsampled).unwrap();
-            let narrow = picture(128, 512, 0, Chroma::Subsampled).unwrap();
-            assert!(matches!(copy.copy(&narrow), Err(CodecError::WrongSize { .. })));
-            let short = picture(256, 448, 0, Chroma::Subsampled).unwrap();
-            assert!(matches!(copy.copy(&short), Err(CodecError::WrongSize { .. })));
-            let full = picture(256, 512, 0, Chroma::Full).unwrap();
-            assert!(matches!(copy.copy(&full), Err(CodecError::PixelFormat { .. })));
+            for stripe in layout(512).unwrap() {
+                let copy = StripeCopy::new((256, 512), stripe, Chroma::Subsampled).unwrap();
+                for (w, h) in [(128, 512), (256, 448), (256, 528), (272, 512)] {
+                    let other = picture(w, h, 0, Chroma::Subsampled).unwrap();
+                    assert!(
+                        matches!(copy.copy(&other), Err(CodecError::WrongSize { .. })),
+                        "{w}×{h} into {stripe:?}"
+                    );
+                }
+                let full = StripeCopy::new((256, 512), stripe, Chroma::Full).unwrap();
+                let subsampled = picture(256, 512, 0, Chroma::Subsampled).unwrap();
+                assert!(matches!(full.copy(&subsampled), Err(CodecError::NotFullChroma(_))));
+            }
+            assert!(matches!(
+                StripeCopy::new((256, 448), layout(512).unwrap()[1], Chroma::Subsampled),
+                Err(CodecError::WrongSize { .. })
+            ));
+        }
+
+        /// A 4:2:0 stripe's session codes a 4:4:4 capture, as the whole picture's does: the
+        /// captures of the few frames after a stream switches back from 4:4:4.
+        #[test]
+        fn a_subsampled_stripe_codes_a_full_chroma_capture() {
+            use crate::video::VideoEncoder as _;
+            let (w, h) = (256_u32, 512_u32);
+            let config = EncoderConfig {
+                width: w,
+                height: h,
+                codec: VideoCodec::Hevc,
+                fps: 60,
+                bitrate_bps: 4_000_000,
+                chroma: Chroma::Subsampled,
+            };
+            let (tx, rx) = std::sync::mpsc::channel();
+            let stripe = layout(h).unwrap()[1];
+            let session = crate::VideoToolbox::stripe(config, stripe, move |packet| {
+                let _gone = tx.send(packet.keyframe);
+            })
+            .unwrap();
+            let full = PixelBuffer::from_retained(picture(256, 512, 0, Chroma::Full).unwrap());
+            let options = FrameOptions { force_keyframe: true, ..FrameOptions::default() };
+            session.encode(&full, 1, &options).unwrap();
+            assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "its keyframe");
         }
 
         /// The gate times both ways on the real encoder and says which won.
@@ -561,7 +646,7 @@ mod imp {
                     let copies: Vec<StripeCopy> = layout(h)
                         .unwrap()
                         .iter()
-                        .map(|&s| StripeCopy::new(w as usize, s, chroma).unwrap())
+                        .map(|&s| StripeCopy::new((w as usize, h as usize), s, chroma).unwrap())
                         .collect();
                     let mut took: Vec<Duration> = std::iter::repeat_with(|| {
                         let started = Instant::now();

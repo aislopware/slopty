@@ -4082,7 +4082,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#eb3a963ebea8070f4b15538362a90da21b571990"
+source = "git+https://github.com/aislopware/libghostty-rs.git#2f8b499f2c97f64dcf4223c27f9f61f92bf33c73"
 dependencies = [
  "bitflags 2.13.2",
  "int-enum",
@@ -4093,7 +4093,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#eb3a963ebea8070f4b15538362a90da21b571990"
+source = "git+https://github.com/aislopware/libghostty-rs.git#2f8b499f2c97f64dcf4223c27f9f61f92bf33c73"
 
 [[package]]
 name = "libloading"
@@ -7235,6 +7235,7 @@ version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-application-services",
@@ -7643,6 +7644,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "slopty-agent",
  "slopty-core",
  "slopty-net",
  "slopty-platform",

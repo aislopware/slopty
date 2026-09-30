@@ -99,10 +99,10 @@ pub trait VideoEncoder: Send + Sync + Sized + 'static {
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError>;
 
-    /// A session for one stripe of the pictures handed to it (`crate::stripes`): `config` is
-    /// the stripe's own picture, the capture's width and the stripe's `coded_rows` high, and
-    /// every picture handed to [`Self::encode`] is a whole capture, of which the session codes
-    /// the rows `stripe` names.
+    /// A session for one stripe of the pictures handed to it (`crate::stripes`): `config`
+    /// describes the whole picture, every picture handed to [`Self::encode`] is a whole capture
+    /// of that size, and the session codes the rows `stripe` names, a picture `coded_rows`
+    /// high.
     ///
     /// # Errors
     ///
