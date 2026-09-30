@@ -52,6 +52,9 @@ e2e = [ "gpui/test-support" ]
 
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
+# The platform's own text system (Core Text), for the grid's paint oracle to shape and
+# rasterise real glyphs (`terminal::view::paint_oracle`).
+gpui_platform = { workspace = true, features = [ "font-kit" ] }
 # The captured Claude Code sessions, decoded as the worker decodes them, feed the face's tests.
 slopty-agent.workspace = true
 slopty-client = { workspace = true, features = [ "headless" ] }

@@ -166,7 +166,11 @@ impl CaptureSource for ScreenCaptureKit {
         geometry::pointer_location()
     }
 
-    fn cursor_shape(scale: u8) -> Option<CursorShape> {
-        crate::cursor_shape(scale)
+    fn cursor_seed() -> Option<i32> {
+        crate::cursor_seed()
+    }
+
+    fn cursor_shape() -> Option<CursorShape> {
+        crate::read_cursor()
     }
 }

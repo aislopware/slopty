@@ -620,16 +620,21 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, content).unwrap();
         }
+        let terminfo = tmp.join("terminfo");
+        compile_terminfo(&terminfo).await;
         let size = TermSize { cols: 60, rows: 10, metrics: CellMetrics::default() };
         let pty = Pty::open(size).unwrap();
         let injection = si.apply(program, &strings(args), arg0, &[]);
         // A daemon's PATH: none of the developer's Homebrew hooks (mise, direnv) in the way.
-        // A TERMINFO of our own, as ptyd sets once its database is compiled: the `sudo`
-        // wrapper is defined only then.
+        // The terminal ptyd gives a shell once its database is compiled, whether or not this
+        // machine has the entry: a TERM the shell cannot look up leaves readline on a dumb
+        // terminal, which drops the prompt's marks from a prompt wider than the tile. The
+        // `sudo` wrapper is defined only with a TERMINFO.
         let mut env = vec![
             pair("HOME", &home.to_string_lossy()),
             pair("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
-            pair("TERMINFO", &tmp.join("terminfo").to_string_lossy()),
+            pair("TERM", crate::terminfo::NAMES[0]),
+            pair("TERMINFO", &terminfo.to_string_lossy()),
         ];
         env.extend(injection.env);
         env.extend(extra.iter().map(|(k, v)| pair(k, v)));
@@ -670,6 +675,24 @@ mod tests {
         let _status: io::Result<std::process::ExitStatus> = child.wait().await;
         let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
         String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Our terminfo entry, compiled into `database` by the `tic` ptyd runs.
+    async fn compile_terminfo(database: &Path) {
+        use tokio::io::AsyncWriteExt as _;
+        let mut tic = tokio::process::Command::new("/usr/bin/tic")
+            .args(["-x", "-o"])
+            .arg(database)
+            .arg("-")
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = tic.stdin.take().unwrap();
+        stdin.write_all(crate::terminfo::source().as_bytes()).await.unwrap();
+        drop(stdin);
+        let out = tic.wait_with_output().await.unwrap();
+        assert!(out.status.success(), "tic: {}", String::from_utf8_lossy(&out.stderr));
     }
 
     /// `OSC 133;<mark>` with either terminator, `mark` possibly followed by parameters.
@@ -781,15 +804,19 @@ mod tests {
         }
     }
 
+    /// The profile's prompt is wider than the tile, as macOS's `\h:\W \u\$ ` is on a Mac with
+    /// a long host name (a hosted runner's is 60 characters): it wraps and keeps its marks.
     #[tokio::test]
     async fn a_login_bash_reads_its_profile_and_still_marks() {
+        let profile =
+            format!("export SLOPTY_TEST_PROFILE=ran\nPS1='{}:\\W \\$ '\n", "h".repeat(70));
         for bash in bashes() {
             let text = run_shell(
                 "bash-login",
                 bash,
                 &[],
                 Some("-bash"),
-                &[(".bashrc", "export SLOPTY_TEST_BASHRC=ran\n"), (".bash_profile", "export SLOPTY_TEST_PROFILE=ran\n")],
+                &[(".bashrc", "export SLOPTY_TEST_BASHRC=ran\n"), (".bash_profile", &profile)],
                 "echo rc=$SLOPTY_TEST_BASHRC profile=$SLOPTY_TEST_PROFILE login=$SLOPTY_BASH_LOGIN; false\nexit\n",
             )
             .await;

@@ -94,7 +94,7 @@ static READING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 /// The window server's cursor seed, which moves whenever the cursor on screen changes; `None`
 /// without the call. Tens of nanoseconds, no round trip.
 #[must_use]
-pub(crate) fn cursor_seed() -> Option<i32> {
+pub fn cursor_seed() -> Option<i32> {
     let calls = CALLS.as_ref()?;
     // SAFETY: a plain call with no arguments, as `CurrentSeed` names it.
     Some(unsafe { (calls.seed)() })
@@ -107,7 +107,7 @@ pub(crate) fn cursor_seed() -> Option<i32> {
 /// a 1080p one. `CursorShape::scale` says which, so a client shows it at the same size in
 /// points whatever its own display.
 #[must_use]
-pub(crate) fn read_cursor() -> Option<CursorShape> {
+pub fn read_cursor() -> Option<CursorShape> {
     let calls = CALLS.as_ref()?;
     let one_at_a_time = READING.lock();
     // SAFETY: a plain call with no arguments, as `MainConnection` names it.
@@ -192,21 +192,21 @@ fn shape_of(data: &[u8], row_bytes: usize, rect: CGRect, hotspot: CGPoint) -> Op
 /// One per loop. [`CursorWatch::poll`] costs a seed read when nothing changed, so it can run
 /// at the display's rate: a shape change is seen within one poll, where a 33 ms read of the
 /// whole picture took up to 33 ms and a round trip every time.
-#[derive(Debug, Default)]
-pub(crate) struct CursorWatch {
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CursorWatch {
     seed: Option<i32>,
 }
 
 impl CursorWatch {
     /// A watch that reads the picture on its first poll.
     #[must_use]
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self { seed: None }
     }
 
     /// The cursor's picture when it changed since the last poll (always on the first), else
     /// `None`. A read that fails is not retried until the cursor changes again.
-    pub(crate) fn poll(&mut self) -> Option<CursorShape> {
+    pub fn poll(&mut self) -> Option<CursorShape> {
         let seed = cursor_seed()?;
         if self.seed == Some(seed) {
             return None;
@@ -216,27 +216,6 @@ impl CursorWatch {
         self.seed = Some(seed);
         read_cursor()
     }
-}
-
-/// The process's watch for [`cursor_shape`], and the last picture it read.
-static SHARED: parking_lot::Mutex<(CursorWatch, Option<CursorShape>)> =
-    parking_lot::Mutex::new((CursorWatch::new(), None));
-
-/// The cursor on screen now, read only when the seed moved since the last call in this process.
-///
-/// Otherwise it is the last picture read, so a caller polling it pays a seed read while the
-/// cursor holds. The scale argument is ignored: the window server's picture is at its
-/// display's scale, which `CursorShape::scale` carries.
-#[must_use]
-pub fn cursor_shape(_scale: u8) -> Option<CursorShape> {
-    let mut shared = SHARED.lock();
-    let (watch, last) = &mut *shared;
-    if let Some(read) = watch.poll() {
-        *last = Some(read);
-    }
-    let shape = last.clone();
-    drop(shared);
-    shape
 }
 
 /// Connect to the window server and read the cursor once, so the first read a stream makes is

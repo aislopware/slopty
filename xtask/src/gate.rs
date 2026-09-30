@@ -773,7 +773,7 @@ mod tests {
         assert!(testkit.contains(&listed), "{listed} is not bins::PACKAGES");
     }
 
-    const FORK: &str = "git+https://github.com/aislopware/gpui-fast.git#867b4d48";
+    const FORK: &str = "git+https://github.com/aislopware/gpui-fast.git#58fb4674";
 
     fn lock(packages: &[(&str, &str)]) -> String {
         packages

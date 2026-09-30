@@ -2889,3 +2889,51 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     non-`Send`. Numbers: MEASUREMENTS, "ghostty on 76895d97b, libghostty-rs fixes, and a
     frame's dirty flags in one call". Plain output and OSC-heavy output cost what they did.
     Scroll frames are 1–2 % cheaper.
+
+- ✅ **The grid's rows are painted under keys** (2026-09-30, MEASUREMENTS "the grid's rows under
+  keys"). The terminal element paints each row in five passes (backgrounds with the selection
+  and search hits, underlines, sprites, words, strikethroughs), and each pass over a row is a
+  stretch under a key (`Window::paint_keyed`, gpui-fast). GPUI draws a stretch whose key it
+  painted last frame again from that frame's scene: in place, or moved when the row only moved
+  by whole device pixels, as rows do when output scrolls. Every other thing the grid paints
+  (the cursor, the block bands and rules, images, the ⌘-hover link, the input method's text,
+  captions, the scrollbar, the bell) is painted every frame between the passes, so the order
+  on the glass is what painting the grid whole gives.
+  - The key stands for everything the stretch paints relative to its origin. It is the frame's
+    part (the words' base: font size, cell width, family, ligatures and the palette with the
+    minimum contrast and bold-as-bright; the cell, line, baseline, stroke geometry, sprite
+    thickness and scale; the zoom and the raster size), the row's parts hashed by what they
+    paint (every word's key and column, every background, stroke and sprite with its colour
+    and tile), and what the pass paints on the row beyond them: the selection and search
+    marks for the backgrounds, and the block cursor's text colour on its row for the words and
+    sprites. The blink phase, the faint prompt and the local-echo guesses reach the key through
+    the row's parts, which change with them. The element's size is not in it, so rows a
+    resize leaves alone are drawn again. While the zoom is in motion nothing is keyed.
+  - A row moved by whole device pixels matches one painted there only if nothing it paints
+    rounds differently at the new place. GPUI rounds a quad's edges to the nearest device pixel
+    and a glyph to the nearest quarter, so an edge on a half pixel (a 1.5 pt stroke at 1×, a
+    grid at a fractional zoom, a tile at a fractional position) rounds either way by a float's
+    last bit. The paint oracle found it: a 1.5× window, a scroll, an underline 1 device pixel
+    thick drawn again where painting afresh made it 2. So the key holds the row's place unless
+    every edge the rows paint (origin, cell, line, baseline, strokes) is within 1/64 of a
+    device pixel, and off that grid a row is drawn again only where it was. Dotted and dashed
+    runs start on a whole device pixel for the same reason.
+  - Rejected: keying only with retention's whole-view replay (the terminal is notified by
+    every frame of output, so the view is never replayed while it matters); snapping the grid's
+    origin to device pixels so every row is on the grid (text in a tile that slides would move
+    in whole pixels rather than GPUI's quarter-pixel glyph steps, a smoothness loss during
+    every strip motion).
+  - Tests: `terminal/view/paint_oracle.rs` runs two windows through the same random history of
+    output, rewrites, scrolls, selections, search hits, cursor moves and blinks, input-method
+    text, ⌘-hover, themes (colours, font size, line height, ligatures, minimum contrast, bold
+    as bright), zooms, focus, resizes and scale factors of 1, 1.5 and 2, one with retention and
+    one painting everything afresh, and requires every frame's primitives to match in order.
+    Its text system sizes each glyph's raster by the glyph and face, since the scene keeps a
+    sprite's bounds but not its tile. Dropping the cursor's colour, the marks or the place from
+    the key each fail it within 150 steps. It also requires more than 1 000 stretches drawn
+    again and 100 moved over its six seeds. `…_in_core_text` runs the same histories on the
+    Mac's own text system, real fonts shaped and rasterised by Core Text, taken from
+    `gpui_platform::text_system()` (gpui-fast `58fb467`, added for it: the platform, the
+    only other way to that text system, panics off the main thread, and a test has a thread
+    of its own). Both pass over 60 seeds. With the place left out of the key off the grid,
+    Core Text fails at seed 2, step 97.

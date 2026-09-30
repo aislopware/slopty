@@ -32,14 +32,14 @@ use std::time::{Duration, Instant};
 use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::composition::{NativeHost, NativeHostOptions};
 use gpui::{
-    Animation, AnimationExt as _, App, Autocapitalize, Bounds, ContentMask, Context, CursorStyle,
-    ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Global,
-    InteractiveElement as _, IntoElement, Keystroke, LongPressEvent, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Path, PathBuilder,
-    PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString,
-    Size, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
-    TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
-    px, size,
+    Animation, AnimationExt as _, App, Autocapitalize, Bounds, ContentMask, Context, CursorImage,
+    CursorImageId, CursorStyle, DevicePixels, ElementInputHandler, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, Global, InteractiveElement as _, IntoElement, Keystroke,
+    LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Path, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
+    ScrollDelta, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, TextInputAction, TextInputConfiguration, TouchDragEvent,
+    TouchPhase, UTF16Selection, Window, canvas, div, point, px, size,
 };
 use slopty_client::pacing::{PacingStats, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
@@ -315,6 +315,11 @@ pub struct ScreenView {
     cursor: CursorState,
     /// The worker's cursor picture, drawn wherever the pointer is drawn.
     pointer: Pointer,
+    /// This view's name for the worker's cursor picture as the system pointer
+    /// (`CursorStyle::Image`), and whether the platform has a picture under it.
+    system_pointer: (CursorImageId, bool),
+    /// The system pointer the last render asked for over the picture.
+    styled: CursorStyle,
     /// When this client last put the worker's pointer somewhere (a move, a press or a release
     /// over the picture), on the executor's clock.
     placed: Option<Instant>,
@@ -892,7 +897,11 @@ impl ScreenView {
     ) -> Self {
         let Opened { stream, target, size, quality } = opened;
         // A cursor picture's texture lives in every window's atlas until it is dropped from it.
-        cx.on_release(|view, cx| view.pointer.drop_image(cx)).detach();
+        cx.on_release(|view, cx| {
+            view.pointer.drop_image(cx);
+            cx.set_cursor_image(view.system_pointer.0, None);
+        })
+        .detach();
         handle.set_muted(theme.behaviour.stream.muted);
         let glass = glass::Glass::new();
         let presenter = Arc::clone(&glass);
@@ -932,6 +941,8 @@ impl ScreenView {
             wanted_width: None,
             cursor: CursorState::default(),
             pointer: Pointer::Arrow,
+            system_pointer: (next_pointer_id(), false),
+            styled: CursorStyle::Arrow,
             placed: None,
             drawn: None,
             label: match target {
@@ -1101,7 +1112,7 @@ impl ScreenView {
             CaptureTarget::Display(_) => self.hold_end().filter(|end| now < *end),
             CaptureTarget::Window(_) => None,
         };
-        if self.pointer_drawn(now) != self.drawn {
+        if self.pointer_drawn(now) != self.drawn || self.pointer_style(now) != self.styled {
             cx.notify();
         }
         recheck
@@ -1156,12 +1167,33 @@ impl ScreenView {
     /// or the worker's pointer is off the target).
     fn pointer_drawn(&self, now: Instant) -> Option<(f32, f32)> {
         let (at, shown) = self.pointer_spot(now);
-        (shown && self.shape.is_some()).then_some(at)
+        (shown && self.shape.is_some() && !self.hardware_pointer(now)).then_some(at)
+    }
+
+    /// Whether the system pointer is the worker's cursor rather than a pointer this view draws:
+    /// on macOS, over a picture, outside trackpad mode, whenever the pointer is this client's
+    /// own (always on a window stream, for the hold after a move on a display). The window
+    /// server then moves it with the hand, with no frame of this app's; the view draws it only
+    /// where the worker moves the pointer itself.
+    fn hardware_pointer(&self, now: Instant) -> bool {
+        cfg!(target_os = "macos")
+            && self.trackpad.is_none()
+            && self.shape.is_some()
+            && match self.target {
+                CaptureTarget::Window(_) => true,
+                CaptureTarget::Display(_) => self.local_drives(now),
+            }
+    }
+
+    /// The system pointer over the picture now ([`pointer_style`]).
+    fn pointer_style(&self, now: Instant) -> CursorStyle {
+        let (id, pictured) = self.system_pointer;
+        pointer_style(self.shape.is_some(), self.hardware_pointer(now), pictured.then_some(id))
     }
 
     /// Draw again when the pointer this client just placed is not where the last render drew it.
     fn redraw_pointer(&self, now: Instant, cx: &mut Context<Self>) {
-        if self.pointer_drawn(now) != self.drawn {
+        if self.pointer_drawn(now) != self.drawn || self.pointer_style(now) != self.styled {
             cx.notify();
         }
     }
@@ -1235,15 +1267,22 @@ impl ScreenView {
         })
     }
 
-    /// Read the counters; a change of health is the header's news. The overlay, while it shows,
-    /// is drawn again with them: a still stream draws no frame that would.
+    /// Read the counters; a change of health is the header's news. The header draws from the
+    /// workspace's copy of the view's facts, which it takes again when the view notifies, so a
+    /// change notifies: with the event alone the header kept its old word until something else
+    /// notified the view, which a still stream may never do. The overlay, while it shows, is
+    /// sampled here and drawn again: a still stream draws no frame that would.
     fn read_health(&mut self, cx: &mut Context<Self>) {
         let health = self.probe.read(&self.handle.stats(), &self.glass.pacing(), Instant::now());
-        if health != self.health {
+        let changed = health != self.health;
+        if changed {
             self.health = health;
             cx.emit(ScreenViewEvent::Health);
         }
         if self.hud.is_some() {
+            self.sample_hud(cx);
+        }
+        if changed || self.hud.is_some() {
             cx.notify();
         }
     }
@@ -1339,9 +1378,19 @@ impl ScreenView {
 
     /// The worker said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
     /// pointer from now on, or the arrow again for `None`.
+    ///
+    /// The system pointer takes the picture at once, before any frame
+    /// (`App::set_cursor_image`); the view draws again only when the drawn pointer shows it or
+    /// the system pointer changes between the picture and the arrow.
     pub fn set_cursor_shape(&mut self, shape: Option<CursorShape>, cx: &mut Context<Self>) {
+        let image = shape.as_ref().and_then(system_picture);
+        self.system_pointer.1 = image.is_some();
+        cx.set_cursor_image(self.system_pointer.0, image);
         std::mem::replace(&mut self.pointer, Pointer::from_shape(shape)).drop_image(cx);
-        cx.notify();
+        let now = cx.background_executor().now();
+        if self.drawn.is_some() || self.pointer_style(now) != self.styled {
+            cx.notify();
+        }
     }
 
     /// The worker cursor picture's size and hotspot in points, when one is drawn.
@@ -1376,13 +1425,19 @@ impl ScreenView {
         self.rate
     }
 
-    /// Recompute the overlay's rates when a second has passed; returns its plain line and its
-    /// engineering lines.
-    fn hud_text(&mut self, cx: &App) -> Option<(Vec<Figure>, SharedString)> {
-        let hud = self.hud.as_mut()?;
+    /// The overlay's plain line and its engineering lines, as last sampled.
+    fn hud_text(&self) -> Option<(Vec<Figure>, SharedString)> {
+        self.hud.as_ref().map(|hud| (hud.summary.clone(), hud.text.clone()))
+    }
+
+    /// Sample the overlay's figures, once a [`HUD_PERIOD`] ([`Self::read_health`]), never in a
+    /// render: a render that sampled whenever a period had passed drew figures a frame drawn a
+    /// moment later would not, and the frame shown was stale against it.
+    fn sample_hud(&mut self, cx: &App) {
+        let Some(hud) = self.hud.as_mut() else { return };
         let now = Instant::now();
         let elapsed = now.duration_since(hud.sampled_at);
-        if elapsed >= HUD_PERIOD {
+        if !elapsed.is_zero() {
             // The frame and pacing percentiles sort their rings: once a HUD period, never
             // per paint.
             let ui = crate::frames::stats(cx);
@@ -1418,7 +1473,6 @@ impl ScreenView {
             hud.sample = stats;
             hud.sampled_at = now;
         }
-        Some((hud.summary.clone(), hud.text.clone()))
     }
 
     /// Whether the worker has sent any audio for this stream (the mute control is pointless
@@ -2714,8 +2768,11 @@ impl Render for ScreenView {
         }
         // Whatever asked for this render, it draws the pointer as it is now: a change that
         // waited for a frame has it.
-        let drawn = self.pointer_drawn(cx.background_executor().now());
+        let now = cx.background_executor().now();
+        let drawn = self.pointer_drawn(now);
         self.drawn = drawn;
+        let styled = self.pointer_style(now);
+        self.styled = styled;
         let entity = cx.entity();
         let handler = cx.entity();
         let focus = self.focus.clone();
@@ -2895,7 +2952,7 @@ impl Render for ScreenView {
                 .child(pill)
         });
 
-        let hud = self.hud_text(cx).map(|(summary, text)| self.hud_panel(&summary, &text, cx));
+        let hud = self.hud_text().map(|(summary, text)| self.hud_panel(&summary, &text, cx));
         let console = self.console_overlay();
         div()
             .id("screen")
@@ -2910,7 +2967,7 @@ impl Render for ScreenView {
             // The tile's body surface: a picture of another aspect sits on the page it would
             // be, not in a grey well.
             .bg(hsla(self.theme.content()))
-            .cursor(local_pointer(self.shape.is_some()))
+            .cursor(styled)
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
@@ -3079,11 +3136,40 @@ impl ScreenView {
     }
 }
 
-/// The system pointer over the picture: none while a frame is up, since the pointer is drawn on
-/// it in the worker's cursor picture (or an arrow, or nothing when the worker's is off the
-/// target), and the arrow before the first frame, when there is nothing to point at yet.
-const fn local_pointer(showing: bool) -> CursorStyle {
-    if showing { CursorStyle::None } else { CursorStyle::Arrow }
+/// The system pointer over the picture. Before the first frame there is nothing to point at
+/// yet: the arrow. While the system pointer is the worker's cursor (`hardware`), its picture
+/// under `picture`, or the arrow until the worker has sent one. Otherwise none: the view draws
+/// the pointer on the picture in the worker's cursor (or an arrow, or nothing when the
+/// worker's is off the target).
+const fn pointer_style(
+    showing: bool,
+    hardware: bool,
+    picture: Option<CursorImageId>,
+) -> CursorStyle {
+    match (showing, hardware, picture) {
+        (true, true, Some(id)) => CursorStyle::Image(id),
+        (true, false, _) => CursorStyle::None,
+        (false, ..) | (true, true, None) => CursorStyle::Arrow,
+    }
+}
+
+/// The worker's cursor picture as the system pointer's: its pixels, hotspot and scale as the
+/// worker read them, so it shows at the size in points it has on the worker's display, with the
+/// hotspot on the same point. `None` for a picture whose bytes do not fill it.
+fn system_picture(shape: &CursorShape) -> Option<CursorImage> {
+    CursorImage::new(
+        shape.bgra.clone(),
+        size(DevicePixels(i32::from(shape.w)), DevicePixels(i32::from(shape.h))),
+        point(DevicePixels(i32::from(shape.hot_x)), DevicePixels(i32::from(shape.hot_y))),
+        f32::from(shape.scale.max(1)),
+    )
+    .ok()
+}
+
+/// A name for a view's system pointer picture, unique in the process.
+fn next_pointer_id() -> CursorImageId {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    CursorImageId(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// ⌘ + `key`.
@@ -3473,12 +3559,99 @@ mod tests {
         assert!(view.read_with(cx, |v, _| v.pointer_picture().is_none()), "none: the arrow");
     }
 
-    /// The client's own pointer hides over a picture that shows a frame, where the worker's is
-    /// drawn, and stays the arrow before the first frame.
+    /// The system pointer is the arrow before the first frame; over a frame it is the worker's
+    /// picture while this client drives the pointer (the arrow until a picture came), and
+    /// hidden while the view draws the worker's.
     #[test]
-    fn the_local_pointer_hides_once_a_frame_is_up() {
-        assert_eq!(local_pointer(false), CursorStyle::Arrow);
-        assert_eq!(local_pointer(true), CursorStyle::None);
+    fn the_system_pointer_is_the_workers_picture_while_this_client_drives_it() {
+        let id = CursorImageId(9);
+        assert_eq!(pointer_style(false, true, Some(id)), CursorStyle::Arrow);
+        assert_eq!(pointer_style(true, true, Some(id)), CursorStyle::Image(id));
+        assert_eq!(pointer_style(true, true, None), CursorStyle::Arrow);
+        assert_eq!(pointer_style(true, false, Some(id)), CursorStyle::None);
+    }
+
+    /// A change of health notifies the view, which is what has the workspace take its facts
+    /// (and the header's word) again; a reading that changes nothing draws nothing.
+    #[gpui::test]
+    fn a_change_of_health_notifies_the_view(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        let notified = Rc::new(std::cell::Cell::new(0_u32));
+        cx.update(|_, cx| {
+            let notified = Rc::clone(&notified);
+            cx.observe(&view, move |_, _| notified.set(notified.get().saturating_add(1))).detach();
+        });
+        view.update(cx, ScreenView::read_health);
+        cx.run_until_parked();
+        assert_eq!(notified.get(), 0, "all well, and still: nothing to tell");
+
+        let long_ago = Instant::now().checked_sub(CUT_FOR_TEST).expect("a clock past boot");
+        view.update(cx, |v, cx| {
+            v.probe.verdict(RateVerdict::Cut, long_ago);
+            v.read_health(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.header().health), Some(Health::LowBandwidth));
+        assert_eq!(notified.get(), 1, "the header's word changed: the view notified");
+    }
+
+    /// The overlay's figures are sampled by the once-a-second reading, never by a render: a
+    /// render drawn a period after the last sample shows that sample, as a frame drawn from
+    /// scratch a moment later does, and the reading brings the new figures.
+    #[gpui::test]
+    fn the_overlay_is_sampled_by_its_timer_not_by_a_render(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| v.set_hud(true, cx));
+        cx.run_until_parked();
+        let long_ago = Instant::now().checked_sub(CUT_FOR_TEST).expect("a clock past boot");
+        view.update(cx, |v, cx| {
+            if let Some(hud) = v.hud.as_mut() {
+                hud.sampled_at = long_ago;
+            }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let figures = |cx: &mut gpui::VisualTestContext| {
+            view.read_with(cx, |v, _| v.hud_text().map(|(summary, _)| summary.len()))
+        };
+        assert_eq!(figures(cx), Some(0), "a render a period on samples nothing");
+        view.update(cx, ScreenView::read_health);
+        assert_eq!(figures(cx), Some(4), "the reading samples: rate, glass, bitrate, round trip");
+    }
+
+    /// Longer than the cut the header waits for ([`health::CUT_FOR`]).
+    const CUT_FOR_TEST: Duration = Duration::from_secs(4);
+
+    /// A worker on a Retina display reads its cursor at 2×: 64 pixels a side, hotspot at pixel
+    /// (11, 12). The system pointer shows it 32 points a side with the hotspot at (5.5, 6)
+    /// points, the size and spot it has on the worker's screen, on a client display of any
+    /// scale; the same picture read on a 1× display shows at its pixels as points. A picture
+    /// short of bytes, or with the hotspot off it, is no system pointer.
+    #[test]
+    fn the_system_pointer_takes_the_workers_scale_so_the_hotspot_stays_on_its_point() {
+        let at_2x = CursorShape {
+            w: 64,
+            h: 64,
+            hot_x: 11,
+            hot_y: 12,
+            bgra: vec![7; 64 * 64 * 4],
+            scale: 2,
+        };
+        let image = system_picture(&at_2x).expect("a picture");
+        assert_eq!(image.size_in_points(), size(32.0, 32.0));
+        assert_eq!(image.hotspot_in_points(), point(5.5, 6.0));
+        assert_eq!(image.bgra(), at_2x.bgra.as_slice(), "the bytes as read, BGRA premultiplied");
+
+        let at_1x =
+            CursorShape { w: 32, h: 32, hot_x: 5, hot_y: 6, bgra: vec![7; 32 * 32 * 4], scale: 1 };
+        let image = system_picture(&at_1x).expect("a picture");
+        assert_eq!(image.size_in_points(), size(32.0, 32.0));
+        assert_eq!(image.hotspot_in_points(), point(5.0, 6.0));
+
+        let off = CursorShape { hot_x: 64, ..at_2x.clone() };
+        let short = CursorShape { bgra: vec![7; 64 * 64 * 4 - 1], ..at_2x };
+        assert!(system_picture(&short).is_none(), "a byte short");
+        assert!(system_picture(&off).is_none(), "the hotspot off the right edge");
     }
 
     /// A modifier pressed on its own reaches the worker as that key: each one that moves is a
@@ -5312,54 +5485,57 @@ mod tests {
         drawn_at(cx).map(|b| b.origin)
     }
 
-    /// On a window stream the pointer is drawn where this client put it, in the worker's cursor
-    /// picture, by the frame the move itself draws: no cursor sample comes into it. A sample
-    /// that does come (the echo of an older move) neither moves it nor draws. Before the first
-    /// move there is none, as the worker says.
+    /// On a window stream the pointer is the system pointer in the worker's cursor picture, which
+    /// the window server moves with the hand: the view never draws it, a move draws no frame, a
+    /// new picture from the worker draws none, and a late echo neither moves nor draws anything.
     #[gpui::test]
-    fn a_window_streams_pointer_is_drawn_where_this_client_put_it_in_the_same_frame(
+    fn a_window_streams_pointer_is_the_system_pointer_in_the_workers_picture(
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
         let cursor = pumped(&view, cx);
-        let shape = CursorShape { w: 8, h: 8, hot_x: 2, hot_y: 2, bgra: vec![0; 256], scale: 2 };
+        let shape =
+            |fill| CursorShape { w: 8, h: 8, hot_x: 2, hot_y: 2, bgra: vec![fill; 256], scale: 2 };
         view.update(cx, |v, cx| {
             v.show_picture(picture(800, 600), cx);
-            v.set_cursor_shape(Some(shape), cx);
+            v.set_cursor_shape(Some(shape(0)), cx);
         });
         cx.run_until_parked();
-        assert_eq!(drawn_at(cx), None, "put nowhere yet: none");
-        let pictured = |at| pointer_bounds(at, size(px(4.0), px(4.0)), point(px(1.0), px(1.0)));
+        let id = view.read_with(cx, |v, _| v.system_pointer.0);
+        let style = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |v, _| v.styled);
+        assert_eq!(style(cx), CursorStyle::Image(id), "the worker's picture as the system pointer");
+        assert_eq!(drawn_at(cx), None, "and none drawn");
 
         let first = at_fraction(&view, cx, 0.25, 0.5);
         cx.simulate_mouse_move(first, None, Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(drawn_at(cx), Some(pictured(first)));
-
-        let second = at_fraction(&view, cx, 0.75, 0.25);
         let before = renders(&view, cx);
+        let second = at_fraction(&view, cx, 0.75, 0.25);
         cx.simulate_mouse_move(second, None, Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(renders(&view, cx), before.saturating_add(1), "one frame, the move's own");
-        assert_eq!(drawn_at(cx), Some(pictured(second)), "the worker's picture, at the new point");
-        let sample = view.read_with(cx, |v, _| v.cursor);
-        assert_eq!(sample, CursorState::default(), "with no sample come");
+        assert_eq!(renders(&view, cx), before, "a move draws no frame");
+        assert_eq!(drawn_at(cx), None);
         let moves = inputs(&mut rx);
         assert!(
             matches!(moves.as_slice(), [ScreenInput::Move { .. }, ScreenInput::Move { x, y }] if (*x - 600.0).abs() < 0.5 && (*y - 150.0).abs() < 0.5),
             "both moves went: {moves:?}"
         );
 
+        view.update(cx, |v, cx| v.set_cursor_shape(Some(shape(255)), cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), before, "a new picture draws no frame");
+        assert_eq!(style(cx), CursorStyle::Image(id), "under the same name");
+
         cursor.send(CursorState { x: 200, y: 300, visible: true }).expect("the pump listens");
         cx.run_until_parked();
-        assert_eq!(drawn_at(cx), Some(pictured(second)), "the late echo moves nothing");
-        assert_eq!(renders(&view, cx), before.saturating_add(1), "and draws nothing");
+        assert_eq!(drawn_at(cx), None, "the late echo draws no pointer");
+        assert_eq!(renders(&view, cx), before, "and no frame");
     }
 
     /// On a display the worker's sample draws the pointer while this client is not moving it
-    /// (another user's hand, an app's warp), this client's own point draws it while it is, and
-    /// once the hold runs out the worker's sample takes over, drawn where the worker says the
-    /// pointer went.
+    /// (another user's hand, an app's warp), the system pointer is it while this client moves
+    /// it, and once the hold runs out the worker's sample takes over, drawn where the worker
+    /// says the pointer went.
     #[gpui::test]
     fn a_displays_pointer_follows_the_worker_unless_this_client_moves_it(
         cx: &mut gpui::TestAppContext,
@@ -5378,16 +5554,21 @@ mod tests {
             "the worker's"
         );
 
+        let style = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |v, _| v.styled);
+        assert_eq!(style(cx), CursorStyle::None, "the view draws the worker's");
         let here = at_fraction(&view, cx, 0.25, 0.25);
         cx.simulate_mouse_move(here, None, Modifiers::default());
         cx.run_until_parked();
-        assert_eq!(arrow_drawn(cx), Some(arrow_at(here)), "this client's, at once");
+        assert_eq!(arrow_drawn(cx), None, "this client's is the system pointer, at once");
+        assert_eq!(style(cx), CursorStyle::Arrow, "the arrow until the worker sends a picture");
 
         let drawn = renders(&view, cx);
+        let further = at_fraction(&view, cx, 0.3, 0.3);
+        cx.simulate_mouse_move(further, None, Modifiers::default());
         cursor.send(CursorState { x: 600, y: 450, visible: true }).expect("the pump listens");
         cx.run_until_parked();
-        assert_eq!(arrow_drawn(cx), Some(arrow_at(here)), "held while this client drives it");
-        assert_eq!(renders(&view, cx), drawn, "a sample under the hold draws nothing");
+        assert_eq!(arrow_drawn(cx), None, "held while this client drives it");
+        assert_eq!(renders(&view, cx), drawn, "a move or a sample under the hold draws nothing");
 
         cx.executor().advance_clock(LOCAL_HOLD);
         cx.run_until_parked();
@@ -5397,6 +5578,7 @@ mod tests {
             Some(arrow_at(there)),
             "the hold ran out: where the worker's went"
         );
+        assert_eq!(style(cx), CursorStyle::None, "drawn by the view again");
 
         cursor.send(CursorState { x: 80, y: 60, visible: true }).expect("the pump listens");
         cx.run_until_parked();

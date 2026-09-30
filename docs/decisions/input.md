@@ -940,7 +940,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     costs no frame. A new picture under an id that is showing is set at once, before any
     frame; the last 64 cursors built are kept by content. No upstream pull request existed
     (zed and longbridge searched for image or custom cursors). Branch `cursor-image` on
-    aislopware/gpui-fast.
+    aislopware/gpui-fast, merged into its main at `132dbc1`, which Slopty pins.
+  - *The fork's review* (2026-10-01) fixed two things before the merge. A new picture used to
+    invalidate the cursor rects of the key window only, so another window showing the same id
+    kept the old cursor when it was key again; every window whose view shows the id is
+    invalidated now, and the cursor is set at once over the key window's view only. The
+    cache matched on a 64-bit hash of the picture alone; a hit now compares the pixels too, so
+    two pictures whose keys collide never share a cursor. Checked and left as they were: the
+    `NSCursor` lives while an id or the cache holds it and the rect retains its own; everything
+    runs on the main thread; the hotspot is in points from the top left; a 1× picture on a 2×
+    display keeps its size in points; the cursor rect is the view's whole bounds, so a scroll
+    moves nothing, and the video's native host is non-interactive and under the GPUI view, so
+    it never takes the cursor; nothing hides or unhides the cursor; an inactive application
+    sets nothing; a tile losing focus changes nothing, since the style follows the hovered
+    hitbox.
   - *The view.* On macOS the system pointer is the worker's picture whenever the pointer is
     this client's own: always on a window stream, and for the hold after a move on a display.
     The view draws the worker's picture only where the worker moves the pointer itself (its
@@ -958,11 +971,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     which `CursorShape::scale` carries; a client on a Retina display shows a 1× worker's
     cursor scaled up, as Parsec does. The data's layout (premultiplied, a host-order ARGB
     word, hotspot and rect in points) is pinned by comparing it pixel for pixel with
-    `currentSystemCursor` while that still answers. The arrow is grey, so blue against red
-    rests on `OSXvnc`'s reading until a coloured cursor is compared.
+    `currentSystemCursor` while that still answers.
+  - *Colour order, checked* (2026-10-01). A test app the test spawns
+    (`slopty-cursor-app`) takes the cursor from the background (`SetsCursorInBackground`) and
+    shows a 16-point square of red, green, blue and half-covered white with its hotspot at
+    (3, 5). The worker's reading gives red as BGRA `[0, 0, 255, 255]`, blue as
+    `[255, 0, 0, 255]` and the white as `[128, 128, 128, 128]`, hotspot (3, 5) at 1×, so the
+    bytes are BGRA, premultiplied, as `OSXvnc` said. On the client, the fork draws a cursor's
+    picture into an sRGB RGBA bitmap and gets the colours back as given, which a byte-for-byte
+    check could not tell from swapped channels.
   - *Hardware checks.* The calls were found and read on macOS 27.0.1 (26A434), a 1× display.
-    Owed: a 2× display, to see the global data's scale and hotspot units there, a coloured
-    cursor (a drag's copy badge), and the pointer by hand over a window and a display tile.
+    The 2× units are proved on synthetic data at each layer (the reading, the view's
+    conversion, the fork's cursor): a 64-pixel picture at 2× with its hotspot on pixel
+    (11, 12) is a 32-point cursor with its hotspot at (5.5, 6) points. Owed: a real 2×
+    display, and the pointer by hand over a window and a display tile.
   - Numbers: MEASUREMENTS, "the remote pointer as the system cursor, and the cursor seed".
     Tests: fork `the_pointer_takes_the_picture_as_it_enters_and_moving_over_it_draws_nothing`,
     `an_id_is_pointed_at_pictures_and_forgotten_without_a_frame`,
@@ -970,5 +992,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `an_id_pointed_back_at_a_picture_it_showed_builds_nothing`; `slopty-capture`
     `this_macos_exports_the_window_servers_cursor_calls`,
     `the_global_cursor_is_the_system_cursors_picture_and_its_seed_costs_nanoseconds`,
-    `the_global_data_is_read_at_its_displays_scale_with_the_hotspot_in_pixels`. The view and
-    worker halves wait in `target/wip-cursor/` for the files' owner, with the gpui pin.
+    `the_global_data_is_read_at_its_displays_scale_with_the_hotspot_in_pixels`,
+    `a_coloured_cursor_reads_back_in_bgra_with_its_hotspot_at_its_scale`; fork
+    `a_cursor_draws_its_pictures_colours_not_its_byte_order`; `slopty-ui`
+    `a_window_streams_pointer_is_the_system_pointer_in_the_workers_picture`,
+    `the_system_pointer_takes_the_workers_scale_so_the_hotspot_stays_on_its_point`;
+    `slopty-worker` `the_shape_loop_reads_the_picture_only_when_the_seed_moves`.

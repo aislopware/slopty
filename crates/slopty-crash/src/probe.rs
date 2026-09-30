@@ -66,6 +66,10 @@ pub fn run(exe: &Path, args: &[&str], trigger: Trigger, data_dir: &Path) -> io::
 }
 
 /// Crashes this process as `trigger` names; an unknown name does nothing.
+///
+/// Never inlined, so a report names it by its whole path from the symbol table: inlined, a
+/// line-tables-only build knows it only as `fire`.
+#[inline(never)]
 pub(crate) fn fire(trigger: &str) {
     match trigger {
         "panic" => panic(),

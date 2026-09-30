@@ -252,17 +252,58 @@ fn assert_clean(s: &ScreenInfo) {
     );
 }
 
-/// The worker's own counters for the one live stream of `client`: captured, encoded and dropped
-/// frames, the encode's p50 and p95, and its capture → packetized mean, in microseconds.
-async fn worker_side(stack: &Stack, client: &str) -> (u64, u64, u64, u64, u64, u64) {
+/// The worker's own counters for one stream, in microseconds where they are times.
+struct WorkerSide {
+    captured: u64,
+    /// The source's frames coded and sent.
+    encoded: u64,
+    /// A still picture's refinements, coded and sent besides [`Self::encoded`].
+    refined: u64,
+    /// Captures a newer one replaced before the encoder took them.
+    superseded: u64,
+    dropped: u64,
+    encode_p50: u64,
+    encode_p95: u64,
+    /// Capture → packetized, the mean.
+    packetized: u64,
+}
+
+impl WorkerSide {
+    /// One line of them.
+    fn row(&self) -> String {
+        format!(
+            "captured {} encoded {} refined {} superseded {} dropped {}, encode p50 {} / p95 {} \
+             µs, capture → packetized mean {} µs",
+            self.captured,
+            self.encoded,
+            self.refined,
+            self.superseded,
+            self.dropped,
+            self.encode_p50,
+            self.encode_p95,
+            self.packetized
+        )
+    }
+}
+
+/// The worker's own counters for the one live stream of `client`.
+async fn worker_side(stack: &Stack, client: &str) -> WorkerSide {
     let live = stack.worker_screens().await.unwrap();
     let mine: Vec<_> = live.iter().filter(|s| s["client"] == client).collect();
     assert_eq!(mine.len(), 1, "{live:#?}");
     let stats = &mine[0]["stats"];
     let n = |key: &str| stats[key].as_u64().unwrap_or_else(|| panic!("{key}: {stats}"));
     let q = |key: &str, p: &str| stats[key][p].as_u64().unwrap_or_default();
-    let mean = n("latency_sum_us").checked_div(n("encoded")).unwrap_or_default();
-    (n("captured"), n("encoded"), n("dropped"), q("encode", "p50_us"), q("encode", "p95_us"), mean)
+    WorkerSide {
+        captured: n("captured"),
+        encoded: n("encoded"),
+        refined: n("refined"),
+        superseded: n("superseded"),
+        dropped: n("dropped"),
+        encode_p50: q("encode", "p50_us"),
+        encode_p95: q("encode", "p95_us"),
+        packetized: n("latency_sum_us").checked_div(n("encoded")).unwrap_or_default(),
+    }
 }
 
 /// Open the drawn editor window in the strip and wait until it has shown [`FRAMES`].
@@ -298,14 +339,12 @@ async fn a_drawn_window_streams_into_its_tile() {
     // 1280 × 800 points: whatever scale the tile asked for, the stream keeps the window's shape.
     let [w, h] = screen.size;
     assert!((f64::from(w) / f64::from(h) - 1.6).abs() < 0.01, "{w}×{h}");
-    let (captured, encoded, dropped, encode_p50, encode_p95, packetized) =
-        worker_side(&stack, &dump.client).await;
-    println!(
-        "MEASURE drawn window, worker: captured {captured} encoded {encoded} dropped {dropped}, \
-         encode p50 {encode_p50} / p95 {encode_p95} µs, capture → packetized mean {packetized} µs"
-    );
-    assert!(encoded >= screen.frames, "the app painted more than the worker encoded");
-    assert!(captured >= encoded, "{captured} captured, {encoded} encoded");
+    let worker = worker_side(&stack, &dump.client).await;
+    println!("MEASURE drawn window, worker: {}", worker.row());
+    // A still picture's refinements are painted as frames and counted apart from the source's.
+    let sent = worker.encoded.saturating_add(worker.refined);
+    assert!(sent >= screen.frames, "the app painted more than the worker sent: {}", worker.row());
+    assert!(worker.captured >= worker.encoded, "{}", worker.row());
 
     let drv = &mut stack.driver;
     let heading = format!("window {}", EDITOR.1);
@@ -514,13 +553,8 @@ mod frame_time {
         let app = dump.screens[0].clone();
         println!("MEASURE glass, app surface: {}", row(&app));
         println!("MEASURE glass, app UI frames: {}", dump.frames.row());
-        let (captured, encoded, dropped, encode_p50, encode_p95, packetized) =
-            worker_side(&stack, &dump.client).await;
-        println!(
-            "MEASURE glass, worker under the app: captured {captured} encoded {encoded} dropped \
-             {dropped}, encode p50 {encode_p50} / p95 {encode_p95} µs, capture → packetized \
-             mean {packetized} µs"
-        );
+        let worker = worker_side(&stack, &dump.client).await;
+        println!("MEASURE glass, worker under the app: {}", worker.row());
         stack.shutdown().await;
     }
 }

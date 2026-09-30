@@ -409,6 +409,14 @@ pub struct ScreenStats {
     /// Frames encoded from the held capture rather than a fresh one: the last capture of a
     /// picture that went still, or a refresh or keyframe answered while nothing changed.
     pub repaired: u64,
+    /// Refinement frames of a still picture: the held capture coded again at a finer quality
+    /// once it stopped changing. Sent and painted like any frame, and not among
+    /// [`Self::encoded`], which counts the source's frames only: painted frames are at most
+    /// `encoded + refined`.
+    pub refined: u64,
+    /// Captures a newer capture replaced in the encoder's mailbox before the encoder took them:
+    /// the source drew faster than the encoder took pictures. Never encoded.
+    pub superseded: u64,
     /// Video datagrams that waited in the audio lane past their frame's own hand-over.
     pub laned: u64,
     /// Whether the stream is on the display-crop path *right now*. The counter above says how

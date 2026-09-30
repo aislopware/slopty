@@ -331,6 +331,9 @@ pub struct TerminalView {
     zoom: f32,
     /// The overview's zoom is in motion this frame (set by the workspace before each frame).
     zooming: bool,
+    /// The grid's rows are painted under keys and drawn again from the last frame while
+    /// unchanged (`Window::paint_keyed`); off, every row is painted afresh every frame.
+    keyed_paint: bool,
     /// Frames drawn while zooming (tests).
     #[cfg(test)]
     motion_frames: u32,
@@ -538,6 +541,7 @@ impl TerminalView {
             row_cache: RowCache::default(),
             zoom: 1.0,
             zooming: false,
+            keyed_paint: true,
             #[cfg(test)]
             motion_frames: 0,
             #[cfg(test)]
@@ -2074,6 +2078,18 @@ impl TerminalView {
     /// The overview's zoom, which the grid is drawn at (set by the workspace before each frame).
     pub const fn set_zoom(&mut self, zoom: f32) {
         self.zoom = zoom;
+    }
+
+    /// Paint the grid's rows under keys, drawn again from the last frame while unchanged (the
+    /// default), or afresh every frame: what keyed paint is measured and checked against.
+    pub const fn set_keyed_paint(&mut self, on: bool) {
+        self.keyed_paint = on;
+    }
+
+    /// Whether the grid's rows are painted under keys ([`Self::set_keyed_paint`]).
+    #[must_use]
+    pub const fn keyed_paint(&self) -> bool {
+        self.keyed_paint
     }
 
     /// Whether the zoom is in motion this frame (set by the workspace before each frame): the
@@ -8100,29 +8116,41 @@ mod tests {
     /// same line a frame), a screen of new text a frame, and a scroll through the scrollback a
     /// line a frame. Each sample is the frame applied and drawn; beside the times it prints the
     /// grid stretches GPUI painted and drew again from the last frame (`Window::paint_keyed`).
-    /// It runs twice: on GPUI's test text system, which rasterises nothing, so a glyph costs
-    /// its lookup and no sprite, and on the paint oracle's, whose every glyph is a sprite in the
-    /// scene as on the glass. Prints the numbers MEASUREMENTS records; run by hand, in release:
+    /// It runs on GPUI's test text system, which rasterises nothing, so a glyph costs its
+    /// lookup and no sprite, and on the paint oracle's, whose every glyph is a sprite in the
+    /// scene as on the glass; each with the grid's stretches keyed, and painted afresh every
+    /// frame as before keyed paint. Prints the numbers MEASUREMENTS records; run by hand, in
+    /// release:
     /// `cargo test -p slopty-ui --release --lib terminal_frames_cost -- --ignored --nocapture`.
     #[test]
     #[ignore = "measurement, run by hand"]
     fn terminal_frames_cost() {
-        let mut bare = TestAppContext::build(gpui::TestDispatcher::new(0), None);
-        let bare = frames_cost(&mut bare);
-        let mut glyphs = TestAppContext::build_with_text_system(
-            gpui::TestDispatcher::new(0),
-            None,
-            Arc::new(paint_oracle::Glyphs),
-        );
-        let glyphs = frames_cost(&mut glyphs);
+        let mut report = Vec::new();
+        for (system, glyphs) in [("GPUI's test text system", false), ("every glyph a sprite", true)]
+        {
+            for (arm, keyed) in [("painted afresh", false), ("keyed", true)] {
+                let dispatcher = gpui::TestDispatcher::new(0);
+                let mut cx = if glyphs {
+                    TestAppContext::build_with_text_system(
+                        dispatcher,
+                        None,
+                        Arc::new(paint_oracle::Glyphs),
+                    )
+                } else {
+                    TestAppContext::build(dispatcher, None)
+                };
+                report.push(format!(" {system}, {arm}:\n  {}", frames_cost(&mut cx, keyed)));
+            }
+        }
         println!(
             "MEASURE terminal frames 200 × 60, frame applied and drawn (600 frames each after \
-             60)\n GPUI's test text system:\n  {bare}\n every glyph a sprite:\n  {glyphs}"
+             60)\n{}",
+            report.join("\n")
         );
     }
 
-    /// [`terminal_frames_cost`] on `cx`: one line per case.
-    fn frames_cost(cx: &mut TestAppContext) -> String {
+    /// [`terminal_frames_cost`] on `cx`, the rows under keys or not: one line per case.
+    fn frames_cost(cx: &mut TestAppContext, keyed: bool) -> String {
         const COLS: u16 = 200;
         const ROWS: u16 = 60;
         const FRAMES: usize = 600;
@@ -8133,7 +8161,8 @@ mod tests {
         cx.update(gpui_kit::init);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let size = TermSize { cols: COLS, rows: ROWS, ..TermSize::default() };
-            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            let mut view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            view.set_keyed_paint(keyed);
             window.focus(&view.focus, cx);
             view
         });

@@ -436,8 +436,11 @@ pub trait CaptureSource: 'static {
     fn pointer_moves() -> u32;
     /// Where the pointer is, in global points. A window-server round trip.
     fn pointer_location() -> (f64, f64);
-    /// The cursor's picture at `scale` pixels per point, when there is one to read.
-    fn cursor_shape(scale: u8) -> Option<CursorShape>;
+    /// A number that moves whenever the cursor on screen changes, or `None` when there is no
+    /// way to tell. Cheap enough to read every tick: no round trip.
+    fn cursor_seed() -> Option<i32>;
+    /// The cursor's picture at its display's scale, when there is one to read. A round trip.
+    fn cursor_shape() -> Option<CursorShape>;
 }
 
 #[cfg(test)]

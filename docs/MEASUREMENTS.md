@@ -11419,8 +11419,10 @@ cursor plane cannot be read without a camera, so the claim is structural and the
 frames: in the fork, a tile styled `CursorStyle::Image` takes the picture as the entering move
 is dispatched, and 21 moves over it build the tile 0 times
 (`the_pointer_takes_the_picture_as_it_enters_and_moving_over_it_draws_nothing`). In Slopty's
-view (waiting in `target/wip-cursor/ui.patch`), a window stream's moves, new pictures and
-late echoes draw no frame; a display stream draws one frame when the hold starts or ends.
+view, a window stream's moves, new pictures and late echoes draw 0 frames, where each move was
+1 (`a_window_streams_pointer_is_the_system_pointer_in_the_workers_picture`); on a display, a
+move or a sample inside the hold draws 0, and the hold starting or ending draws 1
+(`a_displays_pointer_follows_the_worker_unless_this_client_moves_it`).
 
 **A shape change on the client** (fork, `a_shape_change_is_built_once_and_set_in_microseconds`,
 32 pictures of 64 × 64 at 2×, twenty rounds; four runs, p50 / p99):
@@ -11433,6 +11435,11 @@ late echoes draw no frame; a display stream draws one frame when the hold starts
 
 `NSCursor.currentCursor` is the cursor set as soon as `set` returns: no frame and no run-loop
 turn stand between the picture arriving and the system cursor taking it.
+
+After the review (2026-10-01, load 27–32), a cache hit compares the pixels behind the key: the
+same run gives build 15.8 µs / 126 µs, a picture built before 2.1 µs / 94 µs (the 16 KB compare
+of a 64 × 64 picture), `set` 337 µs / 10.4 ms (p50 / p99). The picture changes only when the
+worker's cursor does, so the compare costs nothing per move.
 
 **Seeing the change on the worker** (`slopty-capture`,
 `the_global_cursor_is_the_system_cursors_picture_and_its_seed_costs_nanoseconds`, 200 reads
@@ -11456,16 +11463,24 @@ each; four runs, p50 / p99):
   the pointer was over the target. It now waits for the pointer to come over the target (1/s
   backstop) and ticks 120 times a second only while it is there.
 - **Layout pinned.** On this macOS the global data is the same picture, pixel for pixel, as the
-  1× representation of `currentSystemCursor`: 28 × 40 pixels at 1×, hotspot (5, 5). The arrow
-  is grey, so the equality cannot tell blue from red; that order rests on `OSXvnc`'s reading
-  (blue at shift 0 of a host-order word). A Retina display is still to be checked.
+  1× representation of `currentSystemCursor`: 28 × 40 pixels at 1×, hotspot (5, 5).
+- **Colour order** (2026-10-01,
+  `a_coloured_cursor_reads_back_in_bgra_with_its_hotspot_at_its_scale`). A test app's 16-point cursor of red, green, blue and half-covered white reads back as BGRA
+  `[0, 0, 255, 255]`, `[0, 255, 0, 255]`, `[255, 0, 0, 255]` and `[128, 128, 128, 128]`,
+  16 × 16 at 1×, hotspot (3, 5): blue first, premultiplied, exact on this display. The test
+  holds the cursor for 0.47–0.56 s. A Retina display is still to be checked.
+- **Wakeups, tested** (`the_shape_loop_reads_the_picture_only_when_the_seed_moves`). Off the
+  target: 0 seed reads in 200 ms. Over it: 10–40 seed reads in 250 ms (120 Hz with the test's
+  scheduling), 1 picture read, then 1 more when the seed moves; off again, 0.
 
 ```sh
-# fork (.research/gpui-fast, branch cursor-image)
+# fork (.research/gpui-fast, main at 132dbc1)
 cargo test -p gpui --lib fast::tests::cursor
 cargo test -p gpui_macos --lib fast::cursor -- --nocapture | grep MEASURE
-# worker: reads the cursor, never the screen; changes nothing, posts nothing
-SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-capture --no-capture -E 'test(/cursor/)' | grep MEASURE
+# worker: reads the cursor, never the screen; the colour test shows its own cursor for ~0.5 s
+SLOPTY_SCREEN_E2E=1 cargo nextest run -p slopty-capture --no-capture -E 'test(/cursor/)' | grep -E 'MEASURE|quadrants'
+cargo nextest run -p slopty-ui -E 'test(/pointer/)'
+cargo nextest run -p slopty-worker -E 'test(the_shape_loop)'
 ```
 
 ## 2026-09-30 — two stripes, capture to glass
@@ -11530,3 +11545,47 @@ What it says:
   stripes it no longer gains from; the spend half of the gate does not see it.
 - **The copies cost more under load** but stay under a millisecond for both 4:2:0 stripes up to
   5K, on the stripes' own threads, beside a 9–23 ms encode.
+
+## 2026-09-30 — the grid's rows under keys: frame cost with `paint_keyed` and without
+
+The terminal element paints each row's backgrounds, underlines, sprites, words and
+strikethroughs as stretches under keys (`Window::paint_keyed`, gpui-fast), so a row that did not
+change is drawn again from the last frame's scene, in place or moved by whole device pixels
+(`docs/decisions/terminal.md`, "The grid's rows are painted under keys"). The two arms are one
+binary: `TerminalView::set_keyed_paint(false)` paints every row afresh, as before. A focused
+200 × 60 screen of dense coloured text under a blinking block cursor; each sample is a frame
+applied and drawn, 600 frames a case after 60. "Bare" is GPUI's test text system (a glyph is a
+lookup, no sprite); "sprites" is the paint oracle's (`terminal/view/paint_oracle.rs`), where every
+glyph is a sprite in the scene as on the glass. Release, mac-studio, gpui-fast `132dbc1`, two
+runs started at a load average of 18.5 and 17.3 (a first run at 48–90 gave the same medians):
+
+```sh
+cargo test -p slopty-ui --release --lib terminal_frames_cost -- --ignored --nocapture
+```
+
+p50 / p95 in µs, runs 1 and 2:
+
+| case | bare, afresh | bare, keyed | sprites, afresh | sprites, keyed | stretches a keyed frame: painted / again (moved) |
+| --- | --- | --- | --- | --- | --- |
+| unchanged | 202 / 258, 210 / 283 | **22 / 26, 24 / 39** | 758 / 1592, 745 / 940 | **140 / 306, 134 / 187** | 0 / 120 (0) |
+| cursor blinking | 200 / 238, 210 / 298 | **26 / 35, 28 / 29** | 755 / 1627, 744 / 971 | **149 / 307, 148 / 212** | 1 / 119 (0) |
+| a key echoed at the prompt | 206 / 251, 215 / 324 | **32 / 46, 31 / 52** | 752 / 1499, 728 / 852 | **150 / 221, 148 / 215** | 1 / 118 (0) |
+| a line of output a frame | 286 / 386, 299 / 442 | **114 / 186, 119 / 178** | 852 / 1699, 830 / 998 | **434 / 933, 419 / 588** | 3 / 117 (117) |
+| `yes`, a screen of one line a frame | 212 / 319, 166 / 238 | 206 / 292, 210 / 288 | 214 / 390, 186 / 255 | 182 / 356, 192 / 273 | 0 / 60 (58) |
+| a screen of new text a frame | 2245 / 4005, 2202 / 4201 | 2543 / 9780, 2250 / 4228 | 3037 / 7744, 2765 / 4633 | 2879 / 8413, 2769 / 4453 | 120 / 0 |
+| scrolling the scrollback a line a frame | 275 / 365, 290 / 439 | **109 / 423, 99 / 134** | 850 / 1983, 832 / 1031 | **396 / 499, 398 / 517** | 2 / 118 (118) |
+
+What it says:
+
+- **Typing echo costs a fifth of what it did.** With every glyph a sprite, a key echoed at the
+  prompt went from 728–752 to 148–150 µs at p50: one row's two stretches are painted and the
+  other 118 are copied. The bare arm says the same, 206–215 to 31–32 µs.
+- **Scrolling costs half.** A line a frame through the scrollback went from 832–850 to 396–398
+  µs, and a line of output from 830–852 to 419–434 µs: 117–118 stretches move by a row's height
+  instead of being painted, and the new row is painted. What is left is the prepaint's rows and
+  GPUI's copy of the moved operations.
+- **A screen of new text costs the same.** Every row's key is new, so all 120 stretches are
+  painted; keying them costs nothing that shows against the 2–3 ms of building the rows.
+- **`yes` neither gains nor loses.** Its rows are all one line, already built and shared by the
+  row cache, and only its glyph pass keys: 58 of 60 stretches move, the medians are within
+  the runs' spread of each other in both text systems.

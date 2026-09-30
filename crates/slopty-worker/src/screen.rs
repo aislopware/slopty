@@ -145,9 +145,10 @@ const CURSOR_PERIOD: Duration = Duration::from_micros(8_333);
 const CURSOR_BACKSTOP: Duration = Duration::from_secs(1);
 /// How long a new size must hold before the stream is rebuilt for it ([`ResizeDebounce`]).
 const RESIZE_HOLD: Duration = Duration::from_millis(100);
-/// How often the cursor's picture is read while the pointer is over the target (30 Hz). It
-/// goes to the client only when it changed.
-const SHAPE_PERIOD: Duration = Duration::from_millis(33);
+/// How often the cursor's seed is read while the pointer is over the target (120 Hz): a shape
+/// change is seen within this, and the picture is read only when the seed moved. It goes to
+/// the client only when it changed.
+const SHAPE_PERIOD: Duration = Duration::from_micros(8_333);
 
 /// What a stream tells its owner outside the datagram path.
 #[derive(Debug)]
@@ -1207,6 +1208,8 @@ impl Counters {
             },
             encoder_bps: self.encoder_bps.load(Ordering::Relaxed),
             repaired: self.repaired.load(Ordering::Relaxed),
+            refined: self.refined.load(Ordering::Relaxed),
+            superseded: self.superseded.load(Ordering::Relaxed),
             laned: self.laned.load(Ordering::Relaxed),
             suspected: self.suspected.load(Ordering::Relaxed),
             suspicions: self.suspicions.load(Ordering::Relaxed),
@@ -1492,6 +1495,8 @@ struct Shared<P: Platform = Native> {
     /// The worker's pointer is over the target, as the cursor loop last saw it; the shape loop
     /// reads the cursor's picture only while it is.
     pointer_over: AtomicBool,
+    /// Wakes [`shape_loop`]: the pointer came over the target.
+    shape_wake: tokio::sync::Notify,
     /// `host_now_us()` until which frames are held on the accessibility API's word alone
     /// (zero: no suspicion). Set by the hide watch's callback, read on every frame; the
     /// geometry tick's `target_hidden` is the confirmation that outlives it.
@@ -1577,6 +1582,7 @@ impl<P: Platform> Shared<P> {
             cropped: AtomicBool::new(cropped),
             target_hidden: AtomicBool::new(false),
             pointer_over: AtomicBool::new(false),
+            shape_wake: tokio::sync::Notify::new(),
             suspect_until_us: AtomicU64::new(0),
             filter_stalled: AtomicBool::new(false),
             sink,
@@ -3854,11 +3860,7 @@ impl<P: Platform> Pipeline<P> {
             tokio::spawn(cursor_loop(Arc::clone(&shared), point_scale, injector.pointer()));
         let repair = tokio::spawn(repair_loop(Arc::clone(&shared)));
         let lane = tokio::spawn(lane_loop(Arc::clone(&shared)));
-        let shape = tokio::spawn(shape_loop(
-            Arc::clone(&shared),
-            backing_of(point_scale),
-            Arc::clone(&on_event),
-        ));
+        let shape = tokio::spawn(shape_loop(Arc::clone(&shared), Arc::clone(&on_event)));
         let hide_watch = hide_watch_for::<P>(id, target, &shared).await;
         #[expect(clippy::cast_possible_truncation, reason = "a small ratio")]
         let scale = (point_scale * zoom) as f32;
@@ -4573,11 +4575,7 @@ impl<P: Platform> Pipeline<P> {
             self.injector.pointer(),
         ));
         self.shape.abort();
-        self.shape = tokio::spawn(shape_loop(
-            Arc::clone(&self.shared),
-            backing_of(point_scale),
-            Arc::clone(&self.on_event),
-        ));
+        self.shape = tokio::spawn(shape_loop(Arc::clone(&self.shared), Arc::clone(&self.on_event)));
         Ok(())
     }
 
@@ -4601,19 +4599,8 @@ impl<P: Platform> Pipeline<P> {
         }
         let stats = self.stats();
         let cursor_wakes = self.shared.cursor_wakes.load(Ordering::Relaxed);
-        // Not in `ScreenStats` (a wire type): captures the encoder was too busy to take.
-        let superseded = self.shared.counters.superseded.load(Ordering::Relaxed);
-        let refined = self.shared.counters.refined.load(Ordering::Relaxed);
-        tracing::info!(stream = %self.id, ?stats, superseded, refined, cursor_wakes, "screen stream closed");
+        tracing::info!(stream = %self.id, ?stats, cursor_wakes, "screen stream closed");
     }
-}
-
-/// The cursor pictures' backing scale for a target of `point_scale` pixels a point.
-const fn backing_of(point_scale: f64) -> u8 {
-    #[expect(clippy::cast_possible_truncation, reason = "a display scale is 1 to 4")]
-    #[expect(clippy::cast_sign_loss, reason = "a display scale is positive")]
-    let backing = point_scale.round().clamp(1.0, 4.0) as u8;
-    backing
 }
 
 /// Set a worker window's size in points through the accessibility API.
@@ -4827,7 +4814,11 @@ async fn cursor_loop<P: Platform>(shared: Arc<Shared<P>>, point_scale: f64, inpu
             };
             cursor_sample(rect, at, pixels_per_point)
         };
-        shared.pointer_over.store(sample.2, Ordering::Relaxed);
+        if sample.2 && !shared.pointer_over.swap(true, Ordering::Relaxed) {
+            shared.shape_wake.notify_one();
+        } else if !sample.2 {
+            shared.pointer_over.store(false, Ordering::Relaxed);
+        }
         if last != Some(sample) {
             last = Some(sample);
             seq = seq.wrapping_add(1);
@@ -4885,26 +4876,46 @@ fn placed_sample(
     }
 }
 
-/// Read the cursor's picture at `SHAPE_PERIOD` while the pointer is over the target, and
-/// report each change through `on_event`. Its own task: the first read in a process takes
-/// seconds (`slopty_capture::warm_cursor` pays that at start-up), and a read must never
-/// hold the position loop.
+/// Follow the cursor's picture while the pointer is over the target, and report each change
+/// through `on_event`. Every [`SHAPE_PERIOD`] it reads the window server's cursor seed, which
+/// costs no round trip, and reads the picture only when the seed moved since the last read.
+/// While the pointer is elsewhere it sleeps until the cursor loop sees it come over the target
+/// (`shape_wake`), or [`CURSOR_BACKSTOP`] passes. Its own task: a picture read is a
+/// window-server round trip, run on the blocking pool, and must never hold the position loop.
 async fn shape_loop<P: Platform>(
     shared: Arc<Shared<P>>,
-    backing: u8,
     on_event: Arc<dyn Fn(StreamEvent) + Send + Sync>,
+) {
+    follow_shape(&shared, &*on_event, Source::<P>::cursor_seed, Source::<P>::cursor_shape).await;
+}
+
+/// [`shape_loop`] with the seed and picture reads it makes: the capture source's, or a test's.
+async fn follow_shape<P: Platform>(
+    shared: &Shared<P>,
+    on_event: &(dyn Fn(StreamEvent) + Send + Sync),
+    cursor_seed: fn() -> Option<i32>,
+    cursor_shape: fn() -> Option<CursorShape>,
 ) {
     let mut ticks = tokio::time::interval(SHAPE_PERIOD);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sent = ShapeDedup::default();
+    let mut read_at: Option<i32> = None;
     while !shared.sink.is_closed() {
-        ticks.tick().await;
         if !shared.pointer_over.load(Ordering::Relaxed) {
+            tokio::select! {
+                () = shared.shape_wake.notified() => {}
+                () = tokio::time::sleep(CURSOR_BACKSTOP) => {}
+            }
             continue;
         }
-        let Ok(read) =
-            tokio::task::spawn_blocking(move || Source::<P>::cursor_shape(backing)).await
-        else {
+        ticks.tick().await;
+        let seed = cursor_seed();
+        if seed.is_some() && seed == read_at {
+            continue;
+        }
+        // Taken before the picture: a change between the two is read again next tick.
+        read_at = seed;
+        let Ok(read) = tokio::task::spawn_blocking(cursor_shape).await else {
             return;
         };
         if let Some(shape) = sent.observe(read) {
@@ -6873,6 +6884,72 @@ mod tests {
         release.send(()).unwrap();
         let built = tokio::time::timeout(Duration::from_secs(5), rebuild.built()).await.unwrap();
         built.unwrap();
+    }
+
+    /// The window server's cursor as [`the_shape_loop_reads_the_picture_only_when_the_seed_moves`]
+    /// fakes it: the seed, and how many times the seed and the picture were read.
+    static FAKE_SEED: AtomicU64 = AtomicU64::new(1);
+    static SEEDS_READ: AtomicU64 = AtomicU64::new(0);
+    static SHAPES_READ: AtomicU64 = AtomicU64::new(0);
+
+    fn fake_seed() -> Option<i32> {
+        SEEDS_READ.fetch_add(1, Ordering::Relaxed);
+        i32::try_from(FAKE_SEED.load(Ordering::Relaxed)).ok()
+    }
+
+    #[expect(clippy::unnecessary_wraps, reason = "the signature of the read it stands for")]
+    fn fake_shape() -> Option<CursorShape> {
+        SHAPES_READ.fetch_add(1, Ordering::Relaxed);
+        let fill = u8::try_from(FAKE_SEED.load(Ordering::Relaxed) % 256).unwrap_or(0);
+        Some(CursorShape { w: 1, h: 1, hot_x: 0, hot_y: 0, bgra: vec![fill; 4], scale: 1 })
+    }
+
+    /// With the pointer off the target the loop reads nothing, not even the seed. Once the
+    /// cursor loop says it came over, it reads the seed every tick (120 a second) and the
+    /// picture once, sends it, and reads the picture again only when the seed moves.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_shape_loop_reads_the_picture_only_when_the_seed_moves() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let on_event: Arc<dyn Fn(StreamEvent) + Send + Sync> = {
+            let sent = Arc::clone(&sent);
+            Arc::new(move |event| {
+                if let StreamEvent::Cursor(shape) = event {
+                    sent.lock().push(shape.bgra[0]);
+                }
+            })
+        };
+        let task = tokio::spawn({
+            let shared = Arc::clone(&shared);
+            async move { follow_shape(&shared, &*on_event, fake_seed, fake_shape).await }
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(SEEDS_READ.load(Ordering::Relaxed), 0, "off the target: nothing read");
+
+        shared.pointer_over.store(true, Ordering::Relaxed);
+        shared.shape_wake.notify_one();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let seeds = SEEDS_READ.load(Ordering::Relaxed);
+        assert!((10..=40).contains(&seeds), "about 30 seeds in 250 ms at 120 Hz: {seeds}");
+        assert_eq!(SHAPES_READ.load(Ordering::Relaxed), 1, "the picture once, for the first seed");
+        assert_eq!(*sent.lock(), [1], "and sent once");
+
+        FAKE_SEED.store(2, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(SHAPES_READ.load(Ordering::Relaxed), 2, "read again when the seed moved");
+        assert_eq!(*sent.lock(), [1, 2]);
+
+        shared.pointer_over.store(false, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let off = SEEDS_READ.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(SEEDS_READ.load(Ordering::Relaxed), off, "off the target again: no reads");
+
+        wire.closed.store(true, Ordering::Relaxed);
+        task.abort();
     }
 
     /// A datagram the transport refused never left, so it says nothing of how fast the link

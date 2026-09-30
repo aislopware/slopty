@@ -17,7 +17,7 @@
 //! It writes `ready pid=<pid> window=<CGWindowID>`, then a line for each press, drag and release
 //! AppKit takes (`event`, with its event number), for each session callback (`began`, `moved`
 //! when the point changes, `ended` with the operation), and `cursor class=<c>` each time the
-//! system cursor changes class, read as the worker reads it (`slopty_capture::cursor_shape`) and
+//! system cursor changes class, read as the worker reads it (`slopty_capture::read_cursor`) and
 //! classed against AppKit's arrow, copy, link, not-allowed and closed-hand cursors by the pixels
 //! that differ. It never becomes the active application and leaves when its stdin closes.
 
@@ -325,12 +325,16 @@ mod macos {
     /// Width, height and premultiplied BGRA pixels.
     type Pixels = (u16, u16, Vec<u8>);
 
-    /// A cursor's picture as `cursor_shape` reads the system's: premultiplied BGRA at 2×.
-    fn pixels(cursor: &NSCursor) -> Option<Pixels> {
+    /// AppKit's cursors by name, read at one scale.
+    type References = Vec<(&'static str, Pixels)>;
+
+    /// A cursor's picture as `read_cursor` reads the system's: premultiplied BGRA at `scale`
+    /// pixels a point, the scale of the display the window server draws the cursor on.
+    fn pixels(cursor: &NSCursor, scale: u8) -> Option<Pixels> {
         let image = cursor.image();
         let points = image.size();
         #[expect(clippy::cast_possible_truncation, reason = "a cursor is a few hundred pixels")]
-        let wanted = (points.width * 2.0).round() as isize;
+        let wanted = (points.width * f64::from(scale)).round() as isize;
         let reps = image.representations();
         let rep: Retained<NSImageRep> = reps
             .iter()
@@ -375,10 +379,9 @@ mod macos {
             .count()
     }
 
-    /// Say the system cursor's class each time it changes: the reference of its size with the
-    /// fewest differing pixels, or `other`.
-    fn watch_cursor() -> Retained<NSTimer> {
-        let references: Vec<(&str, Pixels)> = [
+    /// AppKit's arrow, copy, link, not-allowed and closed-hand cursors at `scale`.
+    fn references(scale: u8) -> References {
+        let references: References = [
             ("arrow", NSCursor::arrowCursor()),
             ("copy", NSCursor::dragCopyCursor()),
             ("link", NSCursor::dragLinkCursor()),
@@ -386,19 +389,33 @@ mod macos {
             ("closedhand", NSCursor::closedHandCursor()),
         ]
         .into_iter()
-        .filter_map(|(name, cursor)| Some((name, pixels(&cursor)?)))
+        .filter_map(|(name, cursor)| Some((name, pixels(&cursor, scale)?)))
         .collect();
         say(&format!(
-            "references {}",
+            "references at {scale}x {}",
             references
                 .iter()
                 .map(|(name, (w, h, _))| format!("{name}={w}x{h}"))
                 .collect::<Vec<_>>()
                 .join(" ")
         ));
+        references
+    }
+
+    /// Say the system cursor's class each time it changes: the reference of its size with the
+    /// fewest differing pixels, or `other`. The references are read at the scale of the picture
+    /// the window server hands back, and again when that scale changes.
+    fn watch_cursor() -> Retained<NSTimer> {
+        let at_scale: RefCell<Option<(u8, References)>> = RefCell::new(None);
+        let watch = RefCell::new(slopty_capture::CursorWatch::new());
         let last = RefCell::new(String::new());
         let tick = RcBlock::new(move |_timer| {
-            let Some(shape) = slopty_capture::cursor_shape(2) else { return };
+            let Some(shape) = watch.borrow_mut().poll() else { return };
+            let mut at_scale = at_scale.borrow_mut();
+            if at_scale.as_ref().is_none_or(|(scale, _)| *scale != shape.scale) {
+                *at_scale = Some((shape.scale, references(shape.scale)));
+            }
+            let Some((_, references)) = at_scale.as_ref() else { return };
             let best = references
                 .iter()
                 .filter(|(_, (w, h, _))| (*w, *h) == (shape.w, shape.h))

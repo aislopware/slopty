@@ -3,10 +3,12 @@
 //! The element names each row's stretches of paint by a key (`Window::paint_keyed`), and GPUI
 //! draws a stretch whose key it painted last frame again from that frame, in place or moved.
 //! Two windows here take the same random history of output, edits, scrolls, selections, search
-//! hits, cursor moves and blinks, input-method text, links, themes, zooms, focus and resizes:
-//! one draws with retention on, so keyed stretches are drawn again, and one with it off, so
-//! every stretch is painted afresh. Every frame the two paint must match, primitive for
-//! primitive and in the same order.
+//! hits, cursor moves and blinks, input-method text, links, themes (colours, font size, line
+//! height, ligatures, minimum contrast, bold as bright), zooms, focus, resizes and scale factors
+//! (1.5 among them, where a row's move is often not whole device pixels): one draws with
+//! retention on, so keyed stretches are drawn again, and one with it off, so every stretch is
+//! painted afresh. Every frame the two paint must match, primitive for primitive and in the
+//! same order.
 //!
 //! The windows shape with a text system of their own ([`Glyphs`]): GPUI's test one
 //! rasterises nothing, so a test on it never sees a glyph painted. Here every glyph gets a
@@ -90,17 +92,21 @@ impl PlatformTextSystem for Glyphs {
         &self,
         params: &RenderGlyphParams,
     ) -> anyhow::Result<Bounds<DevicePixels>> {
-        // Small numbers throughout: a glyph's id modulo a prime, and a face of 1 to 4.
-        let id = i32::try_from(params.glyph_id.0.wrapping_rem(97)).unwrap_or(0);
+        // The scene keeps a sprite's bounds and colour but not its tile, so the size alone must
+        // tell every glyph and face the histories paint apart: the width is the id modulo a
+        // prime above every ASCII character, the height the face and what the modulo lost.
+        let id = params.glyph_id.0;
+        let low = i32::try_from(id.wrapping_rem(251)).unwrap_or(0);
+        let high = i32::try_from((id / 251).wrapping_rem(8)).unwrap_or(0);
         let face = i32::try_from(params.font_id.0).unwrap_or(0);
         Ok(Bounds {
             origin: point(
                 DevicePixels(face.wrapping_rem(2)),
-                DevicePixels(id.wrapping_rem(5).wrapping_neg().wrapping_sub(9)),
+                DevicePixels(low.wrapping_rem(5).wrapping_neg().wrapping_sub(9)),
             ),
             size: size(
-                DevicePixels(id.wrapping_rem(13).wrapping_add(face).wrapping_add(1)),
-                DevicePixels(id.wrapping_rem(7).wrapping_add(9)),
+                DevicePixels(low.wrapping_add(1)),
+                DevicePixels(face.wrapping_mul(8).wrapping_add(high).wrapping_add(9)),
             ),
         })
     }
@@ -356,11 +362,11 @@ fn frame(seq: u64, first: u64, updates: Vec<(u16, Line)>, cursor: Cursor) -> Ter
 /// A step of the history, done to both terminals alike.
 type Step = Box<dyn Fn(&mut TerminalView, &mut Window, &mut gpui::Context<TerminalView>)>;
 
-/// Runs `steps` random steps from `seed` on both windows, comparing every frame, and gives
-/// how many stretches the retained window drew again and how many of those moved.
-fn run(seed: u64, steps: usize) -> (u64, u64) {
-    let mut cx =
-        TestAppContext::build_with_text_system(TestDispatcher::new(seed), None, Arc::new(Glyphs));
+/// Runs `steps` random steps from `seed` on both windows, shaping with `text` and comparing
+/// every frame, and gives how many stretches the retained window drew again and how many of
+/// those moved.
+fn run(seed: u64, steps: usize, text: Arc<dyn PlatformTextSystem>) -> (u64, u64) {
+    let mut cx = TestAppContext::build_with_text_system(TestDispatcher::new(seed), None, text);
     cx.update(gpui_kit::init);
     let mut sides = sides(&mut cx);
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
@@ -378,12 +384,13 @@ fn run(seed: u64, steps: usize) -> (u64, u64) {
             Some(step) => step,
             None => next_step(&mut rng, &mut seq, &mut first, &mut cursor),
         };
-        let resize = what.starts_with("resize");
         for side in &mut sides {
             let view = side.view.clone();
-            if resize {
-                let wide = rng_size(&what);
-                side.cx.simulate_resize(wide);
+            if what.starts_with("resize") {
+                side.cx.simulate_resize(size_named(&what));
+            }
+            if what.starts_with("scale") {
+                side.cx.simulate_scale_factor_change(scale_named(&what));
             }
             side.cx.update(|window, cx| view.update(cx, |view, cx| step(view, window, cx)));
         }
@@ -417,9 +424,21 @@ fn run(seed: u64, steps: usize) -> (u64, u64) {
     (replayed, moved)
 }
 
+/// The window sizes a resize step picks from: the first, wider and taller, only taller, a
+/// fraction of a cell wider (the grid keeps its columns), and narrower than the rows.
+const SIZES: [(f32, f32); 5] =
+    [(520.0, 260.0), (560.0, 300.0), (520.0, 330.0), (523.5, 260.0), (300.0, 200.0)];
+
 /// The window size a resize step names.
-fn rng_size(what: &str) -> Size<Pixels> {
-    if what.ends_with("wide") { size(px(560.0), px(300.0)) } else { size(px(520.0), px(260.0)) }
+fn size_named(what: &str) -> Size<Pixels> {
+    let at = what.rsplit(' ').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    let (w, h) = SIZES.get(at).copied().unwrap_or(SIZES[0]);
+    size(px(w), px(h))
+}
+
+/// The scale factor a scale step names.
+fn scale_named(what: &str) -> f32 {
+    what.rsplit(' ').next().and_then(|n| n.parse().ok()).unwrap_or(2.0)
 }
 
 fn apply(event: TermEvent) -> Step {
@@ -429,7 +448,7 @@ fn apply(event: TermEvent) -> Step {
 /// The next random step, with what it does.
 fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor) -> (String, Step) {
     let row = rng.u16_below(ROWS);
-    match rng.below(20) {
+    match rng.below(21) {
         0..=3 => {
             *seq = seq.saturating_add(1);
             *first = first.saturating_add(1);
@@ -543,13 +562,24 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
         13 => {
             let variant = if rng.chance(50) { Variant::Light } else { Variant::Dark };
             let short = rng.chance(40);
+            let font = [0.0, 0.0, -1.5, 2.0][rng.below(4)];
+            let ligatures = rng.chance(70);
+            let contrast = [100, 100, 450][rng.below(3)];
+            let bright = rng.chance(50);
             (
-                format!("theme {variant:?}, short lines {short}"),
+                format!(
+                    "theme {variant:?}, short lines {short}, font {font:+}, ligatures \
+                     {ligatures}, contrast {contrast}, bold bright {bright}"
+                ),
                 Box::new(move |view, _window, cx| {
                     let mut theme = Theme::new(variant);
                     if short {
                         theme.typography.mono_line_height = 0.8;
                     }
+                    theme.typography.mono_size += font;
+                    theme.typography.ligatures = ligatures;
+                    theme.terminal.minimum_contrast = contrast;
+                    theme.terminal.bold_is_bright = bright;
                     view.set_theme(theme, cx);
                 }),
             )
@@ -579,24 +609,56 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
                 }),
             )
         }
-        16 => {
-            let wide = rng.chance(50);
-            (format!("resize {}", if wide { "wide" } else { "back" }), Box::new(|_, _, _| {}))
+        16 => (format!("resize {}", rng.below(SIZES.len())), Box::new(|_, _, _| {})),
+        17 => {
+            let scale = [1.0, 2.0, 1.5][rng.below(3)];
+            (format!("scale {scale}"), Box::new(|_, _, _| {}))
         }
         _ => ("redrawn".to_owned(), Box::new(|_view, _window, cx| cx.notify())),
     }
 }
 
-/// Every frame of a random history paints what painting the grid whole paints, and stretches
-/// were drawn again, in place and moved.
-#[test]
-fn the_keyed_grid_paints_what_a_grid_painted_whole_paints() {
+/// Runs the histories of seeds 1 to 6 on `text`, and checks that stretches were drawn again,
+/// in place and moved.
+fn histories(text: &Arc<dyn PlatformTextSystem>) {
     let (mut replayed, mut moved) = (0_u64, 0_u64);
     for seed in 1..=6 {
-        let (r, m) = run(seed, 250);
+        let (r, m) = run(seed, 250, Arc::clone(text));
         replayed = replayed.saturating_add(r);
         moved = moved.saturating_add(m);
     }
     assert!(replayed > 1_000, "stretches were drawn again: {replayed}");
     assert!(moved > 100, "stretches were drawn again moved: {moved}");
+}
+
+/// Every frame of a random history paints what painting the grid whole paints, every glyph a
+/// raster of its own size.
+#[test]
+fn the_keyed_grid_paints_what_a_grid_painted_whole_paints() {
+    let glyphs: Arc<dyn PlatformTextSystem> = Arc::new(Glyphs);
+    histories(&glyphs);
+}
+
+/// The same on the Mac's own text system: real fonts shaped and rasterised by Core Text, at
+/// the quarter-pixel places GPUI puts glyphs, where a row drawn again moved would drift from
+/// one painted there if anything it paints fell between two.
+#[test]
+fn the_keyed_grid_paints_what_a_grid_painted_whole_paints_in_core_text() {
+    let text = gpui_platform::text_system();
+    // Without `font-kit` the platform's text system is GPUI's no-op one, which draws no glyph.
+    let menlo = text.font_id(&gpui::font("Menlo")).unwrap_or_else(|e| panic!("Menlo: {e}"));
+    let m = text.glyph_for_char(menlo, 'm').unwrap_or_else(|| panic!("no glyph for m"));
+    let params = RenderGlyphParams {
+        font_id: menlo,
+        glyph_id: m,
+        font_size: px(13.0),
+        subpixel_variant: point(0, 0),
+        scale_factor: 2.0,
+        is_emoji: false,
+        subpixel_rendering: false,
+        dilation: 0,
+    };
+    let ink = text.glyph_raster_bounds(&params).unwrap_or_else(|e| panic!("raster: {e}"));
+    assert!(ink.size.width.0 > 0 && ink.size.height.0 > 0, "Core Text rasterises glyphs");
+    histories(&text);
 }

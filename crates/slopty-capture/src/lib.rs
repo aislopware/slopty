@@ -43,7 +43,9 @@ pub use ax::{HideWatch, resize_window};
 #[cfg(target_os = "macos")]
 pub use content::{Shareable, enumerate};
 #[cfg(target_os = "macos")]
-pub use cursor::{AlphaAt, Layout, bgra_premultiplied, cursor_shape, warm_cursor};
+pub use cursor::{
+    AlphaAt, CursorWatch, Layout, bgra_premultiplied, cursor_seed, read_cursor, warm_cursor,
+};
 #[cfg(target_os = "macos")]
 pub use geometry::{
     Above, active_displays, can_capture, counts_as_occluder, display_bounds, display_enclosing,

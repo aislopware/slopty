@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args;
 use serde::Deserialize;
@@ -141,12 +141,10 @@ pub fn run(sh: &Shell, opts: &BenchOpts) -> Result<()> {
         trend(&root.join("target/nightly/bench.jsonl"), &judged, sh)?;
     }
     if opts.update_budgets {
-        let mut next = if opts.filter.is_some() { budgets.clone() } else { BTreeMap::new() };
-        for (m, ..) in &judged {
-            if let Some(i) = m.instructions {
-                next.insert(m.name.clone(), i);
-            }
-        }
+        // A run that failed measured only part of the tree: rewriting from it would drop the
+        // budget of every series it never reached.
+        ensure!(ran.is_ok(), "the measurement failed, so {BUDGETS} is left as it was: {ran:?}");
+        let next = next_budgets(&budgets, &judged, opts.filter.is_some());
         write_budgets(&root.join(BUDGETS), &next)?;
         println!("✔ wrote {} budgets to {BUDGETS}", next.len());
     }
@@ -232,6 +230,22 @@ fn read_budgets(path: &Utf8Path) -> Result<BTreeMap<String, u64>> {
     let Ok(text) = std::fs::read_to_string(path) else { return Ok(BTreeMap::new()) };
     let file: File = toml::from_str(&text).with_context(|| format!("parsing {path}"))?;
     Ok(file.instructions)
+}
+
+/// The budgets a run records: every series it measured, and, when a filter picked only some,
+/// the budgets it did not reach as they were. A whole run drops the budgets of series gone.
+fn next_budgets(
+    budgets: &BTreeMap<String, u64>,
+    judged: &[(Measured, Verdict, Option<u64>)],
+    filtered: bool,
+) -> BTreeMap<String, u64> {
+    let mut next = if filtered { budgets.clone() } else { BTreeMap::new() };
+    for (m, ..) in judged {
+        if let Some(i) = m.instructions {
+            next.insert(m.name.clone(), i);
+        }
+    }
+    next
 }
 
 fn write_budgets(path: &Utf8Path, budgets: &BTreeMap<String, u64>) -> Result<()> {
@@ -384,6 +398,24 @@ fn trend(path: &Utf8Path, judged: &[(Measured, Verdict, Option<u64>)], sh: &Shel
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_filtered_run_keeps_the_budgets_it_did_not_reach() {
+        let wall = Wall { p50: 0, p95: 0, p99: 0, p999: 0, max: 0 };
+        let measured = |name: &str, i| Measured {
+            name: name.to_owned(),
+            samples: 1,
+            ops: 1,
+            instructions: Some(i),
+            wall_ns: wall,
+        };
+        let budgets = BTreeMap::from([("a".to_owned(), 10_u64), ("b".to_owned(), 20)]);
+        let judged = [(measured("a", 11), Verdict::Held, Some(10))];
+        let filtered = next_budgets(&budgets, &judged, true);
+        assert_eq!(filtered, BTreeMap::from([("a".to_owned(), 11), ("b".to_owned(), 20)]));
+        let whole = next_budgets(&budgets, &judged, false);
+        assert_eq!(whole, BTreeMap::from([("a".to_owned(), 11)]), "a whole run drops what is gone");
+    }
 
     #[test]
     fn a_budget_holds_within_its_slack() {

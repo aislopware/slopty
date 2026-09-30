@@ -25,11 +25,14 @@ status-level = "fail"
 # missing hardware puts a test here, never timing and never a pattern.
 # - The guest has no performance counters: `proc_pid_rusage` reads 0 instructions and 0 cycles.
 # - The guest has no wake-on-LAN: `pmset -g` gives no `womp` setting.
+# - The guest has no SoC counters: IOReport offers none of the encode-engine, memory-controller,
+#   GPU or energy channels, so there is nothing to subscribe to.
 default-filter = '''
 not (
     (package(slopty-testkit) & (
         test(=bench::tests::a_series_reports_per_operation_and_as_json)
-        | test(=process::tests::this_process_reads_back)))
+        | test(=process::tests::this_process_reads_back)
+        | test(=soc::tests::a_span_reads_back)))
     | (package(slopty-worker) & test(=caps::tests::this_mac_says_whether_it_wakes_on_lan))
 )
 '''

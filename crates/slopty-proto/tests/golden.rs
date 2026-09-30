@@ -2847,6 +2847,8 @@ mod ctl {
             },
             encoder_bps: 18_000_000,
             repaired: 11,
+            refined: 13,
+            superseded: 14,
             laned: 12,
             on_crop: true,
         };

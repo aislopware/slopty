@@ -243,7 +243,11 @@ pub mod headless {
             (0.0, 0.0)
         }
 
-        fn cursor_shape(_scale: u8) -> Option<CursorShape> {
+        fn cursor_seed() -> Option<i32> {
+            None
+        }
+
+        fn cursor_shape() -> Option<CursorShape> {
             None
         }
     }

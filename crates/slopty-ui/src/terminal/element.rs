@@ -156,9 +156,17 @@ pub struct Prepared {
     /// Images the program placed (kitty graphics), clipped to the grid.
     images: Vec<PreparedImage>,
     /// What every row's stretch keys hold of the frame: the font, cell, palette, zoom, raster
-    /// size, scale and the element's size. `None` while the zoom is in motion, when every
-    /// frame paints another size and a key would only cost.
+    /// size, baseline and scale. Not the element's size: a row paints nothing from it, so a
+    /// tile resized in place draws its unchanged rows again. `None` while the zoom is in
+    /// motion, when every frame paints another size and a key would only cost.
     stretches: Option<u64>,
+    /// Every edge the rows paint lies on a whole device pixel: the grid's origin, cell, line,
+    /// baseline and strokes. GPUI rounds a quad's edges to the nearest device pixel and a
+    /// glyph to the nearest quarter, so an edge that falls between two can round either way
+    /// by a float's last bit, and a row moved by whole device pixels would not match one
+    /// painted there. Off the grid, a row's key holds its place too, so it is drawn again
+    /// only where it was.
+    on_grid: bool,
     /// The grid's place in the hit test: a touch that lands on an overlay above it (the find
     /// bar, a menu) is not the grid's.
     hitbox: Hitbox,
@@ -285,11 +293,25 @@ enum Pass {
 }
 
 /// The key of `pass` over `row`: the frame's part ([`Prepared::stretches`]), the row's parts
-/// and `extra`, what the pass paints on this row beyond its parts.
-fn stretch_key(frame: u64, pass: Pass, row: &PreparedRow, extra: u64) -> u64 {
+/// and `extra`, what the pass paints on this row beyond its parts; and off the device grid
+/// ([`Prepared::on_grid`]) `place`, the stretch's origin by its bits.
+fn stretch_key(
+    frame: u64,
+    pass: Pass,
+    row: &PreparedRow,
+    extra: u64,
+    place: Option<(u32, u32)>,
+) -> u64 {
     let mut h = FxHasher::default();
-    (frame, pass, row.parts.key, extra).hash(&mut h);
+    (frame, pass, row.parts.key, extra, place).hash(&mut h);
     h.finish()
+}
+
+/// Whether `v` points is a whole number of device pixels at `scale`, far closer to one than
+/// the half and eighth pixels GPUI rounds quads and glyphs at.
+fn on_device_pixel(v: Pixels, scale: f32) -> bool {
+    let device = f32::from(v) * scale;
+    (device - device.round()).abs() < 1.0 / 64.0
 }
 
 /// Paints `paint`, relative to `origin`, as the stretch named `key`: drawn again from the last
@@ -475,7 +497,9 @@ fn pattern_pieces(
     let point_of = |d: f32| px(d / scale);
     let thick = (f32::from(thickness) * scale).round().max(1.0);
     let top = (f32::from(y) * scale).round();
-    let (start, cell) = (f32::from(x0) * scale, f32::from(cell_width) * scale);
+    // The run starts on a whole device pixel, so the pieces fall on the same pixels of their
+    // cells wherever the row is: a row moved by whole pixels rounds as one painted there.
+    let (start, cell) = ((f32::from(x0) * scale).round(), f32::from(cell_width) * scale);
     let mut out = Vec::new();
     let mut piece = |from: f32, to: f32| {
         let (from, to) = (from.round(), to.round());
@@ -1470,6 +1494,7 @@ impl Element for TerminalElement {
         if !cx.has_global::<Probe>() {
             cx.set_global(Probe::default());
         }
+        let keyed = self.view.read(cx).keyed_paint();
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         // Resolving the family walks every installed font: once per app for a theme's list
         // (the cache), remembered per view so a frame costs neither the walk nor the lookup.
@@ -2028,7 +2053,20 @@ impl Element for TerminalElement {
                     .unwrap_or_default(),
                 blinking,
                 images,
-                stretches: (!self.zooming).then(|| {
+                on_grid: [
+                    origin.x,
+                    origin.y,
+                    cell_width,
+                    line_height,
+                    grid.baseline,
+                    grid.underline.y,
+                    grid.underline.thickness,
+                    grid.strikethrough.y,
+                    grid.strikethrough.thickness,
+                ]
+                .into_iter()
+                .all(|v| on_device_pixel(v, window.scale_factor())),
+                stretches: (keyed && !self.zooming).then(|| {
                     let mut h = FxHasher::default();
                     row_frame.hash(&mut h);
                     for v in [
@@ -2036,8 +2074,6 @@ impl Element for TerminalElement {
                         f32::from(font_size),
                         f32::from(raster_size),
                         f32::from(grid.baseline),
-                        f32::from(bounds.size.width),
-                        f32::from(bounds.size.height),
                     ] {
                         v.to_bits().hash(&mut h);
                     }
@@ -2176,8 +2212,15 @@ impl Element for TerminalElement {
         // again from the last frame while the key holds: a row that did not change, or only
         // moved, is copied rather than painted. What else a frame paints (the cursor, the
         // bands, the overlay) is painted every frame, between the passes as before.
-        let frame = prepared.stretches;
+        let (frame, on_grid) = (prepared.stretches, prepared.on_grid);
         let at = |row: &PreparedRow| point(m.origin.x, row.y);
+        let key_of = |pass: Pass, row: &PreparedRow, extra: u64| {
+            frame.map(|frame| {
+                let place = (!on_grid)
+                    .then(|| (f32::from(m.origin.x).to_bits(), f32::from(row.y).to_bits()));
+                stretch_key(frame, pass, row, extra, place)
+            })
+        };
         for row in &prepared.rows {
             if row.parts.quads.is_empty() && row.marks.is_empty() {
                 continue;
@@ -2187,7 +2230,7 @@ impl Element for TerminalElement {
                 (start, end).hash(&mut marks);
                 hash_color(color, &mut marks);
             }
-            let key = frame.map(|frame| stretch_key(frame, Pass::Backgrounds, row, marks.finish()));
+            let key = key_of(Pass::Backgrounds, row, marks.finish());
             stretch(window, key, at(row), |window| {
                 for (start, end, color) in row.parts.quads.iter().chain(&row.marks) {
                     let x = m.origin.x + m.cell_width * f32::from(*start);
@@ -2225,7 +2268,7 @@ impl Element for TerminalElement {
         // Underlines, under the glyphs so a descender crosses the line rather than being
         // cut by it (ghostty draws them in the same order).
         for row in prepared.rows.iter().filter(|row| row.parts.under) {
-            let key = frame.map(|frame| stretch_key(frame, Pass::Under, row, 0));
+            let key = key_of(Pass::Under, row, 0);
             stretch(window, key, at(row), |window| {
                 paint_decorations(window, &m, row, Layer::Under);
             });
@@ -2254,8 +2297,7 @@ impl Element for TerminalElement {
         if prepared.rows.iter().any(|row| !row.parts.sprites.is_empty()) {
             window.paint_layer(bounds, |window| {
                 for row in prepared.rows.iter().filter(|row| !row.parts.sprites.is_empty()) {
-                    let key = frame
-                        .map(|frame| stretch_key(frame, Pass::Sprites, row, under_cursor(row)));
+                    let key = key_of(Pass::Sprites, row, under_cursor(row));
                     stretch(window, key, at(row), |window| {
                         for sprite in &row.parts.sprites {
                             let x = m.origin.x + m.cell_width * f32::from(sprite.col);
@@ -2285,8 +2327,7 @@ impl Element for TerminalElement {
         let (zoom, font_size, raster) = (prepared.zoom, prepared.font_size, prepared.raster_size);
         window.paint_layer(bounds, |window| {
             for row in prepared.rows.iter().filter(|row| !row.parts.segments.is_empty()) {
-                let key =
-                    frame.map(|frame| stretch_key(frame, Pass::Glyphs, row, under_cursor(row)));
+                let key = key_of(Pass::Glyphs, row, under_cursor(row));
                 stretch(window, key, at(row), |window| {
                     paint_words(
                         window,
@@ -2301,7 +2342,7 @@ impl Element for TerminalElement {
         });
         // Strikethroughs, over the glyphs, where the font's metrics put them.
         for row in prepared.rows.iter().filter(|row| row.parts.over) {
-            let key = frame.map(|frame| stretch_key(frame, Pass::Over, row, 0));
+            let key = key_of(Pass::Over, row, 0);
             stretch(window, key, at(row), |window| {
                 paint_decorations(window, &m, row, Layer::Over);
             });

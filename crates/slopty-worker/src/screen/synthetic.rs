@@ -388,7 +388,11 @@ impl<const HZ: u16, const W: u16, const H: u16> CaptureSource for StudioAt<HZ, W
         (0.0, 0.0)
     }
 
-    fn cursor_shape(_scale: u8) -> Option<CursorShape> {
+    fn cursor_seed() -> Option<i32> {
+        None
+    }
+
+    fn cursor_shape() -> Option<CursorShape> {
         None
     }
 }
@@ -1052,6 +1056,9 @@ mod tests {
     /// estimate states plus the width of the two clock reads.
     #[test]
     fn the_clock_probes_time_captures_as_the_shared_clock_does() {
+        /// Longer than any picture takes on a machine that is only busy: past it the stream
+        /// has stopped.
+        const STALLED: Duration = Duration::from_secs(10);
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
         runtime.unwrap().block_on(async {
@@ -1095,19 +1102,29 @@ mod tests {
                 );
                 let mut frames = handle.frames();
                 let clocks = anchor();
+                // Waits on the stream, not on the clock: a slow machine only takes longer. A
+                // stream that stops handing out pictures, or whose probes never come back while
+                // it does, fails with what the client saw.
                 let mut errors = Vec::new();
-                let collect = async {
-                    while errors.len() < 60 && frames.changed().await.is_ok() {
-                        let Some(frame) = frames.borrow_and_update().clone() else { continue };
-                        let (Some(estimated), Some(exact)) =
-                            (frame.stamp.captured, clocks.captured(frame.stamp.pts_us))
-                        else {
-                            continue;
-                        };
-                        errors.push(estimated.duration_since(exact).max(exact.duration_since(estimated)));
-                    }
-                };
-                tokio::time::timeout(Duration::from_secs(60), collect).await.unwrap();
+                let mut seen = 0_u32;
+                while errors.len() < 60 {
+                    let next = tokio::time::timeout(STALLED, frames.changed()).await;
+                    assert!(
+                        next.is_ok_and(|changed| changed.is_ok()),
+                        "no picture for {STALLED:?} after {seen}, {} timed: {:?}",
+                        errors.len(),
+                        handle.stats()
+                    );
+                    let Some(frame) = frames.borrow_and_update().clone() else { continue };
+                    seen += 1;
+                    let (Some(estimated), Some(exact)) =
+                        (frame.stamp.captured, clocks.captured(frame.stamp.pts_us))
+                    else {
+                        assert!(seen < 600, "{seen} pictures and no probe back: {:?}", handle.stats());
+                        continue;
+                    };
+                    errors.push(estimated.duration_since(exact).max(exact.duration_since(estimated)));
+                }
                 let estimate = handle.stats().clock.expect("the probes came back");
                 let max = errors.iter().max().copied().unwrap_or_default();
                 errors.sort_unstable();
