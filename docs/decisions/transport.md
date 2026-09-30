@@ -1853,3 +1853,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - *What no test here reaches.* The system posting its notifications, because no test sleeps
     the Mac or moves its network, and the two lost-resume races, which need a resume to land
     within one tick of a link ending.
+- ✅ **A resent Initial is not a stateless reset** (2026-10-01, MEASUREMENTS "the fill's dials
+  after the port fix, and a reset by peer"). The fill's dials that got no answer stayed fixed
+  ("A dual-stack port no IPv4 socket holds"): four soaks, about 47 000 CLI calls, none failed to
+  reach the server. The same load in one process turned up a second, rarer failure. About one
+  fresh dial in 100 000 on a loaded machine failed at once with "stream: reset by peer", when
+  the client opened its first stream. The server had sent no stateless reset to any of those
+  client ports. The client took one of the server's own packets for one.
+  - **How.** The null crypto has no AEAD tag (`slopty_net::crypto`, `tag_len` 0), so a packet
+    ends in whatever frame it carries last. The server's HELLO is its transport parameters,
+    which noq writes in a shuffled order (`transport_parameters.rs`, `order.shuffle`). One
+    time in about twelve the stateless reset token comes last, so the HELLO ends in the token.
+    The server's first flight coalesces its Initial ahead of Handshake and 1-RTT packets. The
+    padding goes to the last packet (`finish_and_track(…, PadDatagram::No)` for the others), so
+    the Initial ends in the token. noq's `unprotect_header` compared the last 16 bytes of every
+    packet with the peer's token, a long-header packet coalesced ahead of others included, and
+    `handle_packet` took a match for a reset even when the packet decrypted. The first copy is
+    read before the client knows the token and passes. A resent copy that the client reads
+    before it answers the first is taken for a reset. Once the client has sent a Handshake
+    packet it drops Initials unread, so only a slow client meets the resend: the server's
+    probe timeout is a few milliseconds, and a loaded machine answers later. A probe in the
+    stressed run showed it: a first flight, then 10 µs later a 173-byte unpadded Initial and
+    `got stateless reset`.
+  - **The fix is noq-proto patch 17** (`vendor/noq-proto/SLOPTY.md`). Only a short-header
+    packet is compared. A stateless reset takes that form (RFC 9000 §10.3), and a short-header
+    packet runs to the end of its datagram, so those are the datagram's trailing 16 bytes that
+    §10.3.1 compares. No genuine reset is missed. Behind an AEAD a packet ends in its tag, so
+    upstream never goes wrong, and noq and quinn still compare every packet with no pull
+    request about it. The patch is correct for them too and small enough to offer.
+  - **Rejected: a tag on the null crypto.** A keyed checksum would end every packet in bytes
+    no frame writes. It would cost bytes and hashing on every packet of the input and frame
+    paths to guard a check that belongs to noq.
+  - **Not taken: skipping the check for a packet that decrypted and was routed by one of the
+    connection's own IDs** (the RFC allows it). Under the null crypto every packet decrypts, so
+    this would close the last way a real packet can end in the compared token. That way needs
+    a short-header packet whose last frame is the NEW_CONNECTION_ID for the ID in use. The
+    client compares the server's handshake token, which no NEW_CONNECTION_ID carries. The
+    server compares the token of the client's sequence-1 ID, and noq writes the client's
+    NEW_CONNECTION_ID frames in ascending sequence (`PendingNewCids::pop`), so that frame ends
+    a packet only when it is sent alone. No run or seed here produced one, and the skip needs
+    the endpoint to pass the routing to the connection.
+  - Tests: `a_long_header_packet_ending_in_the_token_is_no_stateless_reset` and
+    `a_short_header_packet_ending_in_the_token_is_a_stateless_reset` (noq-proto,
+    `packet_crypto.rs`). `a_path_that_delivers_every_datagram_twice_still_connects`
+    (`crates/slopty-net/tests/sim.rs`) runs a dial on a simulated path that delivers every
+    datagram twice. Its seed 7 failed with "reset by peer" before the fix, and so did 25 of
+    300 seeds; 0 of 1 000 fail after it. The nightly sweep runs it on 200 seeds.

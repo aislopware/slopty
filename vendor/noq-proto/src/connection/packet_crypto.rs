@@ -157,9 +157,7 @@ impl CryptoState {
             None => None,
         };
 
-        let packet = partial_decode.data();
-        let stateless_reset = packet.len() >= RESET_TOKEN_SIZE + 5
-            && stateless_reset_token.as_deref() == Some(&packet[packet.len() - RESET_TOKEN_SIZE..]);
+        let stateless_reset = is_stateless_reset(&partial_decode, stateless_reset_token);
 
         match partial_decode.finish(header_crypto) {
             Ok(packet) => Some(UnprotectHeaderResult {
@@ -454,6 +452,21 @@ impl CryptoState {
     }
 }
 
+/// Whether `packet` ends in the peer's stateless reset `token`.
+///
+/// A stateless reset takes the form of a short-header packet (RFC 9000 §10.3), and a
+/// short-header packet runs to the end of its datagram, so these are the datagram's trailing 16
+/// bytes that §10.3.1 compares. A long-header packet is never one. It ends in its own payload,
+/// even when coalesced ahead of other packets, and under a packet key without an AEAD tag that
+/// payload can end in the token itself: a server's transport parameters carry it, and their
+/// order is shuffled, so an unpadded Initial resending them can end with it.
+fn is_stateless_reset(packet: &PartialDecode, token: Option<ResetToken>) -> bool {
+    let data = packet.data();
+    !packet.has_long_header()
+        && data.len() >= RESET_TOKEN_SIZE + 5
+        && token.as_deref() == Some(&data[data.len() - RESET_TOKEN_SIZE..])
+}
+
 /// Per space kind cryptographic state.
 #[derive(Default)]
 pub(super) struct CryptoSpace {
@@ -501,5 +514,72 @@ impl Index<SpaceKind> for [CryptoSpace; 3] {
 
     fn index(&self, index: SpaceKind) -> &Self::Output {
         &self[index as usize]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::{Bytes, BytesMut};
+
+    use super::*;
+    use crate::packet::{FixedLengthConnectionIdParser, Header, InitialHeader, PacketNumber};
+
+    /// A header key that samples 16 bytes and changes nothing, as a cipher without a tag has.
+    struct Plain;
+
+    impl HeaderKey for Plain {
+        fn decrypt(&self, _: usize, _: &mut [u8]) {}
+        fn encrypt(&self, _: usize, _: &mut [u8]) {}
+        fn sample_size(&self) -> usize {
+            16
+        }
+    }
+
+    const TOKEN: [u8; RESET_TOKEN_SIZE] = [0xa5; RESET_TOKEN_SIZE];
+
+    /// `header` with a payload of 24 bytes that ends in [`TOKEN`], as a peer decodes it.
+    fn ending_in_the_token(header: Header) -> PartialDecode {
+        let mut buf = Vec::new();
+        let encode = header.encode(&mut buf);
+        buf.extend_from_slice(&[0; 8]);
+        buf.extend_from_slice(&TOKEN);
+        encode.finish(&mut buf, &Plain, None);
+        let parser = FixedLengthConnectionIdParser::new(8);
+        let versions = crate::DEFAULT_SUPPORTED_VERSIONS;
+        let (decode, rest) = PartialDecode::new(BytesMut::from(&buf[..]), &parser, versions, false)
+            .expect("a well-formed packet");
+        assert!(rest.is_none());
+        decode
+    }
+
+    /// An Initial whose payload ends in the token, as a server's resent transport parameters
+    /// can under a cipher without a tag, is not a stateless reset.
+    #[test]
+    fn a_long_header_packet_ending_in_the_token_is_no_stateless_reset() {
+        let initial = ending_in_the_token(Header::Initial(InitialHeader {
+            dst_cid: ConnectionId::new(&[1; 8]),
+            src_cid: ConnectionId::new(&[2; 8]),
+            token: Bytes::new(),
+            number: PacketNumber::U8(1),
+            version: crate::DEFAULT_SUPPORTED_VERSIONS[0],
+        }));
+        assert!(!is_stateless_reset(&initial, Some(TOKEN.into())));
+    }
+
+    /// A short-header packet ending in the token still is one.
+    #[test]
+    fn a_short_header_packet_ending_in_the_token_is_a_stateless_reset() {
+        let short = ending_in_the_token(Header::Short {
+            spin: false,
+            key_phase: false,
+            dst_cid: ConnectionId::new(&[1; 8]),
+            number: PacketNumber::U8(1),
+        });
+        assert!(is_stateless_reset(&short, Some(TOKEN.into())));
+        assert!(!is_stateless_reset(
+            &short,
+            Some([0x5a; RESET_TOKEN_SIZE].into())
+        ));
+        assert!(!is_stateless_reset(&short, None));
     }
 }

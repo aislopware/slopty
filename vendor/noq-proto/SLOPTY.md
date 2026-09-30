@@ -1,4 +1,4 @@
-# noq-proto, vendored with sixteen patches
+# noq-proto, vendored with seventeen patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -173,6 +173,22 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    its initial one, so the drop can happen. The rest of #2839 prunes the queue after a path
    reset or migration; here those only ever raise the MTU back to the initial 1232, so it is not
    taken. Test: `drop_oversized_keeps_datagrams_at_limit`.
+
+17. `fix(proto): Take only a short-header packet for a stateless reset`
+
+   `CryptoState::unprotect_header` compared the last 16 bytes of every packet with the peer's
+   reset token, a long-header packet coalesced ahead of others included, and a match ended the
+   connection even when the packet decrypted. RFC 9000 compares the datagram's trailing bytes
+   (section 10.3.1), and a stateless reset takes the form of a short-header packet (section
+   10.3), which always runs to the end of its datagram. Behind an AEAD a packet ends in its tag,
+   so the check never went wrong. Slopty's null crypto has no tag. A server's Initial ends in its
+   transport parameters, whose order noq shuffles, and one time in about twelve the reset token
+   comes last. Sent coalesced, the Initial takes no padding, so a resent copy that the client
+   read before it had answered the first ended in the token it had just learnt. The dial then
+   failed with "reset by peer" (docs/decisions/transport.md, "A resent Initial is not a stateless
+   reset"). Only a short-header packet is compared now. Tests:
+   `a_long_header_packet_ending_in_the_token_is_no_stateless_reset` and
+   `a_short_header_packet_ending_in_the_token_is_a_stateless_reset`.
 
 A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
 app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a

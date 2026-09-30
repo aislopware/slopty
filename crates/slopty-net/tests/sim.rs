@@ -917,6 +917,76 @@ mod tests {
         }
     }
 
+    // (i) A path that delivers every datagram twice.
+
+    /// A socket whose path delivers every datagram it sends twice, back to back.
+    #[derive(Debug)]
+    struct Twice<S> {
+        inner: S,
+    }
+
+    impl AsyncUdpSocket for Twice<slopty_shape::sim::Socket> {
+        fn create_sender(&self) -> Pin<Box<dyn UdpSender>> {
+            Box::pin(Twice { inner: self.inner.create_sender() })
+        }
+
+        fn poll_recv(
+            &mut self,
+            cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+            meta: &mut [RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            self.inner.poll_recv(cx, bufs, meta)
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.local_addr()
+        }
+    }
+
+    impl UdpSender for Twice<Pin<Box<dyn UdpSender>>> {
+        fn poll_send(
+            self: Pin<&mut Self>,
+            transmit: &Transmit<'_>,
+            cx: &mut Context<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let size = transmit.segment_size.unwrap_or(transmit.contents.len());
+            for datagram in transmit.contents.chunks(size) {
+                let one = Transmit { contents: datagram, segment_size: None, ..*transmit };
+                // The simulated network takes every send at once, so nothing is sent a third time.
+                ready!(this.inner.as_mut().poll_send(&one, cx))?;
+                ready!(this.inner.as_mut().poll_send(&one, cx))?;
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A dial where every datagram arrives twice, and what it took.
+    async fn doubled(seed: u64) -> Result<Duration, String> {
+        let net = Net::new(hop(0.0), seed);
+        let twice = |at| Twice { inner: net.bind(at).unwrap() };
+        let (worker, client) = (Box::new(twice(WORKER)), Box::new(twice(CLIENT)));
+        let pair = link_on(net.clone(), worker, client, seed).await?;
+        Ok(pair.took)
+    }
+
+    /// A dial where every datagram arrives twice connects. The worker's first Initial leaves
+    /// coalesced ahead of its Handshake and 1-RTT packets, so the padding goes to those and the
+    /// Initial ends in the worker's HELLO. When the shuffled transport parameters end in its
+    /// stateless reset token, the copy of that Initial, read after the first had handed the
+    /// client the token, ended in the token. noq took it for a stateless reset and the dial
+    /// failed with "reset by peer": 25 of the first 300 seeds, seed 7 the first
+    /// (`vendor/noq-proto/SLOPTY.md`, patch 17). Under load a real client reads the worker's
+    /// resent Initial in the same batch as its first, which is the same thing.
+    #[test]
+    fn a_path_that_delivers_every_datagram_twice_still_connects() {
+        for seed in GATE_SEEDS {
+            let took = simulate(seed, doubled).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+            assert!(took < LOSSY_DIAL, "seed {seed}: the dial took {took:?}");
+        }
+    }
+
     // Repeatability, and the sweep.
 
     /// A seed is its run: the same packets delivered at the same simulated times.
@@ -952,6 +1022,16 @@ mod tests {
             dials.iter().max()
         );
         println!("dial at 20 % loss: {} ({:?} real)", spread(dials), wall_since(started));
+
+        let started = wall();
+        let doubled: Vec<Duration> = NIGHTLY_SEEDS
+            .map(|seed| simulate(seed, doubled).unwrap_or_else(|e| panic!("seed {seed}: {e}")))
+            .collect();
+        println!(
+            "dial with every datagram twice: {} ({:?} real)",
+            spread(doubled),
+            wall_since(started)
+        );
 
         let started = wall();
         let back: Vec<Duration> =

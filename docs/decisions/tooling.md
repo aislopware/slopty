@@ -413,6 +413,61 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   its own paint writes, and is built in every frame for that alone. gpui-kit's text input
   writes its state in every render, which counts as news for every view that reads that state.
 
+**gpui-fast's scroll layers stay compiled out on Apple.** ✅ 2026-10-01
+
+*What changed.* longbridge's scroll layers (#24 with #25 Metal and #27 list rows, #26 with #29)
+are merged into the fork. `fast::layers::COMPILED` is off on macOS and iOS. The fork's Metal
+fixes for them landed with the merge: tiles drew nothing in frames without paths, debug bounds
+were lost, tile scenes were built once per tile, and layers were promoted while their owner
+animated.
+
+*Why.* Correct is not enough; layers are not a net win for Slopty today.
+
+- Where they win, the Metal composite is cheaper. In gpui_perf, `list-uniform-scroll` goes
+  from 3.4M to 1.55M instructions a frame. On the GPU, a composited frame takes 227 µs against
+  274 µs drawn directly.
+- Slopty's lists never composite. Measured over 600 wheel frames:
+  - the conversation face goes from 4.17M to 4.32M instructions a frame (it was +20% before the
+    animation fix);
+  - the navigator goes from 4.06M to 4.08M.
+- The cause is in Slopty. The view holding each list reads an entity in its render that is
+  written while the window draws every scrolled frame. For the face that is most likely its
+  prompt rail. So every composited frame is a repaint until the layer is demoted.
+
+*What it asks of Slopty.* To turn layers on, those writes must stop during a scroll.
+`the_navigator_draws_only_the_rows_in_view` must also allow a list layer's overscan rows.
+
+*A cost that stays.* #24's conservative glyph mask test costs the terminal strip 2 to 2.7%
+instructions a frame (`strip-scroll` 7.71M to 7.91M), whether layers are compiled in or not.
+
+**Native views compose through the fork's own mechanism, not longbridge #30.** ✅ 2026-10-01
+
+*The two mechanisms.*
+
+- **The fork's.** It places natives under GPUI's single drawable and cuts antialiased holes in
+  painter's order. So anything drawn after a native is above it: the palette, menus, toasts,
+  focus rings and headers. Clipping, rounding, fade, hit testing and focus come from GPUI's
+  frame, and a present is transactional only when a native changes.
+- **longbridge #30 (zed#62379).** It stacks a base drawable, the native, and one extra
+  full-window `CAMetalLayer` for overlays. Only deferred and window-level draws go above the
+  native. The app places natives by hand, and every frame draws the overlay surface, empty or
+  not.
+
+*The numbers.* Measured on a 3024×1964 window, per frame
+(`composition_overlay_gpu_cost` in `gpui_apple`):
+
+| Case | Fork, GPU | #30, GPU | Fork, CPU instructions | #30, CPU instructions |
+|---|---|---|---|---|
+| Palette over a browser tile | 1.23 ms | 1.81 ms | 90K | 142K |
+| Palette over a remote screen | 1.40 ms | 1.78 ms | 90K | 142K |
+| Palette closed | 0.75–0.93 ms | 0.72 ms | 80K | 129K |
+
+With the palette closed, #30 saves the hole's blend but still pays 50K more CPU instructions.
+Each overlay surface also holds up to 71 MB of drawables, and the WindowServer composites one
+more full-window layer.
+
+*What Slopty keeps.* `native_view` and `VideoLayer` stay as they are.
+
 - ✅ **A golden holding a `serde_json::Value` puts its keys in order** (2026-09-29).
   `golden__ctl__ctl_reply_permission_answer` passed in the workspace and failed under
   `cargo test -p slopty-proto`: whether a `Value` keeps the order its keys were written in is

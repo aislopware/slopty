@@ -11627,3 +11627,57 @@ What it says:
 - **`yes` neither gains nor loses.** Its rows are all one line, already built and shared by the
   row cache, and only its glyph pass keys: 58 of 60 stretches move, the medians are within
   the runs' spread of each other in both text systems.
+
+## 2026-10-01 — the fill's dials after the port fix, and a reset by peer
+
+Mac Studio M1 Max, macOS 27.0, other sessions building beside it (load average 26 to 38). It
+reruns the fill that found the dial with no answer ("A finding the fill brought out", fixed in
+"A dual-stack port no IPv4 socket holds") and records a second failure it turned up
+(decisions/transport.md, "A resent Initial is not a stateless reset").
+
+The soak, terminals only (`--stream-lanes 0`, so nothing captures the screen), counts the CLI
+calls that could not reach the server at the first try. A cycle makes seven calls, so a run is
+about 11 800 calls, where the fill that found the bug made 11 870 and saw 1 to 2:
+
+| soak | cycles (warm-up + fill + load) | calls that got no answer |
+| --- | --- | --- |
+| 1 | 2 + 1 536 + 152 | **0** |
+| 2 | 2 + 1 536 + 149 | **0** |
+| 3 | 2 + 1 536 + 123 | **0** |
+| 4, with noq-proto patch 17 | 2 + 1 536 + 146 | **0** |
+
+Soak 3 failed its own check on the worker's thread count (18 before the load, 19 after),
+which is not the transport's. None of the four leaked, and each server's slope was 0 KiB/min.
+
+The in-process rig (`fresh_endpoints_dial_a_loopback_server`, 100 000 fresh endpoints dialing
+a server that pushes to every link every 2 ms) got no answer 0 times. It failed one dial in
+100 000 another way, with `stream: reset by peer` at the client's first stream, while two
+soaks ran beside it. Three rigs at once with 32 dialers each load the machine enough to show
+it. "Before" ran with a tracing probe that kept each thread's last 40 noq events and printed
+them at every stateless reset (a one-off, not kept, which slowed the dials); "after" ran once
+with the same probe and once without:
+
+| noq-proto | dials, 3 × 200 000 at once | reset by peer | no answer | run |
+| --- | --- | --- | --- | --- |
+| before patch 17, probe | 600 000 | **7** (2, 2, 3) | 0 | 522 s |
+| after, probe | 600 000 | **0** | 0 | 465 s |
+| after, no probe | 600 000 | **0** | 0 | 424 s |
+
+The server sent no stateless reset to any of the seven client ports. Each failing client had
+read the server's first flight (a 182-byte Initial, its Handshake packet and a 973-byte 1-RTT
+packet), then 10 µs later a 173-byte Initial that the server had resent unpadded, and took it
+for a reset. The stateless resets the probe saw otherwise, 41 to 57 a run before and after
+alike, all went to links that had closed.
+
+On the simulated network (`crates/slopty-net/tests/sim.rs`), a dial over a path that delivers
+every datagram twice failed with the same `stream: reset by peer` for 25 of seeds 1 to 300
+before the patch (seed 7 the first) and for 0 of seeds 1 to 1 000 after it. That is one seed in
+12, the share of shuffles that write the reset token last among the server's transport
+parameters. Each doubled dial took 10 ms of simulated time.
+
+```sh
+cargo xtask soak --stream-lanes 0 --out target/deep/soak/<name>   # summary.json: calls_unreached
+for i in 1 2 3; do ROUNDS=200000 TASKS=32 cargo test -p slopty-net --release --test dual_stack_port -- --ignored --nocapture & done; wait
+cargo test -p slopty-net --test sim a_path_that_delivers_every_datagram_twice_still_connects
+cargo test --manifest-path vendor/noq-proto/Cargo.toml --target-dir target/noq-proto --lib packet_crypto
+```
