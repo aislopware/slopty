@@ -46,6 +46,10 @@ fn backlog_bytes(text: &str) -> Result<usize, String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    // The custodian stays clear of the platform crate; its service always sets the data dir.
+    if let Some(data_dir) = std::env::var_os("SLOPTY_DATA_DIR") {
+        slopty_crash::install(slopty_crash::Process::Ptyd, Path::new(&data_dir));
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -24,8 +24,12 @@ anyhow.workspace = true
 gpui.workspace = true
 gpui-kit.workspace = true
 slopty-app.workspace = true
+slopty-crash.workspace = true
 slopty-platform.workspace = true
 slopty-ui.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

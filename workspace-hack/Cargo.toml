@@ -124,6 +124,7 @@ gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = [
 gpui_macos = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "runtime_shaders", "test-support", "wayland", "x11"] }
 itertools = { version = "0.13" }
+miniz_oxide = { version = "0.8", features = ["simd"] }
 noq = { version = "1", default-features = false, features = ["fast-apple-datapath", "runtime-tokio"] }
 noq-udp = { path = "../vendor/noq-udp", default-features = false, features = ["fast-apple-datapath", "tracing"] }
 objc2 = { path = "../vendor/objc2" }
@@ -162,6 +163,7 @@ futures-lite = { version = "2" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
+miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
@@ -189,6 +191,7 @@ futures-lite = { version = "2" }
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
+miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }

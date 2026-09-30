@@ -20,6 +20,7 @@ clap.workspace = true
 parking_lot.workspace = true
 rustix.workspace = true
 slopty-core.workspace = true
+slopty-crash.workspace = true
 slopty-proto.workspace = true
 slopty-pty.workspace = true
 tokio.workspace = true

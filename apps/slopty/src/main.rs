@@ -110,6 +110,7 @@ fn menus() -> Vec<Menu> {
 }
 
 fn main() -> Result<()> {
+    slopty_crash::install(slopty_crash::Process::App, &slopty_platform::dirs::data_dir());
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

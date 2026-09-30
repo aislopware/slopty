@@ -6997,8 +6997,10 @@ dependencies = [
  "gpui",
  "gpui-kit",
  "slopty-app",
+ "slopty-crash",
  "slopty-platform",
  "slopty-ui",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7085,6 +7087,7 @@ dependencies = [
  "slopty-capture",
  "slopty-client",
  "slopty-core",
+ "slopty-crash",
  "slopty-deploy",
  "slopty-grid",
  "slopty-net",
@@ -7156,6 +7159,18 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "slopty-crash"
+version = "0.1.0"
+dependencies = [
+ "backtrace",
+ "libc",
+ "rustc-demangle",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -7263,6 +7278,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-ui-kit",
  "slopty-app",
+ "slopty-crash",
  "slopty-e2e",
  "slopty-platform",
  "slopty-ui",
@@ -7394,6 +7410,7 @@ dependencies = [
  "parking_lot",
  "rustix",
  "slopty-core",
+ "slopty-crash",
  "slopty-proto",
  "slopty-pty",
  "slopty-testkit",
@@ -7432,6 +7449,7 @@ dependencies = [
  "anyhow",
  "clap",
  "serde_json",
+ "slopty-crash",
  "slopty-net",
  "slopty-platform",
  "slopty-server",
@@ -7633,6 +7651,7 @@ dependencies = [
  "slopty-client",
  "slopty-codec",
  "slopty-core",
+ "slopty-crash",
  "slopty-input",
  "slopty-media",
  "slopty-net",
@@ -10021,6 +10040,7 @@ dependencies = [
  "litemap",
  "log",
  "memchr",
+ "miniz_oxide 0.8.9",
  "mio",
  "noq",
  "noq-udp",

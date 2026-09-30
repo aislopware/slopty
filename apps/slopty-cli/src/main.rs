@@ -119,6 +119,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SettingsCmd,
     },
+    /// This machine's latest crash reports, newest first: every Slopty process's panics and
+    /// fatal signals, with macOS's own reports of them.
+    Crashes {
+        /// How many.
+        #[arg(long, default_value_t = 10)]
+        last: usize,
+        /// Every frame, not only the first few.
+        #[arg(long)]
+        all_frames: bool,
+    },
     /// Add a worker by its address: a Tailscale `MagicDNS` name, a LAN name or an IP, with an
     /// optional `:port`.
     Add {
@@ -226,6 +236,7 @@ enum BenchCmd {
 }
 
 fn main() -> Result<ExitCode> {
+    slopty_crash::install(slopty_crash::Process::Cli, &slopty_platform::dirs::data_dir());
     // `attach` and the benches carry keys and echoes through every runtime thread; unclassed,
     // a loaded Mac held one for hundreds of milliseconds (MEASUREMENTS.md, "the keystroke path
     // under an all-core spin").
@@ -270,6 +281,7 @@ async fn run() -> Result<ExitCode> {
             Ok(())
         }
         Cmd::Hook { cmd: Some(cmd) } => hook::run(cmd, &data_dir).await,
+        Cmd::Crashes { last, all_frames } => crashes(&data_dir, last, all_frames, cli.json),
         Cmd::Settings { cmd } => {
             let path = slopty_settings::path_in(&data_dir);
             match cmd {
@@ -327,6 +339,41 @@ async fn run() -> Result<ExitCode> {
         }
     };
     done.map(|()| ExitCode::SUCCESS)
+}
+
+/// `slopty crashes`: the latest reports, each with its first frames.
+fn crashes(data_dir: &std::path::Path, last: usize, all_frames: bool, json: bool) -> Result<()> {
+    let reports = slopty_crash::reports(data_dir);
+    let shown = reports.get(..last.min(reports.len())).unwrap_or_default();
+    if json {
+        println!("{}", serde_json::to_string_pretty(shown)?);
+        return Ok(());
+    }
+    if shown.is_empty() {
+        println!("no crash reports in {}", slopty_crash::crash_dir(data_dir).display());
+    }
+    for report in shown {
+        println!(
+            "{}  {} (pid {})  {}",
+            report.when(),
+            report.process,
+            report.pid,
+            report.headline()
+        );
+        if let Some(thread) = &report.thread {
+            println!("  thread {thread}");
+        }
+        let frames = if all_frames { report.frames.len() } else { 8 };
+        for frame in report.frames.iter().take(frames) {
+            println!("    {}", frame.describe());
+        }
+        println!("  {}", report.path.display());
+        if let Some(ips) = report.ips.as_ref().filter(|ips| **ips != report.path) {
+            println!("  macOS's report: {}", ips.display());
+        }
+        println!();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

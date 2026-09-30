@@ -28,6 +28,7 @@ use objc2_ui_kit::{
 /// classes up by name, so they are registered with the runtime before it starts.
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: c_int, _argv: *const *const c_char) -> c_int {
+    slopty_crash::install(slopty_crash::Process::IosApp, &slopty_platform::dirs::data_dir());
     let Some(mtm) = MainThreadMarker::new() else {
         return 1;
     };

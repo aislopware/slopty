@@ -1,0 +1,121 @@
+{"app_name":"slopty-worker","timestamp":"2026-09-30 06:26:03.00 +0700","app_version":"","slice_uuid":"06d2c671-5bbd-34fa-a308-294e4222c83d","build_version":"","platform":1,"share_with_app_devs":0,"is_first_party":1,"bug_type":"309","os_version":"macOS 27.0.1 (26A434)","roots_installed":0,"incident_id":"00000000-0000-0000-0000-000000000000","name":"slopty-worker"}
+{
+  "uptime" : 74000,
+  "procRole" : "Unspecified",
+  "version" : 2,
+  "userID" : 501,
+  "deployVersion" : 210,
+  "modelCode" : "Mac13,1",
+  "coalitionID" : 5414,
+  "osVersion" : {
+    "train" : "macOS 27.0.1",
+    "build" : "26A434",
+    "releaseType" : "User"
+  },
+  "captureTime" : "2026-09-30 06:26:01.5484 +0700",
+  "codeSigningMonitor" : 2,
+  "incident" : "00000000-0000-0000-0000-000000000000",
+  "pid" : 34956,
+  "translated" : false,
+  "cpuType" : "ARM-64",
+  "procLaunch" : "2026-09-30 06:26:00.9106 +0700",
+  "procStartAbsTime" : 1782788390075,
+  "procExitAbsTime" : 1782802238182,
+  "procName" : "slopty-worker",
+  "procPath" : "\/Volumes\/VOLUME\/*\/slopty-worker",
+  "parentProc" : "Exited process",
+  "parentPid" : 30026,
+  "coalitionName" : "com.openssh.sshd",
+  "crashReporterKey" : "00000000-0000-0000-0000-000000000000",
+  "chargingStatus" : {"externalSourceConnected":true},
+  "developerMode" : 1,
+  "responsiblePid" : 24199,
+  "codeSigningID" : "slopty_worker-ae08831c778f2a6f",
+  "codeSigningTeamID" : "",
+  "codeSigningFlags" : 570556929,
+  "codeSigningValidationCategory" : 10,
+  "codeSigningTrustLevel" : 4294967295,
+  "codeSigningAuxiliaryInfo" : 0,
+  "instructionByteStream" : {"beforePC":"9AMAqmgAADbgAxOqRZnhl+ADFKozAQGUGv4AlP17v6n9AwCRCAKAUg==","atPC":"CQFA+e\/7AJT\/gwDR\/XsBqf1DAJEI\/\/+QCGE4kYkoAPApYSGR6SMAqQ=="},
+  "bootSessionUUID" : "00000000-0000-0000-0000-000000000000",
+  "sip" : "enabled",
+  "vmRegionInfo" : "0x10 is not in any region.  Bytes before following region: 4330602480\n      REGION TYPE                    START - END         [ VSIZE] PRT\/MAX SHRMOD  REGION DETAIL\n      UNUSED SPACE AT START\n--->  \n      __TEXT                      1021fc000-103118000    [ 15.1M] r-x\/r-x SM=COW  \/Volumes\/VOLUME\/*\/slopty-worker",
+  "exception" : {"codes":"0x0000000000000001, 0x0000000000000010","rawCodes":[1,16],"type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x0000000000000010"},
+  "termination" : {"flags":0,"code":11,"namespace":"SIGNAL","indicator":"Segmentation fault: 11","byProc":"exc handler","byPid":34956},
+  "vmregioninfo" : "0x10 is not in any region.  Bytes before following region: 4330602480\n      REGION TYPE                    START - END         [ VSIZE] PRT\/MAX SHRMOD  REGION DETAIL\n      UNUSED SPACE AT START\n--->  \n      __TEXT                      1021fc000-103118000    [ 15.1M] r-x\/r-x SM=COW  \/Volumes\/VOLUME\/*\/slopty-worker",
+  "extMods" : {"caller":{"thread_create":0,"thread_set_state":0,"task_for_pid":0},"system":{"thread_create":0,"thread_set_state":0,"task_for_pid":13},"targeted":{"thread_create":0,"thread_set_state":0,"task_for_pid":0},"warnings":0},
+  "faultingThread" : 0,
+  "threads" : [{"threadState":{"x":[{"value":4365489344},{"value":4},{"value":0},{"value":4365489348},{"value":0},{"value":32},{"value":118},{"value":0},{"value":16},{"value":1986487667},{"value":4365489348},{"value":4},{"value":0},{"value":4365489348},{"value":4341560127,"symbolLocation":473,"symbol":"anon.181f1749efffcbbc6d356d7917cc942d.4"},{"value":118},{"value":6565870944,"symbolLocation":0,"symbol":"_platform_memmove"},{"value":5069},{"value":0},{"value":3},{"value":0},{"value":6136267024},{"value":6127910912},{"value":0},{"value":8272042080,"symbolLocation":0,"symbol":"mach_task_self_"},{"value":6136268696},{"value":1},{"value":65535},{"value":4360011776}],"flavor":"ARM_THREAD_STATE64","lr":{"value":4333310196},"cpsr":{"value":1610616832},"fp":{"value":6136266880},"sp":{"value":6136266880},"esr":{"value":2449473542,"description":"(Data Abort) byte read Translation fault"},"pc":{"value":4341256616,"matchesCrashFrame":1},"far":{"value":16}},"id":6577586,"triggered":true,"name":"main","queue":"com.apple.main-thread","frames":[{"imageOffset":10654120,"symbol":"_RNvNtCskAb58Kv7Z0d_12slopty_crash5probe4segv","symbolLocation":12,"imageIndex":0},{"imageOffset":2707700,"symbol":"_RNvNtCskAb58Kv7Z0d_12slopty_crash5probe4fire","symbolLocation":128,"imageIndex":0},{"imageOffset":2670280,"symbol":"_RNvCskAb58Kv7Z0d_12slopty_crash7install","symbolLocation":272,"imageIndex":0},{"imageOffset":2463432,"sourceLine":357,"sourceFile":"main.rs","symbol":"_RNvCs8357qjOySiy_13slopty_worker4main","imageIndex":0,"symbolLocation":40},{"symbol":"call_once<fn() -> core::result::Result<(), anyhow::Error>, ()>","inline":true,"imageIndex":0,"imageOffset":2411864,"symbolLocation":4,"sourceLine":250,"sourceFile":"function.rs"},{"imageOffset":2411864,"sourceLine":166,"sourceFile":"backtrace.rs","symbol":"_RINvNtNtCs82bWklYMk3w_3std3sys9backtrace28___rust_begin_short_backtraceFEINtNtCs8Mbv00yxnRz_4core6result6ResultuNtCsh8UU9HXTIn6_6anyhow5ErrorEB19_ECs8357qjOySiy_13slopty_worker","imageIndex":0,"symbolLocation":12},{"imageOffset":116872,"symbol":"_RNCINvNtCs82bWklYMk3w_3std2rt10lang_startINtNtCs8Mbv00yxnRz_4core6result6ResultuNtCsh8UU9HXTIn6_6anyhow5ErrorEE0Cs8357qjOySiy_13slopty_worker","symbolLocation":24,"imageIndex":0},{"imageOffset":10428484,"symbol":"_RNvNtCs82bWklYMk3w_3std2rt19lang_start_internal","symbolLocation":952,"imageIndex":0},{"imageOffset":2482108,"symbol":"main","symbolLocation":52,"imageIndex":0},{"imageOffset":204416,"symbol":"start","symbolLocation":6688,"imageIndex":1}]}],
+  "usedImages" : [
+  {
+    "source" : "P",
+    "arch" : "arm64",
+    "base" : 4330602496,
+    "size" : 15843328,
+    "uuid" : "06d2c671-5bbd-34fa-a308-294e4222c83d",
+    "path" : "\/Volumes\/VOLUME\/*\/slopty-worker",
+    "name" : "slopty-worker"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6561603584,
+    "size" : 784100,
+    "uuid" : "d341ddcb-7969-3a9c-8e03-0cf4751398a9",
+    "path" : "\/usr\/lib\/dyld",
+    "name" : "dyld"
+  },
+  {
+    "size" : 0,
+    "source" : "A",
+    "base" : 0,
+    "uuid" : "00000000-0000-0000-0000-000000000000"
+  },
+  {
+    "source" : "P",
+    "arch" : "arm64e",
+    "base" : 6565855232,
+    "size" : 38132,
+    "uuid" : "080e4444-a0fb-3913-9756-4e470015f32f",
+    "path" : "\/usr\/lib\/system\/libsystem_platform.dylib",
+    "name" : "libsystem_platform.dylib"
+  }
+],
+  "sharedCache" : {
+  "base" : 6556860416,
+  "size" : 7410368512,
+  "uuid" : "c284a291-b68b-3d0d-a1a0-3f866f87efdc"
+},
+  "vmSummary" : "ReadOnly portion of Libraries: Total=2.4G resident=0K(0%) swapped_out_or_unallocated=2.4G(100%)\nWritable regions: Total=89.9M written=369K(0%) resident=369K(0%) swapped_out=0K(0%) unallocated=89.5M(100%)\n\n                                VIRTUAL   REGION \nREGION TYPE                        SIZE    COUNT (non-coalesced) \n===========                     =======  ======= \nDeferred Reclaim                  64.0M        1 \nGuard                            385.0G        1 \nMalloc                            17.4M       10 \nMalloc Guard Page                 3792K        4 \nOS Alloc Once                       32K        1 \nStack                             8160K        1 \nStack Guard                       56.0M        1 \nUntagged                           160K        3 \n__AUTH                            3582K      342 \n__AUTH_CONST                      58.9M      579 \n__CTF                               824        1 \n__DATA                            20.0M      583 \n__DATA_CONST                      29.4M      578 \n__DATA_DIRTY                      8775K      511 \n__FONT_DATA                        2352        1 \n__LINKEDIT                         1.6G        2 \n__OBJC_RO                        118.0M        1 \n__OBJC_RW                         2735K        1 \n__TEXT                           880.0M      657 \n__TPRO_CONST                       132K        4 \npage table in kernel               369K        1 \nshared memory                       32K        1 \n===========                     =======  ======= \nTOTAL                            387.8G     3284 \n",
+  "legacyInfo" : {
+  "threadTriggered" : {
+    "name" : "main",
+    "queue" : "com.apple.main-thread"
+  }
+},
+  "logWritingSignature" : "2fab35710005f6d0dc9767849815da411ab713e1",
+  "roots_installed" : 0,
+  "bug_type" : "309",
+  "trmStatus" : 8192,
+  "trialInfo" : {
+  "rollouts" : [
+    {
+      "rolloutId" : "63f9578e238e7b23a1f3030a",
+      "factorPackIds" : [
+
+      ],
+      "deploymentId" : 240000005
+    },
+    {
+      "rolloutId" : "6410af69ed1e1e7ab93ed169",
+      "factorPackIds" : [
+
+      ],
+      "deploymentId" : 240000011
+    }
+  ],
+  "experiments" : [
+
+  ]
+}
+}

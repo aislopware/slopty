@@ -37,6 +37,7 @@ objc2-ui-kit = { workspace = true, features = [
     "UIWindowScene",
 ] }
 slopty-app.workspace = true
+slopty-crash.workspace = true
 slopty-e2e = { workspace = true, default-features = false }
 slopty-platform.workspace = true
 slopty-ui.workspace = true

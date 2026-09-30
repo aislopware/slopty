@@ -45,6 +45,7 @@ slopty-tailnet = { path = "crates/slopty-tailnet" }
 slopty-vdisplay = { path = "crates/slopty-vdisplay" }
 slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 slopty-testkit = { path = "crates/slopty-testkit" }
+slopty-crash = { path = "crates/slopty-crash" }
 
 # core
 anyhow = "1.0.104"
@@ -114,6 +115,9 @@ tokio = { version = "1.53.1", features = [
 # observability
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = [ "env-filter", "json", "fmt" ] }
+# Crash reports (`slopty-crash`): a panic's frames, and std's symbolizer for a signal record's.
+backtrace = "0.3.76"
+rustc-demangle = "0.1.28"
 plist = "1.10.1"
 rustix = { version = "1.1.5", features = [
     "fs",

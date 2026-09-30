@@ -1,0 +1,25 @@
+[package]
+name = "slopty-crash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Crash reports for every Slopty process: panics and fatal signals, written locally and listed with macOS's own reports"
+
+[lints]
+workspace = true
+
+[dependencies]
+# A panic's frames, resolved in the panicking process, and a signal record's frames, resolved
+# by the next run of the same binary: std's own symbolizer, with a public frame API.
+backtrace.workspace = true
+# The fatal-signal handler, `dladdr`, and the thread and clock calls it makes.
+libc.workspace = true
+# Rust names in macOS's `.ips` reports, which ReportCrash leaves mangled.
+rustc-demangle.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

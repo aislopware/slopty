@@ -354,6 +354,7 @@ fn watch_caps(
 type Displays = Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>;
 
 fn main() -> Result<()> {
+    slopty_crash::install(slopty_crash::Process::Worker, &slopty_platform::dirs::data_dir());
     // The connections' loops and noq's drivers carry every keystroke and echo: they run at the
     // class of work a person waits on, as the session threads do.
     slopty_platform::user_interactive_thread();

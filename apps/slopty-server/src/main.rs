@@ -55,6 +55,7 @@ fn admission(data_dir: &std::path::Path) -> Admission {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    slopty_crash::install(slopty_crash::Process::Server, &slopty_platform::dirs::data_dir());
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

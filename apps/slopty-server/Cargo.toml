@@ -21,6 +21,7 @@ doc = false
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+slopty-crash.workspace = true
 slopty-net.workspace = true
 # The machine's name, per platform.
 slopty-platform.workspace = true
