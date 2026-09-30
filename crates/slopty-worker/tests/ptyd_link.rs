@@ -27,11 +27,22 @@ mod ptyd_link {
         fn forget(&self, _session: SessionId) {}
     }
 
-    /// `slopty-ptyd` in this build's profile, built on demand (`-p slopty-worker` alone does not
-    /// build it). Cargo names the executable: where a final binary lands relative to a test's
-    /// own executable changes with the build-dir layout.
+    /// `slopty-ptyd` in this build's profile. A workspace build already put it in the profile
+    /// directory: the ancestor of this test's executable that sits in the target dir (found
+    /// from `CARGO_TARGET_TMPDIR`), whether the test runs from `deps/` or the gate's `run/`.
+    /// When no ancestor does (a build-dir outside the target dir) or the binary is missing
+    /// (`-p slopty-worker` alone), cargo is asked to build it and name the executable.
     fn ptyd_bin() -> PathBuf {
         let exe = std::env::current_exe().unwrap();
+        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap();
+        let built = exe
+            .ancestors()
+            .find(|dir| dir.parent() == Some(target))
+            .map(|profile| profile.join("slopty-ptyd"))
+            .filter(|path| path.exists());
+        if let Some(built) = built {
+            return built;
+        }
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut build = std::process::Command::new(cargo);
         build.args(["build", "-p", "slopty-ptyd", "--bin", "slopty-ptyd", "--message-format=json"]);

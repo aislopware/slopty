@@ -118,9 +118,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - **Tinted appearances fill every dot white** (`fill-specializations`). Tinting keeps
       luminance, so green dots came out `#47337c` on `#241f2f` in tinted dark; white makes them
       `#6143b5`.
-    - **No `color-space-for-untagged-svg-colors`.** Its only accepted value is `display-p3`,
-      which renders `#4ac06c` as P3 numbers (oversaturated). Left out, untagged SVG colours are
-      sRGB: a flat `#4ac06c` layer renders `(72, 187, 105)`.
+    - **Every layer's colour is its own sRGB-tagged fill** (`fill-specializations`, default
+      `srgb:0.29020,0.75294,0.42353`), not the SVG's untagged hex. Xcode versions disagree on
+      what an untagged SVG colour means. Xcode 27 reads it as sRGB, and its one explicit
+      alternative, `color-space-for-untagged-svg-colors: display-p3`, renders `#4ac06c` as P3
+      numbers (`#00c362` in sRGB). CI's default Xcode 26.6 rendered the lit dots away from the
+      brand green (2026-09-30, run 36669257345). With the tagged fill the faces measure
+      `#4ac06d` on Xcode 27.0 and 27.1.
+    - **ictool's PNG files are colour-managed when read.** It writes whatever space a render
+      needed: 8-bit sRGB for most, but 16-bit Display P3 with an embedded ICC profile for
+      TintedLight even on Xcode 27. The test decodes at full depth and converts through the
+      embedded matrix/TRC profile to sRGB (`icon::tests::colour`). A failure prints each lit
+      dot's colour and the profile.
   - **Geometry.** The grid spans 68 % of the plate (pitch 232) and each dot is 0.38 of the
     pitch across (r 88), the avatar's proportions. No small-size tuning was needed. At 16 px
     the pitch is 2.9 px, so each dot lands on about a 2×2 pixel block: lit 187, unlit about
@@ -136,8 +145,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - Appearances at 128 px (prompt / cursor): Default 4.67 / 4.67, Dark 4.88 / 5.40,
       TintedLight 3.46 / 3.46, TintedDark 1.98 / 2.08, ClearLight 2.79 / 2.79,
       ClearDark 6.55 / 6.55.
-    - At 1024 px, 9.18 % of the pixels are within 8 of `#4ac06c`. The four lit dots' area is
-      9.28 %, so a specular wash or a colour drift fails the test.
+    - **The lit dots are the brand green within one just-noticeable difference** (Oklab ΔE
+      0.02) at 128 px and up, in ictool's renders and in the shipped `.icns` slots. Xcode 27's
+      glass shading puts them at 0.006 to 0.012. The specular wash (0.032) and the hexes read as
+      P3 (0.030) fall outside. At 1024 px, 9.18 % of the pixels are within that distance; the
+      four lit dots' area is 9.28 %.
 
     Rerun: `cargo nextest run -p xtask icon --no-capture`. The review renders
     (`icon-{16,32,128,512,1024}.png` and the five other appearances at 512 px) come from

@@ -230,9 +230,13 @@ impl Art {
                 "image-name": format!("{}.svg", dot.id),
                 "glass": dot.lit(),
                 "opacity": (f64::from(dot.opacity) * 100.0).round() / 100.0,
-                // Tinting keeps the luminance of what it tints: left green, the lit dots turn
-                // a dim purple on the dark tinted plate (#47337c on #241f2f), so they tint white.
+                // The colour is the layer's, tagged sRGB: an SVG colour is untagged, and Xcode
+                // versions disagree on what untagged means (26.6 on CI rendered the green away
+                // from #4ac06c, 27 renders it exact). Tinting keeps the luminance of what it
+                // tints: left green, the lit dots turn a dim purple on the dark tinted plate
+                // (#47337c on #241f2f), so they tint white.
                 "fill-specializations": [
+                    { "value": { "solid": dot.colour.icon_composer() } },
                     { "appearance": "tinted", "value": { "solid": "extended-gray:1.00000,1.00000" } },
                 ],
             })
@@ -253,8 +257,6 @@ impl Art {
                 "translucency": { "enabled": false, "value": 0 },
             })
         };
-        // No `color-space-for-untagged-svg-colors`: untagged SVG colours are then sRGB, as the
-        // brand hexes are; its one accepted value, `display-p3`, would oversaturate them.
         json!({
             "fill": { "solid": self.plate.icon_composer() },
             "groups": [

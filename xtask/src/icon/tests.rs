@@ -7,9 +7,9 @@
     reason = "pixel indices within a 1024 px image, and colour formulas written as published"
 )]
 
-use resvg::tiny_skia::Pixmap;
-
 use super::*;
+
+mod colour;
 
 fn art() -> Art {
     let root = crate::tools::repo_root().expect("root");
@@ -60,33 +60,39 @@ fn contrast(a: [u8; 3], b: [u8; 3]) -> f64 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-/// A square image, straight (not premultiplied) RGBA.
+/// A square image, straight (not premultiplied) RGBA in 8-bit sRGB, whatever space it was
+/// stored in.
 struct Raster {
     size: u32,
     pixels: Vec<[u8; 4]>,
+    /// Where its colour space came from, for failure messages.
+    source: String,
 }
 
 impl Raster {
     fn png(path: &Utf8Path) -> Self {
-        let pixmap = Pixmap::decode_png(&std::fs::read(path).expect("png")).expect("decodes");
-        assert_eq!(pixmap.width(), pixmap.height(), "{path} is square");
-        let pixels = pixmap
-            .pixels()
-            .iter()
-            .map(|p| {
-                let c = p.demultiply();
-                [c.red(), c.green(), c.blue(), c.alpha()]
-            })
-            .collect();
-        Self { size: pixmap.width(), pixels }
+        Self::png_bytes(&std::fs::read(path).expect("png"))
     }
 
-    fn icns(image: &icns::Image) -> Self {
+    fn png_bytes(bytes: &[u8]) -> Self {
+        let decoded = colour::decode_png(bytes);
+        Self { size: decoded.size, pixels: decoded.pixels, source: decoded.profile.to_string() }
+    }
+
+    /// One `.icns` slot: its embedded PNG, colour-managed, or the raw ARGB of the small slots.
+    fn icns(element: &icns::IconElement) -> Self {
+        if element.data.starts_with(b"\x89PNG") {
+            return Self::png_bytes(&element.data);
+        }
+        let image = element.decode_image().expect("slot decodes");
         let rgba = image.convert_to(icns::PixelFormat::RGBA);
         assert_eq!(rgba.width(), rgba.height());
         let (pixels, _) = rgba.data().as_chunks::<4>();
-        let pixels = pixels.to_vec();
-        Self { size: rgba.width(), pixels }
+        Self {
+            size: rgba.width(),
+            pixels: pixels.to_vec(),
+            source: "icns ARGB (untagged)".to_owned(),
+        }
     }
 
     fn at(&self, x: f32, y: f32) -> [u8; 3] {
@@ -105,16 +111,36 @@ impl Raster {
         (*first as f32, (*last + 1) as f32)
     }
 
-    /// Share of pixels within `tolerance` per channel of `colour`.
-    fn share(&self, colour: [u8; 3], tolerance: u8) -> f64 {
+    /// Share of opaque pixels within `tolerance` (Oklab ΔE) of `colour`.
+    fn share(&self, colour: [u8; 3], tolerance: f64) -> f64 {
         let near = self
             .pixels
             .iter()
-            .filter(|p| p[3] == 255 && (0..3).all(|i| p[i].abs_diff(colour[i]) <= tolerance))
+            .filter(|p| p[3] == 255 && colour::delta_e([p[0], p[1], p[2]], colour) <= tolerance)
             .count();
         near as f64 / self.pixels.len() as f64
     }
+
+    /// The centre colour of every lit dot, and the worst Oklab distance from `brand`.
+    fn lit_centres(&self, art: &Art, brand: [u8; 3]) -> (Vec<String>, f64) {
+        let (lo, hi) = self.shape();
+        let map = |v: f32| lo + v / art.canvas * (hi - lo);
+        let centres: Vec<[u8; 3]> = art
+            .dots
+            .iter()
+            .filter(|d| d.lit())
+            .map(|d| self.at(map(d.centre.0), map(d.centre.1)))
+            .collect();
+        let worst = centres.iter().map(|c| colour::delta_e(*c, brand)).fold(0.0, f64::max);
+        (centres.into_iter().map(colour::hex).collect(), worst)
+    }
 }
+/// How far (Oklab ΔE) a lit dot's face may sit from the brand green: one just-noticeable
+/// difference. Xcode 27's glass shading puts the faces at 0.006 to 0.012; the specular wash
+/// (0.032) and the hexes read as Display P3 (0.030) both fall outside
+/// (`colour::tests::the_brand_tolerance_keeps_renders_and_catches_regressions`).
+const BRAND_TOLERANCE: f64 = 0.02;
+
 /// How the mark reads in one picture, sampled at each dot's centre (WCAG contrast).
 #[derive(Debug)]
 struct Reading {
@@ -281,16 +307,29 @@ fn compiles_and_the_prompt_reads_at_every_size_and_appearance() {
         std::fs::File::open(resources.join(format!("{NAME}.icns"))).expect("icns"),
     )
     .expect("readable icns");
-    let slots = icns.available_icons();
-    assert!(!slots.is_empty(), "the fallback .icns has images");
-    for kind in slots {
-        let raster = Raster::icns(&icns.get_icon_with_type(kind).expect("slot decodes"));
+    assert!(!icns.elements.is_empty(), "the fallback .icns has images");
+    let brand = art.dots[0].colour.0;
+    for element in &icns.elements {
+        let slot = element.ostype;
+        let raster = Raster::icns(element);
         let r = reading(&art, &raster);
-        eprintln!("icns {kind:?} ({} px): {r:?}", raster.size);
-        assert!(r.mark >= 3.0, "{kind:?}: the prompt stands {:.2}:1 over the unlit dots", r.mark);
-        assert!(r.unlit >= 1.2, "{kind:?}: unlit dots {:.2}:1 over the plate", r.unlit);
+        let (centres, worst) = raster.lit_centres(&art, brand);
+        eprintln!(
+            "icns {slot} ({} px, {}): {r:?}, lit centres {centres:?}",
+            raster.size, raster.source
+        );
+        assert!(r.mark >= 3.0, "{slot}: the prompt stands {:.2}:1 over the unlit dots", r.mark);
+        assert!(r.unlit >= 1.2, "{slot}: unlit dots {:.2}:1 over the plate", r.unlit);
         if raster.size >= 32 {
-            assert!(r.cursor >= 3.0, "{kind:?}: the cursor {:.2}:1 over its neighbour", r.cursor);
+            assert!(r.cursor >= 3.0, "{slot}: the cursor {:.2}:1 over its neighbour", r.cursor);
+        }
+        if raster.size >= 128 {
+            assert!(
+                worst <= BRAND_TOLERANCE,
+                "{slot}: lit dots {centres:?} are ΔE {worst:.3} from {} ({})",
+                colour::hex(brand),
+                raster.source
+            );
         }
     }
 
@@ -300,18 +339,33 @@ fn compiles_and_the_prompt_reads_at_every_size_and_appearance() {
         let raster = Raster::png(&out);
         assert_eq!(raster.size, px);
         let r = reading(&art, &raster);
-        eprintln!("ictool {px} px: {r:?}");
+        eprintln!("ictool {px} px ({}): {r:?}", raster.source);
         assert!(r.mark >= 3.0, "{px} px: the prompt stands {:.2}:1 over the unlit dots", r.mark);
         assert!(r.unlit >= 1.2, "{px} px: unlit dots {:.2}:1 over the plate", r.unlit);
         if px >= 32 {
             assert!(r.cursor >= 3.0, "{px} px: the cursor {:.2}:1 over its neighbour", r.cursor);
         }
+        if px >= 128 {
+            let (centres, worst) = raster.lit_centres(&art, brand);
+            eprintln!("  lit centres {centres:?}, worst ΔE {worst:.4}");
+            assert!(
+                worst <= BRAND_TOLERANCE,
+                "{px} px: lit dots {centres:?} are ΔE {worst:.3} from {} ({})",
+                colour::hex(brand),
+                raster.source
+            );
+        }
         if px == 1024 {
             // Four lit dots of r 88 on the 1024 canvas cover 9.28 %; their faces keep the
-            // brand hex (no specular wash), less the anti-aliased rims.
-            let share = raster.share(art.dots[0].colour.0, 8);
-            eprintln!("brand green share at 1024: {share:.4}");
-            assert!((0.08..=0.10).contains(&share), "brand green covers {share:.3}");
+            // brand green (no specular wash), less the anti-aliased rims.
+            let share = raster.share(brand, BRAND_TOLERANCE);
+            eprintln!("  brand green share {share:.4}");
+            assert!(
+                (0.08..=0.10).contains(&share),
+                "brand green covers {share:.3} ({}, lit centres {:?})",
+                raster.source,
+                raster.lit_centres(&art, brand).0
+            );
         }
     }
     for rendition in Rendition::ALL {
