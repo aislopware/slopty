@@ -2,7 +2,9 @@
 //!
 //! A measurement is an ignored test named `*_cost` in a crate that takes `slopty-testkit` as a
 //! dev-dependency. It times its samples with `slopty_testkit::bench` and appends one JSON line per
-//! series to the file `SLOPTY_BENCH_OUT` names. This command runs them all in release with
+//! series to the file `SLOPTY_BENCH_OUT` names. A study that prints its own numbers, needs a
+//! window or runs for minutes takes another name, because every `*_cost` test runs here under
+//! the default timeout. This command runs them all in release with
 //! `--run-ignored only`, reads the lines back and compares each series with
 //! [`BUDGETS`]:
 //! - retired instructions per operation are the gating number: more than [`SLACK_PERCENT`] over the

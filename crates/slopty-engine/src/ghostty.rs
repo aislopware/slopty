@@ -3384,15 +3384,19 @@ mod tests {
             })
             .collect();
         let joined = answers.concat();
-        assert!(joined.contains("\x1b]11;rgb:1616/1818/1d1d"), "{answers:?}");
-        assert!(joined.contains("\x1b]10;rgb:e6e6/e6e6/e6e6"), "{answers:?}");
-        assert!(joined.contains("\x1b]12;rgb:8a8a/b4b4/f8f8"), "{answers:?}");
-        let red = slopty_theme::TerminalPalette::DARK.ansi.get(1).copied().expect("red");
-        let want = format!(
-            "\x1b]4;1;rgb:{0:02x}{0:02x}/{1:02x}{1:02x}/{2:02x}{2:02x}",
-            red.r, red.g, red.b
-        );
-        assert!(joined.contains(&want), "{answers:?} lacks {want:?}");
+        let dark = slopty_theme::TerminalPalette::DARK;
+        let xterm = |c: slopty_theme::Rgb| {
+            format!("rgb:{0:02x}{0:02x}/{1:02x}{1:02x}/{2:02x}{2:02x}", c.r, c.g, c.b)
+        };
+        let red = dark.ansi.get(1).copied().expect("red");
+        for want in [
+            format!("\x1b]11;{}", xterm(dark.bg)),
+            format!("\x1b]10;{}", xterm(dark.fg)),
+            format!("\x1b]12;{}", xterm(dark.cursor)),
+            format!("\x1b]4;1;{}", xterm(red)),
+        ] {
+            assert!(joined.contains(&want), "{answers:?} lacks {want:?}");
+        }
     }
 
     /// The driver's own colours, once set, are what the queries answer.

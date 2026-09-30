@@ -124,7 +124,7 @@ fn projects_cost() {
     let mut large = large();
     let bench = Bench::new("server.projects_cost");
 
-    let file = large.projects.file(0);
+    let file = large.projects.file(Vec::new(), 0);
     let mut compact = bench.series("file_write_compact");
     let mut written = Vec::new();
     for _ in 0..SAMPLES {
@@ -148,10 +148,11 @@ fn projects_cost() {
     let mut keep = bench.series("log_append");
     let mut replica = file.clone();
     let mut line = Vec::new();
-    for u in updates.iter().cycle().take(SAMPLES) {
+    let kept: Vec<Keep> = updates.iter().map(|u| Keep::Project(Box::new(u.kept.clone()))).collect();
+    for k in kept.iter().cycle().take(SAMPLES) {
         line = keep.time(|| {
-            replica.apply(&u.kept);
-            serde_json::to_vec(&u.kept).unwrap()
+            replica.apply(k);
+            serde_json::to_vec(k).unwrap()
         });
     }
     keep.report().unwrap();

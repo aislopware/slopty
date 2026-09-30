@@ -289,6 +289,85 @@ fn long_text_is_measured_at_a_poll_and_not_kept() {
     assert_eq!(c.board().reads_of(&text()), 2, "read at the poll, and again by the fetch");
 }
 
+/// The types of each item an offer lists, in order.
+fn kinds(offer: &Offer) -> Vec<Vec<ClipType>> {
+    offer.items.iter().map(|i| i.reps.iter().map(|r| r.kind.clone()).collect()).collect()
+}
+
+/// A copy lands on the pasteboard a type at a time, all under the one count its clear left:
+/// `NSPasteboard` moves the count with ownership, not with each type written, and promises no
+/// more. A poll that finds more types under a count it announced announces the whole copy
+/// again, so an offer read half written never stands.
+#[test]
+fn a_copy_that_grows_under_its_count_is_announced_whole() {
+    let c = clip();
+    c.watch(next_link(), true);
+    let (png, text) = (png(), text());
+    c.board().clear();
+    c.board().put(&[&[(&png, b"\x89PNG picture")]]);
+    let half = c.poll(Instant::now()).expect("what is there so far");
+    assert_eq!(kinds(&half), [[ClipType::Format(ClipFormat::Png)]]);
+    c.board().put(&[&[
+        (&png, b"\x89PNG picture"),
+        (&text, b"copied"),
+        ("com.example.own", b"own"),
+    ]]);
+    let whole = c.poll(Instant::now()).expect("the rest of the copy, under the same count");
+    assert_eq!(
+        kinds(&whole),
+        [[
+            ClipType::Format(ClipFormat::Png),
+            ClipType::Format(ClipFormat::Text),
+            ClipType::Apple("com.example.own".to_owned()),
+        ]]
+    );
+    assert!(whole.generation > half.generation, "it replaces the half");
+    assert_eq!(texts(&whole)[1], Some(&b"copied"[..]));
+    assert_eq!(c.poll(Instant::now()), None, "announced once more, not again");
+    let rep = whole.rep_ref(0, ClipType::Format(ClipFormat::Png));
+    assert_eq!(c.fetch(&rep, None), Fetched::Data(Bytes::from_static(b"\x89PNG picture")));
+}
+
+/// A poll whose read of the copy's text sees more types land meanwhile announces nothing then:
+/// the copy is still being written. The next poll announces it whole.
+#[test]
+fn a_copy_still_being_written_as_it_is_read_waits_for_the_next_poll() {
+    let c = Arc::new(clip());
+    c.watch(next_link(), true);
+    c.board().clear();
+    c.board().put(&[&[(&text(), b"copied")]]);
+    let hook = {
+        let (weak, png, text) = (Arc::downgrade(&c), png(), text());
+        move || {
+            if let Some(c) = weak.upgrade() {
+                c.board().put(&[&[(&text, b"copied"), (&png, b"\x89PNG picture")]]);
+            }
+        }
+    };
+    *c.board().during_read.lock() = Some(Box::new(hook));
+    assert_eq!(c.poll(Instant::now()), None, "read while it grew");
+    let whole = c.poll(Instant::now()).expect("the whole copy");
+    assert_eq!(
+        kinds(&whole),
+        [[ClipType::Format(ClipFormat::Text), ClipType::Format(ClipFormat::Png)]]
+    );
+    assert_eq!(c.poll(Instant::now()), None, "once");
+}
+
+/// An item whose types have not landed yet is a copy half done: nothing is announced for it,
+/// and its types are announced once they are there.
+#[test]
+fn an_item_with_no_types_yet_is_announced_once_they_land() {
+    let c = clip();
+    c.watch(next_link(), true);
+    c.board().clear();
+    c.board().put(&[&[]]);
+    assert_eq!(c.poll(Instant::now()), None, "nothing to offer yet");
+    c.board().put(&[&[(&text(), b"late")]]);
+    let offer = c.poll(Instant::now()).expect("its types landed");
+    assert_eq!(texts(&offer), [Some(&b"late"[..])]);
+}
+
 /// Someone copies while a fetch reads: what was read is not served under the offer before.
 #[test]
 fn a_copy_landing_during_a_fetch_is_not_served_under_the_old_offer() {

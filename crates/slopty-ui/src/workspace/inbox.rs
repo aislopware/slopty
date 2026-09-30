@@ -370,7 +370,7 @@ impl WorkspaceView {
             .py(px(spacing.xs))
             .border_b_1()
             .border_color(hsla(s.border_subtle))
-            .child(self.inbox.plate.under(theme))
+            .child(self.inbox.plate.under_on(theme, true, Some(self.clock_instant())))
             .child(
                 tab("inbox-unread", "Unread", !all, Some(unread))
                     .on_click(cx.listener(|this, _ev, _w, cx| this.show_inbox_all(false, cx))),

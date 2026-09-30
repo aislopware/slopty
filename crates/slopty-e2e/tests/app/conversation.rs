@@ -386,7 +386,7 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
         .wait_for("the step settled", STEP, |d| {
             // The fold carries the turn's figures from the transcript: what it wrote. Its model
             // is the one the composer names, so the fold leaves it out.
-            labels(d, "Button").iter().any(|l| l == "Worked \u{b7} 1 step \u{b7} 20 tokens")
+            labels(d, "Button").iter().any(|l| l == "Worked \u{b7} Ran 1 command \u{b7} 20 tokens")
                 && !has(d, "Article", writing)
                 && !has(d, "Status", "Preparing Bash")
         })

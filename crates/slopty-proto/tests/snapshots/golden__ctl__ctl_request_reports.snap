@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+{"cmd":"reports","session":"01020304-0506-0708-090a-0b0c0d0e0f10","token":"c0ffee","payload":"{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"go on\"}","inbox":{"socket":"/tmp/claude-501/inbox.sock","token":"t0ken"}}

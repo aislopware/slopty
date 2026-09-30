@@ -49,19 +49,14 @@ mod tests {
 
     /// As [`daemons`], with `programs` searched first for a command's program.
     async fn daemons_finding(dir: &Path, server: SocketAddr, programs: Option<&Path>) -> Daemons {
-        let path = programs.map(|first| {
-            let rest = std::env::var_os("PATH").unwrap_or_default();
-            std::env::join_paths(
-                std::iter::once(first.to_owned()).chain(std::env::split_paths(&rest)),
-            )
-            .unwrap()
-        });
+        let home = dir.join("home");
         let with_path = |command: &mut Command| {
-            if let Some(path) = &path {
-                command.env("PATH", path);
+            slopty_testkit::env::scrub(command.as_std_mut(), &home);
+            if let Some(first) = programs {
+                command.env("PATH", slopty_testkit::env::path_with(first));
             }
-            // Inherited, as from a developer's shell: an agent the worker starts must not have
-            // it, or its mod goes silent.
+            // As a developer's shell may hold it: an agent the worker starts must not have it,
+            // or its mod goes silent.
             command.env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1");
         };
         let ptyd_sock = dir.join("ptyd.sock");
@@ -283,10 +278,16 @@ mod tests {
         let settings = "[worker.labels]\nfast-disk = true\nrack = \"b2\"\nvram_gb = 24\n\
                         [worker.probes]\nok = \"printf ok\"\nbad = \"false\"\n";
         std::fs::write(data.join("settings.toml"), settings).unwrap();
+        // The cargo running this test, found where the worker looks for toolchains.
+        let programs = dir.path().join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        let cargo = std::env::var_os("CARGO").expect("run under cargo");
+        std::os::unix::fs::symlink(cargo, programs.join("cargo")).unwrap();
         let server =
             ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
                 .unwrap();
-        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let _daemons =
+            daemons_finding(dir.path(), server.local_addr().unwrap(), Some(&programs)).await;
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
         let (mut peer, _reg) = Peer::welcome(link).await;
 
@@ -307,7 +308,6 @@ mod tests {
         let probes = [("bad", Fact::Bool(false)), ("ok", text("ok"))];
         let probes = probes.map(|(name, fact)| (name.to_owned(), fact));
         assert_eq!(facts.get("probes"), Some(&Fact::Map(probes.into())), "{facts:?}");
-        // The test runs under cargo, so the worker it starts finds it.
         let Some(Fact::Map(toolchains)) = facts.get("toolchains") else { panic!("{facts:?}") };
         assert!(
             matches!(toolchains.get("cargo"), Some(Fact::Text(v)) if !v.is_empty()),
@@ -936,6 +936,125 @@ mod tests {
         })
         .await;
         assert!(!kept.join(format!("{session}.json")).exists(), "handed over once");
+    }
+
+    /// An agent the worker starts inherits nothing of the environment the test runs in: not
+    /// the developer's Claude Code settings or credentials, not the Slopty terminal the test
+    /// may run inside, not the build's own variables. The daemons start from a clean one
+    /// (`slopty_testkit::env::scrub`), and the agent from theirs.
+    #[tokio::test]
+    async fn an_agent_the_worker_starts_inherits_nothing_of_the_test_s_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_peer, _session, record, _posted, _kept, _daemons) =
+            resting_agent_with_an_inbox(dir.path(), &[]).await;
+        let started = recorded(&record, |r| r["inherited"].is_object()).await;
+        let inherited: std::collections::BTreeMap<String, u64> =
+            serde_json::from_value(started["inherited"].clone()).unwrap();
+        assert!(inherited.contains_key("STUB_RECORD"), "what the start gave it: {inherited:?}");
+        let leaked = slopty_testkit::env::leaked(&inherited);
+        assert!(leaked.is_empty(), "the test's own environment leaked into the agent: {leaked:?}");
+    }
+
+    /// The batch kept for `session` in `kept` once it is `batch`.
+    async fn kept_batch(kept: &Path, session: slopty_core::SessionId, batch: u64) {
+        let looking = async {
+            while slopty_agent::reports::peek(kept, session).ok().flatten().map(|b| b.batch)
+                != Some(batch)
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::time::timeout(STEP, looking).await.expect("the worker keeps the batch");
+    }
+
+    /// Reports go to an agent's inbox only when it could take typed input: not while it waits
+    /// on a prompt that is the person's to answer, whose answer the post could otherwise land
+    /// in the middle of. Those batches wait for its hooks; once the prompt is answered, the
+    /// next batch is posted at once.
+    #[tokio::test]
+    async fn reports_are_not_posted_while_the_agent_waits_on_the_person() {
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut peer, session, _record, posted, kept, _daemons) =
+            resting_agent_with_an_inbox(dir.path(), &[]).await;
+        let asking = json!({ "hook_event_name": "PermissionRequest", "tool_name": "Bash" });
+        hook(dir.path(), session, asking).await;
+        let context = |n: u64| {
+            format!("<slopty-reports project=\"demo\">\ntask {n}: done\n</slopty-reports>")
+        };
+        // The link takes one message at a time, so the batch after one is kept only once the
+        // one before was judged.
+        for batch in [5, 6] {
+            let deliver = FromServer::Deliver { session, batch, context: context(batch) };
+            peer.tx.send(&deliver).await.unwrap();
+            kept_batch(&kept, session, batch).await;
+        }
+        let ran = json!({ "hook_event_name": "PostToolUse", "tool_name": "Bash" });
+        hook(dir.path(), session, ran).await;
+        let deliver = FromServer::Deliver { session, batch: 7, context: context(7) };
+        peer.tx.send(&deliver).await.unwrap();
+        let got = inbox_notes(&posted, 1).await;
+        let [note] = got.as_slice() else { panic!("one message: {got:?}") };
+        let content = note["content"].as_str().unwrap();
+        assert!(content.contains("task 7: done"), "only the batch after the answer: {content}");
+    }
+
+    /// A kept batch is its own session's to take, by the token the worker made for it: asked
+    /// for or acknowledged under another session's token, nothing is handed over or dropped.
+    /// Under its own it is handed over, and dropped only once the hook says it printed it.
+    #[tokio::test]
+    async fn reports_are_handed_only_to_their_own_session_by_its_token() {
+        use serde_json::json;
+        use slopty_proto::ctl::{CtlReply, CtlRequest, ReportsAsk};
+        use slopty_proto::project::AgentReport;
+
+        let dir = tempfile::tempdir().unwrap();
+        let more = [("STUB_INBOX_HOLD", "1".to_owned())];
+        let (mut peer, session, _record, _posted, kept, _daemons) =
+            resting_agent_with_an_inbox(dir.path(), &more).await;
+        let context = "<slopty-reports project=\"demo\">\ntask 3: done\n</slopty-reports>";
+        let deliver = FromServer::Deliver { session, batch: 3, context: context.to_owned() };
+        peer.tx.send(&deliver).await.unwrap();
+        kept_batch(&kept, session, 3).await;
+
+        let key = slopty_agent::vouch::SessionKey::load_or_make(&dir.path().join("data")).unwrap();
+        let (own, other) = (key.token(session), key.token(slopty_core::SessionId::new()));
+        let payload = json!({ "hook_event_name": "UserPromptSubmit", "prompt": "go on" });
+        let ask = |token: &str| {
+            CtlRequest::Reports(ReportsAsk {
+                session,
+                token: token.to_owned(),
+                payload: payload.to_string(),
+                inbox: None,
+            })
+        };
+        let handed =
+            |token: &str| CtlRequest::ReportsHanded { session, token: token.to_owned(), batch: 3 };
+
+        let refused = ctl(dir.path(), &ask(&other)).await;
+        assert!(matches!(refused, CtlReply::Error { .. }), "{refused:?}");
+        let refused = ctl(dir.path(), &handed(&other)).await;
+        assert!(matches!(refused, CtlReply::Error { .. }), "{refused:?}");
+        let refused = ctl(dir.path(), &handed("")).await;
+        assert!(matches!(refused, CtlReply::Error { .. }), "{refused:?}");
+        assert_eq!(slopty_agent::reports::peek(&kept, session).unwrap().map(|b| b.batch), Some(3));
+
+        let CtlReply::Reports { batch: Some(3), print: Some(print) } =
+            ctl(dir.path(), &ask(&own)).await
+        else {
+            panic!("the batch, to print")
+        };
+        let print: serde_json::Value = serde_json::from_str(&print).unwrap();
+        assert_eq!(print["hookSpecificOutput"]["additionalContext"], context);
+        assert!(kept.join(format!("{session}.json")).exists(), "kept until the hook printed it");
+        assert_eq!(ctl(dir.path(), &handed(&own)).await, CtlReply::Ok { changed: true });
+        peer.heard(|m| {
+            matches!(m, ToServer::Report(AgentReport::Delivered { session: s, batch: 3 }) if *s == session)
+        })
+        .await;
+        assert!(!kept.join(format!("{session}.json")).exists(), "handed over once");
+        assert_eq!(ctl(dir.path(), &handed(&own)).await, CtlReply::Ok { changed: false });
     }
 
     #[tokio::test]

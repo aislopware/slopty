@@ -359,11 +359,21 @@ fn zsh_env(root: &Path) -> Result<(&'static str, PathBuf)> {
     Ok(("ZDOTDIR", dir))
 }
 
+/// `program`, started from a clean environment whose home is `home`
+/// (`slopty_testkit::env::scrub`): nothing of the developer's (their Claude Code settings and
+/// credentials, the Slopty terminal the run may be inside, their `PATH` and dotfiles) reaches a
+/// daemon, or the shells and agents it starts. What a run needs it sets after.
+fn scrubbed(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
+    let mut command = Command::new(program);
+    slopty_testkit::env::scrub(command.as_std_mut(), home);
+    command
+}
+
 /// ptyd on `root/ptyd.sock`, up once its socket is.
 async fn spawn_ptyd(root: &Path, log: &str, env: &[(&str, &str)]) -> Result<Child> {
     let ptyd_sock = root.join("ptyd.sock");
     let (zdotdir, zsh) = zsh_env(root)?;
-    let mut ptyd = Command::new(bin("slopty-ptyd")?)
+    let mut ptyd = scrubbed(bin("slopty-ptyd")?, &root.join("home"))
         .arg("--socket")
         .arg(&ptyd_sock)
         .env(zdotdir, zsh)
@@ -391,7 +401,7 @@ async fn spawn_worker(
     server: Option<&str>,
     port: u16,
 ) -> Result<(Child, String)> {
-    let mut command = Command::new(bin("slopty-worker")?);
+    let mut command = scrubbed(bin("slopty-worker")?, &root.join("home"));
     command
         .arg("--ptyd-socket")
         .arg(root.join("ptyd.sock"))
@@ -652,9 +662,9 @@ impl Stack {
         std::fs::set_permissions(&claude, mode)?;
         std::fs::write(fake.join("transcript.jsonl"), TRANSCRIPT)?;
         std::fs::write(fake.join("transcript-done.jsonl"), TRANSCRIPT_DONE)?;
-        let path = std::env::var("PATH").unwrap_or_default();
+        let path = slopty_testkit::env::path_with(&fake);
         let (home, fake_dir) = (home.to_string_lossy(), fake.to_string_lossy());
-        let path = format!("{}:{path}", fake.display());
+        let path = path.to_string_lossy();
         let env = [("HOME", &*home), ("PATH", &*path), ("SLOPTY_FAKE_CLAUDE_DIR", &*fake_dir)];
         Self::launch_in(dir, worker_name, &env).await
     }
@@ -1004,14 +1014,13 @@ impl Stack {
     pub fn relay_hook(&self, session: &str, args: &[&str], payload: &Value) -> Result<Child> {
         let home = self.path("home");
         std::fs::create_dir_all(&home)?;
-        let mut child = Command::new(bin("slopty")?)
+        let mut child = scrubbed(bin("slopty")?, &home)
             .arg("--data-dir")
             .arg(self.path("hook-data"))
             .arg("hook")
             .args(args)
             .env("SLOPTY_SESSION", session)
             .env("SLOPTY_WORKER_SOCKET", self.path("worker.sock"))
-            .env("HOME", &home)
             .env("CLAUDE_CONFIG_DIR", self.path("claude-config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1258,7 +1267,7 @@ impl ServerDaemon {
     ///
     /// When the binary is missing, or the server dies or does not listen in time.
     pub async fn start(data_dir: &Path, name: &str, log: &str) -> Result<Self> {
-        let mut child = Command::new(bin("slopty-server")?)
+        let mut child = scrubbed(bin("slopty-server")?, &data_dir.join("home"))
             .args(["--port", "0", "--mcp-port", "0", "--print-addr"])
             .arg("--data-dir")
             .arg(data_dir)
@@ -1619,11 +1628,10 @@ impl SecondWorker {
             r#"{{"hook_event_name":"{event}","session_id":"e2e","transcript_path":"{}"{fields}}}"#,
             transcript.display()
         );
-        let mut hook = Command::new(bin("slopty")?)
+        let mut hook = scrubbed(bin("slopty")?, &self.home)
             .arg("hook")
             .env("SLOPTY_SESSION", session)
             .env("SLOPTY_WORKER_SOCKET", self.worker.ctl_socket())
-            .env("HOME", &self.home)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -1660,7 +1668,7 @@ pub async fn slopty_json(
     args: &[&str],
     stdin: &[u8],
 ) -> Result<Value> {
-    let mut child = Command::new(bin("slopty")?)
+    let mut child = scrubbed(bin("slopty")?, &data_dir.join("home"))
         .arg("--data-dir")
         .arg(data_dir)
         .args(["--server", server, "--json"])
@@ -2054,9 +2062,12 @@ impl ProjectStack {
         std::fs::write(app_dir.join("settings.toml"), settings)?;
         let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
+        // The first run's own shell is in before any test opens another, so the tiles stand in
+        // one order on every run.
         driver
-            .wait_for("the worker the server lists", STARTUP, |d| {
+            .wait_for("the worker the server lists, and its first shell", STARTUP, |d| {
                 d.workers.iter().any(|w| w.name == worker_name && w.status == "connected")
+                    && d.items.iter().any(|i| i.session.is_some())
             })
             .await?;
         Ok(Self { driver, app, worker, server, dir })

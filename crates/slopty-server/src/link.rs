@@ -44,7 +44,7 @@ pub async fn serve(listener: ServerListener, hub: Hub) {
                 Role::Shell { name, session, token } => {
                     let speaker = match token {
                         Some(token) if proven(&hub, &name, session, &token) => {
-                            Speaker::Proven(session)
+                            Speaker::ProvenShell(session)
                         }
                         _ => Speaker::Shell(session),
                     };

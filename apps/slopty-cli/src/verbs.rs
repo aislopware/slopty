@@ -603,12 +603,12 @@ fn session() -> Option<SessionId> {
     std::env::var(slopty_proto::ctl::SESSION_ENV).ok()?.trim().parse().ok()
 }
 
-/// The token the server gave the task terminal this runs in (`SLOPTY_AGENT_TOKEN`), if any.
+/// The token the worker gave the terminal this runs in (`SLOPTY_SESSION_TOKEN`), if any.
 fn token() -> Option<String> {
-    std::env::var(slopty_proto::project::AGENT_TOKEN_ENV).ok().filter(|t| !t.trim().is_empty())
+    std::env::var(slopty_proto::ctl::SESSION_TOKEN_ENV).ok().filter(|t| !t.trim().is_empty())
 }
 
-/// The proof of the task terminal an agent's tools speak from, when they run in one.
+/// The proof of the terminal an agent's tools speak from, when they run in one.
 pub fn vouch() -> Option<Vouch> {
     Some(Vouch { session: session()?, token: token()? })
 }

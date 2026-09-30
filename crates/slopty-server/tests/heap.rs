@@ -139,6 +139,7 @@ mod tests {
             listen: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 45550)),
             caps: caps(),
             sessions: Vec::new(),
+            session_key: [7; 32],
         };
         let lease = hub.register(registration, IpAddr::from([127, 0, 0, 1]), tx).unwrap();
         let empty = held();

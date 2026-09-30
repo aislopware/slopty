@@ -250,6 +250,34 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   The CLI inside a Slopty terminal is an agent when an agent runs there, when the terminal works
   on a project, when an agent opened it or typed into it, or when the server does not know it.
   So an agent cannot borrow the person's word through a shell, its own or one it drives.
+- A program proves which terminal it runs in with the token its worker made for that terminal
+  (`SLOPTY_SESSION_TOKEN`, in every session's environment): a keyed blake3 of the session id
+  under the worker's own key (`session.key`, 0600, in its data directory), which the worker
+  sends the server when it registers. The worker checks the token itself for what it hands
+  over locally, and the server checks it against every registered worker's key. Before, the
+  server minted a token only for the terminals it started, so an agent in any other terminal
+  proved nothing, and `slopty hook reports` took any session's batch from any same-user process.
+- An agent changes the projects only from a terminal it proves works in one, and only within
+  it (`hub::projects::agent_scope`). An unproven agent (an MCP surface, the CLI with no token)
+  changes none.
+  - An orchestrator works in its whole project. Only an orchestrator, or the person, makes a
+    project or sets one.
+  - A task's agent works in its own task and what is split from it. A task it creates goes
+    under its own task unless it names a parent inside that subtree, so what it splits off
+    counts against the project's depth like everything else. Before, it could root tasks at
+    the top of the tree, past the depth limit.
+  - A terminal an agent names as orchestrator or assignee is its own, one it opened, one the
+    project holds (its orchestrator's, a task's, a start's for it), or one another agent of the
+    project opened. The person's own terminals are the person's to give. Before, an agent could
+    draw any live terminal into a project.
+- The terminals an agent opened or typed into, and those a task's start holds, are kept in the
+  projects store beside the projects (`Keep::Watch` and `Keep::Unwatch` in its log, `watched` in
+  its snapshot). A server restart keeps them, so the shell an agent opened still speaks for an
+  agent and stays its project's. An entry is dropped once its terminal is gone from a worker
+  whose link is up, never from one that is away.
+- Claude Code's folder trust is written only for a folder strictly inside the one Slopty makes
+  its own in (`slopty_agent::trust::trust`, `within`). An ancestor, or a worktree whose `.git`
+  file leads outside, is refused, since trusting its key would trust the person's repository.
 - Only the person answers a permission (`answer_permission` from an agent is `Forbidden`),
   merges a task, records its verifier, or names a verifier for a project or a task: a verifier
   is the person's word on what counts as done. Only the person's read of a conversation holds its
@@ -269,7 +297,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
     the `slopty mcp` server; `--plugin-dir` only as the worker's own mod.
   - `--debug-file` is not on the list, since it writes wherever it is pointed.
 - They are allowed only for the projects the person names in `[server.projects]
-  permission_flags`. No agent can start another with more than it has.
+  permission_flags`, and only to that project's own agents (`hub::projects::allowance`): an
+  agent has the allowance of the project it proves it works in, and names no other's. No agent
+  can start another with more than it has. Before, any agent that named such a project had it.
 - An agent's environment for a new terminal cannot steer what runs there: `PATH`, `HOME`,
   `ZDOTDIR`, `SHELL`, `BASH_ENV`, `ENV`, `XDG_CONFIG_HOME` and anything starting `SLOPTY_`,
   `CLAUDE`, `ANTHROPIC_`, `NODE_`, `BUN_`, `DYLD_`, `LD_` or `GIT_CONFIG` are refused with
@@ -303,20 +333,14 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   worker answered is replayed with that answer, and one that was lost in flight (interrupted,
   worker unreachable) is not remembered, so its retry starts it.
 - What is left, known:
-  - An agent can name any live terminal as a project's orchestrator or a task's assignee. The
-    backstops above then watch it, but a person's own terminal can be drawn into a project.
   - The CLI says it speaks for the person when it finds no Slopty variables in its
     environment (a session id that does not parse, or a token alone, speaks for an agent); a
     process outside Slopty's terminals that clears them is trusted as the person.
-  - Any agent that names a `permission_flags` project may use its allowance, not only the
-    agents the person started in it.
   - Allow rules in `.claude/settings.local.json`, and `/permissions` typed into a TUI, are
     Claude Code's to honour and are not read; the mode backstop still watches the result.
-  - Anything running as the person's user can reach the worker's socket and speak as a client,
-    or run `slopty hook reports` as another session. Tailscale bounds who reaches a host; the
-    uid is the boundary on it.
-  - The terminals an agent drove are remembered in memory only, so a server restart forgets
-    them.
+  - Anything running as the person's user can reach the worker's socket and speak as a
+    client, and can read the worker's key and so any session's token. Tailscale bounds who
+    reaches a host; the uid is the boundary on it.
 
 **Claims are prefixes at component granularity, compared as APFS compares names.** ✅ 2026-09-30
 - A path is normalised to `/`-separated components relative to the repository root, and to
@@ -439,11 +463,15 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   it in a file for that session beside its control socket. A node with no terminal waits,
   parked until its next terminal opens.
 - The agent's own `SessionStart`, `UserPromptSubmit` and `Stop` hooks run
-  `slopty hook reports`, synchronously. It takes the file (claimed by a rename, so two hooks
-  never both hand it over) and prints it as the hook's `additionalContext`, or for `Stop` as
-  `decision: block` with the reports as the reason, so a finishing agent reads them before it
-  ends its turn. It then tells the worker, whose `Delivered` report acks the batch; the server
-  marks a `Delivered` moment. A batch not acked is sent again when the worker registers again,
+  `slopty hook reports`, synchronously. It asks the worker for its session's batch over the
+  control socket with the session's token (`CtlRequest::Reports`), and the worker answers what
+  to print: the batch as the hook's `additionalContext`, or for `Stop` as `decision: block`
+  with the reports as the reason, so a finishing agent reads them before it ends its turn. The
+  batch stays kept until the hook says it printed it (`CtlRequest::ReportsHanded`, with the
+  token again). Only then does the worker drop it and send the `Delivered` report that acks
+  it, and the server marks a `Delivered` moment. A hook that dies in between leaves the batch
+  for the next one. Keeping, handing over and dropping run one at a time per worker, so a
+  batch kept meanwhile is never dropped in its place. A batch not acked is sent again when the worker registers again,
   folded into the next one, or put back when the terminal closes.
 - Report text cannot close its `<slopty-reports>` block, so a report never reads as the
   server's own words.
@@ -457,6 +485,12 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   checked against 2.1.285). A message starts a turn in an idle session and is read between tool
   calls in a busy one. The reports hook notes the session's socket and token on every run, and
   the worker posts each batch there as it arrives, marked with a fresh nonce.
+- A post obeys the rules for typing into an agent (`orchestrate::may_type`): nothing is posted
+  while the agent waits on a prompt that is the person's, while the person's unsent text is in
+  its composer, before a hook has spoken from it, or after it exited. The batch then waits for
+  the hook that comes once that clears (the person's prompt, the turn's end, the agent's
+  start). Before, a post could start a turn in the middle of the person's answer or draft.
+  A draft the person abandons unsent holds the batch until the agent's next hook.
 - The post only wakes. Claude Code may hold or refuse what arrives (`crossSessionInbound`, or a
   session that bypasses prompts holding messages from one that does not) and answers nothing.
   So the batch stays in its file and the post is noted beside it. The next hook looks for the
@@ -471,7 +505,20 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   - **Typing the reports.** It drives the TUI behind the person's back.
 - `apps/slopty-worker/tests/server_link.rs` proves both paths against the stub `claude`, which
   speaks the socket: a woken agent's turn acknowledges the batch without a second copy, and a
-  held message leaves the batch for the next prompt's hook.
+  held message leaves the batch for the next prompt's hook. It also proves that no batch is
+  posted while the agent waits on the person, and that a batch is asked for and acknowledged
+  only under its own session's token.
+
+**A hook that comes before its terminal's open returns waits for it.** ✅ 2026-10-01
+- Claude Code fires `SessionStart` as it starts, which can be before the worker's open of its
+  terminal has returned and put the session in the worker's table. The control socket used to
+  refuse such a hook ("no such session"), so the agent never reported through its hooks and
+  nothing was ever typed into it. A session being opened is now marked before the open starts,
+  and a hook for it waits for the open to finish (`Worker::get_opened`). A session nobody is
+  opening is still refused at once.
+- Found as a load-sensitive failure of
+  `an_agent_started_for_a_task_has_the_tools_and_grows_the_tree` (3 of 47 runs under a load
+  average near 40). With the fix, 40 of 40 runs passed at load 40–56.
 
 **Tests use a stub `claude`.** ✅ 2026-09-30
 - `slopty-stub-claude` (in `slopty-testkit`) records its argv, env and MCP configs. It fires
@@ -497,11 +544,34 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   backstops, a shell an agent drove speaking as an agent, an agent's environment, typing into an
   agent's TUI and naming a verifier refused, an agent's terminals under the fleet bound, an
   assign under the project's limits, keyed starts replayed and scoped to their caller, reports
-  batched, paced and parked, and a restart's reconcile. The store tests replay a log
-  past its snapshot, over a torn last line and a bad middle one.
+  batched, paced and parked, and a restart's reconcile. They also cover an agent's scope: the
+  terminals it may put to work, a project's allowance for its own agents only, the terminals
+  it opened kept across a restart, and a task's agent splitting work only under its own task.
+  The store tests replay a log past its snapshot, over a torn last line and a bad middle one.
+
+**The board says each thing once, in one neutral scale.** ✅ 2026-09-30 (design review of
+`project-tree`, `project-lanes` and `project-timeline` against Warp, Zed, T3 Code, Amp and
+MonoCode)
+- *Needs you* is a band that runs the tile's full width, one tone step up (`raised`) with no
+  frame. Colour is kept for what it means: the heading and each mark are `warn`, and nothing
+  else is. Its rows keep the tree's geometry, so their marks stand on the tree's column, and
+  its heading sits on that column too. A row in the band says no state word, since the
+  heading already says it (the inbox's rule). Before, it was a framed card inset from the
+  tile, its marks one step right of the tree's, and each row said "Needs you" under the
+  heading "Needs you".
+- The lanes share the tile's width in equal columns, as many as fit at 232 pt each
+  (`lanes_across`), and wrap onto a new row. Before, fixed-width lanes left an unused gap at
+  the right and the next row started at an odd place. A lane that comes or goes moves no card
+  sideways. Cards are a tone step with no border; hover and the picked card step up once more
+  (`overlay`).
+- A timeline entry for a task made under the title it still has says "Created", because the
+  row already names the task. A task renamed since keeps "Created: *old title*".
+- Tests: `the_board_says_each_thing_once_and_fills_its_tile` and
+  `as_many_lanes_stand_across_as_fit_at_the_zoom` (`slopty-ui`). The e2e project stack now
+  waits for the first run's own shell before the test opens anything, so the tiles stand in
+  the same order on every run. Three runs rendered byte-identical goldens.
 
 Not built in Phase 1:
-- the project tile (the UI lane), including dropping updates at or below the snapshot's `seq`;
 - worktrees and mirrors, so a task's `cwd` must already exist on the placed worker;
 - mirror presence as a fact;
 - the verifier run and the merge queue;

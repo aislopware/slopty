@@ -469,7 +469,7 @@ impl ConversationView {
 
     /// The model in the composer's foot, a way to the model list: while the agent is idle,
     /// and after its turn otherwise, as its hint says.
-    pub(super) fn model_button(&self, model: String, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn model_button(&self, model: &str, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let idle = self.idle();
@@ -482,29 +482,14 @@ impl ConversationView {
             hsla(s.text_muted),
         )
         .size(self.z(theme.typography.meta()));
-        let button = div()
-            .id("composer-model")
-            .debug_selector(|| "composer-model".to_owned())
+        let button = self
+            .foot_chip("composer-model", IconName::Asterisk, s.text_muted, model.to_owned())
             .role(Role::Button)
             .aria_label(SharedString::from(format!("Model: {model}")))
             .aria_expanded(open)
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.xxs))
-            .min_w_0()
-            .px(self.z(theme.spacing.xxs))
-            .rounded(self.z(theme.radii.xs))
             .when(open, |el| el.bg(hsla(s.raised)))
             .when(idle, |el| el.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))))
             .when(!idle, |el| el.opacity(slopty_theme::alpha::PRESSED))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(model)),
-            )
             .child(chevron)
             .tooltip(move |_window, cx| {
                 let theme = std::rc::Rc::clone(&hint_theme);
@@ -513,6 +498,42 @@ impl ConversationView {
             })
             .when(idle, |el| el.on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))));
         crate::a11y::tab_stop(button, s.accent).into_any_element()
+    }
+
+    /// A chip of the composer's foot: `icon` in `ink`, then `text`, as tall as the buttons
+    /// beside it so the row reads as one line.
+    pub(super) fn foot_chip(
+        &self,
+        id: &'static str,
+        icon: IconName,
+        ink: slopty_theme::Rgb,
+        text: String,
+    ) -> gpui::Stateful<gpui::Div> {
+        let theme = &self.theme;
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xxs))
+            .min_w_0()
+            .h(self.z(kit::icon_button_side(theme)))
+            .px(self.z(theme.spacing.xs))
+            .rounded(self.z(theme.radii.sm))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(theme.surfaces.text_secondary))
+            .child(
+                crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, hsla(ink))
+                    .size(self.z(theme.typography.icon())),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(text)),
+            )
     }
 
     /// Open or close the model list over the field, while the agent is idle.

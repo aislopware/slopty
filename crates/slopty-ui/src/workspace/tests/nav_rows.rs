@@ -447,6 +447,53 @@ fn the_selected_row_sits_on_the_plate(cx: &mut TestAppContext) {
     }
 }
 
+/// The plate glides on the workspace's clock, the one the springs run on: held still, it
+/// stays where the clock puts it however long the frames take to draw, part of the way there
+/// at a part of the glide and on the row once the glide is over. On the wall clock, a frame
+/// drawn again later drew it further on than the frame on screen.
+#[gpui::test]
+fn the_plate_glides_on_the_workspaces_clock(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    view.update(cx, |v, _| {
+        v.set_animation(true);
+        v.hold_clock(Some(Duration::ZERO));
+    });
+    let plate = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.navigator_plate());
+    let row = |cx: &mut VisualTestContext, tile: TileRef| {
+        cx.debug_bounds(selector("nav-tile", tile.item)).expect("the row")
+    };
+    let settled = Duration::from_secs(5);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    view.update(cx, |v, _| v.hold_clock(Some(settled)));
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    let from = row(cx, first);
+    assert_eq!(plate(cx), Some(from), "on the first row");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(second, cx));
+    cx.run_until_parked();
+    let to = row(cx, second);
+    assert_eq!(plate(cx), Some(from), "the glide starts where the plate was");
+    let half = settled.saturating_add(crate::kit::Pace::Settle.duration().div_f32(2.0));
+    view.update(cx, |v, _| v.hold_clock(Some(half)));
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    let midway = plate(cx).expect("a plate").top();
+    assert!(from.top() < midway && midway < to.top(), "{from:?} → {midway:?} → {to:?}");
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    assert_eq!(plate(cx).map(|p| p.top()), Some(midway), "the clock held, the plate holds");
+
+    view.update(cx, |v, _| v.hold_clock(Some(settled.saturating_mul(2))));
+    cx.update(Window::simulate_next_frame);
+    cx.run_until_parked();
+    assert_eq!(plate(cx), Some(to), "landed on the second row");
+}
+
 /// One agent is one row. At work with its tile's row in view, *Working* does not list it again:
 /// the row ends in "Working" already. Folded away, *Working* lists it. Waiting, its row ends in
 /// the state's own word ("Needs approval"), not the section's "Needs you".

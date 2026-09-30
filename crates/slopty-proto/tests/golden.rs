@@ -1559,6 +1559,7 @@ mod golden {
                     listen: std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45570)),
                     caps: caps.clone(),
                     sessions: Vec::new(),
+                    session_key: [7; 32],
                 })),
             },
         );
@@ -2683,8 +2684,9 @@ mod ctl {
     use serde::de::DeserializeOwned;
     use slopty_core::{DisplayId, SessionId, WallMs, WindowId, WorkerId};
     use slopty_proto::ctl::{
-        CtlReply, CtlRequest, Decision, Health, LtrStats, PasteboardAccess, PermissionAnswer,
-        PermissionAsk, Quantiles, ScreenStats, ScreenSummary, Tailscale,
+        CtlReply, CtlRequest, Decision, Health, InboxAt, LtrStats, PasteboardAccess,
+        PermissionAnswer, PermissionAsk, Quantiles, ReportsAsk, ScreenStats, ScreenSummary,
+        Tailscale,
     };
     use slopty_proto::screen::{CaptureTarget, VideoCodec};
     use slopty_proto::server::{Os, WorkerCaps};
@@ -2776,6 +2778,22 @@ mod ctl {
                 payload: r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#.to_owned(),
                 wait_ms: 595_000,
             }),
+        );
+        snap(
+            "ctl_request_reports",
+            &CtlRequest::Reports(ReportsAsk {
+                session: session(),
+                token: "c0ffee".to_owned(),
+                payload: r#"{"hook_event_name":"UserPromptSubmit","prompt":"go on"}"#.to_owned(),
+                inbox: Some(InboxAt {
+                    socket: "/tmp/claude-501/inbox.sock".to_owned(),
+                    token: Some("t0ken".to_owned()),
+                }),
+            }),
+        );
+        snap(
+            "ctl_request_reports_handed",
+            &CtlRequest::ReportsHanded { session: session(), token: "c0ffee".to_owned(), batch: 7 },
         );
     }
 
@@ -2956,6 +2974,16 @@ mod ctl {
     fn outcomes() {
         snap("ctl_reply_ok", &CtlReply::Ok { changed: true });
         snap("ctl_reply_error", &CtlReply::Error { message: "no such session".to_owned() });
+        snap(
+            "ctl_reply_reports",
+            &[
+                CtlReply::Reports {
+                    batch: Some(7),
+                    print: Some(r#"{"decision":"block","reason":"task 2: done"}"#.to_owned()),
+                },
+                CtlReply::Reports { batch: None, print: None },
+            ],
+        );
     }
 
     /// What the doctor says of a worker whose clipboard reads wait on the person, and of one

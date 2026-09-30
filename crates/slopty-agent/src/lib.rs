@@ -54,6 +54,7 @@ pub mod statusline;
 pub mod title;
 pub mod transcript;
 pub mod trust;
+pub mod vouch;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -145,8 +146,6 @@ pub enum HookEvent {
     Report,
     /// `slopty hook statusline`: the status line's meters, which say nothing about the turn.
     Statusline,
-    /// `slopty hook reports` handed a batch of reports over to the agent ([`reports`]).
-    Delivered,
     /// An event this build does not know, such as one a newer Claude Code adds; ignored.
     #[default]
     #[serde(other)]
@@ -179,7 +178,6 @@ impl HookEvent {
             Self::PostCompact => "PostCompact",
             Self::Report => "Report",
             Self::Statusline => "Statusline",
-            Self::Delivered => "Delivered",
             Self::Other => "Other",
         }
     }
@@ -320,9 +318,6 @@ pub struct Hook {
     /// `Statusline`: the worktree the session runs in.
     #[serde(default)]
     pub worktree: Option<Worktree>,
-    /// `Delivered`: the batch of reports handed over.
-    #[serde(default)]
-    pub batch: Option<u64>,
 }
 
 /// Characters a forwarded hook keeps of a background task's description or a scheduled prompt.
@@ -453,7 +448,6 @@ impl Hook {
                 };
                 Some(AgentReport::NativeTask { session, task })
             }
-            HookEvent::Delivered => Some(AgentReport::Delivered { session, batch: self.batch? }),
             _ => None,
         }
     }
@@ -771,7 +765,7 @@ impl Tracker {
     /// (a restart after a crash) or when the human started it (`/clear`, `/resume`).
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
         // The status line's meters ride the hook path but say nothing about the turn.
-        if matches!(hook.event, HookEvent::Statusline | HookEvent::Delivered) || !self.owns(hook) {
+        if hook.event == HookEvent::Statusline || !self.owns(hook) {
             return None;
         }
         self.hooked = true;
@@ -1141,7 +1135,6 @@ impl Tracker {
             | HookEvent::PreCompact
             | HookEvent::PostCompact
             | HookEvent::Statusline
-            | HookEvent::Delivered
             | HookEvent::Other => return None,
         })
     }
@@ -1745,8 +1738,7 @@ mod tests {
     /// reads as `Other`.
     #[test]
     fn an_event_is_spelled_as_its_name_and_a_new_one_reads_as_other() {
-        let ours =
-            [HookEvent::Report, HookEvent::Statusline, HookEvent::Delivered, HookEvent::Other];
+        let ours = [HookEvent::Report, HookEvent::Statusline, HookEvent::Other];
         for event in HOOK_EVENTS.into_iter().chain(ours) {
             let name = serde_json::json!(event.as_str());
             assert_eq!(serde_json::to_value(event).expect("json"), name, "{event}");

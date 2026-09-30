@@ -123,6 +123,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         CtlReply::Ok { changed } => println!("{}", if changed { "done" } else { "no change" }),
         CtlReply::Permission(answer) => bail!("a permission decision nobody asked for: {answer:?}"),
         CtlReply::Handoff(handed) => bail!("a handoff nobody asked for: {handed:?}"),
+        CtlReply::Reports { batch, .. } => bail!("reports nobody asked for: {batch:?}"),
         CtlReply::Error { message } => bail!("{message}"),
     }
     Ok(())

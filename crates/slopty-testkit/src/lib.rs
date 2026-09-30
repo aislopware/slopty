@@ -1,6 +1,7 @@
 //! What the tests measure with, in one place: never a dependency of a shipped binary.
 //!
 //! - [`bins`]: the daemons and doubles a test spawns, from the test's own build.
+//! - [`env`](mod@env): the clean environment each of them starts from, never the person's.
 //! - [`alloc`]: a counting global allocator, so a test can hold a hot path to a number of
 //!   allocations and bytes. The counts are per thread and deterministic, so they gate.
 //! - [`stats`]: the percentiles every measurement prints.
@@ -25,6 +26,7 @@
 pub mod alloc;
 pub mod bench;
 pub mod bins;
+pub mod env;
 pub mod live;
 pub mod process;
 pub mod soc;

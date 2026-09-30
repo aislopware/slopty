@@ -1153,7 +1153,12 @@ impl Workspace {
                             }
                         };
                         if let Some(resume) = resumed {
-                            let Some(link) = rtt_link.upgrade() else { break };
+                            // The link ended before the resume reached it: the connect loop is
+                            // in its backoff, and the resume says to dial now.
+                            let Some(link) = rtt_link.upgrade() else {
+                                rtt_wake.notify_one();
+                                break;
+                            };
                             if probe(cx, &link, resume, &rtt_view, key).await {
                                 // Resumes that came while it ran are answered by this one.
                                 while resumes.try_recv().is_ok() {}
@@ -1161,7 +1166,13 @@ impl Workspace {
                                 continue;
                             }
                             tracing::warn!(worker = %id, resume = resume.name(), path = %link.path(), "no answer after a resume; relinking");
+                            // The pump relinks at once. If the link ended while the probe ran,
+                            // the pump is gone and the connect loop waits out its backoff
+                            // instead: the wake cuts that short. A wake left over when the
+                            // pump took the relink costs at most one dial without backoff; a
+                            // new link starts heard, so it is not given up for it.
                             relink_asked.notify_one();
+                            rtt_wake.notify_one();
                             break;
                         }
                         let Some(link) = rtt_link.upgrade() else {

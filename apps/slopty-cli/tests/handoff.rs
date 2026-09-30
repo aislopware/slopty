@@ -56,14 +56,12 @@ mod tests {
             let ours = self.path("ours");
             let path =
                 format!("{}:{}:/usr/bin:/bin", ours.display(), self.path("theirs").display());
-            Command::new(ours.join(name))
+            slopty_testkit::env::scrub(&mut Command::new(ours.join(name)), self.dir.path())
                 .args(args)
                 .current_dir(self.dir.path())
                 .env("PATH", path)
                 .env(BIN, &ours)
-                .env("HOME", self.dir.path())
                 .env("SLOPTY_WORKER_SOCKET", self.path("no-worker.sock"))
-                .env_remove("SLOPTY_SESSION")
                 .env("STUB_EXIT", code.to_string())
                 .status()
                 .unwrap()

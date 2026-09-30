@@ -9,9 +9,9 @@ use std::rc::Rc;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Bounds, Context, InteractiveElement as _, IntoElement as _, ObjectFit,
-    ParentElement as _, PathBuilder, Pixels, SharedString, StatefulInteractiveElement as _,
-    Styled as _, StyledImage as _, canvas, div, img, point, px,
+    AnyElement, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement as _,
+    ObjectFit, ParentElement as _, PathBuilder, Pixels, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledImage as _, canvas, div, img, point, px,
 };
 use gpui_kit::component::input::{Input, Textarea};
 use slopty_core::WallMs;
@@ -153,8 +153,10 @@ impl ConversationView {
         }
         let (spacing, zoom) = (self.theme.spacing, self.zoom);
         let z = |v: f32| px(v * zoom);
-        let tasks = self.tasks_card(cx);
-        let tray = self.tray(cx);
+        let work = self.tray_work();
+        let one_line = self.status_on_one_line(&work);
+        let tasks = self.tasks_card(one_line, cx);
+        let tray = self.tray(&work, cx);
         let settled = self.settled_line(cx);
         let away = self.away_line(cx);
         let asking = self.approvals.prompt().is_some();
@@ -180,11 +182,31 @@ impl ConversationView {
             }
             _ => inside,
         };
-        // The work in the background and the task list are the shell's top sections, over the
-        // field, a hairline apart, as T3's composer holds pending work: one surface, not three.
+        // The work in the background and the task list are the shell's top, over the field,
+        // one tone step under it with no rule between them, as T3's composer holds pending
+        // work: one surface, not three. With one piece of work and nothing opened they share
+        // one line.
         let s = self.theme.surfaces;
+        let has_status = tray.is_some() || tasks.is_some();
+        let status = has_status.then(|| {
+            let half = |el: AnyElement| {
+                if one_line { div().flex_1().min_w_0().child(el).into_any_element() } else { el }
+            };
+            div()
+                .id("composer-status")
+                .debug_selector(|| "composer-status".to_owned())
+                .flex()
+                .when(one_line, |el| el.flex_row().items_center())
+                .when(!one_line, gpui::Styled::flex_col)
+                .px(z(spacing.xs))
+                .py(z(spacing.xxs))
+                .rounded_t(z(self.theme.radii.lg))
+                .bg(hsla(s.panel))
+                .children(tray.map(half))
+                .children(tasks.map(half))
+        });
         // The menu is the section nearest the field it writes into.
-        let sections = tray.into_iter().chain(tasks).chain(menu).map(|section| {
+        let menu = menu.map(|section| {
             div()
                 .border_b_1()
                 .border_color(hsla(s.border_subtle))
@@ -199,7 +221,8 @@ impl ConversationView {
             .flex()
             .flex_col()
             .rounded(z(self.theme.radii.lg))
-            .children(sections)
+            .children(status)
+            .children(menu)
             .child(div().p(z(spacing.md)).child(inside));
         Some(
             div()
@@ -487,6 +510,45 @@ impl ConversationView {
             .or_else(|| self.model.meters().and_then(|m| m.model.clone()))
     }
 
+    /// The permission mode the agent is in, from the freshest word on it: the mode a prompt
+    /// was sent in (the transcript) or the one the agent's hook reported with a permission
+    /// prompt since.
+    pub(super) fn permission_mode(&self) -> String {
+        let turn = self.model.thread(&ThreadId::Main).and_then(|t| t.last_turn());
+        let sent = turn.and_then(|t| Some((t.started_ms, t.mode.clone()?)));
+        [sent, self.heard_mode.clone()]
+            .into_iter()
+            .flatten()
+            .max_by_key(|(at, _)| *at)
+            .map_or_else(|| "default".to_owned(), |(_, mode)| mode)
+    }
+
+    /// The permission mode as a chip, read-only: the terminal is where it changes, and
+    /// nothing here drives the TUI's own menu. Bypassing permissions is the one mode drawn in
+    /// the warning tone.
+    fn mode_chip(&self) -> AnyElement {
+        let s = self.theme.surfaces;
+        let mode = self.permission_mode();
+        let label = approval::mode_label(&mode).to_owned();
+        let (icon, ink) = match mode.as_str() {
+            "acceptEdits" => (IconName::FilePen, s.text_muted),
+            "plan" => (IconName::Map, s.text_muted),
+            "dontAsk" => (IconName::ShieldBan, s.text_muted),
+            "bypassPermissions" => (IconName::ShieldOff, s.warn),
+            _ => (IconName::Shield, s.text_muted),
+        };
+        let hint_theme = Rc::clone(&self.hint_theme);
+        self.foot_chip("composer-mode", icon, ink, label.clone())
+            .role(Role::Status)
+            .aria_label(SharedString::from(format!("Permissions: {label}")))
+            .when(ink == s.warn, |el| el.text_color(hsla(s.warn)))
+            .tooltip(move |_window, cx| {
+                let theme = Rc::clone(&hint_theme);
+                cx.new(|_| kit::Hint::new("Changes in the terminal", "", theme)).into()
+            })
+            .into_any_element()
+    }
+
     /// The chips of what is attached to the draft, in a wrapping row over the field: a pasted
     /// picture as the picture, a file by its name, each with a way to take it off the draft and,
     /// while it uploads, how far it got. `None` while nothing is attached. The chip is the one
@@ -637,9 +699,9 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// The field that types into the agent's terminal, and under it the permission mode and
-    /// the model it runs (read-only: the terminal is where either changes), and the way to
-    /// send (or, while the agent works and nothing is typed, to stop it).
+    /// The field that types into the agent's terminal, and under it the model it runs and its
+    /// permission mode, as chips, and the way to send (or, while the agent works and nothing
+    /// is typed, to stop it).
     fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
         let theme = self.theme.clone();
         let s = theme.surfaces;
@@ -682,45 +744,8 @@ impl ConversationView {
                 }
             },
         ));
-        // What the agent runs under, read-only: the terminal is where either changes.
-        let mode = self
-            .model
-            .thread(&ThreadId::Main)
-            .and_then(|t| t.last_turn())
-            .and_then(|t| t.mode.clone())
-            .unwrap_or_else(|| "default".to_owned());
-        let model = self.running_model();
-        let setting = div()
-            .id("composer-setting")
-            .debug_selector(|| "composer-setting".to_owned())
-            .role(Role::Status)
-            .aria_label(SharedString::from(match &model {
-                Some(model) => {
-                    format!("Permissions: {}, model: {model}", approval::mode_label(&mode))
-                }
-                None => format!("Permissions: {}", approval::mode_label(&mode)),
-            }))
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .min_w_0()
-            .text_size(self.z(theme.typography.small()))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(hsla(s.text_secondary))
-                    .child(SharedString::from(approval::mode_label(&mode).to_owned())),
-            )
-            .children(model.map(|model| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(self.z(theme.spacing.xs))
-                    .min_w_0()
-                    .text_color(hsla(s.text_muted))
-                    .child(kit::separator(&self.theme))
-                    .child(self.model_button(model, cx))
-            }));
+        let model = self.running_model().map(|model| self.model_button(&model, cx));
+        let mode = self.mode_chip();
         let attach = kit::icon_button_at(
             &theme,
             "composer-attach",
@@ -757,7 +782,8 @@ impl ConversationView {
                     .items_center()
                     .gap(self.z(theme.spacing.xs))
                     .child(attach)
-                    .child(setting)
+                    .children(model)
+                    .child(mode)
                     .child(div().flex_1())
                     .child(send),
             )

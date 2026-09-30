@@ -203,6 +203,12 @@ pub struct Daemon {
     /// Where each agent's inbox is noted, which takes its reports at once
     /// ([`slopty_agent::reports::Inbox`]).
     pub inboxes: PathBuf,
+    /// Held across each change to a session's kept batch: keeping one, handing it over, and
+    /// dropping it once handed, so a batch kept meanwhile is never dropped in its place.
+    pub reports_turn: Arc<parking_lot::Mutex<()>>,
+    /// The key every session's token is made under, kept in the data directory: the token
+    /// proves which session a program speaks from, to this daemon and to the server.
+    pub session_key: slopty_agent::vouch::SessionKey,
 }
 
 impl Daemon {
@@ -521,6 +527,9 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     if let Err(e) = slopty_agent::reports::clear(&deliveries) {
         tracing::warn!(error = %e, "reports of an earlier run left in place");
     }
+    let session_key = slopty_agent::vouch::SessionKey::load_or_make(&data_dir)
+        .with_context(|| format!("the session key in {}", data_dir.display()))?;
+    worker.set_session_key(session_key);
     let daemon = Daemon {
         worker,
         listener,
@@ -552,6 +561,8 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         claude_mod,
         deliveries,
         inboxes,
+        reports_turn: Arc::default(),
+        session_key,
         displays,
         sources,
     };

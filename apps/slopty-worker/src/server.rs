@@ -184,6 +184,7 @@ async fn session(
         listen: daemon.listen,
         caps: now,
         sessions: daemon.worker.summaries().await,
+        session_key: daemon.session_key.bytes(),
     };
     let link =
         match slopty_net::server::connect(endpoint, addr, Role::Worker(Box::new(registration)))
@@ -244,18 +245,25 @@ async fn session(
                     });
                 }
                 Ok(FromServer::Deliver { session, batch, context }) => {
-                    let dir = daemon.deliveries.clone();
+                    let (dir, turn) =
+                        (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));
                     let kept = tokio::task::spawn_blocking(move || {
                         let batch = slopty_agent::reports::Batch { batch, context };
+                        let _turn = turn.lock();
                         slopty_agent::reports::put(&dir, session, &batch)
                     });
                     match kept.await {
-                        Ok(Ok(())) => {
-                            tracing::debug!(%session, batch, "reports kept for the hooks");
-                            let (deliveries, inboxes) =
-                                (daemon.deliveries.clone(), daemon.inboxes.clone());
-                            tokio::spawn(hand_over(deliveries, inboxes, session));
-                        }
+                        Ok(Ok(())) => match may_post(daemon, session) {
+                            Ok(()) => {
+                                tracing::debug!(%session, batch, "reports kept, and posted");
+                                let (deliveries, inboxes) =
+                                    (daemon.deliveries.clone(), daemon.inboxes.clone());
+                                tokio::spawn(hand_over(deliveries, inboxes, session));
+                            }
+                            Err(why) => {
+                                tracing::debug!(%session, batch, why, "reports kept for the hooks");
+                            }
+                        },
                         Ok(Err(e)) => tracing::warn!(%session, error = %e, "reports not kept"),
                         Err(e) => tracing::warn!(%session, error = %e, "reports not kept"),
                     }
@@ -425,6 +433,17 @@ async fn hand_over(deliveries: PathBuf, inboxes: PathBuf, session: SessionId) {
             }
         }
     }
+}
+
+/// Whether reports kept for `session` may be posted to its agent's inbox now: only when the
+/// agent could take typed input ([`slopty_worker::orchestrate::may_type`]). Not while a prompt
+/// is the person's to answer or a draft of theirs is in its prompt, nor before its hooks say it
+/// is at its prompt or after it is gone. The batch then waits for the hook that follows once
+/// that clears: the person's prompt, the turn's end, the agent's start.
+fn may_post(daemon: &Daemon, session: SessionId) -> Result<(), String> {
+    let handle = daemon.worker.get(session).map_err(|e| e.to_string())?;
+    let agents = DaemonAgents(Arc::clone(&daemon.agents));
+    slopty_worker::orchestrate::may_type(&handle, &agents, true).map_err(|f| f.message)
 }
 
 /// Write `text` to the Unix socket at `socket` and close it.

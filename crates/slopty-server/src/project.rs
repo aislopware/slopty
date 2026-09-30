@@ -48,13 +48,51 @@ pub enum Caller {
     Agent,
 }
 
-/// The store's file: every project whole, as of the `through`th change.
+/// The store's file: every project whole, and the terminals the server watches, as of the
+/// `through`th change.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct ProjectsFile {
     /// By name.
     pub projects: Vec<Record>,
+    /// The terminals the server watches, whatever project they are in.
+    pub watched: Vec<Watched>,
     /// How many changes it holds: the store's log goes on from the next.
     pub through: u64,
+}
+
+/// What an agent did to a terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Drove {
+    /// It typed into it.
+    Typed,
+    /// It opened it: `by` is the terminal the agent proved it spoke from, when it proved one.
+    Opened {
+        /// The opener's terminal.
+        by: Option<SessionId>,
+    },
+}
+
+/// A terminal the server watches for as long as it lives, kept across a restart so a server
+/// that comes back still holds it to the bounds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Watched {
+    /// The terminal.
+    pub term: TermRef,
+    /// The server started an agent there in `default` mode, which it may not leave.
+    pub locked: bool,
+    /// What an agent did to it: the CLI in it speaks for an agent, and it counts as one.
+    pub drove: Option<Drove>,
+}
+
+/// One change the store keeps.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Keep {
+    /// A project's.
+    Project(Box<Kept>),
+    /// A terminal watched, as it is now.
+    Watch(Watched),
+    /// A terminal no longer watched.
+    Unwatch(SessionId),
 }
 
 /// One change a project took, whole: what the store's log keeps, and what a client is pushed
@@ -84,10 +122,23 @@ pub(crate) struct Change {
 }
 
 impl ProjectsFile {
-    /// Take a change in, as the model made it: the store's replica and a replay of its log
-    /// stay the model's state.
-    pub fn apply(&mut self, kept: &Kept) {
+    /// Take a change in, as the hub made it: the store's replica and a replay of its log stay
+    /// the hub's state.
+    pub fn apply(&mut self, keep: &Keep) {
         self.through = self.through.saturating_add(1);
+        match keep {
+            Keep::Project(kept) => self.apply_project(kept),
+            Keep::Watch(watched) => {
+                match self.watched.iter_mut().find(|w| w.term.session == watched.term.session) {
+                    Some(held) => *held = *watched,
+                    None => self.watched.push(*watched),
+                }
+            }
+            Keep::Unwatch(session) => self.watched.retain(|w| w.term.session != *session),
+        }
+    }
+
+    fn apply_project(&mut self, kept: &Kept) {
         let at = self.projects.iter().position(|r| r.project.id == kept.project);
         let record = match (at, &kept.record) {
             (Some(i), _) => self.projects.get_mut(i),
@@ -455,6 +506,18 @@ impl Record {
         false
     }
 
+    /// Whether `task` is `root` or split from it, however deep.
+    fn under(&self, root: TaskId, task: TaskId) -> bool {
+        let mut at = Some(task);
+        while let Some(t) = at {
+            if t == root {
+                return true;
+            }
+            at = self.task(t).ok().and_then(|t| t.parent);
+        }
+        false
+    }
+
     /// How deep a new task under `parent` is: 1 for a task with no parent.
     fn depth_under(&self, parent: Option<TaskId>) -> usize {
         let mut depth = 1_usize;
@@ -718,9 +781,9 @@ impl Projects {
         Self { records, ..Self::default() }
     }
 
-    /// Everything, as the store keeps it after `through` changes.
-    pub(crate) fn file(&self, through: u64) -> ProjectsFile {
-        ProjectsFile { projects: self.records.values().cloned().collect(), through }
+    /// Every project, as the store keeps it after `through` changes, beside `watched`.
+    pub(crate) fn file(&self, watched: Vec<Watched>, through: u64) -> ProjectsFile {
+        ProjectsFile { projects: self.records.values().cloned().collect(), watched, through }
     }
 
     /// The person's policy.
@@ -875,6 +938,11 @@ impl Projects {
     /// A task as it is.
     pub(crate) fn task(&self, id: &ProjectId, task: TaskId) -> Result<&Task, Refused> {
         self.records.get(id).ok_or_else(|| unknown_project(id))?.task(task)
+    }
+
+    /// Whether `task` of project `id` is `root` or split from it, however deep.
+    pub(crate) fn under(&self, id: &ProjectId, root: TaskId, task: TaskId) -> bool {
+        self.records.get(id).is_some_and(|r| r.under(root, task))
     }
 
     /// Make a project.

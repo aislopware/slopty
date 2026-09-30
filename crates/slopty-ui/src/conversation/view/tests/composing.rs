@@ -8,8 +8,8 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use slopty_core::WallMs;
 use slopty_proto::conversation::{
     Answer, Body, Change, Choice, Clipped, CommandSource, ConversationEvent, Entry,
-    PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, SlashCommand, ThreadId,
-    ToolDetail, Verdict,
+    PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, Settled, SlashCommand,
+    ThreadId, ToolDetail, Verdict,
 };
 
 use super::{face, feed};
@@ -401,4 +401,47 @@ fn an_unreachable_worker_keeps_the_draft(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(seen.borrow().last(), Some(&FaceEvent::Reconnect));
     assert_eq!(draft(&view, cx), "keep me", "the draft stays");
+}
+
+/// The foot's mode chip says the freshest word on the mode: a hook's, with a permission prompt
+/// asked after the last prompt was sent, outlives the prompt; one older than the transcript's
+/// gives way to it.
+#[gpui::test]
+fn the_mode_chip_takes_the_freshest_word(cx: &mut TestAppContext) {
+    let (view, cx) = face(cx, "tools");
+    let mode = |view: &Entity<ConversationView>, cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| v.permission_mode())
+    };
+    let sent = mode(&view, cx);
+    let started = view
+        .read_with(cx, |v, _| {
+            v.model().thread(&ThreadId::Main).and_then(|t| t.last_turn()).map(|t| t.started_ms)
+        })
+        .expect("a turn");
+    assert!(cx.debug_bounds("composer-mode").is_some(), "the chip is drawn");
+
+    let mut stale = question_prompt(&view, cx);
+    stale.mode = Some("bypassPermissions".to_owned());
+    stale.asked_ms = WallMs::ZERO;
+    ask(&view, cx, stale);
+    assert_eq!(mode(&view, cx), sent, "a word older than the prompt gives way");
+
+    let mut fresh = question_prompt(&view, cx);
+    fresh.ask = 6;
+    fresh.mode = Some("plan".to_owned());
+    fresh.asked_ms = WallMs::from_millis(started.as_millis().saturating_add(1));
+    ask(&view, cx, fresh);
+    let session = view.read_with(cx, |v, _| v.session());
+    for ask in [5, 6] {
+        view.update(cx, |v, cx| {
+            v.permission(
+                PermissionEvent::Settled { session, ask, outcome: Settled::Withdrawn },
+                None,
+                cx,
+            );
+        });
+    }
+    cx.run_until_parked();
+    assert_eq!(mode(&view, cx), "plan", "the hook's word outlives its prompt");
+    assert!(cx.debug_bounds("composer-mode").is_some(), "the composer is back");
 }

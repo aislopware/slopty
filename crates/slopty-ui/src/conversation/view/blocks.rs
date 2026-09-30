@@ -665,7 +665,11 @@ impl ConversationView {
                                 .px(self.z(theme.spacing.sm))
                                 .rounded(self.z(theme.radii.xs))
                                 .border_1()
-                                .border_color(hsla(if picked { s.accent } else { s.border_subtle }))
+                                .border_color(if picked {
+                                    hsla(s.accent)
+                                } else {
+                                    hsla(s.border_subtle)
+                                })
                                 .text_color(hsla(if picked { s.text } else { s.text_secondary }))
                                 .child(SharedString::from(option.label.clone()))
                         }),

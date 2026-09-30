@@ -411,7 +411,7 @@ impl ConversationView {
             .rounded(self.z(theme.radii.lg))
             .bg(hsla(s.raised))
             .text_size(self.z(theme.typography.prose()))
-            .line_height(relative(theme.typography.markdown_line_height))
+            .line_height(relative(theme.typography.prose_line_height))
             .children(images)
             .when(command.is_some() || !text.is_empty(), |el| {
                 el.child(
@@ -507,9 +507,9 @@ impl ConversationView {
                 .child(SharedString::from(fold.lead()))
                 .into_any_element(),
         ];
-        if let Some(steps) = fold.steps_label() {
+        for what in fold.what() {
             parts.push(dot());
-            parts.push(div().child(SharedString::from(steps)).into_any_element());
+            parts.push(div().flex_none().child(SharedString::from(what)).into_any_element());
         }
         if fold.added > 0 || fold.removed > 0 {
             parts.push(dot());
@@ -618,7 +618,7 @@ impl ConversationView {
             .group(ANSWER_GROUP)
             .py(self.z(theme.spacing.xs))
             .text_size(self.z(theme.typography.prose()))
-            .line_height(relative(theme.typography.markdown_line_height))
+            .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
             .child(self.markdown(format!("md-{}-{id}", self.session), shown))
             .children(self.expand_link(id, text, cx))
@@ -1371,7 +1371,7 @@ impl ConversationView {
                 .aria_label(SharedString::from(format!("Writing: {}", first_line(&block.text))))
                 .py(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.prose()))
-                .line_height(relative(theme.typography.markdown_line_height))
+                .line_height(relative(theme.typography.prose_line_height))
                 .text_color(hsla(s.text_secondary))
                 .child(
                     self.markdown_view(format!("live-md-{}-{key}", self.session), &block.text)

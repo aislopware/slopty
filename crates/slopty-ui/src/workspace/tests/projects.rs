@@ -264,6 +264,68 @@ fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("project").is_none());
 }
 
+/// What waits on the person stands on the tree's column and says no word its heading says;
+/// the lanes share the tile's width equally, however many there are; a task made under the
+/// title it still has says only that it was made.
+#[gpui::test]
+fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, true, cx));
+    cx.run_until_parked();
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    let labels = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| -> Vec<String> {
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        tree.into_iter().filter_map(|n| n.label).collect()
+    };
+    let x =
+        |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).expect("drawn").origin.x;
+    assert_eq!(
+        x(cx, "project-needs-project-node-2"),
+        x(cx, "project-row-project-node-1"),
+        "the band's rows on the tree's column"
+    );
+    let said = labels(&view, cx);
+    let store: Vec<&String> = said.iter().filter(|l| l.starts_with("Read the store")).collect();
+    assert_eq!(store.len(), 2, "in the band and in the tree: {said:?}");
+    assert_eq!(
+        store.iter().filter(|l| l.contains("Needs you")).count(),
+        1,
+        "the tree's row says it, the band's leaves it to its heading: {store:?}"
+    );
+
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| b.show(Lens::Board, cx));
+    cx.run_until_parked();
+    let body = cx.debug_bounds("project-body").expect("drawn");
+    let lanes: Vec<Bounds<Pixels>> = ["needs-you", "working", "up-next"]
+        .map(|lane| {
+            let id: &'static str = Box::leak(format!("project-lane-{lane}").into_boxed_str());
+            cx.debug_bounds(id).expect("drawn")
+        })
+        .into();
+    let width = lanes[0].size.width;
+    assert!(
+        lanes.iter().all(|l| (l.size.width - width).abs() < px(0.5)),
+        "one width for every lane: {lanes:?}"
+    );
+    let right = lanes.iter().map(Bounds::right).fold(px(0.0), Pixels::max);
+    assert!(
+        body.right() - right <= px(Theme::default().spacing.inset()),
+        "no lane-wide gap at the right: {lanes:?} in {body:?}"
+    );
+
+    b.update(cx, |b, cx| b.show(Lens::Timeline, cx));
+    let said = labels(&view, cx);
+    assert!(
+        said.iter().any(|l| l.starts_with("#1 Wire the board: Created,")),
+        "made under the title it has: {said:?}"
+    );
+}
+
 /// Letting the server go takes its projects, their boards and everything kept for them.
 #[gpui::test]
 fn forgetting_the_server_keeps_nothing_of_its_projects(cx: &mut TestAppContext) {

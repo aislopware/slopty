@@ -89,15 +89,13 @@ mod handoff {
             self.link("slopty-editor");
             self.link("slopty-browser");
             let links = self.dir.join("links");
-            let mut command = Command::new("/bin/sh");
+            let mut command = scrubbed("/bin/sh", &self.dir);
             command
                 .args(["-c", script])
                 .current_dir(&self.dir)
                 .env("SLOPTY_WORKER_SOCKET", self.sock())
-                .env("HOME", &self.dir)
                 .env("PATH", format!("{}:{}:{PATH}", links.display(), stubs.display()))
                 .env("EDITOR", links.join("slopty-editor"))
-                .env_remove("SLOPTY_SESSION")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -117,14 +115,12 @@ mod handoff {
             session: Option<SessionId>,
             path: &str,
         ) -> Child {
-            let mut command = Command::new(self.link(name));
+            let mut command = scrubbed(self.link(name), &self.dir);
             command
                 .args(args)
                 .current_dir(&self.dir)
                 .env("SLOPTY_WORKER_SOCKET", self.sock())
-                .env("HOME", &self.dir)
                 .env("PATH", path)
-                .env_remove("SLOPTY_SESSION")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -183,10 +179,18 @@ mod handoff {
         }
     }
 
-    /// ptyd and a worker on `dir`.
+    /// `program`, started from a clean environment with its home at `home`
+    /// (`slopty_testkit::env::scrub`): nothing of the developer's reaches it.
+    fn scrubbed(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
+        let mut command = Command::new(program);
+        slopty_testkit::env::scrub(command.as_std_mut(), home);
+        command
+    }
+
+    /// ptyd and a worker on `dir`, whose home is `dir`.
     async fn daemons(dir: &Path) -> Daemons {
         let ptyd_sock = dir.join("ptyd.sock");
-        let mut ptyd = Command::new(bin("slopty-ptyd"))
+        let mut ptyd = scrubbed(bin("slopty-ptyd"), dir)
             .arg("--socket")
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
@@ -202,7 +206,7 @@ mod handoff {
         }
         let leaf = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let pasteboard = format!("dev.aislopware.slopty.handoff.{leaf}");
-        let mut worker = Command::new(bin("slopty-worker"))
+        let mut worker = scrubbed(bin("slopty-worker"), dir)
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
@@ -735,11 +739,10 @@ mod handoff {
             "session_id": "s1",
             "pr": { "number": 1234, "url": "https://github.com/o/r/pull/1234", "review_state": "approved" },
         });
-        let mut wrapper = Command::new(d.link("slopty"))
+        let mut wrapper = scrubbed(d.link("slopty"), &d.dir)
             .args(["hook", "statusline"])
             .env("SLOPTY_WORKER_SOCKET", d.sock())
             .env("SLOPTY_SESSION", shell.to_string())
-            .env("HOME", &d.dir)
             .env("CLAUDE_CONFIG_DIR", d.dir.join("claude-config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())

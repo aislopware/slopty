@@ -431,24 +431,52 @@ fn the_approval_card_is_said_once(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds(selector("agent", tile.item)).is_some(), "the TUI's header says it");
 }
 
-/// The status bar counts the agents at work whose tiles are off screen: one in view says so
-/// in its own header.
+/// The status bar says how every agent stands, on screen or not, in one quiet line: busy,
+/// waiting on work in the background, blocked on the person. Each worker is named once there
+/// are two with agents, and an agent at rest is not counted.
 #[gpui::test]
-fn the_status_bar_counts_only_agents_out_of_view(cx: &mut TestAppContext) {
+fn the_status_bar_counts_every_workers_agents(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
-    let (tile, _session) = agent_tile(&view, cx, &mut studio);
-    assert!(cx.debug_bounds("status-agents").is_none(), "its tile is on screen");
-    let far = (2..6)
-        .map(|n| opens(&view, cx, &studio, SessionId::new(), studio.me, n))
-        .last()
-        .expect("a shell");
-    view.update_in(cx, |v, _w, cx| v.focus_tile(far, cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("item", tile.item)).is_none(), "scrolled away");
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("status-agents").is_some(), "counted once it is out of view");
+    let (_tile, working) = agent_tile(&view, cx, &mut studio);
+    let label = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        view.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        cx.update(|window, _cx| crate::a11y::tree(window))
+            .into_iter()
+            .find(|n| {
+                n.role == "Status"
+                    && n.label.as_deref().is_some_and(|l| {
+                        l.contains("working") || l.contains("blocked") || l.contains("waiting")
+                    })
+            })
+            .and_then(|n| n.label)
+    };
+    assert!(cx.debug_bounds("status-agents").is_some(), "counted though its tile is on screen");
+    assert_eq!(label(&view, cx).as_deref(), Some("1 working"));
+
+    let asking = SessionId::new();
+    let _asking = opens(&view, cx, &studio, asking, studio.me, 2);
+    let mut mini = connect(&view, cx, 2, "mini");
+    let resting = SessionId::new();
+    let _resting = opens(&view, cx, &mini, resting, mini.me, 1);
+    let background = SessionId::new();
+    let _background = opens(&view, cx, &mini, background, mini.me, 2);
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(blocked(asking), cx);
+        v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(resting) }, cx);
+        let waiting = AgentStatus::Waiting { tasks: 1, crons: 0 };
+        v.agent_event(AgentEvent { status: waiting, ..blocked(background) }, cx);
+    });
+    mini.drain();
+    assert_eq!(
+        label(&view, cx).as_deref(),
+        Some("studio: 1 working, 1 blocked; mini: 1 waiting"),
+        "{working:?}"
+    );
 }
 
 /// An agent that has not titled itself is named by its session's first prompt once its face

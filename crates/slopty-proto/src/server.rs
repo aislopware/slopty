@@ -32,7 +32,7 @@ pub enum Role {
     Agent {
         /// What it calls itself, for logs.
         name: String,
-        /// The terminal it speaks from, proven, when it runs in a task's.
+        /// The terminal it speaks from, proven, when it runs in a Slopty terminal.
         vouch: Option<Vouch>,
     },
     /// The CLI run inside a Slopty terminal (`SLOPTY_SESSION` set): a person's shell or an
@@ -43,14 +43,15 @@ pub enum Role {
         name: String,
         /// The terminal it runs in.
         session: SessionId,
-        /// The token the server gave that terminal at its start
-        /// ([`crate::project::AGENT_TOKEN_ENV`]), when it has one.
+        /// The token its worker gave that terminal ([`crate::ctl::SESSION_TOKEN_ENV`]), when it
+        /// has one.
         token: Option<String>,
     },
 }
 
-/// Proof that a link speaks from one terminal: the token the server gave that terminal when it
-/// started it for a task ([`crate::project::AGENT_TOKEN_ENV`]), which nothing else is given.
+/// Proof that a link speaks from one terminal: the token its worker gave that terminal
+/// ([`crate::ctl::SESSION_TOKEN_ENV`]), which the server checks with the worker's key
+/// ([`Registration::session_key`]).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Vouch {
     /// The terminal (`SLOPTY_SESSION`).
@@ -74,6 +75,9 @@ pub struct Registration {
     pub caps: WorkerCaps,
     /// The terminals it runs now.
     pub sessions: Vec<SessionSummary>,
+    /// The key its terminals' tokens are made under, so the server can tell which terminal a
+    /// link speaks from ([`Vouch`]).
+    pub session_key: [u8; 32],
 }
 
 /// Operating system of a worker.

@@ -11,7 +11,7 @@ description = "Slopty server: the control plane — worker registry and leases, 
 workspace = true
 
 [dependencies]
-# The tokens that prove which task terminal an agent's tools speak from (`vouch`).
+# Digests of keyed verbs (`hub`).
 blake3.workspace = true
 # Placement rules over the workers' facts (`placement`).
 cel.workspace = true

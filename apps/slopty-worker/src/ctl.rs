@@ -1,6 +1,7 @@
 //! Local control socket: newline-delimited JSON, one request per connection.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -8,7 +9,8 @@ use slopty_agent::Hook;
 use slopty_core::SessionId;
 use slopty_proto::WorkerMsg;
 use slopty_proto::ctl::{
-    CtlReply, CtlRequest, Health, PasteboardAccess, PermissionAnswer, Tailscale,
+    CtlReply, CtlRequest, Health, InboxAt, PasteboardAccess, PermissionAnswer, ReportsAsk,
+    Tailscale,
 };
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -73,6 +75,10 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
             }
             Err(message) => CtlReply::Error { message },
         },
+        CtlRequest::Reports(ask) => reports(&daemon, ask).await,
+        CtlRequest::ReportsHanded { session, token, batch } => {
+            handed(&daemon, session, &token, batch).await
+        }
         CtlRequest::Open { session, url } => match slopty_proto::handoff::page(&url) {
             Some(page) => CtlReply::Handoff(crate::handoff::open(&daemon, session, page).await),
             None => CtlReply::Error {
@@ -149,17 +155,87 @@ async fn doctor(daemon: &Daemon) -> Health {
     }
 }
 
+/// Why a program is not taken as speaking from `session`: its token is not the one this
+/// worker made for it.
+fn unvouched(daemon: &Daemon, session: SessionId, token: &str) -> Option<CtlReply> {
+    (!daemon.session_key.vouches(session, token)).then(|| CtlReply::Error {
+        message: format!("not {session}'s own token ({})", slopty_proto::ctl::SESSION_TOKEN_ENV),
+    })
+}
+
+/// `slopty hook reports` asks for the batch kept for its session: the one it names by the
+/// token this worker made for it. Its inbox is noted, and the reply says what to print; the
+/// batch stays kept until [`handed`].
+async fn reports(daemon: &Daemon, ask: ReportsAsk) -> CtlReply {
+    use slopty_agent::reports;
+    let ReportsAsk { session, token, payload, inbox } = ask;
+    if let Some(refused) = unvouched(daemon, session, &token) {
+        return refused;
+    }
+    let hook = match Hook::parse(&payload) {
+        Ok(hook) => hook,
+        Err(e) => return CtlReply::Error { message: format!("bad hook payload: {e}") },
+    };
+    let (deliveries, inboxes, turn) =
+        (daemon.deliveries.clone(), daemon.inboxes.clone(), Arc::clone(&daemon.reports_turn));
+    let handed = tokio::task::spawn_blocking(move || {
+        if let Some(InboxAt { socket, token }) = inbox {
+            let inbox = reports::Inbox { socket: PathBuf::from(socket), token };
+            if let Err(e) = reports::keep_inbox(&inboxes, session, &inbox) {
+                tracing::warn!(%session, error = %e, "the agent's inbox not noted");
+            }
+        }
+        let held = hook.stop_hook_active == Some(true);
+        let transcript = hook.transcript_path.as_deref().map(Path::new);
+        let turn_now = reports::Turn { prompt: hook.prompt.as_deref(), transcript, held };
+        let _turn = turn.lock();
+        reports::hand_over(&deliveries, session, hook.event, turn_now)
+    })
+    .await;
+    match handed {
+        Ok(handed) => CtlReply::Reports {
+            batch: handed.as_ref().map(|h| h.batch),
+            print: handed.and_then(|h| h.print).map(|print| print.to_string()),
+        },
+        Err(e) => CtlReply::Error { message: format!("reports not read: {e}") },
+    }
+}
+
+/// `slopty hook reports` printed `batch` for its session: it is dropped, and the server hears
+/// it was handed over.
+async fn handed(daemon: &Daemon, session: SessionId, token: &str, batch: u64) -> CtlReply {
+    if let Some(refused) = unvouched(daemon, session, token) {
+        return refused;
+    }
+    let (deliveries, turn) = (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));
+    let dropped = tokio::task::spawn_blocking(move || {
+        let _turn = turn.lock();
+        slopty_agent::reports::handed(&deliveries, session, batch)
+    })
+    .await
+    .map_err(std::io::Error::other)
+    .flatten();
+    match dropped {
+        Ok(was_kept) => {
+            if was_kept {
+                let report = slopty_proto::project::AgentReport::Delivered { session, batch };
+                let _sent = daemon.reports.send(report);
+            }
+            CtlReply::Ok { changed: was_kept }
+        }
+        Err(e) => CtlReply::Error { message: format!("reports not dropped: {e}") },
+    }
+}
+
 /// A hook fired in `session`: the followers hear of it and the agent table takes it in. The
 /// hook as read, and whether the agent's status changed; or why it was not taken.
 async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Hook, bool), String> {
     let hook = Hook::parse(payload).map_err(|e| format!("bad hook payload: {e}"))?;
-    if daemon.worker.get(session).is_err() {
+    // A hook may come before the open that started its agent returns.
+    if daemon.worker.get_opened(session).await.is_err() {
         return Err("no such session".to_owned());
     }
-    // Reports handed over are the server's business, not a follower's.
-    if hook.event != slopty_agent::HookEvent::Delivered {
-        daemon.follows.lock().board.heard(session, &hook);
-    }
+    daemon.follows.lock().board.heard(session, &hook);
     let (mut event, branch, mode) = {
         let mut agents = daemon.agents.lock();
         let event = agents.apply(session, &hook);

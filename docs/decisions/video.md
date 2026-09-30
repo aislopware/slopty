@@ -1829,7 +1829,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `layers_on_the_full_chroma_and_h264_sessions` in `slopty-codec`, on the real encoder:
       every other frame marked, both fractions read back 1.0 after off, every frame carries
       its error, none dropped.
-  - Measurements (ignored): `temporal_layers_skip_and_toggle`, `temporal_layers_live_cost`,
+  - Measurements (ignored): `temporal_layers_skip_and_toggle`, `temporal_layers_live_switch`,
     `temporal_layers_when_switched_on`, `temporal_layers_by_codec` in `chroma444.rs`, and
     `layers_under_burst_loss` in `burst_loss.rs`.
 

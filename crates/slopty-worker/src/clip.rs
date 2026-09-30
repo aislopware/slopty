@@ -218,6 +218,10 @@ struct State {
     /// The `changeCount` last handled: polled, observed, written, or current when first looked
     /// at; `None` before this process looked.
     seen: Option<isize>,
+    /// The types a poll found under [`State::seen`], when a poll is what saw it. A copy lands a
+    /// type at a time under the count its clear left, so the types moving under that count are
+    /// more of the same copy, announced again whole.
+    read_as: Option<Vec<Vec<String>>>,
     /// When the last client left: a change found when one comes back was made no later than
     /// that, as far as anyone can tell.
     idle_since: Option<Instant>,
@@ -433,6 +437,7 @@ impl State {
             return false;
         }
         self.seen = Some(count);
+        self.read_as = None;
         self.holds = Holds::Native;
         self.copied = if first { None } else { Some(blind.map_or(now, |left| left.min(now))) };
         !first
@@ -577,13 +582,18 @@ impl<B: Board + Access> Clipboard<B> {
             return None;
         }
         let count = self.board.change_count();
-        if self.shared.state.lock().seen == Some(count) {
-            return None;
+        {
+            let state = self.shared.state.lock();
+            if state.seen == Some(count) && state.read_as.is_none() {
+                return None;
+            }
         }
-        let items = self.board.items();
         // A copy clears the pasteboard, which moves the count, and puts the new contents on
-        // after, under that same count. An empty board may be a copy half done, so its count
-        // is left unseen and read again on the next poll.
+        // after, a type at a time, under that same count: `NSPasteboard` promises nothing
+        // about when a write is whole. An empty board may be a copy half done, so its count is
+        // left unseen and read again on the next poll; the types are read on every poll, since
+        // more of them landing under a count read before is more of that copy.
+        let items = self.board.items();
         if items.is_empty() {
             return None;
         }
@@ -591,9 +601,17 @@ impl<B: Board + Access> Clipboard<B> {
             let mut state = self.shared.state.lock();
             // This process wrote meanwhile, or is writing: what was read may be that write, and
             // the next poll sees it under the count the write left.
-            if state.writing || state.writes != writes || !state.saw(count, now) {
+            if state.writing || state.writes != writes {
                 return None;
             }
+            let grew = state.seen == Some(count);
+            if grew && state.read_as.as_ref() == Some(&items) {
+                return None;
+            }
+            if !grew && !state.saw(count, now) {
+                return None;
+            }
+            state.read_as = Some(items.clone());
         }
         let has = |kind: &str| items.iter().position(|types| types.iter().any(|t| t == kind));
         if let Some(n) = has(ORIGIN_TYPE)
@@ -609,6 +627,11 @@ impl<B: Board + Access> Clipboard<B> {
         }
         let concealed = has(CONCEALED_TYPE).is_some() || has(TRANSIENT_TYPE).is_some();
         let (entries, read) = self.read(&items, concealed);
+        // Types that landed while it was read: the copy is still being written, and the next
+        // poll reads it again.
+        if self.board.change_count() != count || self.board.items() != items {
+            return None;
+        }
         self.announce(count, concealed, entries, read)
     }
 
@@ -659,7 +682,8 @@ impl<B: Board + Access> Clipboard<B> {
     }
 
     /// Announce `entries` as the next offer from `me`, unless their inline bytes are what was
-    /// last announced or written.
+    /// last announced or written. More of a copy announced under the same count is announced
+    /// whatever its bytes: its types are what changed.
     fn announce(
         &self,
         count: isize,
@@ -673,7 +697,8 @@ impl<B: Board + Access> Clipboard<B> {
         let keys: HashSet<Hash> =
             items.iter().flat_map(|i| &i.reps).filter_map(|r| r.hash).collect();
         let mut state = self.shared.state.lock();
-        if !keys.is_empty() && keys.is_subset(&state.last) {
+        let more = state.announced.as_ref().is_some_and(|a| a.count == count);
+        if !more && !keys.is_empty() && keys.is_subset(&state.last) {
             return None;
         }
         state.generation = state.generation.wrapping_add(1);
@@ -880,6 +905,7 @@ impl<B: Board + Access> Clipboard<B> {
         state.holds = Holds::Native;
         if let Some(cleared) = cleared {
             state.seen = Some(cleared);
+            state.read_as = None;
         }
         drop(state);
         self.tell_interest();
@@ -926,6 +952,7 @@ impl<B: Board + Access> Clipboard<B> {
             return false;
         };
         state.seen = Some(count);
+        state.read_as = None;
         state.copied = copied;
         state.holds = match holds {
             Holds::Secret { link, source, until, .. } => {

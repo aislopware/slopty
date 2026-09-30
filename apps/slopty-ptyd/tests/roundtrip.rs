@@ -29,7 +29,9 @@ mod roundtrip {
     async fn start() -> Daemon {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("ptyd.sock");
-        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_slopty-ptyd"))
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_slopty-ptyd"));
+        // A clean environment: nothing of the developer's reaches the shells ptyd starts.
+        let mut child = slopty_testkit::env::scrub(&mut child, &dir.path().join("home"))
             .arg("--socket")
             .arg(&socket)
             .arg("--backlog-bytes")

@@ -35,13 +35,14 @@
 //! agents (status, branches, Claude Code's own subagents) moves the tasks they work on. Every
 //! change is a [`Happening::Project`] in the one log, and the projects file is written after it.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
+use slopty_agent::vouch::SessionKey;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::RequestId;
 use slopty_proto::agent::{AgentBranch, AgentStatus, SessionAgent};
@@ -56,8 +57,7 @@ use slopty_proto::terminal::{SessionState, SessionSummary};
 use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 
 use crate::deliver::Deliveries;
-use crate::project::{Caller, Change, Kept, Projects, ProjectsFile, Starting};
-use crate::vouch::AgentKey;
+use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
 
 mod projects;
 
@@ -148,9 +148,6 @@ struct Inner {
     rankers: Arc<Semaphore>,
     /// Wakes the loop that delivers reports ([`Hub::deliver_reports`]).
     deliver: Arc<Notify>,
-    /// The key of the tokens task terminals are given ([`crate::vouch`]); with none, no
-    /// terminal gets one and no link is proven.
-    agent_key: std::sync::OnceLock<AgentKey>,
 }
 
 /// The newest [`HubEvent`]s, oldest first.
@@ -188,14 +185,12 @@ struct State {
     next_start: u64,
     /// Reports on their way to the agents they are for.
     deliveries: Deliveries,
-    /// Terminals of agents the server started in `default` mode, until their first word of
-    /// the mode they are in ([`Hub::permission_mode`]).
-    locked: HashSet<TermRef>,
-    /// Terminals an agent opened or typed into: the CLI in them speaks for an agent, so an
-    /// agent never borrows the person's word through a shell of its own.
-    driven: HashMap<SessionId, tokio::time::Instant>,
+    /// Terminals the server watches for as long as they live ([`Watched`]), with when each
+    /// was first watched: agents it started in `default` mode, and terminals an agent opened or
+    /// typed into, whose CLI speaks for an agent. The store keeps them, so a restart does too.
+    watched: HashMap<SessionId, (Watched, tokio::time::Instant)>,
     /// Where every change to the projects goes to be kept ([`crate::store::ProjectStore`]).
-    keeper: Option<mpsc::UnboundedSender<Kept>>,
+    keeper: Option<mpsc::UnboundedSender<Keep>>,
 }
 
 /// A project change made under a key, so a repeat of the verb answers as the first did.
@@ -260,12 +255,25 @@ pub enum Speaker {
     Person,
     /// An agent: an MCP surface.
     Agent,
-    /// The CLI inside the Slopty terminal `session`: an agent's when an agent runs there or it
-    /// works on a project, the person's otherwise.
+    /// The CLI inside the Slopty terminal `session`, by its word alone: an agent's when an
+    /// agent runs there, it works on a project or an agent drove it, the person's otherwise.
     Shell(SessionId),
-    /// An agent's tools proven to speak from the task terminal `session` by its token
-    /// ([`crate::vouch`]).
+    /// The CLI inside the terminal `session`, proven by the token its worker gave it
+    /// ([`slopty_agent::vouch`]): the person's or an agent's as [`Self::Shell`] is.
+    ProvenShell(SessionId),
+    /// An agent's tools proven to speak from the terminal `session` by its token.
     Proven(SessionId),
+}
+
+impl Speaker {
+    /// The terminal it proved it speaks from.
+    #[must_use]
+    pub const fn proven(self) -> Option<SessionId> {
+        match self {
+            Self::Proven(session) | Self::ProvenShell(session) => Some(session),
+            Self::Person | Self::Agent | Self::Shell(_) => None,
+        }
+    }
 }
 
 /// What a client or an agent link is told first: the fleet and its projects, read together.
@@ -302,6 +310,8 @@ struct Entry {
     branches: HashMap<SessionId, AgentBranch>,
     /// What the worker reported it is and has.
     facts: Facts,
+    /// The key its terminals' tokens are made under, once it registered.
+    session_key: Option<SessionKey>,
 }
 
 #[derive(Debug)]
@@ -343,6 +353,7 @@ impl Hub {
                 link: None,
                 branches: HashMap::new(),
                 facts: Facts::new(),
+                session_key: None,
             };
             state.workers.insert(entry.info.worker, entry);
         }
@@ -354,29 +365,18 @@ impl Hub {
         let state = Mutex::new(state);
         let rankers = Arc::new(Semaphore::new(projects::RANKERS));
         let deliver = Arc::new(Notify::new());
-        let agent_key = std::sync::OnceLock::new();
-        let inner =
-            Inner { name, lan, state, events, persist, log, head, rankers, deliver, agent_key };
+        let inner = Inner { name, lan, state, events, persist, log, head, rankers, deliver };
         Self { inner: Arc::new(inner) }
     }
 
-    /// Give task terminals tokens under `key` from now on, and prove links by them; a key
-    /// once set stays.
-    pub fn set_agent_key(&self, key: AgentKey) {
-        if self.inner.agent_key.set(key).is_err() {
-            tracing::warn!("the agent key was set already; the first stays");
-        }
-    }
-
-    /// Whether `token` proves a link speaks from the terminal `session`.
+    /// Whether `token` proves a link speaks from the terminal `session`: the token its worker
+    /// gave it, under the key the worker registered with.
     #[must_use]
     pub fn vouches(&self, session: SessionId, token: &str) -> bool {
-        self.inner.agent_key.get().is_some_and(|key| key.vouches(session, token))
-    }
-
-    /// The token the terminal `session` is given at its start, when there is a key.
-    fn token_of(&self, session: SessionId) -> Option<String> {
-        self.inner.agent_key.get().map(|key| key.token(session))
+        let state = self.inner.state.lock();
+        // Only the worker holding a key mints tokens under it, so the terminal is that worker's
+        // even before the worker announces it.
+        state.workers.values().any(|e| e.session_key.is_some_and(|key| key.vouches(session, token)))
     }
 
     /// This hub, not kept alive by the handle.
@@ -385,22 +385,28 @@ impl Hub {
         WeakHub(Arc::downgrade(&self.inner))
     }
 
-    /// Take up the projects a store kept, before any link is served.
-    pub fn adopt_projects(&self, file: ProjectsFile) {
-        self.inner.state.lock().projects = Projects::restore(file);
+    /// Take up the projects and the watched terminals a store kept, before any link is served.
+    pub fn adopt_projects(&self, mut file: ProjectsFile) {
+        let mut state = self.inner.state.lock();
+        let now = tokio::time::Instant::now();
+        state.watched = file.watched.drain(..).map(|w| (w.term.session, (w, now))).collect();
+        state.projects = Projects::restore(file);
     }
 
-    /// Every project as it is now, as the store writes it after `through` changes.
+    /// Every project and watched terminal as it is now, as the store writes it after `through`
+    /// changes.
     #[must_use]
     pub fn projects_file(&self, through: u64) -> ProjectsFile {
-        self.inner.state.lock().projects.file(through)
+        let state = self.inner.state.lock();
+        let watched = state.watched.values().map(|(w, _)| *w).collect();
+        state.projects.file(watched, through)
     }
 
     /// Every change to the projects from now on, in order, for the store to keep: what a
     /// change carries is sent under the hub's lock, never the whole state. A second call
     /// takes the changes from the first.
     #[must_use]
-    pub fn keep_projects(&self) -> mpsc::UnboundedReceiver<Kept> {
+    pub fn keep_projects(&self) -> mpsc::UnboundedReceiver<Keep> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.inner.state.lock().keeper = Some(tx);
         rx
@@ -500,7 +506,8 @@ impl Hub {
         tx: mpsc::Sender<FromServer>,
     ) -> Result<Lease, Refusal> {
         let mut state = self.inner.state.lock();
-        let Registration { worker, name, listen, caps, sessions } = registration;
+        let Registration { worker, name, listen, caps, sessions, session_key } = registration;
+        let key = SessionKey::from_bytes(session_key);
         if state.workers.get(&worker).is_some_and(|e| e.link.is_some()) {
             return Err(Refusal::DuplicateWorker);
         }
@@ -548,12 +555,21 @@ impl Hub {
             entry.sessions = sessions;
             entry.generation = generation;
             entry.link = link;
+            entry.session_key = Some(key);
             entry.branches.retain(|session, _| !gone.contains(session));
             (reshaped, gone, opened)
         } else {
             let opened = sessions.clone();
             let (branches, facts) = (HashMap::new(), Facts::new());
-            let entry = Entry { info: info.clone(), sessions, generation, link, branches, facts };
+            let entry = Entry {
+                info: info.clone(),
+                sessions,
+                generation,
+                link,
+                branches,
+                facts,
+                session_key: Some(key),
+            };
             state.workers.insert(worker, entry);
             (true, Vec::new(), opened)
         };
@@ -610,13 +626,13 @@ impl Hub {
         project: &ProjectId,
         task: TaskId,
     ) -> Result<(), Outcome> {
-        let Speaker::Proven(session) = speaker else {
+        let Some(session) = speaker.proven() else {
             return Err(error(
                 ErrorCode::Forbidden,
                 &format!(
                     "an agent reports only on its own task, from the terminal the server started \
                      for it; this caller shows no {} for its terminal",
-                    slopty_proto::project::AGENT_TOKEN_ENV
+                    slopty_proto::ctl::SESSION_TOKEN_ENV
                 ),
             ));
         };
@@ -648,15 +664,15 @@ impl Hub {
     /// The TUI is the person's, so an agent speaks to another through reports and Claude
     /// Code's own messages, which it reads as a peer's, never as the person's keys. The person
     /// allows it per project (`[server.projects] permission_flags`).
-    fn types_into_shell(&self, term: TermRef) -> Result<(), Outcome> {
+    fn types_into_shell(&self, from: Option<SessionId>, term: TermRef) -> Result<(), Outcome> {
         let state = self.inner.state.lock();
         let agent = state
             .workers
             .get(&term.worker)
             .and_then(|e| e.sessions.iter().find(|s| s.id == term.session))
             .is_some_and(|s| s.agent.is_some());
-        let project = state.projects.working_on(term).map(|(project, _)| project);
-        let allowed = state.projects.policy().bounds_for(project.as_ref()).permission_flags;
+        let project = projects::project_of(&state, term);
+        let allowed = projects::allowance(&state, Caller::Agent, from, project.as_ref());
         drop(state);
         if !agent || allowed {
             return Ok(());
@@ -674,7 +690,7 @@ impl Hub {
     /// for) would give the started program more than its starter has, so an agent names none
     /// unless the person allows looser starts for the project (`[server.projects]
     /// permission_flags`).
-    fn env_of_agent(&self, verb: &Verb) -> Result<(), Outcome> {
+    fn env_of_agent(&self, from: Option<SessionId>, verb: &Verb) -> Result<(), Outcome> {
         let (env, project) = match verb {
             Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. } => (env, None),
             Verb::TaskSpawn { project, launch, .. } => (&launch.env, Some(project)),
@@ -683,8 +699,7 @@ impl Hub {
         let Some(name) = env.iter().map(|(name, _)| name.as_str()).find(|n| steers(n)) else {
             return Ok(());
         };
-        let allowed =
-            self.inner.state.lock().projects.policy().bounds_for(project).permission_flags;
+        let allowed = projects::allowance(&self.inner.state.lock(), Caller::Agent, from, project);
         if allowed {
             return Ok(());
         }
@@ -703,7 +718,7 @@ impl Hub {
         match speaker {
             Speaker::Person => Caller::Person,
             Speaker::Agent | Speaker::Proven(_) => Caller::Agent,
-            Speaker::Shell(session) => {
+            Speaker::Shell(session) | Speaker::ProvenShell(session) => {
                 let state = self.inner.state.lock();
                 let agent_here = state
                     .workers
@@ -712,7 +727,7 @@ impl Hub {
                     .any(|s| s.id == session && s.agent.is_some());
                 let working = term_of(&state, session)
                     .is_none_or(|term| state.projects.working_on(term).is_some());
-                let driven = state.driven.contains_key(&session);
+                let driven = projects::driven(&state, session);
                 drop(state);
                 // A terminal the server does not know is nobody's to vouch for.
                 if agent_here || working || driven { Caller::Agent } else { Caller::Person }
@@ -730,13 +745,26 @@ impl Hub {
         verb: Verb,
     ) -> Outcome {
         let caller = self.caller(speaker);
+        let from = speaker.proven();
+        let verb = match caller {
+            Caller::Agent => {
+                let scoped = projects::agent_scope(&self.inner.state.lock(), from, verb);
+                match scoped {
+                    Ok(verb) => verb,
+                    Err(refused) => return refused,
+                }
+            }
+            Caller::Person => verb,
+        };
         if caller == Caller::Agent
             && let Verb::SendInput { term, .. } = &verb
         {
-            if let Err(refused) = self.types_into_shell(*term) {
+            if let Err(refused) = self.types_into_shell(from, *term) {
                 return refused;
             }
-            self.inner.state.lock().driven.insert(term.session, tokio::time::Instant::now());
+            projects::watch(&mut self.inner.state.lock(), *term, |w| {
+                w.drove.get_or_insert(Drove::Typed);
+            });
         }
         if caller == Caller::Agent
             && let Verb::TaskReport { project, task, .. } = &verb
@@ -745,7 +773,7 @@ impl Hub {
             return refused;
         }
         if caller == Caller::Agent
-            && let Err(refused) = self.env_of_agent(&verb)
+            && let Err(refused) = self.env_of_agent(from, &verb)
         {
             return refused;
         }
@@ -770,8 +798,8 @@ impl Hub {
             Verb::WorkerFacts { worker } => self.worker_facts(worker),
             Verb::TaskGet { project, task } => self.task_get(&project, task),
             Verb::WorkingOn { session } => self.working_on(session),
-            verb @ Verb::SpawnAgent { .. } => self.spawn_agent(caller, key, verb).await,
-            verb @ Verb::OpenTerminal { .. } => self.open_terminal(caller, key, verb).await,
+            verb @ Verb::SpawnAgent { .. } => self.spawn_agent(caller, from, key, verb).await,
+            verb @ Verb::OpenTerminal { .. } => self.open_terminal(caller, from, key, verb).await,
             // Only the person answers a permission, so only the person's read holds prompts.
             Verb::ReadConversation { term, thread, since, max, .. } => {
                 let hold = caller == Caller::Person;
@@ -1075,8 +1103,7 @@ impl Hub {
             entry.branches.remove(&term.session);
         }
         state.deliveries.closed(term);
-        state.locked.remove(&term);
-        state.driven.remove(&term.session);
+        projects::unwatch(state, term.session);
         let updates = state.projects.session_ended(term, WallMs::now());
         self.projects_moved(state, updates);
     }
@@ -1090,12 +1117,8 @@ impl Hub {
         }
         for change in changes {
             self.happen(Happening::Project(Box::new(state.projects.pushed(&change.kept))));
-            if change.durable
-                && let Some(keeper) = &state.keeper
-                && keeper.send(change.kept).is_err()
-            {
-                tracing::warn!("the projects keeper is gone; changes are no longer kept");
-                state.keeper = None;
+            if change.durable {
+                projects::keep(state, Keep::Project(Box::new(change.kept)));
             }
         }
         self.unpark_deliveries(state);
@@ -1686,7 +1709,14 @@ pub(crate) mod tests {
 
     pub(crate) fn registration(worker: WorkerId, sessions: Vec<SessionSummary>) -> Registration {
         let listen = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550));
-        Registration { worker, name: "studio".to_owned(), listen, caps: caps(), sessions }
+        Registration {
+            worker,
+            name: "studio".to_owned(),
+            listen,
+            caps: caps(),
+            sessions,
+            session_key: [7; 32],
+        }
     }
 
     fn ip() -> IpAddr {

@@ -4162,3 +4162,70 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     board and back with the keyboard, ↓↓↩ to an agent's tile, the lenses by key, clicks that
     open or say why not, the server's changes with the retained-frame oracle, forgetting the
     server, the palette's line and a task agent's ⇧⌘J).
+
+- ✅ **Closer to MonoCode: tone steps over frames, hairlines of the ink, prose at 15/1.6, the
+  agents in the status bar** (2026-10-01). This is the second reference pass, with MonoCode's
+  source tokens beside ours (`.research/ui-ref-monocode-2026-10-01.md`). Where we already
+  matched, nothing moved: radii 4/6/8/12, 28 pt rows, a 13/12/11/10 type scale, and motion at
+  120/160 ms on the same curve. MonoCode's most-used grey text (≈ `#767676` on `#171717`)
+  falls under the WCAG AA line our surfaces are lifted to, so our text tones stay.
+  - **Hairlines are the ink at an opacity** (`slopty_theme::Hairline`: the chrome's text at
+    the old step's share, `border` 0.105/0.115 and `border_subtle` 0.06/0.065 of 255). A
+    fixed grey was mixed for the content, so on the bars, the navigator or a floating sheet
+    it sat a different step off each. Laid over whatever it crosses, it sits the same step
+    off every surface, and over the content it is the old colour to within a level.
+    `colors::hsla` takes either tone (`colors::Tone`), so no call site changed.
+  - **A plan is a tone step, not a frame**: `band`, with no border and no rule under its head,
+    and its head and body on one text edge. The composer's pending work (the background tray
+    and the task list) is one `panel` step at the top of the shell, with no rule between the
+    two. With one piece of work, neither opened and the tile at least `ONE_LINE_FROM` (560 pt)
+    wide, they share one line: the work on the left, the tasks on the right.
+  - **Conversation prose is 15 pt at 1.6** (`Typography::prose()` is base + 2,
+    `prose_line_height`), for the prompt, the answer and the words being written. Markdown
+    elsewhere keeps 1.5: a note, a plan, a code block. A task box is sized from the icon size
+    beside its text, so a note's boxes did not grow. At our tile widths a line of prose holds
+    about 85 characters in the 720 pt column and about 40 on a phone, both inside the range
+    that reads well.
+  - **The status bar says how every agent stands**: per worker, the counts of working (a turn),
+    waiting (background work) and blocked (on the person), each with a mark in its tone, and
+    each worker named once there are two with agents. Agents at rest are not counted. This
+    supersedes the rule that the bar counts only working agents whose tiles are off screen,
+    and that a blocked one is counted on the bell alone. The bell stays the way to the
+    blocked one; the bar is the ambient count, steady whatever is scrolled into view.
+  - **The dark theme is neutral** (decided on renders of both, side by side). Content goes
+    from blue-grey `#16181d` to `#171717`, with no hue. The chrome's secondary and muted text
+    go from `#b4b9c3`/`#8b919c` to `#b8b8b8`/`#8f8f8f`, both still lifted to AA. ANSI black,
+    white and bright black go from `#1a1b1f`/`#c8ccd4`/`#7a8393` to
+    `#1c1c1c`/`#cbcbcb`/`#838383`; the hues are unchanged. On grey, the accent and the
+    status colours (a ticked box, "Allow once", the amber and green marks) are the only
+    colour on screen, where blue on blue-grey blended. One retune came with it: at a 0.28
+    share toward black the navigator sat only 0.82 L* over the bars, under the unit the
+    ladder test holds, so the bars go to 0.30. The seven `*-dark` goldens moved. The light
+    theme keeps GitHub's slate greys in the terminal (text `#1f2328`, ANSI greys
+    `#24292f`/`#57606a`/`#6e7781`/`#8c959f`) and a faint blue in `text_secondary`
+    (`#4b4f58`). Its surfaces are near neutral, since they are mixed toward `#1d1d1f`.
+  - **A fold names what its work touched**: "Worked for 35 s · Edited notes.md · Ran 3
+    commands · 9 more steps". It names the two weightiest kinds (edits by file name while
+    one, then commands, reads, searches, subagents), then counts the steps left. "N steps"
+    alone was a number with nothing to picture. Explore and task runs were already one
+    grouped line each, so nothing else changed.
+  - **The composer's foot is two chips**: the model (the agent's mark, its name, a chevron
+    while the list can open) and the permission mode (a shield, or the mode's own icon; the
+    warning tone only for bypassing permissions). Both are read-only projections of what
+    Claude Code reports. The model comes from the transcript (the ids that answered the last
+    turn), or the status line's name before any turn has. The mode comes from the transcript
+    (the mode the last prompt was sent in) or from the `permission_mode` the agent's own hook
+    sent with a permission prompt, whichever is newer by the worker's clock. Neither chip
+    drives the TUI's menus. The model list types `/model <alias>`, as before, and the mode
+    changes only in the terminal. The mode set by Shift-Tab between prompts, with no
+    permission asked, reaches the face only with the next prompt: every hook carries it, but
+    only the server's tree hears it today, so showing it at once needs a field on the wire.
+  - Not taken: shortcuts inside controls, because keybindings live in the palette (CLAUDE.md),
+    and plan usage in the bar, which needs an undocumented endpoint and the Keychain
+    credential. Both are parked for the user.
+  - Tests: `the_mode_chip_takes_the_freshest_word`, `a_fold_names_what_its_work_touched`,
+    `the_status_bar_counts_every_workers_agents`,
+    `the_status_bar_reads_the_focused_tile_and_its_link`, `the_readouts_say_what_they_count`,
+    `background_work_sits_over_the_composer`, and the theme's hairline ladder
+    (`the_surfaces_climb_bars_panel_content` and the derived-surfaces sweep, now through
+    `Hairline::over`).

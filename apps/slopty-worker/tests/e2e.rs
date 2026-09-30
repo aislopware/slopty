@@ -89,10 +89,24 @@ mod tests {
         (guard, addr)
     }
 
+    /// `program`, started from a clean environment whose home is `dir`'s own
+    /// (`slopty_testkit::env::scrub`): nothing of the developer's reaches a daemon, or the
+    /// shells and agents it starts.
+    fn scrubbed(program: impl AsRef<std::ffi::OsStr>, dir: &std::path::Path) -> Command {
+        let mut command = Command::new(program);
+        slopty_testkit::env::scrub(command.as_std_mut(), &home_of(dir));
+        command
+    }
+
+    /// The home of the daemons a test starts in `dir`.
+    fn home_of(dir: &std::path::Path) -> PathBuf {
+        dir.join("home")
+    }
+
     /// Start ptyd on `dir`'s socket, once it listens.
     async fn spawn_ptyd(dir: &std::path::Path) -> Child {
         let ptyd_sock = dir.join("ptyd.sock");
-        let mut ptyd = Command::new(bin("slopty-ptyd"))
+        let mut ptyd = scrubbed(bin("slopty-ptyd"), dir)
             .arg("--socket")
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
@@ -108,7 +122,7 @@ mod tests {
     async fn spawn_worker(dir: &std::path::Path) -> (Child, SocketAddr) {
         let ptyd_sock = dir.join("ptyd.sock");
         let ctl_sock = dir.join("worker.sock");
-        let mut worker = Command::new(bin("slopty-worker"))
+        let mut worker = scrubbed(bin("slopty-worker"), dir)
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
@@ -273,7 +287,7 @@ mod tests {
 
         let size = TermSize { cols: 40, rows: 6, ..TermSize::default() };
         // `~` as the directory: the client does not know the worker's home.
-        let home = std::env::var("HOME").unwrap();
+        let home = home_of(dir.path()).to_string_lossy().into_owned();
         worker
             .tx
             .send(&ClientMsg::OpenSession {
@@ -330,11 +344,16 @@ mod tests {
             .tx
             .send(&ClientMsg::Term {
                 session,
-                req: TermRequest::Raw(b"echo cwd=$(pwd)\n".to_vec()),
+                req: TermRequest::Raw(
+                    format!("[ \"$(pwd -P)\" = \"$(cd '{home}' && pwd -P)\" ] && echo at-'home'\n")
+                        .into_bytes(),
+                ),
             })
             .await
             .unwrap();
-        wait_for_text(&mut events, &format!("cwd={home}")).await;
+        // Asked in the shell, since the home's path is longer than a 40-column row; the answer
+        // is split in the command, so its echo is not taken for it.
+        wait_for_text(&mut events, "at-home").await;
 
         worker.tx.send(&ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         loop {
@@ -3750,7 +3769,14 @@ mod tests {
             ("com.example.private".to_owned(), b"an app's own".to_vec()),
         ]);
         board.0.write(&[copied], None).unwrap();
-        let offer = next_msg(&mut worker, offered).await;
+        // The copy lands a type at a time: an offer the worker read half written is followed
+        // by the whole copy's, under the same change count.
+        let offer = loop {
+            let offer = next_msg(&mut worker, offered).await;
+            if offer.items.first().is_some_and(|item| item.reps.len() == 3) {
+                break offer;
+            }
+        };
         assert_eq!(offer.origin, Peer::Worker(worker.ack.worker));
         let reps = &offer.items[0].reps;
         let kinds: Vec<&ClipType> = reps.iter().map(|r| &r.kind).collect();
@@ -4499,8 +4525,7 @@ mod tests {
     async fn the_greeting_names_the_home_and_what_the_worker_can_do() {
         let dir = tempfile::tempdir().unwrap();
         let (_guard, worker) = connect(dir.path()).await;
-        let home = std::env::var("HOME").unwrap_or_default();
-        assert_eq!(worker.ack.home, home);
+        assert_eq!(worker.ack.home, home_of(dir.path()).to_string_lossy());
         let caps = &worker.ack.caps;
         assert!(caps.cpus > 0 && caps.memory > 0 && !caps.os_version.is_empty(), "{caps:?}");
         assert_eq!(caps.version, env!("CARGO_PKG_VERSION"));
@@ -4616,7 +4641,7 @@ mod tests {
     }
 
     /// Run `slopty hook [args]` as Claude Code would, in `session`, with `payload` on stdin; its
-    /// output. The relay is this test's own child: its home is the test's directory.
+    /// output. The relay is this test's own child, with the daemons' home.
     fn relay(
         dir: &std::path::Path,
         session: SessionId,
@@ -4624,14 +4649,13 @@ mod tests {
         payload: &serde_json::Value,
     ) -> Child {
         use tokio::io::AsyncWriteExt as _;
-        let mut child = Command::new(bin("slopty"))
+        let mut child = scrubbed(bin("slopty"), dir)
             .arg("--data-dir")
             .arg(dir.join("data"))
             .arg("hook")
             .args(args)
             .env("SLOPTY_SESSION", session.to_string())
             .env("SLOPTY_WORKER_SOCKET", dir.join("worker.sock"))
-            .env("HOME", dir)
             .env("CLAUDE_CONFIG_DIR", dir.join("claude-config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -1406,8 +1406,8 @@ impl WorkspaceView {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.nav.list.space_plate.under_moving(theme, moves))
-            .child(self.nav.list.plate.under_moving(theme, moves))
+            .child(self.nav.list.space_plate.under_on(theme, moves, Some(self.clock_instant())))
+            .child(self.nav.list.plate.under_on(theme, moves, Some(self.clock_instant())))
             .child(rows);
         div()
             .id("navigator")

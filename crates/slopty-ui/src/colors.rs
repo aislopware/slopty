@@ -1,18 +1,40 @@
 //! Theme tokens → GPUI colours.
 
 use gpui::{Hsla, Rgba};
-use slopty_theme::Rgb;
+use slopty_theme::{Hairline, Rgb};
 
-/// An opaque colour.
-#[must_use]
-pub fn hsla(c: Rgb) -> Hsla {
-    Rgba { r: f32::from(c.r) / 255.0, g: f32::from(c.g) / 255.0, b: f32::from(c.b) / 255.0, a: 1.0 }
-        .into()
+/// A theme colour as GPUI draws it: an opaque one, or a hairline at its own opacity.
+pub trait Tone: Copy {
+    /// Its channels, 0 to 1, and its opacity.
+    fn rgba(self) -> Rgba;
 }
 
-/// A colour with alpha.
+impl Tone for Rgb {
+    fn rgba(self) -> Rgba {
+        Rgba {
+            r: f32::from(self.r) / 255.0,
+            g: f32::from(self.g) / 255.0,
+            b: f32::from(self.b) / 255.0,
+            a: 1.0,
+        }
+    }
+}
+
+impl Tone for Hairline {
+    fn rgba(self) -> Rgba {
+        Rgba { a: self.opacity(), ..self.ink.rgba() }
+    }
+}
+
+/// A theme colour as it is: opaque, or a hairline at its own opacity.
 #[must_use]
-pub fn hsla_alpha(c: Rgb, a: f32) -> Hsla {
-    Rgba { r: f32::from(c.r) / 255.0, g: f32::from(c.g) / 255.0, b: f32::from(c.b) / 255.0, a }
-        .into()
+pub fn hsla(c: impl Tone) -> Hsla {
+    c.rgba().into()
+}
+
+/// A colour at `a` of its own opacity.
+#[must_use]
+pub fn hsla_alpha(c: impl Tone, a: f32) -> Hsla {
+    let rgba = c.rgba();
+    Rgba { a: rgba.a * a, ..rgba }.into()
 }

@@ -3,9 +3,10 @@
 //!
 //! The server sends a batch of reports for an agent's terminal to its worker, which keeps it in
 //! a file per session beside its control socket ([`put`]). When the agent next starts, is
-//! prompted or finishes a turn, Claude Code runs `slopty hook reports`, which takes the file
-//! ([`take`]), prints it as the hook's context ([`output`]) and tells the worker it was handed
-//! over ([`delivered_payload`]). Nothing is typed into a terminal.
+//! prompted or finishes a turn, Claude Code runs `slopty hook reports`, which asks the worker
+//! with the session's token: the worker says what to print ([`hand_over`], [`output`]), the
+//! hook prints it as its context, then says so, and only then does the worker let the batch go
+//! ([`handed`]) and tell the server it was read. Nothing is typed into a terminal.
 //!
 //! An agent at rest would wait for its next prompt. So the same hook also notes the session's
 //! inbox, the socket Claude Code takes messages from other processes on
@@ -64,23 +65,6 @@ pub fn put(dir: &Path, session: SessionId, batch: &Batch) -> io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     let json = serde_json::to_vec(batch).map_err(io::Error::other)?;
     slopty_platform::fs::replace(&file(dir, session), &json)
-}
-
-/// Take the batch kept for `session`, if there is one: claimed by a rename first, so two hooks
-/// firing at once never both hand it over.
-///
-/// # Errors
-/// A batch is there and cannot be read.
-pub fn take(dir: &Path, session: SessionId) -> io::Result<Option<Batch>> {
-    let claimed = dir.join(format!("{session}.taken-{}", std::process::id()));
-    match std::fs::rename(file(dir, session), &claimed) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    }
-    let read = std::fs::read(&claimed);
-    std::fs::remove_file(&claimed)?;
-    serde_json::from_slice(&read?).map(Some).map_err(io::Error::other)
 }
 
 /// The batch kept for `session`, left where it is.
@@ -192,19 +176,29 @@ pub fn note_posted(dir: &Path, session: SessionId, posted: &Posted) -> io::Resul
     slopty_platform::fs::replace(&posted_file(dir, session), &json)
 }
 
-/// Take the note of `session`'s last post, if there is one.
+/// `session`'s agent read batch `batch`: it is no longer kept, nor the note of its post.
+///
+/// Whether it was still kept; a later batch kept in its place stays. Its caller runs one of
+/// these, [`put`] and [`hand_over`] at a time.
 ///
 /// # Errors
-/// A note is there and cannot be read or removed.
-pub fn take_posted(dir: &Path, session: SessionId) -> io::Result<Option<Posted>> {
-    let path = posted_file(dir, session);
-    let read = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    std::fs::remove_file(&path)?;
-    Ok(serde_json::from_slice(&read).ok())
+/// The batch or its note is there and cannot be read or removed.
+pub fn handed(dir: &Path, session: SessionId, batch: u64) -> io::Result<bool> {
+    if peek_posted(dir, session).is_some_and(|p| p.batch == batch) {
+        remove(&posted_file(dir, session))?;
+    }
+    if peek(dir, session)?.is_none_or(|kept| kept.batch != batch) {
+        return Ok(false);
+    }
+    remove(&file(dir, session))?;
+    Ok(true)
+}
+
+fn remove(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// The note of `session`'s last post, left in place; none when it cannot be read.
@@ -323,8 +317,11 @@ pub struct Turn<'a> {
     pub held: bool,
 }
 
-/// Take the batch kept for `session` for a hook firing for `event` in `turn`, and say what to
-/// print for it ([`Handed`]).
+/// The batch kept for `session` for a hook firing for `event` in `turn`, and what to print for
+/// it ([`Handed`]).
+///
+/// It stays kept until the hook says it printed it ([`handed`]), so a hook that dies before is
+/// followed by another that hands it over.
 ///
 /// None when nothing waits, it cannot be read, or the event takes no reports. A turn a `Stop`
 /// hook held already is let end: reports that keep coming would otherwise never let the agent
@@ -344,47 +341,38 @@ pub fn hand_over(
     let reached_by = |batch: &Batch, posted: Option<&Posted>| {
         posted.is_some_and(|p| p.batch == batch.batch && reached(&p.mark, prompt, transcript))
     };
-    if event == HookEvent::Stop && held {
-        let waiting = peek(dir, session).ok()??;
-        let posted = peek_posted(dir, session);
-        if !reached_by(&waiting, posted.as_ref()) {
-            return None;
-        }
+    let batch = peek(dir, session).ok()??;
+    let read = reached_by(&batch, peek_posted(dir, session).as_ref());
+    if event == HookEvent::Stop && held && !read {
+        return None;
     }
-    let batch = take(dir, session).ok()??;
-    let posted = take_posted(dir, session).ok().flatten();
-    let print =
-        if reached_by(&batch, posted.as_ref()) { None } else { output(event, &batch.context) };
+    let print = if read { None } else { output(event, &batch.context) };
     Some(Handed { batch: batch.batch, print })
-}
-
-/// The hook `slopty hook reports` posts once it handed `batch` over, which the worker reports
-/// to the server ([`crate::Hook::report`]).
-#[must_use]
-pub fn delivered_payload(batch: u64) -> String {
-    json!({ "hook_event_name": HookEvent::Delivered, "batch": batch }).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A batch kept for a session is taken once, the latest in place of the earlier; another
-    /// session's stays; nothing kept is nothing taken.
+    /// A batch kept for a session stays until its agent read it, the latest in place of the
+    /// earlier; word that an earlier one was read leaves the latest; another session's stays.
     #[test]
-    fn a_batch_is_kept_per_session_and_taken_once() {
+    fn a_batch_is_kept_per_session_until_it_is_read() {
         let root = tempfile::tempdir().expect("dir");
         let dir = dir(&root.path().join("worker.sock"));
         let (a, b) = (SessionId::new(), SessionId::new());
-        assert_eq!(take(&dir, a).expect("read"), None);
+        assert_eq!(peek(&dir, a).expect("read"), None);
         let first = Batch { batch: 1, context: "one".to_owned() };
         let second = Batch { batch: 2, context: "one\ntwo".to_owned() };
         put(&dir, a, &first).expect("put");
         put(&dir, a, &second).expect("put");
         put(&dir, b, &first).expect("put");
-        assert_eq!(take(&dir, a).expect("read"), Some(second));
-        assert_eq!(take(&dir, a).expect("read"), None, "taken once");
-        assert_eq!(take(&dir, b).expect("read"), Some(first));
+        assert_eq!(peek(&dir, a).expect("read"), Some(second.clone()));
+        assert!(!handed(&dir, a, 1).expect("handed"), "an earlier batch's word");
+        assert_eq!(peek(&dir, a).expect("read"), Some(second), "leaves the latest");
+        assert!(handed(&dir, a, 2).expect("handed"));
+        assert_eq!(peek(&dir, a).expect("read"), None, "read once");
+        assert_eq!(peek(&dir, b).expect("read"), Some(first));
         clear(&dir).expect("clear");
         assert!(!dir.exists());
         clear(&dir).expect("nothing to clear");
@@ -392,7 +380,7 @@ mod tests {
 
     /// A batch whose post reached the agent (its mark in the prompt or the transcript) is only
     /// acknowledged by the next hook; one whose post was held, dropped or never made is
-    /// handed over by it. Either way it is taken once, with its note.
+    /// handed over by it. Either way it stays until read, and goes with its note.
     #[test]
     fn a_hook_hands_over_only_what_the_post_did_not() {
         fn on(t: &Path) -> Turn<'_> {
@@ -418,7 +406,10 @@ mod tests {
         let handed = hand_over(&dir, session, stop, Turn::default()).expect("taken");
         assert_eq!(handed.batch, 3);
         assert_eq!(handed.print.expect("printed")["reason"].as_str(), Some(batch.context.as_str()));
-        assert!(hand_over(&dir, session, stop, Turn::default()).is_none(), "taken once");
+        let again = hand_over(&dir, session, stop, Turn::default()).expect("again");
+        assert_eq!(again.batch, 3, "a hook that died before saying so is followed by another");
+        assert!(super::handed(&dir, session, 3).expect("handed"));
+        assert!(hand_over(&dir, session, stop, Turn::default()).is_none(), "read once");
 
         // Posted, and the message is in the transcript: acknowledged, not printed again.
         put(&dir, session, &batch).expect("put");
@@ -433,7 +424,8 @@ mod tests {
         std::fs::write(&transcript, format!("{{\"type\":\"summary\"}}\n{line}\n")).expect("write");
         let handed = hand_over(&dir, session, stop, on(&transcript)).expect("taken");
         assert_eq!((handed.batch, handed.print), (3, None));
-        assert_eq!(take_posted(&dir, session).expect("read"), None, "the note went with it");
+        assert!(super::handed(&dir, session, 3).expect("handed"));
+        assert_eq!(peek_posted(&dir, session), None, "the note went with it");
 
         // Posted and held: the mark is nowhere, so the hook hands it over.
         put(&dir, session, &batch).expect("put");
@@ -527,7 +519,5 @@ mod tests {
             (Some("block"), Some("task 2: done"))
         );
         assert_eq!(output(HookEvent::PreToolUse, "r"), None);
-        let hook = crate::Hook::parse(&delivered_payload(7)).expect("a hook");
-        assert_eq!((hook.event, hook.batch), (HookEvent::Delivered, Some(7)));
     }
 }

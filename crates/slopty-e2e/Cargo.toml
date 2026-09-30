@@ -20,6 +20,7 @@ harness = [
     "dep:tempfile",
     "dep:slopty-pty",
     "dep:slopty-shape",
+    "dep:slopty-testkit",
 ]
 
 # It runs a tokio client, which the `harness` feature brings.
@@ -36,6 +37,8 @@ slopty-pty = { workspace = true, optional = true }
 # The link the second worker is reached over (`harness::SecondWorker`).
 slopty-shape = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+# The clean environment every daemon and CLI the harness starts runs in (`env::scrub`).
+slopty-testkit = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = [ "process" ] }
 
 # The idle-window helper (`src/bin/slopty-idle-window.rs`): AppKit, macOS only.

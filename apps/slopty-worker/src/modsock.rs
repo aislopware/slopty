@@ -77,7 +77,7 @@ async fn answer(daemon: &Daemon, request: Request<Incoming>) -> Response<Empty<B
         StatusCode::NOT_FOUND
     } else {
         match Limited::new(request.into_body(), MAX_BATCH).collect().await {
-            Ok(body) => take(daemon, &body.to_bytes()),
+            Ok(body) => take(daemon, &body.to_bytes()).await,
             Err(e) => {
                 tracing::debug!(error = %e, "a mod batch that did not arrive whole");
                 StatusCode::PAYLOAD_TOO_LARGE
@@ -90,12 +90,17 @@ async fn answer(daemon: &Daemon, request: Request<Incoming>) -> Response<Empty<B
 }
 
 /// Put a batch on the board of the live session it names.
-fn take(daemon: &Daemon, body: &[u8]) -> StatusCode {
+async fn take(daemon: &Daemon, body: &[u8]) -> StatusCode {
     let Ok(batch) = serde_json::from_slice::<Batch>(body) else {
         return StatusCode::BAD_REQUEST;
     };
     let session = batch.session.as_deref().and_then(|s| s.parse::<SessionId>().ok());
-    let Some(session) = session.filter(|s| daemon.worker.get(*s).is_ok()) else {
+    // A batch may come before the open that started its agent returns.
+    let here = match session {
+        Some(s) => daemon.worker.get_opened(s).await.is_ok(),
+        None => false,
+    };
+    let Some(session) = session.filter(|_| here) else {
         tracing::debug!(session = ?batch.session, "a mod batch for no session here");
         return StatusCode::NOT_FOUND;
     };

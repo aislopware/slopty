@@ -4,9 +4,9 @@
 //! - **Thinking** is one line, "Thought for 12 s", with the first words of it in the muted tone; a
 //!   click opens the whole of it. The density decides whether the line shows at all (Normal hides
 //!   it) and whether it opens unasked (Verbose).
-//! - **A plan** (`ExitPlanMode`) reads as a document in a frame: "Plan", its title and whether it
-//!   was approved over its Markdown at the prose size. A long one shows its head and opens on
-//!   request. It stays in view when its turn folds.
+//! - **A plan** (`ExitPlanMode`) reads as a document one tone step off the conversation, with no
+//!   frame or rule: "Plan", its title and whether it was approved over its Markdown at the prose
+//!   size. A long one shows its head and opens on request. It stays in view when its turn folds.
 //! - **The task list** is a section of the composer's shell while any task is open: the one in
 //!   progress, "3/7", a bar of one segment a task, and when opened each task with how long it took.
 //! - **Background work** (a command or a subagent started with `run_in_background`) is the top
@@ -52,6 +52,9 @@ const TRAY_LINES: usize = 12;
 
 /// Most segments the task bar draws; a longer list shows its count alone.
 const SEGMENTS: usize = 10;
+/// The least tile width, in points, at which the tray's one piece of work and the task list
+/// share a line: each half then still holds a name and its state.
+pub(super) const ONE_LINE_FROM: f32 = 560.0;
 
 /// How a piece of background work stands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -348,9 +351,7 @@ impl ConversationView {
             .items_center()
             .gap(self.z(theme.spacing.sm))
             .h(self.z(theme.density.row))
-            .px(self.z(theme.spacing.sm))
-            .border_b_1()
-            .border_color(hsla(s.border_subtle))
+            .px(self.z(theme.spacing.md))
             .text_size(self.z(theme.typography.small()))
             .child(self.icon(IconName::Map, s.text_muted))
             .child(div().flex_none().text_color(hsla(s.text_muted)).child("Plan"))
@@ -392,9 +393,7 @@ impl ConversationView {
                     .role(Role::Button)
                     .aria_label(label.clone())
                     .px(self.z(theme.spacing.md))
-                    .py(self.z(theme.spacing.xs))
-                    .border_t_1()
-                    .border_color(hsla(s.border_subtle))
+                    .pb(self.z(theme.spacing.sm))
                     .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .cursor_pointer()
@@ -415,15 +414,13 @@ impl ConversationView {
             .flex()
             .flex_col()
             .rounded(self.z(theme.radii.md))
-            .border_1()
-            .border_color(hsla(s.border_subtle))
-            .bg(hsla(s.panel))
+            .bg(hsla(s.band))
             .overflow_hidden()
             .child(head)
             .child(
                 div()
                     .px(self.z(theme.spacing.md))
-                    .py(self.z(theme.spacing.sm))
+                    .pb(self.z(theme.spacing.sm))
                     .text_size(self.z(theme.typography.prose()))
                     .line_height(relative(theme.typography.markdown_line_height))
                     .child(self.markdown(format!("plan-{}-{id}", self.session), &shown))
@@ -438,7 +435,9 @@ impl ConversationView {
     /// The task list, a section of the composer's shell while a task is open or the agent
     /// works: the task in progress, "3/7" and a bar of a segment a task; opened, each task with
     /// how long it took.
-    pub(super) fn tasks_card(&self, cx: &Context<Self>) -> Option<AnyElement> {
+    /// `beside`: it shares its line with the tray, so it starts at the tray's end rather than
+    /// on the field's text edge.
+    pub(super) fn tasks_card(&self, beside: bool, cx: &Context<Self>) -> Option<AnyElement> {
         let thread = self.model.thread(&self.thread)?;
         let tasks = thread.tasks();
         let (done, current) = progress(tasks);
@@ -459,11 +458,11 @@ impl ConversationView {
                 .gap(self.z(theme.spacing.xxs))
                 .children(tasks.iter().map(|t| {
                     let tone = match t.status.as_str() {
-                        "completed" => s.success,
-                        "in_progress" => s.accent_fill,
-                        _ => s.border,
+                        "completed" => hsla(s.success),
+                        "in_progress" => hsla(s.accent_fill),
+                        _ => hsla(s.border),
                     };
-                    div().flex_1().min_w_0().h(px(3.0)).rounded_full().bg(hsla(tone))
+                    div().flex_1().min_w_0().h(px(3.0)).rounded_full().bg(tone)
                 }))
         });
         let label = format!(
@@ -482,7 +481,7 @@ impl ConversationView {
                 .items_center()
                 .gap(self.z(theme.spacing.sm))
                 .h(self.z(theme.density.row))
-                .pl(self.shell_lead())
+                .pl(if beside { self.z(theme.spacing.xs) } else { self.shell_lead() })
                 .pr(self.shell_trail())
                 .rounded(self.z(theme.radii.sm))
                 .cursor_pointer()
@@ -617,21 +616,31 @@ impl ConversationView {
         self.background_work().iter().any(|w| w.standing == Standing::Running)
     }
 
-    /// The work in the background, a section of the composer's shell: a row each, the first
-    /// few unless all were asked for. It is the session's, so a subagent's thread leaves it out.
-    pub(super) fn tray(&self, cx: &Context<Self>) -> Option<AnyElement> {
+    /// The work the tray lists: the session's, so a subagent's thread has none. A finished
+    /// piece leaves once the transcript shows its call, so it is not said twice.
+    pub(super) fn tray_work(&self) -> Vec<Work> {
         if self.thread != ThreadId::Main {
-            return None;
+            return Vec::new();
         }
-        // A finished piece leaves once the transcript shows its call, so it is not said twice.
-        let work: Vec<Work> = self
-            .background_work()
+        self.background_work()
             .into_iter()
             .filter(|w| {
                 w.standing == Standing::Running
                     || crate::conversation::find::row_of(&self.rows, &w.id).is_none()
             })
-            .collect();
+            .collect()
+    }
+
+    /// Whether the tray and the task list share one line: one piece of work in the tray and
+    /// neither it nor the list opened, in a tile wide enough for both ([`ONE_LINE_FROM`]).
+    pub(super) fn status_on_one_line(&self, work: &[Work]) -> bool {
+        let [only] = work else { return false };
+        self.width >= ONE_LINE_FROM && !self.tasks_open && !self.tray_open.contains(&only.id)
+    }
+
+    /// The work in the background, a section of the composer's shell: a row each, the first
+    /// few unless all were asked for.
+    pub(super) fn tray(&self, work: &[Work], cx: &Context<Self>) -> Option<AnyElement> {
         if work.is_empty() {
             return None;
         }

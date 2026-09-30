@@ -475,7 +475,9 @@ mod tests {
     fn relay(stack: &ServerStack, session: &str, payload: &Value) -> Result<tokio::process::Child> {
         use tokio::io::AsyncWriteExt as _;
         let slopty = slopty_e2e::harness::bin_dir()?.join("slopty");
-        let mut child = tokio::process::Command::new(slopty)
+        let mut child = tokio::process::Command::new(slopty);
+        slopty_testkit::env::scrub(child.as_std_mut(), &stack.path("hook-data").join("home"));
+        let mut child = child
             .arg("--data-dir")
             .arg(stack.path("hook-data"))
             .arg("hook")
@@ -555,14 +557,18 @@ mod tests {
         .await?;
         ensure!(held["tool"] == "Bash", "{held}");
         let ask = held["ask"].as_u64().context("ask")?;
-        // Only the person answers: an agent asking over MCP is refused, and the prompt waits.
+        // Only the person answers: MCP offers an agent no tool to answer with, and the prompt
+        // waits.
         let params = json!({
             "name": "answer_permission",
             "arguments": { "term": term, "ask": ask, "verdict": "allow" },
         });
-        let by_agent = stack.mcp(40, "tools/call", params).await?;
-        let refused = by_agent["error"].is_object() || by_agent["result"]["isError"] == json!(true);
-        ensure!(refused, "an agent cannot answer a permission: {by_agent}");
+        let by_agent = stack.mcp(40, "tools/call", params).await;
+        let refused = match &by_agent {
+            Err(e) => e.to_string().contains("no tool is called answer_permission"),
+            Ok(said) => said["error"].is_object() || said["result"]["isError"] == json!(true),
+        };
+        ensure!(refused, "an agent cannot answer a permission: {by_agent:?}");
         let still = stack.slopty(&["agent", "conversation", &term]).await?;
         ensure!(still["held"][0]["ask"] == json!(ask), "the prompt still waits: {still}");
         let ask_arg = ask.to_string();

@@ -81,6 +81,41 @@ impl Rgb {
     }
 }
 
+/// A hairline: the chrome's text at a few hundredths of its strength.
+///
+/// Laid over whatever it crosses, it sits the same step off every surface. A grey mixed for
+/// the content sat a different step off each of the others. `MonoCode`'s and Zed's borders
+/// are drawn the same way.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct Hairline {
+    /// What it is drawn in: the chrome's text.
+    pub ink: Rgb,
+    /// How strongly, 0 to 255, as a channel is.
+    pub alpha: u8,
+}
+
+impl Hairline {
+    /// A hairline in `ink` at `share` (0 to 1) of its strength.
+    #[must_use]
+    pub fn of(ink: Rgb, share: f32) -> Self {
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0 to 255")]
+        let alpha = (share.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Self { ink, alpha }
+    }
+
+    /// Its opacity, 0 to 1.
+    #[must_use]
+    pub fn opacity(self) -> f32 {
+        f32::from(self.alpha) / 255.0
+    }
+
+    /// The colour it shows over `surface`.
+    #[must_use]
+    pub fn over(self, surface: Rgb) -> Rgb {
+        surface.mix(self.ink, self.opacity())
+    }
+}
+
 /// Terminal colours.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct TerminalPalette {
@@ -110,9 +145,11 @@ pub struct TerminalPalette {
 }
 
 /// The dark terminal background: the content step of the chrome's surface order, which tile
-/// headers and bodies share.
+/// headers and bodies share. A neutral charcoal with no hue (`MonoCode`'s), so the accent and
+/// the status colours are the only colour on screen; the blue-grey `#16181d` it replaced
+/// blended with the blue accent (`docs/decisions/ui.md`, "The dark theme is neutral").
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
-const DARK_BG: Rgb = Rgb::hex(0x16181d);
+const DARK_BG: Rgb = Rgb::hex(0x171717);
 /// The light terminal background.
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
 const LIGHT_BG: Rgb = Rgb::hex(0xffffff);
@@ -130,15 +167,15 @@ impl TerminalPalette {
         search_match: Rgb::hex(0x4a4020),
         search_current: Rgb::hex(0x8c6a1f),
         ansi: [
-            Rgb::hex(0x1a1b1f),
+            Rgb::hex(0x1c1c1c),
             Rgb::hex(0xf06c75),
             Rgb::hex(0x98c379),
             Rgb::hex(0xe5c07b),
             Rgb::hex(0x61afef),
             Rgb::hex(0xc678dd),
             Rgb::hex(0x56b6c2),
-            Rgb::hex(0xc8ccd4),
-            Rgb::hex(0x7a8393),
+            Rgb::hex(0xcbcbcb),
+            Rgb::hex(0x838383),
             Rgb::hex(0xff7b86),
             Rgb::hex(0xa6d68a),
             Rgb::hex(0xf0cc8c),
@@ -340,8 +377,11 @@ pub struct Typography {
     /// Terminal line height as a multiple of the one the font asks for (ghostty's
     /// `adjust-cell-height`). `1.0` is the font's own, which is what a terminal wants.
     pub mono_line_height: f32,
-    /// Line height of Markdown prose (assistant turns), as a multiple of the font size.
+    /// Line height of Markdown (a note, a code block, a plan), as a multiple of the font size.
     pub markdown_line_height: f32,
+    /// Line height of the conversation's prose, read at length: looser than Markdown's, as
+    /// the conversations of `MonoCode` and T3 Code are.
+    pub prose_line_height: f32,
     /// UI family.
     pub ui_family: String,
     /// UI base size.
@@ -376,10 +416,11 @@ impl Typography {
         (self.ui_size - 1.0).max(7.0)
     }
 
-    /// Prose read at length: an assistant's answer and the prompt it answers (base + 1).
+    /// Prose read at length: an assistant's answer and the prompt it answers (base + 2, a
+    /// title's size at the regular weight).
     #[must_use]
     pub fn prose(&self) -> f32 {
-        self.ui_size + 1.0
+        self.ui_size + 2.0
     }
 
     /// Titles of panels and dialogs (base + 2).
@@ -420,6 +461,7 @@ impl Default for Typography {
             ligatures: true,
             mono_line_height: 1.0,
             markdown_line_height: 1.5,
+            prose_line_height: 1.6,
             ui_family: ".SystemUIFont".to_owned(),
             ui_size: 13.0,
         }
@@ -550,10 +592,10 @@ pub struct Surfaces {
     /// shows on white, where `panel` sat 1.5 L* off the content and only its rule was seen.
     pub band: Rgb,
     /// The hairlines that divide regions: between panes, under a bar, round a popover.
-    pub border: Rgb,
+    pub border: Hairline,
     /// The quieter hairline inside one region: between rows or groups of a list, under a
     /// tab row, between a panel's sections.
-    pub border_subtle: Rgb,
+    pub border_subtle: Hairline,
     /// Primary text.
     pub text: Rgb,
     /// Labels, tool summaries, counts.
@@ -645,8 +687,9 @@ struct Tones {
 const DARK_TONES: Tones = Tones {
     // One notch under the content, not three: at 0.66 the bars framed the window in black.
     // The panel sits two L* under the content, as the light one does, so an unfocused header
-    // still reads as one; at 0.12 it was 1.5.
-    canvas: Step { toward: Toward::Black, share: 0.28 },
+    // still reads as one; at 0.12 it was 1.5. On the neutral content 0.28 left the panel
+    // 0.82 L* over the bars, under the one unit that shows; 0.30 clears it.
+    canvas: Step { toward: Toward::Black, share: 0.30 },
     panel: Step { toward: Toward::Black, share: 0.16 },
     elevated: ink(0.045),
     raised: ink(0.065),
@@ -656,8 +699,9 @@ const DARK_TONES: Tones = Tones {
     border: ink(0.105),
     pole: Rgb::hex(0xffffff),
     text: Rgb::hex(0xe6e6e6),
-    text_secondary: Rgb::hex(0xb4b9c3),
-    text_muted: Rgb::hex(0x8b919c),
+    // Grey with no hue, as the content is; lifted to AA like every text tone.
+    text_secondary: Rgb::hex(0xb8b8b8),
+    text_muted: Rgb::hex(0x8f8f8f),
     accent: Rgb::hex(0x8ab4f8),
     success: Rgb::hex(0x98c379),
     warn: Rgb::hex(0xe5c07b),
@@ -751,6 +795,8 @@ impl Surfaces {
             };
             content.mix(toward, step.share)
         };
+        // A hairline is the ink laid over the surface, so over the content it is the step.
+        let hairline = |step: Step| Hairline::of(t.text, step.share);
         let (canvas, panel, elevated) = (at(t.canvas), at(t.panel), at(t.elevated));
         let (raised, overlay) = (at(t.raised), at(t.overlay));
         let under = [canvas, panel, content, elevated, raised, overlay];
@@ -765,8 +811,8 @@ impl Surfaces {
             raised,
             overlay,
             band: at(t.band),
-            border: at(t.border),
-            border_subtle: at(t.border_subtle),
+            border: hairline(t.border),
+            border_subtle: hairline(t.border_subtle),
             text,
             text_secondary,
             text_muted,
@@ -1255,7 +1301,7 @@ mod tests {
         let mut t = Typography::default();
         assert_eq!(
             (t.caption(), t.meta(), t.small(), t.prose(), t.title(), t.display()),
-            (10.0, 11.0, 12.0, 14.0, 15.0, 22.0)
+            (10.0, 11.0, 12.0, 15.0, 15.0, 22.0)
         );
         const {
             assert!(Typography::MEDIUM_WEIGHT > 400.0);
@@ -1288,10 +1334,13 @@ mod tests {
             assert!(bars < panel && panel < content.luminance(), "{variant:?} climbs");
             for (name, surface) in [("canvas", s.canvas), ("panel", s.panel), ("content", content)]
             {
-                let (loud, quiet) = (s.border.contrast(surface), s.border_subtle.contrast(surface));
+                let (loud, quiet) = (
+                    s.border.over(surface).contrast(surface),
+                    s.border_subtle.over(surface).contrast(surface),
+                );
                 assert!(quiet < loud, "{variant:?}: the subtle hairline is quieter on {name}");
             }
-            let subtle = s.border_subtle.contrast(content);
+            let subtle = s.border_subtle.over(content).contrast(content);
             assert!(subtle >= 1.05, "{variant:?}: the subtle hairline shows on content");
         }
     }
@@ -1580,6 +1629,7 @@ mod tests {
             let content = Rgb::hex(bg);
             let s = Surfaces::derive(content);
             let l = Rgb::luminance;
+            let c_rgb = content;
             let c = l(content);
             assert!(
                 l(s.canvas) <= l(s.panel) && l(s.panel) <= c,
@@ -1589,16 +1639,25 @@ mod tests {
             if content.is_light() {
                 assert!(l(s.raised) < l(s.canvas), "{name}: hover shows on the bars");
                 assert!(l(s.overlay) < l(s.raised), "{name}: selected past hover");
-                assert!(l(s.border) < l(s.border_subtle), "{name}: hairlines");
+                assert!(
+                    l(s.border.over(c_rgb)) < l(s.border_subtle.over(c_rgb)),
+                    "{name}: hairlines"
+                );
             } else {
                 assert!(c < l(s.elevated), "{name}: what floats is above the content");
                 assert!(l(s.elevated) < l(s.raised), "{name}: hover shows on what floats");
                 assert!(l(s.raised) < l(s.overlay), "{name}: selected past hover");
-                assert!(l(s.border_subtle) < l(s.border), "{name}: hairlines");
+                assert!(
+                    l(s.border_subtle.over(c_rgb)) < l(s.border.over(c_rgb)),
+                    "{name}: hairlines"
+                );
             }
             // A hairline is never drawn across a selected fill, so `overlay` is left out.
             for (surface, under) in under_text(&s, content).into_iter().take(5) {
-                let (loud, quiet) = (s.border.contrast(under), s.border_subtle.contrast(under));
+                let (loud, quiet) = (
+                    s.border.over(under).contrast(under),
+                    s.border_subtle.over(under).contrast(under),
+                );
                 assert!(quiet < loud, "{name}: the subtle hairline is quieter on {surface}");
             }
         }

@@ -1196,6 +1196,12 @@ impl WorkspaceView {
         self.epoch.elapsed()
     }
 
+    /// The instant the layout's clock stands at: what the chrome's own motion (the navigator's
+    /// plate) moves by, so it keeps step with the springs.
+    fn clock_instant(&self) -> Instant {
+        self.epoch.checked_add(self.now()).unwrap_or(self.epoch)
+    }
+
     /// Hold the layout's clock at `at` since the workspace was made, or let it run (`None`).
     #[cfg(test)]
     pub(crate) const fn hold_clock(&mut self, at: Option<Duration>) {

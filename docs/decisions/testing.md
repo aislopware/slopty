@@ -689,3 +689,24 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     binary. Off macOS it opens nothing. Test: `a_span_reads_back`. First use:
     MEASUREMENTS "large streams on the encode engines", where it showed a session never spans
     two engines and put another app's encoder on `ave1` while the Mac was otherwise idle.
+
+- ✅ **Every daemon, CLI and agent a test starts runs in a clean environment** (2026-10-01).
+  - A test runs inside the developer's shell. That shell may hold their Claude Code settings
+    and credentials, API keys, the Slopty terminal it runs in (`SLOPTY_SESSION`,
+    `SLOPTY_SESSION_TOKEN`), and a `PATH` that finds the real `claude`. Everything a daemon
+    inherits reaches the shells and agents it starts, and the stub `claude` recorded such
+    variables, some of them keys.
+  - `slopty_testkit::env::scrub` clears the environment and keeps only what the machine needs:
+    the locale, `TERM`, the user, `TMPDIR`, and what the Rust toolchain reads (logging,
+    backtraces, coverage). `PATH` becomes the system's own directories, with no program the
+    person installed, and `HOME` a directory of the test's own. A test sets anything beyond
+    that itself.
+  - It is the one place every harness starts from: `slopty-worker`'s `e2e`, `handoff` and
+    `server_link`, the CLI's tests, ptyd's, and `slopty-e2e`'s harness for its daemons and
+    CLI. The app and the helper windows are left as they were.
+  - Tests: `a_scrubbed_process_sees_only_the_kept_variables_and_its_own_home`
+    (`slopty-testkit`), and
+    `an_agent_the_worker_starts_inherits_nothing_of_the_test_s_environment` (`server_link`).
+    The stub records each variable's name with a digest of its value (never the value), and the
+    test fails on any variable of its own that reached the agent unchanged. Before the scrub it
+    listed everything beyond the kept set, API keys and every `CARGO_*` variable among them.

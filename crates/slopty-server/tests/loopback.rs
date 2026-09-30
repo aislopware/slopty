@@ -45,6 +45,7 @@ mod tests {
             listen: std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45999)),
             caps: caps(),
             sessions: Vec::new(),
+            session_key: [7; 32],
         }))
     }
 

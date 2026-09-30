@@ -25,7 +25,6 @@ pub mod mcp;
 mod placement;
 pub mod project;
 pub mod store;
-pub mod vouch;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -112,10 +111,6 @@ impl Server {
             move |source| ServerError::State { path, source }
         };
         let hub = Hub::new(config.name, store.load().await.map_err(unreadable(store.path()))?);
-        let key_path = config.data_dir.join(vouch::KEY_FILE);
-        hub.set_agent_key(
-            vouch::AgentKey::load_or_make(&config.data_dir).map_err(unreadable(&key_path))?,
-        );
         let kept = projects.load().await.map_err(unreadable(projects.path()))?;
         hub.adopt_projects(kept.clone());
         let keeper = tokio::spawn(projects.keep(kept, hub.keep_projects()));

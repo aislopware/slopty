@@ -290,6 +290,7 @@ fn every_moment_reads_as_a_sentence() {
         super::view::NO_TASKS,
         super::view::NEEDS_YOU,
         super::view::ORCHESTRATOR,
+        super::view::CREATED,
         super::view::PROJECT_GONE,
     ]) {
         let mut chars = text.chars();
@@ -299,14 +300,18 @@ fn every_moment_reads_as_a_sentence() {
     }
 }
 
-/// The lanes stand side by side only where two fit at the zoom they are drawn at.
+/// As many lanes stand side by side as fit at the zoom they are drawn at, one at the least and
+/// never more than there are lanes.
 #[test]
-fn lanes_stand_side_by_side_where_two_fit_at_the_zoom() {
-    use super::view::lanes_side_by_side;
-    assert!(lanes_side_by_side(480.0, 1.0));
-    assert!(!lanes_side_by_side(400.0, 1.0));
-    assert!(!lanes_side_by_side(480.0, 2.0), "a zoomed board's lanes are wider");
-    assert!(lanes_side_by_side(960.0, 2.0));
+fn as_many_lanes_stand_across_as_fit_at_the_zoom() {
+    use super::view::lanes_across;
+    assert_eq!(lanes_across(480.0, 1.0), 2);
+    assert_eq!(lanes_across(400.0, 1.0), 1);
+    assert_eq!(lanes_across(0.0, 1.0), 1, "before the first layout");
+    assert_eq!(lanes_across(480.0, 2.0), 1, "a zoomed board's lanes are wider");
+    assert_eq!(lanes_across(960.0, 2.0), 2);
+    assert_eq!(lanes_across(1200.0, 1.0), 5);
+    assert_eq!(lanes_across(10_000.0, 1.0), 7, "one column per lane at most");
 }
 
 /// A board unchanged by an update keeps its address, so handing it over again costs a pointer.

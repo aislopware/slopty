@@ -502,9 +502,10 @@ mod actor {
             .await;
         let white = TermColors { fg: [0; 3], bg: [0xff; 3], cursor: [0; 3], ansi: [[0; 3]; 16] };
         session.request(b, TermRequest::Colors(white)).unwrap();
-        // b only views: the answer is still the default dark background.
+        // b only views: the answer is still the default dark background, the theme's
+        // `TerminalPalette::DARK` (the worker does not depend on slopty-theme to name it).
         session.request(a, TermRequest::Raw(b"\r".to_vec())).unwrap();
-        wait_for(&mut rx_a, |_, s| text(s).contains("rgb:1616/1818/1d1d")).await;
+        wait_for(&mut rx_a, |_, s| text(s).contains("rgb:1717/1717/1717")).await;
         // b drives: its white answers.
         session.request(b, TermRequest::Drive { drive: true }).unwrap();
         wait_for(&mut rx_b, |ev, _| {

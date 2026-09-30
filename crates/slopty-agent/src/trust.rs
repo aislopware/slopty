@@ -17,6 +17,12 @@
 //! - Outside a repository, trusting a folder covers the folders below it, but not a repository
 //!   nested there (CHANGELOG 2.1.232: each repository needs its own).
 //! - Trust in the home directory itself lasts one session and is never kept, so it is refused.
+//!
+//! Trust is the person's word that a folder's own settings, hooks and tools may run, so Slopty
+//! keeps it only for folders it made: the key must lie strictly inside the folder the caller
+//! names as Slopty's own (`within`). A folder an agent points at elsewhere, an ancestor that
+//! would cover the person's folders below it, or a worktree whose `.git` file leads to a
+//! repository outside is refused, since trusting its key would trust the person's repository.
 //! - Hooks wait for trust (<https://code.claude.com/docs/en/hooks>, "Workspace trust").
 //!
 //! The edit only adds: nothing in the config is removed or changed but the one flag. A config
@@ -107,19 +113,34 @@ fn linked_root(dir: &Path, git: &Path) -> io::Result<PathBuf> {
 }
 
 /// Mark `folder` trusted in the config at `config` ([`config_path`]), for the person whose home
-/// is `home`: [`Outcome::Unchanged`] when it was already.
+/// is `home`.
+///
+/// Only when the path its trust is kept under lies strictly inside `within`, the folder Slopty
+/// makes its own in. [`Outcome::Unchanged`] when it was already.
 ///
 /// # Errors
 ///
 /// - `NotFound` when there is no config yet (Claude Code has not run for this person) or no such
 ///   folder;
+/// - `PermissionDenied` when the trust would be kept outside `within`;
 /// - `InvalidInput` for the home directory, whose trust Claude Code never keeps;
 /// - `InvalidData` for a config that is empty, does not parse, is not an object or keeps its
 ///   projects in something other than an object;
 /// - `Interrupted` when the config changed under every attempt;
 /// - whatever reading or replacing the file fails with.
-pub fn trust(config: &Path, home: &Path, folder: &Path) -> io::Result<Outcome> {
+pub fn trust(config: &Path, home: &Path, folder: &Path, within: &Path) -> io::Result<Outcome> {
     let key = key(folder)?;
+    let within = std::fs::canonicalize(within)?;
+    if key == within || !key.starts_with(&within) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is not inside {}, the folders Slopty makes; the person trusts the rest",
+                key.display(),
+                within.display()
+            ),
+        ));
+    }
     let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
     if key == home {
         return Err(io::Error::new(
@@ -225,14 +246,20 @@ mod tests {
         let folder = h.home.join("work/task-1");
         std::fs::create_dir_all(&folder).expect("folder");
         let before = doc(&h.config);
-        assert_eq!(trust(&h.config, &h.home, &folder).expect("trust"), Outcome::Changed);
+        assert_eq!(
+            trust(&h.config, &h.home, &folder, h.dir.path()).expect("trust"),
+            Outcome::Changed
+        );
         let after = doc(&h.config);
         let key = folder.to_str().expect("utf-8");
         assert_eq!(after["projects"][key], json!({ "hasTrustDialogAccepted": true }));
         let mut back = after;
         back["projects"].as_object_mut().expect("projects").remove(key);
         assert_eq!(back, before, "nothing else moved");
-        assert_eq!(trust(&h.config, &h.home, &folder).expect("again"), Outcome::Unchanged);
+        assert_eq!(
+            trust(&h.config, &h.home, &folder, h.dir.path()).expect("again"),
+            Outcome::Unchanged
+        );
         let mode = std::fs::metadata(&h.config).expect("meta").permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "its permissions are kept");
         let left = std::fs::read_dir(&h.home).expect("home").count();
@@ -255,7 +282,10 @@ mod tests {
         .expect("config");
         let link = h.home.join("link");
         std::os::unix::fs::symlink(&real, &link).expect("link");
-        assert_eq!(trust(&h.config, &h.home, &link).expect("trust"), Outcome::Changed);
+        assert_eq!(
+            trust(&h.config, &h.home, &link, h.dir.path()).expect("trust"),
+            Outcome::Changed
+        );
         assert_eq!(
             doc(&h.config)["projects"][&key],
             json!({ "allowedTools": ["Read"], "hasTrustDialogAccepted": true })
@@ -279,16 +309,16 @@ mod tests {
             (r#"{"projects":[]}"#, io::ErrorKind::InvalidData),
         ] {
             let h = home_with(text);
-            let err = trust(&h.config, &h.home, &folder(&h)).expect_err(text);
+            let err = trust(&h.config, &h.home, &folder(&h), h.dir.path()).expect_err(text);
             assert_eq!(err.kind(), kind, "{text:?}: {err}");
             assert_eq!(std::fs::read_to_string(&h.config).expect("read"), text, "untouched");
         }
         let h = home_with("{}");
-        let err = trust(&h.config, &h.home, &h.home).expect_err("home");
+        let err = trust(&h.config, &h.home, &h.home, h.dir.path()).expect_err("home");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(std::fs::read_to_string(&h.config).expect("read"), "{}");
         std::fs::remove_file(&h.config).expect("remove");
-        let err = trust(&h.config, &h.home, &folder(&h)).expect_err("no config");
+        let err = trust(&h.config, &h.home, &folder(&h), h.dir.path()).expect_err("no config");
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(!h.config.exists(), "none is made");
     }
@@ -321,6 +351,44 @@ mod tests {
         let plain = base.join("plain/folder");
         std::fs::create_dir_all(&plain).expect("plain");
         assert_eq!(key(&plain).expect("key"), plain);
+    }
+
+    /// Trust stays inside the folders Slopty makes: a folder elsewhere, the folder itself (which
+    /// would cover the person's folders below it), and a worktree whose `.git` file leads to a
+    /// repository outside are refused, and the config is left as it was.
+    #[test]
+    fn trust_stays_inside_the_folders_slopty_makes() {
+        let h = home_with("{}");
+        let base = std::fs::canonicalize(h.dir.path()).expect("canonical");
+        let ours = base.join("slopty");
+        let theirs = base.join("person/repo");
+        std::fs::create_dir_all(theirs.join(".git/worktrees/x")).expect("their repo");
+        let lure = ours.join("trees/x");
+        std::fs::create_dir_all(&lure).expect("lure");
+        let gitdir = theirs.join(".git/worktrees/x");
+        std::fs::write(
+            lure.join(".git"),
+            format!(
+                "gitdir: {}
+",
+                gitdir.display()
+            ),
+        )
+        .expect(".git");
+        std::fs::write(
+            gitdir.join("commondir"),
+            "../..
+",
+        )
+        .expect("commondir");
+        for folder in [base.join("person"), ours.clone(), lure] {
+            let err = trust(&h.config, &h.home, &folder, &ours).expect_err("refused");
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{}: {err}", folder.display());
+        }
+        assert_eq!(std::fs::read_to_string(&h.config).expect("read"), "{}", "untouched");
+        let made = ours.join("trees/y");
+        std::fs::create_dir_all(&made).expect("made");
+        assert_eq!(trust(&h.config, &h.home, &made, &ours).expect("trust"), Outcome::Changed);
     }
 
     /// The config moves with `CLAUDE_CONFIG_DIR`, and a legacy `.config.json` there is the one

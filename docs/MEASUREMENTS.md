@@ -3436,7 +3436,7 @@ cursor loop reads what the probe left. Both include the occlusion list and the d
 Release, mac-studio, 2 000 ticks a run, three runs:
 
 ```
-cargo test -p slopty-capture --release --test geometry -- --ignored geometry_tick_cost --nocapture
+cargo test -p slopty-capture --release --test geometry -- --ignored geometry_tick_reads --nocapture
 ```
 
 | | p50 | p99 | max |
@@ -7511,6 +7511,17 @@ wall times of the same runs moved by up to 40× at p95 (`engine.search_cost.5000
 went from 432 ms to 11 ms at p95 between the runs), which is why they are not the budget.
 Printed by the table at the end of `cargo xtask bench`; the full run is in `xtask/budgets.toml`.
 
+**2026-10-01, the budgets rerecorded.** A run beside a gate put `media.reassemble_cost` 37 %
+(p_frame, 64 132) and 24 % (keyframe, 260 102) over; the next run, on a quieter machine, 9.0 %
+and 9.7 % (51 011, 230 383). The commit the budgets were recorded at (bd015ef8), rebuilt on the
+same toolchain and measured with `cargo nextest run --release -p slopty-media --run-ignored only
+-E 'test(reassemble_cost)'`, gave 51 075 and 230 440. The code did not get dearer; the 9 % came
+with the toolchain and dependencies that moved since. The 37 % is the machine. The likeliest
+cause (not yet isolated) is that `ri_instructions` includes what the kernel retires on the
+process's behalf, and this series takes its 300 KB of frames in fresh pages, so its faults
+would be counted with it. A series that allocates is only as
+steady as the machine under it; an over-budget verdict on one is rerun before it is believed.
+
 ## 2026-09-29 — the transport on a simulated network: handshake, outages, rebinding, a flood
 
 `crates/slopty-net/tests/sim.rs` runs a real client and worker (the shipped endpoint, transport
@@ -8862,13 +8873,13 @@ settling second.
 ```sh
 cargo test -p slopty-codec --test chroma444 --no-run      # target/debug/deps/chroma444-<hash>
 mkdir -p /tmp/slopty-rev && cp target/debug/deps/chroma444-<hash> /tmp/slopty-rev/chroma444 && cd /tmp/slopty-rev
-nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_live_cost
+nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_live_switch
 nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_when_switched_on
 nice ./chroma444 --ignored --nocapture --exact tests::temporal_layers_by_codec
-nice ./chroma444 --ignored --nocapture --exact tests::mean_squared_error_cost
+nice ./chroma444 --ignored --nocapture --exact tests::mean_squared_error_report
 ```
 
-**Switched on a running session** (`temporal_layers_live_cost`). One session runs five phases of
+**Switched on a running session** (`temporal_layers_live_switch`). One session runs five phases of
 600 frames each: without layers, then on, off, on and off. "On" is 0.5 + 0.8, and "off" puts
 both fractions back to 1.0. A second session is opened with layers on, for comparison. Cells
 give the spend in Mbit/s, the dropped frames of 600 and the luma PSNR of the phase's end:
@@ -8927,7 +8938,7 @@ on: it cannot say whether they cost picture. Putting the bit fraction back to 1.
 frame fraction was worth up to 0.6 dB on 4:4:4 at 4 Mbit/s and 0.25 dB on H.264, and nothing
 with room.
 
-**The encoder's error report** (`mean_squared_error_cost`, one session per row, 16 Mbit/s,
+**The encoder's error report** (`mean_squared_error_report`, one session per row, 16 Mbit/s,
 alternated twice). `CalculateMeanSquaredError` costs nothing measurable. One frame in flight
 at 1080p took 6.05–6.17 ms without it and 6.09–6.19 ms with it; on the beat, 6.23–6.30 against
 6.28–6.29. At 3024 × 1968 it took 15.13–15.29 against 15.21–15.23 ms. Set before the first
@@ -11341,6 +11352,33 @@ cargo test -p slopty-ui --lib --no-run   # copy target/debug/deps/slopty_ui-<has
 cd crates/slopty-ui && for r in 1 2 3; do for b in before after; do
   ../../target/ab-focus/$b measure_the_keyboard_moving --ignored --nocapture | grep MEASURE
 done; done
+```
+
+## 2026-09-30 — a dead link found by a resume, against its silence (mac-studio, e2e app build)
+
+The real app and a real worker on loopback, the worker behind a UDP proxy the test cuts
+(`slopty_e2e::cut`: every datagram dropped both ways until the next QUIC Initial, as a sleeping
+Mac's dead path drops them). Timed from the cut, or from the resume handed over the test socket,
+to the first frame whose dump shows the worker's shell drawn from a newer link
+(`docs/decisions/transport.md`, "A resume probes every link at once").
+
+| a dead link found by | deaths | p50 | p95 |
+| --- | --- | --- | --- |
+| its silence (five missed keep-alives, then the redial) | 5 | 6600 ms | 7651 ms |
+| a resume's probe (`woke` and `path-changed` in turn) | 20 | 267 ms | 268 ms |
+
+An earlier run the same evening, before the review's fix to a resume lost between links,
+read 6583 / 7634 and 267 / 269 ms.
+
+- **The probe's floor is the time.** Loopback's round trip is well under a millisecond, so the
+  probe waits its 250 ms floor (`workers::PROBE_FLOOR`) and the new link lands in the next
+  17 ms. The floor is there for a radio just back from sleep. A link that answers is kept, and
+  the test's first resume, over the live link, dialled nothing.
+- **The tiles were dimmed on every one of the twenty.** That no frame shows them empty is
+  `a_link_in_doubt_sets_its_tiles_back_until_it_is_live`'s to hold (`slopty-ui`).
+
+```sh
+cargo xtask e2e app --filter 'test(a_resume_brings_a_dead_link_back_at_once)' 2>&1 | grep MEASURE
 ```
 
 ## 2026-09-30 — ghostty on 76895d97b, libghostty-rs fixes, and a frame's dirty flags in one call

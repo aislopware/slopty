@@ -1803,3 +1803,53 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   loss" because the loss was the client's. Datagram copies and the pacer patch took keys over
   50 ms from 13.5 to 0.5 %. What is new is the instrument: `describe_path` now ends with the
   connection's own `lost N of M sent`, so either end's log names the lossy direction.
+- ✅ **A resume probes every link at once** (2026-09-30, MEASUREMENTS "a dead link found by a
+  resume"). Until now only a link's silence said it was dead: "silent" after three missed
+  keep-alives and given up after five (`SILENCE_DROP`), then dialled again, so a Mac that woke
+  with its links dead showed stale tiles for about 6.6 s. The system knows sooner.
+  `slopty_platform::resume` hands the app a `Resume` when the Mac wakes, its screens wake, its
+  session comes back or is unlocked, the app comes to the front, or Network.framework's path
+  monitor sees another path (another interface or gateway; the monitor repeating the same path
+  is no change, `PathLog`). On iOS the same comes from the scene entering the foreground, the
+  app becoming active and protected data becoming available. Linux has no source yet: its seam
+  is logind's `PrepareForSleep` and a netlink route watch.
+  - **On a path change the connections migrate first** (noq's `handle_network_change`, RFC 9000
+    §9), so a link that survives the move is probed on the new path and never dialled again.
+  - **Every live link is probed at once**: a QUIC PING, and the link is alive on the first
+    datagram back. The probe waits four round trips, clamped to 0.25–1 s (`workers::Probe`).
+    Past the ceiling a new handshake costs less than more waiting.
+  - **The tiles are dimmed while the link is in doubt, never emptied**: at once when the device
+    was away or the path moved, and for a return to the front only once the probe outlasts two
+    round trips (one frame at the least), so switching apps never flickers a healthy tile. The
+    dimming has no word or spinner (`WorkerStatus::Checking`, `Relinking`, `in_doubt`).
+  - **A probe with no answer relinks at once, make before break.** The old link's views stay,
+    dimmed, until the new link's views replace them in one update, so no frame shows the tile
+    empty or the worker away.
+  - **A worker between links is dialled at once** rather than at the end of its backoff. The
+    2026-09-30 review found two ways a resume could be lost in the half second before a link's
+    check notices its link has ended: the resume reached a check whose link was already gone,
+    or a probe outlived its link. Either way the connect loop sat out its backoff (up to 2 s).
+    Both now wake the connect loop. A wake left over when the relink already ran costs at
+    most one dial without backoff.
+  - **Many workers resume together, unstaggered.** A probe is one PING and a relink one
+    handshake of a few datagrams on the process's one socket. A stagger would add its step to
+    every worker after the first, and the aim is every tile live together.
+  - **A transfer rides its link.** A link that answers keeps its transfers, and a path change
+    migrates them with the connection. A transfer on a link found dead fails as it did when
+    the silence found it, only sooner. Transfers are per link (`xfer::Table`), so none carries
+    over to the new one.
+  - **Repeats collapse.** Resumes that arrive while a probe runs are answered by it (iOS posts
+    two on every return to the foreground). A return to the front on macOS, which comes with
+    every ⌘⇥, costs one PING per link.
+  - Measured on the real app and worker, behind a UDP proxy the test cuts (`slopty_e2e::cut`):
+    twenty deaths, each followed by the resume the system would send, against five deaths left
+    to the silence. Numbers and command in MEASUREMENTS.
+  - Tests: `a_resume_brings_a_dead_link_back_at_once` (`slopty-e2e`, app),
+    `a_link_in_doubt_sets_its_tiles_back_until_it_is_live` (`slopty-ui`),
+    `a_probe_is_sized_from_the_round_trip` and `a_resume_probes_a_live_link_and_dials_a_dead_one`
+    (`slopty-app`), and `a_path_changes_only_when_what_a_link_rides_on_does`,
+    `an_injected_resume_reaches_its_watch_while_it_lives` and `the_system_watch_starts_and_stops`
+    (`slopty-platform`).
+  - *What no test here reaches.* The system posting its notifications, because no test sleeps
+    the Mac or moves its network, and the two lost-resume races, which need a resume to land
+    within one tick of a link ending.

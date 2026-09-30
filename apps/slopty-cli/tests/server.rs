@@ -188,14 +188,12 @@ mod tests {
 
     fn slopty(data: &tempfile::TempDir, server: &str, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_slopty"));
+        slopty_testkit::env::scrub(cmd.as_std_mut(), data.path());
         cmd.arg("--server")
             .arg(server)
             .arg("--data-dir")
             .arg(data.path())
             .args(args)
-            .env_remove("SLOPTY_SERVER")
-            .env_remove("SLOPTY_SESSION")
-            .env_remove("SLOPTY_AGENT_TOKEN")
             .env("RUST_LOG", "warn")
             .kill_on_drop(true);
         cmd
@@ -272,7 +270,7 @@ mod tests {
         for (env, expect) in [
             (vec![("SLOPTY_SESSION", session.as_str())], "a shell"),
             (vec![("SLOPTY_SESSION", "not-a-session")], "an agent"),
-            (vec![("SLOPTY_AGENT_TOKEN", "t0ken")], "an agent"),
+            (vec![("SLOPTY_SESSION_TOKEN", "t0ken")], "an agent"),
             (Vec::new(), "the person"),
         ] {
             let mut cmd = slopty(&data, &fake.address(), &["--json", "workers"]);

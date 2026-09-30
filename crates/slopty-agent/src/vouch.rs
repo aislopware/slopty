@@ -1,43 +1,50 @@
-//! Which terminal a link speaks from, proven (`docs/decisions/projects.md`, "An agent never has
-//! more than the person gave it").
+//! Which terminal a program speaks from, proven (`docs/decisions/projects.md`, "An agent never
+//! has more than the person gave it").
 //!
-//! A link says what it is and, inside a Slopty terminal, which terminal it runs in
-//! (`SLOPTY_SESSION`). That claim alone proves nothing, since any process can set a variable.
-//! So when the server starts a task's terminal it gives it a token (`SLOPTY_AGENT_TOKEN`), a
-//! keyed hash of the terminal's id under a key only the server holds ([`AgentKey`]). The agent's
-//! tools inherit it and show it when they dial, and the server checks it with no state of its
-//! own: a restarted server, reading the same key, still knows its agents.
+//! A program says which terminal it runs in (`SLOPTY_SESSION`). That claim alone proves
+//! nothing, since any process can set a variable. So the worker gives every terminal it starts
+//! a token beside it ([`slopty_proto::ctl::SESSION_TOKEN_ENV`]): a keyed hash of the terminal's
+//! id under a key the worker keeps ([`SessionKey`]). The programs in the terminal inherit it and
+//! show it: to the worker, which checks it with its key (`slopty hook reports`), and to the
+//! server, which the worker gave the key when it registered. Neither keeps a token: a restarted
+//! worker or server, holding the same key, still knows every terminal.
 
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
 use slopty_core::SessionId;
 
-/// The key's file in the server's data directory.
-pub const KEY_FILE: &str = "agent.key";
+/// The key's file in the worker's data directory.
+pub const KEY_FILE: &str = "session.key";
 
 /// What a token hashes besides the terminal's id, so no other use of the key collides with it.
-const CONTEXT: &[u8] = b"slopty agent token\0";
+const CONTEXT: &[u8] = b"slopty session token\0";
 
-/// The server's key for the tokens it gives task terminals.
-#[derive(Clone, Copy)]
-pub struct AgentKey([u8; blake3::KEY_LEN]);
+/// A worker's key for the tokens it gives its terminals.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SessionKey([u8; blake3::KEY_LEN]);
 
-impl std::fmt::Debug for AgentKey {
+impl std::fmt::Debug for SessionKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AgentKey(..)")
+        f.write_str("SessionKey(..)")
     }
 }
 
-impl AgentKey {
+impl SessionKey {
     /// This key.
     #[must_use]
     pub const fn from_bytes(bytes: [u8; blake3::KEY_LEN]) -> Self {
         Self(bytes)
     }
 
+    /// Its bytes, for the server the worker registers with.
+    #[must_use]
+    pub const fn bytes(&self) -> [u8; blake3::KEY_LEN] {
+        self.0
+    }
+
     /// The key kept in `data_dir`, made from the system's random source and kept, readable
-    /// by the server's user alone, when there is none.
+    /// by its user alone, when there is none.
     ///
     /// # Errors
     /// The file cannot be read or written, or holds something other than a key.
@@ -46,10 +53,9 @@ impl AgentKey {
         match std::fs::read(&path) {
             Ok(bytes) => {
                 let bytes: [u8; blake3::KEY_LEN] = bytes.try_into().map_err(|held: Vec<u8>| {
-                    let (path, held) = (shown(&path), held.len());
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("{path} holds {held} bytes, no key"),
+                        format!("{} holds {} bytes, no key", path.display(), held.len()),
                     )
                 })?;
                 return Ok(Self(bytes));
@@ -83,10 +89,6 @@ impl AgentKey {
     }
 }
 
-fn shown(path: &Path) -> String {
-    path.display().to_string()
-}
-
 /// Write `bytes` to a new file at `path` that only its owner may read.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
@@ -114,24 +116,24 @@ mod tests {
     /// once, kept private, and read back the same; a file that holds no key is refused.
     #[test]
     fn a_token_vouches_for_its_terminal_under_its_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = AgentKey::load_or_make(dir.path()).unwrap();
+        let dir = tempfile::tempdir().expect("dir");
+        let key = SessionKey::load_or_make(dir.path()).expect("key");
         let (mine, other) = (SessionId::new(), SessionId::new());
         let token = key.token(mine);
         assert!(key.vouches(mine, &token));
         assert!(!key.vouches(other, &token), "another terminal's");
         assert!(!key.vouches(mine, "not hex"), "no token");
-        assert!(!key.vouches(mine, token.get(..32).unwrap()), "part of one");
-        let again = AgentKey::load_or_make(dir.path()).unwrap();
-        assert!(again.vouches(mine, &token), "a restarted server knows its agents");
-        let elsewhere = AgentKey::load_or_make(&dir.path().join("elsewhere")).unwrap();
-        assert!(!elsewhere.vouches(mine, &token), "another server's key");
+        assert!(!key.vouches(mine, token.get(..32).expect("half")), "part of one");
+        let again = SessionKey::load_or_make(dir.path()).expect("again");
+        assert!(again.vouches(mine, &token), "a restarted worker knows its terminals");
+        let elsewhere = SessionKey::load_or_make(&dir.path().join("elsewhere")).expect("other");
+        assert!(!elsewhere.vouches(mine, &token), "another worker's key");
         let mode = {
             use std::os::unix::fs::PermissionsExt as _;
-            std::fs::metadata(dir.path().join(KEY_FILE)).unwrap().permissions().mode()
+            std::fs::metadata(dir.path().join(KEY_FILE)).expect("meta").permissions().mode()
         };
         assert_eq!(mode & 0o777, 0o600);
-        std::fs::write(dir.path().join(KEY_FILE), b"short").unwrap();
-        assert!(AgentKey::load_or_make(dir.path()).is_err(), "a file that is no key");
+        std::fs::write(dir.path().join(KEY_FILE), b"short").expect("write");
+        assert!(SessionKey::load_or_make(dir.path()).is_err(), "a file that is no key");
     }
 }

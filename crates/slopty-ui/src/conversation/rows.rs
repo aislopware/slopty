@@ -5,7 +5,8 @@
 //! recorded.
 //!
 //! A **turn** is a prompt and everything up to the next one. A settled turn folds to one
-//! row, "Worked for 3 m 12 s · 14 steps · +120 −8", between its prompt and its answer: the
+//! row, "Worked for 3 m 12 s · Edited main.rs · Read 6 files · 7 more steps · +120 −8",
+//! between its prompt and its answer, naming what the work touched: the
 //! work hides, the question and the answer stay. The turn the agent is on never folds, so
 //! nothing moves under the reader while it grows, and Verbose folds nothing.
 
@@ -154,12 +155,24 @@ pub fn entry_changes(entry: &Entry) -> (u32, u32) {
 }
 
 /// What a folded turn did.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Fold {
     /// From the prompt to the turn's last record; `None` when the records carry no time.
     pub took_ms: Option<u64>,
     /// Tool calls.
     pub steps: u32,
+    /// The files its edits and writes changed, by name, each once, in the order first changed.
+    pub edited: Vec<String>,
+    /// Commands run.
+    pub ran: u32,
+    /// Files read.
+    pub read: u32,
+    /// Searches: in the files, for files, on the web.
+    pub searched: u32,
+    /// Subagents started.
+    pub delegated: u32,
+    /// Edit and write calls, a file edited twice counting twice.
+    pub edit_calls: u32,
     /// Lines added by its edits and writes.
     pub added: u32,
     /// Lines removed.
@@ -186,22 +199,49 @@ impl Fold {
         }
     }
 
-    /// "14 steps", "1 step".
+    /// What the work touched, the weightiest first: "Edited notes.txt",
+    /// "Ran 2 commands", "Read 3 files", "2 searches", "1 subagent". The first
+    /// [`WHAT_SHOWN`] kinds are said, and the steps of the rest are counted after them
+    /// ("5 more steps"). A turn whose calls are of no kind named here counts its steps.
     #[must_use]
-    pub fn steps_label(&self) -> Option<String> {
-        match self.steps {
-            0 => None,
-            1 => Some("1 step".to_owned()),
-            n => Some(format!("{n} steps")),
+    pub fn what(&self) -> Vec<String> {
+        let plural = |n: u32, one: &str, many: &str| {
+            if n == 1 { format!("1 {one}") } else { format!("{n} {many}") }
+        };
+        let edited = u32::try_from(self.edited.len()).unwrap_or(u32::MAX);
+        let kinds = [
+            (
+                edited,
+                match self.edited.as_slice() {
+                    [one] => format!("Edited {one}"),
+                    _ => format!("Edited {edited} files"),
+                },
+            ),
+            (self.ran, format!("Ran {}", plural(self.ran, "command", "commands"))),
+            (self.read, format!("Read {}", plural(self.read, "file", "files"))),
+            (self.searched, plural(self.searched, "search", "searches")),
+            (self.delegated, plural(self.delegated, "subagent", "subagents")),
+        ];
+        let said: Vec<(u32, String)> = kinds.into_iter().filter(|(n, _)| *n > 0).collect();
+        let mut out: Vec<String> = said.iter().take(WHAT_SHOWN).map(|(_, s)| s.clone()).collect();
+        // An edit of a file already edited is a step, but the file is named once.
+        let named: u32 = said.iter().take(WHAT_SHOWN).map(|(n, _)| *n).fold(0, u32::saturating_add);
+        let edits_again = self.edit_calls.saturating_sub(edited);
+        let rest = self.steps.saturating_sub(named).saturating_sub(edits_again);
+        match (out.is_empty(), rest) {
+            (_, 0) => {}
+            (true, n) => out.push(plural(n, "step", "steps")),
+            (false, n) => out.push(plural(n, "more step", "more steps")),
         }
+        out
     }
 
     /// The whole line, as the accessibility tree reads it:
-    /// "Worked for 3 m 12 s · 14 steps · +120 −8 · 1 failed".
+    /// "Worked for 3 m 12 s · Edited notes.txt · Read 3 files · +120 −8 · 1 failed".
     #[must_use]
     pub fn label(&self) -> String {
         let mut parts = vec![self.lead()];
-        parts.extend(self.steps_label());
+        parts.extend(self.what());
         parts.extend(crate::kit::changes_text(self.added, self.removed));
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
@@ -414,6 +454,17 @@ fn turns(entries: &[Entry]) -> Vec<std::ops::Range<usize>> {
     starts.iter().copied().zip(ends).map(|(a, b)| a..b).filter(|r| !r.is_empty()).collect()
 }
 
+/// How many kinds of work a fold names before it counts the rest.
+pub const WHAT_SHOWN: usize = 2;
+
+/// `path` among the files a turn changed, by name, once.
+fn edited(files: &mut Vec<String>, path: &str) {
+    let name = crate::conversation::tools::file_name(path);
+    if !files.iter().any(|f| f == name) {
+        files.push(name.to_owned());
+    }
+}
+
 /// What a turn's work adds up to; `figures` are the transcript's own for it, whose end Claude
 /// Code stamped when it closed the turn.
 fn fold_of(turn: &[Entry], figures: Option<&Turn>) -> Fold {
@@ -425,6 +476,25 @@ fn fold_of(turn: &[Entry], figures: Option<&Turn>) -> Fold {
         match &entry.body {
             Body::Tool(call) => {
                 fold.steps = fold.steps.saturating_add(1);
+                let bump = |n: &mut u32| *n = n.saturating_add(1);
+                match &call.detail {
+                    ToolDetail::Edit(edit) => {
+                        bump(&mut fold.edit_calls);
+                        edited(&mut fold.edited, &edit.path);
+                    }
+                    ToolDetail::Write(write) => {
+                        bump(&mut fold.edit_calls);
+                        edited(&mut fold.edited, &write.path);
+                    }
+                    ToolDetail::Bash(_) => bump(&mut fold.ran),
+                    ToolDetail::Read(_) => bump(&mut fold.read),
+                    ToolDetail::Grep(_)
+                    | ToolDetail::Glob(_)
+                    | ToolDetail::WebSearch(_)
+                    | ToolDetail::WebFetch(_) => bump(&mut fold.searched),
+                    ToolDetail::Agent(_) => bump(&mut fold.delegated),
+                    _ => {}
+                }
                 if let Some(result) = &call.result {
                     end = end.max(result.at_ms);
                     if result.status == ResultStatus::Error {
@@ -721,7 +791,8 @@ mod tests {
         }
         let main = &ThreadId::Main;
         let fold = fold_key(&model.thread(main).unwrap().entries()[0].id);
-        let lead = "fold Worked for 55 s \u{b7} 4 steps";
+        let lead =
+            "fold Worked for 55 s \u{b7} Ran 1 command \u{b7} Read 1 file \u{b7} 2 more steps";
         assert_eq!(
             words(&model, main, Density::Normal, false, &[]),
             ["prompt", lead, "ExitPlanMode Summary", "answer."]
@@ -763,7 +834,7 @@ mod tests {
             rows,
             [
                 "prompt",
-                "fold Worked for 35 s \u{b7} 13 steps \u{b7} +2 \u{b7} 1 failed",
+                "fold Worked for 35 s \u{b7} Edited notes.md \u{b7} Ran 3 commands \u{b7} 9 more steps \u{b7} +2 \u{b7} 1 failed",
                 "answer.",
                 "changes",
             ]
@@ -843,7 +914,7 @@ mod tests {
     fn an_interrupted_turn_says_it_was_stopped() {
         let model = scenario("interrupt");
         let rows = words(&model, &ThreadId::Main, Density::Normal, false, &[]);
-        assert_eq!(rows, ["prompt", "fold Stopped after 5 s \u{b7} 1 step", "esc"]);
+        assert_eq!(rows, ["prompt", "fold Stopped after 5 s \u{b7} Ran 1 command", "esc"]);
     }
 
     /// A compaction and Claude Code's notes are never hidden in a fold. The fold is timed to
@@ -865,7 +936,7 @@ mod tests {
         let agent = ThreadId::Agent("a0000000000000001".to_owned());
         assert_eq!(
             words(&model, &agent, Density::Normal, false, &[]),
-            ["prompt", "fold Worked for 3 s \u{b7} 1 step", "answer."]
+            ["prompt", "fold Worked for 3 s \u{b7} Read 1 file", "answer."]
         );
         let (description, kind) = model.subagent("a0000000000000001");
         assert_eq!(
@@ -897,5 +968,32 @@ mod tests {
         assert_eq!(a, b);
         let unique: HashSet<&RowKey> = a.iter().collect();
         assert_eq!(unique.len(), a.len(), "{a:?}");
+    }
+
+    /// A fold names what its work touched, the weightiest two kinds first, a lone file by its
+    /// name and a file edited twice once, and counts the steps of the rest.
+    #[test]
+    fn a_fold_names_what_its_work_touched() {
+        let fold = Fold {
+            steps: 9,
+            edited: vec!["main.rs".into()],
+            edit_calls: 2,
+            ran: 1,
+            read: 4,
+            searched: 2,
+            ..Fold::default()
+        };
+        assert_eq!(fold.what(), ["Edited main.rs", "Ran 1 command", "6 more steps"]);
+        let many = Fold {
+            steps: 3,
+            edited: vec!["a".into(), "b".into(), "c".into()],
+            edit_calls: 3,
+            ..Fold::default()
+        };
+        assert_eq!(many.what(), ["Edited 3 files"]);
+        let looking = Fold { steps: 3, read: 1, searched: 2, ..Fold::default() };
+        assert_eq!(looking.what(), ["Read 1 file", "2 searches"]);
+        let other = Fold { steps: 2, ..Fold::default() };
+        assert_eq!(other.what(), ["2 steps"], "calls of no named kind are counted as steps");
     }
 }

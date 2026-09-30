@@ -106,7 +106,7 @@ mod tests {
     /// Both sets include the occlusion list and the display lookup, which are unchanged.
     #[test]
     #[ignore = "measurement"]
-    fn geometry_tick_cost() {
+    fn geometry_tick_reads() {
         let dir = tempfile::tempdir().unwrap();
         let (_idle, id) = idle_window(dir.path());
         let target = slopty_proto::screen::CaptureTarget::Window(id);

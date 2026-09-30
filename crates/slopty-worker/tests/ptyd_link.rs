@@ -62,7 +62,10 @@ mod ptyd_link {
     /// A ptyd on its own socket in `dir`, killed when the child drops.
     async fn ptyd(dir: &Path) -> (Child, PathBuf) {
         let socket = dir.join("ptyd.sock");
-        let child = Command::new(ptyd_bin())
+        let mut child = Command::new(ptyd_bin());
+        // A clean environment: nothing of the developer's reaches the shells ptyd starts.
+        slopty_testkit::env::scrub(child.as_std_mut(), &dir.join("home"));
+        let child = child
             .arg("--socket")
             .arg(&socket)
             .stdout(Stdio::null())

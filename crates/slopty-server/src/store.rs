@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use slopty_proto::server::WorkerInfo;
 use tokio::sync::{mpsc, watch};
 
-use crate::project::{Kept, ProjectsFile};
+use crate::project::{Keep, ProjectsFile};
 
 /// The file's name in the server's data directory.
 pub const FILE: &str = "workers.json";
@@ -107,14 +107,14 @@ pub struct ProjectStore {
 #[derive(Deserialize)]
 struct Logged {
     n: u64,
-    kept: Kept,
+    kept: Keep,
 }
 
 /// [`Logged`] as it is written.
 #[derive(Serialize)]
 struct Logging<'k> {
     n: u64,
-    kept: &'k Kept,
+    kept: &'k Keep,
 }
 
 impl ProjectStore {
@@ -190,7 +190,7 @@ impl ProjectStore {
     /// Keep every change `changes` brings (`crate::Hub::keep_projects`), starting from `file`
     /// as it was loaded, until the hub stops sending them: appended to the log once a burst
     /// settles, the snapshot written again when the log has grown and at the end.
-    pub async fn keep(self, mut file: ProjectsFile, mut changes: mpsc::UnboundedReceiver<Kept>) {
+    pub async fn keep(self, mut file: ProjectsFile, mut changes: mpsc::UnboundedReceiver<Keep>) {
         // What was loaded becomes the snapshot, so the log starts empty.
         self.saved(&file).await;
         let mut logged = 0_usize;
@@ -463,14 +463,16 @@ mod tests {
         assert!(data_dir.join(PROJECTS_FILE).is_dir(), "left as it was");
     }
 
-    /// Changes a model made: a project, then a task in it, then that task noted.
-    fn changes() -> (Vec<Kept>, ProjectsFile) {
+    /// Changes a hub made: a project, then a task in it, then that task noted, and two
+    /// terminals watched, one of them then no longer.
+    fn changes() -> (Vec<Keep>, ProjectsFile) {
         use std::collections::HashSet;
 
-        use slopty_core::WallMs;
+        use slopty_core::{SessionId, WallMs, WorkerId};
+        use slopty_proto::orchestration::TermRef;
         use slopty_proto::project::{LimitsChange, ProjectId, TaskChange, TaskId, TaskSpec};
 
-        use crate::project::{Caller, NewProject, Projects, Running};
+        use crate::project::{Caller, Drove, NewProject, Projects, Running, Watched};
 
         let now = WallMs::from_millis(1_790_000_000_000);
         let id = ProjectId::new("slopty").unwrap();
@@ -492,12 +494,20 @@ mod tests {
         all.extend(p.create_task(&id, spec, now).unwrap().1);
         let note = TaskChange { note: Some("kept".to_owned()), ..TaskChange::default() };
         all.extend(p.update_task(&id, TaskId(1), note, Caller::Person, now).unwrap().1);
-        let kept: Vec<Kept> = all.into_iter().map(|c| c.kept).collect();
+        let mut kept: Vec<Keep> =
+            all.into_iter().map(|c| Keep::Project(Box::new(c.kept))).collect();
+        let watched = |drove| Watched {
+            term: TermRef { worker: WorkerId::new(), session: SessionId::new() },
+            locked: true,
+            drove,
+        };
+        let (kept_on, gone) = (watched(Some(Drove::Opened { by: None })), watched(None));
+        kept.extend([Keep::Watch(gone), Keep::Watch(kept_on), Keep::Unwatch(gone.term.session)]);
         let through = u64::try_from(kept.len()).unwrap();
-        (kept, p.file(through))
+        (kept, p.file(vec![kept_on], through))
     }
 
-    fn line(n: usize, kept: &Kept) -> Vec<u8> {
+    fn line(n: usize, kept: &Keep) -> Vec<u8> {
         let n = u64::try_from(n).unwrap();
         let mut line = serde_json::to_vec(&Logging { n, kept }).unwrap();
         line.push(b'\n');

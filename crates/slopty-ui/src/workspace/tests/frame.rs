@@ -225,7 +225,7 @@ fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
 }
 
 /// The status bar names the focused tile's worker and directory, the round trip there, and
-/// the agents at work. The one waiting is counted on the bell alone, not again down here.
+/// how every worker's agents stand. The bell counts the one blocked too, as its way there.
 #[gpui::test]
 fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -245,12 +245,12 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let names = labels(&view, cx);
     // The same place the header names: the last two directories, a home as `~`.
-    for readout in ["studio", "oss/slopty", "Round trip 42 ms", "1 working"] {
+    let agents = "studio: 1 working; laptop: 1 blocked";
+    for readout in ["studio", "oss/slopty", "Round trip 42 ms", agents] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
-    assert!(!names.iter().any(|l| l.contains("working ·")), "and only the bell: {names:#?}");
     cx.simulate_keystrokes("cmd-shift-a");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(waiting), "⌘⇧A still goes to the one waiting");

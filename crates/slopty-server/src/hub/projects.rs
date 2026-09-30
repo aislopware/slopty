@@ -16,21 +16,22 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentKind;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    AGENT_TOKEN_ENV, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
-    PROJECT_ENV, Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Report, ReportKind,
-    Runner, SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId, TaskLaunch, TimelineEntry, WorkerFacts,
+    Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG, PROJECT_ENV,
+    Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Report, ReportKind, Runner,
+    SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId, TaskLaunch, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
 
 use super::{
     Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, digest, error, keep_start, keyed, known_term,
-    remember, start_again, start_answered,
+    remember, start_again, start_answered, term_of,
 };
 use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Ranking};
 use crate::project::{
-    Assignee, Caller, NewProject, Policy, ProjectChange, Running, Starting, clipped,
+    Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Watched,
+    clipped,
 };
 
 /// How long a start still counts once its worker answered (or its answer was lost), until its
@@ -62,7 +63,7 @@ fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
             terminals.insert(term);
             // A terminal an agent opened or typed into counts as an agent's whatever runs in
             // it now: the agent may start one there at any moment, past every count.
-            if s.agent.is_some() || state.driven.contains_key(&s.id) {
+            if s.agent.is_some() || driven(state, s.id) {
                 agents.insert(term);
             }
         }
@@ -81,12 +82,236 @@ fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
         };
         !(counted || (s.answered && now.duration_since(s.since) >= STARTED_GRACE))
     });
-    let starting = &state.starting;
-    state.locked.retain(|t| terminals.contains(t) || starting.iter().any(|s| s.term == *t));
-    // A terminal an agent opened that never showed is forgotten once any start would be.
-    let shown: HashSet<SessionId> = terminals.iter().map(|t| t.session).collect();
-    state.driven.retain(|s, since| shown.contains(s) || now.duration_since(*since) < STARTED_GRACE);
+    // A watched terminal that is gone is forgotten once any start would be, but only by a
+    // worker that is here to say it is gone: one a restart has not heard from yet keeps its.
+    let here: HashSet<WorkerId> =
+        state.workers.values().filter(|e| e.link.is_some()).map(|e| e.info.worker).collect();
+    let gone: Vec<SessionId> = state
+        .watched
+        .values()
+        .filter(|(w, since)| {
+            here.contains(&w.term.worker)
+                && !terminals.contains(&w.term)
+                && !state.starting.iter().any(|s| s.term == w.term)
+                && now.duration_since(*since) >= STARTED_GRACE
+        })
+        .map(|(w, _)| w.term.session)
+        .collect();
+    for session in gone {
+        unwatch(state, session);
+    }
     (terminals, agents)
+}
+
+/// Whether an agent opened or typed into the terminal `session`.
+pub(super) fn driven(state: &State, session: SessionId) -> bool {
+    state.watched.get(&session).is_some_and(|(w, _)| w.drove.is_some())
+}
+
+/// Watch `term` as `change` leaves it, and have the store keep it when it changed.
+pub(super) fn watch(state: &mut State, term: TermRef, change: impl FnOnce(&mut Watched)) {
+    let mut fresh = false;
+    let (held, _) = state.watched.entry(term.session).or_insert_with(|| {
+        fresh = true;
+        (Watched { term, locked: false, drove: None }, tokio::time::Instant::now())
+    });
+    let before = *held;
+    change(held);
+    let after = *held;
+    if fresh || after != before {
+        keep(state, Keep::Watch(after));
+    }
+}
+
+/// The project and task the terminal `from` works on, when an agent proved it speaks from one.
+pub(super) fn node_of(
+    state: &State,
+    from: Option<SessionId>,
+) -> Option<(ProjectId, Option<TaskId>)> {
+    state.projects.working_on(term_of(state, from?)?)
+}
+
+/// The project `term` works for: the one it works on, or else the one whose agent opened it.
+pub(super) fn project_of(state: &State, term: TermRef) -> Option<ProjectId> {
+    if let Some((project, _)) = state.projects.working_on(term) {
+        return Some(project);
+    }
+    match state.watched.get(&term.session).and_then(|(w, _)| w.drove) {
+        Some(Drove::Opened { by }) => node_of(state, by).map(|(project, _)| project),
+        _ => None,
+    }
+}
+
+/// Whether the person allows looser permissions (`[server.projects] permission_flags`) to a
+/// start for `project` by `caller` speaking from `from`. The allowance is a project's: an agent
+/// has it only in the project it proves it works in, and names none of another's; a start that
+/// names no project has the agent's own.
+pub(super) fn allowance(
+    state: &State,
+    caller: Caller,
+    from: Option<SessionId>,
+    project: Option<&ProjectId>,
+) -> bool {
+    let project = match caller {
+        Caller::Person => project.cloned(),
+        Caller::Agent => {
+            let own = node_of(state, from).map(|(project, _)| project);
+            match project {
+                Some(named) if own.as_ref() != Some(named) => return false,
+                _ => own,
+            }
+        }
+    };
+    state.projects.policy().bounds_for(project.as_ref()).permission_flags
+}
+
+/// Whether `term` is `project`'s to put to work, for an agent speaking from `from`: its own
+/// terminal, one it opened, one the project holds (its orchestrator's, a task's, a start's for
+/// it), or one an agent of the project opened. Never the person's own.
+fn theirs(state: &State, from: SessionId, project: &ProjectId, term: TermRef) -> bool {
+    if term.session == from {
+        return true;
+    }
+    let holds = state.projects.working_on(term).is_some_and(|(p, _)| p == *project)
+        || state
+            .starting
+            .iter()
+            .any(|s| s.term == term && s.task.as_ref().is_some_and(|(p, _)| p == project));
+    if holds {
+        return true;
+    }
+    match state.watched.get(&term.session).and_then(|(w, _)| w.drove) {
+        Some(Drove::Opened { by: Some(by) }) => {
+            by == from || node_of(state, Some(by)).is_some_and(|(p, _)| p == *project)
+        }
+        _ => false,
+    }
+}
+
+/// What an agent speaking from `from` may do to the projects with `verb`, and the verb as it
+/// is done. An agent works in the project it proves it works in: its orchestrator in all of
+/// it, a task's agent in its own task and what is split from it, a task it splits off going
+/// under its own. Only an orchestrator makes a project. The terminals it puts to work are the
+/// project's or its own ([`theirs`]), never the person's.
+pub(super) fn agent_scope(
+    state: &State,
+    from: Option<SessionId>,
+    verb: Verb,
+) -> Result<Verb, Outcome> {
+    let changes = matches!(
+        verb,
+        Verb::ProjectCreate { .. }
+            | Verb::ProjectSet { .. }
+            | Verb::TaskCreate { .. }
+            | Verb::TaskClaim { .. }
+            | Verb::TaskUpdate { .. }
+            | Verb::TaskSpawn { .. }
+            | Verb::TaskAssign { .. }
+    );
+    if !changes {
+        return Ok(verb);
+    }
+    let refuse = |why: &str| Err(error(ErrorCode::Forbidden, why));
+    let Some((own, task_of)) = node_of(state, from) else {
+        return refuse(&format!(
+            "an agent changes a project only from a Slopty terminal that works in it, proven by \
+             its {}; this caller proves none",
+            slopty_proto::ctl::SESSION_TOKEN_ENV
+        ));
+    };
+    let from = from.unwrap_or_default();
+    let in_own = |project: &ProjectId| {
+        if *project == own {
+            Ok(())
+        } else {
+            Err(error(
+                ErrorCode::Forbidden,
+                &format!("this agent works in project {own}, not {project}"),
+            ))
+        }
+    };
+    let under = |project: &ProjectId, task: TaskId| match task_of {
+        Some(root) if !state.projects.under(project, root, task) => Err(error(
+            ErrorCode::Forbidden,
+            &format!(
+                "this agent works on task {root}, and task {task} is neither it nor split from it"
+            ),
+        )),
+        _ => Ok(()),
+    };
+    let named = |project: &ProjectId, term: TermRef| {
+        if theirs(state, from, project, term) {
+            Ok(())
+        } else {
+            Err(error(
+                ErrorCode::Forbidden,
+                "an agent puts to work only its own terminal, one it opened, or one its project \
+                 holds or an agent of the project opened; the person's own terminals are the \
+                 person's to give",
+            ))
+        }
+    };
+    let verb = match verb {
+        Verb::TaskCreate { project, mut spec } => {
+            in_own(&project)?;
+            match (spec.parent, task_of) {
+                (None, Some(root)) => spec.parent = Some(root),
+                (Some(parent), _) => under(&project, parent)?,
+                (None, None) => {}
+            }
+            return Ok(Verb::TaskCreate { project, spec });
+        }
+        other => other,
+    };
+    match &verb {
+        Verb::ProjectCreate { project, orchestrator, .. } => {
+            if task_of.is_some() {
+                return refuse("only the person or an orchestrator makes a project");
+            }
+            if let Some(term) = orchestrator {
+                named(project, *term)?;
+            }
+        }
+        Verb::ProjectSet { project, orchestrator, .. } => {
+            in_own(project)?;
+            if task_of.is_some() {
+                return refuse("only the person or the project's orchestrator changes a project");
+            }
+            if let Some(term) = orchestrator {
+                named(project, *term)?;
+            }
+        }
+        Verb::TaskClaim { project, task, .. }
+        | Verb::TaskUpdate { project, task, .. }
+        | Verb::TaskSpawn { project, task, .. } => {
+            in_own(project)?;
+            under(project, *task)?;
+        }
+        Verb::TaskAssign { project, task, term } => {
+            in_own(project)?;
+            under(project, *task)?;
+            named(project, *term)?;
+        }
+        _ => {}
+    }
+    Ok(verb)
+}
+
+/// Stop watching the terminal `session`, and have the store forget it.
+pub(super) fn unwatch(state: &mut State, session: SessionId) {
+    if state.watched.remove(&session).is_some() {
+        keep(state, Keep::Unwatch(session));
+    }
+}
+
+/// Send the store what it keeps, in the order the changes were made (under the hub's lock).
+pub(super) fn keep(state: &mut State, keep: Keep) {
+    if let Some(keeper) = &state.keeper
+        && keeper.send(keep).is_err()
+    {
+        tracing::warn!("the projects keeper is gone; changes are no longer kept");
+        state.keeper = None;
+    }
 }
 
 /// The first thing in `args`, Claude Code's own arguments, that loosens its permissions
@@ -628,7 +853,7 @@ impl Hub {
     /// What the terminal `session` names works on, by the server's record.
     pub(super) fn working_on(&self, session: SessionId) -> Outcome {
         let state = self.inner.state.lock();
-        let on = super::term_of(&state, session).and_then(|term| state.projects.working_on(term));
+        let on = term_of(&state, session).and_then(|term| state.projects.working_on(term));
         drop(state);
         Outcome::WorkingOn(on)
     }
@@ -765,6 +990,7 @@ impl Hub {
     pub(super) async fn spawn_agent(
         &self,
         caller: Caller,
+        from: Option<SessionId>,
         key: Option<IdempotencyKey>,
         verb: Verb,
     ) -> Outcome {
@@ -775,7 +1001,7 @@ impl Hub {
         let Verb::SpawnAgent { worker, agent, cwd, prompt, args, env, size, .. } = verb else {
             return error(ErrorCode::Invalid, "not an agent's start");
         };
-        let admitted = Self::admit_agent(&mut self.inner.state.lock(), worker, &args);
+        let admitted = Self::admit_agent(&mut self.inner.state.lock(), caller, from, worker, &args);
         let (id, term, permission_flags) = match admitted {
             Ok(admitted) => admitted,
             Err(refused) => return refused,
@@ -785,10 +1011,10 @@ impl Hub {
         let args = match caller {
             Caller::Agent => {
                 let mut state = self.inner.state.lock();
-                state.driven.insert(term.session, tokio::time::Instant::now());
-                if !permission_flags {
-                    state.locked.insert(term);
-                }
+                watch(&mut state, term, |w| {
+                    w.drove = Some(Drove::Opened { by: from });
+                    w.locked |= !permission_flags;
+                });
                 drop(state);
                 started_args(args, permission_flags, None).0
             }
@@ -834,20 +1060,21 @@ impl Hub {
     /// terminal, and whether it may loosen its permissions.
     fn admit_agent(
         state: &mut State,
+        caller: Caller,
+        from: Option<SessionId>,
         worker: WorkerId,
         args: &[String],
     ) -> Result<(u64, TermRef, bool), Outcome> {
         let bounds = state.projects.policy().bounds_for(None);
-        if !bounds.permission_flags
-            && let Some(flag) = loosening(args)
-        {
+        let allowed = allowance(state, caller, from, None);
+        if !allowed && let Some(flag) = loosening(args) {
             return Err(loosened(&flag, None));
         }
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         fleet_room(state, &running, bounds, Some(worker))?;
         let (id, term) = Self::place(state, worker, None, true);
-        Ok((id, term, bounds.permission_flags))
+        Ok((id, term, allowed))
     }
 
     /// Open a terminal under an id the hub chooses; one whose command is `claude` with flags
@@ -856,6 +1083,7 @@ impl Hub {
     pub(super) async fn open_terminal(
         &self,
         caller: Caller,
+        from: Option<SessionId>,
         key: Option<IdempotencyKey>,
         verb: Verb,
     ) -> Outcome {
@@ -867,8 +1095,7 @@ impl Hub {
             return error(ErrorCode::Invalid, "not a terminal's start");
         };
         if let Some(args) = claude_args(&command) {
-            let allowed =
-                self.inner.state.lock().projects.policy().bounds_for(None).permission_flags;
+            let allowed = allowance(&self.inner.state.lock(), caller, from, None);
             if let Some(flag) = loosening(&args).filter(|_| !allowed) {
                 return loosened(&flag, None);
             }
@@ -887,7 +1114,7 @@ impl Hub {
         let session = placed.map_or_else(SessionId::new, |(_, term)| term.session);
         let start =
             Verb::OpenTerminal { worker, cwd, command, env, name, size, session: Some(session) };
-        Self::opening(&mut self.inner.state.lock(), caller, key.as_ref(), sent, &start);
+        Self::opening(&mut self.inner.state.lock(), caller, from, key.as_ref(), sent, &start);
         if let Some((id, _)) = placed {
             return self.forward_placed(id, key, start).await;
         }
@@ -913,14 +1140,16 @@ impl Hub {
     fn opening(
         state: &mut State,
         caller: Caller,
+        from: Option<SessionId>,
         key: Option<&IdempotencyKey>,
         sent: blake3::Hash,
         start: &Verb,
     ) {
         if caller == Caller::Agent
-            && let Verb::OpenTerminal { session: Some(session), .. } = start
+            && let Verb::OpenTerminal { worker, session: Some(session), .. } = start
         {
-            state.driven.insert(*session, tokio::time::Instant::now());
+            let term = TermRef { worker: *worker, session: *session };
+            watch(state, term, |w| w.drove = Some(Drove::Opened { by: from }));
         }
         if let Some(key) = key {
             keep_start(state, key.clone(), sent, start);
@@ -1109,7 +1338,7 @@ impl Hub {
                     state.projects.task(project, task)?,
                 );
                 if !permission_flags && matches!(launch.run, Runner::Claude { .. }) {
-                    state.locked.insert(placed.1);
+                    watch(&mut state, placed.1, |w| w.locked = true);
                 }
                 Ok((placed, permission_flags, role))
             })
@@ -1123,7 +1352,6 @@ impl Hub {
         // Last, so they win over the caller's own.
         env.push((PROJECT_ENV.to_owned(), project.to_string()));
         env.push((TASK_ENV.to_owned(), task.to_string()));
-        env.extend(self.token_of(term.session).map(|token| (AGENT_TOKEN_ENV.to_owned(), token)));
         let session = Some(term.session);
         let (start, conversation) = match run {
             Runner::Claude { prompt, args } => {
@@ -1284,11 +1512,12 @@ impl Hub {
 
     /// Whether the agent in `term` must stay in a mode that asks: the server started it
     /// without looser permissions, or an agent opened or typed into its terminal, and the
-    /// person allows nothing looser for its project.
+    /// person allows nothing looser for the project it works for ([`project_of`]).
     fn held_to_asking(state: &State, term: TermRef) -> bool {
-        let project = state.projects.working_on(term).map(|(project, _)| project);
+        let project = project_of(state, term);
         let allowed = state.projects.policy().bounds_for(project.as_ref()).permission_flags;
-        let watched = state.locked.contains(&term) || state.driven.contains_key(&term.session);
+        let watched =
+            state.watched.get(&term.session).is_some_and(|(w, _)| w.locked || w.drove.is_some());
         watched && !allowed
     }
 

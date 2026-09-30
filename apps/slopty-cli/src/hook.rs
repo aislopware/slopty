@@ -160,37 +160,43 @@ async fn relay_at(
     hook_output(&decide(socket, ask, wait).await)
 }
 
-/// Hand the reports kept for this session over through the hook that runs this: print them as
-/// Claude Code reads a hook's answer, then tell the worker. Note the session's inbox first,
-/// through which the worker hands later reports over at once. Never fails, and prints nothing
-/// outside a session or with nothing waiting: Claude Code must not notice us.
+/// Hand the reports kept for this session over through the hook that runs this: the worker
+/// takes them, with the session's token to show they are its own, and says what to print, as
+/// Claude Code reads a hook's answer. The session's inbox goes with it, through which the
+/// worker hands later reports over at once. Never fails, and prints nothing outside a session
+/// or with nothing waiting: Claude Code must not notice us.
 async fn reports(data_dir: &Path) {
     let mut payload = String::new();
     if std::io::stdin().lock().read_to_string(&mut payload).is_err() {
         return;
     }
     let Ok(Some(session)) = session() else { return };
-    let socket = workerctl::socket(data_dir);
-    // Noted on every run, so a worker started since still reaches an agent at rest.
-    if let Some(inbox) = reports::Inbox::from_env()
-        && let Err(e) = reports::keep_inbox(&reports::inboxes(&socket), session, &inbox)
-    {
-        tracing::debug!(error = %e, "the session's inbox not noted");
-    }
-    let Ok(hook) = slopty_agent::Hook::parse(&payload) else { return };
-    let turn = reports::Turn {
-        prompt: hook.prompt.as_deref(),
-        transcript: hook.transcript_path.as_deref().map(Path::new),
-        held: hook.stop_hook_active == Some(true),
-    };
-    let Some(handed) = reports::hand_over(&reports::dir(&socket), session, hook.event, turn) else {
+    let Some(token) =
+        std::env::var(slopty_proto::ctl::SESSION_TOKEN_ENV).ok().filter(|t| !t.trim().is_empty())
+    else {
         return;
     };
-    if let Some(output) = handed.print {
-        println!("{output}");
-    }
-    let batch = handed.batch;
-    if let Err(e) = post(&socket, session, reports::delivered_payload(batch)).await {
+    let inbox = reports::Inbox::from_env().map(|inbox| slopty_proto::ctl::InboxAt {
+        socket: inbox.socket.to_string_lossy().into_owned(),
+        token: inbox.token,
+    });
+    let ask = slopty_proto::ctl::ReportsAsk { session, token: token.clone(), payload, inbox };
+    let socket = workerctl::socket(data_dir);
+    let ask = CtlRequest::Reports(ask);
+    let batch = match tokio::time::timeout(RELAY_TIMEOUT, exchange(&socket, &ask)).await {
+        Ok(Ok(CtlReply::Reports { batch: Some(batch), print })) => {
+            if let Some(print) = print {
+                println!("{print}");
+            }
+            batch
+        }
+        Ok(Ok(_)) => return,
+        Ok(Err(e)) => return tracing::debug!(error = %e, "reports not asked for"),
+        Err(_) => return tracing::debug!("the worker did not answer for the reports"),
+    };
+    // Said once printed: a hook that dies before leaves the batch for the next.
+    let read = CtlRequest::ReportsHanded { session, token, batch };
+    if let Err(e) = exchange(&socket, &read).await {
         tracing::debug!(error = %e, batch, "reports handed over, not acknowledged");
     }
 }

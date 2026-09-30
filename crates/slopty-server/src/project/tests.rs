@@ -414,7 +414,7 @@ fn a_worker_s_terminals_that_ended_while_the_server_was_away_end_their_assignmen
     let terminals = HashSet::from([on(kept), on(lost)]);
     p.assign(&id(), a, who(on(kept), true, None), &terminals, now()).unwrap();
     p.assign(&id(), b, who(on(lost), true, None), &terminals, now()).unwrap();
-    let restored = Projects::restore(p.file(0));
+    let restored = Projects::restore(p.file(Vec::new(), 0));
     let mut p = restored;
     let updates = p.reconcile(worker, &[kept], now());
     assert_eq!(updates.len(), 1, "{updates:?}");
@@ -591,7 +591,7 @@ fn the_file_holds_everything_and_reads_back_the_same() {
         kind: "Plan".to_owned(),
     };
     p.report(at.worker, &report, now());
-    let file = p.file(0);
+    let file = p.file(Vec::new(), 0);
     let json = serde_json::to_vec(&file).unwrap();
     let read: ProjectsFile = serde_json::from_slice(&json).unwrap();
     assert_eq!(read, file);
@@ -674,7 +674,7 @@ fn a_timeline_is_kept_and_paged_within_its_bytes() {
         p.update_task(&id(), t, change, Caller::Person, now()).unwrap();
     }
     let kept_bytes: usize =
-        p.file(0).projects[0].timeline.iter().map(TimelineEntry::approx_bytes).sum();
+        p.file(Vec::new(), 0).projects[0].timeline.iter().map(TimelineEntry::approx_bytes).sum();
     assert!(kept_bytes <= TIMELINE_BYTES_KEPT, "{kept_bytes}");
     let page = status(&p);
     let page_bytes: usize = page.timeline.iter().map(TimelineEntry::approx_bytes).sum();

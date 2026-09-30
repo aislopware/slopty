@@ -21,7 +21,7 @@
 //! does a round trip nobody would read.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -34,7 +34,7 @@ use gpui::{
 };
 use slopty_client::layout::WorkerKey;
 use slopty_client::relay::RelayNotice;
-use slopty_core::{ItemId, SessionId};
+use slopty_core::ItemId;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_theme::Theme;
 
@@ -116,11 +116,58 @@ impl std::fmt::Debug for Bar {
     }
 }
 
-/// The agents at work: `2 working`; empty when none is. Who waits on the human is counted
-/// once, on the bell.
+/// How one worker's agents stand, in Claude Code's own three words: busy on a turn, waiting on
+/// work in the background, blocked on the person. An agent at rest is not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct AgentCounts {
+    working: usize,
+    waiting: usize,
+    blocked: usize,
+}
+
+impl AgentCounts {
+    /// Count an agent its tile marks `status`.
+    const fn add(&mut self, status: Status) {
+        let n = match status {
+            Status::Working => &mut self.working,
+            Status::Running => &mut self.waiting,
+            Status::NeedsYou => &mut self.blocked,
+            Status::Idle | Status::Done | Status::Failed | Status::Away => return,
+        };
+        *n = n.saturating_add(1);
+    }
+
+    const fn is_empty(self) -> bool {
+        self.working == 0 && self.waiting == 0 && self.blocked == 0
+    }
+
+    /// Each count there is, with its word and the mark's tone.
+    fn parts(self, theme: &Theme) -> impl Iterator<Item = (String, slopty_theme::Rgb)> {
+        let s = theme.surfaces;
+        [
+            (self.working, "working", s.accent_fill),
+            (self.waiting, "waiting", s.text_muted),
+            (self.blocked, "blocked", s.warn_fill),
+        ]
+        .into_iter()
+        .filter(|(n, ..)| *n > 0)
+        .map(|(n, word, tone)| (format!("{n} {word}"), tone))
+    }
+}
+
+/// The agents' line in words, as a screen reader hears it: `2 working, 1 blocked`, each worker
+/// named when there are more than one (`studio: 2 working; mini: 1 waiting`).
 #[must_use]
-fn agent_summary(working: usize) -> String {
-    if working == 0 { String::new() } else { format!("{working} working") }
+fn agents_label(theme: &Theme, counts: &[(String, AgentCounts)]) -> String {
+    let named = counts.len() > 1;
+    counts
+        .iter()
+        .map(|(name, c)| {
+            let said = c.parts(theme).map(|(text, _)| text).collect::<Vec<_>>().join(", ");
+            if named { format!("{name}: {said}") } else { said }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Uploads in flight at a glance: `1 upload · 42%`.
@@ -148,18 +195,29 @@ impl WorkspaceView {
         self.focused().map(|t| t.worker).or_else(|| self.context_worker())
     }
 
-    /// Agents busy on their own, across every worker, as their tiles mark them, but for those
-    /// whose tile is on screen: its header says so already, as the focused tile's upload is
-    /// its header's to say.
-    pub(super) fn working_count(&self) -> usize {
-        let sessions = self
-            .agents
-            .keys()
-            .chain(self.server_agents.keys().filter(|s| !self.agents.contains_key(s)));
-        let shown = |s: SessionId| {
-            self.tile_of_session(s).is_some_and(|t| self.drawn.on_screen.borrow().contains(&t.item))
-        };
-        sessions.filter(|s| !shown(**s) && self.agent_mark(**s) == Some(Status::Working)).count()
+    /// Each worker's agents, as their tiles mark them, in the workers' order: the ones this
+    /// client follows and the ones only the server reports. A worker with none at work is left
+    /// out.
+    pub(super) fn agent_counts(&self) -> Vec<(String, AgentCounts)> {
+        let mut by_worker: BTreeMap<WorkerKey, AgentCounts> = BTreeMap::new();
+        let followed = self.agents.keys().filter_map(|s| Some((*s, self.worker_of_session(*s)?)));
+        let reported = self
+            .server_agents
+            .iter()
+            .filter(|(s, _)| !self.agents.contains_key(s))
+            .map(|(s, (worker, _))| (*s, *worker));
+        for (session, worker) in followed.chain(reported) {
+            if let Some(status) = self.agent_mark(session) {
+                by_worker.entry(worker).or_default().add(status);
+            }
+        }
+        by_worker
+            .into_iter()
+            .filter(|(_, c)| !c.is_empty())
+            .map(|(worker, c)| {
+                (self.workers.get(&worker).map(|w| w.name.clone()).unwrap_or_default(), c)
+            })
+            .collect()
     }
 
     /// Ports forwarded here, across every shell.
@@ -446,15 +504,37 @@ impl WorkspaceView {
         });
         let frame = frame.map(|text| tabular(readout("status-frame", text.clone())).child(text));
         let workers = (!phone).then(|| self.workers_button(cx)).flatten();
-        let working = self.working_count();
-        let agents = (working > 0).then(|| {
-            let text: SharedString = agent_summary(working).into();
-            readout("status-agents", text.clone())
+        // Every worker's agents on one quiet line: a mark in its state's tone and a count, the
+        // worker named when there are more than one.
+        let counts = self.agent_counts();
+        let agents = (!counts.is_empty()).then(|| {
+            let named = counts.len() > 1;
+            let label: SharedString = agents_label(theme, &counts).into();
+            let mut parts: Vec<gpui::AnyElement> = Vec::new();
+            for (name, c) in &counts {
+                if !parts.is_empty() {
+                    parts.push(separator(theme).into_any_element());
+                }
+                if named {
+                    parts.push(div().child(SharedString::from(name.clone())).into_any_element());
+                }
+                for (text, tone) in c.parts(theme) {
+                    parts.push(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(spacing.xs))
+                            .child(state_dot(theme, tone))
+                            .child(tabular(div()).child(SharedString::from(text)))
+                            .into_any_element(),
+                    );
+                }
+            }
+            readout("status-agents", label)
                 .flex()
                 .items_center()
-                .gap(px(spacing.xs))
-                .child(state_dot(theme, s.accent_fill))
-                .child(tabular(div()).child(text))
+                .gap(px(spacing.sm))
+                .children(parts)
         });
         let facts = focused_item.and_then(|item| self.focus_facts(item, cx)).map(|text| {
             let text = SharedString::from(text);
@@ -913,8 +993,23 @@ mod tests {
 
     #[test]
     fn the_readouts_say_what_they_count() {
-        assert_eq!(agent_summary(2), "2 working");
-        assert_eq!(agent_summary(0), "", "waiting is the bell's to count");
+        let theme = Theme::default();
+        let mut one = AgentCounts::default();
+        for status in [Status::Working, Status::Working, Status::NeedsYou, Status::Idle] {
+            one.add(status);
+        }
+        assert_eq!(agents_label(&theme, &[("studio".into(), one)]), "2 working, 1 blocked");
+        let mut other = AgentCounts::default();
+        other.add(Status::Running);
+        assert_eq!(
+            agents_label(&theme, &[("studio".into(), one), ("mini".into(), other)]),
+            "studio: 2 working, 1 blocked; mini: 1 waiting",
+            "each worker named once there are two"
+        );
+        let mut rest = AgentCounts::default();
+        rest.add(Status::Idle);
+        rest.add(Status::Done);
+        assert!(rest.is_empty(), "an agent at rest is not counted");
         assert_eq!(transfers_label(1, 42, 100), "1 upload · 42%");
         assert_eq!(transfers_label(2, 0, 0), "2 uploads · 0%");
         assert_eq!(counted(1, "port", "ports"), "1 port");

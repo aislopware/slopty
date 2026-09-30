@@ -295,6 +295,9 @@ pub struct ConversationView {
     /// The permission prompt on show and when, by this client's clock, it came: its fallback
     /// counts down from here, whatever the worker's clock says.
     held: Option<(u64, WallMs)>,
+    /// The permission mode the agent's own hook last reported with a prompt, and when it asked
+    /// by the worker's clock: fresher than the transcript's, which says it only per prompt.
+    heard_mode: Option<(WallMs, String)>,
     /// Ticks once a second while the agent works and the face shows (the elapsed time).
     clock: Option<Task<()>>,
     focus: FocusHandle,
@@ -423,6 +426,7 @@ impl ConversationView {
             ask_all: false,
             tasks_open: false,
             context_open: false,
+            heard_mode: None,
             context_chip: Rc::default(),
             shown: false,
             viewing: None,
@@ -669,6 +673,9 @@ impl ConversationView {
         match event {
             PermissionEvent::Asked(prompt) => {
                 self.held = Some((prompt.ask, WallMs::now()));
+                if let Some(mode) = &prompt.mode {
+                    self.heard_mode = Some((prompt.asked_ms, mode.clone()));
+                }
                 self.approvals.asked(*prompt);
                 self.deny_open = false;
                 self.ask_all = false;
@@ -766,7 +773,7 @@ impl ConversationView {
 
     /// Where the tile lays the face out: the chrome's zoom and the tile's width at rest.
     pub fn set_layout(&mut self, zoom: f32, width: f32, cx: &mut Context<Self>) {
-        let split = |w: f32| w >= SPLIT_FROM;
+        let split = |w: f32| (w >= SPLIT_FROM, w >= work::ONE_LINE_FROM);
         if (self.zoom - zoom).abs() > f32::EPSILON || split(self.width) != split(width) {
             self.zoom = zoom;
             self.width = width;

@@ -29,18 +29,23 @@ mod tests {
         slopty_testkit::bins::bin(env!("CARGO_BIN_EXE_slopty"), name)
     }
 
+    /// `program`, started from a clean environment with its home at `home`
+    /// (`slopty_testkit::env::scrub`): nothing of the developer's reaches it, or the agents
+    /// the daemons start.
+    fn scrubbed(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
+        let mut command = Command::new(program);
+        slopty_testkit::env::scrub(command.as_std_mut(), home);
+        command
+    }
+
     /// ptyd and a worker registered with the server at `server`, finding `claude` in
     /// `programs` first, with `settings` as its `settings.toml`; killed with the test.
     async fn worker(dir: &Path, server: SocketAddr, programs: &Path, settings: &str) -> Vec<Child> {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::write(dir.join("data").join("settings.toml"), settings).unwrap();
-        let rest = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::env::join_paths(
-            std::iter::once(programs.to_owned()).chain(std::env::split_paths(&rest)),
-        )
-        .unwrap();
+        let path = slopty_testkit::env::path_with(programs);
         let ptyd_sock = dir.join("ptyd.sock");
-        let mut ptyd = Command::new(bin("slopty-ptyd"))
+        let mut ptyd = scrubbed(bin("slopty-ptyd"), &dir.join("home"))
             .env("PATH", &path)
             .arg("--socket")
             .arg(&ptyd_sock)
@@ -56,7 +61,7 @@ mod tests {
             }
         };
         tokio::time::timeout(STEP, ready).await.expect("ptyd socket");
-        let mut worker = Command::new(bin("slopty-worker"))
+        let mut worker = scrubbed(bin("slopty-worker"), &dir.join("home"))
             .env("PATH", &path)
             .env("SLOPTY_WORKER_NAME", "projects-test")
             .arg("--ptyd-socket")
@@ -150,16 +155,12 @@ mod tests {
     /// `slopty <args>` against `server`, its own data under `root`; what it printed, once it
     /// succeeded.
     async fn slopty(root: &Path, server: SocketAddr, args: &[&str]) -> String {
-        let ran = Command::new(bin("slopty"))
+        let ran = scrubbed(bin("slopty"), &root.join("home"))
             .arg("--server")
             .arg(server.to_string())
             .arg("--data-dir")
             .arg(root.join("cli"))
             .args(args)
-            .env_remove("SLOPTY_SERVER")
-            .env_remove("SLOPTY_PROJECT")
-            .env_remove("SLOPTY_TASK")
-            .env_remove("SLOPTY_SESSION")
             .env("RUST_LOG", "warn")
             .kill_on_drop(true)
             .output();
@@ -257,14 +258,27 @@ mod tests {
         let term = spawned.assignment.expect("the task has its agent").term;
         assert_eq!(term.worker, worker, "the only worker that fits");
 
-        let seen: Value =
-            until("the agent answered its tool call and took its prompt", async || {
-                let seen: Value = serde_json::from_slice(&std::fs::read(&record).ok()?).ok()?;
-                let typed = seen["typed"].as_array()?.iter().any(|l| l == "go");
-                let answered = seen["mcp"].as_array()?.len() == 2;
-                (typed && answered).then_some(seen)
-            })
-            .await;
+        let seen: Value = tokio::time::timeout(STEP, async {
+            loop {
+                let seen: Option<Value> =
+                    std::fs::read(&record).ok().and_then(|b| serde_json::from_slice(&b).ok());
+                let typed = seen
+                    .as_ref()
+                    .and_then(|s| s["typed"].as_array())
+                    .is_some_and(|t| t.iter().any(|l| l == "go"));
+                let answered =
+                    seen.as_ref().and_then(|s| s["mcp"].as_array()).is_some_and(|m| m.len() == 2);
+                if let (true, true, Some(seen)) = (typed, answered, seen) {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+            panic!("the agent answered its tool call and took its prompt; it recorded {recorded}")
+        });
 
         // Its environment: the server with no flag, its project and task, its terminal.
         let env = &seen["env"];
@@ -291,7 +305,7 @@ mod tests {
         assert_eq!(told["tasks"][0]["term"], format!("{}/{}", term.worker, term.session));
         // Its report on its own task, proven by the token its terminal was given, lands.
         assert_eq!(seen["mcp"][1]["isError"], false, "{}", seen["mcp"][1]);
-        assert!(seen["env"]["SLOPTY_AGENT_TOKEN"].as_str().is_some_and(|t| !t.is_empty()));
+        assert!(seen["env"]["SLOPTY_SESSION_TOKEN"].as_str().is_some_and(|t| !t.is_empty()));
 
         // The tree: Claude Code's own subagent and to-do under the task, the worktree its
         // status line named, and the timeline saying so.
@@ -426,8 +440,8 @@ mod tests {
 
     /// An agent says which task it is on by the server's record of its session, not by its
     /// environment: one started with a stale `SLOPTY_TASK` and then put on another task
-    /// updates the task it is on when a tool names none. Given no token, since the server did
-    /// not start it for the task, it may not report on it.
+    /// updates the task it is on when a tool names none, and reports on it: its terminal's token
+    /// proves where it speaks from, whoever started it.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_server_s_record_of_a_session_wins_over_its_slopty_task() {
         let dir = tempfile::tempdir().unwrap();
@@ -495,10 +509,9 @@ mod tests {
         .await;
         assert_eq!(seen["env"]["SLOPTY_TASK"], "2", "the stale environment it was given");
         assert_eq!(seen["mcp"][0]["isError"], false, "{}", seen["mcp"][0]);
-        // Put on its task by hand, it was given no token: it may not report on it.
-        let refused = &seen["mcp"][1];
-        assert_eq!(refused["isError"], true, "{refused}");
-        assert!(refused.to_string().contains("SLOPTY_AGENT_TOKEN"), "{refused}");
+        // Put on its task by hand, its terminal's token still proves it: it reports on it.
+        let reported = &seen["mcp"][1];
+        assert_eq!(reported["isError"], false, "{reported}");
         let now = status(&hub, &project).await;
         assert_eq!(now.tasks[0].status.as_deref(), Some("reviewing"), "the task it is on");
         assert_eq!(now.tasks[1].status, None, "not the one its environment named");

@@ -418,6 +418,34 @@ fn background_work_sits_over_the_composer(cx: &mut TestAppContext) {
     assert!(!view.read_with(cx, |v, _| v.tray_open.contains("t4")), "closed");
 }
 
+/// One piece of work in the background and the task list share one line in a tile wide
+/// enough for both, and stack in a narrow one or once either is opened.
+#[gpui::test]
+fn the_tray_and_the_tasks_share_a_line_where_they_fit(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (view, cx, _) = face_at_work(cx, dir.path());
+    let rows = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        let tray = cx.debug_bounds("tray-t4").expect("the build's row");
+        let tasks = cx.debug_bounds("tasks-head").expect("the task list");
+        (tray, tasks)
+    };
+    view.update(cx, |v, cx| v.set_layout(1.0, super::work::ONE_LINE_FROM, cx));
+    let (tray, tasks) = rows(cx);
+    assert_eq!(tray.center().y, tasks.center().y, "one line");
+    assert!(tray.right() <= tasks.left(), "the work first: {tray:?} {tasks:?}");
+
+    view.update(cx, |v, cx| v.set_layout(1.0, super::work::ONE_LINE_FROM - 1.0, cx));
+    let (tray, tasks) = rows(cx);
+    assert!(tray.bottom() <= tasks.top(), "stacked in a narrow tile: {tray:?} {tasks:?}");
+
+    view.update(cx, |v, cx| v.set_layout(1.0, super::work::ONE_LINE_FROM, cx));
+    let head = rows(cx).1.center();
+    cx.simulate_click(head, Modifiers::none());
+    let (tray, tasks) = rows(cx);
+    assert!(tray.bottom() <= tasks.top(), "stacked once the list is opened: {tray:?} {tasks:?}");
+}
+
 /// Opening a fold settles its rows in, and nothing is left settling after; thinking is one
 /// line that says how long it took and opens on a click.
 #[gpui::test]

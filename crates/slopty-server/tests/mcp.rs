@@ -112,6 +112,7 @@ mod tests {
             listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
             caps: caps(),
             sessions: Vec::new(),
+            session_key: [7; 32],
         }));
         let _lease =
             slopty_net::server::connect(&endpoint, &HostAddr::from(server.quic_addr()), role)
@@ -242,6 +243,7 @@ mod tests {
             listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
             caps: caps(),
             sessions: Vec::new(),
+            session_key: [7; 32],
         }));
         let mut link =
             slopty_net::server::connect(&endpoint, &HostAddr::from(server.quic_addr()), role)

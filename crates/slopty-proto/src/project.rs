@@ -106,12 +106,6 @@ pub const LOOSENED_MAX: usize = 16;
 /// The longest item of an [`AgentReport::Loosened`], in bytes.
 pub const LOOSENED_ITEM_MAX: usize = 256;
 
-/// The variable holding the token the server gives a task's terminal at its start.
-///
-/// Its agent's tools show it to prove the terminal they speak from ([`crate::server::Vouch`]),
-/// so an agent reports only on its own task.
-pub const AGENT_TOKEN_ENV: &str = "SLOPTY_AGENT_TOKEN";
-
 /// The longest placement expression, in bytes: a rule, not a program.
 pub const EXPR_MAX: usize = 1024;
 /// The most rules one [`Placement`] holds, of each kind.

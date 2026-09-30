@@ -22,6 +22,14 @@ mod tests {
     use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::Command;
 
+    /// The CLI, started from a clean environment with its home at `home`
+    /// (`slopty_testkit::env::scrub`): nothing of the developer's reaches it.
+    fn scrubbed(home: &std::path::Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_slopty"));
+        slopty_testkit::env::scrub(command.as_std_mut(), home);
+        command
+    }
+
     const PATIENCE: Duration = Duration::from_secs(20);
     const REVISION: &str = "2026-07-28";
 
@@ -67,6 +75,7 @@ mod tests {
                 progress: None,
                 restored: None,
             }],
+            session_key: [7; 32],
         }
     }
 
@@ -180,14 +189,12 @@ mod tests {
         let working = tokio::spawn(work(link));
 
         let data = tempfile::tempdir().unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_slopty"))
+        let mut child = scrubbed(data.path())
             .arg("--server")
             .arg(server.quic_addr().to_string())
             .arg("--data-dir")
             .arg(data.path())
             .arg("mcp")
-            .env_remove("SLOPTY_SERVER")
-            .env_remove("SLOPTY_SESSION")
             .env("RUST_LOG", "warn")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -281,14 +288,12 @@ mod tests {
         let working = tokio::spawn(work(link));
 
         let data = tempfile::tempdir().unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_slopty"))
+        let mut child = scrubbed(data.path())
             .arg("--server")
             .arg(server.quic_addr().to_string())
             .arg("--data-dir")
             .arg(data.path())
             .arg("mcp")
-            .env_remove("SLOPTY_SERVER")
-            .env_remove("SLOPTY_SESSION")
             .env("RUST_LOG", "warn")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

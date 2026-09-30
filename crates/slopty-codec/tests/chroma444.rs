@@ -3466,7 +3466,7 @@ mod tests {
     /// measurement compared fresh sessions only.
     #[test]
     #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
-    fn temporal_layers_live_cost() {
+    fn temporal_layers_live_switch() {
         const PHASE: usize = 600;
         const SETTLE: usize = 60;
         // SAFETY: framework-provided constant strings.
@@ -3540,7 +3540,7 @@ mod tests {
     /// and whether a live session takes it on and off between frames.
     #[test]
     #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
-    fn mean_squared_error_cost() {
+    fn mean_squared_error_report() {
         // SAFETY: framework-provided constant string.
         let key = unsafe { kVTCompressionPropertyKey_CalculateMeanSquaredError };
         for (w, h) in probe_sizes(&[(1920, 1088), (3024, 1968)]) {

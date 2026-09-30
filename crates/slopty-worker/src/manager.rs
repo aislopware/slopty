@@ -1,6 +1,6 @@
 //! Session table + ptyd connection.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -12,7 +12,7 @@ use slopty_proto::ptyd::PtydError;
 use slopty_proto::terminal::{OpenSession, Restored, SessionState, SessionSummary, TermSize};
 use slopty_pty::protocol::{SessionInfo, socket_path};
 use slopty_pty::{PtyError, PtydClient, SpawnSpec};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::WorkerError;
 use crate::orchestrate::Agents;
@@ -94,10 +94,17 @@ struct Inner {
     /// Output copies and checkpoints for ptyd, drained onto `ptyd` by [`tap_loop`].
     tap: mpsc::Sender<Tap>,
     sessions: Mutex<HashMap<SessionId, Entry>>,
+    /// Sessions asked of ptyd and not in [`Self::sessions`] yet: their programs run already, and
+    /// may speak (a hook) before the open returns.
+    opening: Mutex<HashSet<SessionId>>,
+    /// Told whenever an open ends, well or not.
+    opened: Notify,
     /// Environment every session gets on top of the request's (`SLOPTY_WORKER_SOCKET`).
     session_env: Mutex<Vec<(String, String)>>,
     /// Where each session's presence file goes (`CLAUDE_CLIENT_PRESENCE_FILE`), once set.
     presence: Mutex<Option<PathBuf>>,
+    /// The key each session's token is made under ([`slopty_agent::vouch`]), once set.
+    session_key: Mutex<Option<slopty_agent::vouch::SessionKey>>,
     /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
     port_hints: mpsc::UnboundedSender<SessionId>,
     /// Sessions whose place changed ([`SessionStart::moves`]).
@@ -113,6 +120,27 @@ struct Inner {
     /// Kept sessions ptyd did not hold when this worker connected: their shells were lost, and
     /// [`Worker::restore`] reopens them.
     lost: Mutex<HashMap<SessionId, Recipe>>,
+}
+
+/// A session being opened, from before ptyd starts it until it is in the table or the open
+/// failed ([`Worker::get_opened`]).
+struct Opening<'a> {
+    inner: &'a Inner,
+    id: SessionId,
+}
+
+impl<'a> Opening<'a> {
+    fn new(inner: &'a Inner, id: SessionId) -> Self {
+        inner.opening.lock().insert(id);
+        Self { inner, id }
+    }
+}
+
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        self.inner.opening.lock().remove(&self.id);
+        self.inner.opened.notify_waiters();
+    }
 }
 
 impl std::fmt::Debug for Worker {
@@ -166,8 +194,11 @@ impl Worker {
                 ptyd: tokio::sync::Mutex::new(client),
                 tap,
                 sessions: Mutex::new(HashMap::new()),
+                opening: Mutex::new(HashSet::new()),
+                opened: Notify::new(),
                 session_env: Mutex::new(Vec::new()),
                 presence: Mutex::new(None),
+                session_key: Mutex::new(None),
                 port_hints,
                 moves,
                 agents,
@@ -276,6 +307,12 @@ impl Worker {
         *self.inner.session_env.lock() = env;
     }
 
+    /// Give every future session a token under `key` beside its id
+    /// ([`slopty_proto::ctl::SESSION_TOKEN_ENV`]), proving the session its programs speak from.
+    pub fn set_session_key(&self, key: slopty_agent::vouch::SessionKey) {
+        *self.inner.session_key.lock() = Some(key);
+    }
+
     /// Tell every future session where its presence file goes: a file under `dir` named by
     /// the session ([`crate::handoff::presence_file`]), which the daemon keeps while a client
     /// is focused on it.
@@ -284,15 +321,19 @@ impl Worker {
     }
 
     /// What session `id` is spawned with: the request's `extra`, then every session's
-    /// variables, then its own id and presence file. The later wins, so no request moves what
-    /// the worker tells its sessions (its control socket, its server, its mod): a hook relay
-    /// pointed at another socket would ask a stranger to answer its permissions.
+    /// variables, then its own id, token and presence file. The later wins, so no request moves
+    /// what the worker tells its sessions (its control socket, its server, its mod): a hook
+    /// relay pointed at another socket would ask a stranger to answer its permissions.
     fn env_for(&self, id: SessionId, extra: &[(String, String)]) -> Vec<(String, String)> {
         let mut env = extra.to_vec();
         env.extend(self.inner.session_env.lock().iter().cloned());
         // Programs in the session (the `slopty hook` relay above all) learn which session they
         // run in from the environment.
         env.push((slopty_proto::ctl::SESSION_ENV.to_owned(), id.to_string()));
+        let key = *self.inner.session_key.lock();
+        if let Some(key) = key {
+            env.push((slopty_proto::ctl::SESSION_TOKEN_ENV.to_owned(), key.token(id)));
+        }
         if let Some(dir) = self.inner.presence.lock().as_deref() {
             let file = crate::handoff::presence_file(dir, id);
             env.push((PRESENCE_ENV.to_owned(), file.to_string_lossy().into_owned()));
@@ -312,6 +353,7 @@ impl Worker {
         id: SessionId,
         req: &OpenSession,
     ) -> Result<SessionHandle, WorkerError> {
+        let _opening = Opening::new(&self.inner, id);
         let env = self.env_for(id, &req.env);
         let spec = SpawnSpec {
             command: req.command.clone(),
@@ -387,6 +429,7 @@ impl Worker {
         shells: &str,
         launch: &AgentLaunch,
     ) -> Result<SessionHandle, WorkerError> {
+        let _opening = Opening::new(&self.inner, id);
         let plan = recipe.reopen(id, shells, &slopty_platform::dirs::home(), launch);
         let screen = self.inner.keeper.screen(id).await;
         let env = self.env_for(id, &recipe.env);
@@ -477,6 +520,23 @@ impl Worker {
             .get(&id)
             .map(|e| e.handle.clone())
             .ok_or(WorkerError::NoSuchSession)
+    }
+
+    /// Session `id`, waiting out its open when it is being opened: its program runs from the
+    /// moment ptyd starts it, and a hook it fires may come before the open returns.
+    pub async fn get_opened(&self, id: SessionId) -> Result<SessionHandle, WorkerError> {
+        loop {
+            let opened = self.inner.opened.notified();
+            tokio::pin!(opened);
+            opened.as_mut().enable();
+            if let Ok(handle) = self.get(id) {
+                return Ok(handle);
+            }
+            if !self.inner.opening.lock().contains(&id) {
+                return Err(WorkerError::NoSuchSession);
+            }
+            opened.await;
+        }
     }
 
     /// Summaries for the session list, each with the agent running in it now.

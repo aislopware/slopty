@@ -439,8 +439,19 @@ mod tests {
     }
 
     /// A free loopback port, released for the forward to take.
+    /// A port free now, from below the ephemeral range (macOS starts it at 49152, Linux at
+    /// 32768). A port the kernel handed out for `:0` goes back to that pool when it is let go,
+    /// where any socket another test binds meanwhile can take it before the forward does. The
+    /// scan starts at a point the process id picks, so tests running at once try apart.
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+        const PORTS: std::ops::Range<u16> = 10_000..30_000;
+        let start = std::process::id().checked_rem(u32::try_from(PORTS.len()).unwrap()).unwrap();
+        PORTS
+            .cycle()
+            .skip(usize::try_from(start).unwrap())
+            .take(PORTS.len())
+            .find(|&p| std::net::TcpListener::bind(("127.0.0.1", p)).is_ok())
+            .unwrap()
     }
 
     fn port(number: u16, session: SessionId) -> Port {

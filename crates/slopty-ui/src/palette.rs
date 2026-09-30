@@ -226,12 +226,20 @@ impl Plate {
     /// The plate, to lay first in the region the rows scroll in, so it paints under them. It
     /// fills that region and draws only inside it.
     pub(crate) fn under(&self, theme: &Theme) -> impl IntoElement + use<> {
-        self.under_moving(theme, true)
+        self.under_on(theme, true, None)
     }
 
-    /// [`Self::under`], on its row at once unless `moves`, as under Reduce Motion: for a list
-    /// whose owner holds its chrome still.
-    pub(crate) fn under_moving(&self, theme: &Theme, moves: bool) -> impl IntoElement + use<> {
+    /// [`Self::under`], on its row at once unless `moves` (as under Reduce Motion, for a list
+    /// whose owner holds its chrome still), and on its owner's clock: the plate glides by
+    /// `now`, the instant the owner's frame stands for, so it moves in step with the owner's
+    /// other motion (the workspace's springs) and a frame drawn again at that instant draws it
+    /// in the same place. `None` reads the wall clock at paint.
+    pub(crate) fn under_on(
+        &self,
+        theme: &Theme,
+        moves: bool,
+        now: Option<Instant>,
+    ) -> impl IntoElement + use<> {
         let glide = Rc::clone(&self.0);
         let fill = hsla(theme.surfaces.overlay);
         let radius = px(theme.radii.sm);
@@ -240,7 +248,9 @@ impl Plate {
             move |region, (), window, cx| {
                 let moving = moves && crate::kit::motion(cx);
                 let mut glide = glide.borrow_mut();
-                let Some(plate) = glide.frame(Instant::now(), moving) else { return };
+                let Some(plate) = glide.frame(now.unwrap_or_else(Instant::now), moving) else {
+                    return;
+                };
                 window.with_content_mask(Some(gpui::ContentMask { bounds: region }), |window| {
                     window.paint_quad(gpui::fill(plate, fill).corner_radii(radius));
                 });

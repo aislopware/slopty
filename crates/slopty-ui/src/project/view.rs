@@ -43,8 +43,10 @@ pub(crate) const PROJECT_GONE: &str = "This project is no longer on the server";
 pub(crate) const NEEDS_YOU: &str = "Needs you";
 /// What the root of the tree is called.
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
+/// A timeline entry for a task made under the title it still has.
+pub(crate) const CREATED: &str = "Created";
 
-/// How wide a lane is at zoom 1 when the lanes stand side by side.
+/// The least a lane is wide at zoom 1: the tile takes as many across as fit.
 const LANE_W: f32 = 232.0;
 /// How far a level of the tree steps in, at zoom 1.
 const INDENT: f32 = 16.0;
@@ -198,8 +200,10 @@ impl ProjectView {
 
     /// The zoom it is drawn at and its tile's width at rest, in points.
     pub fn set_layout(&mut self, zoom: f32, width: f32, cx: &mut Context<Self>) {
-        let side = lanes_side_by_side;
-        if (self.zoom - zoom).abs() > f32::EPSILON || side(self.width, zoom) != side(width, zoom) {
+        let across = lanes_across;
+        if (self.zoom - zoom).abs() > f32::EPSILON
+            || across(self.width, zoom) != across(width, zoom)
+        {
             self.zoom = zoom;
             self.width = width;
             cx.notify();
@@ -387,10 +391,12 @@ impl ProjectView {
 
 // ----- drawing ---------------------------------------------------------------------------------
 
-/// Whether a tile `width` points wide, drawn at `zoom`, sets its lanes side by side (wrapping
-/// past its width) rather than one over the other: where two fit.
-pub(super) fn lanes_side_by_side(width: f32, zoom: f32) -> bool {
-    width >= 2.0 * LANE_W * zoom
+/// How many lanes a tile `width` points wide, drawn at `zoom`, sets side by side: as many as
+/// fit, one at the least. They share the width equally and wrap past it, so a lane that comes
+/// or goes moves no card sideways.
+pub(super) fn lanes_across(width: f32, zoom: f32) -> u16 {
+    let lanes = u16::try_from(Lane::ALL.len()).unwrap_or(u16::MAX);
+    (2..=lanes).rev().find(|&n| width >= f32::from(n) * LANE_W * zoom).unwrap_or(1)
 }
 
 /// A lane's tone: the mark its tasks wear.
@@ -555,19 +561,15 @@ impl ProjectView {
                 .role(Role::Group)
                 .aria_label(NEEDS_YOU)
                 .flex_none()
-                .mx(self.z(theme.spacing.sm))
-                .mb(self.z(theme.spacing.sm))
-                .py(self.z(theme.spacing.xxs))
-                .rounded(self.z(theme.radii.md))
+                .mb(self.z(theme.spacing.xs))
+                .pb(self.z(theme.spacing.xxs))
                 .bg(hsla(s.raised))
-                .border_1()
-                .border_color(hsla_alpha(s.warn, alpha::TINT))
                 .child(self.heading("project-needs-heading", NEEDS_YOU, Some(s.warn)))
                 .children(rows),
         )
     }
 
-    /// A quiet label over a group of rows.
+    /// A quiet label over a group of rows, on the column their marks stand in.
     fn heading(&self, id: &'static str, text: &'static str, tone: Option<Rgb>) -> Stateful<Div> {
         let theme = &self.theme;
         div()
@@ -575,7 +577,7 @@ impl ProjectView {
             .debug_selector(move || id.to_owned())
             .role(Role::Heading)
             .aria_label(text)
-            .px(self.z(theme.spacing.inset() - theme.spacing.sm))
+            .px(self.z(theme.spacing.inset()))
             .pt(self.z(theme.spacing.xs))
             .pb(self.z(theme.spacing.xxs))
             .text_size(self.z(theme.typography.small()))
@@ -653,7 +655,10 @@ impl ProjectView {
         let card = node.and_then(|t| board.tasks.get(&t));
         let status = mark.or_else(|| self.node_status(board, node));
         let title = card.map_or_else(|| ORCHESTRATOR.to_owned(), |c| c.title.clone());
-        let word = card.map(|c| (state_word(c.state), state_status(c.state).tone(theme)));
+        // A row under "Needs you" says no word its heading says.
+        let word = card
+            .filter(|_| mark.is_none())
+            .map(|c| (state_word(c.state), state_status(c.state).tone(theme)));
         let settled = card.is_some_and(|c| c.state == TaskState::Merged);
         let meta = second.unwrap_or_else(|| self.node_meta(board, node, card));
         let key = format!("{prefix}-{}", node_key(node));
@@ -721,7 +726,7 @@ impl ProjectView {
             .rounded(self.z(theme.radii.sm))
             .cursor_pointer()
             .when(settled, |el| el.opacity(alpha::STRONG))
-            .hover(move |el| el.bg(hsla(s.raised)))
+            .hover(move |el| el.bg(hsla(if mark.is_some() { s.overlay } else { s.raised })))
             .children((depth > 0).then(|| self.guides(depth)))
             .child(
                 div()
@@ -866,7 +871,7 @@ impl ProjectView {
         out
     }
 
-    /// The lanes: side by side where the tile is wide enough, else one over the other.
+    /// The lanes, as many across as the tile fits ([`lanes_across`]), sharing its width.
     fn board(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
         let lanes = board.lanes();
         if lanes.is_empty() {
@@ -874,7 +879,6 @@ impl ProjectView {
         }
         let theme = &self.theme;
         let sp = theme.spacing;
-        let side_by_side = lanes_side_by_side(self.width, self.zoom);
         let columns = lanes.into_iter().map(|(lane, tasks)| {
             let tone = lane_tone(theme, lane);
             let count = tasks.len();
@@ -902,23 +906,24 @@ impl ProjectView {
                 .debug_selector(move || selector)
                 .role(Role::List)
                 .aria_label(lane.title())
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .gap(self.z(sp.xs))
-                .when(side_by_side, |el| el.flex_none().w(self.z(LANE_W - sp.sm)))
                 .child(head)
                 .children(cards)
                 .into_any_element()
         });
-        let wrap = div()
-            .flex()
-            .gap(self.z(sp.sm))
+        let grid = div()
+            .grid()
+            .grid_cols(lanes_across(self.width, self.zoom))
+            .items_start()
+            .gap_x(self.z(sp.sm))
+            .gap_y(self.z(sp.md))
             .px(self.z(sp.inset() - sp.xs))
             .pt(self.z(sp.sm))
-            .when(side_by_side, |el| el.flex_row().flex_wrap().items_start())
-            .when(!side_by_side, gpui::Styled::flex_col)
             .children(columns);
-        vec![wrap.into_any_element()]
+        vec![grid.into_any_element()]
     }
 
     /// One task on the board: its number and title, where it runs, and what it waits on.
@@ -948,11 +953,9 @@ impl ProjectView {
             .gap(self.z(sp.xxs))
             .p(self.z(sp.sm))
             .rounded(self.z(theme.radii.md))
-            .bg(hsla(s.raised))
-            .border_1()
-            .border_color(hsla(if picked { s.border } else { s.border_subtle }))
+            .bg(hsla(if picked { s.overlay } else { s.raised }))
             .cursor_pointer()
-            .hover(move |el| el.border_color(hsla(s.border)))
+            .hover(move |el| el.bg(hsla(s.overlay)))
             .when(own == Lane::Merged, |el| el.opacity(alpha::STRONG))
             .child(
                 div()
@@ -1020,14 +1023,21 @@ impl ProjectView {
             .rev()
             .map(|entry| {
                 let seq = entry.seq;
-                let line = super::model::moment_line(
-                    entry,
-                    |w| self.worker_name(w),
-                    |t| board.agent_at(t),
-                );
+                let task = entry.task.and_then(|t| board.tasks.get(&t));
+                // The row names its task already; a title the task was made under says only
+                // that it was made, unless it has been renamed since.
+                let line = match (&entry.what, task) {
+                    (Moment::TaskCreated { title }, Some(card)) if card.title == *title => {
+                        CREATED.to_owned()
+                    }
+                    _ => super::model::moment_line(
+                        entry,
+                        |w| self.worker_name(w),
+                        |t| board.agent_at(t),
+                    ),
+                };
                 let (glyph, tone) = moment_icon(theme, &entry.what);
                 let age = age_label(now.since(entry.at_ms));
-                let task = entry.task.and_then(|t| board.tasks.get(&t));
                 let key = format!("project-entry-{seq}");
                 let selector = key.clone();
                 let picked = self.picked == Some(Pick::Entry(seq));

@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+[{"reply":"reports","batch":7,"print":"{\"decision\":\"block\",\"reason\":\"task 2: done\"}"},{"reply":"reports","batch":null,"print":null}]

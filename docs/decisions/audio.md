@@ -1214,3 +1214,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`cargo xtask vm live`): two window streams of the test's own app playing a tone arrive as one
     sound, counted in packets per second at the client. Measurement: `concurrent_audio` at N
     streams against one lane.
+
+- ✅ **A copy the worker reads half written is announced again whole** (2026-10-01).
+  - `NSPasteboard` promises nothing about when a write is whole. Its `changeCount` moves with
+    ownership ("increments each time the pasteboard ownership changes"), and `clearContents`
+    is only "the first step in providing data". A copy's types then land one at a time under
+    the count the clear left.
+  - Measured on macOS 26 with a second process writing a three-type item (a 200 KB PNG, text
+    and an app's own type) about 1,450 times while the reader looked in a loop. Between 8 and
+    22 of the copies were seen with fewer types, and one partial state lasted 20.7 ms at a
+    load average near 40. Re-reading the types after reading the text still showed the same
+    partial set 12 to 70 times per run. So neither the count read before and after nor a
+    second read inside one poll can tell a whole copy from a part of one.
+  - The worker therefore reads the types on every poll while a client watches. That costs
+    7 µs at the median and 47 µs at p99, against 1 µs for the count alone. A poll that finds
+    the types changed under the count it read before reads the copy again and announces it
+    whole, under a new generation that replaces the half one. A poll that sees the types move
+    while it reads the text announces nothing, and the next poll reads the copy again. An item
+    that has no types yet is announced once they land. More of a copy is announced even when
+    its inline bytes match the half already sent, since its types are what changed.
+  - This was behind the flaky `the_workers_copy_is_announced_lazily_and_fetched`, whose offer
+    listed only the PNG. Its client now waits for the whole copy's offer. The rule is pinned
+    in `slopty_worker::clip` by `a_copy_that_grows_under_its_count_is_announced_whole`,
+    `a_copy_still_being_written_as_it_is_read_waits_for_the_next_poll` and
+    `an_item_with_no_types_yet_is_announced_once_they_land`.

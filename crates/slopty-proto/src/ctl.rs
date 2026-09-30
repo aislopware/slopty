@@ -25,6 +25,13 @@ use crate::terminal::SessionSummary;
 /// where a hook fired ([`CtlRequest::Hook`]).
 pub const SESSION_ENV: &str = "SLOPTY_SESSION";
 
+/// Environment variable holding the token of the session a process runs in.
+///
+/// It is a keyed hash of [`SESSION_ENV`] under the worker's key, which only the worker gives
+/// out. A program shows it to prove the session it speaks from, to the worker and to the server
+/// ([`crate::server::Vouch`]).
+pub const SESSION_TOKEN_ENV: &str = "SLOPTY_SESSION_TOKEN";
+
 /// CLI → daemon.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -50,6 +57,21 @@ pub enum CtlRequest {
     /// of a [`Self::Hook`], never beside one, and keeps its end open while it waits; closing it
     /// withdraws the question.
     Permission(PermissionAsk),
+    /// A hook that hands the reports kept for a session over to its agent (`slopty hook
+    /// reports`), answered with [`CtlReply::Reports`]. It shows the session's token
+    /// ([`SESSION_TOKEN_ENV`]): only the session's own hooks take its reports or say where its
+    /// inbox is, so no other program reads them, acknowledges them unread or redirects them.
+    Reports(ReportsAsk),
+    /// The hook of a [`Self::Reports`] printed batch `batch`: the worker lets it go and tells
+    /// the server it was read. Until then it stays, for the next hook to hand over.
+    ReportsHanded {
+        /// The session (`SLOPTY_SESSION`).
+        session: SessionId,
+        /// Its token ([`SESSION_TOKEN_ENV`]).
+        token: String,
+        /// The batch printed.
+        batch: u64,
+    },
     /// Open a web page for a program in a session (`BROWSER`, the `open` shim) in the browser
     /// of the client in front of that session; answered with [`CtlReply::Handoff`] (`Taken`,
     /// `Offered` or `Nobody`), or an error for an address that is not
@@ -250,6 +272,15 @@ pub enum CtlReply {
     Handoff(Handed),
     /// The answer to [`CtlRequest::Wake`].
     Wake(Awake),
+    /// The answer to [`CtlRequest::Reports`]: what the hook prints, when it hands anything
+    /// over.
+    Reports {
+        /// The batch handed over, when one waits.
+        batch: Option<u64>,
+        /// The hook's output, JSON; none when the agent read the batch already, through its
+        /// inbox.
+        print: Option<String>,
+    },
     /// Done.
     Ok {
         /// Whether anything changed.
@@ -274,6 +305,29 @@ pub struct PermissionAsk {
     pub payload: String,
     /// How long the relay waits; the worker answers before then.
     pub wait_ms: u64,
+}
+
+/// The `slopty hook reports` relay's question ([`CtlRequest::Reports`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportsAsk {
+    /// The terminal session the agent runs in (`SLOPTY_SESSION`).
+    pub session: SessionId,
+    /// Its token ([`SESSION_TOKEN_ENV`]).
+    pub token: String,
+    /// The hook's stdin, verbatim JSON.
+    pub payload: String,
+    /// The inbox Claude Code takes other programs' messages on in this session, when it has
+    /// one (`CLAUDE_CODE_MESSAGING_SOCKET`).
+    pub inbox: Option<InboxAt>,
+}
+
+/// Where a session's agent takes messages from other programs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxAt {
+    /// Its socket.
+    pub socket: String,
+    /// The token a message shows (`CLAUDE_CODE_MESSAGING_TOKEN`), when the session gave one.
+    pub token: Option<String>,
 }
 
 /// The worker's answer to a [`PermissionAsk`].

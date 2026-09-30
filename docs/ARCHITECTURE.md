@@ -1476,7 +1476,17 @@ its command, every other key still goes to the program.
 client endpoint, with its own reconnect loop and silence check) per worker
 (`slopty_app::workers`), all feeding the one `WorkspaceView` under the worker's `WorkerKey`
 (its `WorkerId`'s 128 bits). A dropped link keeps the worker's tiles ("reconnecting"); the
-next connection's snapshot reconciles them. A worker's capabilities come with its `HelloAck`,
+next connection's snapshot reconciles them. The system says when a link may have died under
+it (`slopty_platform::resume`: the Mac woke, its screens woke, the session came back or was
+unlocked, the app came to the front, and Network.framework's path monitor on a path change;
+UIKit's scene and protected-data notifications on iOS). Each live link is probed at once (a
+QUIC PING, alive on the first datagram back, given up after four round trips clamped to
+0.25–1 s, `workers::Probe`), after a path change only once every connection has migrated
+(`Endpoint::handle_network_change`). A link that answers is kept; one that does not is dialled
+again at once while its tiles stay, dimmed (`WorkerStatus::Checking` and `Relinking`), and the
+new link's views replace the old ones in one update, so no frame shows the tiles empty. A
+worker between links is dialled at once rather than at the end of its backoff. A worker's
+capabilities come with its `HelloAck`,
 then as `WorkerMsg::Caps`, and from the server's directory while its own link is down; its
 navigator header adds a warn line only when something is wrong (Screen Recording or
 Accessibility off on a Mac); a worker on another build never links, and says so instead

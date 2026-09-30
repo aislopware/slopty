@@ -28,8 +28,9 @@
 //! - It shows a prompt and takes what is typed at it, a line at a time.
 //!
 //! What it was given and what it saw goes to `STUB_RECORD` as one JSON document, replaced whole
-//! after each step: its arguments, its `SLOPTY_*` and `CLAUDE_*` environment, the MCP configs,
-//! the hooks it fired, the tool's answer and the lines typed.
+//! after each step: its arguments, its `SLOPTY_*` and `CLAUDE_*` environment, every variable's
+//! name with a digest of its value (to tell what it inherited without writing any value), the
+//! MCP configs, the hooks it fired, the tool's answer and the lines typed.
 
 #![allow(
     clippy::print_stdout,
@@ -78,6 +79,9 @@ struct Record {
     at: Option<PathBuf>,
     argv: Vec<String>,
     env: serde_json::Map<String, Value>,
+    /// Every variable it was started with, by name, as a digest of its value
+    /// (`slopty_testkit::env::digests`): no value is written.
+    inherited: std::collections::BTreeMap<String, u64>,
     mcp_config: Vec<Value>,
     hooks: Vec<Value>,
     mcp: Vec<Value>,
@@ -92,6 +96,7 @@ impl Record {
         let doc = json!({
             "argv": self.argv,
             "env": self.env,
+            "inherited": self.inherited,
             "mcp_config": self.mcp_config,
             "hooks": self.hooks,
             "mcp": self.mcp,
@@ -109,6 +114,7 @@ fn run(args: &[String]) -> Fallible<()> {
             .filter(|(k, _)| k.starts_with("SLOPTY_") || k.starts_with("CLAUDE_"))
             .map(|(k, v)| (k, Value::String(v)))
             .collect(),
+        inherited: slopty_testkit::env::digests(),
         mcp_config: mcp_configs(args),
         hooks: Vec::new(),
         mcp: Vec::new(),
