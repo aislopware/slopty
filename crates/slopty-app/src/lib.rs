@@ -21,8 +21,8 @@
     )
 )]
 mod e2e;
+mod hangs;
 pub mod net;
-mod quick;
 mod server;
 pub mod settings;
 pub mod ssh;
@@ -58,8 +58,8 @@ use slopty_ui::settings_editor::{SettingsEditor, SettingsEditorEvent};
 use slopty_ui::terminal::{TerminalView, TerminalViewEvent};
 use slopty_ui::workspace::attention::Attention;
 use slopty_ui::workspace::{
-    Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, ToggleQuickTerminal,
-    WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView,
+    Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
+    WorkspaceEvent, WorkspaceView,
 };
 pub use ssh::actions::InstallOverSsh;
 pub use this_mac::actions::UseThisMac;
@@ -363,10 +363,10 @@ const TAILNET_NOTE: &str =
 pub struct Workspace {
     /// Every worker, each with its own link.
     workers: Vec<WorkerSlot>,
-    /// What the view was last told: whether a dialog covers it and whether the key bar shows.
-    /// Kept here so the build compares without reading the view, which would build the app's
-    /// root again with every change the view hears of.
-    told: (bool, bool),
+    /// What the view was last told: whether the key bar shows. Kept here so the build compares
+    /// without reading the view, which would build the app's root again with every change the
+    /// view hears of.
+    told: bool,
     /// Where the key bar sends its keys, while it can show: followed from the view's changes
     /// so the build reads no view.
     key_target: Option<KeyTarget>,
@@ -395,6 +395,8 @@ pub struct Workspace {
     subscriptions: Vec<gpui::Subscription>,
     /// The system's Reduce Motion heard as it changes ([`watch_reduce_motion`]).
     motion_watch: Option<slopty_platform::motion::Watch>,
+    /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
+    resume_watch: Option<slopty_platform::resume::Watch>,
     adding: Option<Adding>,
     /// Networking runtime; connects run there.
     runtime: tokio::runtime::Handle,
@@ -435,8 +437,6 @@ pub struct Workspace {
     heard_terminals: std::collections::HashMap<SessionId, Heard>,
     /// What the Dock tile's bar shows, so a terminal's redraw sets it only when it changes.
     dock_progress: Option<slopty_platform::dock::DockProgress>,
-    /// The quick terminal's chord, registered with macOS from the settings.
-    quick_hotkey: quick::Hotkey,
     /// How the worker loops dial: over the network, or a test's stand-in.
     dial: Dialer,
     /// The time iOS grants after the app leaves the screen, held until it returns, so the links
@@ -504,12 +504,11 @@ impl Workspace {
             }
         });
         let this_mac = this_mac::native(&runtime);
-        let quick_hotkey = quick::Hotkey::new(quick::listen(view.clone(), cx));
         let dial = network_dialer(runtime.clone());
         let deployer = ssh::native(&runtime);
         let this = Self {
             workers: Vec::new(),
-            told: (false, false),
+            told: false,
             key_target: None,
             #[cfg(test)]
             renders: 0,
@@ -525,6 +524,7 @@ impl Workspace {
             window_dark: true,
             subscriptions: vec![events, changes],
             motion_watch: None,
+            resume_watch: None,
             adding: None,
             runtime,
             window: None,
@@ -544,7 +544,6 @@ impl Workspace {
             attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
             heard_terminals: std::collections::HashMap::new(),
             dock_progress: None,
-            quick_hotkey,
             dial,
             #[cfg(target_os = "ios")]
             grace: None,
@@ -780,7 +779,8 @@ impl Workspace {
         self.settings = loaded.settings;
         self.rebuild_theme(cx);
         self.apply_keymap(keymap, cx);
-        self.apply_quick_terminal(cx);
+        // The app's palette lines show their chords from the keymap just bound.
+        self.view.update(cx, |v, _| v.extend_palette(app_palette_items()));
         self.set_server(server, None, cx);
         self.refresh_menu(cx);
     }
@@ -796,20 +796,6 @@ impl Workspace {
         slopty_ui::keymap::install(keymap, cx);
         rebuild_app_menus(cx);
         self.refresh_menu(cx);
-    }
-
-    /// The quick terminal as the settings have it: where it sits, its chord registered, and
-    /// the palette's line showing that chord. What is wrong with the chord is said when the
-    /// chord changes, not again with every save.
-    fn apply_quick_terminal(&mut self, cx: &mut Context<Self>) {
-        let settings = &self.settings.quick_terminal;
-        let config = quick::config(settings);
-        self.view.update(cx, |v, cx| v.set_quick_terminal(config, cx));
-        let (chord, said) = self.quick_hotkey.apply(settings);
-        if let Some(why) = said {
-            self.show_notice(why, cx);
-        }
-        self.view.update(cx, |v, _| v.extend_palette(app_palette_items(chord)));
     }
 
     /// The window turned dark or light.
@@ -1007,6 +993,25 @@ impl Workspace {
         self.view.update(cx, |v, cx| v.set_host_actions(hosts, Some(add), cx));
     }
 
+    /// Something may have killed the links: the device was away, the app came back to the
+    /// front, or the path moved. Each live link is probed at once and a dead one dialled again
+    /// at once ([`workers::Probe`]); a worker between links is dialled now. On a path change the
+    /// connections migrate to the new path first (QUIC's own migration, which the probe then
+    /// tests), so a link that survives it is never dialled again.
+    pub(crate) fn resume(&self, resume: slopty_platform::resume::Resume) {
+        tracing::info!(
+            resume = resume.name(),
+            workers = self.workers.len(),
+            "resume; probing the links"
+        );
+        if resume.moved() {
+            net::path_changed();
+        }
+        for slot in &self.workers {
+            slot.resume(resume);
+        }
+    }
+
     /// Dial `id` now rather than at the end of its backoff.
     fn connect_now(&self, id: WorkerId) {
         if let Some(slot) = self.slot(id) {
@@ -1026,6 +1031,9 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let mut redial = slopty_net::redial::Redial::default();
             let mut held = false;
+            // A link a probe found dead after a resume, whose tiles still show what it showed,
+            // set back, until the next link lands or fails (make before break).
+            let mut replacing = false;
             loop {
                 let Ok(Some(plan)) = this.update(cx, |ws, _cx| ws.plan(id)) else {
                     break;
@@ -1034,6 +1042,9 @@ impl Workspace {
                 if let Some(status) = hold
                     && !held
                 {
+                    if std::mem::take(&mut replacing) {
+                        view.update(cx, |v, cx| v.disconnect_worker(key, status.clone(), cx));
+                    }
                     view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
                     // Woken: back online, or the server went away. Timed out: try it anyway.
                     held = !wait_or_wake(cx, &wake, server::HOLD_RETRY).await;
@@ -1062,6 +1073,9 @@ impl Workspace {
                         } else {
                             redial.next(std::time::Instant::now())
                         };
+                        if std::mem::take(&mut replacing) {
+                            view.update(cx, |v, cx| v.disconnect_worker(key, status.clone(), cx));
+                        }
                         view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
                         wait_or_wake(cx, &wake, delay).await;
                         continue;
@@ -1070,6 +1084,7 @@ impl Workspace {
                 redial.linked(std::time::Instant::now());
                 let net::Connected { me, mut ack, sender, mut events, link } = connected;
                 pin_grants(&mut ack.caps);
+                hold_uploads(&link);
                 let link = std::sync::Arc::new(link);
                 let screen_link = std::sync::Arc::clone(&link);
                 let open_screen: slopty_ui::screen::ScreenFactory =
@@ -1079,14 +1094,26 @@ impl Workspace {
                 let worker_link = WorkerLink { me, out: sender, open_screen, remote };
                 let name = ack.name.clone();
                 let sessions = ack.sessions.len();
+                let (resume_tx, mut resumes) = tokio::sync::mpsc::unbounded_channel();
+                let replaced = std::mem::take(&mut replacing);
                 // The slot is checked and the tiles connected in one step: a worker forgotten
                 // while the dial was in flight must not come back as a tile holding this link.
+                // A link replacing one a probe found dead lets the old one's views go in the same
+                // step, so the frame that stops showing them shows this link's.
                 let alive = this.update(cx, |ws, cx| {
                     let Some(key) = workers::adopt(&mut ws.workers, id, weak_link, name.clone())
                     else {
                         return false;
                     };
-                    ws.view.update(cx, |v, cx| v.connect_worker(key, worker_link, ack, cx));
+                    if let Some(slot) = ws.workers.iter_mut().find(|w| w.id == id) {
+                        slot.resume = Some(resume_tx);
+                    }
+                    ws.view.update(cx, |v, cx| {
+                        if replaced {
+                            v.disconnect_worker(key, WorkerStatus::Relinking, cx);
+                        }
+                        v.connect_worker(key, worker_link, ack, cx);
+                    });
                     ws.refresh_menu(cx);
                     ws.update_linked(id, cx);
                     true
@@ -1100,9 +1127,14 @@ impl Workspace {
                 // transport's idle timeout, and past the drop bar the link is given up so the
                 // redial takes over. A wake while the link is up is the server saying the worker
                 // is back or moved: a link that is silent then is the dead one, given up at once.
+                // A resume (the Mac woke, the path moved) probes the link at once rather than
+                // waiting for its silence: an answer keeps it, none has it dialled again at once
+                // while its tiles keep what they show (`relink`).
                 let rtt_link = std::sync::Arc::downgrade(&link);
                 let rtt_view = view.clone();
                 let rtt_wake = std::sync::Arc::clone(&wake);
+                let relink = std::sync::Arc::new(tokio::sync::Notify::new());
+                let relink_asked = std::sync::Arc::clone(&relink);
                 cx.spawn(async move |cx| {
                     let mut hearing = Hearing::new(std::time::Instant::now());
                     // The handshake has measured the path already: the predictors draw from the
@@ -1111,8 +1143,27 @@ impl Workspace {
                         let rtt = link.rtt();
                         rtt_view.update(cx, |v, cx| v.set_rtt(key, rtt, cx));
                     }
+                    let mut listening = true;
                     loop {
-                        let woken = wait_or_wake(cx, &rtt_wake, workers::HEARING_TICK).await;
+                        let (woken, resumed) = tokio::select! {
+                            woken = wait_or_wake(cx, &rtt_wake, workers::HEARING_TICK) => (woken, None),
+                            resume = resumes.recv(), if listening => {
+                                listening = resume.is_some();
+                                (false, resume)
+                            }
+                        };
+                        if let Some(resume) = resumed {
+                            let Some(link) = rtt_link.upgrade() else { break };
+                            if probe(cx, &link, resume, &rtt_view, key).await {
+                                // Resumes that came while it ran are answered by this one.
+                                while resumes.try_recv().is_ok() {}
+                                hearing = Hearing::new(std::time::Instant::now());
+                                continue;
+                            }
+                            tracing::warn!(worker = %id, resume = resume.name(), path = %link.path(), "no answer after a resume; relinking");
+                            relink_asked.notify_one();
+                            break;
+                        }
                         let Some(link) = rtt_link.upgrade() else {
                             if woken {
                                 // The wake was for the connect loop, which is past this link.
@@ -1151,7 +1202,15 @@ impl Workspace {
                 // One foreground update per batch, not per event: whatever arrived while the
                 // last batch was applied goes in the next one, so a flood from many sessions
                 // costs one update (and GPUI draws at most once per display frame anyway).
-                while let Some(first) = events.recv().await {
+                loop {
+                    let first = tokio::select! {
+                        first = events.recv() => first,
+                        () = relink.notified() => {
+                            replacing = true;
+                            None
+                        }
+                    };
+                    let Some(first) = first else { break };
                     let arrived = std::time::Instant::now();
                     let mut batch = Vec::with_capacity(LINK_BATCH);
                     batch.push(first);
@@ -1171,6 +1230,13 @@ impl Workspace {
                     }
                 }
                 // Dropping the link closes the connection; the endpoint stays for the retry.
+                if replacing {
+                    // Dialled again at once; its tiles stay, set back, until that lands.
+                    link.abandon("no answer to a probe after a resume");
+                    drop(link);
+                    view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Relinking, cx));
+                    continue;
+                }
                 drop(link);
                 wait_or_wake(cx, &wake, redial.next(std::time::Instant::now())).await;
             }
@@ -2445,6 +2511,42 @@ async fn wait_or_wake(
     }
 }
 
+/// Probe `link` after `resume`: a QUIC PING, and the link alive the moment anything arrives
+/// from the worker, within the probe's deadline ([`workers::Probe`]). Its worker's tiles are
+/// set back ([`WorkerStatus::Checking`]) from when the probe says, and come back with the
+/// answer.
+async fn probe(
+    cx: &mut gpui::AsyncApp,
+    link: &slopty_client::WorkerLink,
+    resume: slopty_platform::resume::Resume,
+    view: &Entity<WorkspaceView>,
+    key: WorkerKey,
+) -> bool {
+    let plan = workers::Probe::new(resume, link.rtt());
+    let before = link.received_datagrams();
+    let started = std::time::Instant::now();
+    link.ping();
+    let mut doubted = false;
+    loop {
+        let waited = started.elapsed();
+        if link.received_datagrams() != before {
+            if doubted {
+                view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Connected, cx));
+            }
+            tracing::info!(resume = resume.name(), ?waited, "link answered after a resume");
+            return true;
+        }
+        if waited >= plan.deadline {
+            return false;
+        }
+        if !doubted && waited >= plan.doubt_after {
+            doubted = true;
+            view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Checking, cx));
+        }
+        cx.background_executor().timer(workers::PROBE_POLL).await;
+    }
+}
+
 /// A key-bar key as a screen reader names it; an armed modifier says so.
 fn key_label(label: &str, lit: bool) -> String {
     let name = key_spoken(label);
@@ -2487,21 +2589,20 @@ impl Render for Workspace {
             && let Some(editor) = self.settings_editor.clone()
         {
             editor.update(cx, |e, cx| e.focus(window, cx));
+            // Focus moved while the window draws, which asks for no frame: a view already drawn
+            // in this one (a shell's caret) would keep the old focus. The next frame is asked
+            // for, and GPUI builds again the views whose focus answers changed.
+            let editor = editor.entity_id();
+            window.defer(cx, move |_window, cx| App::notify(cx, editor));
         }
         let settings_editor = self.settings_editor.clone();
         let welcome = self.welcome();
-        // A page in a browser tile is a native view over everything GPUI draws: it hides
-        // under the app's own dialogs as it does under the workspace's.
-        let covered = welcome || settings_editor.is_some() || self.adding.is_some();
         // The key bar takes the status bar's row above the keyboard. Told only a change: an
         // update while the window draws would build everything that read the workspace again.
         let shown = key_bar.is_some();
-        if self.told != (covered, shown) {
-            self.told = (covered, shown);
-            self.view.update(cx, |v, cx| {
-                v.set_covered(covered, cx);
-                v.set_key_bar_shown(shown, cx);
-            });
+        if self.told != shown {
+            self.told = shown;
+            self.view.update(cx, |v, cx| v.set_key_bar_shown(shown, cx));
         }
         let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, window, cx));
         let root = match self.split_view {
@@ -2530,12 +2631,6 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
-            .on_action(cx.listener(|this, _: &ToggleQuickTerminal, _window, cx| {
-                let asked = std::time::Instant::now();
-                this.view.update(cx, |v, cx| {
-                    v.toggle_quick_terminal(asked, slopty_ui::workspace::QuickToggle::Command, cx);
-                });
-            }))
             .when(!welcome, |el| {
                 el.child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
                     .when_some(key_bar, |el, bar| {
@@ -2821,11 +2916,8 @@ fn app_key_bindings() -> Vec<gpui::KeyBinding> {
     slopty_ui::keymap::current().bindings(|scope| scope == slopty_ui::keymap::Scope::App)
 }
 
-/// The app's lines for the command palette, after the workspace's; the quick terminal's shows
-/// `quick_chord`, its chord from any app.
-fn app_palette_items(
-    quick_chord: Option<slopty_platform::hotkey::Chord>,
-) -> Vec<slopty_ui::palette::PaletteItem> {
+/// The app's lines for the command palette, after the workspace's.
+fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     use slopty_ui::icons::IconName;
 
     let bindings = app_key_bindings();
@@ -2844,7 +2936,6 @@ fn app_palette_items(
     if ssh::OFFERED {
         items.push(item(ssh::TITLE, IconName::Terminal, Box::new(InstallOverSsh)));
     }
-    items.extend(quick::palette_line(quick_chord));
     items
 }
 
@@ -2890,6 +2981,19 @@ fn pin_grants(caps: &mut slopty_proto::server::WorkerCaps) {
 /// A worker's grants are what it reports, outside the e2e build.
 #[cfg(not(feature = "e2e"))]
 const fn pin_grants(_caps: &mut slopty_proto::server::WorkerCaps) {}
+
+/// In the e2e build, every upload on `link` held before its first byte when the harness asks
+/// (`slopty_e2e::HOLD_UPLOADS_ENV`): how far one got by a given frame is up to the machine.
+#[cfg(feature = "e2e")]
+fn hold_uploads(link: &slopty_client::WorkerLink) {
+    if std::env::var_os(slopty_e2e::HOLD_UPLOADS_ENV).is_some() {
+        link.hold_uploads(true);
+    }
+}
+
+/// Uploads are never held outside the e2e build.
+#[cfg(not(feature = "e2e"))]
+const fn hold_uploads(_link: &slopty_client::WorkerLink) {}
 
 /// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
 #[cfg(feature = "e2e")]
@@ -2952,7 +3056,7 @@ pub fn open_workspace(
     };
     let view = cx.new(|cx| {
         let mut view = WorkspaceView::new(Theme::default(), saved, cx);
-        view.extend_palette(app_palette_items(None));
+        view.extend_palette(app_palette_items());
         view.set_layout_path(layout_path());
         // Beside the layout: the file tiles' edits not yet saved, taken back after a quit or a
         // crash.
@@ -3025,6 +3129,8 @@ pub fn open_workspace(
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());
     watch_reduce_motion(&workspace, cx);
+    watch_resumes(&workspace, &slopty_platform::resume::System, cx);
+    hangs::watch(cx);
     watch_settings(workspace.clone(), cx);
     // A tapped note brings the app forward on its tile, on whichever worker it lives. The tap
     // that launched the app waited for `taps` above and arrives first, once the window is up.
@@ -3136,6 +3242,29 @@ fn watch_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Some(on) = rx.recv().await {
             if workspace.update(cx, |ws, cx| ws.set_reduce_motion(on, cx)).is_err() {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Hear what may have killed the links under the app (the Mac waking, an unlock, a return to
+/// the front, a path change) from `source`, on the main thread ([`Workspace::resume`]).
+fn watch_resumes(
+    workspace: &Entity<Workspace>,
+    source: &dyn slopty_platform::resume::Source,
+    cx: &mut App,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let watch = source.watch(std::sync::Arc::new(move |resume| {
+        let _closed = tx.send(resume);
+    }));
+    workspace.update(cx, |ws, _cx| ws.resume_watch = Some(watch));
+    let workspace = workspace.downgrade();
+    cx.spawn(async move |cx| {
+        while let Some(resume) = rx.recv().await {
+            if workspace.update(cx, |ws, _cx| ws.resume(resume)).is_err() {
                 return;
             }
         }
@@ -3458,6 +3587,44 @@ mod tests {
             cx.run_until_parked();
         }
         assert_eq!(ws.read_with(cx, |ws, _| ws.renders), before, "the root replayed");
+    }
+
+    /// ⌘, focuses the settings editor as the root draws: the frame that follows is the one a
+    /// window drawn from scratch shows, not the last one's with the old focus in it.
+    #[gpui::test]
+    fn the_settings_editor_taking_the_keyboard_leaves_no_stale_frame(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        // The dialog lands at once, so the frame holds still to be judged.
+        cx.update(|_window, cx| cx.set_reduce_motion(true));
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.cancel_add_worker(window, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("cmd-,");
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |ws, _| ws.settings_editor.is_some()), "the editor is open");
+        let quads = |window: &Window| {
+            let mut lines: Vec<String> = window
+                .painted_quads()
+                .iter()
+                .map(|q| {
+                    format!(
+                        "{:?} {:?} {:?} {:?}",
+                        q.bounds, q.background, q.border_color, q.border_widths
+                    )
+                })
+                .collect();
+            lines.sort_unstable();
+            lines
+        };
+        let shown = cx.update(|window, _cx| quads(window));
+        let scratch = cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            quads(window)
+        });
+        let only_shown: Vec<&String> = shown.iter().filter(|l| !scratch.contains(l)).collect();
+        assert!(only_shown.is_empty(), "painted with the old focus: {only_shown:#?}");
     }
 
     /// Esc while an input method composes in the address field is the input method's: the
@@ -3874,27 +4041,8 @@ mod tests {
     /// The palette offers it on a Mac.
     #[test]
     fn the_palette_offers_this_mac_on_a_mac() {
-        let offered = app_palette_items(None).iter().any(|item| item.label == this_mac::TITLE);
+        let offered = app_palette_items().iter().any(|item| item.label == this_mac::TITLE);
         assert_eq!(offered, this_mac::OFFERED);
-    }
-
-    /// The quick terminal's line carries the chord registered from the settings, and none
-    /// when there is no chord; only the Mac offers it.
-    #[test]
-    fn the_palette_shows_the_quick_terminals_chord() {
-        let quick = |chord| {
-            app_palette_items(chord)
-                .into_iter()
-                .find(|item| item.label == slopty_ui::workspace::TOGGLE_QUICK_TERMINAL)
-                .map(|item| item.keys)
-        };
-        let chord = slopty_platform::hotkey::Chord::parse("ctrl-`").ok();
-        if WorkspaceView::quick_terminal_offered() {
-            assert_eq!(quick(chord).as_deref(), Some("\u{2303}`"));
-            assert_eq!(quick(None).as_deref(), Some(""), "no chord, the command still");
-        } else {
-            assert_eq!(quick(chord), None);
-        }
     }
 
     /// A dial a worker answers from another build shows as its status, with both builds and the
@@ -4023,11 +4171,10 @@ mod tests {
         assert_eq!(equivalent.as_deref(), Some("cmd-y"), "no ⌘T left for the menu to take");
     }
 
-    /// A settings file that does not parse changes no key and takes no chord from other apps:
-    /// the keymap and the quick terminal's chord stay as last applied, not the defaults'. A
-    /// chord that does not read is said once, not again with every unrelated save.
+    /// A settings file that does not parse changes no key: the keymap stays as last applied,
+    /// not the defaults', and the file's trouble is said.
     #[gpui::test]
-    fn a_broken_file_keeps_the_keys_and_says_a_bad_chord_once(cx: &mut TestAppContext) {
+    fn a_broken_file_keeps_the_keys(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, false);
@@ -4037,29 +4184,17 @@ mod tests {
         };
         let said =
             |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
-        let quiet = |cx: &mut VisualTestContext| {
-            cx.executor().advance_clock(std::time::Duration::from_secs(10));
-            cx.run_until_parked();
-        };
         let note_keys = || {
             let keymap = slopty_ui::keymap::current();
             let ix = keymap.find(slopty_ui::keymap::Scope::Workspace, "new_note");
             keymap.chords(ix.unwrap_or_default()).to_vec()
         };
 
-        load(cx, "[quick_terminal]\nhotkey = \"\"\n[keys.workspace]\nnew_note = \"cmd-alt-n\"\n");
-        assert_eq!(ws.read_with(cx, |ws, _| ws.quick_hotkey.asked()), None);
-        load(cx, "[quick_terminal\nhotkey = ");
+        load(cx, "[keys.workspace]\nnew_note = \"cmd-alt-n\"\n");
+        assert_eq!(note_keys(), ["alt-cmd-n"], "the file's keys");
+        load(cx, "[keys.workspace\nnew_note = ");
         assert!(said(cx).is_some_and(|t| t.starts_with("Settings: ")), "{:?}", said(cx));
-        assert_eq!(ws.read_with(cx, |ws, _| ws.quick_hotkey.asked()), None, "no ⌃` taken");
         assert_eq!(note_keys(), ["alt-cmd-n"], "the keys last applied");
-
-        quiet(cx);
-        load(cx, "[quick_terminal]\nhotkey = \"alt-q\"\n");
-        assert!(said(cx).is_some_and(|t| t.contains("Quick terminal chord")), "{:?}", said(cx));
-        quiet(cx);
-        load(cx, "[quick_terminal]\nhotkey = \"alt-q\"\n[font]\nligatures = false\n");
-        assert_eq!(said(cx), None, "said once");
     }
 
     /// A change from the settings form writes the file and applies it with the dialog still

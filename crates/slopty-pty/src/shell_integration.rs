@@ -807,7 +807,7 @@ mod tests {
             .into_iter()
             .find(|p| Path::new(p).is_file())
         else {
-            eprintln!("SKIP: fish is not installed (brew install fish)");
+            slopty_testkit::live::skip("fish is not installed (brew install fish)");
             return;
         };
         let text = run_shell(
@@ -1022,7 +1022,7 @@ mod tests {
         {
             shells.push((fish, ".config/fish/config.fish", "set -gx", fish_input));
         } else {
-            eprintln!("SKIP fish: not installed (brew install fish)");
+            slopty_testkit::live::skip("fish is not installed (brew install fish)");
         }
         for (n, (shell, rc, set, input)) in shells.into_iter().enumerate() {
             let (assign, path) = if set == "export" {

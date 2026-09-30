@@ -26,22 +26,9 @@ mod handoff {
 
     const STEP: Duration = Duration::from_secs(20);
 
-    /// A sibling binary from the same build, built on demand into this profile's directory.
+    /// A binary of this build (`slopty_testkit::bins`).
     fn bin(name: &str) -> PathBuf {
-        let worker = PathBuf::from(env!("CARGO_BIN_EXE_slopty-worker"));
-        let path = worker.with_file_name(name);
-        if !path.exists() {
-            let release = worker.parent().is_some_and(|dir| dir.ends_with("release"));
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let mut build = std::process::Command::new(cargo);
-            let package = if name == "slopty" { "slopty-cli" } else { name };
-            build.args(["build", "-p", package, "--bin", name]);
-            if release {
-                build.arg("--release");
-            }
-            assert!(build.status().expect("run cargo").success(), "build {name}");
-        }
-        path
+        slopty_testkit::bins::bin(env!("CARGO_BIN_EXE_slopty-worker"), name)
     }
 
     /// The daemons, killed with the test; their pasteboard released.

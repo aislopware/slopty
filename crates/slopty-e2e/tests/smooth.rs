@@ -407,6 +407,86 @@ mod tests {
         assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
     }
 
+    /// A page of text, served on localhost by the test to every request.
+    const PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>smooth page</title>\
+</head><body style=\"margin:0;font:15px -apple-system,sans-serif;padding:24px\">\
+<h1>A page beside the shells</h1><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, \
+sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></html>";
+
+    /// Serve [`PAGE`] on an ephemeral localhost port until the process ends; the port.
+    fn serve_page() -> u16 {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{PAGE}",
+                    PAGE.len()
+                );
+                let _sent = (&stream).write_all(answer.as_bytes());
+            }
+        });
+        port
+    }
+
+    /// Open the palette and close it again, each every [`OVERVIEW_STEP`], for `run`.
+    async fn palette_cycle(drv: &mut Driver, run: Duration) -> FrameInfo {
+        drv.frames_reset().await.unwrap();
+        let mut clock = clock(OVERVIEW_STEP);
+        let start = Instant::now();
+        let mut open = false;
+        while start.elapsed() < run {
+            clock.tick().await;
+            drv.keys(if open { "escape" } else { "cmd-shift-p" }).await.unwrap();
+            open = !open;
+        }
+        let after = drv.dump().await.unwrap();
+        if open {
+            drv.keys("escape").await.unwrap();
+        }
+        after.frames
+    }
+
+    /// A browser tile beside five streaming shells: the page is a native view the window
+    /// composes, so scrolling the strip past it, the palette over it and the overview around
+    /// it should cost what the shells cost.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e smooth"]
+    async fn a_page_tile_beside_five_shells_pans_on_the_mac() {
+        let port = serve_page();
+        let url = format!("http://127.0.0.1:{port}/");
+        let mut stack = Stack::launch_with("e2e-smooth-page", &[MOVING]).await.unwrap();
+        let drv = &mut stack.driver;
+        drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        ready(drv).await;
+        load(drv, SHELLS_WITH_DISPLAY).await;
+        drv.ok(&Command::OpenUrl { url: url.clone() }).await.unwrap();
+        drv.wait_for("the page, loaded and shown", STEP, |d| {
+            d.item("browser")
+                .and_then(|i| i.browser.as_ref())
+                .is_some_and(|b| b.title == "smooth page" && !b.loading && b.shown && b.snapshot)
+        })
+        .await
+        .unwrap();
+        let label = "1 page tile + 5 streaming shells";
+        let palette = palette_cycle(drv, RUN).await;
+        measure(&format!("(l) mac: {label}, palette in and out over the page"), &palette);
+        focus_first_shell(drv).await;
+        let panned = pan(drv, RUN).await;
+        measure(&format!("(e) mac: {label}, strip column to column"), &panned);
+        let overview = overview_cycle(drv, RUN).await;
+        measure(&format!("(f) mac: {label}, overview in and out"), &overview);
+        stack.shutdown().await;
+        assert!(panned.frames >= 100, "too few frames to judge: {panned:?}");
+    }
+
     /// The scenario that captures a display, which needs the Screen Recording grant
     /// (`cargo xtask e2e smooth --screen-recording`).
     mod screen_recording {

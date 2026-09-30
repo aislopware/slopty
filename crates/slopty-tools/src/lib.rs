@@ -25,7 +25,9 @@ pub mod resolve;
 pub mod tools;
 pub mod view;
 
+use slopty_core::SessionId;
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, Verb};
+use slopty_proto::project::{PROJECT_ENV, ProjectId, TASK_ENV, TaskId};
 
 /// Where verbs go: something that answers each with its [`Outcome`], a failure included.
 ///
@@ -44,6 +46,40 @@ pub trait Dispatch: Send + Sync {
     /// the CLI and `slopty mcp` run on the caller's machine, the server's endpoint does not.
     fn local_files(&self) -> bool {
         true
+    }
+
+    /// Where the caller runs: the defaults a project verb takes when it names no project,
+    /// task or terminal. Only a caller on its own machine has an environment to read.
+    fn scope(&self) -> Scope {
+        Scope::default()
+    }
+}
+
+/// Where the caller runs, as a Slopty session's environment says: its terminal, and for an
+/// agent Slopty started for a task, the project and the task.
+///
+/// An agent's `task_create` then makes a subtask of its own task in its own project, and its
+/// `task_update` moves its own task, with nothing to name.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Scope {
+    /// The terminal it runs in (`SLOPTY_SESSION`).
+    pub session: Option<SessionId>,
+    /// Its project ([`PROJECT_ENV`]).
+    pub project: Option<ProjectId>,
+    /// Its task ([`TASK_ENV`]).
+    pub task: Option<TaskId>,
+}
+
+impl Scope {
+    /// This process's, from its environment; a variable that does not parse is none.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        Self {
+            session: var(slopty_proto::ctl::SESSION_ENV).and_then(|v| v.trim().parse().ok()),
+            project: var(PROJECT_ENV).and_then(|v| v.trim().parse().ok()),
+            task: var(TASK_ENV).and_then(|v| v.parse().ok()),
+        }
     }
 }
 

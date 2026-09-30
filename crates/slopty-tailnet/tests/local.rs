@@ -8,12 +8,12 @@ mod tests {
     #[tokio::test]
     async fn this_machine_is_its_own_users_node() {
         let Some(api) = LocalApi::find() else {
-            eprintln!("skipped: no Tailscale LocalAPI this user can read");
+            slopty_testkit::live::skip("no Tailscale LocalAPI this user can read");
             return;
         };
         let status = api.status().await.expect("the daemon answers");
         if !status.running() {
-            eprintln!("skipped: tailscale is {}", status.backend_state);
+            slopty_testkit::live::skip(&format!("tailscale is {}", status.backend_state));
             return;
         }
         let me = status.me.as_ref().expect("a running node has itself");

@@ -251,14 +251,16 @@ mod tests {
     }
 
     /// Every key of the default file is a field, with the default the file writes, and every
-    /// field names a key of it.
+    /// field names a key of it. A table inside a table is no row.
     #[test]
     fn every_key_is_a_field_with_its_default() {
         let defaults = toml::Table::try_from(Settings::default()).unwrap();
         let mut keys = Vec::new();
         for (table, inner) in &defaults {
-            for key in inner.as_table().unwrap().keys() {
-                keys.push(format!("{table}.{key}"));
+            for (key, value) in inner.as_table().unwrap() {
+                if !value.is_table() {
+                    keys.push(format!("{table}.{key}"));
+                }
             }
         }
         let mut named: Vec<String> =

@@ -22,10 +22,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ⚠️ **macOS delivers keyboard events only to the active app.** Events posted to an inactive
   pid queue up and all land the moment the app activates (observed macOS 26.5: four probe keys
-  arrived as `echoecho` after activation). So the injector activates the owner
-  (`NSRunningApplication::activateWithOptions`) before a button-down or key press when it is
-  not active, and the client sends `Focus` when a screen view gains focus. The host's own
-  desktop sees that app come to the front; there is no public API around this.
+  arrived as `echoecho` after activation). So the injector activates the owner before a
+  button-down or key press when it is not active, and the client sends `Focus` when a screen
+  view gains focus. The host's own desktop sees that app come to the front. How it activates
+  changed 2026-09-30: "A window stream's pointer reaches the view".
 
 - ⚠️ **`CGWindowListCreateDescriptionFromArray` takes raw `CGWindowID`s as array values**, in a
   `CFArray` built with NULL callbacks, not boxed `CFNumber`s: with numbers it returns an empty
@@ -75,6 +75,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   exists for another app's window short of AX observers, which need the same polling fallback.
 
 - ✅ **Magnify is ignored** for now: there is no public constructor for gesture `CGEvent`s.
+  Superseded 2026-09-30: "Trackpad gestures reach the remote app".
 
 - ✅ **The host daemon ships non-sandboxed and Developer-ID signed, and the dev daemon is signed
   too** (2026-09-14). App Sandbox blocks `CGEventPost`, which settled the sandbox half from the
@@ -710,3 +711,219 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_refused_layer_falls_back_to_the_chord_list`, `media_keys_go_and_volume_stays`; the
     workspace's `the_window_going_inactive_lets_the_shortcuts_be` and
     `a_notice_says_when_only_the_chord_list_goes`.
+
+- ✅ **Trackpad gestures reach the remote app** (2026-09-30, M1 Max, macOS 27.0). The wire carried
+  a pinch and the worker dropped it, and there was no rotation, smart zoom or swipe at all.
+  - *Wire.* `ScreenInput` gains `Rotate { degrees, phase, x, y }`, `SmartMagnify { x, y }`,
+    `Swipe { direction, x, y }` and `Gestures { remote }` beside `Magnify`, appended so no
+    older golden moved. `SwipeDirection` is named as the trackpad's swipe mask names it and
+    read by apps as `deltaX` / `deltaY`: left is `deltaX` 1, right −1, up `deltaY` 1, down −1.
+    Goldens `client_screen_magnify`, `client_screen_rotate`, `client_screen_smart_magnify`,
+    `client_screen_swipe`, `client_screen_gestures_remote`.
+  - *Injection.* No public API makes a gesture `CGEvent`, so the worker makes one the way Mac
+    Mouse Fix (`TouchSimulator.m`, `GestureScrollSimulator.m`) and Sensible Side Buttons do:
+    `CGEventCreate`, the type `NSEventTypeGesture` (29), the IOHID subtype in field 110 that
+    AppKit turns into the event kind (8 magnify, 5 rotate, 22 smart magnify, 16 swipe), the
+    amount in 113 (magnification) or 114 (degrees) or the swipe mask in 115, and the phase in
+    132 as IOHID's phase bits, the same values as `CGScrollPhase`. Each goes on the stream's
+    route, like a scroll: to the owner's pid for a window, the HID tap for a display.
+  - *One swipe, one event.* AppKit makes an `NSEventTypeSwipe` of every navigation swipe
+    posted, a directionless one included (`deltaX` 0), so the began-then-ended pair that
+    Sensible Side Buttons posts reaches the app as two swipes. A swipe is now one event, its
+    end with its direction, whatever the phase field says.
+  - *Swipes between pages.* A two-finger swipe that an app follows as it moves (Safari's back
+    and forward, `trackSwipeEventWithOptions:`) is not a swipe event: AppKit's tracking reads
+    the gesture events a trackpad sends beside its scroll events. With the tile's gestures sent
+    (`Gestures { remote: true }`), each trackpad scroll in its gesture phase (MayBegin and
+    Cancelled included, never its momentum) is followed by a gesture of subtype 6
+    (`kIOHIDEventTypeScroll`) with the scroll's travel scaled by 1.67 in fields 116 and 119 and
+    the same phase, as Mac Mouse Fix posts it (scroll first, then gesture). AppKit takes those
+    in: no app sees one as an event. Without them a sideways swipe's tracking stays at its first
+    step (−0.010) and is cancelled when the fingers lift; with them it follows the fingers
+    (−0.010, −0.027, −0.043 … −0.144), ends, and turns the page (−1.0). That holds at a
+    trackpad's 120 reports a second whether they arrive steadily, each 0 to 12 ms late, or two
+    at once every 16.7 ms (`docs/MEASUREMENTS.md`, "a trackpad scroll's gesture, one swipe, a
+    press's number").
+    - *What 120 was not.* An earlier cut measured 60 reports a second only, and a scratch run
+      at 120 turned one swipe in three. The cause was the test's swipe, not the rate: its steps
+      (8, 20, 30, 40 points) at 120 a second made an accelerating flick of 25 to 33 ms, which
+      AppKit's tracking cancels whatever the gesture carries. Nothing on the gesture changed
+      that: one timestamp for both events or the scroll's own, the fixed-point deltas in lines,
+      −0 for no travel, the travel scaled by 0, 1, 1.67 or 3, the gesture before its scroll or
+      after, AppKit's mouse coalescing off, the lift held back 25 to 50 ms, or the reports
+      merged down to 60 a second (which would also add up to 16.7 ms of latency). Mac Mouse
+      Fix's fields 41, 134, 135 and 139 belong to its dock swipe (subtype 23, the branch its
+      `TouchSimulator.m` marks "pre-macOS 27"; on 27 it builds the dock swipe from an IOHIDEvent,
+      since the window server ignores those fields there) and not to a scroll's gesture, which
+      `GestureScrollSimulator.m` gives only 55, 110, 116, 119 and 132, as ours does. Set on the
+      scroll's gesture anyway, 41 and 134 changed nothing a guest could tell apart from its
+      noise (14 of 20 turned without, 8 of 20 with). Swipes of a trackpad's shape, 10 points a
+      report, or 150 ms at 1 to 3 points a millisecond, turned 30 of 30 at 60 and at 120 on
+      this Mac. So nothing re-paces the reports.
+    - *What 120 was, in a guest.* On macOS 26.6 in a tart guest the same test turned the page
+      in 1 run of 7. The guest's scheduler held posts up to 45 ms and then let two go at once,
+      and the lift's verdict reads the events' timestamps, which were the moments they were
+      posted: 18 of 36 swipes turned. Posted at the client's spacing instead, 34 of 36 did
+      ("A gesture's events keep the client's spacing").
+    The pairing stays behind the tile's toggle, off by default, so a stream scrolls as before
+    until someone asks for its gestures. The toggle is read once per gesture, at its first
+    phase, so turning it over mid-swipe never leaves AppKit a gesture with no end or an end
+    with no start (`a_scroll_gesture_keeps_its_pairing_to_its_end`), and a stream that moves to
+    another display keeps it (`a_display_switch_keeps_the_gestures_sent`, `slopty-workerd`). A
+    scroll whose start never reached this injector goes on unpaired
+    (`a_scroll_that_never_opened_here_goes_unpaired`), and a stream that ends mid-gesture
+    cancels each gesture under way, its coast and a pinch or rotation too
+    (`a_stream_ending_mid_gesture_cancels_it`); the client starts a new pinch on each start,
+    whatever the last one left (`a_pinch_keeps_its_side_when_the_gestures_turn_over`).
+  - *Proof, live.* `tests/inject.rs` posts through the real injector and the real
+    `CGEventPostToPid` to an application the test starts itself (`tests/support/gesture_app.rs`)
+    and to nothing else: the injector's route is checked to be that pid before anything is
+    posted. It runs in a guest of the VM lane (`cargo xtask vm live -p slopty-input --test
+    inject`), never on a Mac someone works at. The app's window is clear, shadowless and at the
+    desktop's level, and it reads each event off its queue before AppKit dispatches it, so what
+    is checked is the event AppKit made: every scroll phase and coast as posted, pinch and
+    rotation phases with their amounts, one smart zoom, and exactly one swipe per swipe with its
+    direction. Whether a view gets them is the next entries' ("A window stream's pointer
+    reaches the view"). Swipe tracking needs a gesture's point on a display: 8 000 points off
+    every screen it cancels at once.
+  - *The client.* A pinch over a picture on the Mac zooms the picture, as the 2026-09-28 ruling
+    has it and as Jump Desktop and Screens do with theirs. A tile can instead send its
+    trackpad's gestures to the remote app (`screen::ToggleRemoteGestures`, "Gestures to the
+    remote app"): the worker is told (`Gestures`), a pinch that begins on the picture then goes
+    as `Magnify` with GPUI's phases (its may-begin folded into began), at the stream pixel
+    under the fingers, followed to its end off the picture at the picture's nearest edge (as a
+    drag is), and the picture keeps its zoom. Off by default until the palette offers the
+    command, which lives with the workspace's keymap.
+    Rotation, smart zoom and the swipe reach nothing yet: the pinned gpui-fast (`f994c34`)
+    registers no `rotateWithEvent:` or `smartMagnifyWithEvent:`, has no `PlatformInput` for
+    either, and turns `NSEventTypeSwipe` into a `Navigate` mouse button on its end alone, with
+    no vertical swipe and nothing to tell it from a mouse's side button.
+  - Tests: `a_gesture_reads_back_as_appkit_reads_the_trackpad` (the backend, read back through
+    `NSEvent`; a scroll's gesture shows its type and each phase, and AppKit has no accessor for
+    its travel: `deltaX` and `deltaY` read 0 and `gestureAmount` raises), `gestures_reach_the_target_as_the_trackpad_makes_them` and
+    `a_trackpad_scroll_comes_with_its_gesture_and_its_coast_alone` (the injector),
+    `each_gesture_reaches_the_app_as_a_trackpad_s_does`,
+    `a_swipe_between_pages_follows_the_fingers_only_with_their_gesture` and
+    `a_trackpad_scroll_s_post_cost` (live, `tests/inject.rs`), and
+    `a_pinch_goes_to_the_remote_app_when_its_gestures_are_sent` (`slopty-ui`).
+
+- ✅ **A press, its drags and its release share one event number** (2026-09-30, M1 Max, macOS
+  27.0). The injector never set `kCGMouseEventNumber`, and on macOS 27 AppKit follows a drag by
+  it: a press, the drags after it and its release must carry the same one, or the drag is lost
+  (a window dragged by its title bar among them).
+  - *What went.* Read back by the test's own app, a press, its drags and its release posted
+    without it all carry event number 0: no press of their own at all.
+  - *Now.* Each press takes the next number of a counter the whole worker process shares, so
+    no two presses on two streams share one; its drags (whichever button drags, which also now
+    carries its own button number rather than the left's) and its release carry it, and
+    `release_all` lets go under it. A move with nothing held carries none.
+  - *Proof.* `a_press_its_drags_and_its_release_share_one_number` (the injector, every button);
+    live, `a_drag_reaches_the_app_under_its_press_number` (`tests/inject.rs`): the app reads the
+    press, its drags (AppKit coalesces the ones that wait in its queue) and its release under
+    one number and the next press under another. The app reads presses and does not dispatch
+    them, and the test's backend takes the app to be active, so nothing raises it over the desktop
+    of whoever is at the Mac; whether AppKit's own drag tracking refuses number 0 is therefore
+    not seen here, only that the numbers now are what a real press carries.
+
+- ✅ **A window stream's pointer reaches the view: bound to its window, its app switched to by
+  the window server** (2026-09-30, macOS 26.6.2 in a tart guest; the drag-and-drop P0 (4) left
+  it to this lane, `docs/decisions/audio.md`). A pointer event posted to a pid reaches the
+  app's queue with window 0, and AppKit hands it to no view. A regular app's key window is no
+  exception, so no click, scroll or pinch of a window stream reached any view.
+  - *Probe* (a regular app of the test's own at the normal level, 2 × 5 × 2 cases: its window
+    uncovered or covered by another of its kind; not activated, asked through
+    `NSRunningApplication`, switched to through SkyLight with and without its make-key record,
+    or clicked on its title through the HID tap; each event posted plain, or bound). Posted
+    plain, nothing reached the view in any of the 20. Bound (the event's window in field 51 and
+    its point in the window through `CGEventSetWindowLocation`, both CoreGraphics' own and in
+    no header): the scroll reaches the view always, covered or not, active or not; a press on
+    an app not active is AppKit's click-through question (`acceptsFirstMouse:`), and with the
+    common answer NO it reaches no view and raises nothing; on an active app whose window is not
+    key the first press makes it key, and the rest reach the view; on an active app with its
+    window key, every press, drag, release, scroll and pinch reaches the view.
+  - *Activation.* Asked through `NSRunningApplication` from a process in the background,
+    which the worker is, macOS never activated the app while another app was active: since
+    macOS 14 an app becomes active only when the active one yields to it. When no app was
+    active it sometimes did, which is how it seemed to work before. The window server's own
+    switch does it at once (active and key in 11 ms): `_SLPSSetFrontProcessWithOptions` with
+    the window and `kCPSUserGenerated`, then the two make-key records `SLPSPostEventRecordTo`
+    takes, as yabai, AltTab and Hammerspoon switch windows. They are private to SkyLight, so
+    `backend::front` finds them at run time and falls back to `NSRunningApplication` without
+    them.
+  - *Now.* A window stream's pointer events go bound to the window where its bounds last put it
+    (`Route::Window`); its keys and text go to the pid, which delivers them to the key window as
+    a keyboard's are. Right presses still go through the HID tap for the menu. Before a press or
+    a key, an owner that is not the active app is switched to with the streamed window key, on
+    the same 250 ms check as before, and so is every owner when the tile takes focus (`Focus`).
+    So the first click on a window stream of an app in the background reaches the view, and so
+    does its key. An owner already active with another of its windows key keeps that one until
+    the tile's focus or a click makes the streamed one key.
+  - Tests (the VM lane, `cargo xtask vm live -p slopty-input --test inject`):
+    `a_window_stream_s_pointer_reaches_a_regular_app_s_view_bound_to_its_window`,
+    `only_the_window_server_s_switch_activates_from_the_background` and
+    `a_click_on_an_app_in_the_background_reaches_its_view` (the real backend: press, drag,
+    release and a key reach the view of an app that was behind another's);
+    `a_window_stream_s_pointer_is_bound_to_its_window_and_its_keys_are_not` (the injector). The
+    probe's matrix is in MEASUREMENTS, "a window stream's pointer reaches the view".
+  - Open: macOS 27 (no 27 guest yet). The switch posts two records the app reads as a press and
+    a release with no point (`x=NaN`), as yabai's do; no view takes them.
+
+- ✅ **A gesture's events keep the client's spacing** (2026-09-30, macOS 26.6.2 in a tart guest).
+  The app a gesture reaches judges it by its events' timestamps: whether a swipe between pages
+  turns the page when the fingers lift, how fast a scroll or a pinch was going. Stamped as it is
+  posted, an event carries the path's delay: a report held up by the network or the worker's
+  scheduler and then posted with the next turns a steady swipe into a stop and a jerk.
+  - *Wire.* `ScreenInput::Scroll`, `Magnify` and `Rotate` carry `time_us`: when the client's
+    view read them, microseconds on its own monotonic clock, low 32 bits
+    (`ScreenInput::time_us`). GPUI hands over no time of AppKit's, so the view's own moment it
+    is. Goldens `client_screen_scroll`, `client_screen_magnify`, `client_screen_rotate`.
+  - *Worker.* The injector's `Timeline` stamps each event of a gesture (a precise scroll, its
+    gesture, its coast, a pinch, a rotation) at its client stamp plus the least delay any event
+    of that gesture has had from the client so far, in nanoseconds of uptime, which
+    `NSEvent.timestamp` reads in seconds. An event held up is stamped where it would have been
+    with no hold-up, since one before it came faster; the delay itself is never taken off, so
+    no stamp is later than its post, and none goes back. The two Macs' clocks are never
+    compared: only the delay's changes within one gesture count. A gesture's first phase, or a
+    step of more than a second or back, starts the timeline again. A wheel's lines keep the
+    system's stamp.
+  - *Numbers* (MEASUREMENTS, "a gesture's events keep the client's spacing"): swipes of twelve
+    10-point reports at 120 a second, arriving steadily, jittered or in pairs through a guest
+    that also holds posts up: 18 of 36 turned at post-time stamps, 34 of 36 at the client's
+    spacing. It costs the input thread 70 ns a scroll, a read of the host clock.
+  - Tests: `a_gesture_held_up_on_the_way_keeps_the_client_s_spacing`,
+    `a_gesture_s_timeline_starts_again_and_its_coast_carries_on`,
+    `a_hostile_client_s_stamps_never_go_back_or_ahead` (the injector);
+    `a_stamped_scroll_or_gesture_carries_its_time` (the backend, read back through `NSEvent`);
+    `a_gesture_s_reports_carry_when_they_were_read` (`slopty-ui`); live,
+    `a_swipe_between_pages_follows_the_fingers_only_with_their_gesture`, now stamped by its
+    client at 120 a second, which gives a paired swipe a second go since a guest can still hold
+    a whole swipe up.
+  - Open: a stamp read where AppKit made the event (a GPUI event time from the gpui-fast
+    lane) would take the client's main thread out of it too. Pointer moves are not stamped.
+
+- ✅ **The injector feeds a drag through the HID tap** (2026-09-30; phase P2 of "Drag and drop
+  lands at the point", `docs/decisions/audio.md`, the injector's half only). The drag manager
+  follows the real pointer, and a pid-posted drag starts no session (P0 (4)).
+  - `Injector::enter_drag` switches a window stream's owner to the front (the HID tap reaches
+    whatever window is on top), keeps where the real pointer is, and from then on sends every
+    pointer event of the stream through the HID tap; keys still go to the pid. `press_at` posts
+    the left press at the source and a drag `DRAG_START` (2) points on, under one new number
+    (`press_number`), so the source's view begins its session. `nudge(now)` moves a drag resting
+    in one place a point off and back, once per `NUDGE_EVERY` (100 ms) since the last drag event,
+    which springs a spring-loaded target (P0 (8b)); the release lands where the drag rests.
+    `cancel_drag` posts Escape through the HID tap before the release (P0 (3)), with no
+    modifier but Caps Lock's, since ⌘ or ⌥⌘ held from the drag would make it a system shortcut.
+    `leave_drag` lets go of a press still held where the drag rests (the drop), puts a window
+    stream's real pointer back, and returns the stream to its own route. A stream that ends
+    mid-drag cancels it (`release_all`, and dropping the injector), so nothing is dropped that
+    nobody dropped. A press held on the stream's own route before the drag is let go there
+    first, and a `press_at` that fails leaves no drag on.
+  - Cost: a move in a drag is 69 ns of the injector's own work against 145 ns outside one (no
+    placed pointer to write).
+  - Tests: `a_drag_goes_through_the_hid_tap_under_one_number_and_the_pointer_goes_back`,
+    `a_display_stream_s_drag_leaves_the_pointer_where_it_ended`,
+    `the_first_drag_stays_on_the_target_and_each_press_is_new`,
+    `a_resting_drag_is_nudged_a_point_each_way`, `cancelling_a_drag_escapes_before_the_release`,
+    `a_drag_s_escape_carries_no_modifier_but_caps_lock`, `a_press_at_a_window_gone_leaves_no_drag`,
+    `a_drag_lets_go_of_a_press_on_its_own_route_first` and `a_stream_ending_mid_drag_cancels_it`.
+    The worker's `DragIn` and the helper that use it are the rest of P2.

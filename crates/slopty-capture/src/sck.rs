@@ -6,8 +6,8 @@ use slopty_core::WindowId;
 use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, WindowInfo};
 
 use crate::source::{
-    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Rect,
-    TargetWindow, Went, WindowState,
+    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
+    Rect, TargetWindow, Went, WindowState,
 };
 use crate::{Capture, HideWatch, Shareable, Target, geometry};
 
@@ -91,6 +91,10 @@ impl CaptureSource for ScreenCaptureKit {
 
     fn now_us() -> u64 {
         crate::host_now_us()
+    }
+
+    fn console() -> Option<Console> {
+        crate::console()
     }
 
     fn target_bounds(target: CaptureTarget) -> Option<Rect> {

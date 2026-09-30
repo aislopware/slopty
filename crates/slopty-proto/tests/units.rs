@@ -15,6 +15,24 @@ mod units {
     use slopty_proto::{ClientMsg, WorkerMsg};
     use zerocopy::FromZeros as _;
 
+    /// A stripe's media stream names its stream and its place, and the top stripe's is the
+    /// stream's own.
+    #[test]
+    fn a_stripes_media_stream_names_its_stream() {
+        use slopty_core::StreamId;
+        use slopty_proto::screen::Stripe;
+        for id in [1, 7, 0x7fff_ffff] {
+            let stream = StreamId(id);
+            assert_eq!(Stripe::media_of(stream, 0), stream);
+            let lower = Stripe::media_of(stream, 1);
+            assert_ne!(lower, stream);
+            assert_eq!(Stripe::stream_of(lower), (stream, 1));
+            assert_eq!(Stripe::stream_of(stream), (stream, 0));
+        }
+        assert_eq!(Stripe::MAX, 2);
+        assert_eq!(slopty_proto::media::FRAME_PREFIX_BYTES, 20);
+    }
+
     #[test]
     fn the_limits_are_the_numbers_the_docs_name() {
         assert_eq!(FILE_BYTES, 16_777_216);
@@ -39,11 +57,12 @@ mod units {
             (2, Kind::Audio),
             (3, Kind::Cursor),
             (4, Kind::Heartbeat),
+            (5, Kind::Clock),
         ] {
             assert_eq!(Kind::from_u8(v), Some(kind));
             assert_eq!(kind as u8, v);
         }
-        assert_eq!(Kind::from_u8(5), None, "a terminal copy is a channel of its own");
+        assert_eq!(Kind::from_u8(6), None, "no kind past the clock echo");
         assert_eq!(
             [
                 flags::KEYFRAME,

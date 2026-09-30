@@ -27,6 +27,13 @@ pub(super) struct Surface {
     focus_pending: bool,
 }
 
+impl Surface {
+    /// Whether [`WorkspaceView::settle_search_focus`] has any focus to give.
+    pub(super) const fn focus_asked(&self) -> bool {
+        self.focus_pending || (!self.shown && self.back_to.is_some())
+    }
+}
+
 /// The palette's name for [`super::actions::SearchInFiles`].
 pub(super) const SEARCH_IN_FILES: &str = "Search in files";
 
@@ -108,11 +115,6 @@ impl WorkspaceView {
     /// The surface while it is shown, for the frame to draw over the strip.
     pub(super) fn search_drawn(&self) -> Option<Entity<ProjectSearch>> {
         self.search.kept.as_ref().filter(|_| self.search.shown).map(|(_, view)| view.clone())
-    }
-
-    /// Whether the surface is up, which covers the strip as the palette does.
-    pub(super) const fn search_shown(&self) -> bool {
-        self.search.shown
     }
 
     /// The surface's search, shown or kept, for the tests to read.

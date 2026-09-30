@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Subcommand};
 use serde::Serialize;
-use slopty_core::{DisplayId, WindowId};
+use slopty_core::{DisplayId, SessionId, WindowId};
 use slopty_net::client::bind_client;
 use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
@@ -17,7 +17,7 @@ use slopty_proto::orchestration::{
 };
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::search::SearchQuery;
-use slopty_proto::server::Role;
+use slopty_proto::server::{Role, Vouch};
 use slopty_tools::ops::{
     self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES_PAGE, DEFAULT_MAX_LINES,
     DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS, Spec,
@@ -103,6 +103,16 @@ pub enum VerbCmd {
     Agent {
         #[command(subcommand)]
         cmd: AgentCmd,
+    },
+    /// Projects: one goal many agents work on across the workers, as a tree of tasks.
+    Project {
+        #[command(subcommand)]
+        cmd: Box<crate::projects::ProjectCmd>,
+    },
+    /// A project's tasks: make, claim paths, update, and start their agents.
+    Task {
+        #[command(subcommand)]
+        cmd: Box<crate::projects::TaskCmd>,
     },
     /// Type into a terminal.
     Send {
@@ -482,12 +492,12 @@ pub struct SizeArgs {
 }
 
 impl SizeArgs {
-    fn size(&self) -> Option<Size> {
+    pub fn size(&self) -> Option<Size> {
         Some(Size { cols: self.cols?, rows: self.rows? })
     }
 }
 
-fn key_value(s: &str) -> Result<(String, String), String> {
+pub fn key_value(s: &str) -> Result<(String, String), String> {
     s.split_once('=')
         .filter(|(key, _)| !key.is_empty())
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -565,8 +575,7 @@ pub async fn run(
 ) -> Result<()> {
     let endpoint = bind_client()?;
     let address = link::locate(server, data_dir, &endpoint).await?;
-    let role = Role::Client { name: format!("slopty @ {}", crate::client::machine_name()) };
-    let result = match Link::connect(&endpoint, &address, role).await {
+    let result = match Link::connect(&endpoint, &address, role()).await {
         Ok(link) => execute(cmd, &link, json, key).await,
         Err(e) => Err(e),
     };
@@ -574,7 +583,32 @@ pub async fn run(
     result
 }
 
-fn print_json(value: &impl Serialize) -> Result<()> {
+/// Who this CLI speaks for: inside a Slopty terminal the server decides by what runs there
+/// (an agent's shell never speaks for the person); outside one, the person.
+fn role() -> Role {
+    let name = format!("slopty @ {}", crate::client::machine_name());
+    match session() {
+        Some(session) => Role::Shell { name, session, token: token() },
+        None => Role::Client { name },
+    }
+}
+
+/// The Slopty terminal this runs in (`SLOPTY_SESSION`), if any.
+fn session() -> Option<SessionId> {
+    std::env::var(slopty_proto::ctl::SESSION_ENV).ok()?.trim().parse().ok()
+}
+
+/// The token the server gave the task terminal this runs in (`SLOPTY_AGENT_TOKEN`), if any.
+fn token() -> Option<String> {
+    std::env::var(slopty_proto::project::AGENT_TOKEN_ENV).ok().filter(|t| !t.trim().is_empty())
+}
+
+/// The proof of the task terminal an agent's tools speak from, when they run in one.
+pub fn vouch() -> Option<Vouch> {
+    Some(Vouch { session: session()?, token: token()? })
+}
+
+pub fn print_json(value: &impl Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
@@ -825,6 +859,8 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
             let moved = bulk::download(&mut res, worker.as_deref(), path, &local).await?;
             print_moved(&moved, json)?;
         }
+        VerbCmd::Project { cmd } => crate::projects::project(*cmd, link, json, key).await?,
+        VerbCmd::Task { cmd } => crate::projects::task(*cmd, link, json, key).await?,
     }
     Ok(())
 }

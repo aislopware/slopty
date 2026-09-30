@@ -194,6 +194,7 @@ mod tests {
             .arg(data.path())
             .args(args)
             .env_remove("SLOPTY_SERVER")
+            .env_remove("SLOPTY_SESSION")
             .env("RUST_LOG", "warn")
             .kill_on_drop(true);
         cmd
@@ -250,10 +251,12 @@ mod tests {
                 }],
             }])
         );
-        // The directory and the terminals, each carrying its agent: no status request follows.
-        let verbs = [fake.next_verb().await, fake.next_verb().await];
+        // The directory, the facts and the terminals, each carrying its agent: no status
+        // request follows.
+        let verbs = [fake.next_verb().await, fake.next_verb().await, fake.next_verb().await];
         assert!(verbs.contains(&Verb::ListWorkers), "{verbs:?}");
         assert!(verbs.contains(&Verb::ListTerminals { worker: None }), "{verbs:?}");
+        assert!(verbs.contains(&Verb::WorkerFacts { worker: None }), "{verbs:?}");
         assert!(fake.verbs.try_recv().is_err(), "no status request per terminal");
     }
 
@@ -372,7 +375,7 @@ mod tests {
         mcp.request(1, "tools/list", json!({})).await;
         let list = mcp.reply(1).await;
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 32, "{list}");
+        assert_eq!(tools.len(), 43, "{list}");
         assert_eq!(tools[0]["name"], "list_workers");
         let read_output = tools.iter().find(|t| t["name"] == "read_output").unwrap();
         assert!(read_output["description"].as_str().unwrap().contains("`next`"), "{read_output}");
@@ -381,7 +384,7 @@ mod tests {
         let workers = tool_json(&mcp.reply(2).await);
         assert_eq!(workers[0]["name"], "mac-studio");
         assert_eq!(workers[0]["waiting"][0]["reason"], "permission");
-        let Role::Agent { name } = fake.next_role().await else { panic!("an agent") };
+        let Role::Agent { name, .. } = fake.next_role().await else { panic!("an agent") };
         assert!(name.starts_with("slopty mcp @ "), "{name}");
 
         // An agent that comes to need a human is announced unasked.

@@ -61,6 +61,11 @@ pub const DEFAULT_BUDGET_GB: u64 = 160;
 /// writes about 35 GB, so a build that starts above the floor finishes before the disk does.
 pub const DEFAULT_FLOOR_GB: u64 = 50;
 
+/// What each fork or study checkout's build output under `.research/` may hold, in GB
+/// (`SLOPTY_FORK_BUDGET_GB`). The gpui-fast and gpui-kit forks each grew past 85 GB in a day of
+/// syncs and A/B builds and filled the volume (2026-09-30), since nothing pruned them.
+pub const DEFAULT_FORK_BUDGET_GB: u64 = 40;
+
 /// Nothing used this recently is deleted for the budget: the build that just ran, and the tests
 /// it is about to run from those binaries.
 const GUARD: Duration = Duration::from_secs(3600);
@@ -198,16 +203,92 @@ impl Report {
     }
 }
 
-/// `cargo xtask prune`: every profile directory, waiting for busy ones if asked, with a report.
+/// `cargo xtask prune`: every profile directory, waiting for busy ones if asked, with a report;
+/// the fork checkouts' first, so the floor is met from them before Slopty's own.
 pub fn run(opts: Options) -> Result<()> {
-    let target = repo_root()?.join("target");
+    let root = repo_root()?;
+    let fork_limits = Limits { budget: fork_budget()?, floor: opts.limits.floor };
+    for fork in fork_targets(&root) {
+        let report =
+            prune(&fork, Options { limits: fork_limits, ..opts }, SystemTime::now(), &free_space)?;
+        println!("▶ {fork}");
+        print(&fork, &report, opts.dry_run);
+    }
+    let target = root.join("target");
     let report = prune(&target, opts, SystemTime::now(), &free_space)?;
+    println!("▶ {target}");
     print(&target, &report, opts.dry_run);
     Ok(())
 }
 
+/// `SLOPTY_FORK_BUDGET_GB`, else [`DEFAULT_FORK_BUDGET_GB`], in bytes.
+fn fork_budget() -> Result<u64> {
+    let gb = match std::env::var("SLOPTY_FORK_BUDGET_GB") {
+        Ok(v) => v
+            .trim()
+            .parse()
+            .with_context(|| format!("SLOPTY_FORK_BUDGET_GB={v} is not a number"))?,
+        Err(_) => DEFAULT_FORK_BUDGET_GB,
+    };
+    Ok(u64::saturating_mul(gb, GB))
+}
+
+/// The build directories of the checkouts under `.research/`: each `target*` directory of a
+/// checkout that holds cargo's `CACHEDIR.TAG`.
+pub fn fork_targets(root: &Utf8Path) -> Vec<Utf8PathBuf> {
+    let dirs = |dir: &Utf8Path| -> Vec<Utf8PathBuf> {
+        dir.read_dir_utf8().map_or_else(
+            |_| Vec::new(),
+            |entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.path().to_owned())
+                    .collect()
+            },
+        )
+    };
+    let mut out: Vec<Utf8PathBuf> = dirs(&root.join(".research"))
+        .iter()
+        .flat_map(|checkout| dirs(checkout))
+        .filter(|d| d.file_name().is_some_and(|n| n.starts_with("target")))
+        .filter(|d| d.join("CACHEDIR.TAG").is_file())
+        .collect();
+    out.sort();
+    out
+}
+
+/// The fork checkouts' pass, never failing its caller: idle units, then each fork's budget and
+/// the volume's floor.
+fn prune_forks(limits: Limits, quiet: bool) {
+    let pass = || -> Result<()> {
+        let root = repo_root()?;
+        let opts = Options {
+            idle: Duration::from_secs(DEFAULT_IDLE_HOURS.saturating_mul(3600)),
+            limits: Limits { budget: fork_budget()?, floor: limits.floor },
+            wait: false,
+            dry_run: false,
+        };
+        for fork in fork_targets(&root) {
+            let report = prune(&fork, opts, SystemTime::now(), &free_space)?;
+            let mut freed = report.idle;
+            freed.add(report.budget);
+            if !(quiet && freed.is_empty()) {
+                println!("  prune {fork}: {freed}; {} left", gb(report.size_after));
+            }
+        }
+        Ok(())
+    };
+    if let Err(e) = pass() {
+        eprintln!("  prune of the fork checkouts skipped: {e:#}");
+    }
+}
+
 /// The pass after `check` and `gate`: skips busy directories, never fails the command.
 pub fn auto() {
+    if let Ok(limits) = Limits::from_env() {
+        prune_forks(limits, true);
+    }
     let pass = || -> Result<Report> {
         let opts = Options {
             idle: Duration::from_secs(DEFAULT_IDLE_HOURS.saturating_mul(3600)),
@@ -244,6 +325,11 @@ pub fn auto() {
 pub fn ensure_room(target: &Utf8Path) -> Result<()> {
     let limits = Limits::from_env()?;
     std::fs::create_dir_all(target).with_context(|| format!("create {target}"))?;
+    if free_space(target)? >= limits.floor {
+        return Ok(());
+    }
+    // The forks' build output rebuilds without holding up a gate: it goes first.
+    prune_forks(limits, false);
     if free_space(target)? >= limits.floor {
         return Ok(());
     }

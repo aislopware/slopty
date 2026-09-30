@@ -497,8 +497,9 @@ mod tests {
 
     /// A played agent in a quiet shell: its conversation read over the CLI, which makes
     /// orchestration follow it; a permission prompt the relay asks is held, shown on the next
-    /// read, answered over MCP under a key (and again, answering the first), and the relay prints
-    /// the denial. Then a still picture of a window no worker has, so nothing is captured.
+    /// read, refused when an agent answers it over MCP, answered by the person over the CLI under
+    /// a key (and again, answering the first), and the relay prints the denial. Then a still
+    /// picture of a window no worker has, so nothing is captured.
     async fn agent_reached(stack: &ServerStack, worker: &str) -> Result<()> {
         let term = open_bash(stack, "e2e agent").await?;
         let session = term.rsplit('/').next().context("a session in the term")?.to_owned();
@@ -554,11 +555,28 @@ mod tests {
         .await?;
         ensure!(held["tool"] == "Bash", "{held}");
         let ask = held["ask"].as_u64().context("ask")?;
-        let answer = json!({
-            "term": term, "ask": ask, "verdict": "deny", "message": "not the build folder",
-            "idempotency_key": "e2e-answer",
+        // Only the person answers: an agent asking over MCP is refused, and the prompt waits.
+        let params = json!({
+            "name": "answer_permission",
+            "arguments": { "term": term, "ask": ask, "verdict": "allow" },
         });
-        let done = tool(stack, 40, "answer_permission", answer.clone()).await?;
+        let by_agent = stack.mcp(40, "tools/call", params).await?;
+        let refused = by_agent["error"].is_object() || by_agent["result"]["isError"] == json!(true);
+        ensure!(refused, "an agent cannot answer a permission: {by_agent}");
+        let still = stack.slopty(&["agent", "conversation", &term]).await?;
+        ensure!(still["held"][0]["ask"] == json!(ask), "the prompt still waits: {still}");
+        let ask_arg = ask.to_string();
+        let answer = [
+            "--idempotency-key",
+            "e2e-answer",
+            "agent",
+            "answer",
+            term.as_str(),
+            ask_arg.as_str(),
+            "--deny",
+            "not the build folder",
+        ];
+        let done = stack.slopty(&answer).await?;
         ensure!(done == json!({ "ok": true }), "{done}");
         let out = tokio::time::timeout(STEP, asked.wait_with_output()).await??;
         let printed: Value = serde_json::from_slice(&out.stdout).with_context(|| {
@@ -567,14 +585,10 @@ mod tests {
         let decision = &printed["hookSpecificOutput"]["decision"];
         ensure!(decision["behavior"] == "deny", "{printed}");
         ensure!(decision["message"] == "not the build folder", "{printed}");
-        let again = tool(stack, 41, "answer_permission", answer).await?;
+        let again = stack.slopty(&answer).await?;
         ensure!(again == json!({ "ok": true }), "the same key answers the first: {again}");
-        let params = json!({
-            "name": "answer_permission",
-            "arguments": { "term": term, "ask": ask, "verdict": "allow" },
-        });
-        let late = stack.mcp(42, "tools/call", params).await?;
-        ensure!(late["result"]["isError"] == json!(true), "a second answer finds nothing: {late}");
+        let late = stack.slopty(&["agent", "answer", &term, &ask_arg, "--allow"]).await;
+        ensure!(late.is_err(), "a second answer finds nothing: {late:?}");
 
         // A window no worker has: whether or not this one may record its screen, it answers
         // without a picture (Unsupported, or Invalid past the preflight).

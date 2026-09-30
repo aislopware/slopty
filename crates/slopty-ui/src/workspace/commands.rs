@@ -78,6 +78,12 @@ impl WorkspaceView {
         let kind = self.focused().and_then(|tile| Some((tile, self.item(tile)?.kind.clone())));
         match kind {
             Some((_, ItemKind::Terminal { session }))
+                if self.board_shown(session)
+                    && let Some(board) = self.board_view(session).cloned() =>
+            {
+                board.update(cx, |v, cx| v.focus(window, cx));
+            }
+            Some((_, ItemKind::Terminal { session }))
                 if let Some(view) = self.terminals.get(&session) =>
             {
                 let handle = gpui::Focusable::focus_handle(view.read(cx), cx);
@@ -404,6 +410,19 @@ impl WorkspaceView {
     ) {
         if let Some(view) = self.active_screen() {
             view.update(cx, ScreenView::toggle_trackpad);
+        }
+    }
+
+    /// Gestures to the remote app for the active picture, when the palette runs it with the
+    /// focus elsewhere: the focused picture takes the action itself.
+    pub fn toggle_remote_gestures(
+        &mut self,
+        _: &crate::screen::ToggleRemoteGestures,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.active_screen() {
+            view.update(cx, ScreenView::toggle_remote_gestures);
         }
     }
 

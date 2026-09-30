@@ -28,8 +28,10 @@ mod runner;
 mod setup;
 mod sign;
 mod soak;
+mod tailnet;
 mod tools;
 mod upstream;
+mod vm;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -234,6 +236,17 @@ enum Cmd {
         #[command(subcommand)]
         cmd: upstream::UpstreamCmd,
     },
+    /// macOS guests for the live tests that move the pointer, post HID events or need TCC grants:
+    /// `create`, `start`/`stop`, `ssh`, `exec`, `deploy`, `live -p <crate> -- <nextest args>`,
+    /// `e2e`, `list`, `prune`.
+    Vm(vm::VmOpts),
+    /// A real tailnet on loopback for the live tests: Headscale and two userspace `tailscaled`
+    /// nodes with a Slopty grant between them (`up` holds it until Ctrl-C or `down`; `status`
+    /// prints what a test reads).
+    Tailnet {
+        #[command(subcommand)]
+        cmd: tailnet::TailnetCmd,
+    },
 }
 
 fn main() -> Result<()> {
@@ -305,5 +318,7 @@ fn main() -> Result<()> {
         Cmd::Linux { cmd } => linux::run(&sh, cmd.unwrap_or(linux::LinuxCmd::Build)),
         Cmd::Upstream { cmd } => upstream::run(&sh, &cmd),
         Cmd::TestRunner { binary, args } => runner::exec(&binary, &args),
+        Cmd::Vm(opts) => vm::run(&sh, &opts),
+        Cmd::Tailnet { cmd } => tailnet::run(&cmd),
     }
 }

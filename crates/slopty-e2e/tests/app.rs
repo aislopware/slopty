@@ -18,8 +18,16 @@ mod conversation;
 mod gallery;
 
 #[cfg(test)]
-#[path = "app/quick.rs"]
-mod quick;
+#[path = "app/hangs.rs"]
+mod hangs;
+
+#[cfg(test)]
+#[path = "app/projects.rs"]
+mod projects;
+
+#[cfg(test)]
+#[path = "app/resume.rs"]
+mod resume;
 
 #[cfg(test)]
 #[path = "app/settings.rs"]
@@ -144,6 +152,10 @@ mod tests {
         slopty_e2e::harness::check_jetbrains_mono_face(dump.terminals[0].face.as_ref()).unwrap();
 
         drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
+        // The bar zle sets comes after the prompt, in a write of its own.
+        drv.wait_for("the shell reading its next line", STEP, |d| d.terminals[0].reads_a_line())
+            .await
+            .unwrap();
 
         // The frame the app draws, from its own renderer.
         let frame = drv.render(&render_path).await.unwrap();
@@ -502,6 +514,8 @@ mod tests {
         let render_path = stack.path("note.png");
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+        // A key sent before the first shell holds the keyboard reaches no action.
+        crate::gallery::first_shell(drv).await;
 
         // The note comes from the command palette: ⌘⇧P, "new note", ↩ — the same action the
         // shortcut runs, once the palette is gone and the keyboard is back.
@@ -556,6 +570,9 @@ mod tests {
 
         drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
 
+        drv.wait_for("the carets at their prompts", STEP, slopty_e2e::Dump::prompts_settled)
+            .await
+            .unwrap();
         let frame = drv.render(&render_path).await.unwrap();
         assert_matches("note", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
@@ -898,6 +915,9 @@ mod tests {
         assert_eq!(dump.workers.len(), 1, "{dump:#?}");
         assert_eq!(dump.workers[0].status, "connected", "{dump:#?}");
         drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
+        drv.wait_for("the carets at their prompts", STEP, slopty_e2e::Dump::prompts_settled)
+            .await
+            .unwrap();
         let frame = drv.render(&stack.path("server-unreachable.png")).await.unwrap();
         let fg = foreground_fraction(&frame);
         assert!(fg > 0.004, "the degraded frame is blank ({fg:.4} foreground)");

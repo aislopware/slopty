@@ -34,6 +34,7 @@ fn opened(
             width,
             height,
             scale: 2.0,
+            stripes: Vec::new(),
         };
         v.screen_event(key, event, cx);
     });

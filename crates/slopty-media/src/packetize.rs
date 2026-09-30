@@ -51,6 +51,9 @@ pub struct EncodedFrame<'a> {
     pub discardable: bool,
     /// Capture time, worker monotonic microseconds (low 32 bits).
     pub capture_ts_us: u32,
+    /// The stripes coded from this capture ([`FramePrefix::stripes`]); zero for a stream coded
+    /// as one picture.
+    pub stripes: u8,
 }
 
 /// How a frame is cut up.
@@ -223,6 +226,8 @@ impl Packetizer {
             len: U32::new(u32::try_from(frame.data.len()).unwrap_or(u32::MAX)),
             capture_ts_us: U32::new(frame.capture_ts_us),
             ltr_token: U64::new(frame.ltr_token.unwrap_or(0)),
+            stripes: frame.stripes,
+            reserved: [0; 3],
         };
         let mut header = MediaHeader {
             channel: Channel::Media as u8,
@@ -365,7 +370,7 @@ mod tests {
 
     #[test]
     fn layout_balances_fragments() {
-        for len in [1, 100, 1165, 1166, 1167, 2333, 30_000, 1_000_000] {
+        for len in [1, 100, 1161, 1162, 1163, 2333, 30_000, 1_000_000] {
             let l = layout(len, 200, MAX_PAYLOAD).unwrap();
             let total = len + FRAME_PREFIX_BYTES;
             assert!(
@@ -382,11 +387,11 @@ mod tests {
             ));
         }
         assert_eq!(
-            layout(1166, 200, MAX_PAYLOAD).unwrap(),
+            layout(1162, 200, MAX_PAYLOAD).unwrap(),
             Layout { data_count: 1, shard_bytes: 1182, parity_count: 2 }
         );
-        assert_eq!(layout(1167, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
-        assert_eq!(layout(1167, 200, MAX_PAYLOAD).unwrap().data_count, 2);
+        assert_eq!(layout(1163, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
+        assert_eq!(layout(1163, 200, MAX_PAYLOAD).unwrap().data_count, 2);
         assert!(matches!(layout(0, 200, MAX_PAYLOAD), Err(MediaError::Empty)));
         assert!(matches!(
             layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200, MAX_PAYLOAD),
@@ -416,7 +421,7 @@ mod tests {
         assert!(l.shard_bytes <= 1152 && l.shard_bytes.is_multiple_of(2), "{l:?}");
         assert!(usize::from(l.data_count) * l.shard_bytes >= 5000 + FRAME_PREFIX_BYTES);
         // Odd budgets round down; tiny budgets are floored.
-        assert_eq!(layout(100, 0, 1001).unwrap().shard_bytes, 116);
+        assert_eq!(layout(100, 0, 1001).unwrap().shard_bytes, 100 + FRAME_PREFIX_BYTES);
         assert!(layout(100_000, 0, 10).unwrap().shard_bytes <= MIN_PAYLOAD);
         // The packetizer cuts to the budget it was given.
         let shard = |budget: usize| {
@@ -431,6 +436,7 @@ mod tests {
                 ltr_refresh: false,
                 discardable: false,
                 capture_ts_us: 0,
+                stripes: 0,
             };
             p.packetize(&frame, 0, |_| {}).unwrap().layout.shard_bytes
         };
@@ -461,6 +467,7 @@ mod tests {
             ltr_refresh: false,
             discardable: false,
             capture_ts_us: 99,
+            stripes: 0,
         };
         let sent = p.packetize(&frame, 7, |_| {}).unwrap().clone();
         assert_eq!(sent.frame, 0);
@@ -497,6 +504,7 @@ mod tests {
             ltr_refresh: false,
             discardable: false,
             capture_ts_us: 0,
+            stripes: 0,
         };
         for _ in 0..HISTORY_FRAMES + 2 {
             p.packetize(&frame, 0, |_| {}).unwrap();
@@ -540,6 +548,7 @@ mod tests {
             ltr_refresh: false,
             discardable: false,
             capture_ts_us: 0,
+            stripes: 0,
         };
         let sent = p.packetize(&frame, 0, |_| {}).unwrap();
         let wire = sent.bytes();
@@ -578,6 +587,7 @@ mod tests {
             ltr_refresh: true,
             discardable: false,
             capture_ts_us: 5,
+            stripes: 0,
         };
         let sent = p.packetize(&frame, 3, |_| {}).unwrap().clone();
         let stride = HEADER_BYTES + sent.layout.shard_bytes;
@@ -637,6 +647,7 @@ mod tests {
                 ltr_refresh: false,
                 discardable: false,
                 capture_ts_us: 0,
+                stripes: 0,
             };
             for permille in [DEFAULT_PARITY_PERMILLE, 0] {
                 let mut p = Packetizer::new(StreamId(1));
@@ -675,6 +686,7 @@ mod tests {
             ltr_refresh: false,
             discardable: true,
             capture_ts_us: 1,
+            stripes: 0,
         };
         let flags_of = |sent: &SentFrame| MediaHeader::parse(&sent.datagrams[0]).unwrap().0.flags;
         let with_token = flags_of(p.packetize(&frame(Some(9)), 0, |_| {}).unwrap());

@@ -17,7 +17,7 @@ mod orchestrate {
     use slopty_pty::shell_integration::{self, ShellIntegration};
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::{
-        AgentFeed, Agents, list_commands, read_output, read_screen, send_input, wait_for,
+        AgentFeed, Agents, list_commands, may_type, read_output, read_screen, send_input, wait_for,
     };
     use slopty_worker::session::{self, SessionHandle, SessionStart};
     use tokio::sync::{broadcast, mpsc};
@@ -46,6 +46,39 @@ mod orchestrate {
         }
 
         fn forget(&self, _session: SessionId) {}
+    }
+
+    /// An agent table that says what the test set of every session: its agent and where its
+    /// status came from, and whether an agent ended there.
+    #[derive(Default)]
+    struct Said(parking_lot::Mutex<(Option<(AgentStatus, AgentSource)>, bool)>);
+
+    impl Said {
+        fn agent(&self, status: AgentStatus, source: AgentSource) {
+            *self.0.lock() = (Some((status, source)), false);
+        }
+
+        fn end(&self) {
+            *self.0.lock() = (None, true);
+        }
+    }
+
+    impl Agents for Said {
+        fn status(&self, _session: SessionId) -> Option<SessionAgent> {
+            let (status, source) = self.0.lock().0.clone()?;
+            Some(SessionAgent {
+                kind: AgentKind::ClaudeCode,
+                status,
+                source,
+                since_ms: WallMs::ZERO,
+            })
+        }
+
+        fn forget(&self, _session: SessionId) {}
+
+        fn ended(&self, _session: SessionId) -> bool {
+            self.0.lock().1
+        }
     }
 
     fn agent_event(session: SessionId, status: AgentStatus) -> WorkerMsg {
@@ -409,5 +442,55 @@ mod orchestrate {
             eprintln!("a whole walk {whole:?}; the dropped one ended {freed:?} after its drop");
             assert!(freed < whole / 3, "{freed:?} against {whole:?}");
         });
+    }
+
+    /// A terminal with an agent takes input only while the agent can: not before its hooks
+    /// speak, not while it asks a person, not while a person has a line typed and unsent, not
+    /// once it ended. A terminal with none takes anything.
+    #[tokio::test]
+    async fn nothing_is_typed_into_an_agent_that_cannot_take_it() {
+        use slopty_core::ClientId;
+        use slopty_proto::terminal::TermRequest;
+
+        let sh = shell().await;
+        let h = &sh.handle;
+        let said = Said::default();
+        let refused = |expects_agent| may_type(h, &said, expects_agent).err();
+        let code = |expects_agent| refused(expects_agent).map(|f| f.code);
+        assert_eq!(code(false), None, "no agent, no guard");
+        assert_eq!(code(true), Some(ErrorCode::AgentNotReady), "started as one, not seen yet");
+        for source in [AgentSource::Process, AgentSource::Title, AgentSource::Transcript] {
+            said.agent(AgentStatus::Idle, source);
+            assert_eq!(code(false), Some(ErrorCode::AgentNotReady), "{source:?}: no hook yet");
+        }
+        said.agent(AgentStatus::Idle, AgentSource::Hook);
+        assert_eq!(code(true), None);
+        said.agent(
+            AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+            AgentSource::Hook,
+        );
+        let blocked = refused(false).expect("blocked on a permission");
+        assert_eq!(blocked.code, ErrorCode::AwaitsPerson);
+        assert!(blocked.message.contains("the person's to answer"), "{blocked:?}");
+        said.agent(AgentStatus::Blocked(BlockReason::Question), AgentSource::Hook);
+        assert_eq!(code(false), Some(ErrorCode::AwaitsPerson));
+        said.agent(AgentStatus::Blocked(BlockReason::IdlePrompt), AgentSource::Hook);
+        assert_eq!(code(false), None, "idle at its prompt is not waiting on anyone");
+        said.agent(AgentStatus::Working, AgentSource::Hook);
+        assert_eq!(code(false), None);
+
+        let person = ClientId::new();
+        h.request(person, TermRequest::Raw(b"# half a line".to_vec())).unwrap();
+        let typing = refused(false).expect("a person's draft");
+        assert_eq!(typing.code, ErrorCode::AwaitsPerson);
+        assert!(typing.message.contains("typing"), "{typing:?}");
+        send_input(h, &text("# orchestration's own line\n")).await.unwrap();
+        assert!(h.draft_pending(), "orchestration's Enter does not send the person's line");
+        let enter = slopty_worker::orchestrate::keys::parse("enter", 1).unwrap();
+        h.request(person, TermRequest::Key(enter)).unwrap();
+        assert_eq!(code(false), None, "sent");
+
+        said.end();
+        assert_eq!(code(false), Some(ErrorCode::AgentExited), "its shell would read it");
     }
 }

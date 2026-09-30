@@ -9,13 +9,15 @@
 //! Every entry is asynchronous, so the agent never waits on the relay, except
 //! `PermissionRequest`: that one runs synchronously so the relay can answer the prompt with a
 //! decision from the conversation face ([`crate::permission`]). Until the worker answers, the
-//! relay prints nothing at once and Claude Code shows its own dialog, as before.
+//! relay prints nothing at once and Claude Code shows its own dialog, as before. A session's
+//! start, a prompt and a turn's end also run `slopty hook reports` synchronously, which hands
+//! over the reports waiting for the agent ([`crate::reports`]) and prints nothing otherwise.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
-use crate::{HOOK_EVENTS, HookEvent, permission, statusline};
+use crate::{HOOK_EVENTS, HookEvent, permission, reports, statusline};
 
 /// Hook `timeout` written to settings (seconds).
 const HOOK_TIMEOUT_S: u32 = 5;
@@ -57,6 +59,34 @@ pub fn relay_beside_this_binary() -> Option<PathBuf> {
     Some(exe.parent()?.join("slopty")).filter(|path| path.exists())
 }
 
+/// The flag that hands Claude Code MCP servers for one run. Always in its `=` form: the flag
+/// takes any number of values, so a value after a space would swallow a prompt that follows.
+pub const MCP_CONFIG_FLAG: &str = "--mcp-config";
+
+/// The name Slopty's tools go by in an agent it starts: its tools are `mcp__slopty__…`.
+pub const MCP_SERVER_NAME: &str = "slopty";
+
+/// The `--mcp-config` document that serves Slopty's tools through `<command> mcp` on stdio.
+///
+/// It names no server: `slopty mcp` finds it from the session's
+/// [`slopty_proto::project::SERVER_ENV`], which the agent passes on to its MCP servers.
+#[must_use]
+pub fn mcp_config(command: &str) -> Value {
+    json!({
+        "mcpServers": {
+            MCP_SERVER_NAME: { "type": "stdio", "command": command, "args": ["mcp"] }
+        }
+    })
+}
+
+/// `claude` arguments that also serve Slopty's tools through `<command> mcp`, for that run
+/// alone. The caller's own `--mcp-config`s are kept, as Claude Code merges every one it is given.
+#[must_use]
+pub fn with_mcp(args: Vec<String>, command: &str) -> Vec<String> {
+    let flag = format!("{MCP_CONFIG_FLAG}={}", mcp_config(command));
+    std::iter::once(flag).chain(args).collect()
+}
+
 /// `claude` arguments that also register the relay at `command`, for that run alone, so an
 /// agent Slopty starts reports its status whatever this machine's settings say.
 ///
@@ -77,6 +107,44 @@ pub fn with_relay(args: Vec<String>, command: &str, cwd: &Path) -> Vec<String> {
 
 /// [`with_relay`] with the user settings file named.
 fn with_relay_for(args: Vec<String>, command: &str, cwd: &Path, user: &Path) -> Vec<String> {
+    with_settings(args, cwd, |doc| {
+        install(doc, command);
+        wrap_status_line(doc, command, cwd, user);
+    })
+}
+
+/// The setting that keeps a session out of the mode that asks no permission at all, whatever
+/// its flags or the person's settings say
+/// (<https://code.claude.com/docs/en/settings-reference>, `permissions`).
+const DISABLE_BYPASS: &str = "disableBypassPermissionsMode";
+
+/// `claude` arguments whose run may not skip its permission prompts.
+///
+/// They carry `permissions.disableBypassPermissionsMode` set to `"disable"` on the one
+/// `--settings`, the caller's own merged in as [`with_relay`] merges them.
+///
+/// A permission setting takes the strictest value any source gives, and `--settings` ranks
+/// above the user's, the project's and the local settings (only managed settings rank above
+/// it), so neither `--dangerously-skip-permissions` nor `--permission-mode bypassPermissions`
+/// nor a settings file the agent may edit opens the mode again.
+#[must_use]
+pub fn without_bypass(args: Vec<String>, cwd: &Path) -> Vec<String> {
+    with_settings(args, cwd, |doc| {
+        let Some(root) = doc.as_object_mut() else { return };
+        let permissions = root.entry("permissions").or_insert_with(|| json!({}));
+        if !permissions.is_object() {
+            *permissions = json!({});
+        }
+        if let Some(permissions) = permissions.as_object_mut() {
+            permissions.insert(DISABLE_BYPASS.to_owned(), json!("disable"));
+        }
+    })
+}
+
+/// `args` with their one `--settings` (the caller's last one, read as Claude Code reads it,
+/// or an empty one) edited by `edit` and put first. One that cannot be read leaves `args` as
+/// they are, for Claude Code to report.
+fn with_settings(args: Vec<String>, cwd: &Path, edit: impl FnOnce(&mut Value)) -> Vec<String> {
     let mut rest = Vec::with_capacity(args.len());
     let mut given = None;
     let mut words = args.iter().cloned();
@@ -101,8 +169,7 @@ fn with_relay_for(args: Vec<String>, command: &str, cwd: &Path, user: &Path) -> 
     let Some(mut doc) = doc else {
         return args;
     };
-    install(&mut doc, command);
-    wrap_status_line(&mut doc, command, cwd, user);
+    edit(&mut doc);
     [SETTINGS_FLAG.to_owned(), doc.to_string()].into_iter().chain(rest).collect()
 }
 
@@ -217,6 +284,25 @@ pub fn is_relay(entry: &Value) -> bool {
         && Path::new(command).file_name().is_some_and(|n| n == "slopty")
 }
 
+/// Is a hook entry the reports hook? Any `slopty` binary with `args: ["hook", "reports"]`.
+#[must_use]
+pub fn is_reports(entry: &Value) -> bool {
+    let command = entry.get("command").and_then(Value::as_str).unwrap_or("");
+    let args = entry.get("args").and_then(Value::as_array).map(Vec::as_slice);
+    matches!(args, Some([hook, reports]) if hook == "hook" && reports == "reports")
+        && Path::new(command).file_name().is_some_and(|n| n == "slopty")
+}
+
+/// The reports hook's entry: synchronous, since what it prints is what Claude Code reads.
+fn reports_entry(command: &str) -> Value {
+    json!({
+        "type": "command",
+        "command": command,
+        "args": ["hook", "reports"],
+        "timeout": HOOK_TIMEOUT_S,
+    })
+}
+
 /// The relay's entry for `event`: asynchronous, except for a permission request, which waits
 /// for a decision.
 fn relay_entry(command: &str, event: HookEvent) -> Value {
@@ -272,25 +358,33 @@ pub fn install(doc: &mut Value, command: &str) -> bool {
         let Some(groups) = groups.as_array_mut() else {
             continue;
         };
-        let wanted = relay_entry(command, event);
-        let ours = groups
-            .iter_mut()
-            .filter_map(|group| group.get_mut("hooks").and_then(Value::as_array_mut))
-            .flatten()
-            .find(|entry| is_relay(entry));
-        match ours {
-            Some(entry) if *entry == wanted => {}
-            Some(entry) => {
-                *entry = wanted;
-                changed = true;
-            }
-            None => {
-                groups.push(json!({ "hooks": [wanted] }));
-                changed = true;
-            }
+        changed |= ensure(groups, relay_entry(command, event), is_relay);
+        if reports::EVENTS.contains(&event) {
+            changed |= ensure(groups, reports_entry(command), is_reports);
         }
     }
     changed
+}
+
+/// Put `wanted` in place of the entry `ours` finds among `groups`, or in a group of its own.
+/// Whether that changed anything.
+fn ensure(groups: &mut Vec<Value>, wanted: Value, ours: fn(&Value) -> bool) -> bool {
+    let found = groups
+        .iter_mut()
+        .filter_map(|group| group.get_mut("hooks").and_then(Value::as_array_mut))
+        .flatten()
+        .find(|entry| ours(entry));
+    match found {
+        Some(entry) if *entry == wanted => false,
+        Some(entry) => {
+            *entry = wanted;
+            true
+        }
+        None => {
+            groups.push(json!({ "hooks": [wanted] }));
+            true
+        }
+    }
 }
 
 /// Remove the relay everywhere, pruning empty groups, events and the `hooks` key.
@@ -305,7 +399,7 @@ pub fn uninstall(doc: &mut Value) -> bool {
         for group in groups.iter_mut() {
             if let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 let before = entries.len();
-                entries.retain(|e| !is_relay(e));
+                entries.retain(|e| !is_relay(e) && !is_reports(e));
                 changed |= entries.len() != before;
             }
         }
@@ -330,6 +424,25 @@ pub fn uninstall(doc: &mut Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Slopty's tools reach an agent it starts through `slopty mcp`, in the flag's `=` form so
+    /// a prompt after it stays a prompt, and the caller's own MCP servers stay beside them.
+    #[test]
+    fn a_started_agent_is_handed_slopty_mcp() {
+        let args = with_mcp(
+            vec!["--mcp-config".to_owned(), "mine.json".to_owned(), "fix it".to_owned()],
+            "/opt/slopty",
+        );
+        let (ours, rest) = args.split_first().expect("the flag");
+        assert_eq!(rest, ["--mcp-config", "mine.json", "fix it"]);
+        let doc: Value =
+            serde_json::from_str(ours.strip_prefix("--mcp-config=").expect(ours)).expect("json");
+        let server = &doc["mcpServers"]["slopty"];
+        assert_eq!(server["command"], "/opt/slopty");
+        assert_eq!(server["args"], json!(["mcp"]));
+        assert_eq!(server["type"], "stdio");
+        assert!(server.get("env").is_none(), "the session's own environment names the server");
+    }
 
     #[test]
     fn install_is_idempotent_and_uninstall_restores() {
@@ -412,6 +525,40 @@ mod tests {
         }
     }
 
+    /// A run that may not skip its prompts carries the lock on its one `--settings`, beside
+    /// the relay and the caller's own permissions; nothing else is added.
+    #[test]
+    fn a_run_without_permission_flags_locks_bypass_mode_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = dir.path().join("user-settings.json");
+        let settings = |out: &[String]| -> Value {
+            assert_eq!(out.iter().filter(|a| a.starts_with(SETTINGS_FLAG)).count(), 1, "{out:?}");
+            serde_json::from_str(out.get(1).expect("value")).expect("json")
+        };
+        let mine = r#"{"permissions":{"allow":["Bash(git *)"],"defaultMode":"plan"}}"#;
+        let args = ["--settings", mine, "--dangerously-skip-permissions"].map(str::to_owned);
+        let relayed = with_relay_for(args.to_vec(), "/opt/slopty", dir.path(), &user);
+        let locked = without_bypass(relayed.clone(), dir.path());
+        let doc = settings(&locked);
+        assert_eq!(
+            doc["permissions"],
+            json!({ "allow": ["Bash(git *)"], "defaultMode": "plan", DISABLE_BYPASS: "disable" })
+        );
+        assert!(has_relay(&doc, HookEvent::SessionStart), "the relay stays");
+        assert_eq!(locked.get(2..), Some(&["--dangerously-skip-permissions".to_owned()][..]));
+        assert!(
+            settings(&relayed).pointer("/permissions/disableBypassPermissionsMode").is_none(),
+            "only a locked run carries it"
+        );
+        let bare = without_bypass(Vec::new(), dir.path());
+        assert_eq!(settings(&bare), json!({ "permissions": { DISABLE_BYPASS: "disable" } }));
+        let odd = without_bypass(
+            ["--settings", r#"{"permissions":true}"#].map(str::to_owned).to_vec(),
+            dir.path(),
+        );
+        assert_eq!(settings(&odd)["permissions"], json!({ DISABLE_BYPASS: "disable" }));
+    }
+
     /// The run's status line is the wrapper, in front of the person's own: theirs from the
     /// caller's `--settings` travels on the wrapper's command line, theirs from the files is
     /// looked up when it runs, and either keeps its other fields.
@@ -488,8 +635,16 @@ mod tests {
         assert_eq!(install_at(&path, spaced).expect("install"), Outcome::Unchanged);
         let doc = read(&path).expect("read");
         for event in HOOK_EVENTS {
-            assert_eq!(doc["hooks"][event.as_str()].as_array().map(Vec::len), Some(1), "{event}");
+            let groups = if reports::EVENTS.contains(&event) { 2 } else { 1 };
+            let got = doc["hooks"][event.as_str()].as_array().map(Vec::len);
+            assert_eq!(
+                got,
+                Some(groups),
+                "{event}: the relay, and where reports go the reports hook"
+            );
         }
+        let stop = &doc["hooks"]["Stop"][1]["hooks"][0];
+        assert!(is_reports(stop) && stop.get("async").is_none(), "synchronous: {stop}");
         assert_eq!(registered(&path).expect("read").len(), HOOK_EVENTS.len());
         assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Changed);
         assert!(registered(&path).expect("read").is_empty());

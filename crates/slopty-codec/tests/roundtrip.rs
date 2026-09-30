@@ -179,7 +179,7 @@ mod tests {
         )
         .expect("hardware HEVC encoder");
         if !encoder.ltr_enabled() {
-            eprintln!("no LTR on this encoder; nothing to measure");
+            slopty_testkit::live::skip("no LTR on this encoder; nothing to measure");
             return;
         }
 

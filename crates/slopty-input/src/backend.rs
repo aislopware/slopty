@@ -18,7 +18,7 @@ use objc2_core_graphics::{
 use objc2_foundation::NSPoint;
 use slopty_capture::Rect;
 use slopty_platform::keyboard::nx;
-use slopty_proto::screen::{CaptureTarget, MediaKey, ScrollPhase};
+use slopty_proto::screen::{CaptureTarget, MediaKey, ScrollPhase, SwipeDirection};
 
 use crate::InputError;
 use crate::injector::SharedCaps;
@@ -51,6 +51,118 @@ mod scroll_phase {
     pub(super) const MAY_BEGIN: i64 = 128;
 }
 
+/// The fields of a trackpad gesture's `CGEvent` (`NSEventTypeGesture`, 29), which the SDK does
+/// not declare: AppKit reads the event as the kind its IOHID subtype names. The numbers are
+/// the ones Mac Mouse Fix's `TouchSimulator.m` and `GestureScrollSimulator.m` and
+/// Hammerspoon's `TouchEvents` post (`docs/decisions/input.md`, "Trackpad gestures reach the
+/// remote app"); `a_gesture_reads_back_as_appkit_reads_the_trackpad` holds each to what AppKit
+/// makes of it.
+mod gesture_field {
+    use objc2_core_graphics::CGEventField;
+
+    /// The IOHID event type the gesture carries (`IOHIDEventType`).
+    pub(super) const SUBTYPE: CGEventField = CGEventField(110);
+    /// A pinch's change in magnification, a double.
+    pub(super) const MAGNIFICATION: CGEventField = CGEventField(113);
+    /// A rotation's change in degrees, anticlockwise positive, a double.
+    pub(super) const ROTATION: CGEventField = CGEventField(114);
+    /// A swipe's direction, the `kIOHIDSwipe…` mask.
+    pub(super) const SWIPE: CGEventField = CGEventField(115);
+    /// A gesture scroll's horizontal travel, a double.
+    pub(super) const SCROLL_X: CGEventField = CGEventField(116);
+    /// A gesture scroll's vertical travel, a double.
+    pub(super) const SCROLL_Y: CGEventField = CGEventField(119);
+    /// Where the gesture is: the `CGScrollPhase` values, which are IOHID's phase bits.
+    pub(super) const PHASE: CGEventField = CGEventField(132);
+}
+
+/// What a pointer event posted to a pid lacks to reach a view: the window it is for and its
+/// point in that window.
+///
+/// The window server fills both in only for events it routes itself (the HID tap); a
+/// `CGEventPostToPid` event reaches the app's queue with window 0, and AppKit sends it to no
+/// view, frontmost or not (`docs/decisions/input.md`, "A window stream's pointer
+/// reaches the view").
+pub mod window_binding {
+    use std::ffi::c_void;
+    use std::sync::LazyLock;
+
+    use objc2_core_foundation::CGPoint;
+    use objc2_core_graphics::{CGEvent, CGEventField};
+
+    /// The event record's window, which AppKit reads as `NSEvent.windowNumber`. In no header:
+    /// found by setting each field and reading the event back in an app (macOS 26.6, 27.0).
+    pub const WINDOW: CGEventField = CGEventField(51);
+
+    /// `void CGEventSetWindowLocation(CGEventRef, CGPoint)`: the event's point in its window,
+    /// from the window's top left, which AppKit reads as `locationInWindow`. Exported by
+    /// CoreGraphics, in no header.
+    type SetWindowLocation = unsafe extern "C-unwind" fn(*const CGEvent, CGPoint);
+
+    static SET_WINDOW_LOCATION: LazyLock<Option<SetWindowLocation>> = LazyLock::new(|| {
+        // SAFETY: `dlsym(3)` with `RTLD_DEFAULT` searches every loaded image, CoreGraphics
+        // (which this crate links) among them, for a NUL-terminated name.
+        let symbol =
+            unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"CGEventSetWindowLocation".as_ptr()) };
+        let found = !symbol.is_null();
+        if !found {
+            tracing::warn!("no CGEventSetWindowLocation: window streams' pointer reaches no view");
+        }
+        // SAFETY: the symbol CoreGraphics exports under this name is the function above; its
+        // signature is the one its own `CGEventGetWindowLocation` pairs with.
+        found.then(|| unsafe { std::mem::transmute::<*mut c_void, SetWindowLocation>(symbol) })
+    });
+
+    /// Whether this macOS has what `bind` needs.
+    #[must_use]
+    pub fn available() -> bool {
+        SET_WINDOW_LOCATION.is_some()
+    }
+
+    /// Bind `event` to `window`, whose top left is `origin` in global points. Both halves or
+    /// neither: a window with no point in it sends the event to the wrong view.
+    pub(super) fn bind(event: &CGEvent, window: u32, origin: CGPoint) {
+        let Some(set) = *SET_WINDOW_LOCATION else { return };
+        let at = CGEvent::location(Some(event));
+        CGEvent::set_integer_value_field(Some(event), WINDOW, i64::from(window));
+        // SAFETY: `event` is a live `CGEvent` and the point a plain value, as the function
+        // takes them.
+        unsafe {
+            set(event, CGPoint { x: at.x - origin.x, y: at.y - origin.y });
+        }
+    }
+}
+
+/// `IOHIDEventType` values a gesture's subtype takes (`IOKit/hid/IOHIDEventTypes.h`).
+mod hid_event {
+    /// `kIOHIDEventTypeRotation`: AppKit's `NSEventTypeRotate`.
+    pub(super) const ROTATION: i64 = 5;
+    /// `kIOHIDEventTypeScroll`: the gesture a trackpad scroll comes with, which a fluid swipe
+    /// (`trackSwipeEventWithOptions:`) follows.
+    pub(super) const SCROLL: i64 = 6;
+    /// `kIOHIDEventTypeZoom`: AppKit's `NSEventTypeMagnify`.
+    pub(super) const ZOOM: i64 = 8;
+    /// `kIOHIDEventTypeNavigationSwipe`: AppKit's `NSEventTypeSwipe`.
+    pub(super) const NAVIGATION_SWIPE: i64 = 16;
+    /// `kIOHIDEventTypeZoomToggle`: AppKit's `NSEventTypeSmartMagnify`.
+    pub(super) const ZOOM_TOGGLE: i64 = 22;
+}
+
+/// The `kIOHIDSwipe…` mask for a direction (`IOKit/hid/IOHIDEventTypes.h`).
+const fn swipe_mask(direction: SwipeDirection) -> i64 {
+    match direction {
+        SwipeDirection::Up => 1,
+        SwipeDirection::Down => 2,
+        SwipeDirection::Left => 4,
+        SwipeDirection::Right => 8,
+    }
+}
+
+/// A trackpad scroll's gesture travels this much further than the scroll's points, as Mac
+/// Mouse Fix's `GestureScrollSimulator.m` scales it: what a fluid swipe measures its progress
+/// in.
+const GESTURE_SCROLL_SCALE: f64 = 1.67;
+
 /// `CGMomentumScrollPhase` values.
 mod momentum_phase {
     pub(super) const NONE: i64 = 0;
@@ -60,10 +172,21 @@ mod momentum_phase {
 }
 
 /// Where an event goes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Route {
     /// `CGEventPostToPid`: the owning app, whether or not it is frontmost.
     Pid(i32),
+    /// `CGEventPostToPid` to the owner of `window`, the event bound to that window: a pointer
+    /// event of a window stream. Posted to a pid alone it names no window, so AppKit hands it
+    /// to no view ([`window_binding`]).
+    Window {
+        /// The owning app.
+        pid: i32,
+        /// Its `CGWindowID`.
+        window: u32,
+        /// The window's top left, in global display points.
+        origin: CGPoint,
+    },
     /// The HID tap: the system, as if from real hardware.
     Hid,
 }
@@ -83,6 +206,10 @@ pub enum Event {
         number: i64,
         /// `MouseEventClickState`; 0 for moves.
         clicks: i64,
+        /// `MouseEventNumber`: the press this event belongs to, the same on the press, its
+        /// drags and its release (AppKit follows a drag by it, and loses one whose numbers
+        /// differ); 0 for a move with nothing held, which CoreGraphics numbers itself.
+        press: i64,
     },
     /// Wheel or trackpad scroll.
     Scroll {
@@ -98,6 +225,9 @@ pub enum Event {
         phase: ScrollPhase,
         /// Momentum phase.
         momentum: ScrollPhase,
+        /// Its timestamp on this Mac's event clock, nanoseconds of uptime; 0 for the moment it
+        /// is posted.
+        stamp: u64,
     },
     /// Key press, repeat or release, by position only: the target's layout makes the
     /// character.
@@ -126,6 +256,38 @@ pub enum Event {
         /// Pressed, or let go.
         down: bool,
     },
+    /// A trackpad gesture: `NSEventTypeGesture` with the subtype AppKit reads as `gesture`.
+    Gesture {
+        /// Global display point.
+        at: CGPoint,
+        /// Which, and how much.
+        gesture: Gesture,
+        /// Where it is in its gesture; smart zoom has none.
+        phase: ScrollPhase,
+        /// Its timestamp on this Mac's event clock, nanoseconds of uptime; 0 for the moment it
+        /// is posted.
+        stamp: u64,
+    },
+}
+
+/// What a [`Event::Gesture`] is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Gesture {
+    /// A pinch: the change in magnification.
+    Magnify(f32),
+    /// A rotation: the change in degrees, anticlockwise positive.
+    Rotate(f32),
+    /// Smart zoom, a two-finger double tap.
+    SmartMagnify,
+    /// A navigation swipe, one event: AppKit makes a swipe of every one posted.
+    Swipe(SwipeDirection),
+    /// The gesture a trackpad scroll comes with, in the scroll's points.
+    Scroll {
+        /// Horizontal travel.
+        dx: f32,
+        /// Vertical travel.
+        dy: f32,
+    },
 }
 
 /// An [`Event`] with its route and modifier flags.
@@ -148,10 +310,21 @@ pub trait Backend {
     fn bounds(&mut self, target: CaptureTarget) -> Option<Rect>;
     /// Whether the app with this pid is the active application.
     fn is_active(&mut self, pid: i32) -> bool;
-    /// Bring the app with this pid to the front.
-    fn activate(&mut self, pid: i32) -> Result<(), InputError>;
+    /// Bring the app with this pid to the front, with `window` (a `CGWindowID` of its) as its
+    /// key window when one is named.
+    fn activate(&mut self, pid: i32, window: Option<u32>) -> Result<(), InputError>;
     /// Post one event.
     fn post(&mut self, post: Post) -> Result<(), InputError>;
+    /// Where the worker's real pointer is, in global display points; `None` from a stand-in
+    /// that keeps no pointer.
+    fn pointer(&mut self) -> Option<CGPoint> {
+        None
+    }
+    /// Now on the clock events are stamped with, nanoseconds of uptime: the host time clock,
+    /// which `NSEvent.timestamp` reads in seconds.
+    fn event_clock(&mut self) -> u64 {
+        slopty_capture::host_now_us().saturating_mul(1000)
+    }
     /// Whether Caps Lock is on; `None` when the HID system would not say, as a stand-in that
     /// keeps no lock answers.
     fn caps_lock(&mut self) -> Option<bool> {
@@ -203,21 +376,32 @@ impl Backend for System {
             .is_some_and(|app| app.isActive())
     }
 
-    fn activate(&mut self, pid: i32) -> Result<(), InputError> {
+    /// Through the window server's own process switch (`front`), as a click on the window
+    /// would switch to it: `NSRunningApplication` asks, and since macOS 14 an app is made
+    /// active that way only when the active one yields, which the worker in the background
+    /// never is. It is asked only when the window server's switch is missing.
+    fn activate(&mut self, pid: i32, window: Option<u32>) -> Result<(), InputError> {
         let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
             .ok_or(InputError::NoApplication)?;
-        let _activated =
-            app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+        if !front::bring(pid, window) {
+            let _asked =
+                app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+        }
         Ok(())
     }
 
     fn post(&mut self, post: Post) -> Result<(), InputError> {
         let event = SOURCE.with(|source| build(&post, source.as_deref()))?;
         match post.route {
-            Route::Pid(pid) => CGEvent::post_to_pid(pid, Some(&event)),
+            Route::Pid(pid) | Route::Window { pid, .. } => CGEvent::post_to_pid(pid, Some(&event)),
             Route::Hid => CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event)),
         }
         Ok(())
+    }
+
+    fn pointer(&mut self) -> Option<CGPoint> {
+        let (x, y) = slopty_capture::pointer_location();
+        Some(CGPoint { x, y })
     }
 
     fn caps_lock(&mut self) -> Option<bool> {
@@ -239,7 +423,7 @@ pub fn build(
     source: Option<&CGEventSource>,
 ) -> Result<CFRetained<CGEvent>, InputError> {
     let event = match &post.event {
-        Event::Mouse { kind, at, button, number, clicks } => {
+        Event::Mouse { kind, at, button, number, clicks, press } => {
             let event =
                 CGEvent::new_mouse_event(source, *kind, *at, *button).ok_or(InputError::Create)?;
             CGEvent::set_integer_value_field(
@@ -254,9 +438,16 @@ pub fn build(
                     *clicks,
                 );
             }
+            if *press != 0 {
+                CGEvent::set_integer_value_field(
+                    Some(&event),
+                    CGEventField::MouseEventNumber,
+                    *press,
+                );
+            }
             event
         }
-        Event::Scroll { at, dx, dy, precise, phase, momentum } => {
+        Event::Scroll { at, dx, dy, precise, phase, momentum, stamp } => {
             let units = if *precise { CGScrollEventUnit::Pixel } else { CGScrollEventUnit::Line };
             let (wheel1, wheel2) = (round(*dy), round(*dx));
             let event = CGEvent::new_scroll_wheel_event2(source, units, 2, wheel1, wheel2, 0)
@@ -282,6 +473,7 @@ pub fn build(
             }
             set(CGEventField::ScrollWheelEventScrollPhase, scroll_phase_value(*phase));
             set(CGEventField::ScrollWheelEventMomentumPhase, momentum_phase_value(*momentum));
+            stamped(&event, *stamp);
             event
         }
         Event::Key { vk, down, modifier, repeat } => {
@@ -311,6 +503,11 @@ pub fn build(
             }
             event
         }
+        Event::Gesture { at, gesture, phase, stamp } => {
+            let event = gesture_event(source, *at, *gesture, *phase)?;
+            stamped(&event, *stamp);
+            event
+        }
         Event::Media { key, down } => {
             let flags = NSEventModifierFlags(
                 usize::try_from(post.flags.0).map_err(|_too_wide| InputError::Create)?,
@@ -335,7 +532,164 @@ pub fn build(
         CGEvent::set_flags(Some(&event), post.flags);
     }
     CGEvent::set_integer_value_field(Some(&event), CGEventField::EventSourceUserData, SLOPTY_EVENT);
+    if let Route::Window { window, origin, .. } = post.route {
+        window_binding::bind(&event, window, origin);
+    }
     Ok(event)
+}
+
+/// Give `event` the timestamp `stamp`, unless it is 0: then the system stamps it as it is
+/// posted, as it does every event made with none.
+fn stamped(event: &CGEvent, stamp: u64) {
+    if stamp != 0 {
+        CGEvent::set_timestamp(Some(event), stamp);
+    }
+}
+
+/// A trackpad gesture's `CGEvent`: made blank, typed `NSEventTypeGesture`, and given the
+/// subtype and the fields AppKit reads for it.
+fn gesture_event(
+    source: Option<&CGEventSource>,
+    at: CGPoint,
+    gesture: Gesture,
+    phase: ScrollPhase,
+) -> Result<CFRetained<CGEvent>, InputError> {
+    let event = CGEvent::new(source).ok_or(InputError::Create)?;
+    let gesture_type = u32::try_from(NSEventType::Gesture.0).map_err(|_wide| InputError::Create)?;
+    CGEvent::set_type(Some(&event), CGEventType(gesture_type));
+    CGEvent::set_location(Some(&event), at);
+    let int = |field, value| CGEvent::set_integer_value_field(Some(&event), field, value);
+    let double = |field, value| CGEvent::set_double_value_field(Some(&event), field, value);
+    match gesture {
+        Gesture::Magnify(delta) => {
+            int(gesture_field::SUBTYPE, hid_event::ZOOM);
+            double(gesture_field::MAGNIFICATION, f64::from(delta));
+        }
+        Gesture::Rotate(degrees) => {
+            int(gesture_field::SUBTYPE, hid_event::ROTATION);
+            double(gesture_field::ROTATION, f64::from(degrees));
+        }
+        Gesture::SmartMagnify => int(gesture_field::SUBTYPE, hid_event::ZOOM_TOGGLE),
+        Gesture::Swipe(direction) => {
+            int(gesture_field::SUBTYPE, hid_event::NAVIGATION_SWIPE);
+            int(gesture_field::SWIPE, swipe_mask(direction));
+        }
+        Gesture::Scroll { dx, dy } => {
+            int(gesture_field::SUBTYPE, hid_event::SCROLL);
+            double(gesture_field::SCROLL_X, f64::from(dx) * GESTURE_SCROLL_SCALE);
+            double(gesture_field::SCROLL_Y, f64::from(dy) * GESTURE_SCROLL_SCALE);
+        }
+    }
+    if gesture != Gesture::SmartMagnify {
+        int(gesture_field::PHASE, scroll_phase_value(phase));
+    }
+    Ok(event)
+}
+
+/// Bringing an app to the front as the window server does for a click on one of its windows:
+/// SkyLight's process switch and its make-key record, which the window server takes from any
+/// process in the login session. Neither is in a header; they are found at run time, and the
+/// signatures are the ones yabai calls them with (`src/misc/extern.h`, `window_manager.c`
+/// `window_manager_focus_window_with_raise` and `window_manager_make_key_window`).
+/// `docs/decisions/input.md`, "A window stream's pointer reaches the view".
+mod front {
+    use std::ffi::{CStr, c_void};
+    use std::sync::LazyLock;
+
+    /// `ProcessSerialNumber` (`<HIServices/Processes.h>`).
+    #[repr(C)]
+    #[derive(Default)]
+    struct Psn {
+        high: u32,
+        low: u32,
+    }
+
+    /// `OSStatus GetProcessForPID(pid_t, ProcessSerialNumber *)`, in `HIServices`.
+    type ForPid = unsafe extern "C-unwind" fn(i32, *mut Psn) -> i32;
+    /// `CGError _SLPSSetFrontProcessWithOptions(ProcessSerialNumber *, uint32_t wid, uint32_t
+    /// mode)`.
+    type SetFront = unsafe extern "C-unwind" fn(*const Psn, u32, u32) -> i32;
+    /// `CGError SLPSPostEventRecordTo(ProcessSerialNumber *, uint8_t *bytes)`.
+    type PostRecord = unsafe extern "C-unwind" fn(*const Psn, *const u8) -> i32;
+
+    /// `kCPSAllWindows`: the app's windows come forward with it.
+    const ALL_WINDOWS: u32 = 0x100;
+    /// `kCPSUserGenerated`: the switch a person's click on `wid` makes.
+    const USER_GENERATED: u32 = 0x200;
+
+    struct Switch {
+        for_pid: ForPid,
+        to_front: SetFront,
+        post_record: PostRecord,
+    }
+
+    fn symbol(name: &CStr) -> Option<*mut c_void> {
+        // SAFETY: `dlsym(3)` with `RTLD_DEFAULT` searches every loaded image (HIServices and
+        // SkyLight come with the AppKit and CoreGraphics this crate links) for a NUL-terminated
+        // name.
+        let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+        (!symbol.is_null()).then_some(symbol)
+    }
+
+    static SWITCH: LazyLock<Option<Switch>> = LazyLock::new(|| {
+        let found = (|| {
+            let (for_pid, to_front, post_record) = (
+                symbol(c"GetProcessForPID")?,
+                symbol(c"_SLPSSetFrontProcessWithOptions")?,
+                symbol(c"SLPSPostEventRecordTo")?,
+            );
+            // SAFETY: HIServices exports `GetProcessForPID` with the signature `ForPid` names.
+            let for_pid = unsafe { std::mem::transmute::<*mut c_void, ForPid>(for_pid) };
+            // SAFETY: SkyLight exports `_SLPSSetFrontProcessWithOptions` with the signature
+            // `SetFront` names, as yabai declares it.
+            let to_front = unsafe { std::mem::transmute::<*mut c_void, SetFront>(to_front) };
+            // SAFETY: SkyLight exports `SLPSPostEventRecordTo` with the signature `PostRecord`
+            // names, as yabai declares it.
+            let post_record =
+                unsafe { std::mem::transmute::<*mut c_void, PostRecord>(post_record) };
+            Some(Switch { for_pid, to_front, post_record })
+        })();
+        if found.is_none() {
+            tracing::warn!("no window-server process switch: activation falls back to AppKit's");
+        }
+        found
+    });
+
+    /// The make-key record for `window`, as the window server sends a window a click makes key:
+    /// `kind` 1 then 2.
+    fn key_record(window: u32, kind: u8) -> [u8; 0xf8] {
+        let mut bytes = [0_u8; 0xf8];
+        bytes[0x04] = 0xf8;
+        bytes[0x08] = kind;
+        bytes[0x3a] = 0x10;
+        bytes[0x3c..0x40].copy_from_slice(&window.to_ne_bytes());
+        bytes[0x20..0x30].fill(0xff);
+        bytes
+    }
+
+    /// Switch to `pid`, with `window` its key window when named. Whether the window server took
+    /// the switch.
+    pub(super) fn bring(pid: i32, window: Option<u32>) -> bool {
+        let Some(front) = SWITCH.as_ref() else { return false };
+        let mut psn = Psn::default();
+        // SAFETY: a pid and an out pointer that outlives the call.
+        if unsafe { (front.for_pid)(pid, &raw mut psn) } != 0 {
+            return false;
+        }
+        let (wid, mode) = window.map_or((0, ALL_WINDOWS), |w| (w, USER_GENERATED));
+        // SAFETY: a serial number the call above filled in, a window id and a mode.
+        if unsafe { (front.to_front)(&raw const psn, wid, mode) } != 0 {
+            return false;
+        }
+        if let Some(window) = window {
+            for kind in [1, 2] {
+                let record = key_record(window, kind);
+                // SAFETY: the serial number and a record of the 0xf8 bytes the call reads.
+                let _posted = unsafe { (front.post_record)(&raw const psn, record.as_ptr()) };
+            }
+        }
+        true
+    }
 }
 
 /// Caps Lock through the HID system's parameter connection (`IOHIDSetModifierLockState`,
@@ -452,6 +806,10 @@ pub struct Recorder {
     pub caps: Option<bool>,
     /// Every Caps Lock state set, in order.
     pub locks: Vec<bool>,
+    /// What [`Backend::pointer`] answers: the worker's real pointer.
+    pub pointer: Option<CGPoint>,
+    /// What [`Backend::event_clock`] answers, nanoseconds.
+    pub clock_ns: u64,
     /// The Caps Lock claim this recorder's injectors share: its own, and its clones'.
     pub caps_claims: SharedCaps,
 }
@@ -494,7 +852,7 @@ impl Backend for Recorder {
         self.active && self.owner == Some(pid)
     }
 
-    fn activate(&mut self, pid: i32) -> Result<(), InputError> {
+    fn activate(&mut self, pid: i32, _window: Option<u32>) -> Result<(), InputError> {
         self.activations.push(pid);
         if self.owner == Some(pid) {
             self.active = true;
@@ -507,6 +865,14 @@ impl Backend for Recorder {
     fn post(&mut self, post: Post) -> Result<(), InputError> {
         self.posts.push(post);
         Ok(())
+    }
+
+    fn pointer(&mut self) -> Option<CGPoint> {
+        self.pointer
+    }
+
+    fn event_clock(&mut self) -> u64 {
+        self.clock_ns
     }
 
     fn caps_lock(&mut self) -> Option<bool> {
@@ -636,6 +1002,137 @@ mod tests {
         }
     }
 
+    /// Each gesture, built and never posted, reads back through AppKit as the trackpad's
+    /// own does: the event type an app's `-magnifyWithEvent:`, `-rotateWithEvent:`,
+    /// `-smartMagnifyWithEvent:` and `-swipeWithEvent:` are called for, its amount, its phase,
+    /// and a swipe's direction as `deltaX` / `deltaY`; a scroll's gesture stays a gesture. All
+    /// tagged as the worker's own, at the point given.
+    #[test]
+    fn a_gesture_reads_back_as_appkit_reads_the_trackpad() {
+        use objc2_app_kit::NSEventPhase;
+        let at = CGPoint { x: 120.0, y: 80.0 };
+        let read = |gesture, phase| {
+            let event = build(
+                &post(Event::Gesture { at, gesture, phase, stamp: 0 }, CGEventFlags::empty()),
+                None,
+            )
+            .unwrap();
+            let tag = CGEvent::integer_value_field(Some(&event), CGEventField::EventSourceUserData);
+            assert_eq!(tag, SLOPTY_EVENT);
+            assert_eq!(CGEvent::location(Some(&event)), at);
+            NSEvent::eventWithCGEvent(&event).unwrap()
+        };
+        let pinch = read(Gesture::Magnify(0.25), ScrollPhase::Began);
+        assert_eq!(pinch.r#type(), NSEventType::Magnify);
+        assert!((pinch.magnification() - 0.25).abs() < 1e-6, "{}", pinch.magnification());
+        assert_eq!(pinch.phase(), NSEventPhase::Began);
+        let pinch = read(Gesture::Magnify(-0.1), ScrollPhase::Ended);
+        assert!((pinch.magnification() + 0.1).abs() < 1e-6);
+        assert_eq!(pinch.phase(), NSEventPhase::Ended);
+
+        let turn = read(Gesture::Rotate(12.5), ScrollPhase::Changed);
+        assert_eq!(turn.r#type(), NSEventType::Rotate);
+        assert!((turn.rotation() - 12.5).abs() < 1e-4, "{}", turn.rotation());
+        assert_eq!(turn.phase(), NSEventPhase::Changed);
+        assert_eq!(
+            read(Gesture::Rotate(1.0), ScrollPhase::Cancelled).phase(),
+            NSEventPhase::Cancelled
+        );
+
+        assert_eq!(
+            read(Gesture::SmartMagnify, ScrollPhase::None).r#type(),
+            NSEventType::SmartMagnify
+        );
+
+        for (direction, dx, dy) in [
+            (SwipeDirection::Left, 1.0, 0.0),
+            (SwipeDirection::Right, -1.0, 0.0),
+            (SwipeDirection::Up, 0.0, 1.0),
+            (SwipeDirection::Down, 0.0, -1.0),
+        ] {
+            let swipe = read(Gesture::Swipe(direction), ScrollPhase::Ended);
+            assert_eq!(swipe.r#type(), NSEventType::Swipe, "{direction:?}");
+            assert_eq!((swipe.deltaX(), swipe.deltaY()), (dx, dy), "{direction:?}");
+        }
+
+        // A scroll's gesture stays a gesture, in each phase a trackpad's goes through. AppKit
+        // has no accessor for its travel (`deltaX` and `deltaY` read 0, `gestureAmount` raises);
+        // what it does with it, following a swipe between pages, is the live
+        // `a_swipe_between_pages_follows_the_fingers_only_with_their_gesture`.
+        for (phase, appkit) in [
+            (ScrollPhase::MayBegin, NSEventPhase::MayBegin),
+            (ScrollPhase::Began, NSEventPhase::Began),
+            (ScrollPhase::Changed, NSEventPhase::Changed),
+            (ScrollPhase::Ended, NSEventPhase::Ended),
+            (ScrollPhase::Cancelled, NSEventPhase::Cancelled),
+        ] {
+            let scroll = read(Gesture::Scroll { dx: 3.0, dy: -2.0 }, phase);
+            assert_eq!(scroll.r#type(), NSEventType::Gesture, "{phase:?}");
+            assert_eq!(scroll.phase(), appkit, "{phase:?}");
+        }
+    }
+
+    /// A scroll and a gesture given a timestamp carry it, in nanoseconds as `NSEvent` reads
+    /// it in seconds; given none they carry none, which the system fills in as it posts them.
+    #[test]
+    fn a_stamped_scroll_or_gesture_carries_its_time() {
+        let at = CGPoint { x: 1.0, y: 2.0 };
+        let phase = ScrollPhase::Changed;
+        let seconds = |stamp| {
+            let scroll = Event::Scroll {
+                at,
+                dx: -10.0,
+                dy: 0.0,
+                precise: true,
+                phase,
+                momentum: ScrollPhase::None,
+                stamp,
+            };
+            let gesture = Event::Gesture {
+                at,
+                gesture: Gesture::Scroll { dx: -10.0, dy: 0.0 },
+                phase,
+                stamp,
+            };
+            [scroll, gesture].map(|event| {
+                let built = build(&post(event, CGEventFlags::empty()), None).unwrap();
+                NSEvent::eventWithCGEvent(&built).unwrap().timestamp()
+            })
+        };
+        assert!(seconds(0).iter().all(|s| s.abs() < f64::EPSILON), "left to the system");
+        let [scroll, gesture] = seconds(1_234_567_890_123);
+        assert!((scroll - 1_234.567_890_123).abs() < 1e-9, "{scroll}");
+        assert!((gesture - scroll).abs() < 1e-12, "one time for both");
+    }
+
+    /// A pointer event routed to a window carries it: field 51, which AppKit reads as the
+    /// event's window, and its point from the window's top left; routed to the pid alone it
+    /// carries neither. Built, never posted.
+    #[test]
+    fn a_window_route_binds_the_event_to_its_window() {
+        assert!(window_binding::available(), "CoreGraphics exports the setter");
+        let at = CGPoint { x: 130.0, y: 90.0 };
+        let event = Event::Mouse {
+            kind: CGEventType::LeftMouseDown,
+            at,
+            button: CGMouseButton::Left,
+            number: 0,
+            clicks: 1,
+            press: 3,
+        };
+        let built = |route| {
+            build(&Post { route, flags: CGEventFlags::empty(), event: event.clone() }, None)
+                .unwrap()
+        };
+        let origin = CGPoint { x: 100.0, y: 50.0 };
+        let bound = built(Route::Window { pid: 1, window: 4242, origin });
+        let plain = built(Route::Pid(1));
+        let window = |e: &CGEvent| CGEvent::integer_value_field(Some(e), window_binding::WINDOW);
+        assert_eq!((window(&bound), window(&plain)), (4242, 0));
+        assert_eq!(NSEvent::eventWithCGEvent(&bound).unwrap().windowNumber(), 4242);
+        assert_eq!(CGEvent::location(Some(&bound)), at, "its place on the screen stays");
+    }
+
     #[test]
     fn phases_use_the_iokit_values() {
         assert_eq!(scroll_phase_value(ScrollPhase::Began), 1);
@@ -649,8 +1146,8 @@ mod tests {
     fn recorder_activates_only_its_owner() {
         let mut r = Recorder::window(42, Rect::default());
         assert!(!r.is_active(42));
-        assert!(r.activate(7).is_err());
-        r.activate(42).unwrap();
+        assert!(r.activate(7, None).is_err());
+        r.activate(42, Some(3)).unwrap();
         assert!(r.is_active(42));
         assert_eq!(r.activations, [7, 42]);
     }

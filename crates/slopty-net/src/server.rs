@@ -91,7 +91,7 @@ impl ServerListener {
             let link = AcceptedLink { conn, remote, role: hello, tx, rx };
             let wanted = match &link.role {
                 Role::Worker(_) => slopty_tailnet::Role::Worker,
-                Role::Client { .. } => slopty_tailnet::Role::Client,
+                Role::Client { .. } | Role::Shell { .. } => slopty_tailnet::Role::Client,
                 Role::Agent { .. } => slopty_tailnet::Role::Agent,
             };
             if grant.allows(wanted) {

@@ -48,4 +48,6 @@ slopty-capture.workspace = true
 slopty-server.workspace = true
 slopty-tailnet = { workspace = true, features = [ "fake" ] }
 tempfile.workspace = true
+# The daemons and doubles the tests spawn, found built (`slopty_testkit::bins`).
+slopty-testkit.workspace = true
 tokio = { workspace = true, features = [ "test-util" ] }

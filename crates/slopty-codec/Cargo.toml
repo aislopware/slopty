@@ -27,7 +27,8 @@ objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
 parking_lot.workspace = true
 objc2-core-media.workspace = true
-objc2-core-video.workspace = true
+# `CVPixelBufferPool` for a stripe's own pictures (`stripes.rs`).
+objc2-core-video = { workspace = true, features = [ "CVPixelBufferPool" ] }
 objc2-video-toolbox.workspace = true
 tracing.workspace = true
 
@@ -47,6 +48,8 @@ objc2-core-video.workspace = true
 # probe in `tests/chroma444.rs`.
 objc2-video-toolbox = { workspace = true, features = [ "VTVideoEncoderList" ] }
 objc2-core-media.workspace = true
+# The process's CPU time, CPU energy and footprint in the concurrent-decode measurement.
+libc.workspace = true
 
 # The audio ring on loom's atomics, only under `--cfg slopty_loom`: `cargo xtask deep loom` runs
 # `audio::ring_model` (`docs/decisions/tooling.md`, "The audio ring is model-checked with loom").

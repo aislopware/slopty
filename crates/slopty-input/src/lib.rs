@@ -19,7 +19,12 @@
 //! client's own once the worker has taken the client's input source ([`sources`]). Text the
 //! client composed itself goes as its own event, in pieces a key event can carry ([`text`]).
 //! Caps Lock is set as a lock, and media keys go to the system as system-defined events.
-//! Magnify gestures have no public `CGEvent` constructor and are ignored.
+//! Trackpad gestures (a pinch, a rotation, smart zoom, a swipe, and, while the tile sends its
+//! gestures, the gesture a trackpad scroll comes with) have no public `CGEvent` constructor:
+//! they are built as the trackpad's are, from a blank event and the fields AppKit reads
+//! ([`backend`]). A press, its drags and its release carry one event number, as AppKit follows
+//! a drag by it. A drag session a worker feeds for a drop goes through the HID tap for its
+//! life, since the drag manager follows the real pointer ([`Injector::enter_drag`]).
 //!
 //! [`InputSink`] is the worker's input seam, compiled on every target; [`CgEvents`] is the
 //! macOS implementation (`docs/decisions/topology.md`): the stream's [`Injector`] on an
@@ -51,11 +56,11 @@ mod thread;
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]
-pub use backend::{Backend, Event, Post, Recorder, Route, System};
+pub use backend::{Backend, Event, Gesture, Post, Recorder, Route, System};
 #[cfg(target_os = "macos")]
 pub use injector::{
-    CapsClaims, CapsKept, Injector, SharedCaps, can_post, flags_for, keep_caps, request_post,
-    to_point,
+    CapsClaims, CapsKept, DRAG_START, Injector, NUDGE_EVERY, SharedCaps, can_post, flags_for,
+    keep_caps, request_post, to_point,
 };
 #[cfg(target_os = "macos")]
 pub use pasteboard::MacBoard;

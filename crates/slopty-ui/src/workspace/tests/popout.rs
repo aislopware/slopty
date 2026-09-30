@@ -44,6 +44,7 @@ fn a_tile_pops_out_into_its_own_window_and_back(cx: &mut TestAppContext) {
             width: 1600,
             height: 1000,
             scale: 2.0,
+            stripes: Vec::new(),
         };
         v.screen_event(key, event, cx);
         v.focus_tile(tile, cx);

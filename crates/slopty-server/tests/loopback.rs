@@ -115,6 +115,10 @@ mod tests {
             FromServer::Terminals(Vec::new()),
             "then the terminals"
         );
+        let FromServer::Projects(part) = next(&mut client).await else {
+            panic!("then the projects")
+        };
+        assert!(part.first && part.last && part.projects.is_empty(), "in one part: {part:?}");
 
         client
             .tx
@@ -230,6 +234,7 @@ mod tests {
         let mut client = dial(&server, client_role()).await.unwrap();
         let _directory = next(&mut client).await;
         let _terminals = next(&mut client).await;
+        let _projects = next(&mut client).await;
 
         cut.store(true, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();

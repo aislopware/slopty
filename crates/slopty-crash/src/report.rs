@@ -57,6 +57,22 @@ pub enum Kind {
         /// The faulting address (`si_addr`), for `SIGSEGV` and `SIGBUS` the memory touched.
         address: u64,
     },
+    /// The main thread held up past the hang threshold: the process lived on, but for this
+    /// long it drew nothing and answered no input.
+    Hang {
+        /// The longest single piece of main-thread work, in milliseconds: the freeze as a user
+        /// saw it.
+        stall_ms: u64,
+        /// From what started it to the frame that ended it, in milliseconds; longer than
+        /// `stall_ms` when several stalls piled up before one frame.
+        active_ms: u64,
+        /// The longest piece of work: a task and where it was spawned, an action, an input, a
+        /// window's draw or its presentation.
+        cause: String,
+        /// No single piece of work was that long: many short ones filled one frame's time.
+        #[serde(default)]
+        piled_up: bool,
+    },
     /// A crash macOS reported in a `.ips` file.
     Exception {
         /// The Mach exception, such as `EXC_BAD_ACCESS`.
@@ -134,6 +150,15 @@ impl Report {
                 line
             }
             Kind::Signal { name, address, .. } => format!("{name} at {address:#x}"),
+            Kind::Hang { stall_ms, active_ms, cause, piled_up } => {
+                if *piled_up {
+                    format!(
+                        "hang: {active_ms} ms of main-thread work before a frame, {cause} longest"
+                    )
+                } else {
+                    format!("hang: main thread held {stall_ms} ms by {cause}")
+                }
+            }
             Kind::Exception { exception, signal, reason } => {
                 let mut line = exception.clone();
                 if let Some(signal) = signal {

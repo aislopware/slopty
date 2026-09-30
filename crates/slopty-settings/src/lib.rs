@@ -41,9 +41,6 @@ pub mod bounds {
     pub const FPS: RangeInclusive<u16> = 15..=120;
     /// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
     pub const MBPS: RangeInclusive<u16> = 1..=200;
-    /// The quick terminal's height, in percent of the screen: a fifth still holds a prompt and
-    /// a few lines of output; all of it is a full-screen terminal.
-    pub const QUICK_HEIGHT: RangeInclusive<u8> = 20..=100;
 }
 
 /// File name inside the data directory.
@@ -426,39 +423,6 @@ impl Default for RemoteSettings {
     }
 }
 
-/// `[quick_terminal]`: the terminal a system-wide chord slides down from the top of the screen.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-#[schemars(title = "Quick terminal")]
-pub struct QuickTerminalSettings {
-    /// From any app; empty turns the chord off, the palette's command stays.
-    ///
-    /// The chord that shows and hides the quick terminal from any app, in the palette's key
-    /// syntax (`` ctrl-` ``, `cmd-alt-space`, `f12`). Empty registers none.
-    #[schemars(title = "Chord", example = "ctrl-`")]
-    pub hotkey: String,
-    /// How much of the screen it takes, from the top.
-    ///
-    /// Its height in percent of the screen under the pointer, below the menu bar.
-    #[schemars(
-        title = "Height",
-        range(min = *bounds::QUICK_HEIGHT.start(), max = *bounds::QUICK_HEIGHT.end()),
-        extend("x-step" = 5, "x-unit" = "%")
-    )]
-    pub height: u8,
-    /// It slides away when another window or app takes the keyboard.
-    ///
-    /// Hide the quick terminal once it loses the keyboard.
-    #[schemars(title = "Hide when unfocused")]
-    pub autohide: bool,
-}
-
-impl Default for QuickTerminalSettings {
-    fn default() -> Self {
-        Self { hotkey: "ctrl-`".to_owned(), height: 40, autohide: true }
-    }
-}
-
 /// `[keys]`: the app's key bindings the file changes.
 ///
 /// A table per context (`[keys.workspace]`, `[keys.terminal]`) of action names and their
@@ -551,7 +515,7 @@ impl JsonSchema for Chords {
 }
 
 /// `[worker]`: what `slopty-worker` reads from the same file when it starts.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "This Mac as a worker")]
 pub struct WorkerSettings {
@@ -570,6 +534,39 @@ pub struct WorkerSettings {
     #[serde(with = "server_address")]
     #[schemars(title = "Register with", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
+    /// What this machine is, in the person's words, for a project's placement to read.
+    ///
+    /// Named values (`fast-disk = true`, `rack = "b2"`, `vram_gb = 24`) the worker reports to
+    /// its server as its `labels` fact, which a project's placement rule reads
+    /// (`labels.rack == "b2"`). Reread every 10 minutes.
+    #[schemars(
+        title = "Labels",
+        example = serde_json::json!({ "fast-disk": true, "rack": "b2", "vram_gb": 24 })
+    )]
+    pub labels: BTreeMap<String, Label>,
+    /// Commands whose answers a project's placement reads.
+    ///
+    /// Named shell commands (`cuda = "nvidia-smi -L"`) the worker runs through `sh -c` every
+    /// 10 minutes and reports as its `probes` fact: what the command printed, trimmed and cut
+    /// at 1 KiB, or `true` when it printed nothing; `false` when it fails or runs past 5 s.
+    #[schemars(title = "Probes", example = serde_json::json!({ "cuda": "nvidia-smi -L" }))]
+    pub probes: BTreeMap<String, String>,
+}
+
+/// One of `[worker.labels]`: a flag, a number, a word or a list of them.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, expecting = "a label: true or false, a number, a string, or a list of them")]
+pub enum Label {
+    /// `fast-disk = true`.
+    Bool(bool),
+    /// `vram_gb = 24`.
+    Int(i64),
+    /// `tflops = 26.5`.
+    Float(f64),
+    /// `rack = "b2"`.
+    Text(String),
+    /// `zones = ["eu", "us"]`.
+    List(Vec<Self>),
 }
 
 /// `[server]`: what `slopty-server` reads from the file of the data directory its own lives in.
@@ -583,6 +580,99 @@ pub struct ServerSettings {
     /// [`WorkerSettings::allow`].
     #[schemars(title = "Allowed addresses", example = ["10.8.0.0/24"])]
     pub allow: Vec<String>,
+    /// What every project's own limits stay under.
+    pub projects: ProjectBounds,
+}
+
+/// `[server.projects]`: what the person allows projects across the fleet
+/// (`docs/decisions/projects.md`). A project sets its own limits under these, and no agent
+/// raises them.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(title = "Projects")]
+pub struct ProjectBounds {
+    /// Agents running at once across the fleet, in a project or not.
+    ///
+    /// The most live agents the server lets run across every worker at once.
+    #[schemars(title = "Live agents", example = 24)]
+    pub live_agents: u16,
+    /// The most a project may let run on one worker.
+    ///
+    /// The highest per-worker limit of live agents any one project may set.
+    #[schemars(title = "Live agents per worker", example = 8)]
+    pub live_per_worker: u16,
+    /// The most a project may let run in all.
+    ///
+    /// The highest limit of live agents any one project may set across the fleet.
+    #[schemars(title = "Live agents per project", example = 24)]
+    pub live_per_project: u16,
+    /// How deep a project's tree of tasks may grow.
+    ///
+    /// The deepest task tree any project may set: 1 allows only tasks with no parent.
+    #[schemars(title = "Task depth", example = 16)]
+    pub depth: u16,
+    /// Timeline entries a project may keep.
+    ///
+    /// The most timeline entries any project may keep; older ones are dropped first.
+    #[schemars(title = "Timeline kept", example = 65_536)]
+    pub timeline_kept: u32,
+    /// Projects whose agents may be started with looser permissions.
+    ///
+    /// The names of the projects whose spawned agents may be given flags that loosen Claude
+    /// Code's permissions (`--dangerously-skip-permissions`, `--permission-mode`). Empty
+    /// allows none.
+    #[schemars(title = "Looser permissions for", example = ["nightly-refactor"])]
+    pub permission_flags: Vec<String>,
+    /// Projects the server keeps.
+    ///
+    /// The most projects the server keeps at once; creating one more is refused.
+    #[schemars(title = "Projects", example = 64)]
+    pub projects: u16,
+    /// Tasks one project holds.
+    ///
+    /// The most tasks one project holds, finished ones included.
+    #[schemars(title = "Tasks per project", example = 512)]
+    pub tasks_per_project: u32,
+    /// The longest project or task title, in bytes.
+    ///
+    /// The longest title a project or a task may have, in bytes.
+    #[schemars(title = "Longest title", example = 256)]
+    pub title_max: u32,
+    /// The longest task brief, in bytes.
+    ///
+    /// The longest brief a task may carry, in bytes.
+    #[schemars(title = "Longest brief", example = 65_536)]
+    pub brief_max: u32,
+    /// Paths one task may own.
+    ///
+    /// The most paths one task may claim to write.
+    #[schemars(title = "Paths per task", example = 64)]
+    pub owns_max: u16,
+    /// How deep a placement rule may nest comprehensions.
+    ///
+    /// The deepest nesting of `all`, `exists`, `exists_one`, `map` and `filter` in one
+    /// placement rule; each level multiplies what a rule may cost.
+    #[schemars(title = "Comprehension depth", example = 1)]
+    pub comprehension_depth: u8,
+}
+
+impl Default for ProjectBounds {
+    fn default() -> Self {
+        Self {
+            live_agents: 24,
+            live_per_worker: 8,
+            live_per_project: 24,
+            depth: 16,
+            timeline_kept: 65_536,
+            permission_flags: Vec::new(),
+            projects: 64,
+            tasks_per_project: 512,
+            title_max: 256,
+            brief_max: 64 * 1024,
+            owns_max: 64,
+            comprehension_depth: 1,
+        }
+    }
 }
 
 /// `[client]`: how the app and the `slopty` CLI find the workers.
@@ -638,8 +728,6 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     /// Remote window and display streams.
     pub remote: RemoteSettings,
-    /// The terminal a chord slides down from the top of the screen.
-    pub quick_terminal: QuickTerminalSettings,
     /// Terminal colours.
     pub colors: ColorSettings,
     /// The app's key bindings the file changes.
@@ -799,15 +887,6 @@ muted = {muted}
 # bits. The worker sends it only while the link carries that rate, 4:2:0 below.
 sharp_text = {sharp_text}
 
-[quick_terminal]
-# The chord that slides a terminal down from the top of the screen, from any
-# app (\"ctrl-`\", \"cmd-alt-space\", \"f12\"); \"\" registers none.
-hotkey = {hotkey}
-# Its height in percent of the screen under the pointer (20 to 100).
-height = {quick_height}
-# Hide it once another window or app takes the keyboard.
-autohide = {autohide}
-
 [colors]
 # Terminal colours as \"#rrggbb\"; \"\" keeps the theme's own. They apply in
 # both appearances.
@@ -844,6 +923,19 @@ allow = []
 # (port 45560 when absent). Empty runs it on its own. --server and
 # SLOPTY_SERVER override it.
 server = \"\"
+# What this Mac is, for a project's placement rules to read as labels.<name>:
+# flags, numbers, words or lists of them.
+#
+# [worker.labels]
+# fast-disk = true
+# rack = \"b2\"
+#
+# Shell commands run every 10 minutes, read as probes.<name>: what one printed
+# (cut at 1 KiB), true when it printed nothing, false when it failed or ran
+# past 5 seconds.
+#
+# [worker.probes]
+# cuda = \"nvidia-smi -L\"
 
 [client]
 # The server whose directory lists the workers this app and the slopty CLI
@@ -873,9 +965,6 @@ server = \"\"
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
             muted = d.remote.muted,
             sharp_text = d.remote.sharp_text,
-            hotkey = toml_string(&d.quick_terminal.hotkey),
-            quick_height = d.quick_terminal.height,
-            autohide = d.quick_terminal.autohide,
         )
     }
 
@@ -988,14 +1077,18 @@ impl Loaded {
     }
 }
 
-/// Keys in `given` with no counterpart in `known`, recursively through tables. `[keys]` names
-/// actions the keymap knows, not this crate, and the keymap says which it does not.
+/// Tables whose keys the person names. `[keys]` names actions the keymap knows, not this
+/// crate, and the keymap says which it does not; a worker's labels and probes are anything.
+const OPEN_TABLES: [&str; 3] = ["keys", "worker.labels", "worker.probes"];
+
+/// Keys in `given` with no counterpart in `known`, recursively through tables, except the
+/// [`OPEN_TABLES`].
 fn unknown_keys(given: &toml::Table, known: &toml::Table, prefix: &str, out: &mut Vec<String>) {
     for (key, value) in given {
-        if prefix.is_empty() && key == "keys" {
+        let full = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+        if OPEN_TABLES.contains(&full.as_str()) {
             continue;
         }
-        let full = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
         match known.get(key) {
             None => out.push(format!("unknown key `{full}`")),
             Some(toml::Value::Table(known_inner)) => {
@@ -1114,25 +1207,6 @@ mod tests {
         );
         assert!(!Settings::default().remote.muted, "sound on, as the worker plays it");
         assert!(!Settings::default().remote.sharp_text, "4:2:0 unless asked: fewer bits");
-    }
-
-    #[test]
-    fn quick_terminal_keys() {
-        let loaded = Settings::parse(
-            "[quick_terminal]\nhotkey = \"cmd-alt-space\"\nheight = 60\nautohide = false\n",
-        );
-        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
-        assert_eq!(
-            loaded.settings.quick_terminal,
-            QuickTerminalSettings { hotkey: "cmd-alt-space".into(), height: 60, autohide: false }
-        );
-        let d = Settings::default().quick_terminal;
-        assert_eq!((d.hotkey.as_str(), d.height, d.autohide), ("ctrl-`", 40, true));
-        let off = Settings::parse("[quick_terminal]\nhotkey = \"\"\n");
-        assert_eq!(off.settings.quick_terminal.hotkey, "", "no chord: the palette's command only");
-        assert_eq!(off.settings.quick_terminal.height, 40, "the rest keeps its default");
-        let wrong = Settings::parse("[quick_terminal]\nheight = \"half\"\n");
-        assert!(wrong.error.is_some(), "a height is a number");
     }
 
     /// `[keys]` holds a table per context of action names and their chords: one, a list, or
@@ -1346,7 +1420,7 @@ mod tests {
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
         assert!(text.contains("allow = []"), "{text}");
         assert!(text.contains("server = \"\""), "{text}");
-        assert!(text.contains("hotkey = \"ctrl-`\""), "{text}");
+        assert!(!text.contains("[quick_terminal]"), "{text}");
         assert!(text.contains("[keys]\n# The app's keys"), "{text}");
     }
 
@@ -1406,6 +1480,71 @@ mod tests {
         assert_eq!((server.host(), server.port()), ("studio.tail1234.ts.net", 45560));
         assert!(Settings::default().worker.allow.is_empty(), "the private ranges by default");
         assert_eq!(Settings::default().worker.server, None, "on its own by default");
+    }
+
+    /// A worker's labels take any flag, number, word or list of them, and its probes any
+    /// command; both are the person's own names, so none of them is an unknown key.
+    #[test]
+    fn worker_labels_and_probes() {
+        let loaded = Settings::parse(
+            "[worker.labels]\nfast-disk = true\nvram_gb = 24\ntflops = 26.5\nrack = \"b2\"\nzones = [\"eu\", 2]\n[worker.probes]\ncuda = \"nvidia-smi -L\"\n",
+        );
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        let worker = &loaded.settings.worker;
+        let label = |name: &str| worker.labels.get(name).cloned();
+        assert_eq!(label("fast-disk"), Some(Label::Bool(true)));
+        assert_eq!(label("vram_gb"), Some(Label::Int(24)));
+        assert_eq!(label("tflops"), Some(Label::Float(26.5)));
+        assert_eq!(label("rack"), Some(Label::Text("b2".to_owned())));
+        assert_eq!(
+            label("zones"),
+            Some(Label::List(vec![Label::Text("eu".to_owned()), Label::Int(2)]))
+        );
+        assert_eq!(worker.probes.get("cuda").map(String::as_str), Some("nvidia-smi -L"));
+        assert!(Settings::default().worker.labels.is_empty() && worker.server.is_none());
+
+        let wrong = Settings::parse("[worker.labels]\ngpu = { vram = 24 }\n");
+        let error = wrong.error.map(|e| e.to_string()).unwrap_or_default();
+        assert!(error.contains("a label"), "{error}");
+        assert!(Settings::parse("[worker.probes]\ncuda = 1\n").error.is_some(), "a command");
+        let back = toml::to_string(&loaded.settings).unwrap_or_default();
+        assert_eq!(Settings::parse(&back).settings.worker, *worker, "written back:\n{back}");
+    }
+
+    /// The fleet's bounds on projects, each key with its default when the file leaves it out.
+    #[test]
+    fn server_project_bounds() {
+        let d = Settings::default().server.projects;
+        assert_eq!(
+            (d.live_agents, d.live_per_worker, d.live_per_project, d.depth, d.timeline_kept),
+            (24, 8, 24, 16, 65_536)
+        );
+        assert!(d.permission_flags.is_empty(), "no project loosens permissions by default");
+        let loaded = Settings::parse(
+            "[server.projects]\nlive_agents = 40\ndepth = 4\npermission_flags = [\"nightly\"]\n\
+             projects = 8\ntasks_per_project = 100\ntitle_max = 80\nbrief_max = 4096\n\
+             owns_max = 16\ncomprehension_depth = 2\n",
+        );
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        assert_eq!(
+            loaded.settings.server.projects,
+            ProjectBounds {
+                live_agents: 40,
+                depth: 4,
+                permission_flags: vec!["nightly".to_owned()],
+                projects: 8,
+                tasks_per_project: 100,
+                title_max: 80,
+                brief_max: 4096,
+                owns_max: 16,
+                comprehension_depth: 2,
+                ..ProjectBounds::default()
+            }
+        );
+        assert!(Settings::parse("[server.projects]\ncomprehension_depth = 300\n").error.is_some());
+        let typo = Settings::parse("[server.projects]\nlive_agent = 40\n");
+        assert_eq!(typo.warnings, ["unknown key `server.projects.live_agent`"]);
+        assert!(Settings::parse("[server.projects]\ndepth = -1\n").error.is_some());
     }
 
     #[test]

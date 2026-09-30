@@ -6,7 +6,8 @@
 //! rows and video go client ↔ worker directly.
 //!
 //! * [`hub`] — the registry, the leases and the one verb dispatch.
-//! * [`store`] — the state file that lists known workers across restarts.
+//! * [`project`] — projects: their records, path claims, placement, and how agents move tasks.
+//! * [`store`] — the state files: known workers and every project, across restarts.
 //! * [`link`] — the QUIC front end.
 //! * [`mcp`] — the MCP front end (Streamable HTTP).
 
@@ -17,19 +18,23 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
+mod deliver;
 pub mod hub;
 pub mod link;
 pub mod mcp;
+mod placement;
+pub mod project;
 pub mod store;
+pub mod vouch;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-pub use hub::{GONE_AFTER, Hub, Lan, Lease, SystemLan, WAIT_CAP_MS};
+pub use hub::{Acting, GONE_AFTER, Hub, Lan, Lease, Speaker, SystemLan, WAIT_CAP_MS};
 pub use mcp::Mcp;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
-pub use store::Store;
+pub use store::{ProjectStore, Store};
 use tokio::task::JoinHandle;
 
 /// Log whether this machine serves as a Tailscale peer relay: the server's machine is always
@@ -59,6 +64,14 @@ pub enum ServerError {
         /// Why.
         source: std::io::Error,
     },
+    /// A state file could not be read: the server does not start rather than write over it.
+    #[error("state file {path}: {source}")]
+    State {
+        /// Which.
+        path: PathBuf,
+        /// Why.
+        source: std::io::Error,
+    },
 }
 
 /// How to run a server.
@@ -85,13 +98,27 @@ pub struct Server {
     mcp: SocketAddr,
     store: Store,
     tasks: Vec<JoinHandle<()>>,
+    /// Keeps the projects; finishes, writing them, once the hub stops sending it changes.
+    keeper: JoinHandle<()>,
 }
 
 impl Server {
     /// Load the state file, bind both listeners and start serving.
     pub async fn start(config: Config) -> Result<Self, ServerError> {
         let store = Store::in_dir(&config.data_dir);
-        let hub = Hub::new(config.name, store.load().await);
+        let projects = ProjectStore::in_dir(&config.data_dir);
+        let unreadable = |path: &std::path::Path| {
+            let path = path.to_owned();
+            move |source| ServerError::State { path, source }
+        };
+        let hub = Hub::new(config.name, store.load().await.map_err(unreadable(store.path()))?);
+        let key_path = config.data_dir.join(vouch::KEY_FILE);
+        hub.set_agent_key(
+            vouch::AgentKey::load_or_make(&config.data_dir).map_err(unreadable(&key_path))?,
+        );
+        let kept = projects.load().await.map_err(unreadable(projects.path()))?;
+        hub.adopt_projects(kept.clone());
+        let keeper = tokio::spawn(projects.keep(kept, hub.keep_projects()));
         let listener = ServerListener::bind(config.quic, config.admission.clone())?;
         let quic = listener.local_addr()?;
         let mcp_listener = mcp::bind(config.mcp)
@@ -104,11 +131,12 @@ impl Server {
         }
         let tasks = vec![
             tokio::spawn(store.clone().keep(hub.persisted())),
+            tokio::spawn(Hub::deliver_reports(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
             tokio::spawn(mcp::serve(mcp_listener, config.admission, hub.clone())),
         ];
         tracing::info!(name = %hub.name(), %quic, %mcp, state = %store.path().display(), "serving");
-        Ok(Self { hub, listener, quic, mcp, store, tasks })
+        Ok(Self { hub, listener, quic, mcp, store, tasks, keeper })
     }
 
     /// The registry.
@@ -148,6 +176,10 @@ impl Server {
             && let Err(e) = self.store.save(&workers).await
         {
             tracing::warn!(error = %e, "state not saved at shutdown");
+        }
+        self.hub.stop_keeping();
+        if let Err(e) = self.keeper.await {
+            tracing::warn!(error = %e, "projects not saved at shutdown");
         }
     }
 }

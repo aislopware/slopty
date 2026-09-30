@@ -9,14 +9,17 @@
 //! [`listing::folder`] a directory for a folder tile, and [`search`] searches the files under a
 //! directory for text.
 //! [`orchestrate::Orchestrator`] answers the verbs the server forwards (open, type, read, wait,
-//! files, [`ports`]); [`caps`] says what this worker can do.
+//! files, [`ports`]); [`caps`] says what this worker can do, and [`facts`] what it is and has
+//! for a project's placement.
 
 pub mod caps;
 pub mod changes;
 pub mod clip;
 pub mod conversation;
+pub mod facts;
 pub mod file;
 pub mod find;
+pub mod fswatch;
 pub mod handoff;
 pub mod items;
 pub mod listing;

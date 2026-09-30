@@ -286,8 +286,8 @@ mod tests {
             self.recorder.is_active(pid)
         }
 
-        fn activate(&mut self, pid: i32) -> Result<(), InputError> {
-            self.recorder.activate(pid)
+        fn activate(&mut self, pid: i32, window: Option<u32>) -> Result<(), InputError> {
+            self.recorder.activate(pid, window)
         }
 
         fn post(&mut self, post: Post) -> Result<(), InputError> {
@@ -430,8 +430,8 @@ mod tests {
                 self.0.is_active(pid)
             }
 
-            fn activate(&mut self, pid: i32) -> Result<(), InputError> {
-                self.0.activate(pid)
+            fn activate(&mut self, pid: i32, window: Option<u32>) -> Result<(), InputError> {
+                self.0.activate(pid, window)
             }
 
             fn post(&mut self, _post: Post) -> Result<(), InputError> {
@@ -531,8 +531,8 @@ mod tests {
                 self.0.is_active(pid)
             }
 
-            fn activate(&mut self, pid: i32) -> Result<(), InputError> {
-                self.0.activate(pid)
+            fn activate(&mut self, pid: i32, window: Option<u32>) -> Result<(), InputError> {
+                self.0.activate(pid, window)
             }
 
             fn post(&mut self, post: Post) -> Result<(), InputError> {
@@ -573,7 +573,8 @@ mod tests {
                 Event::Key { .. }
                 | Event::Scroll { .. }
                 | Event::Text { .. }
-                | Event::Media { .. } => None,
+                | Event::Media { .. }
+                | Event::Gesture { .. } => None,
             })
             .collect();
         assert_eq!(

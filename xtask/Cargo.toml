@@ -20,6 +20,8 @@ objc2-core-foundation.workspace = true
 xshell.workspace = true
 resvg.workspace = true
 icns.workspace = true
+# `cargo xtask vm` removes its run's guest on SIGINT, SIGTERM or SIGHUP (`signal`).
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # `statvfs`: the free space `xtask prune` and the gate keep on the build volume.

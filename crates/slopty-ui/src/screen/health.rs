@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use slopty_client::ScreenStats;
 use slopty_client::pacing::PacingStats;
+#[cfg(test)]
+use slopty_client::pacing::Spread;
 use slopty_proto::screen::RateVerdict;
 
 use super::HudInput;
@@ -33,17 +35,30 @@ pub struct Figure {
     pub warn: bool,
 }
 
-/// The overlay's plain line: the painted rate, how long a frame takes from arrival to the
-/// glass (p50), the bitrate received and the round trip. "To glass" is flagged when its p95
-/// passes two display periods, the round trip from [`RTT_WARN_FROM`].
+/// The overlay's plain line: the painted rate, how long a frame takes to reach the glass
+/// (p50), the bitrate received and the round trip, which is flagged from [`RTT_WARN_FROM`].
+///
+/// "To glass" is from the capture on the worker once the stream's clock probes have placed the
+/// worker's clock, the number a remote desktop is judged on, and flagged when its p95 passes
+/// three display periods and half the round trip: one period each for the capture, the codec
+/// and the display, and the path's one way. Until then it is from the arrival of the frame's
+/// last datagram, flagged past two display periods.
 #[must_use]
 pub fn summary(input: &HudInput<'_>) -> Vec<Figure> {
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
     let period = Duration::from_secs(1).checked_div(u32::from(input.target_fps.max(1)));
-    let slow = period.is_some_and(|p| input.pacing.latency_p95 > p.saturating_mul(2));
+    let one_way = input.rtt.and_then(|rtt| rtt.checked_div(2)).unwrap_or_default();
+    let captured = input.capture.count > 0 && input.stats.clock.is_some();
+    let (p50, slow) = if captured {
+        let limit = period.map(|p| p.saturating_mul(3).saturating_add(one_way));
+        (input.capture.p50, limit.is_some_and(|limit| input.capture.p95 > limit))
+    } else {
+        let limit = period.map(|p| p.saturating_mul(2));
+        (input.pacing.latency_p50, limit.is_some_and(|limit| input.pacing.latency_p95 > limit))
+    };
     let presented = input.pacing.presented > 0;
     let glass = if presented {
-        format!("{:.0} ms to glass", ms(input.pacing.latency_p50))
+        format!("{:.0} ms to glass", ms(p50))
     } else {
         "\u{2013} to glass".to_owned()
     };
@@ -141,6 +156,7 @@ mod tests {
             size: (1920, 1080),
             scale: 1.0,
             chroma: None,
+            seams: None,
             target_fps: 60,
             fps: 59.6,
             mbps: 18.25,
@@ -149,9 +165,13 @@ mod tests {
             rate: None,
             stats,
             pacing,
+            capture: &NO_CAPTURE,
             ui: None,
         }
     }
+
+    const NO_CAPTURE: Spread =
+        Spread { p50: Duration::ZERO, p95: Duration::ZERO, max: Duration::ZERO, count: 0 };
 
     /// The plain line says the rate, the time to glass, the bitrate and the round trip; a
     /// frame slower than two display periods at p95 and a round trip from 150 ms are flagged,
@@ -198,6 +218,45 @@ mod tests {
         let blank = summary(&HudInput { rtt: None, ..input(&stats, &none) });
         assert_eq!(blank[1].text, "\u{2013} to glass");
         assert_eq!(blank[3].text, "RTT \u{2013}");
+    }
+
+    /// Once the worker's clock is placed, "to glass" is from the capture, and it is flagged
+    /// only past three display periods and the path's one way: 50 ms plus 10 ms at 60 Hz over a
+    /// 20 ms round trip. Timings from a capture with no clock behind them are not shown.
+    #[test]
+    fn to_glass_is_from_the_capture_once_the_clock_is_placed() {
+        use slopty_client::pacing::{ClockAnchor, ClockEstimate};
+        let pacing = PacingStats {
+            presented: 600,
+            latency_p50: Duration::from_millis(8),
+            latency_p95: Duration::from_millis(12),
+            ..PacingStats::default()
+        };
+        let capture = |p50: u64, p95: u64| Spread {
+            p50: Duration::from_millis(p50),
+            p95: Duration::from_millis(p95),
+            max: Duration::from_millis(p95),
+            count: 240,
+        };
+        let clocked = ScreenStats {
+            clock: Some(ClockEstimate {
+                anchor: ClockAnchor { at: Instant::now(), host_us: 0 },
+                bound: Duration::from_millis(10),
+                rtt: Duration::from_millis(20),
+                drift_ppm: 0,
+            }),
+            ..ScreenStats::default()
+        };
+        let rtt = Some(Duration::from_millis(20));
+        let fast = capture(41, 59);
+        let line = summary(&HudInput { capture: &fast, rtt, ..input(&clocked, &pacing) });
+        assert_eq!((line[1].text.as_str(), line[1].warn), ("41 ms to glass", false));
+        let slow = capture(48, 61);
+        let line = summary(&HudInput { capture: &slow, rtt, ..input(&clocked, &pacing) });
+        assert_eq!((line[1].text.as_str(), line[1].warn), ("48 ms to glass", true));
+        let unclocked = ScreenStats::default();
+        let line = summary(&HudInput { capture: &fast, rtt, ..input(&unclocked, &pacing) });
+        assert_eq!((line[1].text.as_str(), line[1].warn), ("8 ms to glass", false));
     }
 
     /// The mark is silent while all is well; a stall says so at once, a cut only once it has

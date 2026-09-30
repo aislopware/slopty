@@ -53,6 +53,7 @@ impl WorkspaceView {
         w.name = name;
         w.status = WorkerStatus::Connected;
         w.link = Some(link);
+        w.links = w.links.saturating_add(1);
         // The worker hands pages and files only to a client that said it takes them.
         self.declare_handoffs(key);
         self.focus_link_reset(key);
@@ -155,7 +156,7 @@ impl WorkspaceView {
             self.pending_focus_self = true;
         }
         self.update_awake(cx);
-        self.count_needs_you(cx);
+        self.agents_moved(cx);
         cx.notify();
     }
 
@@ -397,9 +398,6 @@ impl WorkspaceView {
                 let tile = TileRef { worker: key, item: id };
                 let placement = if by_me { Placement::Local } else { Placement::Remote };
                 self.layout.open(tile, placement);
-                if by_me {
-                    self.quick_arrived(key, id);
-                }
                 self.note_recent(id);
                 // A worker's given shell opens beside the rest and leaves the focus where it
                 // was: a worker coming up must not take the keys someone is typing elsewhere.
@@ -497,7 +495,7 @@ impl WorkspaceView {
         self.finished.remove(&session);
         self.update_awake(cx);
         self.reconcile(cx);
-        self.count_needs_you(cx);
+        self.agents_moved(cx);
         cx.notify();
     }
 
@@ -849,7 +847,7 @@ impl WorkspaceView {
                     self.screens.remove(&id);
                 }
             }
-            ScreenEvent::Geometry { stream, width, height } => {
+            ScreenEvent::Geometry { stream, width, height, .. } => {
                 if width > 0 && height > 0 {
                     for id in self.streams_of(key, stream, cx) {
                         if let Some(view) = self.screens.get(&id) {

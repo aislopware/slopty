@@ -1,0 +1,538 @@
+//! Golden byte snapshots of the project messages (`slopty_proto::project`): the verbs and
+//! answers, the change pushed to every client, the snapshot a client gets on connecting, and
+//! what a worker reports of its agents. A changed snapshot is a wire change: accept it
+//! deliberately (`cargo insta review`).
+
+#[cfg(test)]
+mod golden_project {
+    use std::collections::BTreeMap;
+
+    use slopty_core::{SessionId, WallMs, WorkerId};
+    use slopty_proto::agent::{AgentBranch, PullRequest, Review, Worktree};
+    use slopty_proto::codec;
+    use slopty_proto::orchestration::{
+        ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
+    };
+    use slopty_proto::project::{
+        AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Moment, Native,
+        NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placement, Preference,
+        Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Reason, Report, ReportKind,
+        Runner, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
+        TimelineEntry, VerifierRun, WorkerFacts,
+    };
+    use slopty_proto::server::{FromServer, ToServer};
+    use uuid::Uuid;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes
+            .chunks(16)
+            .map(|row| row.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[track_caller]
+    fn snap<T: serde::Serialize>(name: &str, msg: &T) {
+        let bytes = codec::encode(msg).expect("encodes");
+        insta::assert_snapshot!(name, hex(&bytes));
+    }
+
+    fn at() -> WallMs {
+        WallMs::from_millis(1_790_000_000_000)
+    }
+
+    fn term() -> TermRef {
+        TermRef {
+            worker: WorkerId::from_uuid(Uuid::from_u128(0x0199_a000_0000_7000_8000_0000_0000_0001)),
+            session: SessionId::from_uuid(Uuid::from_u128(
+                0x0199_a1b1_c3d4_7000_8000_0000_0000_abcd,
+            )),
+        }
+    }
+
+    fn project_id() -> ProjectId {
+        ProjectId::new("slopty").expect("a name")
+    }
+
+    fn project() -> Project {
+        Project {
+            id: project_id(),
+            title: "Projects mode".to_owned(),
+            repo: "~/src/slopty".to_owned(),
+            target: "main".to_owned(),
+            verifier: Some("cargo gate".to_owned()),
+            orchestrator: Some(term()),
+            limits: Limits::default(),
+            metadata: Some(r#"{"goal":"open"}"#.to_owned()),
+            created_ms: at(),
+        }
+    }
+
+    fn placement() -> Placement {
+        Placement {
+            pin: None,
+            require: vec![r#"os == "linux" && cpus >= 16"#.to_owned()],
+            prefer: vec![Preference { expr: "has(probes.cuda)".to_owned(), weight: 5 }],
+            near: vec![Peer::Task(TaskId(1))],
+            avoid: vec![Peer::Worker(term().worker)],
+        }
+    }
+
+    fn spec() -> TaskSpec {
+        TaskSpec {
+            parent: Some(TaskId(1)),
+            depends_on: vec![TaskId(2)],
+            kind: "build".to_owned(),
+            title: "Server store".to_owned(),
+            brief: "Keep projects beside workers.json.".to_owned(),
+            owns: vec!["crates/slopty-server".to_owned()],
+            read_only: false,
+            placement: placement(),
+            verifier: Some("cargo nextest run -p slopty-server".to_owned()),
+            metadata: Some(r#"{"lane":"server"}"#.to_owned()),
+        }
+    }
+
+    fn task() -> Task {
+        let s = spec();
+        Task {
+            id: TaskId(3),
+            parent: s.parent,
+            depends_on: s.depends_on,
+            kind: s.kind,
+            title: s.title,
+            brief: s.brief,
+            owns: s.owns,
+            read_only: s.read_only,
+            placement: s.placement,
+            verifier: s.verifier,
+            metadata: s.metadata,
+            state: TaskState::Blocked,
+            status: Some("waiting on a permission".to_owned()),
+            assignment: Some(Assignment {
+                term: term(),
+                since_ms: at(),
+                ended_ms: None,
+                conversation: Some("0199a1b1-c3d4-7000-8000-00000000c0de".to_owned()),
+            }),
+            branch: Some("slopty/slopty/3".to_owned()),
+            worktree: Some("/w/slopty-3".to_owned()),
+            base: Some(commit('b')),
+            pr: Some(PullRequest {
+                number: 42,
+                url: "https://github.com/o/r/pull/42".to_owned(),
+                review: Some(Review::Pending),
+                merge_request: false,
+            }),
+            verified: Some(run(false, "clippy: 2 errors")),
+            created_ms: at(),
+            updated_ms: WallMs::from_millis(1_790_000_005_000),
+        }
+    }
+
+    fn commit(c: char) -> String {
+        std::iter::repeat_n(c, 40).collect()
+    }
+
+    fn run(passed: bool, summary: &str) -> VerifierRun {
+        VerifierRun { passed, summary: summary.to_owned(), head: commit('a'), base: commit('b') }
+    }
+
+    fn native_agent() -> NativeAgent {
+        NativeAgent {
+            id: "ag1".to_owned(),
+            kind: "Explore".to_owned(),
+            started_ms: at(),
+            stopped_ms: Some(WallMs::from_millis(1_790_000_004_000)),
+            transcript: Some("/t/ag1.jsonl".to_owned()),
+            last: Some("Found it.".to_owned()),
+        }
+    }
+
+    fn natives() -> Natives {
+        Natives {
+            agents: vec![native_agent()],
+            tasks: vec![NativeTask {
+                id: "1".to_owned(),
+                subject: "Read the hub".to_owned(),
+                done: true,
+            }],
+        }
+    }
+
+    fn status(timeline: Vec<TimelineEntry>, next: u64) -> ProjectStatus {
+        ProjectStatus {
+            project: project(),
+            tasks: vec![task().card(&natives())],
+            orchestrator_natives: Natives::default().counts(),
+            timeline,
+            next,
+            bounds: Bounds { permission_flags: true, ..Bounds::default() },
+            live: Live { fleet: 7, project: 3 },
+        }
+    }
+
+    fn entry(seq: u64, what: Moment) -> TimelineEntry {
+        TimelineEntry { seq, at_ms: at(), task: Some(TaskId(3)), what }
+    }
+
+    fn request(verb: Verb) -> ToServer {
+        ToServer::Request { id: 21, key: None, verb }
+    }
+
+    fn reply(outcome: Outcome) -> FromServer {
+        FromServer::Reply { id: 21, outcome }
+    }
+
+    fn launch(run: Runner) -> TaskLaunch {
+        TaskLaunch {
+            pin: None,
+            cwd: "~/src/slopty".to_owned(),
+            run,
+            env: vec![("A".to_owned(), "1".to_owned())],
+            size: Some(Size { cols: 120, rows: 36 }),
+            ignore_dependencies: false,
+        }
+    }
+
+    #[test]
+    fn project_verbs() {
+        let limits = LimitsChange {
+            live_per_worker: Some(2),
+            live_per_project: Some(6),
+            depth: Some(4),
+            timeline_kept: Some(1024),
+        };
+        snap(
+            "project_create",
+            &request(Verb::ProjectCreate {
+                project: project_id(),
+                title: "Projects mode".to_owned(),
+                repo: "~/src/slopty".to_owned(),
+                target: "main".to_owned(),
+                verifier: Some("cargo gate".to_owned()),
+                orchestrator: Some(term()),
+                limits,
+                metadata: Some(r#"{"goal":"open"}"#.to_owned()),
+            }),
+        );
+        snap(
+            "project_set",
+            &request(Verb::ProjectSet {
+                project: project_id(),
+                orchestrator: None,
+                verifier: None,
+                limits: LimitsChange { depth: Some(3), ..LimitsChange::default() },
+                metadata: None,
+            }),
+        );
+        snap("project_list", &request(Verb::ProjectList));
+        snap(
+            "project_status",
+            &request(Verb::ProjectStatus { project: project_id(), since: Some(7), timeout_ms: 0 }),
+        );
+        snap(
+            "task_create",
+            &request(Verb::TaskCreate { project: project_id(), spec: Box::new(spec()) }),
+        );
+        snap(
+            "task_create_read_only",
+            &request(Verb::TaskCreate {
+                project: project_id(),
+                spec: Box::new(TaskSpec {
+                    title: "Review".to_owned(),
+                    read_only: true,
+                    ..TaskSpec::default()
+                }),
+            }),
+        );
+        snap(
+            "task_claim",
+            &request(Verb::TaskClaim {
+                project: project_id(),
+                task: TaskId(3),
+                paths: vec!["docs/decisions/projects.md".to_owned()],
+            }),
+        );
+        let change = TaskChange {
+            state: Some(TaskState::Done),
+            status: Some("gate passed; ready".to_owned()),
+            branch: Some("slopty/slopty/3".to_owned()),
+            verified: Some(run(true, "gate passed")),
+            base: Some(commit('b')),
+            note: Some("ready".to_owned()),
+            depends_on: Some(vec![TaskId(1), TaskId(2)]),
+            placement: Some(placement()),
+            verifier: Some(String::new()),
+            metadata: Some("{}".to_owned()),
+        };
+        snap(
+            "task_update",
+            &request(Verb::TaskUpdate {
+                project: project_id(),
+                task: TaskId(3),
+                change: Box::new(change),
+            }),
+        );
+        snap(
+            "task_assign",
+            &request(Verb::TaskAssign { project: project_id(), task: TaskId(3), term: term() }),
+        );
+        let claude = Runner::Claude {
+            prompt: Some("Read your brief: slopty task status.".to_owned()),
+            args: vec!["--model".to_owned(), "opus".to_owned()],
+        };
+        snap(
+            "task_spawn",
+            &request(Verb::TaskSpawn {
+                project: project_id(),
+                task: TaskId(3),
+                launch: TaskLaunch {
+                    pin: Some(term().worker),
+                    ignore_dependencies: true,
+                    ..launch(claude)
+                },
+            }),
+        );
+        let bench = Runner::Command { argv: vec!["cargo".to_owned(), "bench".to_owned()] };
+        snap(
+            "task_spawn_command",
+            &request(Verb::TaskSpawn {
+                project: project_id(),
+                task: TaskId(4),
+                launch: launch(bench),
+            }),
+        );
+        snap(
+            "placement_suggest",
+            &request(Verb::PlacementSuggest {
+                project: Some(project_id()),
+                task: Some(TaskId(3)),
+                placement: Some(placement()),
+            }),
+        );
+        snap("worker_facts", &request(Verb::WorkerFacts { worker: Some(term().worker) }));
+        snap("task_get", &request(Verb::TaskGet { project: project_id(), task: Some(TaskId(3)) }));
+        snap("working_on", &request(Verb::WorkingOn { session: term().session }));
+        snap(
+            "task_report",
+            &request(Verb::TaskReport { project: project_id(), task: TaskId(3), report: report() }),
+        );
+    }
+
+    #[test]
+    fn project_answers() {
+        let timeline = vec![
+            entry(8, Moment::Assigned { term: term(), spawned: true }),
+            entry(9, Moment::State { from: TaskState::Running, to: TaskState::Blocked }),
+        ];
+        snap("project_reply_status", &reply(Outcome::Project(Box::new(status(timeline, 10)))));
+        snap("project_reply_list", &reply(Outcome::Projects(vec![project()])));
+        snap("project_reply_task", &reply(Outcome::Task(Box::new(task()))));
+        let ranked = vec![
+            Suggestion {
+                worker: term().worker,
+                name: "box".to_owned(),
+                fits: true,
+                score: 105,
+                reasons: vec![
+                    Reason {
+                        rule: "online".to_owned(),
+                        held: true,
+                        points: 0,
+                        detail: String::new(),
+                    },
+                    Reason {
+                        rule: "has(probes.cuda)".to_owned(),
+                        held: true,
+                        points: 5,
+                        detail: String::new(),
+                    },
+                ],
+            },
+            Suggestion {
+                worker: WorkerId::from_uuid(Uuid::from_u128(2)),
+                name: "studio".to_owned(),
+                fits: false,
+                score: 0,
+                reasons: vec![Reason {
+                    rule: r#"os == "linux" && cpus >= 16"#.to_owned(),
+                    held: false,
+                    points: 0,
+                    detail: "false here".to_owned(),
+                }],
+            },
+        ];
+        snap("project_reply_suggestions", &reply(Outcome::Suggestions(ranked)));
+        snap(
+            "project_reply_facts",
+            &reply(Outcome::Facts(vec![WorkerFacts { worker: term().worker, facts: facts() }])),
+        );
+        let refused = Outcome::Error {
+            code: ErrorCode::Unplaced,
+            message: "no worker can take task 3".to_owned(),
+        };
+        snap(
+            "project_reply_node",
+            &reply(Outcome::Node(Box::new(NodeDetail { task: Some(task()), natives: natives() }))),
+        );
+        snap(
+            "project_reply_working_on",
+            &reply(Outcome::WorkingOn(Some((project_id(), Some(TaskId(3)))))),
+        );
+        snap("project_reply_unplaced", &reply(refused));
+        for (name, code) in [
+            ("project_reply_conflict", ErrorCode::Conflict),
+            ("project_reply_unknown_project", ErrorCode::UnknownProject),
+            ("project_reply_unknown_task", ErrorCode::UnknownTask),
+            ("project_reply_limit", ErrorCode::Limit),
+            ("project_reply_bad_expression", ErrorCode::BadExpression),
+        ] {
+            snap(name, &reply(Outcome::Error { code, message: String::new() }));
+        }
+    }
+
+    fn report() -> Report {
+        Report {
+            kind: ReportKind::Done,
+            note: "Store keeps a log; gate passed.".to_owned(),
+            artifacts: vec!["docs/decisions/projects.md".to_owned()],
+            branch: Some("slopty/slopty/3".to_owned()),
+            pr: Some(42),
+        }
+    }
+
+    /// Every shape a fact takes.
+    fn facts() -> Facts {
+        let labels = BTreeMap::from([
+            ("fast-disk".to_owned(), Fact::Bool(true)),
+            ("vram_gb".to_owned(), Fact::Int(24)),
+            ("rack".to_owned(), Fact::Text("b2".to_owned())),
+        ]);
+        BTreeMap::from([
+            ("load".to_owned(), Fact::Float(1.5)),
+            ("labels".to_owned(), Fact::Map(labels)),
+            ("rust_targets".to_owned(), Fact::List(vec![Fact::Text("wasm32-wasip2".to_owned())])),
+        ])
+    }
+
+    /// Every timeline moment, as it is pushed inside a change, and the snapshot's sequence.
+    #[test]
+    fn project_pushed() {
+        let moments = [
+            Moment::Created,
+            Moment::Orchestrator { term: term() },
+            Moment::Limits { limits: Limits::default() },
+            Moment::TaskCreated { title: "Server store".to_owned() },
+            Moment::Claimed { paths: vec!["crates/slopty-server".to_owned()] },
+            Moment::Assigned { term: term(), spawned: false },
+            Moment::State { from: TaskState::Planned, to: TaskState::Running },
+            Moment::Branch { branch: Some("slopty/slopty/3".to_owned()), pr: Some(42) },
+            Moment::Verified { passed: true, summary: "gate passed".to_owned() },
+            Moment::AgentGone { term: term() },
+            Moment::Reported { report: report() },
+            Moment::Delivered { term: term(), reports: 3 },
+            Moment::Note { text: "ready".to_owned() },
+        ];
+        let timeline: Vec<TimelineEntry> =
+            (1..).zip(moments).map(|(seq, what)| entry(seq, what)).collect();
+        let snapshot = status(timeline.clone(), 14);
+        let part = ProjectsPart { seq: 49, first: true, last: true, projects: vec![snapshot] };
+        snap("project_snapshot", &FromServer::Projects(Box::new(part)));
+        let update = ProjectUpdate {
+            project: project_id(),
+            record: Some(project()),
+            task: Some(task().card(&natives())),
+            native: None,
+            entry: timeline.last().cloned(),
+        };
+        let event =
+            HubEvent { seq: 50, at_ms: at(), what: Happening::Project(Box::new(update.clone())) };
+        snap("project_event_pushed", &FromServer::Event(event));
+        let quiet = ProjectUpdate { record: None, entry: None, ..update.clone() };
+        let event = HubEvent { seq: 51, at_ms: at(), what: Happening::Project(Box::new(quiet)) };
+        snap("project_event_quiet", &FromServer::Event(event));
+        let leaf = ProjectUpdate {
+            record: None,
+            task: None,
+            entry: None,
+            native: Some(NativeChange {
+                task: Some(TaskId(3)),
+                native: Native::Agent(native_agent()),
+            }),
+            ..update
+        };
+        let event = HubEvent { seq: 52, at_ms: at(), what: Happening::Project(Box::new(leaf)) };
+        snap("project_event_native", &FromServer::Event(event));
+    }
+
+    /// What a worker says it is and has.
+    #[test]
+    fn worker_facts_reported() {
+        snap("report_facts", &ToServer::Facts(facts()));
+    }
+
+    /// What a worker tells the server of its agents beyond their status.
+    #[test]
+    fn agent_reports() {
+        let session = term().session;
+        snap(
+            "report_branch",
+            &ToServer::Report(AgentReport::Branch(AgentBranch {
+                session,
+                pr: None,
+                worktree: Some(Worktree {
+                    name: "rows".to_owned(),
+                    path: "/w/.claude/worktrees/rows".to_owned(),
+                    branch: Some("worktree-rows".to_owned()),
+                    original_cwd: "/w".to_owned(),
+                    original_branch: Some("main".to_owned()),
+                }),
+            })),
+        );
+        snap(
+            "report_subagent_started",
+            &ToServer::Report(AgentReport::SubagentStarted {
+                session,
+                agent: "ag1".to_owned(),
+                kind: "Explore".to_owned(),
+            }),
+        );
+        snap(
+            "report_subagent_stopped",
+            &ToServer::Report(AgentReport::SubagentStopped {
+                session,
+                agent: "ag1".to_owned(),
+                transcript: Some("/t/ag1.jsonl".to_owned()),
+                last: Some("Found it.".to_owned()),
+            }),
+        );
+        let task = NativeTask { id: "1".to_owned(), subject: "Read".to_owned(), done: false };
+        snap("report_native_task", &ToServer::Report(AgentReport::NativeTask { session, task }));
+        snap(
+            "report_permission_mode",
+            &ToServer::Report(AgentReport::PermissionMode {
+                session,
+                mode: "bypassPermissions".to_owned(),
+            }),
+        );
+        snap("report_delivered", &ToServer::Report(AgentReport::Delivered { session, batch: 7 }));
+        snap(
+            "deliver",
+            &FromServer::Deliver {
+                session,
+                batch: 7,
+                context: "<slopty-reports project=\"slopty\">\ntask 3: done\n</slopty-reports>"
+                    .to_owned(),
+            },
+        );
+    }
+
+    /// A project name is checked as it decodes, so a bad one never reaches the store.
+    #[test]
+    fn a_bad_project_name_does_not_decode() {
+        let bytes = codec::encode_body(&"Not A Name").expect("encodes");
+        let decoded: Result<ProjectId, _> = codec::decode_body(&bytes);
+        decoded.unwrap_err();
+    }
+}

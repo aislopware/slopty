@@ -175,8 +175,10 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   than in another app. `ItemKind::Browser { url }` is a tile like any other (placed, moved,
   closed and taken back the same way), and its page is the platform's `WKWebView`. GPUI draws
   the whole window into one Metal layer, so the page cannot be a GPUI element; it is a native
-  subview that always draws on top. Four rules follow from that, all in the pure
-  `browser::placement` with its tests:
+  subview that always draws on top. Four rules followed from that, all in the pure
+  `browser::placement` with its tests. (Superseded 2026-09-30: the window composes the page
+  under GPUI's layer now, so the rules below, the covers and the monitor are gone; see ui.md,
+  "A browser tile's page is composed by the window, not laid over it".)
   - The page goes where the tile's body was drawn in this frame, measured in the body's
     prepaint and applied in a prepaint that runs after every tile's, so it never trails the
     strip by a frame. It is clipped to the strip.
@@ -201,9 +203,8 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   address as quiet text, "←" while there is history, and "↻". No address field and no tabs:
   the palette is the address bar. (Amended 2026-09-27: the header has an address field now,
   ⌘L or a click on the address; see ui.md, "A page's address is its header's field".)
-  A page with the keyboard gets ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z: the Mac's key monitor hands them
-  to the page before the workspace's key equivalents can take them (ui.md, "The browser
-  tile's native view").
+  A page with the keyboard gets ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z (ui.md, "A browser tile's page is
+  composed by the window, not laid over it", has how).
 
 - ✅ **A browser tile's address is the worker's** (2026-09-25). The item is shared by every
   client of the worker, while each client serves the worker's ports on its own loopback at
@@ -538,7 +539,9 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     comes to it or leaves it, and a focused body in the frame the keyboard moves at all, even
     within the tile: a replayed body replays its input handler and key listeners, so a shell
     replayed after ⌘E put the keyboard in its header's rename field took the typed name
-    (`a_tile_is_named_from_its_header`). Otherwise it is replayed, whatever inside it has the
+    (`a_tile_is_named_from_its_header`). Amended 2026-09-30: the keyboard's half of the rule
+    is gone, since gpui-fast builds again the views whose focus answers changed (`ui.md`, "The
+    workspace reads no focus as a whole"). Otherwise it is replayed, whatever inside it has the
     keys. That is the view itself (a shell's grid, a remote window, a folder, a file's editor
     the file view observes) or a gpui-kit field, and both notify for every key, caret blink,
     selection and input-method change.
@@ -583,3 +586,57 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `a_focused_shell_whose_find_bar_has_the_keys_is_replayed_until_it_is_typed_in`,
     `a_programs_title_draws_the_chrome_only_when_the_tiles_title_follows`,
     `markdown::tests::task_counts_agree_with_the_segments`.
+
+- ✅ **File tiles follow the disk on the kernel's events** (2026-09-30, gap audit #4). The
+  worker looked at every watched file's size and time once a second, so an agent's edit reached
+  its tile up to a second late. `slopty_worker::fswatch` now follows the files on kqueue(2) on
+  macOS and inotify(7) on Linux. The wire is unchanged: `ClientMsg::WatchFiles` names the files,
+  and each change comes back as `WorkerMsg::File`, as before.
+  - **Not `FSEvents`, alone or through `notify`.** The choice was measured, not assumed.
+    fseventsd delivers an event about 11.5 ms after the change, even with the flags
+    `notify` 8.2 already sets (latency 0, `NoDefer`, `FileEvents`). A kqueue event arrives in
+    about 0.1 ms. An `FSEvents` stream also carries its whole subtree, and a non-recursive
+    watch only filters afterwards. A tile of `~/notes.md` would then hear every write under the
+    home folder: 19.7 ms of the worker's CPU for 5 000 writes in a sibling folder, against
+    0.7 ms. `notify`'s callback also panics, inside an `extern "C"` function (so the worker
+    aborts), on a path that is not UTF-8 or on an event flag its bitflags do not know. On Linux
+    it would use the same inotify with a thread of its own. Both backends go through `rustix`,
+    which the worker already had. There is no new runtime dependency: `notify` is a macOS
+    dev-dependency, kept only for the comparison test.
+  - **What is watched.** For each path the worker watches the deepest directory of it that
+    exists, so a `build/` deleted and made again is followed back down. It also watches the
+    directory a symlink ends in. On macOS it watches the file itself too (`O_EVTONLY`, which
+    does not hold the volume mounted), since there a write to a file does not touch its
+    directory. A directory's watch sees what a watch on the file's inode loses: an editor's
+    temporary file renamed over the path, a delete, and a file made again. A client has one
+    kqueue or inotify descriptor, and tokio's reactor wakes on it (`AsyncFd`). No thread
+    waits, and an idle watch costs nothing, where the poll made a stat a second per file.
+  - **One save, one send.** An event only says "look". A file is looked at 2 ms after its
+    events stop (`QUIET`), or after 50 ms of steady writes (`HOLD`). It is sent only when its
+    stamp moved. The stamp is device, inode, size, modification time and change time, so a copy
+    that keeps the old time and size is still a change. A file truncated to nothing waits up
+    to `HOLD` for the writes that usually follow, so a slow writer's empty moment is never
+    sent. On Linux, `IN_CLOSE_WRITE` and `IN_MOVED_TO` say the change is whole, and the file is
+    looked at at once. Two sends of one file are at least `HOLD` apart, so a log written a line
+    a millisecond is sent at most 20 times a second. As before, one file is sent at a time, and
+    a file that changes during a send is sent once more when it ends.
+  - **Where events cannot reach, the poll stays.** Some volumes cannot hear another machine's
+    writes: those not `MNT_LOCAL` or on FUSE on macOS, and NFS, SMB, FUSE, 9P, Ceph, AFS,
+    virtiofs and vboxsf by their `statfs` magic on Linux. A file on one is watched and also
+    looked at every second. A file past a client's 64 watches is polled every second, the old
+    behaviour, and so is a directory the worker may not open. On macOS every watch is a
+    descriptor, and a launchd daemon starts at a soft limit of 256 for all of them. When
+    kqueue or inotify itself fails (inotify's `max_user_instances`, or `ENOSPC` past
+    `max_user_watches` for one directory), the paths it would have covered are polled.
+  - **Not done yet.** Folder tiles still refresh only on focus. Following them needs a wire
+    message, which is the other half of gap #4. A dangling symlink's target that appears later
+    is seen only on the next change in the link's own directory.
+  - Numbers in MEASUREMENTS.md, 2026-09-30, "file tiles on kernel events". Tests: worker
+    `fswatch` unit tests (the volume classifier, the anchor of a missing path and of a
+    symlink, when a touch is due) and `tests/fswatch.rs` on the real file system:
+    `every_kind_of_save_reaches_the_follower_once`, `a_burst_of_writes_is_one_report`,
+    `a_truncate_waits_for_the_writes_after_it`,
+    `a_directory_deleted_and_made_again_is_followed`, `a_symlink_follows_its_target`,
+    `past_the_watch_limit_a_file_is_polled`, `an_unwatchable_directory_is_polled` (macOS),
+    `the_follower_ends_with_its_list`, and the measurement
+    `edit_to_report_against_fsevents_and_bare_kqueue`.

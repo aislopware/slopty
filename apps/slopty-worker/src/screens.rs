@@ -1162,6 +1162,33 @@ mod serving {
     use super::fake::{BUILT, Fake, Gated, Nowhere, Plain, Queued, Toolbox, note, unsourced};
     use super::{Command, serve};
 
+    /// A display switch keeps the tile's word on its trackpad gestures: the input sink made
+    /// for the new display is told they are sent, as the old one was, so a trackpad scroll
+    /// there still comes with its gesture while the tile shows them sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_display_switch_keeps_the_gestures_sent() {
+        const FROM: u32 = 61;
+        const TO: u32 = 62;
+        let mut from = note(FROM);
+        let mut to = note(TO);
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let target = CaptureTarget::Display(slopty_core::DisplayId(FROM));
+        let (mut stream, _opened) =
+            Pipeline::<Fake<Plain>>::open(StreamId(FROM), target, Quality::default(), sink, |_| {})
+                .await
+                .unwrap();
+        stream.inject(&ScreenInput::Gestures { remote: true }).unwrap();
+        let told = from.recv().await.expect("the first sink heard it");
+        assert_eq!(told.input, ScreenInput::Gestures { remote: true });
+        stream.switch_display(slopty_core::DisplayId(TO)).await.unwrap();
+        let told = tokio::time::timeout(Duration::from_secs(2), to.recv())
+            .await
+            .expect("the new sink is told")
+            .expect("a sink");
+        assert_eq!(told.input, ScreenInput::Gestures { remote: true });
+        stream.close().await;
+    }
+
     /// A stream of display `display` on `P`, served on a task of its own: its command queue, the
     /// events it sends the client, and what its input sink queued.
     async fn served<P: Platform>(
@@ -1889,5 +1916,118 @@ mod sourcing {
         drop(a.commands);
         a.task.await.unwrap();
         assert_eq!(tis.0.lock().as_deref(), Some(US), "none asks: the worker's own");
+    }
+}
+
+/// The Mac's lock state from the capture to the client, end to end: the drawn Mac is locked
+/// ([`slopty_capture::synthetic::set_console`]), the stream's geometry probe reads it, the
+/// source check ranks it over the frames, and the client's link hears it over QUIC.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod console {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use slopty_capture::Console;
+    use slopty_capture::synthetic::set_console;
+    use slopty_client::{LinkEvent, WorkerLink};
+    use slopty_core::{ClientId, StreamId, WorkerId};
+    use slopty_net::WorkerMsg;
+    use slopty_net::worker::WorkerListener;
+    use slopty_proto::handshake::{Hello, HelloAck};
+    use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, SourceState};
+    use slopty_worker::screen::Pipeline;
+    use slopty_worker::screen::synthetic::{DISPLAY, Synthetic};
+    use tokio::sync::mpsc;
+
+    use super::fake::{Nowhere, unsourced};
+    use super::{Command, serve};
+
+    /// The next source state the client hears that `wanted` accepts, and how long it took.
+    async fn heard(
+        events: &mut mpsc::Receiver<LinkEvent>,
+        wanted: impl Fn(SourceState) -> bool,
+    ) -> (SourceState, Duration) {
+        let from = Instant::now();
+        let deadline =
+            tokio::time::Instant::now().checked_add(Duration::from_secs(10)).expect("a deadline");
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv()).await;
+            let Ok(Some(event)) = event else { panic!("the client never heard it: {event:?}") };
+            if let LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Source { state, .. })) = event
+                && wanted(state)
+            {
+                return (state, from.elapsed());
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_locked_mac_reaches_the_client_and_so_does_its_return() {
+        let listener = WorkerListener::bind(
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            slopty_net::admission::Admission::default(),
+        )
+        .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let endpoint = slopty_net::client::bind_client().unwrap();
+        let hello = Hello { client: ClientId::new(), name: "console".to_owned() };
+        let dialing = endpoint.clone();
+        let dialed =
+            tokio::spawn(
+                async move { slopty_net::client::connect_addr(&dialing, addr, hello).await },
+            );
+        let mut accepted = listener.accept().await.expect("the client connects");
+        let ack = HelloAck {
+            worker: WorkerId::new(),
+            name: "console".to_owned(),
+            home: String::new(),
+            caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+            load: 0.0,
+            sessions: Vec::new(),
+        };
+        accepted.tx.send(&WorkerMsg::HelloAck(ack)).await.unwrap();
+        let mut link = WorkerLink::start(dialed.await.unwrap().unwrap());
+        let mut events = link.events().expect("the link's events");
+
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let target = CaptureTarget::Display(DISPLAY.id);
+        let (mut stream, _opened) =
+            Pipeline::<Synthetic>::open(StreamId(1), target, Quality::default(), sink, |_| {})
+                .await
+                .unwrap();
+        let (commands, mut commanded) = mpsc::unbounded_channel::<Command>();
+        let (out, mut told) = mpsc::channel::<WorkerMsg>(64);
+        // The connection's writer: what the stream tells goes out on the control stream.
+        let mut tx = accepted.tx;
+        let writer = tokio::spawn(async move {
+            while let Some(msg) = told.recv().await {
+                if tx.send(&msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let serving = tokio::spawn(async move {
+            serve(&mut stream, ClientId::new(), &mut commanded, &out, None, &unsourced()).await;
+            stream.close().await;
+        });
+
+        let (drawing, _) = heard(&mut events, |_| true).await;
+        assert_eq!(drawing, SourceState::Live, "the drawn Mac draws");
+        set_console(Console::Locked);
+        let (locked, took) = heard(&mut events, |s| s != SourceState::Live).await;
+        assert_eq!(locked, SourceState::Locked, "the frames still come, and it is locked");
+        eprintln!("locked → client: {:.0} ms", took.as_secs_f64() * 1e3);
+        set_console(Console::Away);
+        assert_eq!(heard(&mut events, |_| true).await.0, SourceState::Away);
+        set_console(Console::Shown);
+        assert_eq!(heard(&mut events, |_| true).await.0, SourceState::Live, "back, drawing");
+
+        drop(commands);
+        serving.await.unwrap();
+        writer.abort();
+        link.close();
+        endpoint.close(0_u32.into(), b"done");
     }
 }

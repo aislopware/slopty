@@ -32,6 +32,7 @@ mod allocs {
             ltr_refresh: false,
             discardable: false,
             capture_ts_us: n,
+            stripes: 0,
         }
     }
 

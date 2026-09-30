@@ -380,7 +380,7 @@ mod tests {
     fn the_displays_are_listed_without_a_grant() {
         let displays = active_displays();
         if displays.is_empty() {
-            eprintln!("skipped: no display attached");
+            slopty_testkit::live::skip("no display attached");
             return;
         }
         for d in &displays {

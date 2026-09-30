@@ -7,34 +7,34 @@
 //! before the page loads ([`local_url`]).
 //!
 //! GPUI cannot draw a page, so the page is the platform's web view (`slopty_platform::web`),
-//! a native view that always draws above everything GPUI draws. The workspace measures the
-//! tile's body every frame and asks [`placement`] where the page goes: over the body, cut to
-//! the strip, or nowhere when GPUI has something to show on top (the palette, a menu, the
-//! overview) or the tile is off the strip. While the page is hidden the body shows its last
-//! snapshot, so covering it never leaves a hole.
+//! which the window composes with GPUI's content through a native host: the tile's body is a
+//! `native_view` element, and the page shows wherever that element is drawn, cut to what clips
+//! it (the strip) and under whatever GPUI draws after it (a menu, the palette, a toast, a
+//! script's dialog). A tile drawn scaled (the overview) shows the page's last snapshot, as a
+//! page laid out at that size would reflow. GPUI's focus on the element is the page's
+//! keyboard: a click in the page focuses it, and focus leaving it gives the keyboard back.
 //!
-//! What a browser brings of its own sits in the tile beside the page, never over it, since
-//! nothing GPUI draws can cover a native view: the find bar above the page, a download's row
-//! below it, and a script's dialog on the page's snapshot while the page waits for the answer.
+//! What a browser brings of its own sits in the tile: the find bar above the page, a
+//! download's row below it, and a script's dialog over it while the page waits for the answer.
 //! A pop-up opens a tile of its own (`docs/decisions/ui.md`, "The browser tile's own chrome").
 
-use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
+use gpui::composition::{NativeHost, NativeHostOptions, native_view};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
-    InteractiveElement as _, IntoElement, KeyDownEvent, ObjectFit, ParentElement as _, Pixels,
-    Render, RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _,
-    StyledImage as _, Subscription, Task, Window, canvas, div, img, px,
+    AnyElement, AnyWindowHandle, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ObjectFit, ParentElement as _, Render,
+    RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    Subscription, Task, Window, div, img, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
-pub use native::{Dialog, DialogKind};
-use slopty_client::layout::{Rect, WorkerKey};
+pub use native::{Dialog, DialogKind, Edit};
+use slopty_client::layout::WorkerKey;
 use slopty_core::ItemId;
 use slopty_theme::Theme;
 
@@ -42,10 +42,15 @@ use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
 use crate::kit::{self, ButtonKind, FIND_PLACEHOLDER};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
+use crate::workspace::actions::{PageCut, PageRedo, PageSelectAll, PageUndo, UndoClose};
 
-/// Below this the tile is fading out (or in) and the page stays hidden; a native view would
-/// not fade with it.
-pub const MIN_ALPHA: f32 = 0.05;
+/// The key context of a page's area; the keymap binds the page's own edits under it, where
+/// the page holds the keyboard (`keymap::PAGE_HELD`).
+pub const CTX: &str = "PageBody";
+
+/// Two presses of Esc on a page closer than this give the keyboard back; one alone reaches
+/// the page.
+const DOUBLE_ESCAPE: Duration = Duration::from_millis(400);
 
 /// How often a shown page is asked for its title and address, which scripts change without
 /// a navigation.
@@ -85,62 +90,14 @@ pub fn next_zoom(current: f64, step: Zoom) -> f64 {
     }
 }
 
-/// What GPUI is drawing over the strip this frame.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Cover {
-    /// An overlay: the palette, the picker, a titlebar menu, a dialog of the app's.
-    pub overlay: bool,
-    /// The overview, open or on its way.
-    pub overview: bool,
-    /// Where a toast was drawn, at the foot of the strip: pages end above it.
-    pub toast: Option<Rect>,
-}
-
-/// Where a page goes this frame.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Placement {
-    /// Out of sight: covered, off the strip, fading, or not drawn at all.
-    Hidden,
-    /// Over `frame`, cut to `clip`, at `alpha`; window coordinates in points.
-    Shown {
-        /// The strip's area: nothing of the page shows outside it.
-        clip: Rect,
-        /// The tile's body.
-        frame: Rect,
-        /// The tile's opacity.
-        alpha: f32,
-    },
-}
-
-/// Where the page of a tile goes: `body` is where its tile's body was drawn this frame (none
-/// when the tile was not drawn), `strip` the strip's area, `alpha` the tile's opacity.
-#[must_use]
-pub fn placement(body: Option<Rect>, strip: Rect, alpha: f32, cover: Cover) -> Placement {
-    let Some(frame) = body else { return Placement::Hidden };
-    // A native page draws over everything, so the clip stops where a toast starts.
-    let clip = match cover.toast {
-        Some(toast) if toast.y < strip.y + strip.h => {
-            Rect { h: (toast.y - strip.y).max(0.0), ..strip }
-        }
-        _ => strip,
-    };
-    let visible = frame.w >= 1.0 && frame.h >= 1.0 && clip.h >= 1.0 && frame.intersects(&clip);
-    if cover.overlay || cover.overview || alpha < MIN_ALPHA || !visible {
-        return Placement::Hidden;
-    }
-    Placement::Shown { clip, frame, alpha: alpha.min(1.0) }
-}
-
-/// Where something in the strip was drawn, and in which of the strip's builds.
-pub(crate) type Drawn = Rc<Cell<Option<(u64, Bounds<Pixels>)>>>;
-
 /// What a browser tile tells the workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserEvent {
-    /// The page was clicked and has the keyboard: its tile takes the focus.
+    /// The page took the keyboard (a click in it): its tile takes the focus.
     Focused,
-    /// The keyboard is the workspace's again: the page gave it back (a click elsewhere,
-    /// ⌃Tab, Esc twice), or the find bar or a dialog that had it closed.
+    /// The keyboard is the workspace's again: the page gave it back with nothing else taking
+    /// it (Esc twice, a click where nothing takes the keyboard), or the find bar or a dialog
+    /// that had it closed.
     Released,
     /// A pop-up or a `_blank` link asked for this address, as the worker names it: a tile of
     /// its own beside this one.
@@ -249,13 +206,21 @@ pub struct BrowserView {
     /// The address the open page was last given.
     loaded: Option<String>,
     page: PageState,
-    /// Where the page's area was last laid out. A view drawn again from the last frame is
-    /// where it was, so this holds for every frame the tile is drawn in.
-    page_area: Rc<Cell<Option<Bounds<Pixels>>>>,
-    /// The page's last picture, shown while the page is hidden.
+    /// The page's last picture, shown where the tile is drawn scaled and in a render.
     snapshot: Option<Arc<RenderImage>>,
     theme: Theme,
     native: native::Native,
+    /// Where the page is composed into its window, once it is open there.
+    host: Option<PageHost>,
+    /// GPUI's focus standing for the page's keyboard: while it is focused the page holds it.
+    page_focus: FocusHandle,
+    /// Hears the page take the keyboard and give it back, once the view is in a window.
+    focus_watch: Vec<Subscription>,
+    /// The tile is drawn at its own size, so the page itself shows. Drawn scaled (the
+    /// overview, the strip zoomed out) it shows its snapshot.
+    live: bool,
+    /// When Esc last went to the page, for a second one soon after to give the keyboard back.
+    last_escape: Option<Instant>,
     /// The page's messages, and the poll for its title while it is open.
     tasks: Vec<Task<()>>,
     /// The page's zoom, 1 at its own size.
@@ -265,6 +230,12 @@ pub struct BrowserView {
     downloads: Vec<DownloadRow>,
     /// A poll of the downloads under way is running.
     polling_downloads: bool,
+}
+
+/// The page's native host in the window it is composed into.
+struct PageHost {
+    window: AnyWindowHandle,
+    host: NativeHost,
 }
 
 impl std::fmt::Debug for BrowserView {
@@ -283,7 +254,7 @@ impl BrowserView {
     /// A tile for `url` on `worker`; the page itself opens the first time the tile is shown
     /// once the address is served here ([`Self::set_local`]).
     #[must_use]
-    pub fn new(id: ItemId, worker: WorkerKey, url: &str, theme: Theme) -> Self {
+    pub fn new(id: ItemId, worker: WorkerKey, url: &str, theme: Theme, cx: &Context<Self>) -> Self {
         Self {
             id,
             worker,
@@ -291,10 +262,14 @@ impl BrowserView {
             local: None,
             loaded: None,
             page: PageState { url: url.to_owned(), loading: true, ..PageState::default() },
-            page_area: Rc::default(),
             snapshot: None,
             theme,
             native: native::Native::default(),
+            host: None,
+            page_focus: cx.focus_handle(),
+            focus_watch: Vec::new(),
+            live: true,
+            last_escape: None,
             tasks: Vec::new(),
             zoom: 1.0,
             search: None,
@@ -351,7 +326,6 @@ impl BrowserView {
         self.page.failed = Some(why);
         self.page.loading = false;
         self.local = None;
-        self.native.hide();
         cx.notify();
     }
 
@@ -384,43 +358,59 @@ impl BrowserView {
         PageState { url, failed: self.page.failed.clone(), ..page }
     }
 
-    /// Whether the page is on screen now.
+    /// Whether the page is on screen now, as the platform shows it.
     #[must_use]
     pub fn shown(&self) -> bool {
         self.native.shown()
     }
 
-    /// Whether the page has the keyboard.
+    /// Whether the page has the keyboard, as the platform's first responder says.
     #[must_use]
     pub fn focused(&self) -> bool {
         self.native.focused()
     }
 
-    /// Whether a picture of the page is ready for when it is hidden.
+    /// Whether GPUI's focus is on the page, which gives it the platform's keyboard.
+    #[must_use]
+    pub fn holds_keyboard(&self, window: &Window) -> bool {
+        self.page_focus.is_focused(window)
+    }
+
+    /// Whether a picture of the page is ready for when the tile is drawn without it.
     #[must_use]
     pub const fn has_snapshot(&self) -> bool {
         self.snapshot.is_some()
     }
 
-    /// What decides where the native page stands over its tile, or that it hides: a bar over
-    /// or under it, a dialog on its picture, a failure, a local address to open it at. When
-    /// it changes the page is placed again.
+    /// The number of the window the page is in, for a key the self-test delivers there.
+    #[cfg(target_os = "macos")]
     #[must_use]
-    pub const fn placing(&self) -> Placing {
-        Placing {
-            find: self.search.is_some(),
-            downloads: self.downloads.len(),
-            dialog: self.dialog.is_some(),
-            failed: self.page.failed.is_some(),
-            local: self.local.is_some(),
-        }
+    pub fn window_number(&self) -> Option<isize> {
+        self.native.window_number()
     }
 
-    /// Where the page's area was last laid out, in window coordinates: where the page goes
-    /// whenever its tile is drawn.
+    /// The edits done in a test's page, oldest first.
+    #[cfg(test)]
+    pub(crate) fn performed(&self) -> Vec<Edit> {
+        self.native.performed()
+    }
+
+    /// The page's native host, once it is open in a window.
     #[must_use]
-    pub fn page_area(&self) -> Option<Bounds<Pixels>> {
-        self.page_area.get()
+    pub fn native_host(&self) -> Option<&NativeHost> {
+        self.host.as_ref().map(|h| &h.host)
+    }
+
+    /// Whether the tile is drawn at its own size, which shows the page itself; scaled, it
+    /// shows its snapshot, taken again as it goes.
+    pub fn set_live(&mut self, live: bool, cx: &mut Context<Self>) {
+        if self.live != live {
+            self.live = live;
+            if !live {
+                self.native.snapshot();
+            }
+            cx.notify();
+        }
     }
 
     /// Draw by another theme.
@@ -431,46 +421,16 @@ impl BrowserView {
         }
     }
 
-    /// Put the page where [`placement`] says. A failed page stays hidden, so its reason shows
-    /// instead of a blank page. `false` when the page is to show and has not been opened yet,
-    /// which is [`Self::open_at`]'s: the view is only read here.
-    #[must_use]
-    pub fn place(&self, placement: Placement) -> bool {
-        match placement {
-            // A dialog is drawn on the page's picture: the page waits under it.
-            Placement::Shown { clip, frame, alpha }
-                if self.page.failed.is_none() && self.dialog.is_none() =>
-            {
-                if !self.native.open() {
-                    return self.local.is_none();
-                }
-                self.native.place(clip, frame, alpha);
-            }
-            Placement::Shown { .. } | Placement::Hidden => {
-                if self.native.shown() {
-                    // The picture it leaves behind is the page as it was a moment ago.
-                    self.native.snapshot();
-                    self.native.hide();
-                }
-            }
-        }
-        true
-    }
-
-    /// Open the page the first time it is shown, where [`placement`] says.
-    pub fn open_at(&mut self, placement: Placement, window: &Window, cx: &mut Context<Self>) {
-        if let Some(address) = self.local.clone() {
-            self.open(&address, window, cx);
-        }
-        let _placed = self.place(placement);
-    }
-
-    fn open(&mut self, address: &str, window: &Window, cx: &mut Context<Self>) {
+    /// Open the page at `address` in `window`: the web view, and the host that composes it
+    /// there. Opened as the window draws, the first time the tile is drawn with an address.
+    fn open(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<native::Event>();
         let sink: Rc<dyn Fn(native::Event)> = Rc::new(move |event| {
             let _sent = tx.send(event);
         });
-        if !self.native.create(window, address, sink) {
+        let opened = self.native.create(window, address, sink) && self.compose_in(window, cx);
+        if !opened {
+            self.native = native::Native::default();
             self.page.failed = Some("This device has no web view".to_owned());
             // Opened as the window draws, where a notify would only reach the next frame the
             // window happens to draw: this one asks for it.
@@ -503,6 +463,79 @@ impl BrowserView {
         self.tasks = vec![events, poll];
     }
 
+    /// Compose the open page into `window`, whose GPUI view the page's host is made in.
+    /// Whether it could: a window of a platform that composes natives.
+    fn compose_in(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let here = window.window_handle();
+        if self.host.as_ref().is_some_and(|h| h.window == here) {
+            return true;
+        }
+        let options = NativeHostOptions {
+            opaque: true,
+            interactive: true,
+            label: Some(SharedString::from(format!("Page {}", self.url))),
+        };
+        let host = match window.create_native_host(options, cx) {
+            Ok(host) => host,
+            Err(e) => {
+                tracing::warn!(item = %self.id, "no native host for the page: {e:#}");
+                return false;
+            }
+        };
+        if !self.native.attach(&host) {
+            return false;
+        }
+        self.host = Some(PageHost { window: here, host });
+        self.watch_focus(window, cx);
+        true
+    }
+
+    /// Hear the page take the keyboard (GPUI focusing its element: a click in it, or the
+    /// platform's first responder moving into it) and give it back.
+    fn watch_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let took = cx.on_focus(&self.page_focus, window, |this, _window, cx| {
+            this.last_escape = None;
+            cx.emit(BrowserEvent::Focused);
+        });
+        // Focus that went somewhere (a field, another tile) is where it belongs; focus that
+        // went nowhere is the workspace's again.
+        let gave = cx.on_blur(&self.page_focus, window, |_this, window, cx| {
+            if window.focused(cx).is_none() {
+                cx.emit(BrowserEvent::Released);
+            }
+        });
+        self.focus_watch = vec![took, gave];
+    }
+
+    /// A key while the page holds the keyboard, before any binding and the page see it: a
+    /// second Esc soon after the first gives the keyboard back, and is the page's no more.
+    fn page_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let m = keystroke.modifiers;
+        if keystroke.key != "escape" || m.control || m.alt || m.shift || m.platform || m.function {
+            return;
+        }
+        let now = Instant::now();
+        let twice =
+            self.last_escape.is_some_and(|at| now.saturating_duration_since(at) < DOUBLE_ESCAPE);
+        self.last_escape = if twice { None } else { Some(now) };
+        if twice {
+            cx.stop_propagation();
+            window.blur(cx);
+        }
+    }
+
+    /// Open as a test's page: composed into `window` through a native host of the test
+    /// platform's, with no web view behind it.
+    #[cfg(test)]
+    pub(crate) fn open_stand_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.native = native::Native::stand_in();
+        self.loaded = Some(self.url.clone());
+        let composed = self.compose_in(window, cx);
+        debug_assert!(composed, "the test platform composes natives");
+        cx.notify();
+    }
+
     /// A message from the page (or a test's, standing in for it).
     pub(crate) fn native_event(
         &mut self,
@@ -523,13 +556,7 @@ impl BrowserView {
                 tracing::info!(item = %self.id, %why, "page failed");
                 self.page.failed = Some(why);
                 self.page.loading = false;
-                self.native.hide();
                 cx.notify();
-            }
-            native::Event::Clicked => cx.emit(BrowserEvent::Focused),
-            native::Event::Released => {
-                self.native.snapshot();
-                cx.emit(BrowserEvent::Released);
             }
             native::Event::Snapshot(png) => {
                 let decoding = cx.background_spawn(async move { texture(&png) });
@@ -640,9 +667,6 @@ impl BrowserView {
     /// ⌘F: the find bar above the page, or the caret back in it with its text selected. A
     /// page that had the keyboard gives it to the bar.
     pub fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.native.focused() {
-            self.native.release();
-        }
         if self.search.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
             let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
@@ -741,9 +765,6 @@ impl BrowserView {
     /// A script's dialog: drawn in the tile on the page's picture, the keyboard in it. One
     /// still up is dismissed first, so the page never waits on two.
     fn show_dialog(&mut self, dialog: Dialog, window: &mut Window, cx: &mut Context<Self>) {
-        if self.native.focused() {
-            self.native.release();
-        }
         let input = match dialog.kind() {
             DialogKind::Prompt { default } => {
                 let default = default.clone();
@@ -891,36 +912,6 @@ impl BrowserView {
         cx.notify();
     }
 
-    /// Give the page the keyboard (a click on the tile's body when the page is hidden does
-    /// nothing; the page takes its own clicks).
-    pub fn focus(&self) {
-        self.native.focus();
-    }
-
-    /// Take the keyboard back from the page.
-    pub fn release(&self) {
-        self.native.release();
-    }
-
-    /// Give the page the keyboard and show the platform's key handling `key` (`cmd-a`,
-    /// `cmd-shift-z`), as a key down would: the self-test's way in. Whether it was taken for
-    /// the page.
-    #[must_use]
-    pub fn press(&self, key: &str) -> bool {
-        self.native.focus();
-        let mut command = false;
-        let mut shift = false;
-        let mut last = "";
-        for part in key.split('-') {
-            match part {
-                "cmd" => command = true,
-                "shift" => shift = true,
-                other => last = other,
-            }
-        }
-        self.native.press(last, command, shift)
-    }
-
     /// The header's words: the page's title, else its address without the scheme.
     #[must_use]
     pub fn title(&self) -> String {
@@ -1062,16 +1053,6 @@ pub fn worker_url(page: &str, loaded: &str, item: &str) -> String {
     if on_loaded { format!("{is}://{ia}{tail}") } else { page.to_owned() }
 }
 
-/// What decides where a page stands over its tile ([`BrowserView::placing`]).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Placing {
-    find: bool,
-    downloads: usize,
-    dialog: bool,
-    failed: bool,
-    local: bool,
-}
-
 /// A PNG as GPUI keeps pictures: premultiplied BGRA.
 fn texture(png: &[u8]) -> Option<Arc<RenderImage>> {
     let mut rgba = image::load_from_memory(png).ok()?.into_rgba8();
@@ -1083,20 +1064,27 @@ fn texture(png: &[u8]) -> Option<Arc<RenderImage>> {
 
 impl Render for BrowserView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(address) = self.local.clone()
+            && !self.native.open()
+            && self.page.failed.is_none()
+        {
+            self.open(&address, window, cx);
+        }
+        // A render cannot see a native view, so it draws the page's picture instead.
+        let live = self.live && self.page.failed.is_none() && !crate::screen::capturing(cx);
+        let host = if live && self.native.open() && self.compose_in(window, cx) {
+            self.native_host().cloned()
+        } else {
+            None
+        };
         // Blank while a page that loads in time would fill it; past the grace, a word.
-        let waited = self.page.failed.is_none()
+        let waited = host.is_none()
+            && self.page.failed.is_none()
             && self.snapshot.is_none()
             && crate::screen::past_grace("browser-opening", window, cx);
         let theme = &self.theme;
         let s = &theme.surfaces;
         let id = *self.id.as_uuid();
-        let page_area = Rc::clone(&self.page_area);
-        let measure = canvas(
-            move |bounds, _window, _cx| page_area.set(Some(bounds)),
-            |_bounds, (), _window, _cx| {},
-        )
-        .absolute()
-        .inset_0();
         let notice = |text: String| {
             div()
                 .size_full()
@@ -1109,27 +1097,44 @@ impl Render for BrowserView {
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(text))
         };
-        let body = match (&self.page.failed, &self.snapshot) {
-            (Some(why), _) => {
+        let body = match (host, &self.page.failed, &self.snapshot) {
+            (Some(host), ..) => native_view(&host)
+                .debug_selector(move || format!("page-{id}"))
+                .size_full()
+                .track_focus(&self.page_focus)
+                .on_key_down(cx.listener(Self::page_key))
+                .on_action(cx.listener(|this, _: &PageUndo, _, _| this.native.perform(Edit::Undo)))
+                // ⌘Z is "Undo close" in the menu bar, which has it before any binding: while the
+                // page holds the keyboard it is the page's undo, as Edit ▸ Undo is a field's.
+                .on_action(cx.listener(|this, _: &UndoClose, _, _| this.native.perform(Edit::Undo)))
+                .on_action(cx.listener(|this, _: &PageRedo, _, _| this.native.perform(Edit::Redo)))
+                .on_action(cx.listener(|this, _: &PageCut, _, _| this.native.perform(Edit::Cut)))
+                .on_action(
+                    cx.listener(|this, _: &PageSelectAll, _, _| this.native.perform(Edit::SelectAll)),
+                )
+                .into_any_element(),
+            (None, Some(why), _) => {
                 notice(format!("Can't open {}: {why}", short_url(&self.url))).into_any_element()
             }
-            (None, Some(image)) => {
-                img(Arc::clone(image)).size_full().object_fit(ObjectFit::Cover).into_any_element()
-            }
-            (None, None) if waited => {
+            (None, None, Some(image)) => img(Arc::clone(image))
+                .debug_selector(move || format!("page-picture-{id}"))
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+            (None, None, None) if waited => {
                 notice(format!("Opening {}…", short_url(&self.url))).into_any_element()
             }
-            (None, None) => div().size_full().into_any_element(),
+            (None, None, None) => div().size_full().into_any_element(),
         };
-        // The page's own area: what is measured for the native view, under the find bar and
-        // over the downloads, which it must not cover.
+        // The page's own area, under the find bar and over the downloads; a script's dialog
+        // is drawn after the page, so over it.
         let page = div()
+            .key_context(CTX)
             .relative()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
             .child(body)
-            .child(measure)
             .children(self.render_dialog(cx));
         div()
             .id(SharedString::from(format!("browser-{id}")))
@@ -1218,7 +1223,8 @@ impl BrowserView {
         Some(bar.into_any_element())
     }
 
-    /// A script's dialog: a sheet on the page's picture, under the scrim.
+    /// A script's dialog: a sheet over the page, under the scrim, which takes the pointer
+    /// from the page.
     fn render_dialog(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let pending = self.dialog.as_ref()?;
         let theme = &self.theme;
@@ -1282,6 +1288,7 @@ impl BrowserView {
                     ),
             );
         let layer = div()
+            .occlude()
             .absolute()
             .inset_0()
             .flex()
@@ -1355,8 +1362,8 @@ mod native {
     use std::rc::Rc;
 
     use gpui::Window;
-    use slopty_client::layout::Rect;
-    pub use slopty_platform::web::{Dialog, DialogKind};
+    use gpui::composition::NativeHost;
+    pub use slopty_platform::web::{Dialog, DialogKind, Edit};
     pub(super) use slopty_platform::web::{Download, WebEvent as Event};
 
     use super::PageState;
@@ -1365,23 +1372,54 @@ mod native {
     #[derive(Default)]
     pub(super) struct Native {
         view: Option<slopty_platform::web::WebView>,
-    }
-
-    fn frame(r: Rect) -> slopty_platform::web::Frame {
-        slopty_platform::web::Frame {
-            x: f64::from(r.x),
-            y: f64::from(r.y),
-            w: f64::from(r.w),
-            h: f64::from(r.h),
-        }
+        /// A test's page: open, with no web view behind it.
+        stand_in: bool,
+        /// The edits a test's page was asked to do.
+        #[cfg(test)]
+        performed: std::cell::RefCell<Vec<Edit>>,
     }
 
     impl Native {
         pub(super) const fn open(&self) -> bool {
-            self.view.is_some()
+            self.view.is_some() || self.stand_in
         }
 
-        /// Open the page in `window`'s view; `false` when the platform has none to give.
+        /// A test's page, open with no web view behind it.
+        #[cfg(test)]
+        pub(super) fn stand_in() -> Self {
+            Self { stand_in: true, ..Self::default() }
+        }
+
+        #[cfg(test)]
+        pub(super) fn performed(&self) -> Vec<Edit> {
+            self.performed.borrow().clone()
+        }
+
+        /// Do `edit` in the page.
+        #[cfg(target_os = "macos")]
+        pub(super) fn perform(&self, edit: Edit) {
+            #[cfg(test)]
+            self.performed.borrow_mut().push(edit);
+            if let Some(view) = &self.view {
+                view.perform(edit);
+            }
+        }
+
+        /// UIKit hands a hardware keyboard's keys to the page while it holds them, which does
+        /// its own edits; GPUI's keymap never sees them there.
+        #[cfg(target_os = "ios")]
+        #[expect(
+            clippy::unused_self,
+            reason = "one call for both platforms; the Mac's reads its web view"
+        )]
+        pub(super) const fn perform(&self, _edit: Edit) {}
+
+        #[cfg(target_os = "macos")]
+        pub(super) fn window_number(&self) -> Option<isize> {
+            self.view.as_ref().and_then(slopty_platform::web::WebView::window_number)
+        }
+
+        /// Open the page for `window`; `false` when the platform has no web view to give.
         pub(super) fn create(
             &mut self,
             window: &Window,
@@ -1389,24 +1427,31 @@ mod native {
             sink: Rc<dyn Fn(Event)>,
         ) -> bool {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
-                Ok(RawWindowHandle::AppKit(handle)) => handle.ns_view,
-                Ok(RawWindowHandle::UiKit(handle)) => handle.ui_view,
-                _ => return false,
+            self.view = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
+                #[cfg(target_os = "macos")]
+                Ok(RawWindowHandle::AppKit(handle)) => {
+                    slopty_platform::web::WebView::new(handle.ns_view, url, sink)
+                }
+                #[cfg(target_os = "ios")]
+                Ok(RawWindowHandle::UiKit(_)) => slopty_platform::web::WebView::new(url, sink),
+                _ => None,
             };
-            self.view = slopty_platform::web::WebView::new(host, url, sink);
             self.view.is_some()
         }
 
-        pub(super) fn place(&self, clip: Rect, at: Rect, alpha: f32) {
-            if let Some(view) = &self.view {
-                view.place(frame(clip), frame(at), f64::from(alpha));
-            }
-        }
-
-        pub(super) fn hide(&self) {
-            if let Some(view) = &self.view {
-                view.hide();
+        /// Make the web view `host`'s content. Whether it is: a test's stand-in has none to
+        /// give and needs none.
+        pub(super) fn attach(&self, host: &NativeHost) -> bool {
+            let Some(view) = &self.view else { return self.open() };
+            // SAFETY: gpui's `attach_view` rule: `view` is the live `WKWebView` (an `NSView *`
+            // on macOS, a `UIView *` on iOS) this struct keeps, and a GPUI window's render,
+            // where this is called, runs on the main thread.
+            match unsafe { host.attach_view(view.view()) } {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!("the page's host refused its view: {e:#}");
+                    false
+                }
             }
         }
 
@@ -1462,22 +1507,6 @@ mod native {
             }
         }
 
-        pub(super) fn focus(&self) {
-            if let Some(view) = &self.view {
-                view.focus();
-            }
-        }
-
-        pub(super) fn release(&self) {
-            if let Some(view) = &self.view {
-                view.release();
-            }
-        }
-
-        pub(super) fn press(&self, key: &str, command: bool, shift: bool) -> bool {
-            self.view.as_ref().is_some_and(|v| v.press(key, command, shift))
-        }
-
         pub(super) fn find(&self, text: &str, backwards: bool) {
             if let Some(view) = &self.view {
                 view.find(text, backwards);
@@ -1525,66 +1554,6 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const STRIP: Rect = Rect { x: 0.0, y: 40.0, w: 1200.0, h: 760.0 };
-    const BODY: Rect = Rect { x: 8.0, y: 76.0, w: 590.0, h: 700.0 };
-
-    #[test]
-    fn a_drawn_uncovered_tile_shows_its_page_cut_to_the_strip() {
-        assert_eq!(
-            placement(Some(BODY), STRIP, 1.0, Cover::default()),
-            Placement::Shown { clip: STRIP, frame: BODY, alpha: 1.0 }
-        );
-        // Half off the strip's left edge: still shown, the clip cuts it.
-        let half = Rect { x: -300.0, ..BODY };
-        assert_eq!(
-            placement(Some(half), STRIP, 1.0, Cover::default()),
-            Placement::Shown { clip: STRIP, frame: half, alpha: 1.0 }
-        );
-    }
-
-    #[test]
-    fn anything_gpui_draws_on_top_hides_the_page() {
-        let covered = |cover| placement(Some(BODY), STRIP, 1.0, cover);
-        assert_eq!(covered(Cover { overlay: true, ..Cover::default() }), Placement::Hidden);
-        assert_eq!(covered(Cover { overview: true, ..Cover::default() }), Placement::Hidden);
-    }
-
-    #[test]
-    fn a_toast_cuts_the_page_short_above_it() {
-        let toast = Rect { x: 400.0, y: 740.0, w: 400.0, h: 36.0 };
-        let cover = Cover { toast: Some(toast), ..Cover::default() };
-        let above = Rect { h: 700.0, ..STRIP };
-        assert_eq!(
-            placement(Some(BODY), STRIP, 1.0, cover),
-            Placement::Shown { clip: above, frame: BODY, alpha: 1.0 },
-            "the page ends where the toast begins"
-        );
-        let low = Rect { y: 745.0, h: 40.0, ..BODY };
-        assert_eq!(placement(Some(low), STRIP, 1.0, cover), Placement::Hidden, "all under it");
-        let gone = Rect { y: 900.0, ..toast };
-        let cover = Cover { toast: Some(gone), ..Cover::default() };
-        assert_eq!(
-            placement(Some(BODY), STRIP, 1.0, cover),
-            Placement::Shown { clip: STRIP, frame: BODY, alpha: 1.0 },
-            "a toast below the strip cuts nothing"
-        );
-    }
-
-    #[test]
-    fn a_tile_off_the_strip_fading_or_not_drawn_hides_the_page() {
-        assert_eq!(placement(None, STRIP, 1.0, Cover::default()), Placement::Hidden);
-        let gone = Rect { x: 1300.0, ..BODY };
-        assert_eq!(placement(Some(gone), STRIP, 1.0, Cover::default()), Placement::Hidden);
-        assert_eq!(placement(Some(BODY), STRIP, 0.01, Cover::default()), Placement::Hidden);
-        let flat = Rect { h: 0.5, ..BODY };
-        assert_eq!(placement(Some(flat), STRIP, 1.0, Cover::default()), Placement::Hidden);
-        // Fading in past the threshold: shown, at the tile's opacity.
-        assert_eq!(
-            placement(Some(BODY), STRIP, 0.5, Cover::default()),
-            Placement::Shown { clip: STRIP, frame: BODY, alpha: 0.5 }
-        );
-    }
 
     #[test]
     fn addresses_are_http_or_https_with_a_host() {

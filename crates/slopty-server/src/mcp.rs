@@ -24,7 +24,7 @@ use slopty_tools::mcp::Handler;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
-use crate::hub::Hub;
+use crate::hub::{Acting, Hub, Speaker};
 
 /// Largest request body: a `write_file` of a whole message's worth of bytes in base64.
 ///
@@ -34,14 +34,16 @@ use crate::hub::Hub;
 pub const MAX_BODY_BYTES: usize =
     MAX_FRAME_BYTES.div_ceil(3).saturating_mul(4).saturating_add(1_048_576);
 
-/// The MCP tool server over the hub.
-pub type Mcp = Handler<Hub>;
+/// The MCP tool server over the hub, for agents.
+pub type Mcp = Handler<Acting>;
 
-/// The tools over `hub`. A stateless HTTP call has no stream to send progress on.
+/// The tools over `hub`, answering as to an agent: MCP is how models call. A stateless HTTP
+/// call has no stream to send progress on.
 #[must_use]
 pub fn handler(hub: Hub) -> Mcp {
     let info = Implementation::new("slopty-server", env!("CARGO_PKG_VERSION"));
-    Handler::new(hub, info, ServerCapabilities::builder().enable_tools().build())
+    let acting = Acting::new(hub, Speaker::Agent);
+    Handler::new(acting, info, ServerCapabilities::builder().enable_tools().build())
 }
 
 /// Serve MCP on `listener` to the peers `admission` admits. Connections run in a set this

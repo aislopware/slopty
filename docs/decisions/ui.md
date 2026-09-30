@@ -1115,7 +1115,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   catches a change on disk under the live worker, with the goldens `editor`, `editor-dirty`
   and `editor-conflict`.
 
-- ✅ **The browser tile's native view** (2026-09-25). `slopty_platform::web` owns the
+- ✅ **The browser tile's native view** (2026-09-25; superseded 2026-09-30 by "A browser
+  tile's page is composed by the window, not laid over it": the clip view, the covers and the
+  key monitor below are gone). `slopty_platform::web` owns the
   `WKWebView`: a clipping view (the strip's area) added to the GPUI window's view from its
   `raw_window_handle`, and the web view inside it at the tile's body. macOS converts to the
   unflipped `NSView` coordinates. iOS uses UIKit's top-left points as they are, and speaks to
@@ -3374,8 +3376,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (the running app's ⌘, and ⌘T, ⌘N on the Keyboard page).
 
 - ✅ **The browser tile's own chrome** (2026-09-28, `.research/gap-audit-2026-09-28.md` §3 #6).
-  A page does what a browser would, and what it draws sits beside the native view, never on it,
-  since nothing GPUI draws can cover one.
+  A page does what a browser would. What it draws sat beside the native view, never on it, while
+  nothing GPUI drew could cover one; since 2026-09-30 a script's dialog is drawn over the live
+  page ("A browser tile's page is composed by the window, not laid over it").
   - **Pop-ups.** One delegate object answers WebKit for a page: navigations, `WKUIDelegate` and
     `WKDownloadDelegate`, the last two by selector (the bindings type most of `WKUIDelegate` for
     macOS only, and WebKit asks `respondsToSelector:` rather than conformance). `window.open`
@@ -3387,8 +3390,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     entry of history, and reports as `webViewDidClose:`) closes its tile as ⌘W would, so "Undo
     close" brings it back. Pop-ups follow WebKit's own rule on macOS, where a script may open a
     window without a click.
-  - **Dialogs.** `alert`, `confirm` and `prompt` hide the page (its snapshot stays) under the
-    scrim and an elevated sheet from the kit, the keyboard in it: ↩ is OK, Esc Cancel. A
+  - **Dialogs.** `alert`, `confirm` and `prompt` put the scrim and an elevated sheet from the
+    kit over the page, which the scrim keeps from the pointer, the keyboard in the sheet: ↩ is
+    OK, Esc Cancel. A
     `Dialog` answers WebKit's handler exactly once, and dropping one (the tile closed) cancels
     it, since WebKit raises on a handler never called.
   - **Web Inspector** is on in debug builds, off in release; a setting can come when someone
@@ -3685,91 +3689,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     labels, nothing reopened, and back), and
     `popout::tests::a_window_opens_at_the_remote_size_fitted_to_the_screen`.
 
-- ✅ **A quick terminal slides down from the top of the screen** (2026-09-29).
-  - **A chord from any app, with no grant.** `[quick_terminal] hotkey` (⌃\` by default, in the
-    palette's key syntax; empty registers none) is registered with the Carbon Event Manager's
-    `RegisterEventHotKey` (`slopty_platform::hotkey::Hotkey`). The window server hands that
-    one chord to Slopty whichever app is in front, and the app in front never sees it. It
-    needs no Accessibility grant, unlike the session tap that takes system shortcuts for a
-    remote Mac, and sees nothing else typed. `NSEvent`'s global monitor was the other
-    candidate: it needs Accessibility for key events and cannot keep the chord from the app
-    in front. A chord without ⌘ or ⌃ is refused unless it is an F key, since it would take
-    typing from every app, and macOS refuses ⌥-only hot keys anyway. A chord another app holds
-    says so in a toast; the palette's "Toggle quick terminal" still works and shows the chord.
-    The self-test registers nothing, and its panel takes no keyboard: the machine's keyboard
-    is the person's.
-  - **One shell, a tile like any other.** The first show opens a shell on the worker of the
-    shell used last, in its directory, else where a new tile would go, and the workspace's
-    focus stays where it was. Its item is the quick terminal from then on. The panel draws
-    that tile's own `TerminalView`, the entity the workspace keeps, as a popped-out remote
-    tile's window draws its `ScreenView`. The tile says "In the quick terminal", and a click
-    there shows the panel. So the session, its rows, its agent status, the navigator row and a
-    relaunch's restore are the plumbing every shell has, and showing or hiding sends the worker
-    nothing. The alternative, a shell kept out of the layout, would have been a second kind
-    of item for every reader of the registry to skip. A shell that ends is put away with the
-    panel and its tile, and the next show opens a new one. Which item is the quick terminal is
-    not saved: after a relaunch the old one is an ordinary tile.
-  - **A panel over every app.** The window is GPUI's `WindowKind::PopUp`, an `NSPanel` with the
-    non-activating style at the pop-up level, on every Space and beside a full-screen app.
-    `slopty_platform::panel::Panel` takes its title bar off (borderless), makes it clear where
-    nothing is drawn, keeps it up when the app is not active, and leaves it out of ⌘\` and
-    Mission Control. A show places it along the top of the visible frame of the screen under
-    the pointer, the screen's width and `height` percent tall (40 by default, 20 to 100), then
-    orders it in front and makes it key without activating the app, as Spotlight does. A hide
-    orders it out, and the keyboard goes back to whoever had it. The window is kept, so the
-    next show draws what is already laid out.
-  - **Motion.** The sheet slides down from above the window on the sheet pace and the
-    drawer's curve (240 ms) and back up on the settle pace (160 ms), drawn by GPUI in the
-    clear window rather than by moving the window, so the terminal is laid out once at its
-    size and never resized mid-slide. Under Reduce Motion it is in place at once and gone at
-    once. Its bottom edge is rounded on the floating radius over a hairline, and the panel
-    wears the system's window shadow.
-  - **Hiding.** The chord again while it has the keyboard, the palette's command, losing the
-    keyboard (`autohide`, on by default), Esc while no shell holds the keyboard, or its shell
-    ending. The chord while it is up but another app has the keyboard brings it back to the
-    keyboard instead. Esc in a shell is the program's.
-  - **AppKit outside GPUI's updates.** Moving the panel makes AppKit tell GPUI of the new frame
-    and the keyboard from inside the call, and GPUI drops what arrives while the app is being
-    updated (a first run logged "RefCell already borrowed" and lost the resize). So the
-    placing, showing and ordering out run on the next turn of the main run loop, outside any
-    update, which costs under a millisecond.
-  - **Timing.** A show is timed from the chord's arrival on the main run loop (or the
-    palette's command) to the panel in front and to the first frame painted there, and logged
-    as `quick terminal shown` under `slopty::quick_terminal`; the frame on the glass is logged
-    too when the window reports its presentation, which the panel's did not in the first runs
-    (MEASUREMENTS, "Quick terminal: chord to glass": 1.0 ms to the front, 16.5 ms to the first
-    frame at 60 Hz).
-  - **Not done.** The worker's clipboard is not watched for the quick terminal while the
-    workspace window is in the background, as it is for a popped-out tile. The system
-    shortcut tap does not arm in the panel. There is no live test of the chord itself:
-    pressing it would mean posting a key event to the session, which the tests never do; the
-    live case goes through the palette's command, which reaches the same toggle.
-  - Tests: `workspace::tests::quick::the_quick_terminal_keeps_its_shell_across_shows` (the last
-    shell's directory, the focus kept, the workspace's own view drawn with the keyboard, the
-    tile's line, hide and show with no second shell and nothing closed),
-    `…::the_quick_terminal_hides_when_it_loses_the_keyboard`,
-    `…::esc_hides_the_quick_terminal_only_without_a_shell_in_it`,
-    `…::an_ended_quick_shell_goes_and_the_next_show_opens_another`,
-    `…::the_quick_terminal_slides_in_unless_motion_is_reduced`; `slopty_platform`
-    `hotkey::tests` (the syntax, the refused chords, main thread only) and
-    `panel::tests::the_band_hangs_from_the_top_of_the_visible_frame`; `slopty_settings`
-    `tests::quick_terminal_keys`; `slopty_app` `quick::tests::the_quick_terminal_follows_its_settings`
-    and `tests::the_palette_shows_the_quick_terminals_chord`; live, `cargo xtask e2e app`
-    `quick::the_quick_terminal_keeps_one_shell_across_shows` (one shell opened, its tile saying
-    where it went, the same session after sixteen more toggles).
+- ✅ **A quick terminal slides down from the top of the screen** (2026-09-29; superseded
+  2026-09-30: removed). A global chord (a Carbon hot key, ⌃\` by default) slid one kept shell
+  down from the top of the screen in a non-activating panel over any app. The user judged it
+  not useful enough to keep, so the panel, its settings section, the palette command, the hot
+  key and the panel's AppKit dressing are gone, with no setting kept for old files. The
+  keymap's chord parser, which it lent the `[keys]` table, now lives in
+  `slopty_ui::keymap::chord`.
 
 - ✅ **The palette's "Toggle quick terminal" hides a shown panel; drawing it changes nothing**
-  (2026-09-29). The palette runs in the workspace's window, which holds the keyboard then, so
-  the chord's rule (hide only while the panel has the keyboard, else bring it to the front)
-  showed it again, and with no chord and "Hide when unfocused" off nothing put it away. The
-  command now hides a shown panel (`QuickToggle::Command`); the chord keeps its rule. The
-  panel's shadow follows the slide from next-frame callbacks and a show is timed from the
-  window's presentation reports, where a paint callback wrote the view each frame; the
-  approvals the workspace asks of its workers follow its changes rather than its render. The
-  keyboard side is not run live, since it would take the keyboard from the person at the Mac.
-  Tests: `workspace::tests::quick::the_palettes_command_puts_a_shown_quick_terminal_away`;
-  `ssh::tests::reopening_the_panel_and_the_sheet_keeps_no_subscription` (the panel's, the SSH
-  sheet's and the settings dialog's subscriptions go with them).
+  (2026-09-29; the quick terminal superseded 2026-09-30, see above). What outlives it: the
+  approvals the workspace asks of its workers follow its changes rather than its render, and
+  `ssh::tests::reopening_the_panel_and_the_sheet_keeps_no_subscription` checks that the SSH
+  sheet's and the settings dialog's subscriptions go with them.
 - ✅ **The strip and the chrome read facts, never a tile's body** (2026-09-29, the gpui-fast
   switch). Under retention a view is built again when anything it read changed. A header that
   read its terminal for the title was built with every line the shell printed, a navigator row
@@ -4079,3 +4011,154 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     blinks at the cadence without building the strip, steady under Reduce Motion; the panel
     opens from the palette's action and Esc closes it); goldens `empty-workspace` and `about`
     (`about_slopty_leads_with_the_mark`).
+
+- ✅ **A browser tile's page is composed by the window, not laid over it** (2026-09-30, gpui-fast
+  f994c34's native hosts; MEASUREMENTS "a browser tile's page composed by the window"). It
+  supersedes "The browser tile's native view" and the placing rules of workspace.md's "A browser
+  tile is a native page that follows its tile".
+  - The page's `WKWebView` is the content of a native host (`Window::create_native_host`,
+    `attach_view`), and the tile's body is the `native_view` element. The window puts the
+    page under GPUI's layer, cuts a hole where the element is drawn and clips it with the
+    element, so the strip cuts it and what GPUI draws after it is over it: the palette, a
+    menu, a toast, a script's dialog, the app's own dialogs. Gone: the clip view,
+    `browser::placement` and `Cover`, the prepaint that placed the pages after every tile,
+    `MIN_ALPHA`, the toast's cut, and the app telling the workspace it was covered. The page
+    fades with its tile, over the window's background rather than over GPUI's content (the
+    fork's limit for a faded native), for the moment a fade lasts.
+  - A tile drawn scaled (the overview, the strip zoomed out) shows the page's snapshot, since a
+    page laid out that small would reflow. A snapshot is taken after each load and as the tile
+    goes scaled, and not each time something covered the page, as it was before. A render
+    cannot see a native view, so it draws the snapshot too, and the `browser` golden is
+    unchanged.
+  - The keyboard is GPUI's focus on the page's element (`track_focus`). A click in the page is
+    GPUI's first, which focuses the element; the platform's first responder follows GPUI's
+    focus, and a first responder that moves into the page focuses the element. The page
+    taking the keyboard focuses its tile; focus that leaves it for nothing gives it to the
+    workspace. Esc twice gives it back, and one Esc stays the page's. ⌃Tab and the
+    workspace's other chords are GPUI's keymap's, which sees a key before the page does.
+  - The edit keys. AppKit offers ⌘ keys to the page before the menu bar, and WebKit gives back
+    what the page did not take, to the menu and then to the window. ⌘C and ⌘V reach the page
+    through the Edit menu's Copy and Paste, which AppKit sends up the responder chain. Nothing
+    sends ⌘A, ⌘X or ⇧⌘Z to a native view, and the menu's "Undo close" holds ⌘Z. So the keymap
+    binds undo, redo, cut and select all under the page's element, deeper than the workspace
+    (`PageBody > NativeView`), and the page does them itself (`web::Edit`), as the key monitor
+    did. "Undo close" is the page's undo while the page holds the keyboard, as Safari's
+    Edit ▸ Undo is a field's; from the menu with the mouse it undoes in the page too.
+  - Not taken: keeping the key monitor. It saw every key and click in the process before
+    AppKit, and it did the page's focus by hand; the fork's hosts do both from GPUI's own hit
+    test and focus.
+  - Measured with the palette opening and closing over a page beside five streaming shells:
+    WebKit spends a third to a half of what it did (0.01–0.02 s against 0.04–0.05 s per 5 s),
+    and the palette's frames are 0.2–0.3 ms shorter at p95. Moving the strip costs the same.
+  - Tests: `a_page_is_its_tile_s_body_where_the_strip_draws_it`,
+    `the_overview_shows_the_page_s_picture_and_a_failed_page_says_why`,
+    `the_page_taking_the_keyboard_focuses_its_tile_and_giving_it_back_the_workspace`,
+    `a_click_in_the_page_focuses_it_and_its_tile`,
+    `esc_once_is_the_page_s_and_twice_gives_the_keyboard_back`,
+    `the_edit_keys_are_the_page_s_while_it_holds_the_keyboard` (slopty-ui
+    `workspace/tests/page_host.rs`, on the test platform's hosts with the web view stood in
+    for), `a_letter_is_its_ansi_key_and_anything_else_no_key` (slopty-platform), and the app
+    e2e `a_page_on_localhost_opens_in_a_browser_tile`. That e2e opens the palette over a page
+    that stays shown, clicks into the page until the platform's first responder is in it, and
+    sends ⌘Z, ⇧⌘Z and ⌘A to the page's window as AppKit does (`Command::PageKeys`), reading
+    each edit back from the page's title. The e2e app is never the key window (it must not take
+    the keyboard from the person at the Mac), so the application's key-equivalent and menu pass
+    is not exercised live; the unit test covers the menu's "Undo close" reaching the page.
+  - Open: the fork gives a native that held the keyboard no way to hand it back when the native
+    is dropped, so the web view makes the GPUI view first responder itself as it goes. A
+    test-mode present in the fork would let tests read where the host was placed and what it
+    clipped; today they read the element's bounds.
+
+- ✅ **A focus change draws only what shows the focus** (2026-09-30). gpui-fast `beb580e`
+  stopped `focus` and `blur` from refreshing the window. Each question a view asks about the
+  focus while it draws (`is_focused`, `contains_focused`, `within_focused`, `Window::focused`) is
+  recorded and asked again before the next frame, and only the views whose answer changed are
+  built again. Slopty's own whole-window refreshes after a focus move went with it: the
+  workspace's pending focus and the settings editor taking the keyboard. An audit found every
+  view that draws focus reading it through those questions, or through a field whose writer
+  notifies. A focus move made while the window draws still asks for no frame of its own, so
+  those two places ask for the next one by notifying a view that is built again on every focus
+  move anyway: the strip, or the editor. `workspace::tests::retained`'s
+  `the_keyboard_moving_builds_only_the_shells_it_moves_between` builds again the two shells the
+  keyboard moves between, not a third, and fails with the old refresh.
+
+- ✅ **The workspace reads no focus as a whole** (2026-09-30, gpui-fast `beb580e` and pin
+  `867b4d4`). The fork stopped refreshing the window on `Window::focus` and `blur`: what a view
+  asks through a handle (`is_focused`, `contains_focused`, `within_focused`) is recorded, asked
+  again before each frame, and only the views whose answer changed are built again, while
+  `Window::focused` counts as reading the focus as a whole. Slopty still read it whole in two
+  places a frame builds, so every focus move built the workspace and the strip again as a
+  refresh would have: `apply_pending_focus` compared the focus before and after giving what
+  was asked, and the strip kept what had the keys (`Drawn::keys`) so `cacheable` could draw a
+  focused body afresh when the keyboard moved inside its tile.
+  - **Now.** `cacheable` follows the strip's own focus alone (the tile the layout focuses,
+    which bodies are laid out by). A shell the keyboard leaves for its header's rename field
+    asks for its focus in its input handler, so the fork builds it again without the handler
+    and the typed name goes to the field (`a_tile_is_named_from_its_header`). The workspace
+    notifies the strip for the next frame only when it gave focus that was asked for
+    (`focus_asked`), since the fork asks for no frame when the focus moves while a window
+    draws and a view replayed in that frame would keep the old focus. Whether the focus moved
+    is not read.
+  - **Cost.** The keyboard moved by a view of its own (a click in a body, a find bar giving it
+    back) over 60 shells and 60 notes: 0.28–0.33 ms p50 to 0.13–0.14 ms, and the workspace and
+    strip built for none of 420 moves, against every one before (`docs/MEASUREMENTS.md`). A
+    move the workspace asks for is unchanged (1.07–1.13 ms to 1.02–1.07 ms): the layout moves
+    with it, which builds both anyway.
+  - **Left for the fork.** A focus given while the window draws could ask for its own frame
+    (`Window::draw` compares the focus only across its focus listeners); then the strip's
+    notify goes too.
+  - Tests: `workspace::tests::retained`'s
+    `the_keyboard_moving_on_its_own_builds_neither_the_workspace_nor_the_strip` (the two shells
+    built again, a third not, workspace and strip not, each frame the one drawn from scratch)
+    and `the_keyboard_moving_builds_only_the_shells_it_moves_between`; `focus_cache`'s replay
+    tests; `a_tile_is_named_from_its_header`.
+
+- ✅ **A project's board is a face of its orchestrator's tile** (2026-09-30,
+  `docs/decisions/projects.md` "What the user sees", R8 of
+  `.research/agent-orchestrator-2026-09-30.md`).
+  - **Where it lives.** A project is the server's, and its orchestrator is a Claude Code session
+    in a terminal tile like any other. That tile turns between its TUI and the board (⇧⌘J, the
+    header's button, the palette's line for the project; the conversation face stays one ⌘J
+    away). So the board sits where the person talks to the orchestrator, every client that has
+    the tile can show it, and no second kind of item (a tile with no worker behind it) enters the
+    registry, the layout or the navigator. Not taken: a board as its own tile kind, which needs a
+    wire item on some worker for something the server owns, and an overlay, which hides the
+    strip the agents run on. A task agent's ⇧⌘J goes to its project's board; a project with no
+    orchestrator, or one whose tile is not here, says so.
+  - **What it shows.** A header with the project's title, where its work lands (repository →
+    target branch), its verifier and its live agents against its limit, over a bar that is every
+    task at once, one segment per lane in the lane's tone. Under it, what waits on the person:
+    each blocked task and a blocked orchestrator, with what its agent asks when this client
+    hears it. Then one of three lenses (1, 2, 3, or the tabs): the tree of who split what from
+    whom, down to Claude Code's own subagents running inside a session, each node with its
+    worker, branch, pull request, open dependencies ("after #1"), subagents and to-dos, and its
+    agent's own status line; the board (R8), each task in the lane of its most urgent
+    descendant (needs you, failed, working, up next, verifying, ready to merge, merged), lanes
+    side by side where the tile is wide enough and stacked where it is not; the timeline,
+    newest first, one sentence per moment with its age: a report says its kind and first line,
+    and a delivery names the agent it reached (the orchestrator, or `#3's agent`).
+  - **Keys and clicks.** ↑ ↓ (or j k) walk the rows on the selection plate, ↩ or a click opens
+    the node's agent in its tile with the keyboard in it. A node with no live agent, or one on a
+    worker this client cannot reach, says why in a notice. The orchestrator's own row turns the
+    tile back to its terminal.
+  - **Mirror.** `slopty_ui::project::model::Projects` keeps the server's snapshot parts and
+    changes, dropping a change at or below the snapshot's `seq` (projects.md, "Project changes
+    are deltas"). A native leaf's change moves its node's counts, since the server does not send
+    the card again for it. The timeline keeps its latest 256 entries. Live counts come from the
+    cards (open assignments and the orchestrator), not from the snapshot's `Live`, which no
+    change updates.
+  - **Cost.** Boards are made the first time they show and handed what they show only while
+    they show, compared before a notify, so a change elsewhere draws no board. The mirror holds
+    each project behind an `Arc` that a change copies on write, so the hand-over is a pointer and
+    an untouched project compares by address. An agent's status moving marks the boards for the
+    next frame like any change to the layout does. Lanes stand side by side where two fit at the
+    tile's zoom. The clock
+    alone draws nothing: the timeline's ages move on once a minute, only while it shows. A new
+    row slides 4 pt up into place as it fades in; under Reduce Motion it is there at once.
+  - Tests: `project::tests` (the snapshot and its `seq`, the timeline kept once and bounded,
+    the tree, lanes by the most urgent descendant, open dependencies, native counts, sessions
+    to nodes and terminals to agents, every moment in words, an update copying only the board it touches, lanes by
+    width and zoom); `workspace::tests::projects` (the tile turning to its
+    board and back with the keyboard, ↓↓↩ to an agent's tile, the lenses by key, clicks that
+    open or say why not, the server's changes with the retained-frame oracle, forgetting the
+    server, the palette's line and a task agent's ⇧⌘J).

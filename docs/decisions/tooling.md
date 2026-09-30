@@ -189,6 +189,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the lanes' incremental caches, and the sweep bounds them. A `cargo clean` of the lanes
     when `Cargo.lock` changes would make every gate after a sync cold. Numbers:
     MEASUREMENTS "target/ growth under varied check sets".
+  - **The fork checkouts are swept too** (2026-09-30). The volume filled to 32 MB free because
+    nothing pruned `.research/*/target*`. The gpui-fast fork held 87 GB of earlier compiles'
+    object files and gpui-kit 88 GB. Every `target*` dir under `.research/` that has cargo's
+    `CACHEDIR.TAG` gets the same sweep under its own budget (`SLOPTY_FORK_BUDGET_GB`, 40 GB).
+    The forks go first, in `prune`, after `check`/`gate`, and in the gate's floor check, since
+    their build output rebuilds without holding up a gate. One sweep took the volume from 56 to
+    168 GB free.
 
 - ✅ **Each fork has its own check interval; gpui-kit is asked at every gate** (2026-09-27).
   gpui-kit lands several changes a day (four between one morning's sync and the afternoon:

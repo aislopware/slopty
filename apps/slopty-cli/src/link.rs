@@ -25,8 +25,9 @@ use slopty_proto::server::{FromServer, Role, ToServer};
 use slopty_tools::Dispatch;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-/// Environment variable naming the server, between `--server` and the settings file.
-pub const SERVER_ENV: &str = "SLOPTY_SERVER";
+/// Environment variable naming the server, between `--server` and the settings file. Every
+/// session a worker runs has it, so `slopty` and `slopty mcp` inside one need no flag.
+pub const SERVER_ENV: &str = slopty_proto::project::SERVER_ENV;
 
 /// Where the server is: [`configured`], else the first server that answers on the tailnet,
 /// dialled from `endpoint` (`slopty_net::discover`).
@@ -228,6 +229,11 @@ impl Link {
 impl Dispatch for Link {
     async fn send(&self, key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
         retried(key, verb, |key, verb| self.request(key, verb)).await
+    }
+
+    /// The session's own: an agent started for a task finds its project and task here.
+    fn scope(&self) -> slopty_tools::Scope {
+        slopty_tools::Scope::from_env()
     }
 }
 

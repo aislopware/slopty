@@ -51,11 +51,18 @@ slopty-crash = { path = "crates/slopty-crash" }
 anyhow = "1.0.104"
 thiserror = "2.0.21"
 regex = "1.13.1"
+# Projects' placement rules over the workers' facts (`docs/decisions/projects.md`). No chrono or
+# regex: a fact is a word, a number or a list, and time never decides where work runs.
+cel = { version = "0.14.5", default-features = false }
+# NFC for comparing the paths tasks claim, as APFS compares names.
+icu_normalizer = "2.3.0"
+# Owned paths compare case-folded (Unicode full case folding), as a case-insensitive volume does.
+icu_casemap = "2.3.0"
 bitflags = { version = "2.13.2", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }
 core-foundation = "0.10.1"
 # core-video follows the GPUI fork: `SurfaceSource: From<CVPixelBuffer>` needs the same crate version.
-core-video = "0.5.2"
+core-video = "0.6.1"
 memchr = "2.8.3"
 # Clipboard and file-transfer digests: equal digests are the same contents (echo backstop,
 # end-to-end file check).
@@ -351,6 +358,9 @@ icns = "0.5.0"
 insta = { version = "1.48.0", features = [ "yaml", "redactions" ] }
 proptest = "1.11.0"
 tempfile = "3.27.0"
+# FSEvents, only as the measured alternative to the worker's kqueue file watch
+# (`slopty-worker/tests/fswatch.rs`; docs/decisions/workspace.md).
+notify = { version = "8.2.0", default-features = false, features = [ "macos_fsevent" ] }
 ignore = "0.4.33"
 # Project-wide text search on the worker (`slopty_worker::search`): ripgrep's own searcher,
 # matcher and regex adapter, walked with `ignore` above (docs/decisions/search.md).
@@ -376,6 +386,24 @@ noq-udp = { path = "vendor/noq-udp" }
 objc2 = { path = "vendor/objc2" }
 # The same fix backported to the objc2 0.5.2 that accesskit_macos still uses.
 objc2_05 = { package = "objc2", path = "vendor/objc2-0.5" }
+# block 0.1.6 with its extern statics of an uninhabited type made inhabited (rust#74840, a future
+# hard error); `vendor/block/SLOPTY.md`.
+block = { path = "vendor/block" }
+# gpui-kit keeps upstream's gpui-pre requirements; the gpui-fast fork's `compat/` crates stand in
+# for them under their names (longbridge/gpui-fast#23), so the graph holds one GPUI. `xtask
+# upstream check` fails on any crates.io `gpui-pre*` left in Cargo.lock.
+gpui-pre = { git = "https://github.com/aislopware/gpui-fast.git" }
+gpui-pre-platform = { git = "https://github.com/aislopware/gpui-fast.git" }
+gpui-pre-macros = { git = "https://github.com/aislopware/gpui-fast.git" }
+gpui-pre-sum-tree = { git = "https://github.com/aislopware/gpui-fast.git" }
+gpui-pre-web = { git = "https://github.com/aislopware/gpui-fast.git" }
+# cel at upstream master with the comprehension error absorption of cel-rust#379 and a total
+# order for iterating maps (ours, drafted upstream in .research/cel-rust-upstream-pr.md): a
+# placement rule over a map answers the same on every run, and `all`/`exists` follow the CEL
+# spec when an element errors. Also ours: `Context::default` shares one stdlib `Env` instead of
+# building it per context, which was most of placement's cost. Goes when upstream releases all
+# three.
+cel = { git = "https://github.com/aislopware/cel-rust.git", rev = "69202be434bf40f0198866a49d65a9ac897d0c8e" }
 
 # ---------------------------------------------------------------------------------------------
 # Lints. Groups are `warn` here; the gate (`cargo gate`) runs clippy with `-D warnings`, so a

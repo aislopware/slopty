@@ -44,6 +44,7 @@ use objc2_video_toolbox::{
 use slopty_proto::screen::VideoCodec;
 
 use crate::cf::{self, check};
+use crate::stripes::{Stripe, StripeCopy};
 use crate::video::{Chroma, EncodedPacket, EncoderConfig, FrameOptions, Mse, VideoEncoder};
 use crate::{CodecError, PixelBuffer, nal};
 
@@ -695,7 +696,12 @@ impl Encoder {
 /// [`Encoder`] as the worker's [`VideoEncoder`]: it takes the frames ScreenCaptureKit hands
 /// over, which are `IOSurface`-backed pixel buffers.
 #[derive(Debug)]
-pub struct VideoToolbox(Encoder);
+pub struct VideoToolbox {
+    encoder: Encoder,
+    /// For a stripe's session, its rows of each capture, copied into a picture of its own on
+    /// the submitting thread, so two stripes submitted at once copy at once too.
+    stripe: Option<StripeCopy>,
+}
 
 impl VideoEncoder for VideoToolbox {
     type Image = PixelBuffer;
@@ -704,7 +710,26 @@ impl VideoEncoder for VideoToolbox {
         config: EncoderConfig,
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError> {
-        Encoder::new(config, sink).map(Self)
+        Ok(Self { encoder: Encoder::new(config, sink)?, stripe: None })
+    }
+
+    fn stripe(
+        config: EncoderConfig,
+        stripe: Stripe,
+        sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+    ) -> Result<Self, CodecError> {
+        let width = usize::try_from(config.width).unwrap_or(usize::MAX);
+        let copy = StripeCopy::new(width, stripe, config.chroma)?;
+        let config = EncoderConfig { height: stripe.coded_rows, ..config };
+        Ok(Self { encoder: Encoder::new(config, sink)?, stripe: Some(copy) })
+    }
+
+    fn side_by_side(
+        width: u32,
+        height: u32,
+        chroma: Chroma,
+    ) -> Result<Option<crate::stripes::SideBySide>, CodecError> {
+        crate::stripes::side_by_side(width, height, chroma)
     }
 
     fn encode(
@@ -713,23 +738,26 @@ impl VideoEncoder for VideoToolbox {
         pts_us: u64,
         options: &FrameOptions,
     ) -> Result<(), CodecError> {
-        self.0.encode(image.as_cv(), pts_us, options)
+        match &self.stripe {
+            None => self.encoder.encode(image.as_cv(), pts_us, options),
+            Some(copy) => self.encoder.encode(&*copy.copy(image.as_cv())?, pts_us, options),
+        }
     }
 
     fn set_bitrate(&self, bps: u32) -> Result<(), CodecError> {
-        self.0.set_bitrate(bps)
+        self.encoder.set_bitrate(bps)
     }
 
     fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError> {
-        self.0.set_frame_rate(fps)
+        self.encoder.set_frame_rate(fps)
     }
 
     fn set_temporal_layers(&self, on: bool) -> Result<bool, CodecError> {
-        Ok(self.0.set_temporal_layers(on))
+        Ok(self.encoder.set_temporal_layers(on))
     }
 
     fn frames_dropped(&self) -> u64 {
-        self.0.frames_dropped()
+        self.encoder.frames_dropped()
     }
 }
 
@@ -1213,7 +1241,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let encoder = encoder(tx);
         if !encoder.ltr_enabled() {
-            eprintln!("no LTR on this encoder; nothing to check");
+            slopty_testkit::live::skip("no LTR on this encoder; nothing to check");
             return;
         }
         let frames = 12_usize;

@@ -23,7 +23,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Subcommand, ValueEnum};
 use slopty_agent::hooks::{self, Outcome};
 use slopty_agent::permission::{self, hook_output};
-use slopty_agent::{HOOK_EVENTS, HookEvent};
+use slopty_agent::{HOOK_EVENTS, HookEvent, reports};
 use slopty_core::SessionId;
 use slopty_proto::ctl::{CtlReply, CtlRequest, Decision, PermissionAsk, SESSION_ENV};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -61,6 +61,9 @@ pub enum HookCmd {
         #[arg(long)]
         command: Option<String>,
     },
+    /// Hand the reports waiting for this session's agent over to it, as Claude Code's hook
+    /// for a session's start, a prompt and a turn's end (registered with the relay).
+    Reports,
     /// Report this session's agent status yourself (any program, from inside the session).
     Report {
         /// What the agent is doing.
@@ -157,6 +160,48 @@ async fn relay_at(
     hook_output(&decide(socket, ask, wait).await)
 }
 
+/// Hand the reports kept for this session over through the hook that runs this: print them as
+/// Claude Code reads a hook's answer, then tell the worker. Note the session's inbox first,
+/// through which the worker hands later reports over at once. Never fails, and prints nothing
+/// outside a session or with nothing waiting: Claude Code must not notice us.
+async fn reports(data_dir: &Path) {
+    let mut payload = String::new();
+    if std::io::stdin().lock().read_to_string(&mut payload).is_err() {
+        return;
+    }
+    let Ok(Some(session)) = session() else { return };
+    let socket = workerctl::socket(data_dir);
+    // Noted on every run, so a worker started since still reaches an agent at rest.
+    if let Some(inbox) = reports::Inbox::from_env()
+        && let Err(e) = reports::keep_inbox(&reports::inboxes(&socket), session, &inbox)
+    {
+        tracing::debug!(error = %e, "the session's inbox not noted");
+    }
+    if let Some((output, batch)) = hand_over(&reports::dir(&socket), session, &payload) {
+        println!("{output}");
+        if let Err(e) = post(&socket, session, reports::delivered_payload(batch)).await {
+            tracing::debug!(error = %e, batch, "reports handed over, not acknowledged");
+        }
+    }
+}
+
+/// What to print for the hook whose payload is `payload` to hand over the batch kept for
+/// `session` in `dir`, and the batch; none when nothing waits or the event takes nothing.
+fn hand_over(dir: &Path, session: SessionId, payload: &str) -> Option<(serde_json::Value, u64)> {
+    let event = slopty_agent::Hook::parse(payload).ok()?.event;
+    if !reports::EVENTS.contains(&event) {
+        return None;
+    }
+    let batch = match reports::take(dir, session) {
+        Ok(batch) => batch?,
+        Err(e) => {
+            tracing::debug!(error = %e, "reports not read");
+            return None;
+        }
+    };
+    Some((reports::output(event, &batch.context)?, batch.batch))
+}
+
 /// The part of a hook payload the daemon reads, and the event it names. The payload is read
 /// whole, since a `PostToolUse` carries the tool's output and that can run to megabytes, and
 /// only the fields [`slopty_agent::Hook`] names go on, trimmed ([`slopty_agent::Hook::trimmed`]).
@@ -221,6 +266,10 @@ pub async fn post(socket: &Path, session: SessionId, payload: String) -> Result<
 
 pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
     match cmd {
+        HookCmd::Reports => {
+            reports(data_dir).await;
+            Ok(())
+        }
         HookCmd::Report { status, message } => {
             let Some(session) = session()? else {
                 bail!("not inside a Slopty session ({SESSION_ENV} is unset)");

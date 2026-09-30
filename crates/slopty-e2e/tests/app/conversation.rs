@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use slopty_e2e::{Command, Dump, Stack};
+use slopty_e2e::{Command, Driver, Dump, Stack};
 
 use crate::gallery::{STEP, first_shell, golden};
 
@@ -98,6 +98,17 @@ fn has(d: &Dump, role: &str, label: &str) -> bool {
     d.a11y_node(role, Some(label)).is_some()
 }
 
+/// ⌘J once the app knows the agent: the relay exiting means the worker has the hook, not that
+/// the status has reached the app, and before it has ⌘J only says no agent runs there.
+async fn show_face(drv: &mut Driver) {
+    drv.wait_for("the agent", STEP, |d| {
+        d.terminals.iter().any(|t| t.agent_source.is_some() && t.agent.as_deref() != Some("none"))
+    })
+    .await
+    .unwrap();
+    drv.keys("cmd-j").await.unwrap();
+}
+
 /// An agent working through an edit asks to run a command: the face shows the turn it is on,
 /// the edit's diff in it, and the prompt in the composer's place with its three answers; the
 /// header says how many lines changed, how full the context is and which model it is. The
@@ -111,7 +122,7 @@ async fn the_face_holds_a_prompt_over_the_turn_it_interrupts() {
     let dump = first_shell(&mut stack.driver).await;
     let session = dump.terminals[0].session.clone();
     let transcript = start_recorded(&stack, &session, "edit").await;
-    stack.driver.keys("cmd-j").await.unwrap();
+    show_face(&mut stack.driver).await;
     stack
         .driver
         .wait_for("the conversation", STEP, |d| {
@@ -151,7 +162,7 @@ async fn a_subagent_has_a_thread_of_its_own() {
     let session = dump.terminals[0].session.clone();
     start_recorded(&stack, &session, "tools").await;
     let drv = &mut stack.driver;
-    drv.keys("cmd-j").await.unwrap();
+    show_face(drv).await;
     drv.wait_for("the conversation", STEP, |d| has(d, "Group", "Conversation")).await.unwrap();
     // Settled: the prompt, the turn folded to its figures, the answer and the files it changed.
     drv.wait_for("the settled turn", STEP, |d| {
@@ -196,9 +207,11 @@ async fn a_subagent_has_a_thread_of_its_own() {
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_file_dropped_on_the_face_waits_in_the_composer() {
-    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    // Held before its first byte, so the chip reads 0% however fast this machine is.
+    let held = [(slopty_e2e::HOLD_UPLOADS_ENV, "1")];
+    let mut stack = Stack::launch_with("e2e-worker", &held).await.unwrap();
     let dir = stack.dir.path().to_path_buf();
-    // Sparse: big enough to still be on its way when the frame is drawn, free to make.
+    // Sparse: a recording's size, free to make.
     let source = stack.path("screen-recording.mov");
     std::fs::File::create(&source).unwrap().set_len(2 << 30).unwrap();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -206,7 +219,7 @@ async fn a_file_dropped_on_the_face_waits_in_the_composer() {
     let session = dump.terminals[0].session.clone();
     start_recorded(&stack, &session, "tools").await;
     let drv = &mut stack.driver;
-    drv.keys("cmd-j").await.unwrap();
+    show_face(drv).await;
     let dump = drv
         .wait_for("the settled conversation", STEP, |d| {
             has(d, "Group", "Conversation") && has(d, "List", "Changed files")
@@ -226,7 +239,6 @@ async fn a_file_dropped_on_the_face_waits_in_the_composer() {
         "the header says nothing the chip says: {:#?}",
         dump.a11y
     );
-    // Drawn at once, as the transfers golden is: the upload is still near its start.
     drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
     let frame = drv.render(&dir.join("conversation-attachment.png")).await.unwrap();
     slopty_e2e::snapshot::assert_matches(
@@ -248,11 +260,7 @@ async fn a_file_dropped_on_the_face_waits_in_the_composer() {
 
 /// Scroll the conversation up a few lines at a time until `shows` holds, as a reader looking
 /// for something above the tail would.
-async fn scroll_up_until(
-    drv: &mut slopty_e2e::Driver,
-    what: &str,
-    shows: impl Fn(&Dump) -> bool,
-) -> Dump {
+async fn scroll_up_until(drv: &mut Driver, what: &str, shows: impl Fn(&Dump) -> bool) -> Dump {
     for _ in 0..60 {
         let dump = drv.dump().await.unwrap();
         if shows(&dump) {
@@ -342,7 +350,7 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
     });
     let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
     assert!(done.success(), "the relay ran");
-    stack.driver.keys("cmd-j").await.unwrap();
+    show_face(&mut stack.driver).await;
     stack
         .driver
         .wait_for("the conversation", STEP, |d| has(d, "Group", "Conversation"))
@@ -588,7 +596,7 @@ async fn the_face_shows_the_work_beyond_words() {
     let (main, output) = work_session(&stack);
     start(&stack, &session, &main).await;
     let drv = &mut stack.driver;
-    drv.keys("cmd-j").await.unwrap();
+    show_face(drv).await;
     let building = "Build the release binary: Running";
     drv.wait_for("the build in the background", STEP, |d| {
         has(d, "List", "In the background")
@@ -790,7 +798,7 @@ mod frame_time {
         });
         let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
         assert!(done.success(), "the relay ran");
-        stack.driver.keys("cmd-j").await.unwrap();
+        show_face(&mut stack.driver).await;
         stack
             .driver
             .wait_for("the conversation", STEP, |d| {

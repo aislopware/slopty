@@ -11,10 +11,19 @@ description = "Slopty server: the control plane — worker registry and leases, 
 workspace = true
 
 [dependencies]
+# The tokens that prove which task terminal an agent's tools speak from (`vouch`).
+blake3.workspace = true
+# Placement rules over the workers' facts (`placement`).
+cel.workspace = true
 hyper.workspace = true
+# Claimed paths compared as APFS compares names (`project::owned`).
+icu_normalizer.workspace = true
+icu_casemap.workspace = true
 hyper-util.workspace = true
 parking_lot.workspace = true
 rmcp = { workspace = true, features = [ "transport-streamable-http-server" ] }
+# The projects file's records (`project`).
+serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true
 slopty-net.workspace = true
@@ -30,5 +39,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 slopty-tailnet = { workspace = true, features = [ "fake" ] }
+# The `*_cost` measurements (`cargo xtask bench`).
+slopty-testkit.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = [ "test-util" ] }

@@ -57,9 +57,6 @@ actions!(
         /// Show the focused remote window or display in a window of its own on this Mac, the
         /// same stream going on; again, or closing that window, puts it back in its tile.
         ToggleOwnWindow,
-        /// Slide the quick terminal down from the top of the screen, or put it away: one shell
-        /// kept across shows, over any app. The Mac's system-wide chord runs it too.
-        ToggleQuickTerminal,
         /// Send the system's own shortcuts (⌘Tab, ⌘Space, Mission Control) to the focused
         /// remote Mac while its tile has the keyboard, or leave them to this Mac.
         ToggleSystemKeys,
@@ -159,6 +156,9 @@ actions!(
         FontReset,
         /// The focused agent terminal between its TUI and its conversation.
         ToggleConversation,
+        /// The focused orchestrator's tile between its terminal and its project's board; from
+        /// an agent on a task, its project's board.
+        ToggleProjectBoard,
         /// The focused page's address as a field in its header, all of it selected: ↩ goes
         /// there, Esc leaves it as it was. With no page focused, "Open URL…".
         EditAddress,
@@ -170,6 +170,14 @@ actions!(
         ReloadPage,
         /// Web Inspector on the focused page (a debug build of the Mac app).
         InspectPage,
+        /// Undo in the page that holds the keyboard.
+        PageUndo,
+        /// Redo in the page that holds the keyboard.
+        PageRedo,
+        /// Cut the selection of the page that holds the keyboard.
+        PageCut,
+        /// Select all in the page that holds the keyboard: its field with the caret, or the page.
+        PageSelectAll,
     ]
 );
 
@@ -255,6 +263,11 @@ pub fn palette_items() -> Vec<PaletteItem> {
             IconName::MousePointer2,
             Box::new(crate::screen::ToggleTrackpad),
         ),
+        w(
+            crate::screen::REMOTE_GESTURES,
+            IconName::Hand,
+            Box::new(crate::screen::ToggleRemoteGestures),
+        ),
         w("Show or hide the navigator", IconName::PanelLeft, Box::new(ToggleNavigator)),
         w("Name this tile", IconName::Pencil, Box::new(RenameItem)),
         w("Point other devices at this tile", IconName::Cast, Box::new(PointOthers)),
@@ -321,6 +334,10 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Tabbed column", IconName::PanelsTopLeft, Box::new(ToggleTabbed)),
         w("Overview", IconName::LayoutGrid, Box::new(ToggleOverview)),
         w("Show conversation or terminal", IconName::MessageSquare, Box::new(ToggleConversation)),
+        w("Show project board or terminal", IconName::Workflow, Box::new(ToggleProjectBoard)),
+        w("Project tree", IconName::ListTree, Box::new(crate::project::ShowTree)),
+        w("Project board", IconName::Kanban, Box::new(crate::project::ShowBoard)),
+        w("Project timeline", IconName::Clock, Box::new(crate::project::ShowTimeline)),
         w("Conversation density", IconName::ListChecks, Box::new(CycleDensity)),
         w("Stop the agent", IconName::Square, Box::new(Interrupt)),
         w("Larger text", IconName::AArrowUp, Box::new(FontLarger)),

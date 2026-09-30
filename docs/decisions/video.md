@@ -1937,12 +1937,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ⏸ **Two stripes, built: the wire, the worker and the client** (designed 2026-09-29, not
   built; the ruling above).
   - Build only behind the gate in the ruling. Two stripes, never more.
-  - Geometry, one function both ends call (`slopty-media`, `stripes.rs`). The seam is the
-    multiple of 64 (the HEVC CTU) nearest half, and each stripe also codes `OVERLAP` = 64 rows
-    past it. Stripe 0 shows `[0, seam)` and codes `[0, seam + 64)`; stripe 1 shows
+  - Geometry, one function both ends call (built: `slopty_codec::stripes::layout`, see "A
+    large stream takes both encode engines while it has them"). The seam is the multiple of 64
+    (the HEVC CTU) nearest half, the lower one on a tie, and each stripe also codes `OVERLAP` =
+    64 rows past it. Stripe 0 shows `[0, seam)` and codes `[0, seam + 64)`; stripe 1 shows
     `[seam, H)` and codes `[seam − 64, H)`. For 3024 × 1968 that is 960 + 1008 shown and
     1024 + 1072 coded; for 3840 × 2160, 1088 + 1072 and 1152 + 1136; for 5120 × 2880,
-    1472 + 1408 and 1536 + 1472. Every coded height is a multiple of 16 when H is, which the
+    1408 + 1472 and 1472 + 1536. Every coded height is a multiple of 16 when H is, which the
     padding already guarantees.
   - Wire (`slopty-proto`):
     - a `Stripe { media: StreamId, coded_top, coded_rows, shown_top }` in `screen.rs`: each
@@ -1964,8 +1965,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     has its own IOSurface-backed `CVPixelBufferPool` of `coded_rows` rows. Per capture, the
     stripe's coded rows of both planes are copied into a pool buffer (12.4 MB a frame at 4K):
     a CPU copy first, a Metal blit only if the copy measures over 0.5 ms, and never
-    `VTPixelTransferSession`, which goes through the scaler the padding work removed. A probe
-    `stripes_copy_cost` measures the copy at the three sizes before building.
+    `VTPixelTransferSession`, which goes through the scaler the padding work removed. Built as
+    `slopty_codec::stripes::StripeCopy`; `stripes_copy_cost` measured 0.15 ms a stripe at 4K
+    4:2:0 and 0.6 ms at 4:4:4.
   - Encode (worker). `Live` holds one or two stripe sessions, each with its own `Encoder`,
     encode thread and one-frame mailbox (an aligned submit encodes inside the call, and both
     stripes must submit at the same instant), and its own packetizer, redundancy, LTR book,
@@ -1976,8 +1978,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     slowest stripe. A refresh or NACK on a stripe's `media` is answered by that stripe alone,
     and the next frame's mask names only the stripes coded from that capture. `LayerGate` and
     `Refine` run per stripe.
-  - The gate: `warm_up` times one session against two concurrent ones at the stripe size, once
-    per boot and size class, and keeps whether two beat one by 25 %. Stripes go on when that
+  - The gate: `slopty_codec::stripes::side_by_side` (built) times one session against the two
+    stripes with their copies at once, and `SideBySide::pays` says whether two beat one by 25 %;
+    the worker runs it once per boot and size class and keeps the answer. Stripes go on when that
     holds, the whole picture's mean encode is over 12 ms and the smoothed spend is under 45 %
     of target, and off at 70 %, with a few seconds' hold each way. Switching rebuilds the
     sessions (keyframes) through `install`/`put_in` and sends `Geometry` with the new stripes.
@@ -2143,3 +2146,197 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Open: the test platform presents no frames, so a test sees where the view placed the layer
     and not what the window did with it. A test-mode present in the fork would let tests read
     the hosts. The iOS simulator's layer reports nothing, so its stream shows no timings.
+
+- ⏸ **Giving way by scale, not only by rate** (designed 2026-09-30, not built; follows "A
+  focused stream keeps its rate; the others give way a rung"). Under a machine load of 20–55,
+  the focused stream's p95 stays at 13–40 ms with 7–8 streams, because the engine codes the
+  rest's frames at full size in front of it. The idea is to make each background frame
+  smaller, so it holds the engine for less time.
+  - What it would change. When `Engines::contended` would give way a rate rung, it halves each
+    side of the unfocused streams' capture instead: at most one step, and it holds for the
+    same 10 s. The capture's output size follows through `SCStream`'s configuration update,
+    with no restart. The encoder session cannot change size, so each step rebuilds the session
+    and sends a keyframe. Steps back up after the hold cost the same.
+  - What it touches beyond the worker. The client maps its pointer at the scale it asked for
+    (`ScreenRequest::Scale`), so a scale the worker imposes needs `Geometry`, or a scale field
+    beside it, on every step. Otherwise a background tile clicked during the hold lands at
+    twice the distance. The layer stretches any picture to its tile, so nothing else on the
+    client moves. A tile already painted at half its stream's width or less (the client asks
+    that scale itself) gains nothing, so the step applies only to tiles painted larger:
+    half-width columns of a large display, and pop-outs.
+  - What to measure, all under `measure_concurrent_streams` with a knob choosing rate, scale,
+    or both, in three interleaved rounds each on the same load (a 20–55 machine load, 7 and 8
+    streams):
+    - the focused stream's encode wait and arrival → glass, at p50 and p95;
+    - the background streams' frames a second, and their p95;
+    - the keyframe bytes and the count of keyframes per give-way and per step back;
+    - the rebuild's time on the worker, from the step to the first frame out;
+    - how long the pointer mapping is wrong: a background tile's click during a step, with no
+      `Geometry` sent, as the negative control.
+  - What decides it. Take it if the focused p95 falls under 16.7 ms at 7–8 streams, the
+    background keeps 30 frames a second or more, and a step's keyframe costs less than one
+    second of the stream's own rate. Otherwise keep rate alone. If the rebuild alone costs the
+    focused stream a refresh, the steps must stay fewer than one a second.
+
+- ✅ **Capture to glass on any link: the stream probes the worker's clock** (2026-09-30, M1 Max,
+  macOS 27.0; MEASUREMENTS "capture to glass on any link"). The pacer could time a frame from its
+  capture only where the worker's clock was the client's (loopback, the bench, the e2e glass
+  tool), so the one number a remote desktop is judged on was missing on every real link.
+  - *The probe.* Every stream's worker on the client sends `Feedback::Clock { stream, sent_us }`
+    as a datagram, one per report for its first eight and then one every fifth report (four a
+    second). The worker's connection answers at once through the stream's control, ahead of
+    the stream task's own queue (not of what the transport already holds, whose wait lands in
+    the down leg and is what the fastest-round-trip filter drops): a `Kind::Clock` media datagram whose `ClockEcho` carries `sent_us` back
+    beside the stream's capture clock as the probe came and as the echo left. Both legs are
+    datagrams, so a probe never waits behind a lost packet on the control stream, and on both
+    ends the arrival is the connection reader's stamp, not the stream task's: the worker's
+    `received` is when its reader took the probe off the connection, carried to the stream as
+    an `Instant` and read on the capture clock, so the time the probe waited for the
+    connection's loop is no part of the round trip. The `Pong` was the other
+    candidate: the app sends it only when a link goes quiet and handles it outside the stream,
+    and one estimate per stream costs a probe of 6 to 12 bytes and an echo of 41, four a second.
+  - *The estimate* (`slopty_media::ClockSync`, pure, so the client and the fuzzer share it) is NTP's: each echo gives the offset
+    `((received − sent) + (echoed − arrived)) / 2`, off by at most half its round trip. Probes
+    are kept for 30 s. Each 2 s slice gives its fastest probe, and those within 200 µs (or an
+    eighth of it on a slower path) of the fastest round trip in the window are fitted by
+    weighted least squares. The slope, the drift between the two Macs' quartz, is fitted once
+    they span 8 s, clamped to ±500 ppm; two Macs drift tens of ppm, a millisecond a minute at
+    worst, which a fixed offset over a 30 s window would smear. Each probe pins the worker's
+    clock to within half its round trip of the offset it saw (nothing can do better without
+    assuming the path symmetric), and while the clocks drift at a steady rate the line's error
+    is a line too. So the stated bound is how far the line strays from what the newest probe
+    pins, or from what the fitted probes at either end pin carried to the anchor, whichever is
+    less: it holds after every probe, where half the slowest fitted round trip, the first bound
+    written, was 111 µs off on loopback while claiming 101 µs, and could not see the fit miss a
+    clock drifting past ±500 ppm. A frame captured after the anchor is off by the drift since
+    as well, tens of µs between probes. A probe the line cannot explain, even at the full width
+    of its own round trip plus half the slowest fitted one and 1 ms, is a clock that stepped (a Mac that slept stops its host clock); two in
+    a row that agree with each other replace the window.
+  - *Where it lands.* The decoder's callback places each picture's capture on the client's
+    clock through the newest anchor (`FrameStamp::captured`), and the pacer times it to the
+    layer's glass time. An exact shared clock (`Pacer::share_clock`) still wins where one exists,
+    which is how the bench and the e2e tools check the estimate. `ScreenStats::clock` carries the
+    estimate; the stats overlay leads its plain line with capture → glass once there is one
+    (flagged past three display periods and half the round trip), and its presentation line
+    shows `capture p50 / p95 / max ±bound`.
+  - *Numbers.* In process on loopback the estimate sits 0.01 ms off the shared clock at p50
+    (0.58 ms at worst, while the first probes met a busy runtime); behind a 5 ms-each-way, 3 %
+    loss link, 0.26 ms at p50, 0.37 ms at worst; rerun with the bound that holds, 0.06 ms on
+    loopback within a stated 1.33 ms and 0.10 ms at p50 (0.37 at worst) behind 5 ms within
+    6.9 ms.
+    Capture → painted read 15.35 against 15.45 ms and 18.64 against 18.78 ms. Simulated, over
+    six queueing sequences with up to 30 ms on each leg and drift from −80 to +150 ppm, it is
+    within 66 µs after a minute, finds the drift within 11 ppm, and states 5.0–7.2 ms. On the frame path it costs
+    3 ns a datagram (the look for an echo) and 9.4 ns a picture (the anchor read).
+  - Wire: `Feedback::Clock`, `Kind::Clock` and `ClockEcho`, goldens `client_clock_probe` and
+    `media_clock_echo`. The worker's own time per frame in `FramePrefix` (Moonlight's
+    `frameHostProcessingLatency`), which would split the figure into worker, network and client
+    even without a clock, is not taken here.
+  - Tests: `on_loopback_the_estimate_is_the_shared_clock`,
+    `the_estimate_finds_a_drifting_clock_through_a_jittery_link`,
+    `the_stated_bound_holds_after_every_probe` (loopback, queueing, a 40 ms path, one leg
+    slower, and an 800 ppm clock, the bound checked after each of 240 probes),
+    `an_asymmetric_path_stays_inside_the_bound`, `a_clock_that_steps_is_followed_after_two_probes`,
+    `a_slow_probe_or_an_impossible_echo_changes_nothing` and
+    `the_anchor_reads_the_nearest_moment_across_a_wrap` (`slopty-media` `clock`);
+    `a_shared_clock_times_frames_from_their_capture` (`slopty-client` `pacing`);
+    `clock_probes_go_out_and_an_echo_places_the_worker_clock` (the stream's worker);
+    `a_clock_probe_is_echoed_with_the_capture_clock` and
+    `the_clock_probes_time_captures_as_the_shared_clock_does` (the drawn screen through the real
+    encoder and decoder, on loopback and behind 5 ms) in `slopty-worker`;
+    `to_glass_is_from_the_capture_once_the_clock_is_placed` and the overlay's
+    `hud_shows_age_jitter_hold_present_cadence_and_the_verdict` in `slopty-ui`. The `feedback`
+    fuzz target (`fuzz/src/feedback.rs`) takes probes the worker echoes and reads back, any
+    bytes as a media datagram with a clock echo in it, and any readings an echo may carry, and
+    holds the estimate to a drift within ±500 ppm and a bound no tighter than half the fastest
+    round trip.
+
+- ✅ **The client is told when the Mac is locked, or its screens have another session**
+  (2026-09-30, M1 Max, macOS 27.0). A stream of a locked Mac showed whatever the capture made of
+  it with nothing to say why the windows had gone, and nothing the client does can change it:
+  someone has to unlock the Mac, or switch back to the session, at the Mac itself.
+  - *Detection.* The session dictionary CoreGraphics keeps for the worker's login session
+    (`CGSessionCopyCurrentDictionary`, read with the geometry probe off the stream's task).
+    `kCGSessionOnConsoleKey` false or `kCGSessionLoginDoneKey` false is another session on the
+    screens, the login window or another user after a fast user switch, as Chromium's remoting
+    host reads them for its curtain mode. `CGSSessionScreenIsLocked`, the key xnu's
+    `IOKitKeysPrivate.h` names `kIOConsoleSessionScreenIsLockedKey`, is present and true only
+    while the screens are locked; AltTab and RustDesk read the same key. The
+    `com.apple.screenIsLocked` distributed notifications were the other way: they need the main
+    thread's run loop, AppKit suspends them for an inactive app, and Apple says they may be
+    dropped, so they would still need this read beside them. A read costs 71 µs at the median
+    (472 µs at p99) and runs after the probe's bounds are timed, every 250 ms while the stream is
+    locked (a locked stream is never quiet, so its probe keeps its period) and at least once a
+    second otherwise.
+  - *Wire.* `SourceState` gains `Locked` and `Away`, which outrank what the target draws: the
+    lock screen may still produce frames, and they do not make the stream `Live`. The receiver
+    treats both as it treats `Idle` and stops asking for refreshes no refresh can answer.
+    Goldens `worker_screen_source_locked` and `worker_screen_source_away`; nothing else moved.
+  - *The tile.* Over the body, the modal scrim (`kit::scrim`) with whatever picture it last
+    showed kept under it, and in its middle a lifted card (`kit::elevate`, `radii.lg`) holding a
+    `kit::notice`: the Lock or MonitorOff mark, "The Mac is locked" or "The Mac is at the login
+    window", and one line saying when the picture returns. It is a status, so a screen reader
+    hears it, and it comes and goes with the worker's word, with no motion. It asks for nothing:
+    unlocking from the client is not built. Pointer and keys still reach the worker through it,
+    as they would reach the lock screen at the Mac, so nothing stops a person from typing their
+    password into a display stream either.
+  - What ScreenCaptureKit delivers while the Mac is locked (frames of the lock screen, blank
+    frames or none) has no primary source and has not been observed here: the state is read
+    from the session, so either way the tile says the same.
+  - Tests: `the_session_flags_say_what_the_screens_show` (`slopty-capture`),
+    `a_locked_mac_or_a_session_away_outranks_the_frames` (the worker's tracker),
+    `a_locked_mac_is_said_over_the_picture` and `the_console_notice_says_what_is_so`
+    (`slopty-ui`), the ignored `console_read_cost`, and end to end
+    `a_locked_mac_reaches_the_client_and_so_does_its_return` (`slopty-workerd` `screens`): the
+    drawn Mac locked, its stream served as the worker serves one, and the client's link hearing
+    `Locked` 102 ms later, then `Away`, then `Live`. It found the drawn screen the app
+    self-test streams (`StudioAt`) never said what its session showed, so a locked drawn Mac
+    streamed on as `Live`; it now says what the canvas does.
+
+- ✅ **A large stream takes both encode engines while it has them; no session is shared**
+  (2026-09-30, M1 Max with two `ave2` engines, macOS 27.0; MEASUREMENTS "large streams on the
+  encode engines"; backlog #14). The question was what several 4K and 5K streams from one worker
+  should share: a session each (today), two stripe sessions each, or one session for all of
+  them, their pictures side by side.
+  - *No shared session.* A session runs on one engine, however large its picture: IOReport's
+    per-engine interrupts put every frame of a 4K, 5K or two-4K-wide session on one engine and
+    none on the other. So N streams in one session get 1/N of an engine: two 4K pictures in one
+    session were coded at 25 a second where two sessions coded them at 46, three at 12.8, and
+    three 5K pictures in one failed (`VTCompressionSessionCompleteFrames` -17691).
+  - *A session each stays, and a stream larger than one engine is striped.* One engine codes
+    about 400 megapixels a second, a 4K frame in 20.5 ms, so a 4K stream alone is a 48 fps
+    stream and a 5K one 28. Striped, the same stream alone kept 60 at 12.0 ms (p99 12.2) and
+    5K 50 at 19.4 ms. Beside one or two 1080p streams the striped 4K stream still kept 59–60
+    (the 1080p ones too, their encode 6.7 → 16 ms p50 as the stripes share the engines), where
+    as one session it made 47 and 40.
+  - *Under contention stripes cost little and share fairly.* Once large streams fill both
+    engines, stripes code 4–10 % fewer frames in all than a session each (4K: 88.6 against 92.6
+    a second at two streams, 92 against 102 at four) at the same encode time or better at p95
+    (22.8 against 26.0 ms at two). The driver's placement of three sessions is unfair: one gets
+    an engine to itself (47.5 a second) and two share the other (25 each), in every run and at
+    both sizes, while three striped streams got 30.8 each. So the stripe gate stays per stream,
+    as the ruling above has it, and the number of other streams does not enter it; the worker's
+    `Engines` give-way works on a striped stream's rung as on any other's.
+  - *Nothing else is shared.* A 4K session costs 3.2 MB when the process opens its first and
+    0.1 MB each after (3 MB more once it has coded), 0.01 of a core, and nothing on the GPU,
+    which is not in the path. The earlier finding stands: what is worth sharing across a
+    client's streams is the sound (`docs/decisions/audio.md`, "One sound per worker on a client,
+    not one per stream").
+  - *Built here* (`slopty-codec`, `stripes.rs`): `layout`, the geometry both ends call (moved
+    from the `slopty-media` of the build plan below, so the gate and the copy use the one
+    function without a dependency on the wire crate; the client already links the codec);
+    `StripeCopy`, a stripe's coded rows of a capture in an `IOSurface`-backed pool buffer of
+    its own, 0.15 ms per stripe on its own thread at 4K 4:2:0 and 0.6 ms at 4:4:4; and
+    `side_by_side`, the gate's timing of the whole picture against both stripes with their
+    copies at once (4K 20.7 → 12.1 ms, 5K 35.2 → 20.4, 3024 × 1968 15.6 → 9.7). Tests:
+    `the_seam_falls_on_a_coding_tree_unit_near_half`, `a_stripe_holds_its_rows_of_the_capture`
+    (both planes, both chromas), `a_capture_that_does_not_fit_is_refused`,
+    `the_gate_times_both_ways`; the measurements `concurrent_encode` (`tests/streams.rs`) and
+    `stripes_copy_cost`.
+  - *Left for the build plan below.* The wire (a stripe's media stream, the frame prefix's
+    mask), the worker's two encode threads, packetizers and watch, and the client's stitch.
+    At 4:4:4 the copy is over the 0.5 ms the plan set for trying a Metal blit; it is
+    26.5 MB a stripe at about 46 GB/s, the memory's rate, so a blit saves CPU (0.04 of a core
+    a stripe at 60) rather than time, and waits for a measurement on the worker's path.
+  - Not taken: capturing each stripe as a stream of its own (ruled out above: two captures
+    share no display time).

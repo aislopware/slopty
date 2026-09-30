@@ -238,3 +238,58 @@ fn taking_one_tile_back_leaves_the_other_offer(cx: &mut TestAppContext) {
     assert_eq!(left.len(), 1, "{left:?}");
     assert!(left[0].starts_with("Closed"), "{left:?}");
 }
+
+/// A link in doubt after a resume sets its worker's tiles back in the frame it starts, over
+/// what they showed, with no pill; the frame the probe answers brings them back. A relink made
+/// before the old link is let go swaps the old views for the new link's in one step, so no frame
+/// shows the tile empty or saying the worker is away. Every frame is the one drawn from scratch.
+#[gpui::test]
+fn a_link_in_doubt_sets_its_tiles_back_until_it_is_live(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let [(shell, tile), ..] = three_shells(&view, cx, &studio);
+    let fresh = |cx: &mut VisualTestContext, step: &str| {
+        cx.run_until_parked();
+        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        assert!(stale.is_none(), "{step}: the window shows a stale frame. {stale:?}");
+    };
+    let in_doubt: &'static str =
+        Box::leak(format!("in-doubt-{}", tile.item.as_uuid()).into_boxed_str());
+    let pill: &'static str = Box::leak(format!("state-{}", tile.item.as_uuid()).into_boxed_str());
+    let key = studio.key;
+    let status = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, status| {
+        view.update_in(cx, |v, _w, cx| v.set_worker_status(key, status, cx));
+        cx.run_until_parked();
+    };
+    fresh(cx, "the shells");
+    assert!(cx.debug_bounds(in_doubt).is_none());
+
+    status(&view, cx, WorkerStatus::Checking);
+    assert!(cx.debug_bounds(in_doubt).is_some(), "set back in the frame the doubt starts");
+    assert!(cx.debug_bounds(pill).is_none(), "with no word over it");
+    assert!(view.read_with(cx, |v, _| v.terminal(shell).is_some()), "showing what it showed");
+    fresh(cx, "checking");
+    status(&view, cx, WorkerStatus::Connected);
+    assert!(cx.debug_bounds(in_doubt).is_none(), "back the frame the probe answers");
+    fresh(cx, "answered");
+
+    status(&view, cx, WorkerStatus::Relinking);
+    assert!(cx.debug_bounds(in_doubt).is_some() && cx.debug_bounds(pill).is_none());
+    // The new link lands: the old views go and the new link's come in the same update.
+    let (tx, rx) = mpsc::channel(256);
+    let factory: ScreenFactory =
+        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+    let me = studio.me;
+    let sessions = vec![summary(shell, None)];
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Relinking, cx);
+        let link = WorkerLink { me, out: tx, open_screen: factory, remote: None };
+        v.connect_worker(key, link, hello("studio", sessions), cx);
+    });
+    studio.rx = rx;
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(in_doubt).is_none(), "live again");
+    assert!(cx.debug_bounds(pill).is_none(), "and no frame said the worker was away");
+    assert_eq!(view.read_with(cx, |v, _| v.links(key)), 2, "on its second link");
+    fresh(cx, "relinked");
+}

@@ -26,7 +26,7 @@ mod tests {
     #[test]
     fn window_bounds_and_owner_come_back_for_a_real_window() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_SCREEN_E2E=1");
+            slopty_testkit::live::skip("set SLOPTY_SCREEN_E2E=1");
             return;
         }
         let id = any_on_screen_window().expect("an on-screen window");
@@ -40,7 +40,7 @@ mod tests {
     #[test]
     fn window_state_agrees_with_the_single_reads() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_SCREEN_E2E=1");
+            slopty_testkit::live::skip("set SLOPTY_SCREEN_E2E=1");
             return;
         }
         let id = any_on_screen_window().expect("an on-screen window");

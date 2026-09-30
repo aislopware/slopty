@@ -445,10 +445,17 @@ fn loopback_address(listen: &str) -> Result<String> {
 /// on a sleep, and it registers no hooks at all — which is the whole point.
 const FAKE_CLAUDE: &str = r#"#!/bin/sh
 set -e
-stage() { while [ ! -f "$SLOPTY_FAKE_CLAUDE_DIR/$1" ]; do sleep 0.05; done; }
-# The worker asks for the version at start-up. Waiting on a stage there outlived the killed
-# worker as an orphan; failing at once reports what the wait's time-out did: no version.
+# A run's directory goes when its test ends: a stage still waiting then would spin forever.
+stage() {
+    while [ ! -f "$SLOPTY_FAKE_CLAUDE_DIR/$1" ]; do
+        [ -d "$SLOPTY_FAKE_CLAUDE_DIR" ] || exit 1
+        sleep 0.05
+    done
+}
+# The worker asks for the version and for the live sessions at start-up. Waiting on a stage
+# there outlived the killed worker as an orphan; answer them at once instead.
 [ "$1" = "--version" ] && exit 1
+if [ "$1" = "agents" ]; then echo '[]'; exit 0; fi
 echo "fake claude in $PWD"
 stage working
 # OSC 2 with U+25D0 CIRCLE WITH LEFT HALF BLACK, one of the frames Claude Code paints into
@@ -755,6 +762,21 @@ impl Stack {
     pub async fn add_worker(&mut self) -> Result<()> {
         let address = self.address.clone();
         add_worker(&mut self.driver, &address).await
+    }
+
+    /// [`Self::launch`] with the worker behind a path the test can cut ([`crate::cut::Cut`]):
+    /// the app adds it at the cut's address.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`], and when the cut cannot bind.
+    pub async fn launch_behind_cut(worker_name: &str) -> Result<(Self, crate::cut::Cut)> {
+        let dir = StackDir::new("slopty-e2e-cut-")?;
+        let mut stack = Self::spawn_in(dir, worker_name, &[]).await?;
+        let worker: std::net::SocketAddr = stack.address.parse().context("the worker's address")?;
+        let cut = crate::cut::Cut::bind(worker).await?;
+        add_worker(&mut stack.driver, &cut.addr().to_string()).await?;
+        Ok((stack, cut))
     }
 
     /// `env` goes to the daemons and the app alike, on top of the defaults.
@@ -1925,6 +1947,142 @@ impl ServerFleet {
         let _reaped = self.app.wait().await;
         self.far.shutdown().await;
         self.near.shutdown().await;
+        self.server.kill().await;
+        #[cfg(target_os = "macos")]
+        slopty_platform::pasteboard::MacPasteboard::named(&pasteboard_name(self.dir.path(), "app"))
+            .release();
+    }
+}
+
+/// The stand-in for `claude` (`slopty-stub-claude`), built beside the other binaries when it is
+/// not there yet: `cargo xtask e2e` builds the daemons and the app, and this one is the test
+/// kit's.
+///
+/// # Errors
+///
+/// When it is missing and cannot be built.
+pub async fn stub_claude() -> Result<PathBuf> {
+    const STUB: &str = "slopty-stub-claude";
+    let built = built_dir()?;
+    let path = built.join(STUB);
+    if path.exists() {
+        return Ok(path);
+    }
+    let target = built.parent().context("the binaries' directory has a parent")?;
+    let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    build.args(["build", "-p", "slopty-testkit", "--bin", STUB]).arg("--target-dir").arg(target);
+    if built.ends_with("release") {
+        build.arg("--release");
+    }
+    let status = build.status().await.context("run cargo")?;
+    ensure!(status.success() && path.exists(), "build {STUB}: {status}");
+    Ok(path)
+}
+
+/// The app with a server and one registered worker behind it, as projects need.
+///
+/// The worker runs with `slopty-stub-claude` first on its `PATH` as `claude` and a `HOME` of its
+/// own; the app starts at its first run, pointed at the server by its settings. Everything is
+/// killed on drop.
+///
+/// `root/server` is the server's data directory, `root/worker` the worker's, `root/cli` the
+/// CLI's and `root/app` the app's; `root/repo` is an empty directory for agents to work in.
+#[derive(Debug)]
+pub struct ProjectStack {
+    /// Connected to the app's test socket.
+    pub driver: Driver,
+    /// The app process.
+    pub app: Child,
+    /// The worker.
+    pub worker: Worker,
+    /// The server.
+    pub server: ServerDaemon,
+    /// The temporary root, named for the test.
+    pub dir: StackDir,
+}
+
+impl ProjectStack {
+    /// Start everything, and return once the app has dialled the worker the server lists.
+    ///
+    /// # Errors
+    ///
+    /// When a binary is missing, a daemon dies, the worker never comes online or the app does
+    /// not reach it.
+    pub async fn launch(worker_name: &str) -> Result<Self> {
+        let dir = StackDir::new("slopty-e2e-projects-")?;
+        let root = dir.path();
+        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let server_dir = root.join("server");
+        std::fs::create_dir_all(&server_dir)?;
+        let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
+        let programs = root.join("programs");
+        std::fs::create_dir_all(&programs)?;
+        std::os::unix::fs::symlink(stub_claude().await?, programs.join("claude"))?;
+        let home = root.join("home");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(root.join("repo"))?;
+        let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", programs.display());
+        let (home, path) = (home.to_string_lossy().into_owned(), path);
+        let env = [
+            ("HOME", home.as_str()),
+            ("PATH", path.as_str()),
+            ("SLOPTY_BIND", "127.0.0.1"),
+            ("BASH_SILENCE_DEPRECATION_WARNING", "1"),
+        ];
+        let worker =
+            Worker::start(&root.join("worker"), worker_name, Some(server.address()), &log, &env)
+                .await?;
+        let cli = root.join("cli");
+        let started = tokio::time::Instant::now();
+        loop {
+            let workers = slopty_json(server.address(), &cli, &["workers"], b"").await?;
+            let online =
+                workers.as_array().is_some_and(|all| all.iter().any(|w| w["liveness"] == "online"));
+            if online {
+                break;
+            }
+            ensure!(started.elapsed() < STARTUP, "the worker online: {workers}");
+            tokio::time::sleep(POLL).await;
+        }
+        let app_dir = root.join("app");
+        std::fs::create_dir_all(&app_dir)?;
+        let settings = format!(
+            "{}\n[client]\nserver = \"{}\"\n",
+            pinned_settings(APPEARANCE),
+            server.address()
+        );
+        std::fs::write(app_dir.join("settings.toml"), settings)?;
+        let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
+        driver.ok(&crate::Command::Ping).await?;
+        driver
+            .wait_for("the worker the server lists", STARTUP, |d| {
+                d.workers.iter().any(|w| w.name == worker_name && w.status == "connected")
+            })
+            .await?;
+        Ok(Self { driver, app, worker, server, dir })
+    }
+
+    /// Where to put a file for this run.
+    #[must_use]
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+
+    /// `slopty <args> --server <this server> --json`, parsed.
+    ///
+    /// # Errors
+    ///
+    /// As [`slopty_json`].
+    pub async fn slopty(&self, args: &[&str]) -> Result<Value> {
+        slopty_json(self.server.address(), &self.path("cli"), args, b"").await
+    }
+
+    /// Ask the app to quit, then kill it, the worker and the server.
+    pub async fn shutdown(mut self) {
+        let _quit = self.driver.call(&crate::Command::Quit).await;
+        let _killed = self.app.start_kill();
+        let _reaped = self.app.wait().await;
+        self.worker.shutdown().await;
         self.server.kill().await;
         #[cfg(target_os = "macos")]
         slopty_platform::pasteboard::MacPasteboard::named(&pasteboard_name(self.dir.path(), "app"))

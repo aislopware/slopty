@@ -190,6 +190,41 @@ which runs it from a hard link in `<profile>/run/`. A bare `cargo nextest run` d
 To get it, set `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="$PWD/target/xtask/debug/xtask-runner
 test-runner"`.
 
+## Live lane in a VM
+macOS guests for the live tests that may not run on this Mac (`docs/TESTING.md` ▸ "Live lane
+in a VM"). They run under tart (`brew install openai/tools/tart`). Everything lives under
+`SLOPTY_VM_HOME` when it is set, else `/Volumes/Lacie/vms`, and the command refuses a home on the
+startup disk (any volume of its APFS container, symlinks followed).
+`--macos 26|27` picks the guest (26 by default).
+- `cargo xtask vm create`: pull the pinned image (33 GB on disk for 26) and make the base
+  `slopty-26`: 4 cores, 8 GB, this lane's SSH key, the worker's TCC grants, fish, no Spotlight
+  or software update. The pulled manifest is hashed against the pinned digest. `--fresh` makes it again. Nothing boots the base after this; every guest is
+  a copy-on-write clone of it.
+- `cargo xtask vm start|stop`: the long-lived `slopty-26-dev` guest, headless (`--name` for
+  another). `cargo xtask vm ssh [-- cmd]` reaches it over SSH. `cargo xtask vm exec -- cmd` runs
+  a command in its logged-in session, where events post and the grants hold.
+- `cargo xtask vm deploy`: build `slopty-ptyd`, `slopty-worker` and `slopty` (from cargo's own
+  target dir), clone the guest if it does not exist yet, and run `slopty worker deploy` against
+  it. This Mac's address is added to the guest's `[worker] allow`, other settings kept. The worker
+  answers at `<guest ip>:45550` (`tart ip slopty-26-dev`, with `TART_HOME=/Volumes/Lacie/vms/tart`).
+- `cargo xtask vm live -p <crate> [--test <target>] -- <nextest filters>`: a fresh guest per run,
+  `slopty-26-run-<pid>-<time>`, deleted when the run ends or on Ctrl-C, SIGTERM or SIGHUP.
+  `--keep` names it `slopty-26-kept-<pid>-<time>` and leaves it. The run prints the clone, boot
+  and deploy times, and the results land under `target/vm/<guest>/`. Run guests take one of two
+  fixed MACs, locked for the run, so DHCP leases stay at two however many runs there are.
+- `cargo xtask vm e2e`: the lane's proof (a host test against the guest's worker, a real HID
+  event in the guest).
+- `cargo xtask vm list`.
+- `cargo xtask vm prune` removes each `-run-` guest whose process is gone (a run killed outright
+  leaves one; `live` and `e2e` do the same before they start), never one whose run is still going.
+  `--kept` also removes the `-kept-` guests. `--all` removes every guest (base and dev included),
+  the pulled images and the key, and refuses while any run's process lives.
+
+Guests never show a window here (`--no-graphics`), and nothing in them reaches this Mac's pointer,
+screen or TCC. A guest's logs are in `/Volumes/Lacie/vms/logs/<guest>.log`. macOS runs at most
+two macOS guests at once. To look at a guest's screen, run `tart run <name> --vnc` by hand; no
+command of the lane does.
+
 ## Deep checks (on a schedule, not per commit)
 `cargo xtask deep <check>` runs what is too slow for the gate, each on its own target dir
 under `target/deep/`:
@@ -255,11 +290,28 @@ the gate checks its formatting.
   signature. `--stacks` adds `MallocStackLogging`, so the reports show where a leak came from.
 - `cargo xtask nightly [run] [--only <check>] [--skip <check>] [--soak-minutes 20]
   [--proptest-cases 4096] [--iterations 50]` runs the heavy lanes one after another under
-  `nice`: `soak`, `bench` (with `--wall`), `proptest`, `gpui-iterations`, `miri`,
-  `sanitize-address`, `sanitize-thread`, `coverage`, `features` and `fuzz`. Each writes
+  `nice`: `soak`, `bench` (with `--wall`), `proptest`, `gpui-iterations`, `app-soak` (every tile
+  kind opened and closed 1000 times), `miri`, `sanitize-address`, `sanitize-thread`,
+  `sanitize-realtime`, `coverage`, `features`, `fuzz`, `loom`, `leaks` and `metal`. Each writes
   `<check>.log` and `<check>.json` under `target/nightly/<date>/`, beside a `summary.json`. A
   check whose tool is missing is skipped and says why. `cargo xtask nightly install` writes and
   loads the
   LaunchAgent `dev.aislopware.slopty.nightly`, which runs it at 03:00 at background priority;
   `cargo xtask nightly uninstall` removes it. A failing seed of `gpui-iterations` replays with
   `SEED=<n> cargo nextest run -p slopty-ui <test>`.
+
+## Tailnet fixture
+A real tailnet on loopback for the live tests that read Tailscale (`docs/decisions/testing.md` ▸
+**The tailnet's live tests run against real Go daemons that xtask drives on loopback**). It needs
+Go (`brew install go`) the first time, to build the pinned `tailscaled`.
+- `cargo xtask tailnet up`: fetch Headscale and build `tailscale`/`tailscaled` into
+  `target/tailnet/tools` on first use, then start Headscale and the nodes `worker` and `ci` under
+  `target/tailnet/run`. It prints the fixture once the grant has reached the worker, and holds it
+  until Ctrl-C or `down`. Run it in a second terminal, or in the background.
+- `cargo xtask tailnet status`: `SLOPTY_TAILNET_FIXTURE=<path>`, then one `key=value` line for
+  Headscale and one per node (`socket=`, `ips=`, `tags=`, `dns=`). It fails when nothing is up.
+- `cargo xtask tailnet down`: stop `up`, then any process left under the run dir, and remove it.
+- The tests: `SLOPTY_TAILNET_FIXTURE=$PWD/target/tailnet/run/fixture.json cargo nextest run -p
+  slopty-tailnet --test fixture`. Without the variable they skip.
+- `cargo xtask tailnet test [nextest args]`: all of it in one go (up, the tests, down), as the
+  nightly's `tailnet` check runs it.

@@ -35,6 +35,17 @@ fn known() -> Result<KnownWorkers> {
 /// The app's one endpoint, bound on first use.
 static ENDPOINT: std::sync::OnceLock<slopty_net::Endpoint> = std::sync::OnceLock::new();
 
+/// The network path moved under the app: every connection on its endpoint migrates to it.
+///
+/// That is RFC 9000's migration (§9, noq's `Endpoint::handle_network_change`): each connection
+/// takes its local address afresh and pings over the new path. Nothing when no endpoint is bound
+/// yet.
+pub fn path_changed() {
+    if let Some(endpoint) = ENDPOINT.get() {
+        endpoint.handle_network_change(None);
+    }
+}
+
 /// The process-wide client endpoint: every worker link shares one socket. Bound on the
 /// runtime's thread, which the endpoint's driver task needs.
 fn endpoint() -> Result<slopty_net::Endpoint, String> {

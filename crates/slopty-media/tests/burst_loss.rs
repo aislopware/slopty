@@ -272,6 +272,7 @@ mod tests {
                     ltr_refresh: refresh && !keyframe,
                     discardable: is_layer1 && layers == Layers::Flagged,
                     capture_ts_us: now as u32,
+                    stripes: 0,
                 };
                 let stamp = ((now / 1_000) % 256) as u8;
                 let sent = tx.packetize(&frame, stamp, |_| {}).expect("packetize").clone();

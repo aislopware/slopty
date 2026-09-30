@@ -157,6 +157,28 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str) -> Vec<Check> {
             env: vec![("ITERATIONS", opts.iterations.to_string())],
             needs: None,
         },
+        Check {
+            name: "app-soak",
+            program: "cargo".to_owned(),
+            args: own(&[
+                "nextest",
+                "run",
+                "-p",
+                "slopty-ui",
+                "-E",
+                "test(every_tile_kind_opened_and_closed_many_times_leaves_nothing)",
+            ]),
+            env: vec![("SLOPTY_SOAK_CYCLES", "1000".to_owned())],
+            needs: None,
+        },
+        Check {
+            name: "tailnet",
+            program: xtask.to_owned(),
+            args: own(&["tailnet", "test", "--no-fail-fast"]),
+            env: Vec::new(),
+            // `tailscaled` is built from source once; Headscale is a pinned release binary.
+            needs: Some(Need::Tool("go")),
+        },
         deep("miri", &["miri"], Some(Need::Nightly)),
         deep("sanitize-address", &["sanitize", "address"], Some(Need::Nightly)),
         deep("sanitize-thread", &["sanitize", "thread"], Some(Need::Nightly)),

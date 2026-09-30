@@ -45,7 +45,7 @@ mod tests {
 
     fn gated() -> bool {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("skipped: set SLOPTY_SCREEN_E2E=1");
+            slopty_testkit::live::skip("set SLOPTY_SCREEN_E2E=1");
             return false;
         }
         true
@@ -536,6 +536,7 @@ mod occlusion {
 
     #[test]
     fn print_windows_above_the_given_window() {
+        // Not a live skip: a by-hand diagnostic that runs only when given a window to look at.
         let Some(id) = std::env::var("SLOPTY_E2E_WINDOW").ok().and_then(|v| v.parse::<u32>().ok())
         else {
             eprintln!("skipped: set SLOPTY_E2E_WINDOW=<id>");

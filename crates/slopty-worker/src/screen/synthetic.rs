@@ -23,8 +23,8 @@ use std::time::Instant;
 use parking_lot::Mutex;
 use slopty_capture::synthetic::{Canvas, CanvasStream, CanvasTarget};
 use slopty_capture::{
-    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Rect,
-    TargetWindow, Went, WindowState,
+    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
+    Rect, TargetWindow, Went, WindowState,
 };
 use slopty_codec::PixelBuffer;
 use slopty_core::{DisplayId, WindowId};
@@ -108,9 +108,9 @@ impl Platform for Synthetic {
 pub const DISPLAY: DisplayInfo =
     DisplayInfo { id: DisplayId(1), w: 1512.0, h: 982.0, scale: 2.0, hz: 60.0 };
 
-/// [`DISPLAY`] as [`StudioAt`] lists and draws it, refreshing at `HZ`.
-fn shown_display<const HZ: u16>() -> DisplayInfo {
-    DisplayInfo { hz: f32::from(HZ), ..DISPLAY }
+/// [`DISPLAY`] as [`StudioAt`] lists and draws it: refreshing at `HZ`, `W` × `H` points.
+fn shown_display<const HZ: u16, const W: u16, const H: u16>() -> DisplayInfo {
+    DisplayInfo { hz: f32::from(HZ), w: f32::from(W), h: f32::from(H), ..DISPLAY }
 }
 
 /// The application every [`Synthetic`] window belongs to.
@@ -179,8 +179,8 @@ fn bounds(window: &WindowInfo) -> Rect {
     }
 }
 
-fn display_rect() -> Rect {
-    Rect { x: 0.0, y: 0.0, w: f64::from(DISPLAY.w), h: f64::from(DISPLAY.h) }
+fn display_rect(display: &DisplayInfo) -> Rect {
+    Rect { x: 0.0, y: 0.0, w: f64::from(display.w), h: f64::from(display.h) }
 }
 
 /// The process every window is owned by: this one, as far as anyone asks.
@@ -198,12 +198,12 @@ pub struct Scene {
 /// one's size and at the display's beat, with a window list only it keeps.
 pub type Studio = StudioAt<60>;
 
-/// [`Studio`] on a display refreshing at `HZ`: a measurement's 120 Hz panel, whatever the
-/// panels of the Mac it runs on.
+/// [`Studio`] on a display refreshing at `HZ`, `W` × `H` points at 2×: a measurement's 120 Hz
+/// panel or 5K display, whatever the panels of the Mac it runs on.
 #[derive(Clone, Copy, Debug)]
-pub enum StudioAt<const HZ: u16> {}
+pub enum StudioAt<const HZ: u16, const W: u16 = 1512, const H: u16 = 982> {}
 
-impl<const HZ: u16> CaptureSource for StudioAt<HZ> {
+impl<const HZ: u16, const W: u16, const H: u16> CaptureSource for StudioAt<HZ, W, H> {
     type Content = Scene;
     type HideWatch = ();
     type Image = PixelBuffer;
@@ -223,12 +223,12 @@ impl<const HZ: u16> CaptureSource for StudioAt<HZ> {
     }
 
     fn displays(_content: &Scene) -> Vec<DisplayInfo> {
-        vec![shown_display::<HZ>()]
+        vec![shown_display::<HZ, W, H>()]
     }
 
     fn resolve(content: &Scene, kind: CaptureTarget) -> Result<CanvasTarget, CaptureError> {
         let (w, h) = match kind {
-            CaptureTarget::Display(id) if id == DISPLAY.id => (DISPLAY.w, DISPLAY.h),
+            CaptureTarget::Display(id) if id == DISPLAY.id => (f32::from(W), f32::from(H)),
             CaptureTarget::Window(id) => content
                 .windows
                 .iter()
@@ -295,9 +295,15 @@ impl<const HZ: u16> CaptureSource for StudioAt<HZ> {
         Canvas::now_us()
     }
 
+    fn console() -> Option<Console> {
+        Canvas::console()
+    }
+
     fn target_bounds(target: CaptureTarget) -> Option<Rect> {
         match target {
-            CaptureTarget::Display(id) => (id == DISPLAY.id).then(display_rect),
+            CaptureTarget::Display(id) => {
+                (id == DISPLAY.id).then(|| display_rect(&shown_display::<HZ, W, H>()))
+            }
             CaptureTarget::Window(id) => window(id).as_ref().map(bounds),
         }
     }
@@ -341,7 +347,7 @@ impl<const HZ: u16> CaptureSource for StudioAt<HZ> {
     }
 
     fn display_bounds(_id: u32) -> Rect {
-        display_rect()
+        display_rect(&shown_display::<HZ, W, H>())
     }
 
     fn resize_window(
@@ -352,7 +358,8 @@ impl<const HZ: u16> CaptureSource for StudioAt<HZ> {
     ) -> Result<(), AxError> {
         #[expect(clippy::cast_possible_truncation, reason = "points, clamped to the display")]
         let side = |asked: f64, min: f64, max: f32| asked.clamp(min, f64::from(max)).round() as f32;
-        let (w, h) = (side(width, MIN_WINDOW.0, DISPLAY.w), side(height, MIN_WINDOW.1, DISPLAY.h));
+        let (w, h) =
+            (side(width, MIN_WINDOW.0, f32::from(W)), side(height, MIN_WINDOW.1, f32::from(H)));
         SCENE
             .lock()
             .iter_mut()
@@ -402,16 +409,18 @@ mod tests {
     use slopty_capture::synthetic::{inputs_shown, inputs_taken};
     use slopty_client::pacing::{ClockAnchor, Pacer, Spread, percentile};
     use slopty_client::screen::{ScreenRouter, Uplink, spawn_screen};
+    use slopty_codec::stripes::OVERLAP;
     use slopty_core::StreamId;
     use slopty_proto::ClientMsg;
     use slopty_proto::datagram::ClientDatagram;
     use slopty_proto::input::{Mods, MouseButton};
     use slopty_proto::media::MAX_DATAGRAM;
-    use slopty_proto::screen::{Feedback, Quality, ScreenEvent, ScreenRequest};
+    use slopty_proto::screen::{Chroma, Feedback, Quality, ScreenEvent, ScreenRequest, Stripe};
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::screen::{DatagramSink, Pipeline, Refused, StreamControl};
+    use crate::screen::stripes::Knob;
+    use crate::screen::{Coding, DatagramSink, Pipeline, Refused, StreamControl};
 
     const STREAM: StreamId = StreamId(1);
 
@@ -533,24 +542,31 @@ mod tests {
         link_bps: Option<u64>,
         /// Whether the worker refines a still picture.
         refine: bool,
+        /// Whether the stream is coded as two stripes.
+        stripes: Knob,
     }
 
     impl Default for Knobs {
         fn default() -> Self {
-            Self { pad_to: None, link_bps: None, refine: true }
+            Self { pad_to: None, link_bps: None, refine: true, stripes: Knob::Off }
         }
     }
 
-    /// The client's loss feedback, as the worker's connection answers it.
+    /// The client's feedback, as the worker's connection answers it the moment it lands.
     fn answer(control: &StreamControl, bytes: &[u8]) {
         match ClientDatagram::decode(bytes) {
-            Some(ClientDatagram::Feedback(Feedback::Nack { frame, fragments, .. })) => {
-                control.nack(frame, &fragments);
+            Some(ClientDatagram::Feedback(Feedback::Nack { stream, frame, fragments })) => {
+                control.of_media(stream).nack(frame, &fragments);
             }
             Some(ClientDatagram::Feedback(Feedback::Refresh {
-                last_good_frame, keyframe, ..
+                stream,
+                last_good_frame,
+                keyframe,
             })) => {
-                control.request_refresh(last_good_frame, keyframe);
+                control.of_media(stream).request_refresh(last_good_frame, keyframe);
+            }
+            Some(ClientDatagram::Feedback(Feedback::Clock { sent_us, .. })) => {
+                control.clock(sent_us, Instant::now());
             }
             _other => {}
         }
@@ -606,7 +622,7 @@ mod tests {
         seconds: u64,
         knobs: Knobs,
     ) {
-        let Knobs { pad_to, link_bps, refine } = knobs;
+        let Knobs { pad_to, link_bps, refine, stripes } = knobs;
         let ScreenEvent::Listing { displays, .. } = Pipeline::<P>::listing().await.unwrap() else {
             panic!("no listing")
         };
@@ -628,13 +644,16 @@ mod tests {
             Quality { fps, ..Quality::default() },
             Arc::<Wire>::clone(&wire),
             |_event| {},
-            pad_to,
+            Coding { pad_to, stripes },
         )
         .await
         .unwrap();
-        let ScreenEvent::Opened { codec, width, height, .. } = opened else { panic!("{opened:?}") };
+        let ScreenEvent::Opened { codec, width, height, stripes: coded, .. } = opened else {
+            panic!("{opened:?}")
+        };
         if !refine {
-            stream.shared.refine.lock().disable();
+            stream.shared.top.refine.lock().disable();
+            stream.shared.lower.refine.lock().disable();
         }
 
         let control = stream.control();
@@ -648,8 +667,8 @@ mod tests {
             let control = control.clone();
             let decisions = Arc::clone(&decisions);
             let line = delay_line(one_way, move |msg: ClientMsg, _at| {
-                if let ClientMsg::Screen(ScreenRequest::Report { report, .. }) = msg
-                    && let Some(decision) = control.report(&report, None)
+                if let ClientMsg::Screen(ScreenRequest::Report { stream, report }) = msg
+                    && let Some(decision) = control.of_media(stream).report(&report, None)
                 {
                     decisions.lock().push((decision.verdict, decision.target_bps));
                 }
@@ -691,6 +710,9 @@ mod tests {
         // Hop by hop, over the whole run after the warm-up.
         let (mut to_arrival, mut to_decoded, mut decode, mut to_paint, mut to_glass) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        // Capture → painted through the clock probes' estimate, and how far the estimate put
+        // each capture from where the shared clock puts it.
+        let (mut to_glass_estimated, mut estimate_error) = (Vec::new(), Vec::new());
         let mut reach_to_capture = Vec::new();
         // Bytes and frames at the end of the warm-up, so the rates cover the measured seconds.
         let mut settled: Option<(u64, u64)> = None;
@@ -717,6 +739,10 @@ mod tests {
                         {
                             to_paint.push(at.saturating_duration_since(stamp.decoded));
                             to_glass.push(at.saturating_duration_since(captured));
+                            if let Some(estimated) = stamp.captured {
+                                to_glass_estimated.push(at.saturating_duration_since(estimated));
+                                estimate_error.push(estimated.duration_since(captured).max(captured.duration_since(estimated)));
+                            }
                         }
                     }
                 }
@@ -770,7 +796,8 @@ mod tests {
         let stats = handle.stats();
         let worker = stream.stats();
         eprintln!(
-            "MEASURE glass {label}: {width}×{height} {codec:?} at {hz:.0} Hz, {fps} fps asked, one way {:.1} ms, loss {:.1} %, link {}, refinement {}, load {}",
+            "MEASURE glass {label}: {width}×{height} {codec:?} at {hz:.0} Hz, {} stripe(s), {fps} fps asked, one way {:.1} ms, loss {:.1} %, link {}, refinement {}, load {}",
+            coded.len().max(1),
             ms(one_way),
             f64::from(loss_permille) / 10.0,
             link_bps.map_or_else(
@@ -814,6 +841,12 @@ mod tests {
         eprintln!("    capture → decoded:   {}", spread(&mut to_decoded));
         eprintln!("    decoded → painted:   {}", spread(&mut to_paint));
         eprintln!("    capture → painted:   {}", spread(&mut to_glass));
+        eprintln!("    capture → painted, estimated clock: {}", spread(&mut to_glass_estimated));
+        eprintln!(
+            "    estimate off the shared clock by: {}  ({:?})",
+            spread(&mut estimate_error),
+            handle.stats().clock
+        );
         eprintln!("    input at worker → capture showing it: {}", spread(&mut reach_to_capture));
         eprintln!(
             "  frames: captured {} encoded {} dropped {} | client decoded {} lost {} fec {} nacks {} refreshes {} decode errors {} | shown {} skipped {} repeats {} late {} | inputs sent {seq} seen {seen}",
@@ -831,6 +864,12 @@ mod tests {
             pacing.repeats,
             pacing.late
         );
+        if !coded.is_empty() {
+            eprintln!(
+                "  stripes: client striped {}, seam tears {}",
+                stats.striped, stats.seam_tears
+            );
+        }
         let decisions = decisions.lock().clone();
         let verdicts: Vec<String> = decisions
             .chunk_by(|a, b| a == b)
@@ -1005,6 +1044,92 @@ mod tests {
         });
     }
 
+    /// The clock probes place every capture where the shared clock does, on loopback and
+    /// behind 5 ms each way: the drawn screen streamed through the real encoder and decoder,
+    /// the probes answered by the stream's control as the connection answers them, and each
+    /// decoded picture's estimated capture compared with the exact one (both clocks are this
+    /// Mac's). Within a millisecond at the median, and never further off than the bound the
+    /// estimate states plus the width of the two clock reads.
+    #[test]
+    fn the_clock_probes_time_captures_as_the_shared_clock_does() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            for one_way in [Duration::ZERO, Duration::from_millis(5)] {
+                let router = ScreenRouter::new();
+                let line = (!one_way.is_zero()).then(|| {
+                    let router = router.clone();
+                    delay_line(one_way, move |datagrams: Vec<Bytes>, at| {
+                        router.route_many(datagrams, at);
+                    })
+                });
+                let wire = Arc::new(Wire::new(router.clone(), line, None));
+                let quality = Quality { scale: 0.25, ..Quality::default() };
+                let (stream, opened) = Pipeline::<Synthetic>::open(
+                    STREAM,
+                    CaptureTarget::Display(DISPLAY.id),
+                    quality,
+                    wire,
+                    |_event| {},
+                )
+                .await
+                .unwrap();
+                let ScreenEvent::Opened { codec, .. } = opened else { panic!("{opened:?}") };
+                let control = stream.control();
+                let feedback =
+                    delay_line(one_way, move |bytes: Bytes, _at| answer(&control, &bytes));
+                let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+                let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+                let rtt = one_way * 2;
+                let uplink = Uplink {
+                    control: reports_tx,
+                    feedback: Box::new(move |bytes| feedback.send((Instant::now(), bytes)).is_ok()),
+                    rtt: Box::new(move || Some(rtt)),
+                };
+                let handle = spawn_screen(
+                    &tokio::runtime::Handle::current(),
+                    &router,
+                    STREAM,
+                    codec,
+                    uplink,
+                );
+                let mut frames = handle.frames();
+                let clocks = anchor();
+                let mut errors = Vec::new();
+                let collect = async {
+                    while errors.len() < 60 && frames.changed().await.is_ok() {
+                        let Some(frame) = frames.borrow_and_update().clone() else { continue };
+                        let (Some(estimated), Some(exact)) =
+                            (frame.stamp.captured, clocks.captured(frame.stamp.pts_us))
+                        else {
+                            continue;
+                        };
+                        errors.push(estimated.duration_since(exact).max(exact.duration_since(estimated)));
+                    }
+                };
+                tokio::time::timeout(Duration::from_secs(60), collect).await.unwrap();
+                let estimate = handle.stats().clock.expect("the probes came back");
+                let max = errors.iter().max().copied().unwrap_or_default();
+                errors.sort_unstable();
+                let p50 = percentile(&errors, 50);
+                eprintln!(
+                    "MEASURE clock estimate at {:.0} ms each way: off the shared clock p50 {:.3} / max {:.3} ms over {} frames, bound {:.3} ms, rtt {:.3} ms",
+                    ms(one_way),
+                    ms(p50),
+                    ms(max),
+                    errors.len(),
+                    ms(estimate.bound),
+                    ms(estimate.rtt)
+                );
+                assert!(p50 <= Duration::from_millis(1), "p50 {p50:?}, {estimate:?}");
+                assert!(max <= estimate.bound + Duration::from_millis(1), "max {max:?}, {estimate:?}");
+                drop(handle);
+                drain.abort();
+                stream.close().await;
+            }
+        });
+    }
+
     /// `SLOPTY_SYNTHETIC_SCREEN=1` and nothing else turns the drawn screen on.
     #[test]
     fn only_a_one_switches_the_drawn_screen_on() {
@@ -1140,6 +1265,151 @@ mod tests {
         });
     }
 
+    /// A decoded picture's luma plane, row by row with no stride padding, and its width.
+    fn luma(image: &objc2_core_video::CVPixelBuffer) -> (usize, Vec<u8>) {
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+            CVPixelBufferGetHeight, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
+            CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+        };
+        let (w, h) = (CVPixelBufferGetWidth(image), CVPixelBufferGetHeight(image));
+        // SAFETY: CoreVideo rule: the planes are read between a lock and its unlock.
+        let locked =
+            unsafe { CVPixelBufferLockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+        assert_eq!(locked, 0, "lock");
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(image, 0);
+        let base = CVPixelBufferGetBaseAddressOfPlane(image, 0).cast::<u8>();
+        // SAFETY: the buffer is locked, so its luma plane is mapped for `stride * h` bytes.
+        let plane = unsafe { std::slice::from_raw_parts(base, stride * h) };
+        let rows = plane.chunks(stride).flat_map(|row| &row[..w]).copied().collect();
+        // SAFETY: matches the lock above.
+        let _unlocked =
+            unsafe { CVPixelBufferUnlockBaseAddress(image, CVPixelBufferLockFlags::ReadOnly) };
+        (w, rows)
+    }
+
+    /// Mean absolute luma difference between the rows both stripes code, the lower stripe's
+    /// picture moved `shift` rows against the top one's: row `y` of the picture is the top
+    /// picture's row `y` and the lower picture's row `y - lower_top`.
+    fn overlap_error(
+        top: &[u8],
+        lower: &[u8],
+        width: usize,
+        lower_top: usize,
+        shift: isize,
+    ) -> f64 {
+        let (top_rows, lower_rows) = (top.len() / width, lower.len() / width);
+        let (mut sum, mut n) = (0_u64, 0_u64);
+        for y in lower_top..top_rows {
+            let Some(from) = (y - lower_top).checked_add_signed(shift) else { continue };
+            if from >= lower_rows {
+                continue;
+            }
+            let (a, b) = (&top[y * width..][..width], &lower[from * width..][..width]);
+            sum += a.iter().zip(b).map(|(a, b)| u64::from(a.abs_diff(*b))).sum::<u64>();
+            n += width as u64;
+        }
+        sum as f64 / n.max(1) as f64
+    }
+
+    /// A display coded as two stripes reaches the client as two pictures of one capture, each
+    /// from a session of its own, that meet at the seam row for row. The stripes the worker
+    /// announces tile the picture; the client shows the top one's rows above the seam and the
+    /// lower one's from the seam down; and over the rows both code, a capture's two pictures
+    /// match best unshifted, by a margin, on text that scrolls 3 rows a frame: a stripe a row
+    /// off matches best shifted. Drawn, never captured.
+    #[test]
+    fn two_stripes_meet_at_the_seam_row_for_row() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
+            let (stream, opened) = Pipeline::<Synthetic>::open_padded(
+                STREAM,
+                CaptureTarget::Display(DISPLAY.id),
+                Quality { chroma: Chroma::Subsampled, ..Quality::default() },
+                wire,
+                |_event| {},
+                Coding { pad_to: None, stripes: Knob::On },
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, width, height, stripes, .. } = opened else {
+                panic!("{opened:?}")
+            };
+            let [top, lower]: [Stripe; 2] = stripes.try_into().expect("two stripes");
+            assert_eq!((top.media, lower.media), (STREAM, Stripe::media_of(STREAM, 1)));
+            assert_eq!((top.coded_top, top.shown_top), (0, 0));
+            assert_eq!(top.shown_rows, lower.shown_top, "the lower stripe shows from the seam");
+            assert_eq!(lower.shown_top + lower.shown_rows, height, "down to the last row");
+            assert_eq!(top.coded_top + top.coded_rows - lower.coded_top, 2 * OVERLAP);
+
+            let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+            let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+            let control = stream.control();
+            let uplink = Uplink {
+                control: reports_tx,
+                feedback: Box::new(move |bytes| {
+                    answer(&control, &bytes);
+                    true
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(1))),
+            };
+            let handle =
+                spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+            let mut frames = handle.frames();
+            let lower_top = usize::try_from(lower.coded_top).unwrap();
+            let (mut checked, mut apart) = (0, 0);
+            let wait = async {
+                while checked < 12 && frames.changed().await.is_ok() {
+                    let Some(picture) = frames.borrow_and_update().clone() else { continue };
+                    let Some(stitched) = &picture.stripes else { continue };
+                    // One stripe late past the stitch's wait, or coded alone for a refresh, goes
+                    // up beside the other's previous picture: the client counts that, and the
+                    // rows cannot match across two captures of a scroll.
+                    if stitched.lower.pts_us != picture.frame.pts_us {
+                        apart += 1;
+                        continue;
+                    }
+                    assert_eq!(stitched.top_rows, top.shown_rows);
+                    assert_eq!(stitched.lower_from, lower.shown_from());
+                    assert_eq!(
+                        picture.size(),
+                        (usize::try_from(width).unwrap(), usize::try_from(height).unwrap()),
+                        "the stripes together are the picture"
+                    );
+                    let (w, top_luma) = luma(picture.frame.image.as_cv());
+                    let (lower_w, lower_luma) = luma(stitched.lower.image.as_cv());
+                    assert_eq!(w, lower_w);
+                    let errors: Vec<(isize, f64)> = (-6..=6)
+                        .map(|shift| {
+                            (shift, overlap_error(&top_luma, &lower_luma, w, lower_top, shift))
+                        })
+                        .collect();
+                    let aligned = errors.iter().find(|(shift, _)| *shift == 0).unwrap().1;
+                    let off = errors
+                        .iter()
+                        .filter(|(shift, _)| *shift != 0)
+                        .map(|&(_, error)| error)
+                        .fold(f64::INFINITY, f64::min);
+                    eprintln!("seam: unshifted {aligned:.2}, best shifted {off:.2}");
+                    assert!(
+                        aligned < 6.0 && off > 2.0_f64.mul_add(aligned, 1.0),
+                        "the stripes meet unshifted: {errors:?}"
+                    );
+                    checked += 1;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(30), wait).await.expect("stitched pictures");
+            assert_eq!(checked, 12);
+            eprintln!("stripes of two captures: {apart}, seam tears {}", handle.stats().seam_tears);
+            drop(handle);
+            drain.abort();
+            stream.close().await;
+        });
+    }
+
     /// The drawn display streamed as the app streams it: opened at its full size, the client's
     /// reports and loss feedback answered, then asked for a quarter of that and back, a few
     /// times, each change a new encoder session. Every frame of every session decodes: no
@@ -1168,8 +1438,8 @@ mod tests {
                 let control = control.clone();
                 tokio::spawn(async move {
                     while let Some(msg) = reports.recv().await {
-                        if let ClientMsg::Screen(ScreenRequest::Report { report, .. }) = msg {
-                            let _decision = control.report(&report, None);
+                        if let ClientMsg::Screen(ScreenRequest::Report { stream, report }) = msg {
+                            let _decision = control.of_media(stream).report(&report, None);
                         }
                     }
                 })
@@ -1517,6 +1787,57 @@ mod tests {
                 for (label, pad_to) in [("even (before)", Some(2)), ("padded to 16", None)] {
                     let knobs = Knobs { pad_to, ..Knobs::default() };
                     run_padded::<Synthetic>(label, 60, Duration::ZERO, 0, seconds, knobs).await;
+                }
+            }
+        });
+    }
+
+    /// Capture → glass on a drawn 4K and 5K display at 60 Hz, native scale, loopback: the
+    /// picture coded whole on one engine against two stripes on both, alternated
+    /// (`docs/MEASUREMENTS.md`, "Two stripes, capture to glass"). `SLOPTY_GLASS_SECONDS` sets
+    /// each run's length (default 20), `SLOPTY_GLASS_ROUNDS` the rounds (default 2).
+    #[test]
+    #[ignore = "measurement"]
+    fn capture_to_glass_striped_against_whole() {
+        /// [`Synthetic`] on a 3840 × 2160 display.
+        enum Uhd {}
+
+        impl Platform for Uhd {
+            type Audio = slopty_codec::Opus;
+            type Capture = StudioAt<60, 1920, 1080>;
+            type Input = Poke;
+            type Video = slopty_codec::VideoToolbox;
+        }
+
+        /// [`Synthetic`] on a 5120 × 2880 display.
+        enum FiveK {}
+
+        impl Platform for FiveK {
+            type Audio = slopty_codec::Opus;
+            type Capture = StudioAt<60, 2560, 1440>;
+            type Input = Poke;
+            type Video = slopty_codec::VideoToolbox;
+        }
+
+        slopty_platform::user_interactive_thread();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let knob = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+        };
+        let (seconds, rounds) = (knob("SLOPTY_GLASS_SECONDS", 20), knob("SLOPTY_GLASS_ROUNDS", 2));
+        runtime.block_on(async {
+            for _ in 0..rounds {
+                for (label, stripes) in [("one picture", Knob::Off), ("two stripes", Knob::On)] {
+                    let knobs = Knobs { stripes, ..Knobs::default() };
+                    let label4 = format!("4K, {label}");
+                    run_padded::<Uhd>(&label4, 60, Duration::ZERO, 0, seconds, knobs).await;
+                    let label5 = format!("5K, {label}");
+                    run_padded::<FiveK>(&label5, 60, Duration::ZERO, 0, seconds, knobs).await;
                 }
             }
         });

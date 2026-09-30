@@ -108,6 +108,7 @@ mod tests {
                 ltr_refresh,
                 discardable,
                 capture_ts_us: 1_000,
+                stripes: 0,
             };
             let stamp = self.send_ms_lo();
             self.tx.packetize(&frame, stamp, |_| {}).unwrap().clone()
@@ -1720,6 +1721,7 @@ mod tests {
                 ltr_refresh: false,
                 discardable: false,
                 capture_ts_us: 0,
+                stripes: 0,
             };
             let sent = tx.packetize(&frame, 0, |_| {}).unwrap().clone();
             let parity = usize::from(sent.layout.parity_count);

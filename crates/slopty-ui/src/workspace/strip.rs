@@ -18,10 +18,10 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, App, Bounds, Context, DispatchPhase, Entity, EntityId,
-    FocusHandle, FontWeight, InteractiveElement as _, IntoElement as _, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point,
-    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
-    TouchPhase, WeakEntity, Window, canvas, div, px,
+    FontWeight, InteractiveElement as _, IntoElement as _, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement as _, PinchEvent, Pixels, Point, ScrollDelta,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TouchPhase,
+    WeakEntity, Window, canvas, div, px,
 };
 use slopty_client::layout::{
     Axis, AxisLock, DropTarget, Frame, Rect, Strip, TileRef, WHEEL_TICK, WorkerKey,
@@ -123,14 +123,10 @@ pub(super) struct Drawn {
     pub placed: RefCell<Vec<(TileRef, Bounds<Pixels>)>>,
     /// The tile focused when the tiles were last drawn.
     pub focus: Cell<Option<TileRef>>,
-    /// What had the keyboard when the tiles were last drawn.
-    pub keys: RefCell<Option<FocusHandle>>,
     /// Tiles on screen in the frame last drawn: what the status bar need not count again.
     pub on_screen: RefCell<HashSet<ItemId>>,
-    /// Bumped every time the strip builds, so a notice knows whether it was drawn in this one.
+    /// Bumped every time the strip builds.
     pub builds: Cell<u64>,
-    /// The browser tiles the last build drew, at their opacity: the pages to show.
-    pub browsers: RefCell<Vec<(ItemId, f32)>>,
     /// What the last build handed each body it drew, and what the one before handed
     /// ([`WorkspaceView::hand_over`]).
     pub handed: RefCell<HashMap<EntityId, Handed>>,
@@ -151,9 +147,11 @@ pub(super) struct Drawn {
 pub(super) enum Handed {
     Shell { zoom: f32, covered: bool, zooming: bool },
     Face { zoom: f32, width: f32 },
+    Board { zoom: f32, width: f32 },
     Stream { painted: f32 },
     Text { zoom: f32, pad: f32, size: f32 },
     Folder { zoom: f32 },
+    Page { live: bool },
 }
 
 impl Default for Drawn {
@@ -164,10 +162,8 @@ impl Default for Drawn {
             viewport: Cell::default(),
             placed: RefCell::default(),
             focus: Cell::default(),
-            keys: RefCell::default(),
             on_screen: RefCell::default(),
             builds: Cell::default(),
-            browsers: RefCell::default(),
             handed: RefCell::default(),
             handed_before: RefCell::default(),
             marks: Cell::default(),
@@ -748,7 +744,6 @@ impl WorkspaceView {
         }
         let drawn = &self.drawn;
         drawn.builds.set(drawn.builds.get().wrapping_add(1));
-        drawn.browsers.borrow_mut().clear();
         drawn.handed_before.swap(&drawn.handed);
         drawn.handed.borrow_mut().clear();
         if *drawn.strip.borrow() != frame.strip {
@@ -790,7 +785,6 @@ impl WorkspaceView {
         }
         *drawn.placed.borrow_mut() = placed;
         drawn.focus.set(self.layout.focused());
-        *drawn.keys.borrow_mut() = window.focused(cx);
         let closing: Vec<gpui::AnyElement> =
             frame.closing.iter().filter_map(|c| self.render_closing(c, chrome, cx)).collect();
         let backdrops =
@@ -840,9 +834,8 @@ impl WorkspaceView {
             .children(hint)
             .children(empty)
             .children(self.render_marks())
-            // The notices sit in the strip's corner; the pages stop above them.
-            .children(self.render_toast(cx))
-            .child(Self::browser_sync(cx));
+            // The notices sit in the strip's corner, over the tiles and their pages.
+            .children(self.render_toast(cx));
         self.chrome_due.set(false);
         strip.into_any_element()
     }

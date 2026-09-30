@@ -241,8 +241,8 @@ fn assert_clean(s: &ScreenInfo) {
     assert_eq!((r.frames_fec, r.frames_retransmit), (0, 0), "repairs on loopback: {s:#?}");
     assert_eq!((r.refreshes, r.stalls), (0, 0), "a refresh or a stall on loopback: {s:#?}");
     if s.presented == 0 {
-        println!(
-            "NOTE no frame reported presented: the app's window is covered; arrival → present unmeasured"
+        slopty_testkit::live::skip(
+            "no frame reported presented: the app's window is covered; arrival → present unmeasured",
         );
         return;
     }

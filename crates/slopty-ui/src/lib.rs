@@ -17,9 +17,9 @@
 //!   drops go up into it.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
 //! * [`picker`] — the "add a window" chooser.
+//! * [`project`] — a project's board in its orchestrator's tile: the tree, the lanes, the timeline.
 //! * [`search`] — search in files on a worker: the matches grouped by file as they stream in.
 //! * [`paste_key`] — the system's paste button over the iOS key bar's Paste.
-//! * `quick_terminal` — the panel a system-wide chord slides down from the top of the screen.
 //! * [`keymap`] — every command a key runs, its default chords, and `[keys]` laid over them.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
@@ -59,7 +59,7 @@ pub mod note;
 pub mod palette;
 pub mod paste_key;
 pub mod picker;
-mod quick_terminal;
+pub mod project;
 #[cfg(any(test, feature = "e2e"))]
 pub mod retained;
 #[expect(

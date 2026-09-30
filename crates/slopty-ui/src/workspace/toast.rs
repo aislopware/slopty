@@ -328,15 +328,6 @@ impl WorkspaceView {
         if notices.is_empty() {
             return None;
         }
-        let drawn = std::rc::Rc::clone(&self.toast_drawn);
-        let frame = self.drawn.builds.get();
-        // Where the notices are, for a browser tile's page to stop above them.
-        let measure = gpui::canvas(
-            move |bounds, _window, _cx| drawn.set(Some((frame, bounds))),
-            |_bounds, (), _window, _cx| {},
-        )
-        .absolute()
-        .inset_0();
         let stack = div()
             .absolute()
             .bottom(px(theme.spacing.lg))
@@ -346,8 +337,7 @@ impl WorkspaceView {
             .flex_col()
             .items_end()
             .gap(px(theme.spacing.sm))
-            .children(notices)
-            .child(measure);
+            .children(notices);
         Some(
             gpui::deferred(stack)
                 .with_priority(crate::palette::Layer::Toast.priority())

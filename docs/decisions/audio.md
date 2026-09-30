@@ -795,3 +795,422 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `audio_waits_for_the_player_without_holding_video_and_counts_gaps`, which ends on a gap the
     copies fill, and the `client_screen_report` golden. The fuzz targets `reassemble` and
     `feedback` carry copies and drive `AudioCopies`.
+
+- ⏸ **Drag and drop lands at the point, both ways: a real drag session on the worker, fed by the
+  client's own** (2026-09-30, ruling and plan; the spikes and the helper's roles are built,
+  nothing is wired. Builds on `.research/design-dragdrop-clipboard.md` §2–§4 and §8, whose
+  clipboard stage shipped as **Clipboard v2**; that study's claims are rechecked below against
+  primary sources retrieved 2026-09-30). Each phase below turns ✅ in this entry as it lands,
+  with its tests and numbers.
+  - **The gap.** A file dropped on a window or display tile is uploaded to
+    `~/.slopty/drop/<xfer>/` and put on the worker's pasteboard as file URLs
+    (`tile.rs` `drop_files` → `Dest::Staging` → `clip.write_files`). The drop point is thrown
+    away: nothing lands in the folder, mail or upload field under the pointer until someone
+    presses ⌘V there. Only files, never text, pictures or URLs. Nothing drags out of a streamed
+    app at all; drags out exist only for worker paths the client already names (terminal ⌘-drag,
+    folder rows, a file tile's grip, `drag::Promise`).
+  - **Prior art.**
+    - Apple Screen Sharing drags files both ways into and out of the shared screen (support
+      article mh14066). How it moves the bytes, and whether High Performance mode keeps it, is
+      not documented.
+    - Screens 4/5 drop files "over the Connection Window … where you'd like to transfer them"
+      (the remote desktop, Finder), on Apple's API since macOS 10.10 (help.edovia.com
+      file-transfers). From an iPad the host shows a Drop Target window near the cursor once a
+      drag starts, and files land in a fixed Downloads folder, not at a point
+      (file-transfers-ipad).
+    - Jump Desktop has no file drag on Fluid or Mac to Mac (staff reply, 2024-11-28). Parsec
+      documents text alone. Chrome Remote Desktop uploads with a button onto the Desktop
+      (`remoting/host/file_transfer/directory_helpers.cc`, `DIR_USER_DESKTOP`).
+    - RustDesk accepts drops only in its file manager page. Its macOS paste of remote files is a
+      `public.file-url` data provider that makes an empty `/tmp` decoy, then fills Finder's copy
+      of it over RPC, found by an FSEvents watch (`libs/clipboard/.../item_data_provider.rs`).
+    - Barrier dropped at the point on a Mac: a borderless 3×3 window under the cursor, a HID
+      `CGEventPost` mouse-down into it, and a drag begun from that view's `mouseDown:`
+      (`OSXDragSimulator.mm`, `OSXDragView.mm`). It noticed drags leaving by reading
+      `NSDragPboard` (`OSXPasteboardPeeker.mm`). Deskflow removed all of it as "broken on all
+      platforms" (PR #8569, 2025-05). VMware's guest tools catch a drag leaving the guest with a
+      window of their own that takes the drop (`DnDUIX11::OnDestCancel`).
+    - So only Screens and Apple's own Screen Sharing reach the bar, and no source says how
+      either starts the drag on the host. Everything below that rests on host-side behaviour is
+      a spike first (P0).
+  - **Platform facts that shape it.**
+    - `beginDraggingSessionWithItems:event:source:` wants the mouse-down that starts the drag,
+      and the drag "begins at the next turn of the run loop". macOS 27 adds
+      `beginDraggingSession(items:gesture:source:)`, which needs a gesture recogniser. The
+      floor is 26.5, so the event form is the one used.
+    - `CGEventPostToPid` puts an event into one app's stream "immediately before any event taps
+      instantiated for the specified process" (`CGEvent.h`). Nothing documents it moving the
+      window server's drag or the pointer, and the drag manager picks the target under the real
+      pointer. So an injected drag goes through the HID tap and moves the worker's real
+      pointer, as a person's would. Posting needs the Post Event grant the worker already holds.
+    - macOS 27 numbers clicks: a press, its drags and its release must share one
+      `kCGMouseEventNumber` (`CGEventTypes.h`; Deskflow #9978 and #9991). The injector sets none
+      today (`crates/slopty-input/src/injector.rs`), which may already break title-bar drags on 27.
+    - A drop target sees promise items only if it registered
+      `NSFilePromiseReceiver.readableDraggedTypes`, and many views take only file URLs.
+      `receivePromisedFilesAtDestination:` terminates the app when called outside
+      prepare, perform or conclude on macOS 27 (release notes). So files dropped in are real
+      files on the worker before the target reads them. Promised files leaving a remote app
+      can be taken only by a window of ours that the remote drag drops onto.
+    - The drag pasteboard (`NSPasteboardNameDrag`) is one of the "other pasteboards" that
+      "default to always allow access" (`NSPasteboard.AccessBehavior`). Reading it raises no
+      prompt, and an event tap is not needed to see a drag begin.
+    - A drag source cannot see the target's answer while dragging: `NSDraggingSource` hears
+      moves and the end, and `NSDraggingSession` has no current operation and no cancel.
+      A destination answers `draggingUpdated:` synchronously, and a UIKit drop answers
+      `sessionDidUpdate:` synchronously, so the badge on the client is the worker's last report,
+      one round trip behind the pointer at worst.
+    - The worker is a LaunchAgent in the Aqua session (TN2083: a GUI agent "has access to all
+      GUI services") running a bare `CFRunLoop` with no `NSApplication`. Its main run loop also
+      serves the virtual displays and the pasteboard promises.
+  - **Drop in (client → a point in a streamed window or display).**
+    - *Client, macOS.* The remote tile's drop destination grows from `slopty_platform::file_drop`'s
+      view into `RemoteDrop`. It registers for file URLs, promises, text, RTF, HTML, images and
+      URLs, and replaces GPUI's filename-only handling over remote tiles. That takes a gpui-fast
+      hook: GPUI's destination yields over a rect a platform view claims; check upstream's open
+      pull requests first. `draggingEntered:` reads the drag pasteboard into `ClipEntry`s: each
+      file with its size, mode and whether it is a folder; promised types; data under
+      `INLINE_CLIP_BYTES` inline, anything larger listed with its size. It sends
+      `DragInput::Enter` and starts the upload. `draggingUpdated:` sends `Move` (newest wins,
+      and a move to the point already sent is not sent again) and answers the worker's last
+      operation. While a drag rests, the worker nudges it two points out and back after each
+      rest of the spring delay and 300 ms (`slopty_dnd::nudge`): an injected drag resting still
+      does not spring a spring-loaded target (P0 (8b)), nor does one nudged more often (the
+      roles, below).
+      `draggingExited:` sends `Leave` and cancels the upload. `performDragOperation:` answers NO
+      when the last report was none, which slides the image back as a local refusal does.
+      Otherwise it calls promises in (the one moment macOS 27 allows), sends `Drop`, and shows a
+      progress ring at the point until the worker says the drop ended. While a drag is over a
+      tile the client stops drawing the worker's cursor there, since the system's drag cursor
+      and badge are the pointer.
+    - *Transfer first.* The files upload from `Enter` into the drag's own landing
+      (`Dest::Drag(id)`, `~/.slopty/drop/<drag>/`) at bulk priority, with the existing
+      `.partial`, BLAKE3, resume and cancel. A typical hover of 0.5–2 s finishes small files
+      before the drop. Promised files join the upload once called in. `Leave` cancels and
+      removes the partials. A folder keeps its tree.
+    - *Worker.* A `DragIn` state machine per drag in `apps/slopty-worker/src/conn.rs`, beside the
+      paste `Held`.
+      1. On `Enter` it raises a window stream's window, since the HID route hits whatever is
+         topmost. It asks the drag helper (below) for a source window at the mapped global point:
+         a few points, borderless, just above normal windows, answering `acceptsFirstMouse:`
+         with YES (on 26.6 its first press reaches the view either way, P0 (1b); YES keeps it
+         so if that changes).
+      2. The injector enters drag mode. For the drag's life it takes the HID route and gives the
+         press and every drag and release one event number. It posts the press and a drag
+         2 px away. The helper's view then gets a real `mouseDown:`/`mouseDragged:` and begins
+         the session with that event. At once the source window stops taking the mouse,
+         `animatesToStartingPositionsOnCancelOrFail` goes NO, and the source mask outside the
+         app is Copy, so nothing on the client is ever moved away.
+      3. The items are one `NSDraggingItem` per client item: each file's final landing path as
+         `public.file-url`; data as an `NSPasteboardItem` whose provider fetches lazily
+         (`ClipMsg::Fetch` with `Source::Drag`); a promised file as a `public.file-url` provider
+         answered from a table filled before the drop. Each item's image is transparent, since
+         the client's own drag image is the one the person follows, and a second one in the
+         picture would trail it by a round trip.
+      4. `Move` posts a drag at the mapped point, coalesced like moves today.
+      5. For the operation, the worker classifies `NSCursor.currentSystemCursor`, which it
+         already reads for the stream (`slopty-capture/src/cursor.rs`), against the copy, link
+         and not-allowed cursors by image digest. A change goes out as `DragEvent::Operation`.
+         With a Copy-only mask, the copy cursor is an accept and the arrow a refusal.
+      6. `Drop` waits until every file is whole, then posts the release at the point. The
+         helper's `endedAtPoint:operation:` gives the final answer, which goes out as
+         `DragEvent::Ended { op, error }`. The injector returns to the pid route, and on a window
+         stream the real pointer goes back where it was.
+      7. `Leave` posts Escape then the release through the HID route. If P0 finds that ends the
+         drag badly, the fallback is VMware's: the source window returns under the pointer,
+         takes the release, and answers none.
+    - *One drag per worker.* A worker has one pointer, so one drag at a time crosses it,
+      whichever client it comes from. A second client's `Enter` meanwhile is answered
+      `Operation { op: None }` and its tile says the worker is busy with another drag. A client
+      that leaves mid-drag counts as its `Leave`.
+    - *A target that refuses.* While hovering, the badge shows it and the local drop slides back
+      with nothing sent. A target that accepts on hover and refuses at the drop ends with
+      `op: None`: the client says the target refused the files, and the landing is deleted by
+      the existing sweep. A drop held too long on a transfer that fails says which file failed,
+      and the drop is cancelled on the worker.
+  - **Drag out (a streamed app → the client).**
+    - *Detect.* The worker knows when this client's left button is held on a stream and has
+      moved more than 3 pt, since it injects both. It notes the drag pasteboard's change count at
+      the press and reads it every 8 ms from the first move to the release. Apple does not
+      document that a drag bumps it, but Barrier and shipping shelf apps rely on it (P0 proves it
+      here). A change means an app began a drag. The worker reads the items' types, file URLs
+      (stat for size, mode, folder), promised types and small text, and sends
+      `DragEvent::OutBegan { drag, items }`.
+    - *Follow.* A drag cannot begin under pid-posted events at all (P0 (4)): they reach the app's
+      queue with no window, so no view sees the press, and carrying it on through the HID tap
+      starts nothing. So a left press on a window stream goes through the HID tap from the start,
+      with the window raised and unobscured at the point, and the worker watches the drag
+      pasteboard from that press. Moves
+      keep going to the worker while the pointer stays on the tile, so the remote app's own hover
+      feedback shows in the picture. A single-window stream does not capture the worker's drag
+      image (P0 (7): 0 of its pixels in the window's picture, 2113 in the display's), so while in
+      the tile the client draws the items' icons at its own
+      pointer, at its own frame rate.
+    - *Hand over.* When the pointer leaves the tile with the button still held, the client begins
+      a local drag from that mouse-dragged event, the path `drag::drag_out` already uses. Each
+      file is an `NSFilePromiseProvider` whose write fetches from the worker on its own
+      operation queue (`XferMsg::Fetch` by path, resumable). Each data item is an
+      `NSPasteboardItem` whose provider fetches urgently. It sends `DragInput::Catch`. The worker
+      moves the remote drag onto the helper's catcher: a transparent window at the pointer,
+      registered for the item types and promises, answering Copy. It posts two drags over it (so
+      the drag manager re-targets) and the release under the press's event number. The catcher's
+      `performDragOperation:` takes file URLs as references (the files stay put), calls promises
+      into `~/.slopty/drag/<drag>/` (the only moment macOS 27 allows), and keeps data up to
+      `MAX_REP_BYTES`. It answers `OutCaught` with the final names and sizes. The source app
+      sees an ordinary copy drop, so nothing slides back on the worker and nothing is moved
+      there.
+    - *Land.* Bytes move only when the local target keeps its promise, with progress
+      (`NSProgress` published with the file URL) in Finder and in the tile's transfer pill.
+      Coming back onto a tile of the same worker turns into a drop in whose items are the
+      worker's own paths, and no bytes move. A local cancel after the catch leaves the caught
+      promise files to the sweep.
+  - **The drag helper.** The worker re-executes itself as `slopty-worker dnd`: an accessory
+    `NSApplication` (never `prohibited`, which has hung on pasteboard access, FB17775671)
+    spawned on the first drag, kept while any client streams, and restarted if it dies. It is
+    the same signed executable, so it needs no second TCC grant, no `xtask sign` entry and no
+    bundle. It posts no events itself: the worker's injector owns the route, the event numbers
+    and the button state. The daemon keeps AppKit windows and drag sessions out of the process
+    that serves streams and the virtual displays, so a hang in AppKit's drag code cannot stall
+    video or promises. It talks to the worker over a Unix socket in the worker's runtime
+    directory, with `slopty_proto::dnd` messages carrying insta goldens: `SourceAt`,
+    `CatcherAt`, `Stop`, `Data` down; `SourceReady`, `SessionBegan`, `SessionEnded`, `NeedData`
+    and `Caught` up. Its code lives in a new `crates/slopty-dnd`, so the worker crate stays
+    AppKit-light.
+  - **iPad and iPhone.**
+    - Drop in: the existing `UIDropInteraction` answers `sessionDidUpdate:` with a
+      `UIDropProposal` of the worker's last operation and sends the same `DragInput` moves.
+      UIKit asks again only when the finger moves, so a late report shows on the next move.
+      Data may be loaded only in `performDrop` (`UIDropSession.loadObjects`), so the upload
+      starts at the drop and the worker holds its release until the files are whole. The ring
+      shows meanwhile. Each file representation is copied inside its completion handler, since
+      the system deletes it when that returns (`file_drop::arrive` already does this).
+    - Drag out: UIKit starts a drag only from its own lift, and no public call starts one from
+      code. When a worker drag reaches the tile's edge, the worker catches it as on the Mac, and
+      the tile shows a chip at that edge naming what it holds. The chip is a
+      `UIDragInteraction` source with lazily registered file representations
+      (`file_drop::out`), lifted with a second touch. That is Screens' drop target, moved to the
+      client where the person's hand is. Cross-app drags work on iPhone since iOS 15.
+  - **Feel.**
+    - The drag image the person follows is always the local system's, at the display's rate.
+      Only the hover feedback (highlights, insertion carets, springing folders) comes from the
+      worker, through the stream.
+    - Moves ride the stream's numbered input path, newest wins, like pointer moves. Their cost is
+      the input path's, not a new one.
+    - Spring-loaded folders open because the remote pointer rests where the local one rests and
+      the worker nudges a resting drag two points out and back every 800 ms (the spring delay and
+      300 ms), which springs a target about 1.5 s after the pointer comes to rest, where resting
+      still does not (P0 (8b)) and nudges 600 ms apart or less never do. Holding a drop over a
+      folder while a big file finishes may spring it open, and the drop then lands in the folder
+      that opened, the same place.
+    - Targets, measured before anything is tuned: from `Enter`/`Move` to `Operation` at the
+      client, p95 ≤ RTT + 25 ms; from a drop with its files whole to the target's
+      `performDragOperation:`, p95 ≤ RTT/2 + 10 ms; video and input p95 unchanged during a 1 GB
+      drop. They go to `docs/MEASUREMENTS.md` with their commands.
+  - **Wire (`slopty-proto`, goldens for every variant; a wire change, nothing versioned).**
+    - `drag.rs`: `DragId` (16 random bytes, like `XferId`), `DragOp { None, Copy, Link, Move }`
+      and `DragOps` flags.
+    - `DragInput` rides `ScreenInput::Drag`, so it is numbered with the stream's input.
+      `Move` is out of order, like `ScreenInput::Move`; the rest are in order. The variants are
+      `Enter { drag, x, y, allowed, items: Vec<ClipEntry> }`, `Move { drag, x, y }`,
+      `Leave { drag }`, `Drop { drag, x, y }` and `Catch { drag }`.
+    - `DragEvent` rides `ScreenEvent::Drag { stream, event }`, with the variants
+      `Operation { drag, op }`, `Ended { drag, op, error }`, `OutBegan { drag, items }`,
+      `OutCaught { drag, items }` and `OutFailed { drag, error }`.
+    - In `transfer.rs`, `Source` gains `Drag(DragId)`, so `RepRef` fetches a drag's data the way
+      it fetches an offer's, and `Dest` gains `Drag(DragId)`: the drag's landing, with nothing
+      put on the pasteboard. `ClipEntry` gains `file: Option<FileMeta>` (name, size, folder,
+      mode, mtime). Files out are fetched by path with the existing `XferMsg::Fetch`. The study's
+      `FileRef` and `XferMsg::Pull` wait for the File Provider domains.
+    - Goldens: `client_screen_drag_enter`, `_move`, `_leave`, `_drop`, `_catch`;
+      `worker_screen_drag_operation`, `_ended`, `_out_began`, `_out_caught`, `_out_failed`;
+      `client_xfer_begin_drag`; `dnd_*` for the helper socket.
+  - **Tests, and what they may touch.** No test posts an event to any process but its own
+    children, none reads a screen, and each passes or fails on digests, operations and timestamps
+    its own processes report.
+    - *In the gate, on this Mac.*
+      - Goldens.
+      - The worker's `DragIn` and drag-out state machines on the injector's `Recorder` backend
+        and a fake helper: `enter_raises_then_presses_at_the_source_and_drags`,
+        `a_drag_shares_one_event_number`, `moves_coalesce_and_a_still_hover_posts_nothing`,
+        `the_release_waits_for_every_file`, `leave_cancels_the_upload_and_the_session`,
+        `the_route_goes_back_to_the_pid_after_the_drag`, `cursor_shapes_map_to_operations`,
+        `a_drag_pasteboard_change_while_held_is_a_drag_out`,
+        `nothing_is_watched_without_a_held_button`, `catch_wiggles_over_the_catcher_and_lets_go`.
+      - `slopty-dnd` on named pasteboards: its items read back through the client's reader as
+        the same `ClipEntry`s (`every_drag_item_reads_back_as_it_was_sent`). The catcher's
+        receive path, `catcher::take`, reads a named pasteboard as it reads the drag one
+        (`the_catcher_takes_urls_as_references_and_data_whole`), and the drag watch reports a
+        change once (`a_change_is_reported_once_with_what_the_items_hold`).
+      - Headless GPUI (`slopty-ui`): `the_badge_is_the_workers_last_answer`,
+        `a_refused_drop_slides_back_and_sends_nothing`, `a_held_drop_rings_and_cancels`,
+        `leaving_the_tile_during_a_worker_drag_hands_it_over`,
+        `a_drag_back_onto_the_same_worker_names_its_own_paths`.
+      - App e2e against a real worker whose injector and helper record rather than post (a
+        `--dnd-record` seam beside `--pasteboard`): `DropFiles` grows into a drag sequence
+        (enter, moves, drop), and the test asserts that the worker's landing holds the files
+        with matching digests before the recorded release, that a scripted refusal comes back
+        as the badge, and that a cancel leaves no partials.
+    - *Live, opt-in (`#[ignore = "live"]`, `cargo xtask e2e dnd`, never in `cargo gate`).* A real
+      HID drag from the helper onto the test's own child: `slopty-drop-target`, an accessory
+      AppKit app on the wire lane's `slopty-gesture-app` pattern. It is registered for file
+      URLs, promises and text, answers a scripted operation, and prints what it received and
+      when. For drag out, `slopty-drag-source` begins a drag of its own files and promises.
+      Unlike the gesture app's window, these windows must be on a screen, since the drag manager
+      hit-tests at the pointer. HID moves the one real pointer, so these run only in a macOS
+      guest under tart (`cargo xtask vm live`, testing.md "Live tests that drive the desktop run
+      in a macOS guest under tart"), and skip unless `SLOPTY_DND_E2E` and `SLOPTY_VM` are set,
+      which only that lane does. They never run on this Mac nor on the other one.
+    - One harness pattern: the drop target and drag source reuse the wire lane's child-app shape
+      (ready line with pid and window, one stdout line per callback, gone when stdin closes).
+      That lane's gesture harness is agreed through the coordinating session before either
+      child is written.
+  - **Phases, each turning ✅ here as it lands.**
+    - ✅ *P0 — spikes* (2026-09-30, macOS 26.6.2 in a tart guest, 12 live tests in
+      `crates/slopty-dnd/tests/spikes.rs`, `cargo xtask vm live -p slopty-dnd --test spikes`,
+      62 s of tests). Every drag starts in the test's own `slopty-drag-source` and ends on its
+      own `slopty-drop-target` (`tests/support/`, the wire lane's child-app shape); nothing else
+      is posted to. **The design stands.**
+      - (1) ✅ An HID press into an accessory app's pop-up-level window, the app never active,
+        begins a session there, and the release over the drop target delivers the file's
+        `file://` URL at the point (`perform … files=file:///…`, `file … exists=1`); the source
+        ends with `op=1`, a copy. (1b) With `acceptsFirstMouse:` answering NO the press still
+        reaches the view and begins the drag.
+      - (2) ✅ The system cursor, read as the worker reads it (`slopty_capture::cursor_shape`)
+        and classed against AppKit's cursors by differing pixels, is the copy cursor (`diff=0`)
+        over a target answering copy and the arrow (`diff=0`), not the not-allowed cursor, over
+        one answering none.
+      - (3) ✅ Escape posted through the HID tap mid-drag ends the session before the release,
+        with `op=0`, and the release drops nothing.
+      - (4) ✅ as a finding against the pid route: pid-posted presses and drags reach the app's
+        queue under one press number but carry no window (their `locationInWindow` is screen
+        points), so no view sees them and no session begins; the real pointer does not move,
+        and carrying the press on through the HID tap starts nothing. The same with the
+        injector's window route (the owner activated), with raw posts naming the window in
+        fields 91 and 92, and with a titled window that can become key (4a–4c). The children
+        are accessory apps; whether a regular app's key window takes window-less events is
+        left to the input lane, since it bears on every window-stream click.
+      - (5) ✅ The drag pasteboard's change count stays put on a click (4 → 4) and moves when a
+        drag begins (→ 5); its item then names the file (`public.file-url` and five legacy
+        spellings). Read from another process with no prompt.
+      - (6) ✅ On 26.6 a drag begins and drops under each numbering: the injector's per-press
+        number (1 on every event of the press), 0 on every event, and the field left to
+        CoreGraphics (read back as 0). So the numbering is not what 26 needs; whether 27 does
+        (Deskflow #9991) waits for a 27 guest.
+      - (7) ✅ A window capture of the target under the drag holds none of the drag image's
+        magenta (0 pixels of 280×200), the display capture 2113 of 1024×768.
+      - (8a) ✅ A destination that reads the drag pasteboard half a second after the drop finds
+        the same file URL. (8b) ✅ With spring loading on (`com.apple.springing.enabled` 1, delay
+        0.5 s), a drag resting still over a spring-loaded target for 2.5 s gets
+        `springLoadingEntered:` and the highlight but never activates; moves a point either side
+        every 100 ms after that rest activate it about 0.8 s later. (The same moves from the
+        start of the rest never do; the helper's roles below measured why.) A SwiftUI
+        destination cannot be built in Rust, so SwiftUI's read under injected input stays
+        open; (8a) covers the late read an item provider makes.
+      - Still to run on macOS 27 (no 27 guest: its base would put the disk under the prune
+        floor): all of them, (1), (4) and (6) first, since 27 numbers clicks and changed
+        promise reception.
+    - ✅ *The helper's roles, the platform half of P2 and P3* (2026-09-30, macOS 26.6.2 in a
+      tart guest, 5 live tests in `crates/slopty-dnd/tests/roles.rs`,
+      `cargo xtask vm live -p slopty-dnd --test roles`, 57 s). They are built as the library the
+      helper process will run, and not wired yet. The worker's `DragIn`, its watch loop and the
+      helper socket come after P1. Numbers are in MEASUREMENTS, "the drag helper's roles".
+      - `slopty_dnd::source`: a few points of window at a point. A press into it begins a real
+        session with that press, carrying `items::Writers`. A whole file goes as its URL, and
+        anything else (data, a file still arriving) goes as an `NSPasteboardItemDataProvider`
+        promise, answered through a `Provide` callback when a target reads it. The image is
+        clear, only Copy is allowed, a failed drag does not slide back, and once the session
+        begins the window lets the mouse through. Live, a whole file, promised text and a file
+        written 300 ms into the target's read all land at the point.
+        - A target blocks in its read for as long as a provider takes: 5 s, then it takes the
+          file whole and the drag ends as a copy.
+        - So a drop is held for an upload only briefly. Past that, P5's placeholders are the
+          way.
+      - `slopty_dnd::catcher`: a 64-point window registered for files, URLs, text, pictures, PDF
+        and file promises, answering Copy. `take` keeps file URLs as references. Each file
+        promise is called in inside `performDragOperation:` on an `NSOperationQueue`. Other
+        representations are kept whole up to a cap and listed past it, and the promise
+        bookkeeping and legacy spellings are dropped. A drag out of a test app, let go over it,
+        gives the file where it was and the promised file whole in the drag's folder, and the
+        app sees a copy.
+      - `slopty_dnd::watch`: the drag pasteboard's count moved by the first move after the
+        press (3 points, 8 ms). Its items name the file and the promise's content type. A file
+        URL's item also offers `com.apple.pasteboard.promised-file-url` and is not taken for a
+        promise.
+      - `slopty_dnd::nudge`: a one-point move never reaches the target. Nudges 600 ms apart or
+        less never spring it, and 650–700 ms springs it only on some runs. Two points out and
+        back after each rest of the spring delay (read from `com.apple.springing.delay`) and
+        300 ms springs it every time, about 1.5 s after the pointer rests.
+        `which_nudge_periods_spring_a_target` keeps the table.
+    - *P1 — wire.* `slopty-proto` alone, landing before anything that uses it, after the wire
+      lane's change to `ScreenInput`.
+    - *P2 — drop in on macOS.* The worker's `DragIn`, the injector's drag mode, the helper's
+      source role, `Dest::Drag`; the client's `RemoteDrop`, the gpui-fast hook, the badge, the
+      ring, the landing.
+    - *P3 — drag out on macOS.* Drag-pasteboard watch, HID follow, catcher,
+      `OutBegan`/`OutCaught`, the client's hand-over and its in-tile icons.
+    - *P4 — iPad and iPhone.* The drop proposal, a drop held for its upload, the edge chip.
+    - *P5 — lazy files.* The ⏸ File Provider domains (**Worker files paste into Finder through
+      a File Provider domain**) on both ends: a dropped file exists at once as a placeholder
+      and the release no longer waits for its bytes; drag out and pasted worker files reach
+      Finder without a promise.
+  - **Rejected.** Drop by AppleScript, Accessibility or `open -a` (a few apps, no hover, per-app
+    code). Promises alone as the worker's source (URL-only targets refuse them, and Finder takes
+    the URL when both are offered). An empty decoy file filled after the drop (RustDesk; the
+    reader races it, as the File Provider entry found). Escape to end a drag out (the source sees
+    a cancel and never keeps its promises). A listen-only event tap to see drags start (it needs
+    Input Monitoring and still does not say a drag began). AppKit windows in the worker process
+    itself (a hung drag would stall the streams on the main run loop). A second signed helper
+    binary (a second grant and signing entry for nothing).
+  - **Risks.** Injected drags may differ from a person's, which P0 settles. The badge rests on
+    the system cursor; without it, the client shows Copy while hovering and the end decides.
+    During a drag the worker's real pointer moves and a window stream's window is raised, which
+    someone at the worker sees. Files from `~/Desktop`, `~/Documents` or `~/Downloads` may
+    raise the Files and Folders prompt for the worker, so the doctor reports that grant. How long
+    Finder waits on a slow promise and what a slow data provider does to the target app are
+    undocumented, and the live lane measures a 60 s promise and a 5 s provider before big data
+    relies on either. A target that checks the file while hovering finds nothing at its path
+    until the upload is whole, and may refuse; P5's placeholders end that.
+
+- ⏸ **One sound per worker on a client, not one per stream** (2026-09-30, ruling only; nothing
+  built yet. Measured in MEASUREMENTS, "streams from one worker: what they could share").
+  - *What each stream owns today.* Every stream's capture sets `capturesAudio` (`audio: true` in
+    `crates/slopty-worker/src/screen.rs`), so each holds its own ScreenCaptureKit audio tap, and
+    each stream opens its own Opus encoder. The client opens an Opus decoder and a CoreAudio
+    `Player` per stream, and mutes per stream. ScreenCaptureKit filters audio by application, not
+    by window: a single-window filter captures all of the owning app's audio, even from windows
+    not in the picture (Apple, WWDC22 session 10155, "Take ScreenCaptureKit to the next level"),
+    and a display filter every app's. So two tiles of one app, or a desktop tile and any window
+    tile, carry the same sound, and the client plays it once per tile through players whose
+    buffers drift apart: the same sound doubled and out of phase.
+  - *What it costs.* A stream's sound is about 0.016 of a core and 0.041 W of CPU across the
+    worker's encode and the client's decode (118 µs and 37 µs a 10 ms packet), 0.126 cores and
+    0.33 W at eight streams, before the player and the tap. That is more than the stream's video
+    decode (0.007 of a core). Nothing else the streams own is worth sharing: the client's decoders
+    cost 0.007 of a core each and keep 60 pictures a second up to eight 1080p (p95 2.6 ms) or eight
+    4K streams (p95 32 ms, the decode engine full); the encoder sessions share the two engines
+    already, through `placement_fps` and the focus give-way; and one display capture cropped per
+    window cannot replace window captures, which must stream a window others cover.
+  - *The ruling.* A client hears one sound from a worker. The worker captures it once for that
+    client: an audio-only capture whose filter is the union of the applications behind the
+    client's streams (every app when one of them is a display), changed with
+    `updateContentFilter:` as streams open and close. The video captures stop capturing audio.
+    One Opus encoder per client, one decoder and one player per worker on the client, and the mute
+    is the worker's sound, not a tile's. Streams of different apps still sound together, as they
+    do now; what goes is the duplicate.
+  - *Wire.* The sound gets a lane of its own on the worker connection instead of riding a
+    stream's datagrams: open and close with the first and last stream that has sound, its packets
+    tagged by that lane. (Riding the oldest open stream as a carrier would need no wire change but
+    a hand-over, with a gap and a new decoder, whenever that tile closes, and pre-release a format
+    is replaced cleanly, not worked around.) Goldens for the lane's open, close and packet.
+  - *Owners, in order.* `slopty-proto` (the lane, goldens); then `slopty-capture` (an audio-only
+    capture with an application set it can change), `slopty-worker`'s `screen.rs` (video
+    captures without audio, one audio capture and encoder per client, the set kept current), and
+    `slopty-client` with `slopty-ui` (one player per worker, the mute on the worker's sound) side
+    by side.
+  - *Tests.* Worker units on a fake capture: two window streams of one app open one audio capture
+    and one encoder; a display and a window stream, one capture over every app; windows of two
+    apps, one capture over both, which drops an app when its last window closes. Client: one
+    player for a worker's three tiles, and the mute silences all three. Live, in the macOS guest
+    (`cargo xtask vm live`): two window streams of the test's own app playing a tone arrive as one
+    sound, counted in packets per second at the client. Measurement: `concurrent_audio` at N
+    streams against one lane.

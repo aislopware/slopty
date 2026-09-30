@@ -99,6 +99,39 @@ pub trait VideoEncoder: Send + Sync + Sized + 'static {
         sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
     ) -> Result<Self, CodecError>;
 
+    /// A session for one stripe of the pictures handed to it (`crate::stripes`): `config` is
+    /// the stripe's own picture, the capture's width and the stripe's `coded_rows` high, and
+    /// every picture handed to [`Self::encode`] is a whole capture, of which the session codes
+    /// the rows `stripe` names.
+    ///
+    /// # Errors
+    ///
+    /// [`CodecError::NoStripes`] for an encoder that codes no stripes (the default), else as
+    /// [`Self::new`].
+    fn stripe(
+        _config: EncoderConfig,
+        _stripe: crate::stripes::Stripe,
+        _sink: impl Fn(EncodedPacket) + Send + Sync + 'static,
+    ) -> Result<Self, CodecError> {
+        Err(CodecError::NoStripes)
+    }
+
+    /// Whether this machine codes a `width` × `height` picture carrying `chroma` faster as two
+    /// stripes at once than whole, timed now ([`crate::stripes::side_by_side`]): a few hundred
+    /// milliseconds of the encode engines, once per size. `None` for an encoder that codes no
+    /// stripes (the default), or a picture too short to split.
+    ///
+    /// # Errors
+    ///
+    /// When a session for the timing is refused.
+    fn side_by_side(
+        _width: u32,
+        _height: u32,
+        _chroma: Chroma,
+    ) -> Result<Option<crate::stripes::SideBySide>, CodecError> {
+        Ok(None)
+    }
+
     /// Submit one picture; `pts_us` comes back on its packet.
     ///
     /// # Errors

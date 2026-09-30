@@ -5,10 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Test-only measuring: a counting allocator, percentiles, retired instructions and process footprint"
+description = "Test-only measuring and doubles: a counting allocator, percentiles, retired instructions, process footprint, the SoC's media counters, and a stand-in `claude`"
 
 [lints]
 workspace = true
 
 [dependencies]
 libc.workspace = true
+# The stand-in `claude` (`slopty-stub-claude`) reads its settings and speaks MCP in JSON.
+serde_json.workspace = true
+
+# The SoC's media and graphics counters over a span (`soc`), read through IOReport.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation.workspace = true

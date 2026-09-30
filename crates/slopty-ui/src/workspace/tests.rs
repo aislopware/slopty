@@ -914,6 +914,7 @@ fn an_offscreen_window_lets_its_stream_go_after_the_grace(cx: &mut TestAppContex
                 width: 1280,
                 height: 800,
                 scale: 2.0,
+                stripes: Vec::new(),
             },
             cx,
         );
@@ -1495,14 +1496,16 @@ mod nav_rows;
 mod niri_keys;
 mod overlays;
 mod page_chrome;
+mod page_host;
 mod palette;
 mod popout;
-mod quick;
+mod projects;
 mod remote;
 mod retained;
 mod save_copy;
 mod search;
 mod shell_drag;
+mod soak;
 mod strip_marks;
 mod tab_strip;
 mod tiles;

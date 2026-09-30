@@ -24,11 +24,13 @@ const WINDOW: (f32, f32) = (900.0, 600.0);
 /// shows the round trip under the pointer.
 const PARK: (f32, f32) = (1.0, 1.0);
 
-/// Wait until nothing moves and every link has its round trip: two dumps a frame apart place
-/// every tile alike, so a spring still running cannot end up in a golden, nor a status bar
-/// whose readout is yet to land.
+/// Wait until nothing moves, every link has its round trip and every shell at a prompt has its
+/// caret there: two dumps a frame apart place every tile alike, so a spring still running
+/// cannot end up in a golden, nor a status bar whose readout is yet to land, nor the block a
+/// command ran under.
 pub async fn settled(drv: &mut Driver) -> Dump {
     drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
+    drv.wait_for("the carets at their prompts", STEP, Dump::prompts_settled).await.unwrap();
     let deadline = tokio::time::Instant::now().checked_add(STEP);
     let mut last = drv.dump().await.unwrap();
     loop {

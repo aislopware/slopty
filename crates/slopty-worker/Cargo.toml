@@ -52,11 +52,15 @@ objc2.workspace = true
 slopty-codec = { workspace = true, features = [ "experiments" ] }
 slopty-client.workspace = true
 slopty-grid.workspace = true
+# A live test's skip, which the VM lane counts as a failure (`slopty_testkit::live`).
+slopty-testkit.workspace = true
 tempfile.workspace = true
 # Paused time for the change counts' coalescing test.
 tokio = { workspace = true, features = [ "test-util" ] }
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
+# FSEvents, measured against the kqueue follower in `tests/fswatch.rs`.
+notify.workspace = true
 objc2-core-foundation.workspace = true
 objc2-core-video.workspace = true
 objc2-video-toolbox.workspace = true

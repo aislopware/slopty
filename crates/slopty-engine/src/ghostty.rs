@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
-use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIterator};
+use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIteration, RowIterator};
 use libghostty_vt::screen::{
     Cell as VtCell, CellContentTag, CellFields, CellLayout, CellSemanticContent, GridRef,
     RowSemanticPrompt, Screen as VtScreen, TrackedGridRef,
@@ -137,6 +137,9 @@ pub struct GhosttyEngine {
     /// The line discipline changed since the last frame: the next one goes out to say so,
     /// though no cell moved.
     discipline_changed: bool,
+    /// The caret the last frame to every viewer carried. libghostty dirties no row for a caret
+    /// that changes in place (DECSCUSR, DECTCEM), so a change is a frame of its own.
+    cursor_sent: Option<Cursor>,
     scratch: String,
     /// A row read and found the same as the one the viewers hold, kept for the next row to be
     /// read into: a scroll re-reads every row and ships only the few that came in, and a
@@ -149,13 +152,11 @@ pub struct GhosttyEngine {
     spare_prints: Prints,
     /// Scratch for OSC 8 URIs (`ghostty_grid_ref_hyperlink_uri` wants a caller buffer).
     uri_buf: Vec<u8>,
-    /// Watches the bytes for `OSC 133;A` and `133;D`, which libghostty does not surface.
-    osc: osc133::Scanner,
-    /// What the shell redraws after a resize, as the last `133;A` said (see [`redraw`]).
-    prompt_redraw: osc133::Redraw,
-    /// The last mark was a prompt start, not an output start or a command end: the cursor is
-    /// in the prompt or its input.
-    at_prompt: bool,
+    /// The prompt marks and full resets libghostty reported during the write in progress, in
+    /// stream order; the write takes them once it has settled.
+    marks: Rc<RefCell<Vec<Pending>>>,
+    /// The last write's marks, taken and emptied, for the next write's to be swapped into.
+    spare_marks: Vec<Pending>,
     /// Exit status reported on an absolute line (the row the cursor was on at the `D`).
     exit_marks: BTreeMap<u64, Option<u8>>,
     /// Absolute lines a primary prompt started on (`133;A`).
@@ -219,6 +220,9 @@ struct Shown {
     rows: Vec<Option<Arc<Line>>>,
     /// What each held line was read from, index for index with `rows`.
     prints: Prints,
+    /// A held row had kitty placeholder cells when it was read. Their images are placed from
+    /// every row, changed or not, so the next frame walks every row.
+    placeholders: bool,
 }
 
 /// A row's flags that reach its line: a wrap continuation, and its prompt state.
@@ -333,6 +337,16 @@ impl Shown {
         self.prints.get(i)
     }
 
+    /// Move the held lines of screen rows `rows` (the top one at absolute `first`) into the
+    /// next frame's record, as rows no frame read again. Kept out of the frame's row loop,
+    /// whose every other row pays for its size.
+    #[inline(never)]
+    fn carry(&mut self, into: &mut Vec<Option<Arc<Line>>>, first: u64, rows: std::ops::Range<u16>) {
+        for row in rows {
+            into.push(self.take(first.saturating_add(u64::from(row))));
+        }
+    }
+
     fn forget(&mut self, line: u64) {
         if let Some(slot) = self.slot(line) {
             *slot = None;
@@ -344,6 +358,15 @@ impl Shown {
 struct Anchor {
     tracked: TrackedGridRef,
     abs: u64,
+}
+
+/// What libghostty reported during a write that the engine takes once the write has settled.
+enum Pending {
+    /// A prompt mark, with the cursor row where the shell wrote it tracked through whatever
+    /// the rest of the write scrolled or evicted.
+    Mark { mark: osc133::Mark, row: Option<TrackedGridRef>, col: u16, screen: VtScreen },
+    /// A full reset (RIS): the screen, the history and the alternate screen are gone.
+    Reset,
 }
 
 impl std::fmt::Debug for GhosttyEngine {
@@ -392,6 +415,8 @@ impl GhosttyEngine {
         let render = Rc::new(RefCell::new(RenderState::new()?));
         let hold = Rc::new(std::cell::Cell::new(None));
         install_render_hold(&mut term, &render, &hold)?;
+        let marks = Rc::new(RefCell::new(Vec::new()));
+        install_marks(&mut term, &marks)?;
 
         let mut engine = Self {
             anchor: None,
@@ -424,14 +449,14 @@ impl GhosttyEngine {
             buttons_down: 0,
             line_discipline: None,
             discipline_changed: false,
+            cursor_sent: None,
             scratch: String::with_capacity(16),
             spare_line: None,
             spare_rows: Vec::new(),
             spare_prints: Prints::default(),
             uri_buf: vec![0; 256],
-            osc: osc133::Scanner::default(),
-            prompt_redraw: osc133::Redraw::default(),
-            at_prompt: false,
+            marks,
+            spare_marks: Vec::new(),
             exit_marks: BTreeMap::new(),
             prompt_starts: BTreeSet::new(),
             forced_rows: BTreeSet::new(),
@@ -595,6 +620,7 @@ impl GhosttyEngine {
     }
 
     fn bump_epoch(&mut self) {
+        let open = self.open_command();
         self.epochs = self.epochs.wrapping_add(1);
         self.epoch = self.epochs;
         self.base = 0;
@@ -603,6 +629,11 @@ impl GhosttyEngine {
         self.forced_rows.clear();
         self.remarked_rows.clear();
         self.commands.clear();
+        if let Some(output) = open {
+            let history = self.term.scrollback_rows().map_or(0, |n| n as u64);
+            let y = self.term.cursor_y().map_or(0, u64::from);
+            self.reopen_command(history.saturating_add(y), output);
+        }
         tracing::debug!(epoch = self.epoch, "line numbering invalidated");
     }
 
@@ -658,14 +689,56 @@ impl GhosttyEngine {
             tracing::error!(error = %e, "engine settle failed; invalidating line numbering");
             self.bump_epoch();
         }
+        self.take_marks();
     }
 
-    /// The shell wrote a prompt mark at the cursor: remember which line, and the status.
-    fn record_mark(&mut self, mark: osc133::Mark) {
-        let Ok(y) = self.term.cursor_y() else { return };
-        let Ok(scrollback) = self.term.scrollback_rows() else { return };
-        let line = self.base.saturating_add(scrollback as u64).saturating_add(u64::from(y));
-        let col = self.term.cursor_x().unwrap_or(0);
+    /// Record what libghostty reported during the write just settled, in the order the shell
+    /// wrote it.
+    #[expect(clippy::iter_with_drain, reason = "the emptied Vec is kept for the next write")]
+    fn take_marks(&mut self) {
+        let mut taken = std::mem::take(&mut self.spare_marks);
+        std::mem::swap(&mut taken, &mut *self.marks.borrow_mut());
+        for pending in taken.drain(..) {
+            match pending {
+                Pending::Mark { mark, row, col, screen } => {
+                    // A mark on a screen that is gone again: the alternate screen's marks are
+                    // dropped with it, and a switch in from the primary settles before it.
+                    if screen != self.active_screen() {
+                        continue;
+                    }
+                    // Its row went out of the history in the same write: counted at the oldest
+                    // line, so a command end still ends its command.
+                    let y = row.and_then(|r| r.point(PointSpace::Screen).ok().flatten());
+                    let line = self.base.saturating_add(y.map_or(0, |p| u64::from(p.y)));
+                    self.record_mark(mark, line, col);
+                }
+                Pending::Reset => self.forget_screen(),
+            }
+        }
+        self.spare_marks = taken;
+    }
+
+    const fn active_screen(&self) -> VtScreen {
+        if self.on_alt { VtScreen::Alternate } else { VtScreen::Primary }
+    }
+
+    /// A full reset (RIS) cleared the screen and the history and left the alternate screen:
+    /// every line the numbering, the marks and the command blocks refer to is gone. A new
+    /// numbering starts with no marks, and no blocks but a command still running.
+    fn forget_screen(&mut self) {
+        self.primary_anchor = None;
+        self.primary_marks = None;
+        self.primary_commands.clear();
+        self.primary_snapshot = None;
+        self.bump_epoch();
+        if let Err(e) = self.reanchor() {
+            tracing::error!(error = %e, "reanchor after a full reset failed");
+        }
+    }
+
+    /// The shell wrote a prompt mark on absolute `line` at `col`: remember where, and the
+    /// status.
+    fn record_mark(&mut self, mark: osc133::Mark, line: u64, col: u16) {
         self.note_command_mark(line, col, mark);
         // Evicted history can never be read again; drop its marks with it.
         let base = self.base;
@@ -678,12 +751,8 @@ impl GhosttyEngine {
                 *starts = starts.split_off(&base);
             });
         }
-        self.at_prompt = matches!(mark, osc133::Mark::PromptStart { .. });
         match mark {
-            osc133::Mark::PromptStart { redraw } => {
-                if let Some(redraw) = redraw {
-                    self.prompt_redraw = redraw;
-                }
+            osc133::Mark::PromptStart => {
                 // The shell has the terminal back, so whatever reported progress has ended,
                 // cleared or not.
                 if self.progress.replace(Progress::default()).state != ProgressState::None {
@@ -836,8 +905,10 @@ impl GhosttyEngine {
         // to end.
         let graphics_gen = self.term.kitty_graphics()?.generation()?;
         let forcing = hold.is_none() && !self.forced_rows.is_empty();
+        let cursor = Self::cursor(&snapshot)?;
         if !rebuild
             && dirty == Dirty::Clean
+            && self.cursor_sent == Some(cursor)
             && (graphics_gen == self.graphics_gen || hold.is_some())
             && !forcing
             && (hold.is_some() || self.remarked_rows.is_empty())
@@ -849,7 +920,6 @@ impl GhosttyEngine {
             self.graphics_gen = graphics_gen;
         }
 
-        let cursor = Self::cursor(&snapshot)?;
         let scrollback = match hold {
             Some(h) => h.scrollback,
             None => self.term.scrollback_rows()? as u64,
@@ -873,13 +943,25 @@ impl GhosttyEngine {
             spare
         };
 
+        // Nothing scrolled and no row is forced or remarked: only the rows libghostty marks
+        // dirty are visited, and every other one keeps the line and print the record holds.
+        let sparse = in_place
+            && !rebuild
+            && !forcing
+            && (hold.is_some() || self.remarked_rows.is_empty())
+            && !self.shown.placeholders;
+
         let layout = CellLayout::linked();
         let mut row_iter = self.rows_iter.update(&snapshot)?;
         let mut y: u16 = 0;
         // Placeholder cells of virtual kitty placements, gathered from every row (a run that
         // did not change still places its image in this frame).
         let mut runs = Runs::default();
-        while let Some(row) = row_iter.next() {
+        while let Some((at, row)) = next_row(&mut row_iter, sparse, y) {
+            if at != y {
+                self.shown.carry(&mut shown, first, y..at);
+                y = at;
+            }
             let raw = row.raw_row()?;
             // The row flag may be a false positive, but a row without it has no placeholders.
             let placeholders = raw.has_kitty_virtual_placeholder()?;
@@ -1170,6 +1252,12 @@ impl GhosttyEngine {
             runs.finish();
             y = y.saturating_add(1);
         }
+        if sparse {
+            self.shown.carry(&mut shown, first, y..rows);
+        }
+        // Every run was gathered from the rows it lies on, and a row visited or not has the
+        // placeholder cells it had when the record last read it.
+        let placeholders = !runs.runs.is_empty();
         let total = scrollback.saturating_add(u64::from(rows));
         let images = match take {
             Take::Joiner => {
@@ -1189,7 +1277,8 @@ impl GhosttyEngine {
                 self.placed_if(graphics_gen, runs)?
             }
             Take::Everyone | Take::Diff => {
-                let record = Shown { epoch: self.epoch, cols, first, rows: shown, prints };
+                let record =
+                    Shown { epoch: self.epoch, cols, first, rows: shown, prints, placeholders };
                 let old = std::mem::replace(&mut self.shown, record);
                 let mut spare = old.rows;
                 spare.clear();
@@ -1214,6 +1303,7 @@ impl GhosttyEngine {
                 }
                 snapshot.set_dirty(Dirty::Clean)?;
                 self.discipline_changed = false;
+                self.cursor_sent = Some(cursor);
                 self.seq = self.seq.wrapping_add(1);
                 if take == Take::Everyone {
                     // Every viewer takes this frame as a resync, holding nothing yet.
@@ -1754,6 +1844,19 @@ fn blank_line(spare: Option<Line>, cols: u16) -> Line {
     }
 }
 
+/// The next row a frame reads and its screen row (`y` is the one after the last read): every
+/// row, or with `dirty_only` the next one libghostty marks dirty, skipping the clean ones
+/// without a call into libghostty each. Kept out of the frame's row loop, whose every cell
+/// pays for its size.
+#[inline(never)]
+fn next_row<'r, 'a, 's>(
+    rows: &'r mut RowIteration<'a, 's>,
+    dirty_only: bool,
+    y: u16,
+) -> Option<(u16, &'r RowIteration<'a, 's>)> {
+    if dirty_only { rows.next_dirty() } else { rows.next().map(|row| (y, row)) }
+}
+
 fn placeholder_cell(style: &Style, cluster: &str) -> placeholder::Cell {
     let id = |c: slopty_grid::Color| match c {
         slopty_grid::Color::Palette(i) => placeholder::color_id(Some(i), None),
@@ -1826,6 +1929,28 @@ fn install_callbacks(
         };
         write.reply(result, false);
     })?;
+    Ok(())
+}
+
+/// Queue the prompt marks and full resets libghostty reports during a write, each with the
+/// cursor where the shell wrote it: the terminal has applied the bytes before the sequence and
+/// none after it. The cursor's row is tracked, not counted, because the rest of the write may
+/// scroll it or evict history above it before the engine settles.
+fn install_marks(
+    term: &mut Terminal<'static, 'static>,
+    marks: &Rc<RefCell<Vec<Pending>>>,
+) -> Result<(), EngineError> {
+    let for_marks = Rc::clone(marks);
+    term.on_semantic_prompt(move |t, event| {
+        let Some(mark) = osc133::Mark::of(event) else { return };
+        let (Ok(y), Ok(col), Ok(screen)) = (t.cursor_y(), t.cursor_x(), t.active_screen()) else {
+            return;
+        };
+        let row = t.track_grid_ref(Point::Active(PointCoordinate { x: 0, y: u32::from(y) })).ok();
+        for_marks.borrow_mut().push(Pending::Mark { mark, row, col, screen });
+    })?;
+    let for_reset = Rc::clone(marks);
+    term.on_reset(move |_| for_reset.borrow_mut().push(Pending::Reset))?;
     Ok(())
 }
 
@@ -1960,15 +2085,7 @@ fn may_touch_osc_state(bytes: &[u8]) -> bool {
 impl GhosttyEngine {
     /// Feed PTY output.
     pub fn write(&mut self, bytes: &[u8]) {
-        // Feed up to each prompt mark separately so the cursor row at the mark is exact.
-        let mut rest = bytes;
-        while let Some(found) = self.osc.scan(rest) {
-            let (head, tail) = rest.split_at(found.end.min(rest.len()));
-            self.feed(head);
-            self.record_mark(found.mark);
-            rest = tail;
-        }
-        self.feed(rest);
+        self.feed(bytes);
         // libghostty has no colour-change or pointer-change callback. The current colours
         // against the defaults are eight reads and two palette copies, so they and the pointer
         // are looked at only after a write that could have changed them, and once more after
@@ -2283,7 +2400,7 @@ impl GhosttyEngine {
     ///
     /// libghostty-vt failing.
     pub fn at_ground(&self) -> Result<bool, EngineError> {
-        Ok(self.term.vt_ground()?)
+        Ok(self.term.is_vt_ground()?)
     }
 
     /// The terminfo entry the session's programs were given (`TERM`), which an XTGETTCAP
@@ -2394,7 +2511,7 @@ impl GhosttyEngine {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use slopty_grid::{CellWidth, StyleFlags};
+    use slopty_grid::{CellWidth, CursorShape, StyleFlags};
     use slopty_proto::input::{CellMetrics, KeyAction, KeyCode, Mods};
 
     use super::*;
@@ -3007,6 +3124,25 @@ mod tests {
         assert_eq!(out, b"\x1b[<35;3;1M", "1003 reports a move with no button down");
     }
 
+    /// A caret shape set in a write of its own (zsh's `zle-line-init` after the prompt) is a
+    /// frame though no cell moved, and so is a caret hidden or shown in place.
+    #[test]
+    fn a_caret_changed_alone_sends_a_frame() {
+        let mut e = engine(10, 3);
+        e.write(b"~ % ");
+        let first = e.take_frame(0).unwrap().expect("the prompt");
+        assert_eq!(first.cursor.shape, CursorShape::Block);
+        e.write(b"\x1b[5 q");
+        let frame = e.take_frame(0).unwrap().expect("the bar is a frame");
+        assert_eq!(frame.cursor.shape, CursorShape::Bar);
+        assert!(e.take_frame(0).unwrap().is_none(), "nothing changed");
+        e.write(b"\x1b[5 q");
+        assert!(e.take_frame(0).unwrap().is_none(), "the same shape again is no change");
+        e.write(b"\x1b[?25l");
+        let frame = e.take_frame(0).unwrap().expect("hiding the caret is a frame");
+        assert!(!frame.cursor.visible);
+    }
+
     /// The worker's reading of the pty's `termios` rides on the frames, and a change sends
     /// one though no cell moved.
     #[test]
@@ -3332,9 +3468,23 @@ mod tests {
         assert!(is_light([0xff, 0xff, 0xff]) && !is_light([0x0e, 0x0f, 0x12]));
     }
 
+    /// A full reset (RIS) returns a colour the program changed with OSC 4 to the default
+    /// palette (ghostty #14480), and says so.
+    #[test]
+    fn a_full_reset_returns_the_palette_to_the_default() {
+        let mut e = engine(10, 3);
+        e.write(b"\x1b]4;2;#ff00ff\x1b\\");
+        let purple =
+            ColorOverrides { palette: vec![(2, [0xff, 0x00, 0xff])], ..ColorOverrides::default() };
+        assert!(e.drain_events().contains(&EngineEvent::Colors(purple)));
+        e.write(b"\x1bc");
+        assert!(e.drain_events().contains(&EngineEvent::Colors(ColorOverrides::default())));
+    }
+
     /// OSC 10/11/12 and OSC 4 sets are reported as the whole set of changes, once per change;
-    /// a reset (OSC 104/110/111/112) reports the set without them, and RIS keeps them as xterm
-    /// does; the driver's palette changing under the program's is not a change of the program's.
+    /// a reset (OSC 104/110/111/112) reports the set without them, and RIS resets the palette
+    /// but keeps the dynamic colours, as xterm does (ghostty #14480); the driver's palette
+    /// changing under the program's is not a change of the program's.
     #[test]
     fn the_programs_colour_changes_are_reported_as_a_whole_set() {
         let mut e = engine(10, 3);
@@ -3376,7 +3526,11 @@ mod tests {
             }]
         );
         e.write(b"\x1bc");
-        assert!(colors(&mut e).is_empty(), "RIS keeps the dynamic colours, as xterm does");
+        assert_eq!(
+            colors(&mut e),
+            vec![ColorOverrides { cursor: Some([0xff; 3]), ..ColorOverrides::default() }],
+            "RIS resets the palette and keeps the dynamic colours, as xterm does"
+        );
         e.write(b"\x1b]112\x1b\\\x1b]104\x1b\\");
         assert_eq!(colors(&mut e), vec![ColorOverrides::default()]);
     }
@@ -3429,10 +3583,10 @@ mod tests {
         assert_eq!(e.drain_events(), [EngineEvent::Title("after".to_owned())]);
     }
 
-    /// The prompt-mark scanner ends and cancels an OSC where libghostty does: a title written
-    /// the same way shows whether libghostty acted on it.
+    /// A command end counts exactly when libghostty acts on its OSC, framed and cancelled as
+    /// any OSC is: a title written the same way shows whether it did.
     #[test]
-    fn the_mark_scanner_frames_an_osc_as_libghostty_does() {
+    fn a_command_end_counts_when_libghostty_acts_on_it() {
         let framings = [
             ("", "\x07", true),
             ("", "\x1b\\", true),
@@ -3446,10 +3600,10 @@ mod tests {
             let mut e = engine(20, 3);
             e.write(format!("\x1b{after_esc}]2;t{end}").as_bytes());
             let titled = e.drain_events().contains(&EngineEvent::Title("t".to_owned()));
-            let mut scanner = osc133::Scanner::default();
-            let marked =
-                scanner.scan(format!("\x1b{after_esc}]133;D;1;{end}").as_bytes()).is_some();
-            assert_eq!((titled, marked), (acted, acted), "{after_esc:?} … {end:?}");
+            e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07x\r\n\x1b]133;C\x07");
+            e.write(format!("\x1b{after_esc}]133;D;1;{end}").as_bytes());
+            let ended = e.commands_ended() == 1;
+            assert_eq!((titled, ended), (acted, acted), "{after_esc:?} … {end:?}");
         }
     }
 
@@ -3469,6 +3623,109 @@ mod tests {
         let prompt = |exit, input| SemanticMark::Prompt { exit, input };
         assert_eq!(marks[1], prompt(None, Some(2)), "the cancelled status is not taken");
         assert_eq!(marks[2], prompt(Some(0), None));
+    }
+
+    /// A full reset (RIS) clears the screen and the history, and the marks, statuses and
+    /// command blocks of the rows it cleared go with them, also when the reset comes in the
+    /// same read as the command it follows: the prompt after it takes no status from that
+    /// command, and the old commands are not listed.
+    #[test]
+    fn a_full_reset_drops_the_command_state() {
+        let mut e = engine(20, 6);
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        let epoch = e.position().unwrap().epoch;
+        e.write(b"false\r\n\x1b]133;C\x07\x1b]133;D;1\x07\x1bc\x1b]133;A\x07$ \x1b]133;B\x07");
+        let f = e.full_frame(0).unwrap();
+        assert_eq!(f.updates[0].line.mark, SemanticMark::Prompt { exit: None, input: None });
+        assert!(e.commands(None).unwrap().is_empty());
+        assert_ne!(e.position().unwrap().epoch, epoch, "the history is gone: a new numbering");
+        assert_eq!(e.commands_ended(), 1);
+    }
+
+    /// After a full reset the terminal redraws no prompt until the shell says it does again,
+    /// so a resize at a prompt drawn after the reset leaves it alone. A `redraw=1` from before
+    /// the reset no longer counts.
+    #[test]
+    fn a_full_reset_forgets_that_the_shell_redraws_its_prompt() {
+        let mut e = engine(20, 4);
+        e.write(b"\x1b]133;A;redraw=1\x07$ \x1b]133;B\x07");
+        e.write(b"\x1bcout\r\n\x1b]133;A\x07$ \x1b]133;B\x07ls");
+        e.resize(TermSize { cols: 30, ..e.size() }).unwrap();
+        let f = e.full_frame(0).unwrap();
+        let rows: Vec<String> = f.updates.iter().map(|u| u.line.text()).collect();
+        assert_eq!(rows[..2], ["out", "$ ls"]);
+    }
+
+    /// A command that resets the terminal (`reset`, `tput reset`) still ends: it was running
+    /// when the reset cleared its rows, and the shell's `133;D` comes after.
+    #[test]
+    fn a_command_that_resets_the_terminal_still_ends() {
+        let mut e = engine(20, 6);
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07reset\r\n\x1b]133;C\x07\x1bc");
+        e.write(b"\x1b]133;D;0\x07\x1b]133;A\x07$ ");
+        assert_eq!(e.commands_ended(), 1);
+        let blocks = e.commands(None).unwrap();
+        assert_eq!((blocks.len(), blocks[0].finished, blocks[0].exit), (1, true, Some(0)));
+    }
+
+    /// An output start whose command line (`cmdline_url`, as fish 4 writes it) is longer than
+    /// any buffer is still an output start: the command runs and its end counts.
+    #[test]
+    fn a_long_command_line_still_starts_the_output() {
+        let mut e = engine(20, 6);
+        let long = "x".repeat(4096);
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n");
+        e.write(format!("\x1b]133;C;cmdline_url={long}\x07out\r\n\x1b]133;D;0\x07").as_bytes());
+        assert_eq!(e.commands_ended(), 1);
+    }
+
+    /// A write that evicts the history a command's prompt was on still ends the command: the
+    /// marks are taken once the write has settled.
+    #[test]
+    fn a_command_whose_prompt_the_same_write_evicts_still_ends() {
+        let mut e = GhosttyEngine::new(EngineConfig {
+            size: TermSize {
+                cols: 10,
+                rows: 2,
+                metrics: CellMetrics { cell_width: 8, cell_height: 16 },
+            },
+            scrollback_lines: 4,
+        })
+        .unwrap();
+        let mut out = b"\x1b]133;A\x07$ \x1b]133;B\x07x\r\n\x1b]133;C\x07\x1b]133;D;3\x07".to_vec();
+        for i in 0..5000 {
+            out.extend_from_slice(format!("o{i}\r\n").as_bytes());
+        }
+        e.write(&out);
+        assert_ne!(e.position().unwrap().epoch, 0, "the write evicted the anchor with the prompt");
+        assert_eq!(e.commands_ended(), 1);
+    }
+
+    /// A command typed at a prompt drawn before a resize is a command: the resize renumbers
+    /// the lines but keeps the prompt's block open, and bash draws no new `133;A` for it.
+    #[test]
+    fn a_command_typed_after_a_resize_at_the_prompt_is_tracked() {
+        let mut e = engine(20, 6);
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        e.resize(TermSize { cols: 30, ..e.size() }).unwrap();
+        e.write(b"ls\r\n\x1b]133;C\x07a.rs\r\n\x1b]133;D;0\x07");
+        assert_eq!(e.commands_ended(), 1);
+        let blocks = e.commands(None).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!((blocks[0].command.as_str(), blocks[0].exit), ("ls", Some(0)));
+    }
+
+    /// A command that runs through a resize still ends: the reflow renumbers the lines, and
+    /// its block goes on from the cursor.
+    #[test]
+    fn a_command_running_through_a_resize_still_ends() {
+        let mut e = engine(20, 6);
+        e.write(b"\x1b]133;A\x07$ \x1b]133;B\x07sleep 9\r\n\x1b]133;C\x07");
+        e.resize(TermSize { cols: 30, ..e.size() }).unwrap();
+        e.write(b"done\r\n\x1b]133;D;0\x07");
+        assert_eq!(e.commands_ended(), 1);
+        let blocks = e.commands(None).unwrap();
+        assert_eq!((blocks.len(), blocks[0].finished, blocks[0].exit), (1, true, Some(0)));
     }
 
     /// OSC 9 (a body), OSC 777 `notify` (title and body) and OSC 99 (kitty) are one event;
@@ -3851,6 +4108,38 @@ mod tests {
         assert!(text[1..].iter().all(String::is_empty), "{text:?}");
     }
 
+    /// A cursor saved while waiting to wrap stays after the line through two widenings in a
+    /// row. The first moves it into the blank after the line; the second reflowed that blank as
+    /// if it followed the previous line, which pulled the cursor back onto the last `A`
+    /// (ghostty #14478, carried in aislopware/ghostty).
+    #[test]
+    fn a_saved_cursor_survives_repeated_widening() {
+        let mut e = engine(4, 5);
+        e.write(b"abc\r\nAAA|\x1b7");
+        e.resize(TermSize { cols: 5, ..e.size() }).unwrap();
+        e.resize(TermSize { cols: 6, ..e.size() }).unwrap();
+        e.write(b"\x1b8X");
+        let f = e.full_frame(0).unwrap();
+        let text: Vec<String> = f.updates.iter().map(|u| u.line.text()).collect();
+        assert_eq!(text[..2], ["abc", "AAA|X"]);
+        assert!(text[2..].iter().all(String::is_empty), "{text:?}");
+    }
+
+    /// A cursor saved in the blanks after a line stays after it when narrowing wraps the line.
+    /// ghostty measured how far into the blanks it may go from the start of the row, not from
+    /// the end of the wrapped line, and put it on the `d` (carried in aislopware/ghostty).
+    #[test]
+    fn a_saved_cursor_after_a_line_that_narrowing_wraps_stays_after_it() {
+        let mut e = engine(8, 5);
+        e.write(b"abcdef\x1b[1;8H\x1b7\x1b[4;1H");
+        e.resize(TermSize { cols: 4, ..e.size() }).unwrap();
+        e.write(b"\x1b8X");
+        let f = e.full_frame(0).unwrap();
+        let text: Vec<String> = f.updates.iter().map(|u| u.line.text()).collect();
+        assert_eq!(text[..2], ["abcd", "ef X"]);
+        assert!(text[2..].iter().all(String::is_empty), "{text:?}");
+    }
+
     #[test]
     fn wide_characters_get_spacer_tails() {
         let mut e = engine(6, 1);
@@ -4215,23 +4504,28 @@ mod checkpoint_tests {
     #[test]
     #[ignore = "measurement, run by hand"]
     fn frame_cost() {
-        let mut e = engine(60, 12, 1_000);
+        let mut e = engine(200, 60, 1_000);
         e.write(b"$ ");
         let _first = e.take_frame(0).unwrap();
         let bench = Bench::new("engine.frame_cost");
         let mut write = bench.series("write");
         let mut take = bench.series("take_frame");
+        // The worker asks again with nothing new (a flush timer, an ack): no frame.
+        let mut unchanged = bench.series("take_frame_unchanged");
         for i in 0..1_000_u32 {
             let byte = if i % 2 == 0 { b"x" } else { b"y" };
             write.time(|| e.write(byte));
             let frame = take.time(|| e.take_frame(u64::from(i)).unwrap());
             assert!(frame.is_some(), "a typed byte dirties the row");
+            let none = unchanged.time(|| e.take_frame(u64::from(i)).unwrap());
+            assert!(none.is_none(), "nothing changed");
             if i % 50 == 49 {
                 e.write(b"\r\n");
             }
         }
         write.report().unwrap();
         take.report().unwrap();
+        unchanged.report().unwrap();
     }
 
     /// What an Enter at a bottom prompt costs inside the engine: three lines of output and the
@@ -4605,6 +4899,12 @@ mod graphics_tests {
         let frame = e.take_frame(0).unwrap().expect("a frame");
         assert_eq!(frame.images.len(), 1);
         assert_eq!(e.drain_images(), vec![]);
+        // Typing on without leaving that row leaves the placeholder row clean, and a frame
+        // that visits only dirty rows would lose its run.
+        e.write(b"!");
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.updates.iter().map(|u| u.row).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(frame.images.len(), 1);
     }
 
     #[test]

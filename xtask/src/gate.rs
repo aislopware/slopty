@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use pass::{Inputs, Plan, Scope};
 use xshell::{Shell, cmd};
@@ -219,8 +219,13 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
                 scope.spawn(|| {
                     cached(inputs, &tree, &build("clippy ios"), |_| {
                         let sh = lane("clippy ios")?;
-                        lint_ios(&sh)?;
-                        lint_linux(&sh)
+                        // Linux runs whatever iOS found, so one gate names every failure.
+                        let ios = lint_ios(&sh);
+                        let linux = lint_linux(&sh);
+                        match (ios, linux) {
+                            (Err(ios), Err(linux)) => Err(anyhow::anyhow!("{ios:#}; {linux:#}")),
+                            (ios, linux) => ios.and(linux),
+                        }
                     })
                 }),
             ));
@@ -358,11 +363,32 @@ fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> R
     if errors.is_empty() { Ok(()) } else { bail!("{}", errors.join("; ")) }
 }
 
+/// `slopty_testkit::bins::FRESH`: set once every binary a test spawns is built.
+pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
+
+/// `slopty_testkit::bins::PACKAGES`, each after its `-p`.
+const SPAWNED_PACKAGES: [&str; 10] = [
+    "-p",
+    "slopty-ptyd",
+    "-p",
+    "slopty-workerd",
+    "-p",
+    "slopty-serverd",
+    "-p",
+    "slopty-cli",
+    "-p",
+    "slopty-testkit",
+];
+
 /// The gate's tests: build every test binary, then run nextest's `profile` (on `only`'s
 /// packages when given) and the doctests side by side. Cargo holds the target dir's lock only
 /// while it builds, and the build is done, so neither waits for the other.
 fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) -> Result<()> {
     quiet_step("nextest build", cmd!(sh, "cargo nextest run --workspace --no-run"))?;
+    // Every binary a test spawns, so no test shells out to cargo and waits on its locks while
+    // another build on the machine holds them.
+    quiet_step("spawned binaries", cmd!(sh, "cargo build --bins {SPAWNED_PACKAGES...}"))?;
+    let _fresh = sh.push_env(BINS_FRESH, "1");
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
     let filter: Vec<String> = only.map_or_else(Vec::new, |packages| {
@@ -612,7 +638,10 @@ pub fn lint_host(sh: &Shell) -> Result<()> {
     let host = TRIPLES[0];
     quiet_step(
         &format!("clippy {host}"),
-        cmd!(sh, "cargo clippy --workspace --all-targets --target {host} -- -D warnings"),
+        cmd!(
+            sh,
+            "cargo clippy --keep-going --workspace --all-targets --target {host} -- -D warnings"
+        ),
     )
 }
 
@@ -628,7 +657,7 @@ pub fn lint_ios(sh: &Shell) -> Result<()> {
         TRIPLES[1..].iter().flat_map(|t| ["--target".to_owned(), (*t).to_owned()]).collect();
     quiet_step(
         "clippy ios + ios-sim",
-        cmd!(sh, "cargo clippy --workspace {excludes...} {ios...} -- -D warnings"),
+        cmd!(sh, "cargo clippy --keep-going --workspace {excludes...} {ios...} -- -D warnings"),
     )
 }
 
@@ -642,12 +671,52 @@ pub fn doc(sh: &Shell, open: bool) -> Result<()> {
     let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
     quiet_step(
         "rustdoc",
-        cmd!(sh, "cargo doc --workspace --no-deps --document-private-items {open...}"),
+        cmd!(sh, "cargo doc --keep-going --workspace --no-deps --document-private-items {open...}"),
     )
 }
 
 fn deny(sh: &Shell) -> Result<()> {
-    quiet_step("cargo deny", cmd!(sh, "cargo deny --workspace check"))
+    quiet_step("cargo deny", cmd!(sh, "cargo deny --workspace check"))?;
+    one_gpui(&sh.read_file(sh.current_dir().join("Cargo.lock"))?)
+}
+
+/// The graph holds one GPUI: gpui-fast's. gpui-kit asks for `gpui-pre =0.3.x`, which the root
+/// `[patch.crates-io]` points at the fork's `compat/` crates; when gpui-kit moves to a snapshot
+/// the patch no longer matches, cargo only warns and builds crates.io's `gpui-pre` beside the
+/// fork. `gpui-pre-reqwest` is a plain reqwest, built for wasm alone.
+fn one_gpui(lock: &str) -> Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Lock {
+        package: Vec<Package>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Package {
+        name: String,
+        version: String,
+        source: Option<String>,
+    }
+    let lock: Lock = toml::from_str(lock).context("parse Cargo.lock")?;
+    let mut wrong: Vec<String> = lock
+        .package
+        .iter()
+        .filter(|p| {
+            let registry = p.source.as_deref().is_some_and(|s| s.starts_with("registry+"));
+            let pre = p.name.starts_with("gpui-pre") && p.name != "gpui-pre-reqwest";
+            registry && (pre || p.name == "gpui")
+        })
+        .map(|p| format!("{} {} from crates.io", p.name, p.version))
+        .collect();
+    let gpuis = lock.package.iter().filter(|p| p.name == "gpui").count();
+    if gpuis != 1 {
+        wrong.push(format!("{gpuis} packages named gpui"));
+    }
+    ensure!(
+        wrong.is_empty(),
+        "a second GPUI in Cargo.lock ({}): bump the gpui-fast fork's `compat/` crates to the \
+         gpui-pre version gpui-kit pins, and the root `[patch.crates-io]` with them",
+        wrong.join(", ")
+    );
+    Ok(())
 }
 
 /// `workspace-hack` carries the workspace's current feature union (`cargo xtask check` builds
@@ -688,4 +757,59 @@ fn commits(sh: &Shell) -> Result<()> {
     let range =
         last_tag.map_or_else(|| "HEAD".to_owned(), |t| format!("{}^{{commit}}..HEAD", t.trim()));
     quiet_step("committed", cmd!(sh, "committed {range} --no-merge-commit"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BINS_FRESH, SPAWNED_PACKAGES, one_gpui};
+
+    /// The gate builds what the tests look for, under the variable they read.
+    #[test]
+    fn the_spawned_binaries_match_the_testkit() {
+        let testkit = include_str!("../../crates/slopty-testkit/src/bins.rs");
+        assert!(testkit.contains(&format!("pub const FRESH: &str = \"{BINS_FRESH}\";")));
+        let packages: Vec<&str> = SPAWNED_PACKAGES.iter().copied().filter(|a| *a != "-p").collect();
+        let listed = format!("[\"{}\"]", packages.join("\", \""));
+        assert!(testkit.contains(&listed), "{listed} is not bins::PACKAGES");
+    }
+
+    const FORK: &str = "git+https://github.com/aislopware/gpui-fast.git#867b4d48";
+
+    fn lock(packages: &[(&str, &str)]) -> String {
+        packages
+            .iter()
+            .map(|(name, source)| {
+                format!(
+                    "[[package]]\nname = \"{name}\"\nversion = \"0.3.7\"\nsource = \"{source}\"\n"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_fork_and_its_compat_crates_pass() -> anyhow::Result<()> {
+        let crates_io = "registry+https://github.com/rust-lang/crates.io-index";
+        let ok = lock(&[
+            ("gpui", FORK),
+            ("gpui-pre", FORK),
+            ("gpui-pre-platform", FORK),
+            ("gpui-pre-reqwest", crates_io),
+        ]);
+        one_gpui(&ok)
+    }
+
+    #[test]
+    fn crates_io_gpui_pre_beside_the_fork_fails() {
+        let crates_io = "registry+https://github.com/rust-lang/crates.io-index";
+        let two = lock(&[("gpui", FORK), ("gpui-pre", crates_io)]);
+        let error = one_gpui(&two).map_err(|e| e.to_string()).err().unwrap_or_default();
+        assert!(error.contains("gpui-pre 0.3.7 from crates.io"), "{error}");
+    }
+
+    #[test]
+    fn a_second_gpui_package_fails() {
+        let two = lock(&[("gpui", FORK), ("gpui", "git+https://github.com/zed-industries/zed")]);
+        assert!(one_gpui(&two).is_err());
+    }
 }

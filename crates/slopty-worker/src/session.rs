@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -275,6 +275,9 @@ pub struct SessionHandle {
     activity: watch::Receiver<Activity>,
     /// Where orchestration's waits have read up to (see [`Self::mark`]).
     marks: Arc<parking_lot::Mutex<Marks>>,
+    /// A person has typed into the session and not pressed Enter since
+    /// ([`Self::draft_pending`]).
+    draft: Arc<AtomicBool>,
 }
 
 /// Orchestration's read positions in a session: output matched up to `output`, commands
@@ -283,6 +286,38 @@ pub struct SessionHandle {
 struct Marks {
     output: Option<Position>,
     command: Option<Position>,
+}
+
+/// What a person's request does to their draft: `Some(true)` when it leaves text in the
+/// program's input line, `Some(false)` when it ends with Enter (the line is sent), `None` when
+/// it types nothing (a key release, a shortcut, a move, a resize).
+fn drafts(req: &TermRequest) -> Option<bool> {
+    use slopty_proto::input::{KeyAction, KeyCode, Mods};
+    match req {
+        TermRequest::Key(key) => {
+            if key.action == KeyAction::Release || key.composing {
+                return None;
+            }
+            if matches!(key.code, KeyCode::Enter | KeyCode::NumpadEnter) {
+                return Some(false);
+            }
+            let shortcut = key.mods.intersects(Mods::CTRL | Mods::SUPER);
+            let text = key.text.as_deref().is_some_and(|t| t.chars().any(|c| !c.is_control()));
+            (text && !shortcut).then_some(true)
+        }
+        TermRequest::Raw(bytes) => {
+            let after_enter = match bytes.iter().rposition(|b| matches!(b, b'\r' | b'\n')) {
+                Some(at) => bytes.get(at.saturating_add(1)..).unwrap_or_default(),
+                None => bytes.as_slice(),
+            };
+            let typed = after_enter.iter().any(|b| !b.is_ascii_control());
+            if typed { Some(true) } else { (after_enter.len() < bytes.len()).then_some(false) }
+        }
+        // A bracketed paste's newlines stay in the input line; only Enter sends it.
+        TermRequest::Paste { text, .. } => (!text.is_empty()).then_some(true),
+        TermRequest::PastePicture(_) => Some(true),
+        _ => None,
+    }
 }
 
 /// `at` is past `mark`, or in another line numbering (which replaces it).
@@ -348,8 +383,25 @@ impl SessionHandle {
     }
 
     /// Forward a terminal request from a client.
+    ///
+    /// What a person types keeps [`Self::draft_pending`] up to date. It is noted here, as the
+    /// request is queued, rather than when the actor applies it, so a write that checks the
+    /// draft right after cannot slip in ahead of the keystroke. The nil client is the
+    /// worker's own (orchestration), which is nobody's draft.
     pub fn request(&self, client: ClientId, req: TermRequest) -> Result<(), WorkerError> {
+        if client != ClientId::nil()
+            && let Some(pending) = drafts(&req)
+        {
+            self.draft.store(pending, Ordering::Release);
+        }
         self.send(Cmd::Request { client, req, at: tokio::time::Instant::now() })
+    }
+
+    /// A person has typed into the session and not pressed Enter since: what they wrote may
+    /// sit unsent in the program's input line, and anything typed now would be merged into it.
+    #[must_use]
+    pub fn draft_pending(&self) -> bool {
+        self.draft.load(Ordering::Acquire)
     }
 
     /// The title, directory, size, viewers and exit as the actor knows them now.
@@ -525,7 +577,7 @@ pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
     let id = start.id;
     let (activity_tx, activity) =
         watch::channel(Activity { exited: start.exited.is_some(), ..Activity::default() });
-    let handle = SessionHandle { id, tx, activity, marks: Arc::default() };
+    let handle = SessionHandle { id, tx, activity, marks: Arc::default(), draft: Arc::default() };
     thread::Builder::new()
         .name(format!("session-{id}"))
         .spawn(move || {
@@ -2166,6 +2218,32 @@ fn premultiplied_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Text leaves a draft and Enter sends it, whichever way either comes; a shortcut, a move
+    /// or a release types nothing, and a line typed after an Enter in one run is a new draft.
+    #[test]
+    fn typing_leaves_a_draft_and_enter_sends_it() {
+        let key = |name: &str| {
+            TermRequest::Key(crate::orchestrate::keys::parse(name, 0).expect("a key name"))
+        };
+        let raw = |text: &str| TermRequest::Raw(text.as_bytes().to_vec());
+        assert_eq!(drafts(&key("a")), Some(true));
+        assert_eq!(drafts(&key("shift+a")), Some(true));
+        assert_eq!(drafts(&key("enter")), Some(false));
+        for none in ["ctrl+c", "cmd+k", "up", "escape", "tab"] {
+            assert_eq!(drafts(&key(none)), None, "{none}");
+        }
+        let mut released = crate::orchestrate::keys::parse("a", 0).expect("a key name");
+        released.action = slopty_proto::input::KeyAction::Release;
+        assert_eq!(drafts(&TermRequest::Key(released)), None);
+        assert_eq!(drafts(&raw("é")), Some(true));
+        assert_eq!(drafts(&raw("fix it\r")), Some(false));
+        assert_eq!(drafts(&raw("one\rtwo")), Some(true));
+        assert_eq!(drafts(&raw("\x1b")), None);
+        let paste = TermRequest::Paste { text: "a\nb\n".to_owned(), confirmed: true };
+        assert_eq!(drafts(&paste), Some(true), "a paste's newlines do not send it");
+        assert_eq!(drafts(&TermRequest::Clear), None);
+    }
 
     #[test]
     fn output_after_a_quiet_spell_is_framed_at_once() {

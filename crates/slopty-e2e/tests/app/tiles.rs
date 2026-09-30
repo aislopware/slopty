@@ -17,10 +17,13 @@ const STEP: Duration = Duration::from_secs(20);
 /// The renders' window: the size the other app goldens use.
 const WINDOW: (f32, f32) = (900.0, 600.0);
 
-/// Render the frame after every link has its round trip and two dumps agree on every tile's
-/// place, and hold it against `golden/<name>.png`.
+/// Render the frame after every link has its round trip, every shell at a prompt has its
+/// caret there and two dumps agree on every tile's place, and hold it against
+/// `golden/<name>.png`.
 async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
-    let mut last = drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
+    drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
+    let mut last =
+        drv.wait_for("the carets at their prompts", STEP, Dump::prompts_settled).await.unwrap();
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(120)).await;
         let next = drv.dump().await.unwrap();
@@ -318,7 +321,8 @@ fn serve_page() -> u16 {
 /// A page the test serves opens in a tile: the item names the worker's port, which is taken
 /// here by the test's own server, so the client serves it on another and the page loads
 /// through the tunnel. The web view reports its title and address, the tile's header says
-/// them, and the page hides while the palette is over it.
+/// them, and the page stays on screen with the palette drawn over it. A click in the page
+/// gives it the keyboard, and the edit keys then reach the page through AppKit.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_page_on_localhost_opens_in_a_browser_tile() {
@@ -348,19 +352,16 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
     golden(drv, &dir, "browser").await;
 
     drv.keys("cmd-shift-p").await.unwrap();
-    drv.wait_for("the palette over a hidden page", STEP, |d| {
+    drv.wait_for("the palette over the page, which stays", STEP, |d| {
         d.a11y_node("Dialog", Some("Commands")).is_some()
-            && d.item("browser").and_then(|i| i.browser.as_ref()).is_some_and(|b| !b.shown)
-    })
-    .await
-    .unwrap();
-    drv.keys("escape").await.unwrap();
-    drv.wait_for("the page back", STEP, |d| {
-        d.a11y_node("Dialog", Some("Commands")).is_none()
             && d.item("browser").and_then(|i| i.browser.as_ref()).is_some_and(|b| b.shown)
     })
     .await
     .unwrap();
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("the palette gone", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_none())
+        .await
+        .unwrap();
 
     // The edit keys reach the page, not the workspace: undo and redo the page's own edit,
     // then select the field's text. (Copy, cut and paste take the same path; they are left
@@ -375,9 +376,16 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
             .map(|b| b.title.clone())
             .unwrap_or_default()
     };
-    drv.wait_for("the edit page, its edit made", STEP, |d| title_of(d).starts_with("v=abcxyz|"))
+    let dump = drv
+        .wait_for("the edit page, its edit made", STEP, |d| title_of(d).starts_with("v=abcxyz|"))
         .await
         .unwrap();
+    let body = dump.a11y_node("Document", Some(&format!("Page {edit}"))).unwrap().bounds;
+    let (x, y) = (body[0] + body[2] / 2.0, body[1] + body[3] / 2.0);
+    drv.click(x, y).await.unwrap();
+    let page_id = dump.items.iter().find(|i| i.browser.as_ref().is_some_and(|b| b.url == edit));
+    let holder = format!("browser:{}", page_id.unwrap().id);
+    drv.wait_for("the page holds the keyboard", STEP, |d| d.focused == holder).await.unwrap();
     for (keys, want) in
         [("cmd-z", "v=abc|"), ("cmd-shift-z", "v=abcxyz|"), ("cmd-a", "v=abcxyz|s=6")]
     {

@@ -199,6 +199,36 @@ pub(crate) fn with_mode(args: Vec<String>, mode: Option<&str>) -> Vec<String> {
     out
 }
 
+/// The flag that starts a conversation under an id the caller chose.
+pub const SESSION_ID_FLAG: &str = "--session-id";
+
+/// Flags that pick the conversation themselves: an id of their own, or one to resume. Claude
+/// Code refuses `--session-id` beside a resume unless it forks.
+const PICKS_CONVERSATION: [&str; 6] =
+    [SESSION_ID_FLAG, "--resume", "-r", "--continue", "-c", "--from-pr"];
+
+/// `args` starting a conversation whose id is known before its first hook, and that id.
+///
+/// A fresh id is pinned with `--session-id`, unless `args` already pick the conversation:
+/// then they are returned as they are, with no id.
+///
+/// Only the id is known this early. Claude Code writes the transcript when the first prompt
+/// is sent, so until then there is nothing under the id to read or `--resume`, and
+/// [`invocation`] never keeps the flag: a resume names the conversation with `--resume`.
+#[must_use]
+pub fn with_session_id(args: Vec<String>) -> (Vec<String>, Option<String>) {
+    let picked = args.iter().take_while(|word| *word != "--").any(|word| {
+        let flag = word.split_once('=').map_or(word.as_str(), |(flag, _value)| flag);
+        PICKS_CONVERSATION.contains(&flag)
+    });
+    if picked {
+        return (args, None);
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let pinned = [SESSION_ID_FLAG.to_owned(), id.clone()].into_iter().chain(args).collect();
+    (pinned, Some(id))
+}
+
 /// Whether `id` can be a Claude Code session id: it is typed into a shell and names a file.
 pub(crate) fn is_session_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
@@ -318,6 +348,41 @@ mod tests {
         );
         assert_eq!(with_mode(started.clone(), None), started, "not reported");
         assert_eq!(with_mode(started.clone(), Some("yolo")), started, "not a mode");
+    }
+
+    /// A run is pinned to a fresh id unless its arguments pick the conversation already, and
+    /// its resume names the conversation once, with `--resume`: the pinned flag is not kept.
+    #[test]
+    fn a_run_is_pinned_to_a_conversation_id_once() {
+        let (pinned, id) = with_session_id(words("--model opus fix-it"));
+        let id = id.expect("pinned");
+        assert!(uuid::Uuid::parse_str(&id).is_ok(), "{id}");
+        assert_eq!(pinned, words(&format!("--session-id {id} --model opus fix-it")));
+        for picked in [
+            "--session-id 4f1c7a52-9d0e-4b8a-a1a3-0c5f3e0b8d11",
+            "--session-id=4f1c7a52-9d0e-4b8a-a1a3-0c5f3e0b8d11",
+            "--resume abc",
+            "-r abc",
+            "--continue",
+            "-c",
+        ] {
+            assert_eq!(with_session_id(words(picked)), (words(picked), None), "{picked}");
+        }
+        let (after, id) = with_session_id(words("-- -c"));
+        assert!(id.is_some() && after.ends_with(&words("-- -c")), "a prompt after `--`");
+
+        let kept = invocation(&pinned);
+        assert_eq!(kept.args, words("--model opus"), "the pinned id is not kept");
+        let resume = Resume {
+            session: id.unwrap_or_default(),
+            cwd: "/w".to_owned(),
+            transcript: None,
+            args: kept.args,
+            relay: false,
+        };
+        let args = resume.args();
+        assert_eq!(args.iter().filter(|a| a.starts_with("--resume")).count(), 1);
+        assert!(!args.iter().any(|a| a.starts_with(SESSION_ID_FLAG)), "{args:?}");
     }
 
     /// Only a person's own exit ends what comes back; a new conversation or a signal does not.

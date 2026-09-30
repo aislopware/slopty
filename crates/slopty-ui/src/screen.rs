@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::composition::{NativeHost, NativeHostOptions};
 use gpui::{
-    Animation, AnimationExt as _, App, Autocapitalize, Bounds, Context, CursorStyle,
+    Animation, AnimationExt as _, App, Autocapitalize, Bounds, ContentMask, Context, CursorStyle,
     ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Global,
     InteractiveElement as _, IntoElement, Keystroke, LongPressEvent, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Path, PathBuilder,
@@ -41,7 +41,7 @@ use gpui::{
     TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
     px, size,
 };
-use slopty_client::pacing::PacingStats;
+use slopty_client::pacing::{PacingStats, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
@@ -72,10 +72,16 @@ mod actions {
         [
             /// Turn the focused remote picture's fingers into a trackpad, or back.
             ToggleTrackpad,
+            /// Send the focused remote picture's trackpad gestures to the app under the pointer
+            /// on the worker, or keep them for zooming the picture here.
+            ToggleRemoteGestures,
         ]
     );
 }
-pub use actions::ToggleTrackpad;
+pub use actions::{ToggleRemoteGestures, ToggleTrackpad};
+
+/// What the palette's command calls sending a picture's gestures on: one name, on or off.
+pub const REMOTE_GESTURES: &str = "Gestures to the remote app";
 
 /// What the header's trackpad control and the palette's command call trackpad mode: one name,
 /// on or off.
@@ -291,6 +297,8 @@ pub struct ScreenView {
     shape: Option<glass::Shape>,
     /// Where the picture's layer is placed from, in the window the view last drew in.
     host: Option<Host>,
+    /// Where a striped picture's lower stripe's layer is placed from, in that window.
+    lower_host: Option<Host>,
     /// Stream size in pixels as opened.
     size: (u32, u32),
     /// Native pixel size of the target (stream size at scale 1).
@@ -324,6 +332,9 @@ pub struct ScreenView {
     /// platform presents no frames, so its hosts record no placement).
     #[cfg(test)]
     layer_at: LayerAt,
+    /// The same for a striped picture's lower stripe's layer (tests).
+    #[cfg(test)]
+    lower_at: LayerAt,
     /// The stream size the worker maps input with: the size last asked for, or last told by
     /// `Geometry`. The worker takes a new scale in order with the input behind it, so frames
     /// still in flight at the old scale must not move it (unlike `size`, the picture's).
@@ -383,6 +394,8 @@ pub struct ScreenView {
     /// Holds the device out of idle sleep (the Mac) or its screen on (the phone) for as long as
     /// this window streams; dropping the view lets go.
     _awake: Task<()>,
+    /// A detached global observer outlives the view until the global next changes.
+    _capture: Subscription,
     /// On the Mac, GPUI's hold is the system's only: this one keeps the display on too, since
     /// a viewer watching a remote window is not touching the keyboard. `None` under test, which
     /// must not keep this machine's display awake (and whose first activity costs ~17 s in a
@@ -419,6 +432,12 @@ pub struct ScreenView {
     typer: Option<Task<()>>,
     /// Fingers are the pointer here (see [`TOUCH`]); tests turn it on.
     touch: bool,
+    /// What the time a gesture's report was read is counted from ([`Self::time_us`]).
+    epoch: Instant,
+    /// A trackpad's pinch goes to the app under the pointer on the worker rather than zooming
+    /// the picture here ([`ToggleRemoteGestures`]); a pinch it sent is still going on.
+    remote_gestures: bool,
+    remote_pinch: bool,
     /// The zoom readout while it shows, the generation of the last change, and the timer that
     /// takes it down.
     readout: Option<Readout>,
@@ -445,6 +464,9 @@ pub struct HudInput<'a> {
     pub scale: f32,
     /// How much colour the pictures carry, as decoded; `None` before the first.
     pub chroma: Option<Chroma>,
+    /// A striped stream's captures shown with both stripes in one refresh, and apart; `None`
+    /// for one picture.
+    pub seams: Option<(u64, u64)>,
     /// The rate the stream is asked for, frames a second: its display period.
     pub target_fps: u16,
     /// Decoded frames per second over the last sample period.
@@ -461,6 +483,9 @@ pub struct HudInput<'a> {
     pub stats: &'a ScreenStats,
     /// Arrival → present, from the element's pacer.
     pub pacing: &'a PacingStats,
+    /// Capture on the worker → the glass, from the element's pacer; empty until the stream's
+    /// clock probes have placed the worker's clock ([`ScreenStats::clock`]).
+    pub capture: &'a Spread,
     /// The UI's own frame times, when the app installed a probe.
     pub ui: Option<&'a crate::frames::FrameStats>,
 }
@@ -469,16 +494,20 @@ pub struct HudInput<'a> {
 /// did, when the picture was shown, and how the UI itself keeps up.
 ///
 /// Line one is the picture: its size and capture scale, how much colour it carries (4:4:4 when
-/// the decoder hands back full-chroma pictures, `xf44`, else 4:2:0) and the age of the frame
-/// being shown; its rate, throughput and round trip are the plain line's
+/// the decoder hands back full-chroma pictures, `xf44`, else 4:2:0), the age of the frame
+/// being shown and, for a stream coded as two stripes, how many captures reached the glass with
+/// both stripes in one refresh and how many apart; its rate, throughput and round trip are the
+/// plain line's
 /// (`health::summary`). Line two is the path: jitter (RFC 3550 interarrival), how long frames
 /// waited for their last fragment (p50 / p95 of the last report), the in-order queue, recovery
 /// counts, stalls and the worker's bitrate verdict. Line three is the audio: packets played, lost
 /// and concealed, the times playback ran dry, how much the jitter buffer trimmed and stretched to
 /// hold its depth, and the depth it aims for. Line four is the presentation: how long a
-/// frame takes from the arrival of the datagram that completed it to the paint that shows it
-/// (p50 / p95 / worst of the last `slopty_client::pacing::RING` frames, with the decoder's share
-/// of it), the spacing of those paints and its jitter, and the two cadence faults —
+/// frame takes from its capture on the worker to the glass (p50 / p95 / worst, and how far the
+/// estimate of the worker's clock may be off: `docs/decisions/video.md`, "Capture to glass on
+/// any link"), then from the arrival of the datagram that completed it to the glass (p50 / p95 /
+/// worst of the last `slopty_client::pacing::RING` frames, with the decoder's share of it), the
+/// spacing of those paints and its jitter, and the two cadence faults —
 /// `skip` (a frame the display never saw) and `repeat` (a paint that showed the picture again).
 /// Line five is the UI: draw time of the whole window (p50 / p95 / p99 / max over the last
 /// [`crate::frames::RING`] frames), the spacing of frames, and how many went over the display
@@ -504,12 +533,25 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
         },
     );
     let pacing = input.pacing;
+    let capture = match (input.capture.count, stats.clock) {
+        (1.., Some(clock)) => format!(
+            "capture {:.1} / {:.1} / {:.1} ms ±{:.1}",
+            ms(input.capture.p50),
+            ms(input.capture.p95),
+            ms(input.capture.max),
+            ms(clock.bound)
+        ),
+        _ => "capture –".to_owned(),
+    };
     let ui = crate::frames::hud_line(input.ui);
+    let stripes = input.seams.map_or_else(String::new, |(together, apart)| {
+        format!("  ·  stripes {together} together {apart} apart")
+    });
     format!(
-        "{}×{} @{:.2}  ·  {chroma}  ·  {age}\n\
+        "{}×{} @{:.2}  ·  {chroma}  ·  {age}{stripes}\n\
          jitter {:.1} ms  ·  hold {:.1} / {:.1} ms  ·  queue {}  ·  fec {} lost {} nack {} refresh {}  ·  stalls {} ({} ms) {stall}  ·  {rate}\n\
          audio {} lost {} concealed {}  ·  dry {}  ·  trimmed {:.0} ms stretched {:.0} ms  ·  target {:.0} ms\n\
-         present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}\n\
+         {capture}  ·  present {:.1} / {:.1} / {:.1} ms (decode {:.1})  ·  every {:.1} ms ±{:.1}  ·  shown {} skip {} repeat {} late {}\n\
          {ui}",
         input.size.0,
         input.size.1,
@@ -570,6 +612,17 @@ pub const fn chroma_label(chroma: Chroma) -> &'static str {
     }
 }
 
+/// A gesture's phase as the wire carries it: GPUI folds AppKit's may-begin into its start.
+#[must_use]
+pub const fn gesture_phase(phase: TouchPhase) -> ScrollPhase {
+    match phase {
+        TouchPhase::Started => ScrollPhase::Began,
+        TouchPhase::Moved => ScrollPhase::Changed,
+        TouchPhase::Ended => ScrollPhase::Ended,
+        TouchPhase::Cancelled => ScrollPhase::Cancelled,
+    }
+}
+
 /// What the item says while it has no picture yet.
 ///
 /// The two cases look identical to the viewer and are not: a stream still starting up will draw
@@ -580,6 +633,27 @@ pub const fn waiting_text(source: SourceState) -> &'static str {
     match source {
         SourceState::Live => "Waiting for the first frame…",
         SourceState::Idle => "Waiting for the window to draw…",
+        SourceState::Locked | SourceState::Away => console_notice(source).0,
+    }
+}
+
+/// What the tile says over its picture while the worker's Mac shows nothing of the session.
+///
+/// A title and a line under it, for a locked Mac or one whose screens another session has; an
+/// empty title otherwise (`docs/decisions/video.md`, "The client is told when the Mac is
+/// locked"). It says what is so and when it ends, and asks nothing: unlocking is done at the
+/// Mac.
+#[must_use]
+pub const fn console_notice(source: SourceState) -> (&'static str, &'static str) {
+    match source {
+        SourceState::Locked => {
+            ("The Mac is locked", "The picture returns when someone signs in at it.")
+        }
+        SourceState::Away => (
+            "The Mac is at the login window",
+            "Or another user has its screen. The picture returns when this account does.",
+        ),
+        SourceState::Idle | SourceState::Live => ("", ""),
     }
 }
 
@@ -824,7 +898,7 @@ impl ScreenView {
         })));
         let pump = Self::pump(glass.shapes(), handle.cursor(), cx);
         // A render that captures the window draws the picture itself ([`capture_pictures`]).
-        cx.observe_global::<CapturePictures>(|_view, cx| cx.notify()).detach();
+        let capture = cx.observe_global::<CapturePictures>(|_view, cx| cx.notify());
         // Somebody is watching a remote window: the platform must not dim or sleep under it.
         let acquisition = cx.prevent_idle_sleep("Slopty remote window");
         let awake = cx.spawn(async move |_this, _cx| match acquisition.await {
@@ -844,6 +918,7 @@ impl ScreenView {
             glass,
             shape: None,
             host: None,
+            lower_host: None,
             system_keys: false,
             typing: VecDeque::new(),
             typer: None,
@@ -867,6 +942,8 @@ impl ScreenView {
             test_pictures: 0,
             #[cfg(test)]
             layer_at: Rc::default(),
+            #[cfg(test)]
+            lower_at: Rc::default(),
             mapped: size,
             out: Outbox::new(out, cx),
             theme,
@@ -892,6 +969,7 @@ impl ScreenView {
             _health: Self::watch_health(cx),
             rtt: None,
             _awake: awake,
+            _capture: capture,
             #[cfg(target_os = "macos")]
             _display: (!cfg!(test))
                 .then(|| slopty_platform::Activity::display_awake("Slopty remote window")),
@@ -906,6 +984,9 @@ impl ScreenView {
             two_scrolling: false,
             trackpad: None,
             touch: TOUCH,
+            epoch: cx.background_executor().now(),
+            remote_gestures: false,
+            remote_pinch: false,
             readout: None,
             readout_gen: 0,
             readout_timer: None,
@@ -1308,10 +1389,15 @@ impl ScreenView {
             #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
             let mbps = stats.bytes.saturating_sub(hud.sample.bytes) as f64 * 8.0 / secs / 1e6;
             let pacing = self.glass.pacing();
+            let glass = self.glass.glass();
             let input = HudInput {
                 size: self.size,
                 scale: self.quality.scale,
                 chroma: self.shape.map(|shape| shape.chroma),
+                seams: self.shape.and_then(|shape| shape.seam).map(|_seam| {
+                    let seams = self.glass.seams();
+                    (seams.together, seams.split)
+                }),
                 target_fps: self.quality.fps,
                 fps,
                 mbps,
@@ -1320,6 +1406,7 @@ impl ScreenView {
                 rate: self.rate,
                 stats: &stats,
                 pacing: &pacing,
+                capture: &glass.capture,
                 ui: ui.as_ref(),
             };
             hud.summary = health::summary(&input);
@@ -1447,6 +1534,22 @@ impl ScreenView {
     #[cfg(test)]
     pub(crate) fn show_picture(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
         let picture = glass::Picture::new(buffer);
+        let shape = glass::Shape::of(&picture);
+        self.glass.offer(picture, glass::test_stamp(self.test_pictures));
+        self.test_pictures = self.test_pictures.saturating_add(1);
+        self.shaped(shape, cx);
+    }
+
+    /// Put a striped picture up (tests): `top` showing its first `top_rows`, `lower` its rows
+    /// from `lower_from`.
+    #[cfg(test)]
+    fn show_striped(
+        &mut self,
+        (top, top_rows): (CVPixelBuffer, u32),
+        (lower, lower_from): (CVPixelBuffer, u32),
+        cx: &mut Context<Self>,
+    ) {
+        let picture = glass::Picture::striped(top, top_rows, lower, lower_from);
         let shape = glass::Shape::of(&picture);
         self.glass.offer(picture, glass::test_stamp(self.test_pictures));
         self.test_pictures = self.test_pictures.saturating_add(1);
@@ -1609,6 +1712,18 @@ impl ScreenView {
     /// picture (in trackpad mode it scrolls the remote app instead, and the two lock to
     /// whichever they did first). Two fingers tapped and lifted right-click.
     fn pinch(&mut self, ev: &PinchEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        // Each pinch keeps the side it began on, so turning the toggle over halfway through
+        // leaves neither a zoom nor the remote app's gesture without its end. A start is a new
+        // pinch whatever the last one left behind, should its end never have come.
+        let starts = ev.phase == TouchPhase::Started;
+        if starts {
+            self.remote_pinch = false;
+        }
+        let zooming = self.two.is_some() && !starts;
+        if self.remote_pinch || (self.remote_gestures && !self.touch && !zooming) {
+            self.pinch_remote(ev, cx);
+            return;
+        }
         if self.two.is_none() && (ev.phase != TouchPhase::Started || !self.inside(ev.position)) {
             return;
         }
@@ -1628,7 +1743,7 @@ impl ScreenView {
                 let Some(two) = self.two.take() else { return };
                 if self.two_scrolling {
                     self.two_scrolling = false;
-                    self.trackpad_scroll((0.0, 0.0), ScrollPhase::Ended);
+                    self.trackpad_scroll((0.0, 0.0), ScrollPhase::Ended, now);
                 }
                 if ev.phase == TouchPhase::Ended && self.touch && two.tapped(now) {
                     let (x, y) = match self.trackpad {
@@ -1639,6 +1754,46 @@ impl ScreenView {
                 }
             }
         }
+    }
+
+    /// A trackpad's pinch for the app under the fingers on the worker: each report as the
+    /// magnification AppKit read, in its phase, at the stream pixel under the fingers. Like the
+    /// zoom's, it belongs to what it started on: one that began off the picture is not taken,
+    /// and one that began on it is followed to its end even off it (`docs/decisions/input.md`,
+    /// "Trackpad gestures reach the remote app").
+    fn pinch_remote(&mut self, ev: &PinchEvent, cx: &mut Context<Self>) {
+        if !self.remote_pinch && (ev.phase != TouchPhase::Started || !self.inside(ev.position)) {
+            return;
+        }
+        cx.stop_propagation();
+        self.remote_pinch = !matches!(ev.phase, TouchPhase::Ended | TouchPhase::Cancelled);
+        let (x, y) = self.to_stream_edge(ev.position);
+        let time_us = self.time_us(cx.background_executor().now());
+        let phase = gesture_phase(ev.phase);
+        self.input(ScreenInput::Magnify { delta: ev.delta, phase, x, y, time_us });
+    }
+
+    /// Send this picture's trackpad gestures to the worker (`true`) or keep them here. A pinch
+    /// under way finishes where it began, here or on the worker. The worker is told, in order with
+    /// the input, since a trackpad scroll comes with its gesture there only while they are
+    /// sent.
+    pub fn set_remote_gestures(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on != self.remote_gestures {
+            self.remote_gestures = on;
+            self.input(ScreenInput::Gestures { remote: on });
+            cx.notify();
+        }
+    }
+
+    /// Flip [`Self::set_remote_gestures`] (the palette's command).
+    pub fn toggle_remote_gestures(&mut self, cx: &mut Context<Self>) {
+        self.set_remote_gestures(!self.remote_gestures, cx);
+    }
+
+    /// Whether this picture's trackpad gestures go to the worker.
+    #[must_use]
+    pub const fn remote_gestures(&self) -> bool {
+        self.remote_gestures
     }
 
     /// One report of the two fingers: `delta` is the scale step less one, `points` and `at`
@@ -1655,7 +1810,7 @@ impl ScreenView {
                     let phase =
                         if self.two_scrolling { ScrollPhase::Changed } else { ScrollPhase::Began };
                     self.two_scrolling = true;
-                    self.trackpad_scroll(step.by, phase);
+                    self.trackpad_scroll(step.by, phase, cx.background_executor().now());
                 }
                 touch::TwoKind::Undecided => {}
             }
@@ -1667,8 +1822,8 @@ impl ScreenView {
         self.set_zoom(panned.about(at, step.factor, max), cx);
     }
 
-    /// A two-finger drag in trackpad mode: a precise scroll at the pointer.
-    fn trackpad_scroll(&mut self, by: (f32, f32), phase: ScrollPhase) {
+    /// A two-finger drag in trackpad mode: a precise scroll at the pointer, read `now`.
+    fn trackpad_scroll(&mut self, by: (f32, f32), phase: ScrollPhase, now: Instant) {
         let Some(pad) = self.trackpad else { return };
         let (x, y) = self.picture_to_stream(pad.at());
         self.input(ScreenInput::Scroll {
@@ -1680,7 +1835,17 @@ impl ScreenView {
             x,
             y,
             mods: keys::mods(self.modifiers),
+            time_us: self.time_us(now),
         });
+    }
+
+    /// When a gesture's report was read, for the wire: microseconds since this view was made,
+    /// the low 32 bits ([`ScreenInput::time_us`]). GPUI hands over no time of AppKit's own, so
+    /// it is the moment the view takes the event, which the main thread's own delay is in.
+    fn time_us(&self, now: Instant) -> u32 {
+        #[expect(clippy::cast_possible_truncation, reason = "the wire's low 32 bits by design")]
+        let us = now.saturating_duration_since(self.epoch).as_micros() as u32;
+        us
     }
 
     /// A point of the picture (0 to 1) in the stream pixels input maps with.
@@ -1936,13 +2101,14 @@ impl ScreenView {
         // gesture that drifts off it still ends where it began.
         let (x, y) = self.to_stream_edge(ev.position);
         let mods = keys::mods(ev.modifiers);
+        let time_us = self.time_us(cx.background_executor().now());
         // A finger landing on a fling stops it, and macOS closes the old momentum before it
         // opens the new gesture.
         if precise && ev.touch_phase == TouchPhase::Started {
-            self.end_momentum(x, y, mods);
+            self.end_momentum(x, y, mods, time_us);
         }
         let (phase, momentum) = self.scroll_phases(precise, ev.touch_phase, ev.momentum_phase);
-        self.input(ScreenInput::Scroll { dx, dy, precise, phase, momentum, x, y, mods });
+        self.input(ScreenInput::Scroll { dx, dy, precise, phase, momentum, x, y, mods, time_us });
         if precise {
             if self.scrolling == Scrolling::Momentum {
                 self.arm_momentum_end(x, y, mods, cx);
@@ -2001,14 +2167,17 @@ impl ScreenView {
     fn arm_momentum_end(&mut self, x: f32, y: f32, mods: Mods, cx: &Context<Self>) {
         self.momentum_end = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(MOMENTUM_GAP).await;
-            let _gone = this.update(cx, |this, _cx| this.end_momentum(x, y, mods));
+            let _gone = this.update(cx, |this, cx| {
+                let time_us = this.time_us(cx.background_executor().now());
+                this.end_momentum(x, y, mods, time_us);
+            });
         }));
     }
 
     /// The zero-delta `momentumPhase = End` macOS sends when a fling stops, for a coast whose
     /// own close never came: without it the remote app is left latched to a scroll that never
     /// ended.
-    fn end_momentum(&mut self, x: f32, y: f32, mods: Mods) {
+    fn end_momentum(&mut self, x: f32, y: f32, mods: Mods, time_us: u32) {
         if self.scrolling != Scrolling::Momentum {
             return;
         }
@@ -2023,6 +2192,7 @@ impl ScreenView {
             x,
             y,
             mods,
+            time_us,
         });
     }
 
@@ -2177,28 +2347,52 @@ impl ScreenView {
     /// Keep a native host in the window the view draws in, `here`, and the pictures' layer on
     /// it once there is a picture: a view drawn in another window (a tile popped out) gets a
     /// host there, and its layer moves to it.
+    ///
+    /// A striped picture gets a second host and layer for its lower stripe, stacked under the
+    /// first one's ([`stripe_places`]).
     fn place_layer(&mut self, here: gpui::AnyWindowHandle, window: &mut Window, cx: &mut App) {
         if self.host.as_ref().is_none_or(|host| host.window != here) {
             self.glass.detach();
-            self.host = None;
-            let options = NativeHostOptions {
-                opaque: true,
-                interactive: false,
-                label: Some(self.label.clone()),
-            };
-            match window.create_native_host(options, cx) {
-                Ok(native) => self.host = Some(Host { window: here, native, tried: false }),
-                Err(error) => tracing::warn!(%error, "no native host for the picture's layer"),
-            }
+            self.host = self.new_host(here, window, cx);
+            self.lower_host = None;
         }
         let Some(host) = self.host.as_mut() else { return };
-        if self.shape.is_none() || host.tried {
+        let Some(shape) = self.shape else { return };
+        if !host.tried {
+            host.tried = true;
+            if let Err(error) = self.glass.attach(&host.native) {
+                tracing::warn!(%error, "no video layer for the picture");
+            }
+        }
+        if shape.seam.is_none() {
             return;
         }
-        host.tried = true;
-        if let Err(error) = self.glass.attach(&host.native) {
-            tracing::warn!(%error, "no video layer for the picture");
+        if self.lower_host.is_none() {
+            self.lower_host = self.new_host(here, window, cx);
         }
+        let Some(lower) = self.lower_host.as_mut() else { return };
+        if !lower.tried {
+            lower.tried = true;
+            if let Err(error) = self.glass.attach_lower(&lower.native) {
+                tracing::warn!(%error, "no video layer for the lower stripe");
+            }
+        }
+    }
+
+    /// A native host for a layer of the picture in the window `here`.
+    fn new_host(
+        &self,
+        here: gpui::AnyWindowHandle,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Host> {
+        let options =
+            NativeHostOptions { opaque: true, interactive: false, label: Some(self.label.clone()) };
+        window
+            .create_native_host(options, cx)
+            .inspect_err(|error| tracing::warn!(%error, "no native host for the picture's layer"))
+            .ok()
+            .map(|native| Host { window: here, native, tried: false })
     }
 
     /// The pointer drawn at `spot`, a point of the picture: the worker's cursor picture when it
@@ -2269,6 +2463,42 @@ struct Host {
     tried: bool,
 }
 
+/// Where one stripe's layer goes, and the part of it that shows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Place {
+    /// The stripe's whole picture, its rows past the seam too.
+    layer: Bounds<Pixels>,
+    /// Its rows shown: the layer is clipped to these.
+    shown: Bounds<Pixels>,
+}
+
+/// Where a striped picture drawn at `at` puts its two stripes' layers, top first: each picture
+/// at the scale of the whole, the lower one with its row at the seam on the top one's first
+/// row not shown, and each clipped at the seam. `None` for one picture.
+///
+/// Each layer's edges round to device pixels on their own, so at a scale that puts the seam
+/// between them the two can sit up to a device pixel apart; at one to one they meet exactly.
+fn stripe_places(at: Bounds<Pixels>, shape: glass::Shape) -> Option<[Place; 2]> {
+    let seam = shape.seam?;
+    #[expect(clippy::cast_precision_loss, reason = "pixel counts")]
+    let row = |rows: u32| px(rows as f32 * f32::from(at.size.height) / shape.size.1.max(1) as f32);
+    let top_layer = Bounds { origin: at.origin, size: size(at.size.width, row(seam.top)) };
+    let cut = at.origin.y + row(seam.top_rows);
+    let top_shown = Bounds { origin: at.origin, size: size(at.size.width, cut - at.origin.y) };
+    let lower_layer = Bounds {
+        origin: point(at.origin.x, cut - row(seam.lower_from)),
+        size: size(at.size.width, row(seam.lower)),
+    };
+    let lower_shown = Bounds {
+        origin: point(at.origin.x, cut),
+        size: size(at.size.width, at.origin.y + at.size.height - cut),
+    };
+    Some([
+        Place { layer: top_layer, shown: top_shown },
+        Place { layer: lower_layer, shown: lower_shown },
+    ])
+}
+
 /// Where the picture of `picture` pixels is drawn in a body at `body`: the frame it fits at
 /// ([`zoom::fit`]), or `zoom.scale()` times that with its top-left at `zoom.origin()` in the
 /// frame's fractions.
@@ -2301,7 +2531,7 @@ pub fn capture_pictures(on: bool, cx: &mut App) {
     cx.set_global(CapturePictures(on));
 }
 
-fn capturing(cx: &App) -> bool {
+pub(crate) fn capturing(cx: &App) -> bool {
     cx.try_global::<CapturePictures>().is_some_and(|capture| capture.0)
 }
 
@@ -2542,28 +2772,66 @@ impl Render for ScreenView {
         let picture = match (self.shape, &self.host) {
             (Some(shape), Some(host)) => {
                 let native = host.native.clone();
+                let lower_native = self.lower_host.as_ref().map(|host| host.native.clone());
                 let zoom = self.zoom;
                 let captured = capturing(cx).then(|| self.glass.last()).flatten();
                 #[cfg(test)]
-                let layer_at = Rc::clone(&self.layer_at);
+                let (layer_at, lower_at) = (Rc::clone(&self.layer_at), Rc::clone(&self.lower_at));
                 // The layer goes where the picture is drawn, from the body as this frame lays
                 // it out, clipped by the body and whatever clips the tile. GPUI keeps the
-                // pointer over it (no hitbox): the view forwards it to the worker.
+                // pointer over it (no hitbox): the view forwards it to the worker. A striped
+                // picture's two layers stack, each clipped to its rows.
                 canvas(
                     |_bounds, _window, _cx| {},
                     move |body, (), window, _cx| {
                         let at = picture_bounds(body, shape.size, zoom);
-                        window.paint_native(&native, at, gpui::Corners::default(), None);
-                        #[cfg(test)]
-                        layer_at.set(Some((at, window.content_mask().bounds)));
-                        if let Some(picture) = captured {
-                            window.paint_surface(at, picture.buffer());
-                        }
+                        let Some([top, lower]) = stripe_places(at, shape) else {
+                            window.paint_native(&native, at, gpui::Corners::default(), None);
+                            #[cfg(test)]
+                            layer_at.set(Some((at, window.content_mask().bounds)));
+                            if let Some(picture) = captured {
+                                window.paint_surface(at, picture.buffer());
+                            }
+                            return;
+                        };
+                        window.with_content_mask(
+                            Some(ContentMask { bounds: top.shown }),
+                            |window| {
+                                window.paint_native(
+                                    &native,
+                                    top.layer,
+                                    gpui::Corners::default(),
+                                    None,
+                                );
+                                #[cfg(test)]
+                                layer_at.set(Some((top.layer, window.content_mask().bounds)));
+                                if let Some(picture) = &captured {
+                                    window.paint_surface(top.layer, picture.buffer());
+                                }
+                            },
+                        );
+                        let mask = Some(ContentMask { bounds: lower.shown });
+                        window.with_content_mask(mask, |window| {
+                            if let Some(native) = &lower_native {
+                                let corners = gpui::Corners::default();
+                                window.paint_native(native, lower.layer, corners, None);
+                                #[cfg(test)]
+                                lower_at.set(Some((lower.layer, window.content_mask().bounds)));
+                            }
+                            if let Some(buffer) = captured.as_ref().and_then(glass::Picture::lower)
+                            {
+                                window.paint_surface(lower.layer, buffer);
+                            }
+                        });
                     },
                 )
                 .absolute()
                 .inset_0()
                 .into_any_element()
+            }
+            // The notice over the body says it; a second line under it would repeat it.
+            (None, _) if matches!(self.source, SourceState::Locked | SourceState::Away) => {
+                div().size_full().into_any_element()
             }
             (None, _) if waited => {
                 let text = waiting_text(self.source);
@@ -2617,6 +2885,7 @@ impl Render for ScreenView {
         });
 
         let hud = self.hud_text(cx).map(|(summary, text)| self.hud_panel(&summary, &text, cx));
+        let console = self.console_overlay();
         div()
             .id("screen")
             // While the view has the keys, the workspace's own chords stand back (`!Screen`).
@@ -2649,15 +2918,65 @@ impl Render for ScreenView {
             .on_action(cx.listener(|this, _: &ToggleTrackpad, _window, cx| {
                 this.toggle_trackpad(cx);
             }))
+            .on_action(cx.listener(|this, _: &ToggleRemoteGestures, _window, cx| {
+                this.toggle_remote_gestures(cx);
+            }))
             .child(picture)
             .child(record_bounds)
             .children(self.cursor_overlay(drawn))
+            .children(console)
             .children(readout)
             .children(hud)
     }
 }
 
 impl ScreenView {
+    /// While the worker's Mac is locked or another session has its screens: the body dimmed
+    /// under the modal scrim, whatever picture it last showed kept under it, and in its middle
+    /// a lifted card that says so ([`console_notice`]). A status, so a screen reader hears the
+    /// change. Nothing moves in or out: it comes and goes with the worker's word.
+    ///
+    /// The pointer and keys still reach the worker through it, as they would reach the lock
+    /// screen at the Mac: unlocking from here is not built, and nothing stops it either.
+    fn console_overlay(&self) -> Option<gpui::AnyElement> {
+        let (title, detail) = console_notice(self.source);
+        if title.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let icon = match self.source {
+            SourceState::Away => crate::icons::IconName::MonitorOff,
+            _ => crate::icons::IconName::Lock,
+        };
+        let card = kit::elevate(div(), theme)
+            .rounded(px(theme.radii.lg))
+            .py(px(theme.spacing.lg))
+            .max_w(px(kit::Overlay::List.bounds().0 / 2.0))
+            .child(kit::notice(
+                theme,
+                1.0,
+                kit::notice_mark(theme, icon, 1.0),
+                title,
+                Some(SharedString::new_static(detail)),
+            ));
+        Some(
+            div()
+                .id("screen-console")
+                .debug_selector(|| "screen-console".to_owned())
+                .role(gpui::accesskit::Role::Status)
+                .aria_label(title)
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(theme.spacing.md))
+                .bg(kit::scrim(theme))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
     /// The stats overlay: a lifted panel at the picture's top right with the plain line (a
     /// figure past its threshold in the warning tone) and, behind "Details", the engineering
     /// lines in the mono face. It floats: over a remote desktop's own white or black a veil of
@@ -2889,6 +3208,7 @@ fn is_paste_chord(keystroke: &Keystroke) -> bool {
 #[cfg(test)]
 mod tests {
     use gpui::AppContext as _;
+    use slopty_client::pacing::{ClockAnchor, ClockEstimate};
     use slopty_core::DisplayId;
 
     use super::*;
@@ -2930,6 +3250,12 @@ mod tests {
             audio_trimmed: Duration::from_millis(40),
             audio_stretched: Duration::from_millis(20),
             audio_target: Duration::from_millis(60),
+            clock: Some(ClockEstimate {
+                anchor: ClockAnchor { at: Instant::now(), host_us: 0 },
+                bound: Duration::from_micros(280),
+                rtt: Duration::from_micros(560),
+                drift_ppm: 0,
+            }),
             ..ScreenStats::default()
         };
         let pacing = PacingStats {
@@ -2949,6 +3275,7 @@ mod tests {
             size: (1920, 1080),
             scale: 1.0,
             chroma: Some(Chroma::Full),
+            seams: Some((1190, 3)),
             target_fps: 60,
             fps: 59.6,
             mbps: 18.25,
@@ -2957,16 +3284,22 @@ mod tests {
             rate: Some((19_200_000, RateVerdict::Stall, true)),
             stats: &stats,
             pacing: &pacing,
+            capture: &Spread {
+                p50: Duration::from_micros(31_200),
+                p95: Duration::from_millis(38),
+                max: Duration::from_micros(52_100),
+                count: 240,
+            },
             ui: None,
         });
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines,
             vec![
-                "1920×1080 @1.00  ·  4:4:4  ·  age 12 ms",
+                "1920×1080 @1.00  ·  4:4:4  ·  age 12 ms  ·  stripes 1190 together 3 apart",
                 "jitter 1.2 ms  ·  hold 2.0 / 9.0 ms  ·  queue 1  ·  fec 3 lost 1 nack 4 refresh 1  ·  stalls 2 (140 ms) flowing  ·  target 19.2 Mb/s hold (stall) (cwnd)",
                 "audio 50 lost 0 concealed 0  ·  dry 2  ·  trimmed 40 ms stretched 20 ms  ·  target 60 ms",
-                "present 5.4 / 11.9 / 28.0 ms (decode 2.1)  ·  every 16.7 ms ±1.4  ·  shown 1204 skip 2 repeat 7 late 0",
+                "capture 31.2 / 38.0 / 52.1 ms ±0.3  ·  present 5.4 / 11.9 / 28.0 ms (decode 2.1)  ·  every 16.7 ms ±1.4  ·  shown 1204 skip 2 repeat 7 late 0",
                 "ui –",
             ]
         );
@@ -2974,6 +3307,7 @@ mod tests {
             size: (0, 0),
             scale: 0.5,
             chroma: None,
+            seams: None,
             target_fps: 60,
             fps: 0.0,
             mbps: 0.0,
@@ -2982,10 +3316,14 @@ mod tests {
             rate: None,
             stats: &ScreenStats::default(),
             pacing: &PacingStats::default(),
+            capture: &Spread::default(),
             ui: None,
         });
         assert!(
-            blank.contains("chroma –") && blank.contains("age –") && blank.contains("target –"),
+            blank.contains("chroma –")
+                && blank.contains("age –")
+                && blank.contains("target –")
+                && blank.contains("capture –"),
             "{blank}"
         );
         assert!(blank.contains("present 0.0 / 0.0 / 0.0 ms"), "{blank}");
@@ -3471,6 +3809,55 @@ mod tests {
         (view, rx, cx)
     }
 
+    /// The worker saying its Mac is locked puts a status over the body that says so, above the
+    /// picture's place, and stops the refresh requests; another session on the Mac's screens
+    /// says that instead, and the notice goes when the session is back.
+    #[gpui::test]
+    fn a_locked_mac_is_said_over_the_picture(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        let statuses = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _cx| {
+                crate::a11y::tree(window)
+                    .into_iter()
+                    .filter(|n| n.role == "Status")
+                    .filter_map(|n| n.label)
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert!(cx.debug_bounds("screen-console").is_none(), "nothing to say while live");
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Locked, cx));
+        cx.run_until_parked();
+        let over = cx.debug_bounds("screen-console").expect("the notice is up");
+        assert_eq!(over.size, size(px(400.0), px(300.0)), "over the whole body");
+        assert!(statuses(cx).contains(&"The Mac is locked".to_owned()), "{:?}", statuses(cx));
+        assert!(!view.read_with(cx, |v, _| v.handle.source_live()), "no refreshes asked");
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Away, cx));
+        cx.run_until_parked();
+        let said = statuses(cx);
+        assert!(said.contains(&"The Mac is at the login window".to_owned()), "{said:?}");
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Live, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-console").is_none(), "gone with the session back");
+        assert!(view.read_with(cx, |v, _| v.handle.source_live()));
+    }
+
+    /// The notice's words are sentence case, say what is so and when it ends, and never
+    /// ask for anything the client cannot do.
+    #[test]
+    fn the_console_notice_says_what_is_so() {
+        assert_eq!(console_notice(SourceState::Live), ("", ""));
+        assert_eq!(console_notice(SourceState::Idle), ("", ""));
+        for state in [SourceState::Locked, SourceState::Away] {
+            let (title, detail) = console_notice(state);
+            assert!(title.starts_with("The Mac is"), "{title}");
+            // Unlocking from here is not offered, so nothing reads as though it were.
+            let offers = detail.to_lowercase().contains("unlock");
+            assert!(detail.ends_with('.') && !offers, "{detail}");
+            assert_eq!(waiting_text(state), title);
+        }
+    }
+
     /// The `Focused` requests the worker was sent for the test views' stream.
     fn told_focus(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<bool> {
         sent(rx)
@@ -3756,7 +4143,7 @@ mod tests {
             other => panic!("expected a release, got {other:?}"),
         }
         match &got[3] {
-            ScreenInput::Scroll { dx, dy, precise: true, phase, momentum, x, y, mods } => {
+            ScreenInput::Scroll { dx, dy, precise: true, phase, momentum, x, y, mods, .. } => {
                 assert_eq!((*dx, *dy), (3.0, -12.0));
                 assert_eq!((*phase, *momentum), (ScrollPhase::Changed, ScrollPhase::None));
                 assert!(near((*x, *y), 400.0, 300.0), "{got:?}");
@@ -4188,6 +4575,185 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.zoom), Zoom::FIT, "and back");
     }
 
+    /// With the picture's gestures sent on, a trackpad pinch that begins on the picture reaches
+    /// the worker as the magnification AppKit read, in its phases, at the stream pixel under the
+    /// fingers, followed to its end even off the picture, and the picture keeps its zoom; one
+    /// that begins off the picture is not sent. Turned off, a pinch zooms the picture again. The
+    /// worker is told of each turn, ahead of the input after it.
+    #[gpui::test]
+    fn a_pinch_goes_to_the_remote_app_when_its_gestures_are_sent(cx: &mut gpui::TestAppContext) {
+        // A wide picture, drawn across the middle of the body with the body's page above it.
+        let (view, mut rx, cx) =
+            windowed_sized(cx, CaptureTarget::Display(DisplayId(2)), (800, 300));
+        drop(sent(&mut rx));
+        view.update(cx, |v, cx| v.set_remote_gestures(true, cx));
+        let pinch = |cx: &mut gpui::VisualTestContext, at, delta, phase| {
+            cx.simulate_event(PinchEvent {
+                position: at,
+                delta,
+                modifiers: Modifiers::default(),
+                phase,
+            });
+            cx.run_until_parked();
+        };
+        let middle = at_fraction(&view, cx, 0.5, 0.5);
+        let outside = at_fraction(&view, cx, 0.5, 0.1);
+        pinch(cx, middle, 0.0, TouchPhase::Started);
+        pinch(cx, middle, 0.25, TouchPhase::Moved);
+        pinch(cx, outside, -0.1, TouchPhase::Moved);
+        pinch(cx, outside, 0.0, TouchPhase::Ended);
+        pinch(cx, outside, 0.0, TouchPhase::Started);
+        let sent_on = inputs(&mut rx);
+        assert_eq!(sent_on.first(), Some(&ScreenInput::Gestures { remote: true }), "{sent_on:?}");
+        let magnified: Vec<(f32, ScrollPhase, f32, f32)> = sent_on
+            .into_iter()
+            .filter_map(|input| match input {
+                ScreenInput::Magnify { delta, phase, x, y, .. } => Some((delta, phase, x, y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            magnified.iter().map(|m| (m.0, m.1)).collect::<Vec<_>>(),
+            [
+                (0.0, ScrollPhase::Began),
+                (0.25, ScrollPhase::Changed),
+                (-0.1, ScrollPhase::Changed),
+                (0.0, ScrollPhase::Ended),
+            ],
+            "the pinch that began off the picture is not sent"
+        );
+        assert!((magnified[0].2 - 400.0).abs() < 1.0, "the middle of 800 px: {magnified:?}");
+        assert!(
+            magnified[2..].iter().all(|m| m.3 == 0.0),
+            "followed off the picture, at its nearest edge: {magnified:?}"
+        );
+        assert_eq!(view.read_with(cx, |v, _| v.zoom), Zoom::FIT, "the picture keeps its zoom");
+
+        view.update(cx, ScreenView::toggle_remote_gestures);
+        assert!(!view.read_with(cx, |v, _| v.remote_gestures()));
+        pinch(cx, middle, 0.0, TouchPhase::Started);
+        pinch(cx, middle, 0.5, TouchPhase::Moved);
+        pinch(cx, middle, 0.0, TouchPhase::Ended);
+        assert!(view.read_with(cx, |v, _| v.zoom) != Zoom::FIT, "zooms here again");
+        let sent_off = inputs(&mut rx);
+        assert_eq!(sent_off.first(), Some(&ScreenInput::Gestures { remote: false }));
+        assert!(sent_off.iter().all(|i| !matches!(i, ScreenInput::Magnify { .. })));
+    }
+
+    /// A trackpad scroll's reports and a pinch's carry when the view read them, in microseconds
+    /// of one clock, so the worker can post them at the fingers' spacing whatever the path
+    /// does to them on the way.
+    #[gpui::test]
+    fn a_gesture_s_reports_carry_when_they_were_read(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) =
+            windowed_sized(cx, CaptureTarget::Display(DisplayId(2)), (800, 300));
+        drop(sent(&mut rx));
+        let at = at_fraction(&view, cx, 0.5, 0.5);
+        let steps = [Duration::ZERO, Duration::from_micros(8_333), Duration::from_millis(40)];
+        for (k, step) in steps.iter().enumerate() {
+            cx.executor().advance_clock(*step);
+            cx.simulate_event(ScrollWheelEvent {
+                position: at,
+                delta: ScrollDelta::Pixels(point(px(-10.0), px(0.0))),
+                modifiers: Modifiers::default(),
+                touch_phase: if k == 0 { TouchPhase::Started } else { TouchPhase::Moved },
+                momentum_phase: None,
+            });
+            cx.run_until_parked();
+        }
+        view.update(cx, |v, cx| v.set_remote_gestures(true, cx));
+        for (step, phase) in
+            [(Duration::ZERO, TouchPhase::Started), (Duration::from_millis(9), TouchPhase::Moved)]
+        {
+            cx.executor().advance_clock(step);
+            cx.simulate_event(PinchEvent {
+                position: at,
+                delta: 0.1,
+                modifiers: Modifiers::default(),
+                phase,
+            });
+            cx.run_until_parked();
+        }
+        let times: Vec<u32> = inputs(&mut rx).iter().filter_map(ScreenInput::time_us).collect();
+        assert_eq!(times.len(), 5, "{times:?}");
+        let gaps: Vec<u32> = times.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
+        assert_eq!(gaps, [8_333, 40_000, 0, 9_000], "{times:?}");
+    }
+
+    /// Turning the gestures over halfway through a pinch leaves that pinch where it began: one
+    /// zooming the picture keeps zooming it to its end, and one sent to the worker is sent to
+    /// its end. The next pinch takes the new side.
+    #[gpui::test]
+    fn a_pinch_keeps_its_side_when_the_gestures_turn_over(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) =
+            windowed_sized(cx, CaptureTarget::Display(DisplayId(2)), (800, 300));
+        let middle = at_fraction(&view, cx, 0.5, 0.5);
+        let pinch = |cx: &mut gpui::VisualTestContext, delta, phase| {
+            cx.simulate_event(PinchEvent {
+                position: middle,
+                delta,
+                modifiers: Modifiers::default(),
+                phase,
+            });
+            cx.run_until_parked();
+        };
+        let magnified = |rx: &mut mpsc::Receiver<ClientMsg>| -> Vec<ScrollPhase> {
+            inputs(rx)
+                .into_iter()
+                .filter_map(|input| match input {
+                    ScreenInput::Magnify { phase, .. } => Some(phase),
+                    _ => None,
+                })
+                .collect()
+        };
+        drop(sent(&mut rx));
+
+        // A zoom here, turned on halfway: it zooms to its end and nothing is sent.
+        pinch(cx, 0.0, TouchPhase::Started);
+        pinch(cx, 0.5, TouchPhase::Moved);
+        view.update(cx, |v, cx| v.set_remote_gestures(true, cx));
+        pinch(cx, 0.5, TouchPhase::Moved);
+        pinch(cx, 0.0, TouchPhase::Ended);
+        let zoomed = view.read_with(cx, |v, _| v.zoom);
+        assert!(zoomed != Zoom::FIT, "the zoom went on to its end");
+        assert!(magnified(&mut rx).is_empty(), "no half a gesture on the worker");
+
+        // Sent to the worker, turned off halfway: it is sent to its end, and the zoom stays.
+        pinch(cx, 0.0, TouchPhase::Started);
+        pinch(cx, 0.2, TouchPhase::Moved);
+        view.update(cx, |v, cx| v.set_remote_gestures(false, cx));
+        pinch(cx, 0.2, TouchPhase::Moved);
+        pinch(cx, 0.0, TouchPhase::Ended);
+        assert_eq!(
+            magnified(&mut rx),
+            [ScrollPhase::Began, ScrollPhase::Changed, ScrollPhase::Changed, ScrollPhase::Ended],
+            "the worker's gesture has its end"
+        );
+        assert_eq!(view.read_with(cx, |v, _| v.zoom), zoomed, "not zoomed here meanwhile");
+
+        // The next pinch is the picture's again.
+        pinch(cx, 0.0, TouchPhase::Started);
+        pinch(cx, 0.5, TouchPhase::Moved);
+        pinch(cx, 0.0, TouchPhase::Ended);
+        let zoomed = view.read_with(cx, |v, _| v.zoom);
+        assert!(zoomed != Zoom::FIT, "zooms here");
+        assert!(magnified(&mut rx).is_empty());
+
+        // A pinch sent to the worker whose end never came does not keep the next one there
+        // once the gestures are the picture's.
+        view.update(cx, |v, cx| v.set_remote_gestures(true, cx));
+        pinch(cx, 0.0, TouchPhase::Started);
+        pinch(cx, 0.2, TouchPhase::Moved);
+        view.update(cx, |v, cx| v.set_remote_gestures(false, cx));
+        drop(magnified(&mut rx));
+        // Out: the picture is at its largest already, where a pinch in changes nothing.
+        pinch(cx, 0.0, TouchPhase::Started);
+        pinch(cx, -0.3, TouchPhase::Moved);
+        pinch(cx, 0.0, TouchPhase::Ended);
+        assert!(magnified(&mut rx).is_empty(), "the new pinch is the picture's");
+        assert!(view.read_with(cx, |v, _| v.zoom) != zoomed, "and zooms it");
+    }
+
     /// Two fingers zoom about their centroid and pan the zoomed picture as the centroid moves;
     /// tapped and lifted at once on glass they right-click where they were. A pinch that begins
     /// off the picture is not the view's.
@@ -4540,6 +5106,62 @@ mod tests {
             Some((zoomed, rect(0., 0., 400., 300.))),
             "clipped to the body"
         );
+    }
+
+    /// A striped picture's two layers stack where the picture is drawn: at fit, the 800 × 400
+    /// picture's top stripe (256 rows coded, 192 shown) over its lower one (272 coded from row
+    /// 128, shown from its row 64), each clipped at the seam, which falls on the same line for
+    /// both. Zoomed past the body, both are clipped to it too.
+    #[gpui::test]
+    fn a_striped_pictures_layers_meet_at_the_seam(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| {
+            v.show_striped((picture(800, 256), 192), (picture(800, 272), 64), cx);
+        });
+        cx.run_until_parked();
+        let lower = |cx: &gpui::VisualTestContext| {
+            view.read_with(cx, |v, _| v.lower_at.take()).map(|(at, mask)| (at, at.intersect(&mask)))
+        };
+        assert_eq!(view.read_with(cx, |v, _| v.size), (800, 400), "both stripes' shown rows");
+        // Fit at half size in the 400 × 300 body: the picture at y 50 to 250, the seam at 146.
+        assert_eq!(layer(&view, cx), Some((rect(0., 50., 400., 128.), rect(0., 50., 400., 96.))));
+        assert_eq!(lower(cx), Some((rect(0., 114., 400., 136.), rect(0., 146., 400., 104.))));
+
+        view.update(cx, |v, cx| v.set_zoom(Zoom::FIT.about((0.5, 0.5), 2.0, 8.0), cx));
+        cx.run_until_parked();
+        // Twice that about the middle: the picture at y -50 to 350, the seam at 142.
+        assert_eq!(
+            layer(&view, cx),
+            Some((rect(-200., -50., 800., 256.), rect(0., 0., 400., 142.)))
+        );
+        assert_eq!(lower(cx), Some((rect(-200., 78., 800., 272.), rect(0., 142., 400., 158.))));
+    }
+
+    /// Each stripe's layer is its whole picture at the scale of the whole: the lower one's row
+    /// at the seam lands on the top one's first row not shown, and the shown parts tile the
+    /// picture with no gap and no overlap, at one to one and at any scale.
+    #[test]
+    fn a_stripes_shown_rows_tile_the_picture() {
+        let seam = glass::Seam { top: 1152, top_rows: 1088, lower: 1136, lower_from: 64 };
+        let shape =
+            glass::Shape { size: (3840, 2160), chroma: Chroma::Subsampled, seam: Some(seam) };
+        for (at, scale) in [(rect(0., 0., 3840., 2160.), 1.0), (rect(10., 20., 960., 540.), 0.25)] {
+            let [top, lower] = stripe_places(at, shape).expect("striped");
+            let row = |rows: f32| at.origin.y + px(rows * scale);
+            assert_eq!(top.layer.origin, at.origin);
+            assert_eq!(top.layer.size.height, px(1152. * scale));
+            assert_eq!(top.shown.bottom(), row(1088.), "the seam");
+            assert_eq!(lower.shown.top(), top.shown.bottom(), "no gap, no overlap");
+            assert_eq!(lower.layer.top() + px(64. * scale), row(1088.), "its seam row at the seam");
+            assert_eq!(lower.layer.size.height, px(1136. * scale));
+            assert_eq!(lower.shown.bottom(), at.bottom(), "down to the picture's last row");
+            assert_eq!(
+                (top.shown.size.width, lower.shown.size.width),
+                (at.size.width, at.size.width)
+            );
+        }
+        let whole = glass::Shape { seam: None, ..shape };
+        assert_eq!(stripe_places(rect(0., 0., 1., 1.), whole), None);
     }
 
     /// A tile the strip holds.

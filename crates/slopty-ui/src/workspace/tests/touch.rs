@@ -62,6 +62,7 @@ fn a_pinch_over_a_stream_zooms_it_and_over_a_shell_opens_the_overview(cx: &mut T
                 width: 1280,
                 height: 800,
                 scale: 2.0,
+                stripes: Vec::new(),
             },
             cx,
         );
@@ -115,6 +116,7 @@ fn the_palettes_trackpad_mode_reaches_the_active_picture(cx: &mut TestAppContext
                 width: 1280,
                 height: 800,
                 scale: 2.0,
+                stripes: Vec::new(),
             },
             cx,
         );
@@ -134,5 +136,51 @@ fn the_palettes_trackpad_mode_reaches_the_active_picture(cx: &mut TestAppContext
     });
     assert!(!trackpad(cx), "and off again");
     let listed = palette_items().iter().any(|i| i.label == "Trackpad mode");
+    assert!(listed, "the palette offers it");
+}
+
+/// The palette's "Gestures to the remote app" reaches the active picture with the keyboard on
+/// the workspace: off at first, so a pinch zooms here, then on, then off again.
+#[gpui::test]
+fn the_palettes_remote_gestures_reach_the_active_picture(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let window = slopty_core::WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 1);
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.screen_event(
+            key,
+            ScreenEvent::Opened {
+                stream: StreamId(1),
+                target: CaptureTarget::Window(window),
+                codec: VideoCodec::Hevc,
+                width: 1280,
+                height: 800,
+                scale: 2.0,
+                stripes: Vec::new(),
+            },
+            cx,
+        );
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    let remote = |cx: &VisualTestContext| {
+        let screen = |v: &WorkspaceView, cx: &App| {
+            v.screen(tile.item).is_some_and(|s| s.read(cx).remote_gestures())
+        };
+        view.read_with(cx, screen)
+    };
+    assert!(!remote(cx), "off by default: a pinch zooms here");
+    let toggle = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, window, cx| {
+            v.toggle_remote_gestures(&crate::screen::ToggleRemoteGestures, window, cx);
+        });
+    };
+    toggle(cx);
+    assert!(remote(cx), "on");
+    toggle(cx);
+    assert!(!remote(cx), "and off again");
+    let listed = palette_items().iter().any(|i| i.label == crate::screen::REMOTE_GESTURES);
     assert!(listed, "the palette offers it");
 }

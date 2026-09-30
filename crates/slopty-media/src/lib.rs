@@ -18,6 +18,7 @@
 )]
 
 mod audio;
+mod clock;
 mod cursor;
 mod heartbeat;
 mod layers;
@@ -28,6 +29,7 @@ mod redundancy;
 mod refine;
 
 pub use audio::{AudioCopies, AudioPackets, MAX_AUDIO_COPIES, audio_datagram, parse_audio};
+pub use clock::{CLOCK_WINDOW, ClockAnchor, ClockEstimate, ClockSync};
 pub use cursor::{cursor_datagram, parse_cursor};
 pub use heartbeat::{HEARTBEAT_AFTER, heartbeat_datagram};
 pub use layers::LayerGate;

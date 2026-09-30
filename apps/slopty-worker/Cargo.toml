@@ -56,6 +56,8 @@ slopty-client.workspace = true
 # A stand-in LocalAPI for the path reader's tests (`tailnet`).
 slopty-tailnet = { workspace = true, features = [ "fake" ] }
 tempfile.workspace = true
+# The daemons and doubles the tests spawn, found built (`slopty_testkit::bins`).
+slopty-testkit.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 objc2-application-services.workspace = true

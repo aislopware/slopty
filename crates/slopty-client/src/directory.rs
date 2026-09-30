@@ -182,7 +182,9 @@ impl Directory {
             FromServer::Welcome { .. }
             | FromServer::Refused(_)
             | FromServer::Request { .. }
-            | FromServer::Reply { .. } => Vec::new(),
+            | FromServer::Reply { .. }
+            | FromServer::Projects { .. }
+            | FromServer::Deliver { .. } => Vec::new(),
         }
     }
 

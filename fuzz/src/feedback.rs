@@ -1,17 +1,23 @@
-//! The worker's side of a client's loss feedback: NACKs answered from the packetizer's history,
-//! and receiver reports folded into the bitrate controller and the parity ratio.
+//! Both ends of a client's feedback: on the worker, NACKs answered from the packetizer's history,
+//! receiver reports folded into the bitrate controller and the parity ratio, and clock probes
+//! echoed; on the client, the echoes placed on its clock.
 //!
-//! Every field is the client's to choose. A retransmission must be a datagram of the frame asked
+//! Every field is the peer's to choose. A retransmission must be a datagram of the frame asked
 //! for, a data fragment of it, marked as a retransmission; the bitrate must stay between the
-//! floor and the client's ceiling; the parity ratio must stay within its bounds.
+//! floor and the client's ceiling; the parity ratio must stay within its bounds. A probe's echo
+//! must read back as sent, and whatever echoes come, the clock estimate must keep its drift
+//! within what it follows and never state a bound tighter than half the fastest round trip.
+
+use std::time::Instant;
 
 use arbitrary::{Arbitrary, Unstructured};
 use slopty_core::{Duration, StreamId};
 use slopty_media::{
-    AudioCopies, EncodedFrame, MAX_AUDIO_COPIES, Packetizer, PathSample, RateController, Redundancy,
+    AudioCopies, ClockSync, EncodedFrame, MAX_AUDIO_COPIES, Packetizer, PathSample, RateController,
+    Redundancy,
 };
 use slopty_proto::datagram::ClientDatagram;
-use slopty_proto::media::{MediaHeader, flags};
+use slopty_proto::media::{ClockEcho, Kind, MediaHeader, flags};
 use slopty_proto::screen::{Feedback, ReceiverReport};
 
 const STREAM: StreamId = StreamId(3);
@@ -38,6 +44,11 @@ enum Op {
     Report { report: Report, datagrams_sent: u32, rtt_ns: Option<(u64, u64)> },
     /// The client's ceiling moves.
     Ceiling(u32),
+    /// A media datagram reaches the client `arrived_us` after its clock's epoch: a clock echo
+    /// among them is placed on the client's clock.
+    Echo { bytes: Vec<u8>, arrived_us: u32 },
+    /// An echo's readings, as a worker may fill them, reach the client.
+    Readings { sent_us: u64, received_us: u64, echoed_us: u64, arrived_us: u64 },
 }
 
 /// [`ReceiverReport`]'s fields, as the client may fill them.
@@ -102,10 +113,14 @@ struct Worker {
     audio: AudioCopies,
     /// Reports taken, each a 50 ms report period on the audio copies' clock.
     reports: u64,
+    /// The client's clock estimate, and the moment its probes are stamped from.
+    clock: ClockSync,
+    epoch: Instant,
 }
 
 impl Worker {
     fn new(plan: &Plan) -> Self {
+        let epoch = Instant::now();
         let mut packetizer = Packetizer::new(STREAM);
         packetizer.set_parity_permille(plan.parity_permille);
         Self {
@@ -115,6 +130,8 @@ impl Worker {
             redundancy: Redundancy::default(),
             audio: AudioCopies::default(),
             reports: 0,
+            clock: ClockSync::new(epoch),
+            epoch,
         }
     }
 
@@ -133,12 +150,27 @@ impl Worker {
                 let _sent = self.packetizer.packetize(&frame, 0, |_| {});
             }
             Op::Nack { frame, fragments } => self.nack(*frame, fragments),
-            Op::Datagram(bytes) => {
-                if let Some(ClientDatagram::Feedback(Feedback::Nack { frame, fragments, .. })) =
-                    ClientDatagram::decode(bytes)
-                {
+            Op::Datagram(bytes) => match ClientDatagram::decode(bytes) {
+                Some(ClientDatagram::Feedback(Feedback::Nack { frame, fragments, .. })) => {
                     self.nack(frame, &fragments);
                 }
+                Some(ClientDatagram::Feedback(Feedback::Clock { stream, sent_us })) => {
+                    self.echo(stream.0, sent_us);
+                }
+                _other => {}
+            },
+            Op::Echo { bytes, arrived_us } => {
+                if let Some((header, payload)) = MediaHeader::parse(bytes)
+                    && header.kind() == Some(Kind::Clock)
+                    && let Some(echo) = ClockEcho::parse(payload)
+                {
+                    let (sent, received, echoed) =
+                        (echo.sent.get(), echo.received.get(), echo.echoed.get());
+                    self.observe(sent, received, echoed, u64::from(*arrived_us));
+                }
+            }
+            Op::Readings { sent_us, received_us, echoed_us, arrived_us } => {
+                self.observe(*sent_us, *received_us, *echoed_us, *arrived_us);
             }
             Op::Report { report, datagrams_sent, rtt_ns } => {
                 let report = ReceiverReport::from(report);
@@ -165,6 +197,35 @@ impl Worker {
                 self.rate.set_max(*max);
                 self.ceiling = (*max).max(MIN_BPS);
             }
+        }
+    }
+
+    /// The worker answers a probe, and the client reads the echo back as it was sent.
+    fn echo(&mut self, stream: u32, sent_us: u64) {
+        let (received, echoed) = (sent_us.wrapping_mul(3), sent_us.wrapping_mul(3) | 1);
+        let datagram = ClockEcho::new(sent_us, received, echoed).datagram(stream, 7);
+        let Some((header, payload)) = MediaHeader::parse(&datagram) else {
+            panic!("an echo that is not a media datagram");
+        };
+        assert_eq!((header.kind(), header.stream.get()), (Some(Kind::Clock), stream));
+        let Some(echo) = ClockEcho::parse(payload) else { panic!("an echo that does not parse") };
+        assert_eq!((echo.sent.get(), echo.received.get()), (sent_us, received));
+        assert_eq!(echo.echoed.get(), echoed);
+    }
+
+    /// The client takes an echo's readings, and its estimate stays one it can stand behind.
+    fn observe(&mut self, sent_us: u64, received_us: u64, echoed_us: u64, arrived_us: u64) {
+        let Some(arrived) = self.epoch.checked_add(std::time::Duration::from_micros(arrived_us))
+        else {
+            return;
+        };
+        let (probes, _jumps) = self.clock.counts();
+        self.clock.observe(sent_us, received_us, echoed_us, arrived);
+        assert!(self.clock.counts().0 >= probes, "the probes counted went back");
+        if let Some(estimate) = self.clock.estimate() {
+            assert!(estimate.drift_ppm.unsigned_abs() <= 500, "{estimate:?}");
+            let least = (estimate.rtt / 2).saturating_sub(std::time::Duration::from_micros(1));
+            assert!(estimate.bound >= least, "tighter than half the fastest trip: {estimate:?}");
         }
     }
 

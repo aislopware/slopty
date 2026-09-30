@@ -211,6 +211,11 @@ mod tests {
         // hold it or not by chance.
         fleet.driver.wait_for("the notice gone", STEP, |d| d.notice.is_none()).await.unwrap();
         settled(&mut fleet).await;
+        fleet
+            .driver
+            .wait_for("the carets at their prompts", STEP, Dump::prompts_settled)
+            .await
+            .unwrap();
         let path = fleet.dir.path().join("through-server.png");
         let frame = fleet.driver.render(&path).await.unwrap();
         assert_matches("through-server", &frame, TOLERANCE, &artifacts_dir()).unwrap();

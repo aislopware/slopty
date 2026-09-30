@@ -96,6 +96,11 @@
    `slopty hook` must badge the pill. The far worker is killed and restarted twice, as soon as
    it shows down and again after the server has called it unreachable. It must show down within
    5 s and be connected within 2 s of each restart. Golden `through-server`.
+   A project's board runs in the `app` suite on `harness::ProjectStack`: a `slopty-server`, one
+   worker registered with it with `slopty-stub-claude` first on its `PATH` as `claude` and a
+   `HOME` of its own, and the app pointed at the server by its settings. The orchestrator and a
+   task's agent are stubs the server starts; the project and its tasks are made and moved with
+   the `slopty` CLI. Goldens `project-tree`, `project-lanes` and `project-timeline`.
    `cargo xtask linux e2e` (serial) is a terminal-only Linux worker.
    ptyd, the worker and the `slopty` relay are cross-built for `aarch64-unknown-linux-gnu`
    and run in a Debian container on Docker Desktop, as an account with bash for its shell,
@@ -119,6 +124,28 @@ decide whether to run. One that needs the Screen Recording grant sits in its tar
 measurement sits in `frame_time` and runs under `smooth`, alone. The live tests of
 `slopty-capture` and `slopty-input` still return early without `SLOPTY_SCREEN_E2E` or
 `SLOPTY_INPUT_E2E`, which the xtask sets for them.
+
+## Live lane in a VM
+A test that moves the real pointer, posts HID events, locks the screen, reaches the login window
+or needs a TCC grant runs in a macOS guest, never on this Mac (someone works on it over Parsec)
+and never on the other one. `cargo xtask vm live -p <crate> -- <nextest args>` clones a clean
+guest from the base, deploys this tree's worker into it with `slopty worker deploy`, and runs the
+crates' tests there from a nextest archive. They run in the guest's logged-in session, where
+Accessibility, Screen Recording and `PostEvent` are granted, one at a time since there is one
+pointer, with `SLOPTY_INPUT_E2E`, `SLOPTY_SCREEN_E2E`, `SLOPTY_DND_E2E` and `SLOPTY_VM` set. The
+reports and `target/e2e` come back under `target/vm/<guest>/`. Such a test is written as any
+live test is: `#[ignore = "live: cargo xtask vm live …"]`, or gated by its variable. It posts
+only in the guest, and its pass or fail comes from what its own processes report.
+
+**A skip is a failure in the guest.** A live test that finds something missing (its variable
+unset, a grant, a display, a shell) calls `slopty_testkit::live::skip("<why>")` and returns.
+Anywhere else that prints `skipped: <why>` and the test passes unrun; under `SLOPTY_VM` the call
+fails the test instead, since a guest lacks nothing a live test needs. No test prints its own
+skip line, so the lane reads no output to decide. A host test reaches the guest's worker over the
+VM network at `SLOPTY_VM_WORKER` (`crates/slopty-e2e/tests/vm.rs`). `cargo xtask vm e2e` is the
+lane's own proof: that host test, then a real HID pointer move posted in the guest and read
+back there. Why a guest and why tart: `docs/decisions/testing.md` ▸ **Live tests that drive the
+desktop run in a macOS guest under tart**. Commands: `docs/DEV.md` ▸ "Live lane in a VM".
 
 ## Beyond the layers: the deep checks
 `cargo xtask deep <check>` (and the weekly `Deep` workflow) runs what no layer above can see

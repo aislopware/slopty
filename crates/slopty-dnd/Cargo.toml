@@ -1,0 +1,76 @@
+[package]
+name = "slopty-dnd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Drag and drop at a point on a worker: the drag helper's source, catcher and watch, and the live tests that prove them"
+
+[lints]
+workspace = true
+
+# The helper's roles are AppKit windows and pasteboards; the test apps are AppKit applications.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = [
+    "NSURL",
+    "NSTimer",
+    "NSDictionary",
+    "NSOperation",
+    "NSUserDefaults",
+    "block2",
+] }
+objc2-app-kit = { workspace = true, features = [
+    "NSDragging",
+    "NSDraggingItem",
+    "NSDraggingSession",
+    "NSFilePromiseProvider",
+    "NSFilePromiseReceiver",
+    "NSView",
+    "block2",
+] }
+objc2-core-graphics.workspace = true
+# The drag source reads the system cursor as the worker does.
+slopty-capture.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+# The spikes post through the worker's own injector and event builder, and read the pointer
+# and pictures through the worker's capture.
+slopty-input.workspace = true
+slopty-proto.workspace = true
+slopty-core.workspace = true
+# A spike that cannot run says so, and fails instead in the lane's guest.
+slopty-testkit.workspace = true
+objc2-core-foundation.workspace = true
+
+# The drop target the spikes drag onto: the test's own application, and the only one they
+# drop on (`tests/spikes.rs`).
+[[bin]]
+name = "slopty-drop-target"
+path = "tests/support/drop_target.rs"
+test = false
+doc = false
+bench = false
+
+# The application a drag starts in: the worker's drag helper in the drop-in spikes, a streamed
+# app in the drag-out ones (`tests/spikes.rs`).
+[[bin]]
+name = "slopty-drag-source"
+path = "tests/support/drag_source.rs"
+test = false
+doc = false
+bench = false
+
+# The drag helper's roles as a test app: the library's source or catcher at a point, saying
+# what each drag did (`tests/roles.rs`).
+[[bin]]
+name = "slopty-dnd-helper"
+path = "tests/support/helper.rs"
+test = false
+doc = false
+bench = false

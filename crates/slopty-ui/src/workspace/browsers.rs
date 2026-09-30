@@ -1,19 +1,18 @@
 //! Web pages in tiles: opening one (a forwarded port, an address typed into the palette), a
-//! view per browser item, the address field in its header and the page's history, and each
-//! frame the native page put over its tile or hidden.
+//! view per browser item, the address field in its header and the page's history, and the
+//! port each page loads from served on this client.
 
 use std::sync::Arc;
 
-use gpui::{App, AppContext as _, Context, Entity, IntoElement as _, Styled as _, Window, canvas};
+use gpui::{App, AppContext as _, Context, Entity, Window};
 use gpui_kit::component::input::InputState;
-use slopty_client::layout::{Rect, TileRef, WorkerKey};
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::ItemId;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 
 use super::actions::{EditAddress, InspectPage, OpenUrl, PageBack, PageForward, ReloadPage};
 use super::{Field, WorkspaceView};
-use crate::browser::{BrowserEvent, BrowserView, Cover, Zoom};
-use crate::draw::Draw;
+use crate::browser::{BrowserEvent, BrowserView, Zoom};
 use crate::palette::CommandPalette;
 
 /// What the "Open URL…" palette starts with: the forwarded ports live on localhost.
@@ -75,7 +74,7 @@ impl WorkspaceView {
     }
 
     /// The header of `tile`, a page, turns into its address, the whole of it selected. A page
-    /// that had the keyboard gives it to the field.
+    /// that had the keyboard gives it to the field, which takes the focus.
     pub(super) fn start_address(
         &mut self,
         tile: TileRef,
@@ -83,13 +82,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(view) = self.browsers.get(&tile.item).cloned() else { return };
-        let url = {
-            let page = view.read(cx);
-            if page.focused() {
-                page.release();
-            }
-            page.page().url.clone()
-        };
+        let url = view.read(cx).page().url.clone();
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(ADDRESS).default_value(url));
         self.open_field(tile, Field::Address, input, window, cx);
@@ -118,8 +111,8 @@ impl WorkspaceView {
 
     /// Whether the page's own keys (⌘← and ⌘→) are the workspace's to take: a page is focused
     /// and does not hold the keyboard, which would want them for its fields.
-    pub(super) fn page_keys(&self, cx: &App) -> bool {
-        self.focused_page().is_some_and(|v| !v.read(cx).focused())
+    pub(super) fn page_keys(&self, window: &Window, cx: &App) -> bool {
+        self.focused_page().is_some_and(|v| !v.read(cx).holds_keyboard(window))
     }
 
     /// The focused page back one page.
@@ -185,14 +178,6 @@ impl WorkspaceView {
         true
     }
 
-    /// The app draws a dialog over the workspace (settings, adding a worker): pages hide.
-    pub fn set_covered(&mut self, covered: bool, cx: &mut Context<Self>) {
-        if self.covered != covered {
-            self.covered = covered;
-            cx.notify();
-        }
-    }
-
     /// The view of a browser item, once it has one.
     #[must_use]
     pub fn browser(&self, id: ItemId) -> Option<&Entity<BrowserView>> {
@@ -221,7 +206,7 @@ impl WorkspaceView {
                 continue;
             }
             let theme = self.theme.clone();
-            let view = cx.new(|_cx| BrowserView::new(*id, *key, url, theme));
+            let view = cx.new(|cx| BrowserView::new(*id, *key, url, theme, cx));
             let item = *id;
             cx.subscribe(&view, move |this, _view, event, cx| {
                 match event {
@@ -235,6 +220,9 @@ impl WorkspaceView {
                             && this.focused() != Some(tile)
                         {
                             this.focus_tile(tile, cx);
+                            // The page holds the keyboard, which its tile's focus would give
+                            // to the workspace.
+                            this.pending_focus_self = false;
                         }
                     }
                     BrowserEvent::Released => this.pending_focus_self = true,
@@ -244,7 +232,7 @@ impl WorkspaceView {
                 cx.notify();
             })
             .detach();
-            // What the headers, rows and the page's placing show of it is copied as it changes
+            // What the headers and rows show of it is copied as it changes
             // ([`Self::page_changed`]): nothing reads the page's view to draw it.
             cx.observe(&view, move |this, _view, cx| this.page_changed(item, cx)).detach();
             self.browsers.insert(*id, view);
@@ -292,77 +280,5 @@ impl WorkspaceView {
             });
             self.page_changed(id, cx);
         }
-    }
-
-    /// What GPUI draws over the strip this frame, for the pages to hide under.
-    fn cover(&self) -> Cover {
-        let frame = self.drawn.builds.get();
-        Cover {
-            overlay: self.covered
-                || self.palette.is_some()
-                || self.search_shown()
-                || self.picker.is_some()
-                || self.menu.is_some()
-                || self.nav.open,
-            overview: self.layout.overview_open() || self.drawn.zoom.get() < 1.0,
-            toast: self.toast_drawn.get().filter(|(drawn, _)| *drawn == frame).map(|(_, b)| Rect {
-                x: f32::from(b.origin.x),
-                y: f32::from(b.origin.y),
-                w: f32::from(b.size.width),
-                h: f32::from(b.size.height),
-            }),
-        }
-    }
-
-    /// Where each page goes, over its tile's body where the strip drew it in this build, or
-    /// hidden.
-    fn browser_placements(
-        &self,
-        cx: &App,
-    ) -> Vec<(Entity<BrowserView>, crate::browser::Placement)> {
-        let drawn = self.drawn.browsers.borrow();
-        let cover = self.cover();
-        let v = self.drawn.viewport.get();
-        let strip = Rect {
-            x: f32::from(v.origin.x),
-            y: f32::from(v.origin.y),
-            w: f32::from(v.size.width),
-            h: f32::from(v.size.height),
-        };
-        self.browsers
-            .iter()
-            .map(|(id, view)| {
-                let alpha = drawn.iter().find(|(drawn, _)| drawn == id).map(|(_, alpha)| *alpha);
-                let body = alpha.and_then(|_| view.read(cx).page_area()).map(|b| Rect {
-                    x: f32::from(b.origin.x),
-                    y: f32::from(b.origin.y),
-                    w: f32::from(b.size.width),
-                    h: f32::from(b.size.height),
-                });
-                let alpha = alpha.unwrap_or_default();
-                (view.clone(), crate::browser::placement(body, strip, alpha, cover))
-            })
-            .collect()
-    }
-
-    /// An empty element, the strip's last, whose prepaint, after every tile's and the notices',
-    /// puts the pages where the tiles were drawn. The workspace is read; the pages are told.
-    pub(super) fn browser_sync(cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let this = cx.weak_entity();
-        canvas(
-            move |_bounds, window, cx| {
-                let Some(this) = this.upgrade() else { return };
-                let placements = this.read(cx).browser_placements(cx);
-                for (view, placement) in placements {
-                    if !view.read(cx).place(placement) {
-                        view.update(cx, |v, cx| v.open_at(placement, window, cx));
-                    }
-                }
-            },
-            |_bounds, (), _window, _cx| {},
-        )
-        .absolute()
-        .size_0()
-        .into_any_element()
     }
 }

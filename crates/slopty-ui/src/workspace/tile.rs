@@ -765,33 +765,30 @@ impl WorkspaceView {
         }
     }
 
-    /// Whether a tile's body may be drawn from its cached view. A cached view replays last
-    /// frame's paint, the keyboard's input handler and key listeners included, until the view
-    /// itself is notified. So a body is drawn afresh in the frame the focus comes to it or
-    /// leaves it, and a focused body in the frame the keyboard moves at all, even within the
-    /// tile (from a shell to the rename field in its header): a replayed shell would still take
-    /// the text. Otherwise the focused body is replayed too: whatever has the keyboard in it is
-    /// the view or a field the view renders as an entity (gpui-kit's inputs and textareas are
-    /// views), and a field's notify dirties every view above it. So another tile's frame (a
-    /// stream, a flood, an animation step) never draws it again, and every key, caret blink and
-    /// selection does.
-    fn cacheable(&self, placed: &Placed, window: &Window, cx: &App) -> bool {
-        let moved = placed.focused != (self.drawn.focus.get() == Some(placed.tile));
-        let keys_moved = placed.focused && window.focused(cx) != *self.drawn.keys.borrow();
-        !moved && !keys_moved
+    /// Whether a tile's body may be drawn from its cached view: not in the frame the strip's
+    /// focus comes to its tile or leaves it, which the body is laid out by. The keyboard moving
+    /// needs nothing here. A view asks for its focus through its handle (its input handler, a
+    /// caret, a focus ring), and GPUI builds again exactly the views whose answer changed, so a
+    /// shell the keyboard left for the rename field in its header is built again without its
+    /// input handler, and no other body is. Otherwise the focused body is replayed too:
+    /// whatever has the keyboard in it is the view or a field the view renders as an entity
+    /// (gpui-kit's inputs and textareas are views), and a field's notify dirties every view
+    /// above it. So another tile's frame (a stream, a flood, an animation step) never draws it
+    /// again, and every key, caret blink and selection does.
+    fn cacheable(&self, placed: &Placed) -> bool {
+        placed.focused == (self.drawn.focus.get() == Some(placed.tile))
     }
 
     /// A body's view as the strip draws it: from its cached drawing unless it is not
-    /// [`Self::cacheable`]. Then it is built again in this frame: the focus the strip follows
-    /// is given while the window draws, which tells no view.
+    /// [`Self::cacheable`]. Then it is built again in this frame: the strip's focus moved,
+    /// which tells no view.
     fn body_view<V: Render>(
         &self,
         view: &Entity<V>,
         placed: &Placed,
-        window: &Window,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
-        if self.cacheable(placed, window, cx) {
+        if self.cacheable(placed) {
             return view.clone().cached(StyleRefinement::default().size_full()).into_any_element();
         }
         let id = view.entity_id();
@@ -991,7 +988,9 @@ impl WorkspaceView {
         let branch =
             agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
         let actions = self.header_actions(tile, item, chrome, cx);
-        let face = agent.and_then(|(session, _)| self.face_toggle(tile, session, chrome, cx));
+        let face = agent
+            .map(|(session, _)| self.face_toggles(tile, session, chrome, cx))
+            .unwrap_or_default();
         // The kind's own actions stay out of sight until the tile is hovered or focused: a wall
         // of tiles reads as titles, not buttons. Touch has no hover, so the focused tile shows
         // them.
@@ -1813,9 +1812,42 @@ impl WorkspaceView {
         actions
     }
 
-    /// The button that turns an agent's tile between its TUI and its face: a control, so it
-    /// sits with fullscreen and close in the trailing strip, never among the readouts it once
-    /// split. `None` while no agent runs in the shell.
+    /// The buttons that turn an agent's tile between its TUI and its faces: controls, so they
+    /// sit with fullscreen and close in the trailing strip. An orchestrator's tile has one for
+    /// its project's board; while the board shows, that one goes back to the terminal alone.
+    fn face_toggles(
+        &self,
+        tile: TileRef,
+        session: SessionId,
+        chrome: Chrome,
+        cx: &Draw<'_, Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mut out = Vec::new();
+        let board = self.board_shown(session);
+        if self.projects().of_orchestrator(session).is_some() {
+            let (icon, label) = if board {
+                (IconName::SquareTerminal, SHOW_TERMINAL)
+            } else {
+                (IconName::Workflow, super::projects::SHOW_BOARD)
+            };
+            let id = format!("board-{}", tile.item.as_uuid());
+            out.push(
+                kit::icon_button_at(&self.theme, id, icon, label, chrome.k)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.focus_tile(tile, cx);
+                        this.show_board(session, !board, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        if !board {
+            out.extend(self.face_toggle(tile, session, chrome, cx));
+        }
+        out
+    }
+
+    /// The button that turns an agent's tile between its TUI and its conversation: never
+    /// among the readouts it once split. `None` while no agent runs in the shell.
     fn face_toggle(
         &self,
         tile: TileRef,
@@ -1888,7 +1920,7 @@ impl WorkspaceView {
         &self,
         placed: &Placed,
         readouts: Vec<gpui::AnyElement>,
-        face: Option<gpui::AnyElement>,
+        face: Vec<gpui::AnyElement>,
         k: f32,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
@@ -1924,7 +1956,7 @@ impl WorkspaceView {
         let quiet = readouts.is_empty();
         let buttons = f32::from(
             1_u8.saturating_add(u8::from(offer_fullscreen))
-                .saturating_add(u8::from(face.is_some())),
+                .saturating_add(u8::try_from(face.len()).unwrap_or(u8::MAX)),
         );
         let controls = div()
             .absolute()
@@ -2227,6 +2259,7 @@ impl WorkspaceView {
         if bare {
             return self.render_miniature(placed, item, content, cx);
         }
+        let content = self.set_back_in_doubt(placed.tile, content);
         let Some(state) = state else { return content };
         let pill = self.render_state_pill(placed.tile, item, &state, chrome, cx);
         div()
@@ -2238,6 +2271,27 @@ impl WorkspaceView {
             .flex_col()
             .child(content)
             .child(pill)
+            .into_any_element()
+    }
+
+    /// A body whose worker's link is in doubt after a resume ([`WorkerStatus::in_doubt`]),
+    /// set back: what it shows may be stale, and it says so in the frame the doubt starts, with
+    /// no word or spinner over it. It comes back the frame the probe answers or the new link
+    /// lands.
+    fn set_back_in_doubt(&self, tile: TileRef, content: gpui::AnyElement) -> gpui::AnyElement {
+        let doubt = self.workers.get(&tile.worker).is_some_and(|w| w.status.in_doubt());
+        if !doubt {
+            return content;
+        }
+        div()
+            .debug_selector(move || format!("in-doubt-{}", tile.item.as_uuid()))
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .opacity(slopty_theme::alpha::STRONG)
+            .child(content)
             .into_any_element()
     }
 
@@ -2355,18 +2409,14 @@ impl WorkspaceView {
         let well = || div().flex_1().w_full().into_any_element();
         match &item.kind {
             ItemKind::Terminal { session } => match self.terminals.get(session) {
-                Some(_) if self.quick.holds(item.id) => {
-                    let wait = Wait::Lasting(super::quick::IN_QUICK_TERMINAL.into());
-                    div()
-                        .id(SharedString::from(format!("quick-{}", item.id.as_uuid())))
-                        .flex_1()
-                        .w_full()
-                        .flex()
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            this.show_quick_terminal(std::time::Instant::now(), cx);
-                        }))
-                        .child(self.waiting_body(item, wait, k))
-                        .into_any_element()
+                _ if self.board_shown(*session)
+                    && let Some(board) = self.board_view(*session).cloned() =>
+                {
+                    let width = placed.target.w;
+                    let handed = Handed::Board { zoom: k, width };
+                    self.hand_over(cx, &board, handed, move |v, cx| v.set_layout(k, width, cx));
+                    let body = self.body_view(&board, placed, cx);
+                    fixed(body)
                 }
                 _ if self.faces.held.contains(session)
                     || (self.terminals.contains_key(session)
@@ -2377,7 +2427,7 @@ impl WorkspaceView {
                     let width = placed.target.w;
                     let handed = Handed::Face { zoom: k, width };
                     self.hand_over(cx, face, handed, move |v, cx| v.set_layout(k, width, cx));
-                    let body = self.body_view(face, placed, window, cx);
+                    let body = self.body_view(face, placed, cx);
                     fixed(body)
                 }
                 Some(view) => {
@@ -2389,7 +2439,7 @@ impl WorkspaceView {
                         v.set_covered(covered);
                         v.set_zooming(zooming);
                     });
-                    let body = self.body_view(view, placed, window, cx);
+                    let body = self.body_view(view, placed, cx);
                     fixed(body)
                 }
                 None if !worker_up => well(),
@@ -2420,7 +2470,7 @@ impl WorkspaceView {
                         self.hand_over(cx, view, handed, move |v, cx| {
                             v.set_painted_width(painted, cx);
                         });
-                        let body = self.body_view(view, placed, window, cx);
+                        let body = self.body_view(view, placed, cx);
                         div().flex_1().w_full().overflow_hidden().child(body).into_any_element()
                     }
                     None if !worker_up => well(),
@@ -2443,7 +2493,7 @@ impl WorkspaceView {
                     // Cached as a file tile is: a note's Markdown is laid out again only when
                     // the note changes, not on every frame a shell or a stream draws. Focused,
                     // the keyboard is in its editor, which the note watches.
-                    let body = self.body_view(view, placed, window, cx);
+                    let body = self.body_view(view, placed, cx);
                     div()
                         .flex_1()
                         .w_full()
@@ -2457,7 +2507,11 @@ impl WorkspaceView {
             },
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
                 Some(view) => {
-                    self.drawn.browsers.borrow_mut().push((item.id, placed.alpha));
+                    // Scaled, the page would lay itself out small: its picture shows instead.
+                    let live = k >= 1.0 && !self.layout.overview_open();
+                    self.hand_over(cx, view, Handed::Page { live }, move |v, cx| {
+                        v.set_live(live, cx);
+                    });
                     div()
                         .flex_1()
                         .min_h_0()
@@ -2473,7 +2527,7 @@ impl WorkspaceView {
                     let (pad, text_size) = (theme.spacing.inset(), theme.typography.mono_size);
                     let handed = Handed::Text { zoom: k, pad, size: text_size };
                     self.hand_over(cx, view, handed, move |v, _| v.set_layout(k, pad, text_size));
-                    let body = self.body_view(view, placed, window, cx);
+                    let body = self.body_view(view, placed, cx);
                     div()
                         .flex_1()
                         .min_h_0()
@@ -2488,7 +2542,7 @@ impl WorkspaceView {
             ItemKind::Folder { .. } => match self.folders.get(&item.id) {
                 Some(view) => {
                     self.hand_over(cx, view, Handed::Folder { zoom: k }, move |v, _| v.set_zoom(k));
-                    let body = self.body_view(view, placed, window, cx);
+                    let body = self.body_view(view, placed, cx);
                     div()
                         .flex_1()
                         .min_h_0()

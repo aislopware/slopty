@@ -14,20 +14,20 @@
 //! count up lands on the prompt's first row again.
 
 use libghostty_vt::screen::RowSemanticPrompt;
-use libghostty_vt::terminal::{Point, PointCoordinate};
+use libghostty_vt::terminal::{Point, PointCoordinate, PromptRedraw};
 
 use super::GhosttyEngine;
 use crate::EngineError;
-use crate::osc133::Redraw;
 
 impl GhosttyEngine {
     /// Clear the prompt the cursor is in, when the shell redraws all of it and libghostty's
-    /// parser is at ground, so the engine's own sequences cannot land inside the shell's.
+    /// parser is at ground, so the engine's own sequences cannot land inside the shell's. Both
+    /// come from the terminal, which a full reset (RIS) returns to redrawing nothing.
     pub(super) fn clear_prompt_before_reflow(&mut self) -> Result<(), EngineError> {
-        if self.prompt_redraw != Redraw::Full
-            || !self.at_prompt
+        if self.term.prompt_redraw()? != PromptRedraw::Full
+            || !self.term.is_cursor_at_prompt()?
             || self.on_alt
-            || !self.term.vt_ground()?
+            || !self.term.is_vt_ground()?
         {
             return Ok(());
         }

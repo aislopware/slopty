@@ -109,7 +109,8 @@ impl WorkspaceView {
     /// Bring faces in step with the tiles, once a frame: make the face a tile shows, follow
     /// what shows and unfollow what no longer does (hidden, its tile closed, its agent gone,
     /// its link new).
-    pub(super) fn sync_faces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Returns whether it gave a face the keyboard.
+    pub(super) fn sync_faces(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let tiled: HashSet<SessionId> = self
             .layout
             .tiles()
@@ -207,12 +208,15 @@ impl WorkspaceView {
         self.faces.chosen.retain(|s, _| live.contains(s));
         self.faces.following.retain(|s, _| live.contains(s));
         let focus: Vec<SessionId> = self.faces.focus.drain().collect();
+        let mut gave = false;
         for session in focus {
             if let Some(view) = self.faces.views.get(&session).filter(|_| wanted.contains(&session))
             {
                 view.clone().update(cx, |v, cx| v.focus(window, cx));
+                gave = true;
             }
         }
+        gave
     }
 
     fn make_face(&mut self, session: SessionId, window: &mut Window, cx: &mut Context<Self>) {

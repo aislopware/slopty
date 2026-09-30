@@ -107,6 +107,8 @@ pub struct WorkerLink {
     #[cfg(target_vendor = "apple")]
     runtime: tokio::runtime::Handle,
     remote: Arc<dyn Remote>,
+    /// The link's transfers, for [`Self::hold_uploads`].
+    xfers: Arc<Table>,
     /// Closed with the link, so a paste waiting on it stops at once.
     clips: Arc<ClipCache>,
     /// Frames shown from their datagram copy, ahead of the session stream.
@@ -304,6 +306,7 @@ impl WorkerLink {
             datagram_router,
         ));
 
+        let xfers = Arc::clone(&table);
         let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table };
         let remote = Arc::new(LinkRemote::new(
             up,
@@ -322,6 +325,7 @@ impl WorkerLink {
             #[cfg(target_vendor = "apple")]
             runtime: tokio::runtime::Handle::current(),
             remote,
+            xfers,
             clips,
             copies_taken,
             tasks,
@@ -361,6 +365,12 @@ impl WorkerLink {
     #[must_use]
     pub const fn screens(&self) -> &ScreenRouter {
         &self.router
+    }
+
+    /// Hold every upload on this link before its next chunk while `held`
+    /// ([`Table::hold_uploads`]).
+    pub fn hold_uploads(&self, held: bool) {
+        self.xfers.hold_uploads(held);
     }
 
     /// Files and clipboard bytes to and from this worker.
@@ -1152,6 +1162,7 @@ mod tests {
             ltr_refresh: false,
             discardable: false,
             capture_ts_us: 1,
+            stripes: 0,
         };
         let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
         assert!(datagrams.len() >= 3);
@@ -1225,6 +1236,7 @@ mod tests {
                 ltr_refresh: false,
                 discardable: false,
                 capture_ts_us: n,
+                stripes: 0,
             };
             let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
             let sent = Instant::now();

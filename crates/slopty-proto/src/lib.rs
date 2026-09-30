@@ -45,6 +45,7 @@ pub mod items;
 pub mod lan;
 pub mod media;
 pub mod orchestration;
+pub mod project;
 pub mod ptyd;
 pub mod screen;
 pub mod search;

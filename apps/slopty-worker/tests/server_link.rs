@@ -30,22 +30,9 @@ mod tests {
     /// tells the worker at once, so this is slack for a loaded machine, not a wait.
     const EXIT_BOUND: Duration = Duration::from_secs(5);
 
-    /// A sibling binary from the same build, built on demand (as `e2e.rs` does).
+    /// A binary of this build (`slopty_testkit::bins`).
     fn bin(name: &str) -> PathBuf {
-        let worker = PathBuf::from(env!("CARGO_BIN_EXE_slopty-worker"));
-        let path = worker.with_file_name(name);
-        if !path.exists() {
-            let release = worker.parent().is_some_and(|dir| dir.ends_with("release"));
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let mut build = std::process::Command::new(cargo);
-            let package = if name == "slopty" { "slopty-cli" } else { name };
-            build.args(["build", "-p", package, "--bin", name]);
-            if release {
-                build.arg("--release");
-            }
-            assert!(build.status().expect("run cargo").success(), "build {name}");
-        }
-        path
+        slopty_testkit::bins::bin(env!("CARGO_BIN_EXE_slopty-worker"), name)
     }
 
     /// ptyd and the worker for one test, killed with it.
@@ -184,11 +171,45 @@ mod tests {
             ],
             name: Some("link test".to_owned()),
             size: None,
+            session: None,
         }
     }
 
     fn text(s: &str) -> Input {
         Input::Text(s.to_owned())
+    }
+
+    /// Ask the worker in `dir` over its control socket, as the CLI does.
+    async fn ctl(dir: &Path, req: &slopty_proto::ctl::CtlRequest) -> slopty_proto::ctl::CtlReply {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stream = tokio::net::UnixStream::connect(dir.join("worker.sock")).await.unwrap();
+        let mut line = serde_json::to_vec(req).unwrap();
+        line.push(b'\n');
+        stream.write_all(&line).await.unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).await.unwrap();
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    /// A hook fired in `session`, told to the worker as `slopty hook` tells it.
+    async fn hook(dir: &Path, session: slopty_core::SessionId, payload: serde_json::Value) {
+        let req = slopty_proto::ctl::CtlRequest::Hook { session, payload: payload.to_string() };
+        let reply = ctl(dir, &req).await;
+        assert!(matches!(reply, slopty_proto::ctl::CtlReply::Ok { .. }), "{reply:?}");
+    }
+
+    /// The stub agent's record once `pred` holds for it.
+    async fn recorded(at: &Path, pred: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let looking = async {
+            loop {
+                let record = std::fs::read(at).ok().and_then(|b| serde_json::from_slice(&b).ok());
+                if let Some(record) = record.filter(|r| pred(r)) {
+                    return record;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::time::timeout(STEP, looking).await.expect("the stub agent's record")
     }
 
     /// A terminal's summary follows it: the server hears the directory, repository and branch
@@ -247,6 +268,54 @@ mod tests {
             starts.iter().all(|at| (before..=after).contains(at)),
             "{before}..={after}: {starts:?}"
         );
+    }
+
+    /// Once registered, the worker tells the server what it has: its toolchains, and the labels
+    /// and probes in its settings, a probe that prints as its text and one that fails as `false`.
+    /// What the server fills in itself from the registration is left to it.
+    #[tokio::test]
+    async fn the_server_hears_the_workers_facts_with_its_labels_and_probes() {
+        use slopty_proto::project::Fact;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let settings = "[worker.labels]\nfast-disk = true\nrack = \"b2\"\nvram_gb = 24\n\
+                        [worker.probes]\nok = \"printf ok\"\nbad = \"false\"\n";
+        std::fs::write(data.join("settings.toml"), settings).unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, _reg) = Peer::welcome(link).await;
+
+        peer.heard(|m| matches!(m, ToServer::Facts(_))).await;
+        let facts = peer
+            .heard
+            .iter()
+            .find_map(|m| match m {
+                ToServer::Facts(facts) => Some(facts),
+                _ => None,
+            })
+            .expect("heard above");
+        let text = |s: &str| Fact::Text(s.to_owned());
+        let labels =
+            [("fast-disk", Fact::Bool(true)), ("rack", text("b2")), ("vram_gb", Fact::Int(24))]
+                .map(|(name, fact)| (name.to_owned(), fact));
+        assert_eq!(facts.get("labels"), Some(&Fact::Map(labels.into())), "{facts:?}");
+        let probes = [("bad", Fact::Bool(false)), ("ok", text("ok"))];
+        let probes = probes.map(|(name, fact)| (name.to_owned(), fact));
+        assert_eq!(facts.get("probes"), Some(&Fact::Map(probes.into())), "{facts:?}");
+        // The test runs under cargo, so the worker it starts finds it.
+        let Some(Fact::Map(toolchains)) = facts.get("toolchains") else { panic!("{facts:?}") };
+        assert!(
+            matches!(toolchains.get("cargo"), Some(Fact::Text(v)) if !v.is_empty()),
+            "{facts:?}"
+        );
+        for filled in ["name", "worker", "os", "arch", "cpus", "memory_mb", "load", "online"] {
+            assert!(!facts.contains_key(filled), "{filled} is the server's: {facts:?}");
+        }
     }
 
     /// The largest read fits in one message on the link with its envelope, a file larger than
@@ -400,6 +469,8 @@ mod tests {
             args: ["--settings", r#"{"model":"haiku"}"#, "--verbose"].map(String::from).to_vec(),
             env: Vec::new(),
             size: None,
+            session: None,
+            permission_flags: true,
         };
         let Outcome::Opened(term) = peer.ask(spawn).await else { panic!("the agent starts") };
         let recorded = async {
@@ -416,8 +487,19 @@ mod tests {
             .filter(|word| !word.is_empty())
             .map(|word| String::from_utf8(word.to_vec()).unwrap())
             .collect();
-        let [plugin, flag, settings, rest @ ..] = args.as_slice() else { panic!("{args:?}") };
+        let [plugin, mcp, flag, settings, pin, conversation, rest @ ..] = args.as_slice() else {
+            panic!("{args:?}")
+        };
         assert_eq!((flag.as_str(), rest), ("--settings", &["--verbose".to_owned()][..]));
+        assert_eq!(pin, "--session-id", "the conversation's id is chosen before it starts");
+        // Any UUID parses as a session id.
+        assert!(conversation.parse::<slopty_core::SessionId>().is_ok(), "{conversation}");
+        // Slopty's tools, through the same `slopty` beside the worker.
+        let mcp: serde_json::Value =
+            serde_json::from_str(mcp.strip_prefix("--mcp-config=").expect(mcp)).unwrap();
+        let tools = &mcp["mcpServers"]["slopty"];
+        assert_eq!(tools["command"].as_str().map(PathBuf::from), Some(relay.clone()));
+        assert_eq!(tools["args"], serde_json::json!(["mcp"]));
         // The mod, as the worker wrote it under its data dir, in the flag's `=` form.
         let module = plugin.strip_prefix("--plugin-dir=").map(PathBuf::from).expect(plugin);
         assert!(module.starts_with(dir.path().join("data/claude-mod")), "{module:?}");
@@ -426,6 +508,7 @@ mod tests {
         }
         let settings: serde_json::Value = serde_json::from_str(settings).unwrap();
         assert_eq!(settings["model"], "haiku", "the caller's settings are kept");
+        assert!(settings.get("permissions").is_none(), "the person allowed its flags");
         for event in slopty_agent::HOOK_EVENTS {
             assert!(slopty_agent::hooks::has_relay(&settings, event), "{event}");
         }
@@ -457,6 +540,281 @@ mod tests {
                 && ev.kind == AgentKind::ClaudeCode && ev.source == AgentSource::Hook)
         })
         .await;
+    }
+
+    /// An agent the server starts under an id it chose starts once, with its conversation's
+    /// id pinned and bypass mode locked off. Nothing is typed into it while it cannot take it:
+    /// its first prompt waits for its first hook (a title that looks idle is not enough),
+    /// input waits out a permission prompt, and once it has exited, input is refused. Each
+    /// change of its permission mode reaches the server once.
+    #[tokio::test]
+    async fn a_spawned_agent_is_typed_into_only_when_it_can_take_it() {
+        use serde_json::json;
+        use slopty_proto::agent::{AgentKind, AgentSource};
+        use slopty_proto::project::AgentReport;
+
+        let dir = tempfile::tempdir().unwrap();
+        let programs = dir.path().join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        let _relay = bin("slopty");
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons =
+            daemons_finding(dir.path(), server.local_addr().unwrap(), Some(&programs)).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+
+        let record = dir.path().join("record.json");
+        let chosen = slopty_core::SessionId::new();
+        let env = [
+            ("STUB_RECORD", record.to_string_lossy().into_owned()),
+            ("STUB_HOOKS", "[]".to_owned()),
+            ("STUB_TITLE", "\u{2733} Claude Code".to_owned()),
+        ];
+        let spawn = Verb::SpawnAgent {
+            worker: reg.worker,
+            agent: AgentKind::ClaudeCode,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: Some("write the brief".to_owned()),
+            args: Vec::new(),
+            env: env.map(|(k, v)| (k.to_owned(), v)).to_vec(),
+            size: None,
+            session: Some(chosen),
+            permission_flags: false,
+        };
+        let term = TermRef { worker: reg.worker, session: chosen };
+        assert_eq!(peer.ask(spawn.clone()).await, Outcome::Opened(term));
+        assert_eq!(peer.ask(spawn).await, Outcome::Opened(term), "the same start again");
+        let status = ctl(dir.path(), &slopty_proto::ctl::CtlRequest::Status).await;
+        let slopty_proto::ctl::CtlReply::Status { sessions, .. } = status else { panic!() };
+        assert_eq!(sessions.iter().map(|s| s.id).collect::<Vec<_>>(), [chosen], "one terminal");
+
+        let started = recorded(&record, |r| r["argv"].is_array()).await;
+        let argv: Vec<&str> =
+            started["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+        let after = |flag: &str| argv.iter().position(|a| *a == flag).map(|at| argv[at + 1]);
+        let conversation = after("--session-id").expect("pinned");
+        assert!(conversation.parse::<slopty_core::SessionId>().is_ok(), "{conversation}");
+        let settings: serde_json::Value =
+            serde_json::from_str(after("--settings").expect("settings")).unwrap();
+        assert_eq!(settings["permissions"]["disableBypassPermissionsMode"], "disable");
+
+        // Its title says it is at its prompt before any hook has spoken: a dialog of its own
+        // may be up, so nothing goes in.
+        peer.heard(|m| {
+            matches!(m, ToServer::Agent(ev) if ev.session == chosen && ev.source == AgentSource::Title)
+        })
+        .await;
+        let early = peer.ask(Verb::SendInput { term, input: text("hello\n") }).await;
+        assert!(
+            matches!(early, Outcome::Error { code: ErrorCode::AgentNotReady, .. }),
+            "{early:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let quiet = recorded(&record, |_| true).await;
+        assert_eq!(quiet["typed"], json!([]), "the prompt waits for a hook");
+
+        let said = |event: &str, mode: &str| json!({ "hook_event_name": event, "session_id": conversation, "permission_mode": mode });
+        hook(dir.path(), chosen, said("SessionStart", "default")).await;
+        recorded(&record, |r| r["typed"] == json!(["write the brief"])).await;
+
+        let mut asking = said("PermissionRequest", "default");
+        asking["tool_name"] = json!("Bash");
+        hook(dir.path(), chosen, asking).await;
+        let held = peer.ask(Verb::SendInput { term, input: text("more\n") }).await;
+        let Outcome::Error { code: ErrorCode::AwaitsPerson, message } = held else {
+            panic!("{held:?}")
+        };
+        assert!(message.contains("the person's to answer"), "{message}");
+        let mut ran = said("PostToolUse", "plan");
+        ran["tool_name"] = json!("Bash");
+        hook(dir.path(), chosen, ran).await;
+        assert_eq!(peer.ask(Verb::SendInput { term, input: text("more\n") }).await, Outcome::Done);
+        recorded(&record, |r| r["typed"] == json!(["write the brief", "more"])).await;
+
+        let modes = |heard: &[ToServer]| -> Vec<String> {
+            heard
+                .iter()
+                .filter_map(|m| match m {
+                    ToServer::Report(AgentReport::PermissionMode { session, mode })
+                        if *session == chosen =>
+                    {
+                        Some(mode.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        peer.heard(|m| matches!(m, ToServer::Report(AgentReport::PermissionMode { mode, .. }) if mode == "plan")).await;
+        assert_eq!(modes(&peer.heard), ["default", "plan"], "each change once");
+
+        let eof = Input::Keys(vec!["ctrl+d".to_owned()]);
+        assert_eq!(peer.ask(Verb::SendInput { term, input: eof }).await, Outcome::Done);
+        peer.heard(|m| {
+            matches!(m, ToServer::SessionChanged(s) if s.id == chosen && matches!(s.state, SessionState::Exited { .. }))
+        })
+        .await;
+        let gone = peer.ask(Verb::SendInput { term, input: text("ls\n") }).await;
+        assert!(matches!(gone, Outcome::Error { code: ErrorCode::AgentExited, .. }), "{gone:?}");
+    }
+
+    /// Reports the server sends an agent reach it through its own hooks, never its terminal:
+    /// kept until its next prompt, handed over as that prompt's context by the hook its
+    /// settings register, and the server told which batch arrived.
+    #[tokio::test]
+    async fn reports_reach_an_agent_through_its_next_prompt_s_hook() {
+        use serde_json::json;
+        use slopty_proto::agent::AgentKind;
+        use slopty_proto::project::AgentReport;
+
+        let dir = tempfile::tempdir().unwrap();
+        let programs = dir.path().join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        let _relay = bin("slopty");
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons =
+            daemons_finding(dir.path(), server.local_addr().unwrap(), Some(&programs)).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+
+        let (record, gate) = (dir.path().join("record.json"), dir.path().join("prompted"));
+        let session = slopty_core::SessionId::new();
+        let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
+        let env = [
+            ("STUB_RECORD", record.to_string_lossy().into_owned()),
+            ("STUB_LATER", prompt.to_string()),
+            ("STUB_LATER_AFTER", gate.to_string_lossy().into_owned()),
+        ];
+        let spawn = Verb::SpawnAgent {
+            worker: reg.worker,
+            agent: AgentKind::ClaudeCode,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: None,
+            args: Vec::new(),
+            env: env.map(|(k, v)| (k.to_owned(), v)).to_vec(),
+            size: None,
+            session: Some(session),
+            permission_flags: false,
+        };
+        let term = TermRef { worker: reg.worker, session };
+        assert_eq!(peer.ask(spawn).await, Outcome::Opened(term));
+        let started =
+            recorded(&record, |r| r["hooks"].as_array().is_some_and(|h| !h.is_empty())).await;
+        assert_eq!(started["hooks"][0]["event"], "SessionStart");
+        assert_eq!(started["hooks"][0]["outputs"], json!([]), "nothing waits yet");
+
+        let context = "<slopty-reports project=\"demo\">\ntask 2: needs input\n  Which crate owns the store?\n</slopty-reports>";
+        let deliver = FromServer::Deliver { session, batch: 7, context: context.to_owned() };
+        peer.tx.send(&deliver).await.unwrap();
+        let kept = slopty_agent::reports::dir(&dir.path().join("worker.sock"));
+        let waiting = async {
+            while !kept.join(format!("{session}.json")).exists() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        tokio::time::timeout(STEP, waiting).await.expect("the worker keeps the batch");
+        let untouched = recorded(&record, |_| true).await;
+        assert_eq!(untouched["typed"], json!([]), "nothing is typed into the agent");
+
+        std::fs::write(&gate, b"").unwrap();
+        let prompted =
+            recorded(&record, |r| r["hooks"].as_array().is_some_and(|h| h.len() == 2)).await;
+        let turn = &prompted["hooks"][1];
+        assert_eq!(
+            (turn["event"].as_str(), turn["fired"].as_bool()),
+            (Some("UserPromptSubmit"), Some(true))
+        );
+        let outputs = turn["outputs"].as_array().unwrap();
+        let [handed] = outputs.as_slice() else { panic!("{turn}") };
+        assert_eq!(handed["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        assert_eq!(handed["hookSpecificOutput"]["additionalContext"], context);
+        peer.heard(|m| {
+            matches!(m, ToServer::Report(AgentReport::Delivered { session: s, batch: 7 }) if *s == session)
+        })
+        .await;
+        assert!(!kept.join(format!("{session}.json")).exists(), "handed over once");
+    }
+
+    /// Reports reach an agent at rest at once, through the inbox Claude Code takes messages
+    /// from other processes on, never its terminal: its first hook notes the inbox, a batch
+    /// the server sends is posted there with the session's token as a user turn, and the
+    /// server is told it arrived. Nothing waits for a hook afterwards.
+    #[tokio::test]
+    async fn reports_wake_an_agent_at_rest_through_its_inbox() {
+        use serde_json::json;
+        use slopty_proto::agent::AgentKind;
+        use slopty_proto::project::AgentReport;
+
+        let dir = tempfile::tempdir().unwrap();
+        let programs = dir.path().join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons =
+            daemons_finding(dir.path(), server.local_addr().unwrap(), Some(&programs)).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+
+        let (record, posted) = (dir.path().join("record.json"), dir.path().join("inbox.jsonl"));
+        let session = slopty_core::SessionId::new();
+        let env = [
+            ("STUB_RECORD", record.to_string_lossy().into_owned()),
+            ("STUB_INBOX", posted.to_string_lossy().into_owned()),
+        ];
+        let spawn = Verb::SpawnAgent {
+            worker: reg.worker,
+            agent: AgentKind::ClaudeCode,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: None,
+            args: Vec::new(),
+            env: env.map(|(k, v)| (k.to_owned(), v)).to_vec(),
+            size: None,
+            session: Some(session),
+            permission_flags: false,
+        };
+        let term = TermRef { worker: reg.worker, session };
+        assert_eq!(peer.ask(spawn).await, Outcome::Opened(term));
+        let started =
+            recorded(&record, |r| r["hooks"].as_array().is_some_and(|h| !h.is_empty())).await;
+        assert_eq!(started["hooks"][0]["event"], "SessionStart");
+
+        let context =
+            "<slopty-reports project=\"demo\">\ntask 2: done\n  Merged.\n</slopty-reports>";
+        let deliver = FromServer::Deliver { session, batch: 9, context: context.to_owned() };
+        peer.tx.send(&deliver).await.unwrap();
+        peer.heard(|m| {
+            matches!(m, ToServer::Report(AgentReport::Delivered { session: s, batch: 9 }) if *s == session)
+        })
+        .await;
+        // Delivered means the post reached the socket; the stub appends the line a moment later.
+        let whole = async {
+            loop {
+                let lines = std::fs::read_to_string(&posted).unwrap_or_default();
+                if lines.ends_with('\n') {
+                    return lines;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        };
+        let lines = tokio::time::timeout(STEP, whole).await.expect("the inbox took a message");
+        let got: Vec<serde_json::Value> =
+            lines.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(
+            got,
+            [json!({ "content": context, "priority": "next", "authed": true })],
+            "one user turn, with the session's token"
+        );
+        let kept = slopty_agent::reports::dir(&dir.path().join("worker.sock"));
+        assert!(!kept.join(format!("{session}.json")).exists(), "nothing left for the hooks");
+        let untouched = recorded(&record, |_| true).await;
+        assert_eq!(untouched["typed"], json!([]), "nothing is typed into the agent");
     }
 
     #[tokio::test]

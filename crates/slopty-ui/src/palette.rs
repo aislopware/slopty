@@ -449,6 +449,8 @@ pub enum PaletteRun {
         /// What was typed.
         needle: String,
     },
+    /// Show this project's board in its orchestrator's tile.
+    Project(slopty_proto::project::ProjectId),
 }
 
 impl PaletteRun {
@@ -461,7 +463,8 @@ impl PaletteRun {
             | Self::Item(_)
             | Self::Worker(_)
             | Self::FindIn { .. }
-            | Self::FindInFile { .. } => "Go to",
+            | Self::FindInFile { .. }
+            | Self::Project(_) => "Go to",
             Self::OpenFile { .. }
             | Self::OpenFolder { .. }
             | Self::OpenShell { .. }
@@ -488,6 +491,7 @@ impl Clone for PaletteRun {
             Self::OpenAgent { cwd } => Self::OpenAgent { cwd: cwd.clone() },
             Self::OpenUrl(url) => Self::OpenUrl(url.clone()),
             Self::OpenInTile(url) => Self::OpenInTile(url.clone()),
+            Self::Project(project) => Self::Project(project.clone()),
             Self::FindIn { session, needle } => {
                 Self::FindIn { session: *session, needle: needle.clone() }
             }
@@ -529,6 +533,7 @@ impl std::fmt::Debug for PaletteRun {
             Self::FindInFile { item, needle } => {
                 f.debug_struct("FindInFile").field("item", item).field("needle", needle).finish()
             }
+            Self::Project(project) => f.debug_tuple("Project").field(project).finish(),
         }
     }
 }
@@ -682,6 +687,13 @@ impl PaletteItem {
         Self::line(format!("Wake {name}"), String::new(), run, IconName::Power, Section::Commands)
     }
 
+    /// A project by its title: ↩ shows its board.
+    #[must_use]
+    pub fn project(title: &str, project: slopty_proto::project::ProjectId) -> Self {
+        let run = PaletteRun::Project(project);
+        Self::line(title.to_owned(), String::new(), run, IconName::Workflow, Section::Tiles)
+    }
+
     /// An item in the workspace by its title; its icon says what it is.
     #[must_use]
     pub fn item(title: &str, icon: IconName, item: slopty_core::ItemId) -> Self {
@@ -768,6 +780,7 @@ impl PaletteItem {
             PaletteRun::FindInFile { .. } | PaletteRun::OpenFile { .. } => IconName::FileText,
             PaletteRun::Item(_) => IconName::StickyNote,
             PaletteRun::OpenFolder { .. } => IconName::Folder,
+            PaletteRun::Project(_) => IconName::Workflow,
             PaletteRun::Action(_)
             | PaletteRun::Worker(_)
             | PaletteRun::Wake(_)
@@ -2408,6 +2421,8 @@ mod tests {
             PaletteItem::url("a", "", "http://a/").icon,
             PaletteItem::in_tile("a", "", "http://a/").icon,
             PaletteItem::rerun("ls", session).icon,
+            PaletteItem::project("p", slopty_proto::project::ProjectId::new("p").expect("a name"))
+                .icon,
         ]);
         names.extend(crate::workspace::palette_items().into_iter().map(|line| line.icon));
         for name in names {

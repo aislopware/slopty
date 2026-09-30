@@ -110,9 +110,11 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     (Section::Network, "This Mac as a server", &["server.allow"]),
 ];
 
-/// The page a key of `table` that [`LAYOUT`] does not name goes on.
+/// The page a key of `table` that [`LAYOUT`] does not name goes on: a nested table's
+/// (`server.projects`) is its root table's.
 fn home(table: &str) -> Section {
-    match table {
+    let root = table.split_once('.').map_or(table, |(root, _)| root);
+    match root {
         "theme" | "colors" => Section::Appearance,
         "remote" => Section::Streams,
         "client" | "worker" | "server" => Section::Network,
@@ -236,13 +238,14 @@ impl KeyRow {
 }
 
 /// The Keyboard page's groups, in order.
-pub const KEY_GROUPS: [&str; 8] = [
+pub const KEY_GROUPS: [&str; 9] = [
     "General",
     "Layout",
     "Terminal",
     "Conversation",
     "Files",
     "Folders",
+    "Project boards",
     "Search in files",
     "Pages",
 ];
@@ -264,6 +267,7 @@ fn key_group(command: &Command) -> &'static str {
         Scope::Conversation => "Conversation",
         Scope::File => "Files",
         Scope::Folder => "Folders",
+        Scope::Project => "Project boards",
         Scope::Search => "Search in files",
         Scope::Page => "Pages",
     }
@@ -423,6 +427,15 @@ mod tests {
         assert_eq!(figure(13.5, 1.0), "13.5", "what the file holds");
         assert_eq!(figure(1.0, 0.1), "1.0");
         assert_eq!(figure(3.0, 0.5), "3.0");
+    }
+
+    /// A nested table's keys go on the page of the table they sit in: the server's projects
+    /// with the server.
+    #[test]
+    fn a_nested_table_is_on_its_roots_page() {
+        assert_eq!(home("server.projects"), Section::Network);
+        assert_eq!(home("server"), Section::Network);
+        assert_eq!(home("remote"), Section::Streams);
     }
 
     /// Every key of the file is one row, every key the layout names is one of the file's, and

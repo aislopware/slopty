@@ -374,7 +374,7 @@ itself: `Events`, a long poll on a bounded log of what it hears from every worke
 terminals opened and closed, agent status changes) read from a cursor, which is how one agent
 watches the whole fleet over stateless HTTP; and `ForgetWorker`. Each event it logs is pushed
 as it is, `FromServer::Event(HubEvent)`, to every client and agent link. A link gets the state
-(`Directory`, then `Terminals`) on connect and again when it falls behind, and replaces what it
+(`Directory`, then `Terminals`, then `Projects`) on connect and again when it falls behind, and replaces what it
 showed with it. Files are read in ranges of at
 most 8 MiB with the whole size reported, directories listed with `ListDir`, paths checked with
 `Stat`; a terminal opened by a verb takes a size, and `ResizeTerminal` resizes one no client
@@ -383,6 +383,66 @@ keeps each key's outcome for ten minutes (`orchestrate::idempotency::Ledger`), s
 lost its answer to a timeout or a dropped link asks again and gets the first outcome, not a second
 terminal. The CLI and MCP give every mutating verb a key and resend under it on `Interrupted`.
 Rulings in `docs/decisions/topology.md`.
+
+**Projects.** The server also keeps projects: one goal, its tasks as a tree with dependencies,
+and a timeline, beside `workers.json` in `projects.json` (`slopty-server::project`, persisted by
+`store::ProjectStore`). The hub sends every durable change to a keeper, which keeps its own
+replica and appends the change to `projects.log` as a JSON line once a burst settles (250 ms).
+It writes the whole file again, compact, only when the log passes 8 MiB and at shutdown, so
+nothing the store does holds the hub's lock. A file that fails to read stops the server; one
+that fails to parse is set aside as `<name>.bad-<ms>`, and a log line cut short at its end is
+passed over. The hub answers the project verbs itself (`ProjectCreate` … `TaskSpawn`,
+`TaskReport`, `TaskGet`, `WorkingOn`, `PlacementSuggest`, `WorkerFacts`,
+`slopty-proto::orchestration`):
+- Every link says who it speaks for (`slopty_server::Speaker`): a client is the person, an MCP
+  surface an agent, and the CLI inside a Slopty terminal (`Role::Shell`) an agent when an agent
+  runs there, when it works on a project, when an agent opened or typed into it, or when the
+  server does not know it. Only the person answers a permission, merges a task or records its
+  verifier, and only the person's read of a conversation holds its prompts.
+- The hub chooses every terminal's id (the start's token): a start whose answer was lost still
+  counts, and its terminal goes on its task when the worker announces it. An agent it starts
+  begins in `default` mode with bypass mode locked off in its settings, unless the person allows
+  looser modes for the project, and a report of a looser mode from such a terminal closes it.
+- A task's agent reports up its tree (`TaskReport`: checkpoint, needs input, stuck, done). The
+  hub batches reports per node (`slopty-server::deliver`), pushes a batch to the node's worker
+  (`FromServer::Deliver`), and the agent's own `SessionStart`, `UserPromptSubmit` and `Stop`
+  hooks hand it over (`slopty hook reports`, `slopty_agent::reports`). Nothing is typed into a
+  terminal.
+- Each worker reports open facts (`ToServer::Facts`: toolchains, GPUs, power, its person's
+  labels and probe commands, from `slopty-worker::facts`). The hub adds the facts it knows
+  itself (os, cpus, memory, load, live agents), and `list_workers` shows them all.
+- A task's placement is `{ pin, require, prefer, near, avoid }`, with the rules in CEL over the
+  facts (`slopty-server::placement`). A rule's worst case is counted before it runs, and ranking
+  runs on the blocking pool under a deadline. `TaskSpawn` ranks the workers outside the lock, then
+  reserves the chosen worker under it. A start counts against every limit from that reservation
+  until its terminal is live. The hub then forwards an ordinary `SpawnAgent`, or an
+  `OpenTerminal` for a command task, with `SLOPTY_PROJECT` and `SLOPTY_TASK` last in its env.
+  The new terminal is assigned to the task, and a start that can no longer be assigned is
+  closed.
+- The limits are a project's own (`Limits`), under the person's bounds from `[server.projects]`
+  in `settings.toml` (`Hub::set_policy`). The bounds also hold the fleet-wide count of live
+  agents and the projects allowed flags that loosen Claude Code's permissions.
+- A claim is refused when it overlaps a live task's paths, compared after NFC and case folding.
+  Every move between states is checked, and a move back into a live state claims the paths
+  again.
+- An assigned task follows its agent's status while it is running, waiting or blocked. Its
+  assignment ends when the session closes. A worker that registers again is reconciled against
+  its session list.
+- Workers send `ToServer::Report`: the `AgentBranch` from the status line, plus the native
+  subagents and task-list items from the `SubagentStart`/`SubagentStop`/`TaskCreated`/
+  `TaskCompleted` hooks (`Hook::report`, forwarded by `ctl` on the daemon's `reports`
+  channel). The hub keeps these per node, beside the tasks. A report that arrives before its
+  session is assigned is held until it is.
+
+Every change is logged and pushed as `Happening::Project(ProjectUpdate)`, a delta: the record,
+the one task as its card, or the one native that changed, and the timeline entry.
+`FromServer::Projects` comes in parts of at most 8 MiB and carries the event sequence number it
+is current as of, so a client can drop a replayed update logged at or below it. The worker's own agent spawn adds `--mcp-config=` naming `slopty mcp`
+(`slopty_agent::hooks::with_mcp`). Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the
+CLI inside it find the server. With no project or task named, they act on the session's own:
+the server's record of the session first, then `SLOPTY_PROJECT` and `SLOPTY_TASK`
+(`slopty_tools::Scope`). Tests start `slopty-stub-claude`, never `claude`. Rulings in
+`docs/decisions/projects.md`.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
@@ -458,7 +518,22 @@ never overwrites what the stream itself proved). The hint follows the *recent* f
 first one (`SourceTracker`, clock injected so the rule is unit-tested): a new frame is `Live` at
 once, `SOURCE_QUIET_AFTER` (2 s) without one is `Idle` again — longer than the start-up grace so a
 target drawing once a second does not flap — and a target the geometry tick reports off screen is
-`Idle` immediately, since a window that is not on screen cannot be drawing.
+`Idle` immediately, since a window that is not on screen cannot be drawing. Two states outrank
+the frames: `Locked`, the Mac's screens locked, and `Away`, another session (the login window, or
+another user after a fast user switch) on them, both read from the session dictionary
+(`slopty_capture::console`) with each geometry probe. The receiver treats them as `Idle`, and the
+tile dims its body under the scrim with a card that says so (DECISIONS.md, "The client is told
+when the Mac is locked").
+
+**Capture to glass on any link.** Every stream probes the worker's clock: a
+`Feedback::Clock` datagram four times a second (one a report at first), answered at once by the
+stream's control with a `Kind::Clock` media datagram carrying the probe's stamp and the capture
+clock as it came and left. `slopty_media::ClockSync` keeps 30 s of them, fits a line
+through the fastest of each 2 s slice (NTP's offset, with the drift between the two Macs), and
+steps with a clock that jumped; the decoder's callback places each picture's capture on the
+client's clock through its newest anchor (`FrameStamp::captured`), and the pacer times it to the
+layer's glass time. The overlay's plain line leads with capture → glass and says its bound
+(DECISIONS.md, "Capture to glass on any link").
 
 **Worker capture path.** A display target is one `SCContentFilter(display:)`. A window target
 is served two ways, and the worker switches between them on the live stream
@@ -663,13 +738,14 @@ sent at −1: above files, below video.
     on iPad every drop comes through a `UIDropInteraction`. Each drop lands in a temporary
     directory of its own and then reaches the tile under it as an ordinary file drop. A file
     that failed is named in a notice, and what it wrote is deleted.
-- **File tiles.** `ReadFile` answers the first 512 KiB and 2 000 lines of a text file,
+- **File tiles.** `ReadFile` answers a text file whole, up to 16 MiB (`FILE_BYTES`; past
+  `INLINE_FILE_BYTES` the text follows on a bulk stream, `FileRead::Streamed`),
   `WatchFiles` looks at each watched file's size and modification time every second and sends
   a changed one again, and `WriteFile { path, text, base_modified_ms }` saves an edit
   (`slopty_worker::file::write`). The save writes a temporary file beside the target, fsyncs
   it and renames it over, keeping the mode and writing through a symbolic link. A file whose
   modification time is newer than `base_modified_ms` is a `Conflict` and stays as it was. A
-  non-regular file is `Failed`, and so is a text or a file past the 512 KiB cap. The worker
+  non-regular file is `Failed`, and so is a text or a file past the 16 MiB cap. The worker
   answers with `WorkerMsg::Written`, and the watchers, the writer's own included, hear the new
   text on their next look.
 - **Ports.** A session's listening TCP ports come from its process tree (libproc,
@@ -727,6 +803,11 @@ the client held before the close waits on ScreenCaptureKit; and a heartbeat on i
 task with a call that takes it (DECISIONS.md, "The heartbeat has its own task"); input injection), `slopty-input` (client
 `ScreenInput` → `CGEvent`, posted to the owning pid for windows or the HID tap for displays,
 right clicks always through the HID tap because AppKit only tracks context menus for those;
+trackpad gestures (a pinch, a rotation, smart zoom, a swipe as one event, and, while the tile
+sends its gestures, the gesture each trackpad scroll comes with, which a swipe between pages
+follows) built as `NSEventTypeGesture` events with the IOHID subtype AppKit reads, on the same
+route (DECISIONS.md, "Trackpad gestures reach the remote app"); each press numbered, its drags and
+release under its number ("A press, its drags and its release share one event number");
 activates the owner before clicks and keys because macOS only delivers keyboard events to the
 active app, taking an owner found active as active for 250 ms; each stream's `Injector` runs on
 an `InputThread` of its own, fed in order through a channel, so the stream's task never waits on
@@ -836,8 +917,8 @@ worker: the item names the absolute path and lives in the shared document, the t
 not. Each client asks `ClientMsg::ReadFile` when the tile appears (`workspace
 reconcile_notes_and_files`, which also sends the set of paths as `ClientMsg::WatchFiles`: the
 worker looks at each one's size and modification time every second and re-sends a changed
-file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the first
-512 KiB, then the first 2 000 lines, `FileRead::Text | Binary | Missing`) into gpui-kit's code
+file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the whole
+text up to 16 MiB, `FileRead::Text | Streamed | Binary | Missing | TooLarge`) into gpui-kit's code
 editor (`EditorState`, line numbers, no folding or wrap) in the theme's mono font, or one line
 saying why not. Colour comes from the grammar the path names (`slopty-ui::highlight`: syntect's
 bundled grammars on the pure-Rust regex engine, reduced to nine tokens painted from the
@@ -853,8 +934,8 @@ nothing; a clean tile takes a change on disk silently, tints the lines that diff
 (`file::changed_lines`, `similar` over the lines) and puts the caret on the first; a dirty tile
 keeps the edit and shows "Changed on disk" with "Reload" and "Overwrite" inline, and a
 `Conflict` answer to a save does the same. Reload asks for the file again and takes it;
-Overwrite saves with no base. A clipped read (past 512 KiB or 2 000 lines) opens read-only
-with the reason in that line (`file::clipped_reason`), since a save would cut the file. A
+Overwrite saves with no base. A file past 16 MiB (`TooLarge`) is not read at all: the tile
+says so in that line and stays read-only. A
 tile opened from an edit lands on the edit's line (`ToolDetail::Diff.line`: the worker finds
 `old_string` in the file, or `new_string` once the edit landed, `transcript::locate`,
 tinted in the accent tone, `FileView::focus_line`). The tile reads again when any agent's
@@ -913,22 +994,18 @@ sees the new stamp on its watcher's next look. Scripts and agents reach the same
 `Verb::Search` (`slopty search`, the `search_files` MCP tool), one capped reply in path order.
 
 A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
-usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`: an `NSView`
-on macOS, a `UIView` on iOS, each a subview of the GPUI window's view from its
-`raw_window_handle`). A native view always draws over GPUI, so the page follows the tile
-rather than being drawn by it: each frame the tile's body records where it was drawn
-(`BrowserView::drawn_in`), and a final element's prepaint (`WorkspaceView::browser_sync`)
-asks `browser::placement` where each page goes, over the body and clipped to the strip, or
-hidden while anything GPUI draws covers the strip (the palette, the picker, a menu, the
-overview, an app dialog via `set_covered`), while the tile fades or is off the strip; a
-toast cuts the clip short at its top edge (`Cover::toast`, measured where the toast was drawn
-that frame). Hidden,
-the body shows the page's last snapshot (`takeSnapshot` → PNG → `RenderImage`), so covering it
-leaves no hole, and the renders the tests diff show it too. A click on the page gives it the
-keyboard and focuses its tile; on the Mac a local event monitor takes the keyboard back on a
-click elsewhere, ⌃Tab or Esc twice, and hands ⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z to the page
-(`web::edit_for`), which the GPUI view's key equivalents would otherwise take; on iOS the
-page's own fields take the keyboard when tapped and hiding the page ends their editing. The
+usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`). The window
+composes it with GPUI's content through a gpui-fast native host: the tile's body is a
+`native_view` element, so the page shows where the strip draws the tile, clipped with it, under
+a hole GPUI cuts in its own layer, and whatever GPUI draws afterwards (the palette, a menu, a
+toast, a script's dialog, an app dialog) is over the page. A tile drawn scaled (the overview)
+shows the page's last snapshot instead (`takeSnapshot` → PNG → `RenderImage`), since a page laid
+out at that size would reflow, and so does a render, which cannot see a native view. The page's
+keyboard is GPUI's focus on its element (`track_focus`): a click in the page focuses it and its
+tile, the platform's first responder follows GPUI's focus both ways, keys go through GPUI's
+keymap first, and Esc twice gives the keyboard back to the workspace. Undo, redo, cut and select
+all, which no menu item sends to a native view, are bound under the page's element and done by
+the page (`web::Edit`); copy and paste reach it through the Edit menu. The
 item's address is the worker's (`http://localhost:5173/`, the same on every client): each
 client asks its link to serve a loopback port the address names (`Remote::forward`) and loads
 the page from the local port it got (`browser::local_url`), asking again when the link comes
@@ -1213,13 +1290,12 @@ tests read the tokens back through `painted_quads()`: the accent vs hairline ite
 `warn` outline of a blocked agent in both variants, the `error` separator tone, and gpui-kit's
 colours after a sync. gpui-kit's code editor (`EditorState`) is the file tile's body, in the
 terminal mono at the tile's text size, its highlighter the app's own (§4).
-One element is not GPUI's: the browser tile's page is a native `WKWebView` over the Metal
-view, placed each frame from where the tile's body was drawn and hidden whenever GPUI draws
-over the strip (§4). Its chrome (back, reload, the address as text) is GPUI's, from the same
-tokens. The page takes its tile's opacity and hides below `browser::MIN_ALPHA`, so a tile
-fading in or out leaves no page behind; under Reduce Motion there is no fade to follow.
-`slopty-ui::screen::ScreenView` paints a remote window as a `gpui::surface` from the decoder's
-`CVPixelBuffer` (zero copy), draws the worker's cursor from the cursor channel, forwards mouse,
+One element is not GPUI's: the browser tile's page is a native `WKWebView` the window composes
+under GPUI's layer, where the tile's body is drawn (§4). Its chrome (back, reload, the address)
+is GPUI's, from the same tokens. It fades with its tile's opacity as any element does.
+`slopty-ui::screen::ScreenView` hands the decoder's IOSurface-backed `CVPixelBuffer` to the
+stream's `VideoLayer` off the main thread (zero copy, no GPUI frame per picture), places the
+layer under the tile, draws the worker's cursor over it from the cursor channel, forwards mouse,
 scroll and keys (including ⌘ chords the workspace does not bind) as `ScreenInput`, and asks the
 worker for a stream scale matching its painted width. The pointer mapping (tile point → stream pixel over
 the bounds the render recorded, press/release with clicks and modifiers, pixel vs line scroll
@@ -1365,8 +1441,8 @@ read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_
 a live stream re-asks its quality on change and takes a changed `muted`, see
 decisions/video.md and decisions/settings.md), `[colors] foreground |
 background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings laid over
-`TerminalPalette` in both appearances, see decisions/settings.md), `[quick_terminal] hotkey |
-height | autohide` (below), `[keys.<context>] <action> = "chord" | ["chord", …] | ""` (the
+`TerminalPalette` in both appearances, see decisions/settings.md),
+`[keys.<context>] <action> = "chord" | ["chord", …] | ""` (the
 keymap, below); every key has a
 default, unknown keys warn, a
 file that does not parse is skipped with the error in the top bar for a few seconds. The app
@@ -1383,7 +1459,7 @@ only way to change it.
 GPUI key contexts it binds in (the workspace's ⇧⌘F also in any text field, the face's keys also
 in its composer). The app adds its own rows (`[keys.app]`: settings, add a worker, the server).
 `Keymap::new` lays the file's `[keys]` over the table: a chord is read in the palette's syntax
-by the quick terminal's parser (`Chord::read`) and written as GPUI writes it, `""` or `"none"`
+(`keymap::chord`) and written as GPUI writes it, `""` or `"none"`
 unbinds, and one chord runs one command per context: the file's command takes it from a
 default, the first of two of the file's keeps it, and each clash is said naming both, with
 unknown contexts, actions and keys, in the settings notice. `keymap::install` swaps the bindings
@@ -1437,23 +1513,6 @@ at its tailnet name (or its IP, or the host `ssh` reached) and the panel closes 
 same deploy with `--update` runs from a wrong-build tile's "Update"
 (`slopty_app::ssh`, `slopty_ui::add_worker`).
 
-**Quick terminal.** A chord from any app (`[quick_terminal] hotkey`, ⌃\` by default) slides a
-terminal down from the top of the screen under the pointer, over whichever app is in front; the
-same chord, or "Toggle quick terminal" in the palette, puts it away. The chord is a Carbon
-`RegisterEventHotKey` (`slopty_platform::hotkey`), which needs no Accessibility grant; a press
-arrives on the main run loop and goes, with its arrival time, down a channel to
-`WorkspaceView::toggle_quick_terminal`. The terminal is an ordinary shell item on the worker of
-the shell used last, in its directory, opened the first time and kept: its `TerminalView` (the
-workspace's own entity) is drawn in a GPUI `WindowKind::PopUp` window whose root is
-`slopty_ui::quick_terminal::QuickTerminalView`, and its tile says "In the quick terminal".
-`slopty_platform::panel` dresses that `NSPanel` (borderless, non-activating, every Space and
-beside full-screen apps, clear where nothing is drawn) and orders it in and out, so a hide
-keeps the session and a show draws the rows already there. The sheet slides on the theme's
-sheet pace and curve, and lands at once under Reduce Motion. It hides on losing the keyboard
-unless `autohide` is off, on Esc when no shell holds the keyboard, and when its shell ends;
-the next show then opens another (decisions/ui.md, "A quick terminal slides down from the top
-of the screen").
-
 ## 7. Crate map
 
 | Crate | Role | Platform |
@@ -1473,7 +1532,7 @@ of the screen").
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
 | `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, the MCP tools | all |
-| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, QUIC and MCP front ends | server |
+| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, projects (store, claims, placement), QUIC and MCP front ends | server |
 | `slopty-client` | client session state, the item registry mirror, the layout model | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |

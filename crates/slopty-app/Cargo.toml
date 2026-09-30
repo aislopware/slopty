@@ -29,10 +29,13 @@ ignored = [ "gpui_platform" ]
 [dependencies]
 anyhow.workspace = true
 data-encoding.workspace = true
-gpui.workspace = true
+# `profiler`: the foreground journal and the hang monitor that files hangs as reports (`hangs`).
+gpui = { workspace = true, features = [ "profiler" ] }
 gpui-kit.workspace = true
 gpui_platform = { workspace = true, optional = true }
 serde_json.workspace = true
+# A hang of the main thread, filed as a report next to the crashes (`hangs`).
+slopty-crash.workspace = true
 slopty-e2e.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true

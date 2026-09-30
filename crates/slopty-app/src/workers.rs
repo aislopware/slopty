@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use slopty_client::WorkerLink;
 use slopty_client::layout::WorkerKey;
 use slopty_core::WorkerId;
+use slopty_platform::resume::Resume;
 use slopty_ui::workspace::WorkerStatus;
 
 /// GPUI actions for the workers.
@@ -30,10 +31,7 @@ pub mod actions {
 }
 
 /// The workspace's key for a worker: its id's 128 bits.
-#[must_use]
-pub const fn worker_key(id: WorkerId) -> WorkerKey {
-    WorkerKey::new(id.as_uuid().as_u128())
-}
+pub use slopty_ui::workspace::worker_key;
 
 /// One worker as the app keeps it, beside what the workspace keeps.
 pub struct WorkerSlot {
@@ -51,6 +49,8 @@ pub struct WorkerSlot {
     pub name: String,
     /// The live link, to abandon it when the worker is forgotten.
     pub link: Option<std::sync::Weak<WorkerLink>>,
+    /// Hands a resume to the live link's check, which probes it at once ([`Probe`]).
+    pub resume: Option<tokio::sync::mpsc::UnboundedSender<Resume>>,
 }
 
 impl std::fmt::Debug for WorkerSlot {
@@ -67,7 +67,7 @@ impl WorkerSlot {
     #[must_use]
     pub fn new(id: WorkerId, name: String, added: bool) -> Self {
         let wake = std::sync::Arc::default();
-        Self { id, added, wake, key: worker_key(id), name, link: None }
+        Self { id, added, wake, key: worker_key(id), name, link: None, resume: None }
     }
 
     /// Cut a wait short.
@@ -79,6 +79,54 @@ impl WorkerSlot {
     #[must_use]
     pub fn linked(&self) -> bool {
         self.link.as_ref().is_some_and(|l| l.strong_count() > 0)
+    }
+
+    /// Something may have killed its link ([`Resume`]): the live link's check probes it now,
+    /// and a worker between links is dialled now rather than at the end of its backoff.
+    pub fn resume(&self, resume: Resume) {
+        // The check drops its end with its link, so a send that fails is a worker between links.
+        let probed = self.resume.as_ref().is_some_and(|tx| tx.send(resume).is_ok());
+        if !probed {
+            self.wake();
+        }
+    }
+}
+
+/// The least a probe waits for its answer: a path a few milliseconds long answers in a
+/// fraction of it, and a radio just back from sleep in less.
+pub const PROBE_FLOOR: Duration = Duration::from_millis(250);
+/// The most a probe waits: past this a link is as good as dead, and a new one is cheaper.
+pub const PROBE_CEILING: Duration = Duration::from_secs(1);
+/// How long a probe runs before a link that was not in doubt shows it: one frame.
+pub const DOUBT_GRACE: Duration = Duration::from_millis(16);
+/// How often a probe looks for the answer.
+pub const PROBE_POLL: Duration = Duration::from_millis(2);
+
+/// A probe of a live link after a [`Resume`], sized from the link's last round trip.
+///
+/// A QUIC PING goes out, and the link counts as alive the moment anything arrives from the
+/// worker. How long it waits, and when the tiles show the doubt, come from the round trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Probe {
+    /// Past this with nothing heard, the link is given up and dialled again at once.
+    pub deadline: Duration,
+    /// When the tiles are set back: at once when the device was away or the path moved, else
+    /// once the probe has run longer than a healthy link takes to answer.
+    pub doubt_after: Duration,
+}
+
+impl Probe {
+    /// The probe for `resume` over a link whose round trip was last `rtt`.
+    #[must_use]
+    pub fn new(resume: Resume, rtt: Option<Duration>) -> Self {
+        let rtt = rtt.unwrap_or(PROBE_FLOOR);
+        let deadline = rtt.saturating_mul(4).clamp(PROBE_FLOOR, PROBE_CEILING);
+        let doubt_after = if resume.was_away() || resume.moved() {
+            Duration::ZERO
+        } else {
+            rtt.saturating_mul(2).max(DOUBT_GRACE)
+        };
+        Self { deadline, doubt_after }
     }
 }
 
@@ -188,6 +236,40 @@ impl Heard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe waits four round trips, never less than a quarter second nor more than one; the
+    /// tiles show the doubt at once after the device was away or the path moved, and otherwise
+    /// only once the probe outlasts what a healthy link takes.
+    #[test]
+    fn a_probe_is_sized_from_the_round_trip() {
+        let lan = Some(Duration::from_millis(3));
+        let derp = Some(Duration::from_millis(120));
+        let bad = Some(Duration::from_millis(900));
+        assert_eq!(Probe::new(Resume::Woke, lan).deadline, PROBE_FLOOR);
+        assert_eq!(Probe::new(Resume::Woke, derp).deadline, Duration::from_millis(480));
+        assert_eq!(Probe::new(Resume::Woke, bad).deadline, PROBE_CEILING);
+        assert_eq!(Probe::new(Resume::Woke, None).deadline, PROBE_CEILING);
+        for away in [Resume::Woke, Resume::ScreensWoke, Resume::Unlocked, Resume::PathChanged] {
+            assert_eq!(Probe::new(away, lan).doubt_after, Duration::ZERO, "{away:?}");
+        }
+        assert_eq!(Probe::new(Resume::Foreground, lan).doubt_after, DOUBT_GRACE);
+        assert_eq!(Probe::new(Resume::Foreground, derp).doubt_after, Duration::from_millis(240));
+    }
+
+    /// A resume goes to a live link's check; a worker without one is dialled now.
+    #[test]
+    fn a_resume_probes_a_live_link_and_dials_a_dead_one() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut slot = WorkerSlot::new(WorkerId::new(), "studio".to_owned(), true);
+        slot.resume = Some(tx);
+        slot.resume(Resume::Woke);
+        assert_eq!(rx.try_recv().ok(), Some(Resume::Woke), "the live link probes");
+        drop(rx);
+        slot.resume(Resume::Woke);
+        let woke = slot.wake.notified();
+        tokio::pin!(woke);
+        assert!(woke.as_mut().enable(), "its check is gone with its link: dialled now");
+    }
 
     /// A worker forgotten while its dial was in flight gets no link and no key, so the
     /// workspace shows nothing for it; one still there takes the link and its answered name.

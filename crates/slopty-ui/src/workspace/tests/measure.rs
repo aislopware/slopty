@@ -238,6 +238,7 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
                 width: 2560,
                 height: 1600,
                 scale: 2.0,
+                stripes: Vec::new(),
             },
             cx,
         );

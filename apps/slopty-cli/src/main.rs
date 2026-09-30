@@ -3,6 +3,8 @@
 //! * `slopty workers|terminals|open|send|wait|…` drive workers through the server, one verb each
 //!   (`slopty_proto::orchestration`), as text or `--json`.
 //! * `slopty mcp` is the same verbs as an MCP server on stdio, for an AI agent.
+//! * `slopty project …` and `slopty task …` make and follow projects: a goal split into tasks whose
+//!   agents the server places across the workers.
 //! * `slopty server …` runs `slopty-server` as a `LaunchAgent` or a systemd user unit, and `slopty
 //!   server relay` says whether its machine is a Tailscale peer relay.
 //! * `slopty wake <worker>` wakes a sleeping worker from its own LAN.
@@ -28,6 +30,7 @@ mod handoff;
 mod hook;
 mod link;
 mod mcp;
+mod projects;
 mod relay;
 mod service;
 mod statusline;
@@ -300,7 +303,7 @@ async fn run() -> Result<ExitCode> {
             let key = cli.idempotency_key;
             verbs::run(cmd, cli.server.as_deref(), &data_dir, cli.json, key).await
         }
-        Cmd::Mcp => mcp::run(cli.server.as_deref(), &data_dir).await,
+        Cmd::Mcp => Box::pin(mcp::run(cli.server.as_deref(), &data_dir)).await,
         Cmd::Server { cmd } => service::server(cmd, &data_dir).await,
         Cmd::Add { address } => client::add(&data_dir, &address).await,
         Cmd::Forget { worker } => client::forget(&data_dir, &worker),

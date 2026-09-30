@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn the_system_cursor_reads_as_a_small_picture_with_its_hotspot_inside() {
         if std::env::var_os("SLOPTY_SCREEN_E2E").is_none() {
-            eprintln!("SLOPTY_SCREEN_E2E unset; skipping");
+            slopty_testkit::live::skip("set SLOPTY_SCREEN_E2E=1");
             return;
         }
         let warm = warm_cursor();

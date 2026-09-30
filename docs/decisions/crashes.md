@@ -121,3 +121,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     worker restarted after a crash. The app should show them and subscribe to `MXMetricManager`
     for hang and CPU-exception diagnostics, which no in-process hook can see. `slopty-crash`
     should join `LINUX_CRATES`. The iOS build of the crate was not compiled in this change.
+
+- ✅ **A hang of the app's main thread is a report too** (2026-09-30). The app runs GPUI's hang
+  monitor (the gpui-fast `profiler` feature: a journal of every task poll, action, input, draw
+  and present on the main thread, read by a thread of its own every 2 s). One piece of work past
+  250 ms, or 250 ms of work before one frame, once the first frame is up, becomes a `.hang`
+  report through `slopty_crash::record_hang`. It says how long the thread was held, from when
+  to the frame that ended it, and by what: a task and where it was spawned, an action, an
+  input, a draw or a present. A task's spawn site is its frame. The launch before the first
+  frame is not a hang. `slopty crashes` lists hangs with the crashes. They are kept apart, 20
+  per process besides the crashes, so a run of hangs never pushes a crash out.
+  - A store fix came with it. Two reports in one millisecond used to take the next free
+    millisecond, which could be the oldest one's that the rotation had just deleted, and the
+    rotation then deleted the new report. Now a colliding report takes the millisecond after
+    its process's newest.
+  - Tests: `slopty-crash` checks a hang's headline, its frames and its own rotation. The app's
+    `hangs` test turns journal events into a report. `slopty-e2e`'s
+    `a_hang_of_the_main_thread_is_filed_like_a_crash` holds the real app's main thread for
+    600 ms (`Command::HoldMain`) and reads the report back as `slopty crashes` does. What the
+    journal costs a frame is in `docs/MEASUREMENTS.md`, "hang reports".
+  - `MXMetricManager` still sees what this cannot: a hang the system measured from outside,
+    and CPU exceptions.

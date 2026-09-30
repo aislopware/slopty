@@ -5,6 +5,7 @@
 //! datagram's channel, [`Channel::Media`], as every datagram's first byte is its channel
 //! ([`crate::datagram`]). Everything after the header is opaque to this module.
 
+use bytes::{BufMut as _, Bytes, BytesMut};
 use zerocopy::little_endian::{I32, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -37,6 +38,8 @@ pub enum Kind {
     /// datagram left for a while, so the receiver's stall clock keeps running on silence from
     /// the link alone.
     Heartbeat = 4,
+    /// The answer to a clock probe ([`crate::screen::Feedback::Clock`]): a [`ClockEcho`].
+    Clock = 5,
 }
 
 impl Kind {
@@ -49,6 +52,7 @@ impl Kind {
             2 => Some(Self::Audio),
             3 => Some(Self::Cursor),
             4 => Some(Self::Heartbeat),
+            5 => Some(Self::Clock),
             _ => None,
         }
     }
@@ -125,7 +129,7 @@ impl MediaHeader {
 const _: () = assert!(size_of::<MediaHeader>() == HEADER_BYTES, "header layout drifted");
 
 /// Bytes of [`FramePrefix`].
-pub const FRAME_PREFIX_BYTES: usize = 16;
+pub const FRAME_PREFIX_BYTES: usize = 20;
 
 /// Per-frame metadata carried *inside* the fragmented payload, ahead of the encoded bitstream.
 ///
@@ -144,6 +148,13 @@ pub struct FramePrefix {
     pub capture_ts_us: U32,
     /// The long-term-reference token to acknowledge when [`flags::LTR`] is set; zero otherwise.
     pub ltr_token: U64,
+    /// For a striped stream, the stripes coded from this capture, bit `i` for stripe `i`
+    /// ([`crate::screen::Stripe`]); zero for a stream coded as one picture. A receiver shows a
+    /// capture once every stripe it names has decoded, and a stripe it does not name keeps the
+    /// picture it has: a refresh or a refinement codes only the stripe that needs it.
+    pub stripes: u8,
+    /// Zero.
+    pub reserved: [u8; 3],
 }
 
 impl FramePrefix {
@@ -155,6 +166,73 @@ impl FramePrefix {
 }
 
 const _: () = assert!(size_of::<FramePrefix>() == FRAME_PREFIX_BYTES, "prefix layout drifted");
+
+/// Bytes of [`ClockEcho`].
+pub const CLOCK_ECHO_BYTES: usize = 24;
+
+/// Payload of a [`Kind::Clock`] datagram: one round trip's four timestamps, less the fourth,
+/// which the client reads when it arrives.
+///
+/// The worker's two readings are on the clock its capture timestamps are on
+/// ([`FramePrefix::capture_ts_us`], all 64 bits of it), so the client can estimate that clock's
+/// offset from its own the way NTP does: the offset is `((received − sent) + (echoed − arrived))
+/// / 2` and the round trip `(arrived − sent) − (echoed − received)`, and the true offset lies
+/// within half that round trip of the estimate.
+#[derive(
+    Clone, Copy, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned, Debug, PartialEq, Eq,
+)]
+#[repr(C)]
+pub struct ClockEcho {
+    /// The probe's `sent_us`, as the client wrote it.
+    pub sent: U64,
+    /// The worker's capture clock when the probe arrived, microseconds.
+    pub received: U64,
+    /// The worker's capture clock when this echo left, microseconds.
+    pub echoed: U64,
+}
+
+impl ClockEcho {
+    /// An echo of the probe stamped `sent_us`, which arrived at `received_us` and leaves at
+    /// `echoed_us` on the worker's capture clock.
+    #[must_use]
+    pub const fn new(sent_us: u64, received_us: u64, echoed_us: u64) -> Self {
+        Self {
+            sent: U64::new(sent_us),
+            received: U64::new(received_us),
+            echoed: U64::new(echoed_us),
+        }
+    }
+
+    /// Read the payload of a [`Kind::Clock`] datagram; `None` when it is short.
+    #[must_use]
+    pub fn parse(payload: &[u8]) -> Option<&Self> {
+        Self::ref_from_prefix(payload).ok().map(|(echo, _)| echo)
+    }
+
+    /// The [`Kind::Clock`] datagram carrying this echo on `stream`, stamped `send_ms_lo` as
+    /// every datagram of the stream is ([`MediaHeader::send_ms_lo`]): the receiver reads the
+    /// worker's gaps between sends off the stamps of whatever arrives.
+    #[must_use]
+    pub fn datagram(&self, stream: u32, send_ms_lo: u8) -> Bytes {
+        let header = MediaHeader {
+            channel: Channel::Media as u8,
+            stream: U32::new(stream),
+            frame: U32::new(0),
+            index: U16::new(0),
+            data_count: U16::new(0),
+            parity_count: 0,
+            kind: Kind::Clock as u8,
+            flags: 0,
+            send_ms_lo,
+        };
+        let mut out = BytesMut::with_capacity(HEADER_BYTES.saturating_add(CLOCK_ECHO_BYTES));
+        out.put_slice(header.as_bytes());
+        out.put_slice(self.as_bytes());
+        out.freeze()
+    }
+}
+
+const _: () = assert!(size_of::<ClockEcho>() == CLOCK_ECHO_BYTES, "clock echo layout drifted");
 
 /// Bytes of [`CursorUpdate`].
 pub const CURSOR_BYTES: usize = 12;
@@ -212,6 +290,8 @@ mod tests {
             len: U32::new(0x0102_0304),
             capture_ts_us: U32::new(5),
             ltr_token: U64::new(0x0807_0605_0403_0201),
+            stripes: 0b10,
+            reserved: [0; 3],
         };
         let mut body = prefix.as_bytes().to_vec();
         body.push(0xcc);
@@ -220,10 +300,25 @@ mod tests {
         assert_eq!(rest, &[0xcc]);
         assert_eq!(&body[..4], &[4, 3, 2, 1]);
         assert_eq!(&body[8..16], &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(&body[16..20], &[2, 0, 0, 0], "the stripes after the token");
         assert!(FramePrefix::parse(&body[..FRAME_PREFIX_BYTES - 1]).is_none());
 
         let cursor = CursorUpdate { x: I32::new(-1), y: I32::new(2), visible: 1, reserved: [0; 3] };
         assert_eq!(cursor.as_bytes(), &[255, 255, 255, 255, 2, 0, 0, 0, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_clock_echo_is_a_header_and_three_readings() {
+        let echo = ClockEcho::new(1, 0x0102_0304_0506_0708, 0x0102_0304_0506_0709);
+        let datagram = echo.datagram(9, 0xab);
+        assert_eq!(datagram.len(), HEADER_BYTES + CLOCK_ECHO_BYTES);
+        let (header, payload) = MediaHeader::parse(&datagram).unwrap();
+        assert_eq!(
+            (header.kind(), header.stream.get(), header.send_ms_lo),
+            (Some(Kind::Clock), 9, 0xab)
+        );
+        assert_eq!(ClockEcho::parse(payload), Some(&echo));
+        assert_eq!(ClockEcho::parse(&payload[..CLOCK_ECHO_BYTES - 1]), None, "short");
     }
 
     #[test]

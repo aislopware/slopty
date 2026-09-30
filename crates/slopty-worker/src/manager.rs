@@ -300,7 +300,16 @@ impl Worker {
 
     /// Create a session.
     pub async fn open(&self, req: &OpenSession) -> Result<SessionHandle, WorkerError> {
-        let id = SessionId::new();
+        self.open_as(SessionId::new(), req).await
+    }
+
+    /// Create a session under an id the caller chose. The caller makes sure no session runs
+    /// under it already; ptyd refuses an id it holds.
+    pub async fn open_as(
+        &self,
+        id: SessionId,
+        req: &OpenSession,
+    ) -> Result<SessionHandle, WorkerError> {
         let env = self.env_for(id, &req.env);
         let spec = SpawnSpec {
             command: req.command.clone(),

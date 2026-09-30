@@ -244,7 +244,7 @@ impl WorkspaceView {
         }
         self.update_awake(cx);
         self.keep_time(cx);
-        self.count_needs_you(cx);
+        self.agents_moved(cx);
         self.update_run_targets(cx);
         cx.notify();
     }
@@ -289,7 +289,7 @@ impl WorkspaceView {
         if seeded {
             self.update_awake(cx);
             self.keep_time(cx);
-            self.count_needs_you(cx);
+            self.agents_moved(cx);
             self.update_run_targets(cx);
         }
     }
@@ -405,7 +405,7 @@ impl WorkspaceView {
             }
             self.server_agents.insert(session, (worker, event));
         }
-        self.count_needs_you(cx);
+        self.agents_moved(cx);
         cx.notify();
     }
 
@@ -421,14 +421,14 @@ impl WorkspaceView {
             .filter(|(_, event)| event.status != AgentStatus::None)
             .map(|(worker, event)| (event.session, (worker, event)))
             .collect();
-        self.count_needs_you(cx);
+        self.agents_moved(cx);
         cx.notify();
     }
 
     /// The server says a session ended.
     pub fn server_session_closed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         if self.server_agents.remove(&session).is_some() {
-            self.count_needs_you(cx);
+            self.agents_moved(cx);
             cx.notify();
         }
     }
@@ -439,7 +439,7 @@ impl WorkspaceView {
         let before = self.server_agents.len();
         self.server_agents.retain(|_, (w, _)| worker.is_some_and(|gone| *w != gone));
         if self.server_agents.len() != before {
-            self.count_needs_you(cx);
+            self.agents_moved(cx);
             cx.notify();
         }
     }
@@ -456,8 +456,10 @@ impl WorkspaceView {
         self.needs_you().iter().filter(|w| w.worker == worker).count()
     }
 
-    /// Tell the app the count (the Dock badge).
-    pub(super) fn count_needs_you(&self, cx: &mut Context<Self>) {
+    /// What some agent is doing changed: tell the app the count (the Dock badge), and hand the
+    /// boards on show their agents' word in the next frame.
+    pub(super) fn agents_moved(&mut self, cx: &mut Context<Self>) {
+        self.projects.dirty = true;
         cx.emit(WorkspaceEvent::NeedsYou(self.needs_you_count()));
     }
 

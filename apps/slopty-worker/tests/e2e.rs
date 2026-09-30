@@ -27,26 +27,9 @@ mod tests {
 
     const STEP: Duration = Duration::from_secs(20);
 
-    /// A sibling binary from the same build. `cargo test -p slopty-workerd` on its own does not
-    /// build ptyd, so build it on demand — into the profile directory this test binary came
-    /// from, or a `--release` run would build a debug ptyd and then look for it beside the
-    /// release the worker.
+    /// A binary of this build (`slopty_testkit::bins`).
     fn bin(name: &str) -> PathBuf {
-        let worker = PathBuf::from(env!("CARGO_BIN_EXE_slopty-worker"));
-        let path = worker.with_file_name(name);
-        if !path.exists() {
-            let release = worker.parent().is_some_and(|dir| dir.ends_with("release"));
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let mut build = std::process::Command::new(cargo);
-            let package = if name == "slopty" { "slopty-cli" } else { name };
-            build.args(["build", "-p", package, "--bin", name]);
-            if release {
-                build.arg("--release");
-            }
-            let status = build.status().expect("run cargo");
-            assert!(status.success(), "build {name}");
-        }
-        path
+        slopty_testkit::bins::bin(env!("CARGO_BIN_EXE_slopty-worker"), name)
     }
 
     /// Keeps the daemons and the client endpoint alive for the test.
@@ -1836,6 +1819,7 @@ mod tests {
         // stopped charging quiet sources it fires rarely — an idle machine reports none —
         // where the same skip on the old stall count fired on nearly every run.
         let stalled: Vec<u64> = rows.iter().map(|r| r.stalls).filter(|s| *s > 0).collect();
+        // Not a live skip: nothing is missing, this host's scheduler voids the verdicts.
         if !stalled.is_empty() {
             eprintln!(
                 "{stalled:?} stalls on loopback: the scheduler held datagrams, not the link; \

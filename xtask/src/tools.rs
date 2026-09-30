@@ -92,15 +92,21 @@ pub fn lint_linux(sh: &Shell, crates: &[&str]) -> Result<()> {
         // script reads from this variable) lints the same Rust.
         quiet_step(
             &format!("clippy linux-gnu (x86_64 + aarch64), {label}"),
-            cmd!(sh, "cargo clippy {set...} {targets...} {all_targets...} -- -D warnings")
-                .env("CARGO_FEATURE_NO_NEON", "1"),
+            cmd!(
+                sh,
+                "cargo clippy --keep-going {set...} {targets...} {all_targets...} -- -D warnings"
+            )
+            .env("CARGO_FEATURE_NO_NEON", "1"),
         )?;
     }
     let server = picked(&|c| SERVER_CRATES.contains(&c));
     if !server.is_empty() {
         quiet_step(
             &format!("clippy {SERVER_TRIPLE}"),
-            cmd!(sh, "cargo clippy {server...} --target {SERVER_TRIPLE} -- -D warnings"),
+            cmd!(
+                sh,
+                "cargo clippy --keep-going {server...} --target {SERVER_TRIPLE} -- -D warnings"
+            ),
         )?;
     }
     Ok(())

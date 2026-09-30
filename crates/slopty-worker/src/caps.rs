@@ -26,6 +26,8 @@ const LOAD_PERIOD: Duration = Duration::from_secs(30);
 const LOAD_STEP: f32 = 0.5;
 /// How long `claude --version` may take, login shell included.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+/// The most of an agent command's output kept: `claude agents --json` lists every session.
+const OUTPUT_CAP: usize = 4 << 20;
 
 /// The coding agents installed here, with the versions they report.
 ///
@@ -52,27 +54,31 @@ async fn version_of(program: &str) -> Option<String> {
 pub async fn agent_output(program: &str, args: &[&str], wait: Duration) -> Option<Vec<u8>> {
     let on_path = std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()));
-    let mut command = if on_path {
+    let shell = (!on_path).then(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned()));
+    let ran =
+        crate::facts::run(agent_command(program, args, shell.as_deref()), wait, OUTPUT_CAP).await?;
+    ran.ok.then(|| ran.out.into_bytes())
+}
+
+/// `program args…` run straight, or through `shell` as a login shell.
+///
+/// The login shell `exec`s the program: an interactive zsh runs a command in a process group
+/// of its own (job control), which the group [`crate::facts::run`] kills on a time-out would
+/// miss, leaving the program to outlive the wait.
+fn agent_command(program: &str, args: &[&str], shell: Option<&str>) -> tokio::process::Command {
+    let Some(shell) = shell else {
         let mut direct = tokio::process::Command::new(program);
         direct.args(args);
-        direct
-    } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-        let line = std::iter::once(program)
-            .chain(args.iter().copied())
-            .map(slopty_core::shell_quote)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut login = tokio::process::Command::new(shell);
-        login.args(["-l", "-i", "-c", &line]);
-        login
+        return direct;
     };
-    command
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let output = tokio::time::timeout(wait, command.output()).await.ok()?.ok()?;
-    output.status.success().then_some(output.stdout)
+    let line = std::iter::once(program)
+        .chain(args.iter().copied())
+        .map(slopty_core::shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut login = tokio::process::Command::new(shell);
+    login.args(["-l", "-i", "-c", &format!("exec {line}")]);
+    login
 }
 
 /// Everything about this worker as it is now; `agents` from [`installed_agents`] and
@@ -364,5 +370,103 @@ mod tests {
     fn an_unknown_sysctl_is_none() {
         assert_eq!(sysctl_string(c"slopty.no.such.name"), None);
         assert_eq!(sysctl_u64(c"slopty.no.such.name"), None);
+    }
+
+    /// A fake `claude` that starts a child of its own, says the child's pid in `pidfile`, and
+    /// waits on it: hung, as a `claude agents` stuck on the network.
+    fn hung_claude(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let program = dir.join("claude");
+        let pidfile = dir.join("child.pid");
+        let script = format!(
+            "#!/bin/sh\nsleep 600 &\necho $! > {}\nwait\n",
+            slopty_core::shell_quote(&pidfile.to_string_lossy())
+        );
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (program, pidfile)
+    }
+
+    /// The pid a hung `claude` wrote, once it has.
+    async fn child_of(pidfile: &std::path::Path) -> rustix::process::Pid {
+        let written = async {
+            loop {
+                let text = tokio::fs::read_to_string(pidfile).await.unwrap_or_default();
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    return rustix::process::Pid::from_raw(pid).unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), written).await.expect("it started")
+    }
+
+    /// Whether `pid` is gone within a few seconds.
+    async fn gone(pid: rustix::process::Pid) -> bool {
+        for _ in 0..500 {
+            if rustix::process::test_kill_process(pid).is_err() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// A `claude` that hangs past the wait is killed with everything it started, run straight
+    /// or through a login shell whose job control would put it in a group of its own.
+    #[tokio::test]
+    async fn a_hung_agent_command_dies_with_its_children_after_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let (program, pidfile) = hung_claude(dir.path());
+        let program = program.to_string_lossy().into_owned();
+        let mut shells = vec![None, Some("/bin/sh")];
+        if std::path::Path::new("/bin/zsh").exists() {
+            shells.push(Some("/bin/zsh"));
+        }
+        for shell in shells {
+            if pidfile.exists() {
+                std::fs::remove_file(&pidfile).unwrap();
+            }
+            let mut command = agent_command(&program, &[], shell);
+            // The login shell reads no rc of the person's.
+            command.env("HOME", dir.path()).env("ZDOTDIR", dir.path());
+            let waited = std::time::Instant::now();
+            let ran = tokio::join!(
+                crate::facts::run(command, Duration::from_millis(1500), OUTPUT_CAP),
+                child_of(&pidfile)
+            );
+            assert!(ran.0.is_none(), "{shell:?}: no answer past the wait");
+            assert!(waited.elapsed() < Duration::from_secs(10), "{shell:?}");
+            assert!(gone(ran.1).await, "{shell:?}: its child outlived the wait");
+        }
+    }
+
+    /// A poll the worker stops waiting on (it shuts down, the task is aborted) takes its
+    /// command's whole group with it.
+    #[tokio::test]
+    async fn an_abandoned_agent_command_dies_with_its_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let (program, pidfile) = hung_claude(dir.path());
+        let command = agent_command(&program.to_string_lossy(), &[], None);
+        let polling =
+            tokio::spawn(crate::facts::run(command, Duration::from_secs(600), OUTPUT_CAP));
+        let child = child_of(&pidfile).await;
+        polling.abort();
+        assert!(matches!(polling.await, Err(e) if e.is_cancelled()));
+        assert!(gone(child).await, "its child outlived the poll");
+    }
+
+    /// Through a login shell a program still answers with what it printed.
+    #[tokio::test]
+    async fn an_agent_command_answers_through_a_login_shell() {
+        let ran = crate::facts::run(
+            agent_command("printf", &["1.2.3\\n"], Some("/bin/sh")),
+            Duration::from_secs(10),
+            OUTPUT_CAP,
+        )
+        .await
+        .unwrap();
+        assert!(ran.ok);
+        assert_eq!(ran.out, "1.2.3");
     }
 }

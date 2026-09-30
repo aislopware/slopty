@@ -40,8 +40,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 **Project state lives on the server.** ✅ 2026-09-30
 - The server holds, in a store beside `workers.json`:
   - the project: its name, repository, target branch, verifier command and orchestrator session;
-  - its tasks: title, brief, owned paths, needs, parent task, state, assigned worker and
-    session, branch, the verifier's result and the merge;
+  - its tasks: title, brief, kind, owned paths, placement rules, parent and dependencies, state
+    and status text, assigned worker and session, branch, the verifier's result and the merge,
+    and free-form metadata;
   - an append-only event timeline.
 - Workers report; clients mirror, as they mirror the item registry. The project outlives any
   client, and a phone sees the same tree as the Mac.
@@ -57,13 +58,15 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - `.git` is never file-synced (Mutagen documents why not). Worktrees on one host share objects;
   across hosts they fetch.
 
-**A task says what it needs, and the server places it.** ✅ 2026-09-30
-- A task's needs are an OS (Linux or macOS), the Apple SDK, a display or capture, or a named
-  worker. The server picks among the workers that meet them, by `WorkerCaps` (os, installed
-  agents, cpus), current load and whether a mirror is already there. The orchestrator or the
-  user can pin a task to a worker.
-- Work that builds and tests on Linux goes to a Linux worker when one is up, which keeps the
-  Macs free for Apple work.
+**Placement is open: rules over what each worker says of itself.** ✅ 2026-09-30
+- A fixed list of needs (an OS, the Apple SDK, capture) cannot say "the box with the GPU", "a
+  Mac on AC power" or "where the nightly toolchain is". So each worker reports open facts, and a
+  task's placement is rules over them, in the phase 1 rulings below. The user asked for this
+  after reviewing the first design.
+- A pin is never overridden. An orchestrator that reads the facts and pins a task is as
+  first-class as one that writes rules. `placement_suggest` shows the ranking with its reasons
+  before anything starts.
+- Mirror presence becomes a fact once mirrors exist (phase 2).
 
 **Tasks own disjoint paths.** ✅ 2026-09-30
 - A task names the paths it owns, and the server refuses a claim that overlaps a live task's.
@@ -85,8 +88,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 **The user's plan quota bounds concurrency.** ✅ 2026-09-30
 - All agents draw on one Claude plan (a 5-hour window and a weekly cap). Multi-agent runs cost
   7-15× the tokens of one session.
-- A project caps its live agents (4 per host by default), and the project view shows each
-  agent's tokens as the transcript reports them.
+- A project caps its live agents per worker and in all. The person's bounds in the server's
+  settings cap every project and the fleet as a whole. The project view shows each agent's
+  tokens as the transcript reports them.
 
 **What the user sees.** ✅ 2026-09-30
 - A project opens as a tile. It shows:
@@ -115,9 +119,332 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - Moving a running agent to another worker (A8).
 - Bridging to Claude Code Projects.
 
+## Phase 1, as built (2026-09-30)
+
+**A project is a slug; a task is a number within it.** ✅ 2026-09-30
+- A project's id is 1-40 characters of `[a-z0-9-]`, neither starting nor ending with a dash. It
+  is checked as it decodes, so a bad name never reaches the store. It names the branch
+  `slopty/<project>/<task>` and reads well in a tool call.
+- Tasks are numbered from 1 per project (`3` or `#3`). They are not global ids, because an
+  agent says "task 3" and the orchestrator reads it back.
+- Wire types are in `slopty-proto::project`. The verbs are in `slopty-proto::orchestration`:
+  `ProjectCreate`, `ProjectSet`, `ProjectList`, `ProjectStatus` (a long poll on a timeline
+  cursor), `TaskCreate`, `TaskClaim`, `TaskUpdate`, `TaskAssign`, `TaskSpawn`, `TaskReport`,
+  `TaskGet`, `WorkingOn`, `PlacementSuggest` and `WorkerFacts`. They are served as MCP tools
+  (`project_create` … `task_spawn`, `task_report`, `task_get`, `placement_suggest`, and
+  `list_workers` with the facts) and as `slopty project …`, `slopty task …` (with
+  `task suggest`, `task report` and `task get`) and `slopty workers --json`.
+- A task's verifier run names the commits it judged (`VerifierRun { head, base }`, in hex), so
+  a verdict never outlives the work it saw.
+
+**The task model is open.** ✅ 2026-09-30
+- A task has a free-form `kind` (up to 64 characters), a `status` text beside its fixed state
+  (up to 512), and `metadata`, any JSON object up to 16 KiB. A project has metadata too.
+- `depends_on` names other tasks of the project. The graph must stay acyclic, so a dependency
+  that closes a cycle, or names an unknown task, is refused.
+- Tasks nest to any depth up to the project's `depth` limit.
+- A task runs a `Runner`: Claude Code with its prompt and arguments, or a command (any other
+  agent's CLI, a build, a script; the login shell when empty). A task may name its own verifier
+  over the project's.
+- A read-only task owns no paths. It can run beside any writer, and a read-only task that
+  names paths is refused.
+- Every move between states is checked (`TaskState::may_become`). Merged is final, and only a
+  done or verifying task merges. A move back into a live state claims the task's paths again,
+  so reopening a finished task cannot slip past a claim made since.
+
+**Workers report open facts.** ✅ 2026-09-30
+- A fact is a flag, a number, a word, or a list or map of them (`Fact`). Each worker sends its
+  facts on the server link (`ToServer::Facts`) when they change. They are gathered lazily and
+  cached (`slopty-worker::facts`), never on a hot path:
+  - installed agent CLIs and toolchains with their versions, Rust targets, GPUs;
+  - AC or battery;
+  - the person's `[worker.labels]` (read as `labels.<name>`);
+  - `[worker.probes]` shell commands, run every 10 minutes at low priority with a time limit,
+    read as `probes.<name>`.
+- The server adds what it knows itself, over anything a worker sent under the same name: name,
+  worker, os, os_version, arch, cpus, memory_mb, encoders, displays, capture and input, load,
+  online and live_agents. Facts travel beside `WorkerInfo`, not in it, so the directory's wire
+  shape is unchanged. `list_workers` and `WorkerFacts` show them all.
+
+**Placement rules are CEL.** ✅ 2026-09-30
+- `Placement { pin, require, prefer: [(expr, weight)], near, avoid }`:
+  - Every `require` rule must hold. A rule that errors, such as one reading a missing fact,
+    does not hold, and says why.
+  - Each `prefer` rule adds its weight when true, or its value times the weight when it is a
+    number (`load / double(cpus)` weighted -20).
+  - `near` and `avoid` name tasks or workers and move the score by 100. They steer and never
+    refuse.
+  - A worker at the project's per-worker limit does not fit.
+  - The tie-breaks are fewer live agents, then load per cpu, then name.
+- Every fact is a variable by its name, and all of them are also in a `facts` map, so
+  `has(facts.gpus)` asks whether a worker reported one.
+- Why CEL:
+  - It is a published language that always terminates: no loops and no recursion, so its
+    cost grows only with the rule and the facts it reads. Kubernetes (admission policies, CRD validation) and Envoy use it for this job,
+    so agents already write it.
+  - `cel` compiles a rule to a program and reports a bad one with its line and column.
+    It evaluates over plain values, so facts map to it directly.
+  - It gives arithmetic, `in`, map access and `has()` without our writing a grammar.
+- Rejected:
+  - **A hand-rolled `{fact, op, value}` matcher.** It would need its own `and`/`or`, lists,
+    maps, arithmetic and error positions, and would grow with every need.
+  - **Rhai or Lua.** Turing-complete, so every rule needs a sandbox and a fuel limit.
+  - **JSONLogic.** Verbose for an agent to write, and it has no positions in its errors.
+- The rules are agents' input, and the parser recurses. So a rule is at most 1024 bytes,
+  nested at most 32 deep, and a placement has at most 32 rules. A test runs the worst of them
+  on a 2 MiB thread. The cost is about 2.3 MB of server binary.
+- CEL terminates, but a comprehension over a comprehension over a long list still costs its
+  product. So a rule's worst case is counted as it compiles: every node once per element of
+  each comprehension around it, a list read from the facts counted as 1024 elements, the most
+  a worker's fact may hold. A rule over 65 536 steps, or a placement over 262 144, is refused
+  before it runs, with the count. A worker's facts are cut to those bounds as they arrive (1024
+  items per list or map, 4 KiB per text, 64 KiB in all).
+- The same rule gives the same verdict every time: `cel` is patched to our fork at upstream
+  master (`aislopware/cel-rust`), which iterates a map in key order and lets a comprehension
+  absorb an error that a later element settles. The fork's own change sorts keys only when a
+  comprehension walks a map. The fork also builds the standard library once per process
+  instead of once per context, which placement builds per worker.
+- Ranking runs outside the hub's lock, on the blocking pool, two at a time, and stops judging
+  after 2 s; a rule not judged by then does not hold. Ranking 32 workers under four rules takes
+  0.22 ms, compile included (`docs/MEASUREMENTS.md`). The chosen worker is then reserved
+  under the lock, which checks the cap again.
+- `placement_suggest` ranks every worker for a task or for rules given, each with its reasons
+  (rule, held, points, detail). A pinned worker fits over every rule, and the rules it failed
+  still show. A pin to a worker that is offline or full is refused; it never moves elsewhere.
+
+**Every limit is a setting, under the person's bounds.** ✅ 2026-09-30
+- A project's `Limits` are live agents per worker (4), live agents in the project (12), task
+  depth (8) and timeline entries kept (4096). They are set at `project_create` and changed with
+  `project_update`.
+- The person's `[server.projects]` bounds in `settings.toml` cap them: live agents across the
+  fleet (24), per worker (8), per project (24), depth (16) and timeline entries (65 536). The
+  server reads the file at start (`Hub::set_policy`). Agents read the bounds and the live
+  counts in `project_status`, and cannot raise them. A limit set above its bound is refused,
+  naming the setting.
+- Only protective rules stay hard: the plan quota, consent and approvals, and disjoint write
+  claims.
+
+**Counts follow live terminals, not task states.** ✅ 2026-09-30
+- A task's run counts from the moment it is placed until its terminal ends, whatever its state
+  says. A start whose caller left, an assign that failed, or an agent that marked its own task
+  done cannot escape the cap. A start counts for up to 30 s after its worker answers, until
+  the worker announces the terminal.
+- The hub chooses the id of every terminal it starts (`SpawnAgent` and `OpenTerminal` carry
+  it), and a caller never can. So a start whose answer was lost still counts for its 30 s, and
+  when its worker announces that id the terminal goes on its task as if the answer had come.
+  An agent cannot name another's terminal as its own start.
+- A command task counts like an agent, since it may be another agent's CLI.
+- The fleet bound counts every live terminal with an agent in it, in a project or not, plus
+  every start in flight. A plain `spawn_agent` is refused at the bound as a task's start is.
+- A project's orchestrator counts only while its terminal is live.
+- A terminal its worker has opened but not yet announced may be assigned at once, and counts
+  for the task's project from then.
+
+**An agent never has more than the person gave it.** ✅ 2026-09-30
+- Every link says whom it speaks for. A client is the person and an MCP surface is an agent.
+  The CLI inside a Slopty terminal is an agent when an agent runs there, when the terminal works
+  on a project, when an agent opened it or typed into it, or when the server does not know it.
+  So an agent cannot borrow the person's word through a shell, its own or one it drives.
+- Only the person answers a permission (`answer_permission` from an agent is `Forbidden`),
+  merges a task or records its verifier. Only the person's read of a conversation holds its
+  prompts, so an agent reading another's never hides a prompt from the TUI.
+- Every way to start `claude` (`spawn_agent`, `task_spawn`, and a terminal whose command is
+  `claude`) refuses these flags:
+  - `--dangerously-skip-permissions` and `--allow-dangerously-skip-permissions`;
+  - `--allowedTools` and `--allowed-tools`;
+  - `--permission-prompt-tool` and `--settings`;
+  - `--permission-mode`, other than `default`, `plan` or `dontAsk`.
+- They are allowed only for the projects the person names in `[server.projects]
+  permission_flags`. No agent can start another with more than it has.
+- Flags are one door. A settings file in the repository, which an agent may have written, is
+  another, and keys typed into a TUI a third. So an agent the server starts also:
+  - begins in `--permission-mode default` when its arguments name no mode;
+  - has bypass mode locked off (`disableBypassPermissionsMode: "disable"` in the settings the
+    worker adds, `slopty_agent::hooks::without_bypass`).
+- A backstop watches the mode each hook reports. A terminal the server started, or one an agent
+  opened or typed into, that reports a mode looser than those is closed, with a note on its task
+  saying why, unless the person allows looser modes for the project.
+- Nothing may type into an agent that waits on the person (a permission, a question) or whose
+  composer holds the person's unsent text (`AwaitsPerson`), nor into one no hook has yet
+  spoken from (`AgentNotReady`).
+- What is left, known:
+  - `claude` wrapped in a shell line (`sh -c "claude --dangerously-skip-permissions"`) passes
+    the flag check; the backstop closes it only in a terminal the server started or an agent
+    drove.
+  - Allow rules in `.claude/settings.local.json` are Claude Code's to honour and are not read.
+  - Anything running as the person's user can reach the worker's socket and speak as a client.
+    Tailscale bounds who reaches a host; the uid is the boundary on it.
+  - `task_report` over MCP cannot prove that the caller works on the task it names beyond its
+    session's own record.
+
+**Claims are prefixes at component granularity, compared as APFS compares names.** ✅ 2026-09-30
+- A path is normalised to `/`-separated components relative to the repository root, and to
+  NFC. The empty path is the root and owns everything. `crates/a` overlaps `crates/a/src/x.rs`;
+  it does not overlap `crates/ab`.
+- Paths compare case-folded, as the default APFS volume does, so `Docs` and `docs` are one
+  claim.
+- A glob owns what comes before its first wildcard, so it never owns less than it matches.
+  Any false conflicts are the safe kind.
+- A task holds its paths until it is merged or failed. A claim that overlaps a live task's is
+  refused with `Conflict`, naming the task and the path. Overlap is checked within a project
+  only, since two projects are two repositories.
+- Symlinks are not resolved: the server sees no worker's disk. The worktree that phase 2
+  prepares can resolve them on the worker.
+
+**A caller's own task is the server's record first.** ✅ 2026-09-30
+- With no project or task named, a tool acts on the caller's own. That is the task whose live
+  assignment is the caller's terminal (`SLOPTY_SESSION`), and `SLOPTY_TASK` only when the
+  server has none. A stale or inherited environment therefore never moves the wrong task.
+- The defaults apply only inside the caller's own project. A tool naming another project has
+  no own task there and must name one.
+
+**Task state follows its agent only while it works.** ✅ 2026-09-30
+- In running, waiting or blocked, the task follows its agent's `AgentStatus` (working → running,
+  waiting → waiting, blocked → blocked). Verifying, done, merged and failed are set by a verb,
+  never by an agent's status.
+- Only a move into blocked is written to the timeline. Working and waiting flip on every turn,
+  and the kept entries would fill with them.
+- When a session closes, the task's assignment ends with an `AgentGone` moment. The task keeps
+  its state for the orchestrator to judge.
+- A worker that registers again is reconciled against its session list. A task whose terminal
+  ended while the server was away is freed, instead of waiting for a close it will never hear.
+
+**`task_spawn` is the linkage; `spawn_agent` keeps its wire shape.** ✅ 2026-09-30
+- The server places the task's run and forwards an ordinary `SpawnAgent`, or `OpenTerminal`
+  for a command. `SLOPTY_PROJECT` and `SLOPTY_TASK` go last in its env, so they win over the
+  caller's. The new terminal is then assigned to the task.
+- The start is detached from its caller, so a caller that goes away mid-start still leaves its
+  terminal on the task. A terminal that its task can no longer take (merged meanwhile, say) is
+  closed, not left running outside any count.
+- The MCP `spawn_agent` tool's `project`, `task` and `parent` arguments route through it. When
+  no task is named, one is created and titled from the prompt's first line.
+- The worker's own spawn adds `--mcp-config=<json>` naming `slopty mcp` on stdio. The flag is
+  variadic in Claude Code, so the `=` form keeps the next argument from being taken as a second
+  config.
+- Every session a worker starts carries `SLOPTY_SERVER` when the worker has a server. So
+  `slopty mcp` and `slopty` in any shell find it with no flags, and Claude Code passes it on to
+  its MCP servers.
+- A task's agent starts with a conversation id the server chose (`--session-id`, unless its
+  arguments pick one), kept in its assignment (`Assignment.conversation`), so the task knows
+  its transcript before the first hook.
+- A task's agent is told its role (`--append-system-prompt`): its project and task, its paths,
+  whom it reports to and how (`task_report`), and the project's `agent_rules` from its metadata
+  when set. The orchestrator is told its own, with `orchestrator_rules`, as its first delivery
+  (below), since the person started it and the server adds no flags to it. A rules text is at
+  most 2 KiB.
+
+**Workers report their agents' tree on the server link.** ✅ 2026-09-30
+- `ToServer::Report(AgentReport)` carries:
+  - `Branch(AgentBranch)`, which was dropped at the link before;
+  - `SubagentStarted` and `SubagentStopped`;
+  - `NativeTask`, from the `SubagentStart`, `SubagentStop`, `TaskCreated` and `TaskCompleted`
+    hooks.
+- Claude Code's internal helper subagents are skipped. A report lands on the task whose live
+  agent is that session, or on the project whose orchestrator it is. Each node keeps its last
+  256 natives, beside the tasks rather than inside them.
+- A report that arrives before its session is assigned is held, for the last 256 sessions, and
+  lands when the session is assigned.
+- Natives do not go on the timeline. A stop updates its start's entry in the tree, so a
+  hundred subagents cost a hundred nodes, not two hundred timeline entries.
+- On connect, the worker sends every branch it knows. So a server restart does not lose a pull
+  request.
+
+**Project changes are deltas, with a sequence number to drop stale ones.** ✅ 2026-09-30
+- Every change logs `Happening::Project(ProjectUpdate)` on the hub's event log. It carries
+  only what changed: the project record, the one task, the one native, and the timeline entry
+  when there is one, with the task as its card. A task's status change pushes 417 bytes, where
+  the project's whole status is 506 KB at 10 projects of 200 tasks.
+- A client gets `FromServer::Projects(ProjectsPart)` after `Terminals` on connect, and again
+  after a lag. Its `seq` is the last event the snapshot includes, taken under the same lock. A
+  client must drop any `Project` event at or below it, since a replay after a lag would
+  otherwise undo newer state.
+- Change verbs go through the hub's idempotency ledger (the last 1024 keys), so a retried
+  `task_spawn` never starts a second agent.
+- The snapshot carries each task as its card (no brief, no natives; `task_get` has the rest)
+  and comes in parts of at most 8 MiB, marked first and last; a project too large for one part
+  goes on in the next. So a large fleet never builds a frame over the wire's bound. It is
+  742 KB at 10 × 200 tasks, down from 1.83 MB.
+- Everything a project holds is bounded as it comes in, so no agent can grow a frame past what
+  the wire takes: a timeline page is at most 1 MiB, the entries kept at most 8 MiB, an update's
+  events at most 8 MiB, with each field's own bound (title, note, artifacts, branch).
+
+**The store appends a log and never loses a file.** ✅ 2026-09-30
+- The hub sends every durable change to a keeper, which keeps its own replica and appends the
+  change as one JSON line to `projects.log` once a burst settles (250 ms). Nothing the store
+  does holds the hub's lock: a change costs the keeper about a microsecond, where cloning the
+  state under the lock cost 0.7 ms four times a second (`docs/MEASUREMENTS.md`, round 2).
+- The keeper writes the whole file again, compact and atomic (`slopty_platform::fs::replace`),
+  when the log passes 8 MiB and at shutdown, then starts the log again. Each line is numbered
+  and the snapshot names the last it holds, so a read replays only the lines past it.
+- A file that fails to read for any reason other than not existing stops the server
+  (`ServerError::State`), instead of starting empty and writing over it later.
+- A snapshot that does not parse is renamed `<name>.bad-<ms>` (with `-n` when that name is
+  taken), and the server starts empty. Every bad file is kept.
+- A log line cut short at the log's end, a crash mid-append, is passed over. A bad line before
+  the end sets the whole log aside as `.bad-<ms>`, since what follows it may depend on it.
+- A record is recounted as it loads (its timeline's bytes), so no count is trusted from disk.
+- `project_status` returns the latest 64 timeline entries unless given a cursor.
+
+**Reports go up through hooks.** ✅ 2026-09-30
+- A task's agent reports to the node that split its task off, its parent task's agent or the
+  project's orchestrator (`task_report`: checkpoint, needs input, stuck, done, with a note,
+  artifacts, a branch or a pull request). The report lands on the task's timeline at once.
+- Reports wait per node on the server (`slopty-server::deliver`) and go when their kind says:
+  a need at once; a block at once but at most once per task every 3 minutes; a finish once it
+  has settled for 2 minutes, a later report replacing it; a checkpoint with whatever goes next,
+  or after an hour. A batch is at most 9000 bytes, and each node has one batch outstanding.
+- A batch goes to the worker of the node's live terminal (`FromServer::Deliver`), which keeps
+  it in a file for that session beside its control socket. A node with no terminal waits,
+  parked until its next terminal opens.
+- The agent's own `SessionStart`, `UserPromptSubmit` and `Stop` hooks run
+  `slopty hook reports`, synchronously. It takes the file (claimed by a rename, so two hooks
+  never both hand it over) and prints it as the hook's `additionalContext`, or for `Stop` as
+  `decision: block` with the reports as the reason, so a finishing agent reads them before it
+  ends its turn. It then tells the worker, whose `Delivered` report acks the batch; the server
+  marks a `Delivered` moment. A batch not acked is sent again when the worker registers again,
+  folded into the next one, or put back when the terminal closes.
+- Report text cannot close its `<slopty-reports>` block, so a report never reads as the
+  server's own words.
+- Why hooks, not typing: the TUI is the source of truth and nothing types into it behind the
+  person's back. Hooks are Claude Code's own door for context, and they reach an agent the
+  moment it next thinks, at no cost while it is idle.
+
+**Tests use a stub `claude`.** ✅ 2026-09-30
+- `slopty-stub-claude` (in `slopty-testkit`) records its argv, env and MCP configs. It fires
+  every hook its `--settings` registers for each payload it is given, as Claude Code does, and
+  keeps what each printed. `STUB_LATER` fires more once a gate file appears, as a later turn's.
+  It calls one tool through the `slopty` MCP server of its `--mcp-config`, after a gate file
+  appears when a test sets `STUB_MCP_AFTER`.
+- `apps/slopty-worker/tests/server_link.rs` proves reports end to end: a server batch reaches a
+  stub agent through its next prompt's hook as context, the hook's ack comes back as
+  `Delivered`, and nothing is typed into its terminal.
+- `apps/slopty-cli/tests/projects.rs` runs it under a real server, ptyd and worker. It proves:
+  - the env, the MCP config, the hooks, the tool defaulting to the agent's own project, and
+    the tree with its natives and branch;
+  - labels and probes from the worker's settings reaching `slopty workers --json`, a CLI-made
+    command task placed by rules over them, ranked by `task suggest`, and run with its
+    project and task in its env;
+  - an agent started with a stale `SLOPTY_TASK`, then assigned to another task, updating the
+    task the server says it is on.
+- The model (`slopty-server::project`), the placement (`slopty-server::placement`) and the hub
+  (`hub/project_tests.rs`) test each ruling above at their own layer. The hub tests cover
+  concurrent starts at the cap, a caller that leaves, a lost start adopted, the fleet bound,
+  the permission flags on every path, the mode backstop, a shell an agent drove speaking as an
+  agent, reports batched and parked, and a restart's reconcile. The store tests replay a log
+  past its snapshot, over a torn last line and a bad middle one.
+
+Not built in Phase 1:
+- the project tile (the UI lane), including dropping updates at or below the snapshot's `seq`;
+- worktrees and mirrors, so a task's `cwd` must already exist on the placed worker;
+- mirror presence as a fact;
+- the verifier run and the merge queue;
+- waking an idle agent for a report (`asyncRewake`): an agent at rest reads its reports at its
+  next prompt or turn's end, while every report is on its task's timeline at once;
+- the known gaps under "An agent never has more than the person gave it".
+
 ## Phases
 
-1. **Wiring and state.**
+1. **Wiring and state.** Built 2026-09-30, except the tile.
    - Spawned agents get `slopty mcp` through `--mcp-config` and `SLOPTY_SERVER`,
      `SLOPTY_PROJECT` and `SLOPTY_TASK` in their environment.
    - The project and task store on the server, with verbs in `slopty-proto::orchestration`
@@ -129,7 +456,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 2. **Code across machines.**
    - `git-remote-slopty` and the server's bare repositories.
    - A worker verb that prepares a mirror and a worktree for a task.
-   - Placement by needs.
+   - Mirror presence as a placement fact (placement itself was built in Phase 1).
    - A worktree setup file (A3).
    - Linux worker hardening: systemd, x86_64 and a real network e2e.
 3. **Verify and merge.**

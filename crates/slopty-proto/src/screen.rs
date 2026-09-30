@@ -123,6 +123,64 @@ pub enum Chroma {
     Full,
 }
 
+/// One horizontal stripe of a striped stream: a session of its own on the worker, coding its
+/// rows of every capture (`docs/decisions/video.md`, "Two stripes halve the encode at 3K and
+/// above").
+///
+/// A stream larger than one encode engine's pixel rate is coded as two stripes on the worker's
+/// two engines at once. Each stripe is its own media stream, with its own frames, reassembly,
+/// NACKs, refreshes and reports, on [`Self::media`]. It codes [`Self::coded_rows`] rows of the
+/// picture from [`Self::coded_top`], past the seam into its neighbour's rows so the seam's rows
+/// keep their prediction, and shows only [`Self::shown_rows`] rows from [`Self::shown_top`].
+/// Every stripe of one capture carries that capture's `capture_ts_us`, and its frame prefix names
+/// the stripes coded from it ([`crate::media::FramePrefix::stripes`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct Stripe {
+    /// The media stream the stripe's datagrams come on ([`Self::media_of`]).
+    pub media: StreamId,
+    /// The first row of the picture the stripe's session codes.
+    pub coded_top: u32,
+    /// Rows the stripe's session codes: the height of the pictures it decodes to.
+    pub coded_rows: u32,
+    /// The first row of the picture the stripe shows.
+    pub shown_top: u32,
+    /// Rows of the picture the stripe shows.
+    pub shown_rows: u32,
+}
+
+impl Stripe {
+    /// The most stripes a stream is coded as: one per encode engine of an Apple silicon Mac,
+    /// and four were never better than two (MEASUREMENTS.md, "stripes across the two encode
+    /// engines").
+    pub const MAX: usize = 2;
+
+    /// The media stream of stripe `index` of `stream`: the stream's own id for the top stripe,
+    /// and the id with its top bit set for the one under it. A receiver routes a stripe's
+    /// datagrams to its stream by the id alone ([`Self::stream_of`]), before it has read the
+    /// event that names the stripe: a stream's first datagrams often beat its `Opened`.
+    #[must_use]
+    pub const fn media_of(stream: StreamId, index: usize) -> StreamId {
+        if index == 0 { stream } else { StreamId(stream.0 | STRIPE_BIT) }
+    }
+
+    /// The stream a stripe's media stream belongs to, and the stripe's index in it.
+    #[must_use]
+    pub const fn stream_of(media: StreamId) -> (StreamId, usize) {
+        if media.0 & STRIPE_BIT == 0 { (media, 0) } else { (StreamId(media.0 & !STRIPE_BIT), 1) }
+    }
+
+    /// Rows of the stripe's own picture above the ones it shows: the rows it codes past the
+    /// seam above it, 0 for the top stripe.
+    #[must_use]
+    pub const fn shown_from(&self) -> u32 {
+        self.shown_top.saturating_sub(self.coded_top)
+    }
+}
+
+/// The bit of a stripe's media stream id that says it is the lower stripe of the stream the
+/// other bits name. A worker numbers its streams upwards from 1 and never reaches it.
+const STRIPE_BIT: u32 = 1 << 31;
+
 /// Stream quality request.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Quality {
@@ -196,6 +254,8 @@ pub enum ScreenInput {
         y: f32,
         /// Modifiers.
         mods: Mods,
+        /// When the client read it: see [`Self::time_us`].
+        time_us: u32,
     },
     /// A key by its position on the keyboard, never by its character: the worker posts the
     /// position and its own keyboard layout, the client's when it took it
@@ -209,16 +269,21 @@ pub enum ScreenInput {
         /// Modifiers, with their side when the client knows it.
         mods: Mods,
     },
-    /// Pinch (magnify) gesture.
+    /// A trackpad pinch, for the app under the pointer (`NSEventTypeMagnify`): the worker posts
+    /// it as the trackpad would (`docs/decisions/input.md`, "Trackpad gestures reach the remote
+    /// app").
     Magnify {
-        /// Delta.
+        /// The change in magnification since the last event of the pinch, as
+        /// `NSEvent.magnification` reads it (0.1 is ten percent larger).
         delta: f32,
-        /// Phase.
+        /// Where the pinch is in its gesture.
         phase: ScrollPhase,
-        /// Position.
+        /// Where the fingers are, in stream pixels.
         x: f32,
-        /// Position.
+        /// Where the fingers are.
         y: f32,
+        /// When the client read it: see [`Self::time_us`].
+        time_us: u32,
     },
     /// Text the client composed and committed: an input method's or a dead key's result while
     /// the worker has not taken the client's input source, dictation, "Type the clipboard".
@@ -258,6 +323,65 @@ pub enum ScreenInput {
     /// [`Self::KeyboardSource`] goes, as at the stream's end. A later `KeyboardSource` claims
     /// anew.
     KeyboardReleased,
+    /// A trackpad rotation, for the app under the pointer (`NSEventTypeRotate`).
+    Rotate {
+        /// The change in angle since the last event of the rotation, degrees, anticlockwise
+        /// positive, as `NSEvent.rotation` reads it.
+        degrees: f32,
+        /// Where the rotation is in its gesture.
+        phase: ScrollPhase,
+        /// Where the fingers are, in stream pixels.
+        x: f32,
+        /// Where the fingers are.
+        y: f32,
+        /// When the client read it: see [`Self::time_us`].
+        time_us: u32,
+    },
+    /// Smart zoom, a two-finger double tap, for the app under the pointer
+    /// (`NSEventTypeSmartMagnify`): the app zooms to what is under it, or back.
+    SmartMagnify {
+        /// Where the fingers tapped, in stream pixels.
+        x: f32,
+        /// Where the fingers tapped.
+        y: f32,
+    },
+    /// A discrete swipe, for the app under the pointer (`NSEventTypeSwipe`, what
+    /// `-swipeWithEvent:` takes: three fingers, or two where the Mac is set to swipe pages with
+    /// two and the app does not track the scroll itself). A two-finger swipe that an app tracks
+    /// as it moves, as Safari's back and forward do, is a [`Self::Scroll`] with its phases.
+    Swipe {
+        /// Which way.
+        direction: SwipeDirection,
+        /// Where the pointer is, in stream pixels.
+        x: f32,
+        /// Where the pointer is.
+        y: f32,
+    },
+    /// Whether the tile sends its trackpad gestures to the remote app (`true`) or keeps them
+    /// (`false`, how a stream starts). While it sends them, a trackpad scroll comes with the
+    /// gesture a trackpad's does, which is what lets an app follow a two-finger swipe between
+    /// pages as it moves (`docs/decisions/input.md`, "Trackpad gestures reach the remote app").
+    Gestures {
+        /// Sent to the remote app.
+        remote: bool,
+    },
+}
+
+/// Which way a [`ScreenInput::Swipe`] went.
+///
+/// Named as the trackpad's swipe mask names it (`kIOHIDSwipeLeft` and its siblings,
+/// `IOKit/hid/IOHIDEventTypes.h`) and read by the app as `NSEvent.deltaX` / `deltaY`: a left
+/// swipe reads `deltaX` 1, a right one −1, an up swipe `deltaY` 1, a down one −1.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum SwipeDirection {
+    /// `deltaX` 1.
+    Left,
+    /// `deltaX` −1.
+    Right,
+    /// `deltaY` 1.
+    Up,
+    /// `deltaY` −1.
+    Down,
 }
 
 /// A media key the worker takes (`NX_KEYTYPE_*`, `<IOKit/hidsystem/ev_keymap.h>`).
@@ -274,11 +398,31 @@ pub enum MediaKey {
 impl ScreenInput {
     /// Whether this input applies only in its turn. A move sets where the pointer is, so a
     /// newer one may overtake an older one that has not arrived; everything else is an event
-    /// the target sees once, in order (a key, a button, a scroll's delta, a pinch's, text, the
-    /// input source the keys after it are read under).
+    /// the target sees once, in order (a key, a button, a scroll's delta, a pinch's or a
+    /// rotation's, a tap, a swipe, text, the input source the keys after it are read under).
     #[must_use]
     pub const fn in_order(&self) -> bool {
         !matches!(self, Self::Move { .. })
+    }
+
+    /// When the client read a scroll, a pinch or a rotation, in microseconds on the client's
+    /// own monotonic clock, the low 32 bits (they wrap every 71 minutes, and only the spacing
+    /// between two of one gesture counts); `None` for the rest.
+    ///
+    /// The app the gesture reaches judges it by its events' timestamps: whether a swipe between
+    /// pages turns the page on lifting, and how fast a pinch was going. Stamped as it is posted,
+    /// an event carries the path's delay with it, so a report held up by the network or the
+    /// worker's scheduler and then posted with the next turns a steady swipe into a stop and a
+    /// jerk; the worker instead posts each at the client's spacing (`docs/decisions/input.md`,
+    /// "A gesture's events keep the client's spacing").
+    #[must_use]
+    pub const fn time_us(&self) -> Option<u32> {
+        match self {
+            Self::Scroll { time_us, .. }
+            | Self::Magnify { time_us, .. }
+            | Self::Rotate { time_us, .. } => Some(*time_us),
+            _ => None,
+        }
     }
 
     /// Whether this is ⌘V, the chord a paste into a streamed window is: it must find the
@@ -407,14 +551,16 @@ impl ScreenRequest {
     }
 }
 
-/// Loss feedback, client → worker, sent as a QUIC **datagram** rather than on the control stream.
+/// Loss feedback and clock probes, client → worker, sent as a QUIC **datagram** rather than on
+/// the control stream.
 ///
 /// The control stream is ordered: one lost packet carrying a NACK would hold every later NACK
 /// back until QUIC's loss timer retransmits it (a whole PTO, tens of milliseconds on Wi-Fi), by
 /// which time the receiver has given up and asked for a refresh. As datagrams each NACK stands
-/// alone; the receiver's own retries provide the reliability. Encoded with
-/// [`codec::encode_body`](crate::codec::encode_body); a datagram that fails to decode is
-/// ignored.
+/// alone; the receiver's own retries provide the reliability. A clock probe goes the same way
+/// for the opposite reason: a probe held behind a lost packet is a round trip the clock filter
+/// has to throw away. Encoded with [`codec::encode_body`](crate::codec::encode_body); a datagram
+/// that fails to decode is ignored.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Feedback {
     /// Ask for retransmission of specific fragments (inside the playout window).
@@ -436,6 +582,17 @@ pub enum Feedback {
         /// The client holds no reference to predict from (its decoder session was lost, or the
         /// stream has not started): only an IDR can be decoded, whatever it acknowledged before.
         keyframe: bool,
+    },
+    /// What time the worker's capture clock reads: answered at once with a
+    /// [`crate::media::Kind::Clock`] datagram on the stream, carrying `sent_us` back beside the
+    /// worker's own readings, so the client can place the worker's capture timestamps on its own
+    /// clock (`docs/decisions/video.md`, "Capture to glass on any link").
+    Clock {
+        /// Stream.
+        stream: StreamId,
+        /// When the probe left, on the client's clock, microseconds from an epoch of its own;
+        /// the worker only echoes it.
+        sent_us: u64,
     },
 }
 
@@ -492,19 +649,28 @@ pub enum RateVerdict {
     Grow,
 }
 
-/// Whether a stream's capture target is producing pictures.
+/// Whether a stream's capture target is producing pictures, and when it cannot, why.
 ///
 /// A window that is hidden, minimised, or has simply not drawn since the stream opened yields no
 /// frames at all, and there is no way for the client to tell that apart from a stream whose
 /// frames are being lost. Without the distinction the receiver sits in "need refresh" and asks
 /// for one every backoff period for as long as the item is open, which no amount of asking can
-/// answer. The worker says which it is.
+/// answer. The worker says which it is. A locked Mac, or one whose screens another session has,
+/// shows nothing of the target however it draws, and only someone at the Mac can change that:
+/// those two outrank the others (`docs/decisions/video.md`, "The client is told when the Mac is
+/// locked").
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SourceState {
     /// Open and capturing, but the target has produced no frame yet. Nothing to refresh from.
     Idle,
     /// The target has produced a frame; pictures are on the way.
     Live,
+    /// The worker's Mac is locked: its screens show the lock screen until someone unlocks it
+    /// there. Nothing to refresh from.
+    Locked,
+    /// The worker's session is off the Mac's screens: they show the login window, or another
+    /// user's session after a fast user switch. Nothing to refresh from until it is back.
+    Away,
 }
 
 /// Cursor appearance, sent when it changes.
@@ -549,6 +715,9 @@ pub enum ScreenEvent {
         height: u32,
         /// Points-to-pixels scale.
         scale: f32,
+        /// How the video is coded: empty for one picture on `stream`, else its stripes, top
+        /// first, each on a media stream of its own ([`Stripe`]).
+        stripes: Vec<Stripe>,
     },
     /// Stream ended.
     Closed {
@@ -557,7 +726,8 @@ pub enum ScreenEvent {
         /// Why.
         reason: String,
     },
-    /// The window moved or resized; the stream will follow.
+    /// The target was resized, or the stream turned its stripes on or off: the video that
+    /// follows is this size, coded this way.
     Geometry {
         /// Stream.
         stream: StreamId,
@@ -565,6 +735,8 @@ pub enum ScreenEvent {
         width: u32,
         /// Pixel height.
         height: u32,
+        /// How the video is coded from now on, as in `Opened`.
+        stripes: Vec<Stripe>,
     },
     /// The cursor image changed.
     Cursor {

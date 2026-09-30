@@ -21,7 +21,9 @@ use slopty_proto::handoff::HandoffReply;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::ItemSync;
 use slopty_proto::orchestration::ErrorCode;
-use slopty_proto::screen::{Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest};
+use slopty_proto::screen::{
+    Feedback, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest, Stripe,
+};
 use slopty_proto::terminal::{
     CloseReason, SessionSummary, TermError, TermEvent, TermRequest, TermSize,
 };
@@ -273,7 +275,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     let (reports, asked) = mpsc::channel(REPORT_DEPTH);
     tasks.spawn(answer_reports(conn.clone(), out.clone(), asked));
     tasks.spawn(slopty_net::endpoint::trace_path_health(conn.clone(), "worker"));
-    let (feedback_tx, mut feedback_rx) = mpsc::channel::<Feedback>(FEEDBACK_DEPTH);
+    let (feedback_tx, mut feedback_rx) = mpsc::channel::<Arrived>(FEEDBACK_DEPTH);
     let (copies_tx, mut copies_rx) = mpsc::channel::<InputCopy>(COPY_DEPTH);
     tasks.spawn(read_datagrams(conn.clone(), feedback_tx, copies_tx));
     let (clips_tx, mut clips_rx) = mpsc::channel::<crate::xfer::ClipData>(CLIP_DEPTH);
@@ -348,7 +350,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
                 };
                 peer.handle(msg);
             }
-            Some(feedback) = feedback_rx.recv() => peer.feedback(feedback),
+            Some(Arrived { feedback, at }) = feedback_rx.recv() => peer.feedback(feedback, at),
             Some(copy) = copies_rx.recv() => peer.input_copy(copy),
             Some(clip) = clips_rx.recv() => peer.clip_data(&clip.rep, clip.bytes),
             Some(done) = done_rx.recv() => {
@@ -432,16 +434,24 @@ enum InputCopy {
     Window { stream: StreamId, seq: u64, ordered: u64, input: ScreenInput },
 }
 
+/// A feedback datagram and when the reader took it off the connection: a clock probe is
+/// stamped with that, not with when the loop gets to it.
+#[derive(Debug)]
+struct Arrived {
+    feedback: Feedback,
+    at: std::time::Instant,
+}
+
 /// Read the client's datagrams until the connection ends: loss feedback for the loop, and
 /// input copies, which the loop takes only in order ([`InputOrder`]).
 async fn read_datagrams(
     conn: Connection,
-    feedback: mpsc::Sender<Feedback>,
+    feedback: mpsc::Sender<Arrived>,
     copies: mpsc::Sender<InputCopy>,
 ) {
     loop {
-        let datagram = match conn.read_datagram().await {
-            Ok(d) => d,
+        let (datagram, at) = match conn.read_datagram().await {
+            Ok(d) => (d, std::time::Instant::now()),
             Err(e) => {
                 tracing::debug!(error = %e, "read_datagram ended");
                 break;
@@ -449,7 +459,7 @@ async fn read_datagrams(
         };
         match ClientDatagram::decode(&datagram) {
             Some(ClientDatagram::Feedback(f)) => {
-                if feedback.send(f).await.is_err() {
+                if feedback.send(Arrived { feedback: f, at }).await.is_err() {
                     break;
                 }
             }
@@ -1389,7 +1399,7 @@ impl Peer<'_> {
                 self.command(stream, Command::SetQuality(quality));
             }
             ScreenRequest::Report { stream, report } => {
-                if let Some(control) = self.screens.get(&stream).and_then(|s| s.control.clone()) {
+                if let Some(control) = self.media_control(stream) {
                     let asked = Asked { stream, control, report };
                     if self.reports.try_send(asked).is_err() {
                         tracing::debug!(client = %self.client, %stream, "reports backed up; one dropped");
@@ -1438,9 +1448,17 @@ impl Peer<'_> {
         }
     }
 
-    /// Loss feedback from a datagram: retransmit or refresh.
-    fn feedback(&self, feedback: Feedback) {
-        let control = |stream| self.screens.get(&stream).and_then(|s| s.control.as_ref());
+    /// The control for feedback on `media`, a stream's own id or its lower stripe's
+    /// ([`Stripe::media_of`]): a stripe's NACKs, refreshes and reports are answered by it alone.
+    fn media_control(&self, media: StreamId) -> Option<StreamControl> {
+        let (stream, _stripe) = Stripe::stream_of(media);
+        let control = self.screens.get(&stream).and_then(|s| s.control.as_ref())?;
+        Some(control.of_media(media))
+    }
+
+    /// Feedback from a datagram that arrived `at`: retransmit, refresh, or answer a clock probe.
+    fn feedback(&self, feedback: Feedback, at: std::time::Instant) {
+        let control = |stream| self.media_control(stream);
         match feedback {
             Feedback::Nack { stream, frame, fragments } => {
                 if let Some(control) = control(stream) {
@@ -1457,6 +1475,11 @@ impl Peer<'_> {
             Feedback::Refresh { stream, last_good_frame, keyframe } => {
                 if let Some(control) = control(stream) {
                     control.request_refresh(last_good_frame, keyframe);
+                }
+            }
+            Feedback::Clock { stream, sent_us } => {
+                if let Some(control) = control(stream) {
+                    control.clock(sent_us, at);
                 }
             }
         }

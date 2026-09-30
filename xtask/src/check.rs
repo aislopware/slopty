@@ -47,7 +47,7 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
     quiet_step("cargo fmt", cmd!(sh, "cargo +nightly fmt {p...} -- --check"))?;
     quiet_step(
         &format!("clippy {host}"),
-        cmd!(sh, "cargo clippy {b...} --all-targets --target {host} -- -D warnings"),
+        cmd!(sh, "cargo clippy --keep-going {b...} --all-targets --target {host} -- -D warnings"),
     )?;
     let apple: Vec<&str> = names().filter(|c| !HOST_ONLY_CRATES.contains(c)).collect();
     if !apple.is_empty() {
@@ -55,7 +55,10 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
         let ios: Vec<String> =
             TRIPLES[1..].iter().flat_map(|t| ["--target".to_owned(), (*t).to_owned()]).collect();
         let i = &ios;
-        quiet_step("clippy ios + ios-sim", cmd!(sh, "cargo clippy {a...} {i...} -- -D warnings"))?;
+        quiet_step(
+            "clippy ios + ios-sim",
+            cmd!(sh, "cargo clippy --keep-going {a...} {i...} -- -D warnings"),
+        )?;
     }
     lint_linux(sh, &names().collect::<Vec<_>>())?;
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
@@ -71,7 +74,10 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
     }
     {
         let _env = sh.push_env("RUSTDOCFLAGS", "-D warnings --cfg docsrs");
-        quiet_step("rustdoc", cmd!(sh, "cargo doc {b...} --no-deps --document-private-items"))?;
+        quiet_step(
+            "rustdoc",
+            cmd!(sh, "cargo doc --keep-going {b...} --no-deps --document-private-items"),
+        )?;
     }
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
     let dirs: Vec<String> = owned.iter().map(|p| p.dir.to_string()).collect();

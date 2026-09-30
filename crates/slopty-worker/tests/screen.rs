@@ -194,8 +194,10 @@ mod crop_path {
             let occluders = bounds.zip(owner).map(|(b, o)| slopty_capture::occluders(id, &b, o));
             if tokio::time::Instant::now() >= deadline {
                 if let Some(occluders) = occluders.filter(|o| !o.is_empty()) {
-                    eprintln!("skipped: another window covers the test window: {occluders:?}");
                     stream.close().await;
+                    slopty_testkit::live::skip(&format!(
+                        "another window covers the test window: {occluders:?}"
+                    ));
                     return;
                 }
                 panic!(

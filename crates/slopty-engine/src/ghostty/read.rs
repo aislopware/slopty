@@ -113,14 +113,12 @@ pub struct CommandBlock {
 impl GhosttyEngine {
     /// Fold one OSC 133 mark into the command blocks. A prompt that ran nothing (an empty
     /// line, ⌃C, a redraw) is dropped when the next one starts; only a block with output is a
-    /// command, and only its `D` counts as a command ending.
+    /// command, and only its `D` counts as a command ending. Blocks whose prompt left the
+    /// history are dropped after the mark is folded in: marks are taken once their write has
+    /// settled, and a command whose prompt that write evicted still ends.
     pub(super) fn note_command_mark(&mut self, line: u64, col: u16, mark: osc133::Mark) {
-        let base = self.base;
-        while self.commands.front().is_some_and(|b| b.prompt < base) {
-            self.commands.pop_front();
-        }
         match mark {
-            osc133::Mark::PromptStart { .. } => {
+            osc133::Mark::PromptStart => {
                 if self.commands.back().is_some_and(|b| b.output.is_none()) {
                     self.commands.pop_back();
                 }
@@ -143,6 +141,10 @@ impl GhosttyEngine {
                 }
             }
         }
+        let base = self.base;
+        while self.commands.front().is_some_and(|b| b.prompt < base) {
+            self.commands.pop_front();
+        }
     }
 
     /// Screen rows `first_y..=last_y` (screen space: history then screen) as plain text, one
@@ -160,7 +162,7 @@ impl GhosttyEngine {
         // Streamed into the string's own buffer: no copy of what may be the whole history,
         // and blank rows are simply no text.
         let mut text = Vec::new();
-        Formatter::new(&self.term, options)?.format(&mut text)?;
+        Formatter::new(&self.term, options)?.format_vec(&mut text)?;
         Ok(String::from_utf8(text)
             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
     }
@@ -182,6 +184,20 @@ impl GhosttyEngine {
         };
         rows.resize(count, String::new());
         Ok(rows)
+    }
+
+    /// The newest block, when it has not ended: `Some(true)` once its output started.
+    pub(super) fn open_command(&self) -> Option<bool> {
+        self.commands.back().filter(|b| b.end.is_none()).map(|b| b.output.is_some())
+    }
+
+    /// The numbering changed (a resize, a full reset, history evicted past the anchor) and
+    /// took the rows of every block with it. A command that was open is still open, at `line`
+    /// (the cursor): its `133;C` and `133;D` still find it (a `reset` command writes the
+    /// reset, then its shell the end).
+    pub(super) fn reopen_command(&mut self, line: u64, output: bool) {
+        let output = output.then_some(line);
+        self.commands.push_back(Block { prompt: line, output, end: None });
     }
 
     /// Where the cursor is, as a [`Position`].

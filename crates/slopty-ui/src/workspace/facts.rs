@@ -16,7 +16,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_proto::screen::SourceState;
 
 use super::WorkspaceView;
-use crate::browser::{BrowserView, Placing};
+use crate::browser::BrowserView;
 use crate::conversation::{ConversationView, HeaderChips};
 use crate::file::FileView;
 use crate::folder::FolderView;
@@ -151,8 +151,6 @@ pub(super) struct PageFacts {
     pub titled: bool,
     /// It has a page to go back to.
     pub can_go_back: bool,
-    /// What decides where the native page stands ([`BrowserView::placing`]).
-    pub placing: Placing,
 }
 
 impl PageFacts {
@@ -164,7 +162,6 @@ impl PageFacts {
             short_url: view.short_url().to_owned(),
             titled: !page.title.trim().is_empty(),
             can_go_back: page.can_go_back,
-            placing: view.placing(),
         }
     }
 }
@@ -274,7 +271,7 @@ impl WorkspaceView {
     }
 
     /// Copy item `id`'s page again. Its title or address names its tile everywhere; its way
-    /// back and where it stands are the strip's news, the strip placing the native page.
+    /// back is the strip's news.
     pub(super) fn page_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
         let Some(view) = self.browsers.get(&id) else { return };
         let now = PageFacts::of(view.read(cx));

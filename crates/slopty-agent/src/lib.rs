@@ -45,14 +45,17 @@ pub mod detect;
 pub mod discover;
 pub mod hooks;
 pub mod live;
+pub mod loosening;
 pub mod permission;
+pub mod reports;
 pub mod resume;
 pub mod roster;
 pub mod statusline;
 pub mod title;
 pub mod transcript;
+pub mod trust;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -62,6 +65,7 @@ use slopty_proto::agent::{
     AgentBranch, AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason, PullRequest,
     Worktree,
 };
+use slopty_proto::project::{AgentReport, NativeTask};
 
 use crate::detect::Program;
 use crate::title::TitleSignal;
@@ -141,6 +145,8 @@ pub enum HookEvent {
     Report,
     /// `slopty hook statusline`: the status line's meters, which say nothing about the turn.
     Statusline,
+    /// `slopty hook reports` handed a batch of reports over to the agent ([`reports`]).
+    Delivered,
     /// An event this build does not know, such as one a newer Claude Code adds; ignored.
     #[default]
     #[serde(other)]
@@ -173,6 +179,7 @@ impl HookEvent {
             Self::PostCompact => "PostCompact",
             Self::Report => "Report",
             Self::Statusline => "Statusline",
+            Self::Delivered => "Delivered",
             Self::Other => "Other",
         }
     }
@@ -309,6 +316,9 @@ pub struct Hook {
     /// `Statusline`: the worktree the session runs in.
     #[serde(default)]
     pub worktree: Option<Worktree>,
+    /// `Delivered`: the batch of reports handed over.
+    #[serde(default)]
+    pub batch: Option<u64>,
 }
 
 /// Characters a forwarded hook keeps of a background task's description or a scheduled prompt.
@@ -411,6 +421,39 @@ impl Hook {
             && self.agent_type.as_deref().is_some_and(str::is_empty)
     }
 
+    /// What the server's project tree takes from this hook in `session`: one of the model's
+    /// own subagents starting or stopping, or an item of Claude Code's task list made or
+    /// completed. Claude Code's internal subagents (compaction, suggestions) are no node.
+    #[must_use]
+    pub fn report(&self, session: SessionId) -> Option<AgentReport> {
+        if self.is_internal_subagent() {
+            return None;
+        }
+        match self.event {
+            HookEvent::SubagentStart => Some(AgentReport::SubagentStarted {
+                session,
+                agent: self.agent_id.clone()?,
+                kind: self.agent_type.clone().unwrap_or_default(),
+            }),
+            HookEvent::SubagentStop => Some(AgentReport::SubagentStopped {
+                session,
+                agent: self.agent_id.clone()?,
+                transcript: self.agent_transcript_path.clone(),
+                last: first_words(self.last_assistant_message.as_deref()),
+            }),
+            HookEvent::TaskCreated | HookEvent::TaskCompleted => {
+                let task = NativeTask {
+                    id: self.task_id.clone()?,
+                    subject: first_words(self.task_subject.as_deref()).unwrap_or_default(),
+                    done: self.event == HookEvent::TaskCompleted,
+                };
+                Some(AgentReport::NativeTask { session, task })
+            }
+            HookEvent::Delivered => Some(AgentReport::Delivered { session, batch: self.batch? }),
+            _ => None,
+        }
+    }
+
     /// The badge's line for a prompt: its first line, or for the turn a finished background
     /// task starts (its prompt a `<task-notification>`), the notification's summary.
     fn prompt_detail(&self) -> Option<String> {
@@ -477,6 +520,11 @@ pub const fn wants_transcript(event: &AgentEvent) -> bool {
 
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
+}
+
+/// A text's first line, cut for a badge; `None` for no text or a blank first line.
+fn first_words(text: Option<&str>) -> Option<String> {
+    text.map(first_line).filter(|line| !line.is_empty()).map(truncate)
 }
 
 /// Last two path components.
@@ -703,7 +751,7 @@ impl Tracker {
     /// (a restart after a crash) or when the human started it (`/clear`, `/resume`).
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
         // The status line's meters ride the hook path but say nothing about the turn.
-        if hook.event == HookEvent::Statusline || !self.owns(hook) {
+        if matches!(hook.event, HookEvent::Statusline | HookEvent::Delivered) || !self.owns(hook) {
             return None;
         }
         self.hooked = true;
@@ -1072,6 +1120,7 @@ impl Tracker {
             | HookEvent::PreCompact
             | HookEvent::PostCompact
             | HookEvent::Statusline
+            | HookEvent::Delivered
             | HookEvent::Other => return None,
         })
     }
@@ -1087,6 +1136,10 @@ pub struct AgentTable {
     /// The pull request and worktree each session's status line last named, when it named
     /// either.
     branches: HashMap<SessionId, AgentBranch>,
+    /// Sessions whose agent ended and where none has started since ([`Self::ended`]).
+    ended: HashSet<SessionId>,
+    /// The permission mode last reported for each session ([`Self::permission_mode_report`]).
+    reported_modes: HashMap<SessionId, String>,
 }
 
 impl AgentTable {
@@ -1094,8 +1147,12 @@ impl AgentTable {
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
         let tracker = self.sessions.entry(session).or_default();
         let before = tracker.resumable();
+        let had_agent = tracker.status() != &AgentStatus::None;
         let event = tracker.apply(session, hook);
-        if tracker.status() == &AgentStatus::None {
+        let has_agent = tracker.status() != &AgentStatus::None;
+        let resumable = has_agent && matches!(tracker.resumable(), resume::Resumable::Yes(_));
+        self.note_end(session, had_agent, has_agent);
+        if !has_agent {
             self.sessions.remove(&session);
             self.branches.remove(&session);
             if hook.event == HookEvent::SessionEnd
@@ -1104,7 +1161,7 @@ impl AgentTable {
             {
                 self.parked.insert(session, (conversation, 0));
             }
-        } else if matches!(tracker.resumable(), resume::Resumable::Yes(_)) {
+        } else if resumable {
             self.parked.remove(&session);
         }
         event
@@ -1149,12 +1206,44 @@ impl AgentTable {
             return None;
         }
         let tracker = self.sessions.entry(session).or_default();
+        let had_agent = tracker.status() != &AgentStatus::None;
         let event = tracker.observe(session, obs);
-        if tracker.status() == &AgentStatus::None {
+        let has_agent = tracker.status() != &AgentStatus::None;
+        self.note_end(session, had_agent, has_agent);
+        if !has_agent {
             self.sessions.remove(&session);
             self.branches.remove(&session);
         }
         event
+    }
+
+    /// Keep [`Self::ended`] as a signal moved `session` from having an agent or not to having
+    /// one or not.
+    fn note_end(&mut self, session: SessionId, had_agent: bool, has_agent: bool) {
+        if has_agent {
+            self.ended.remove(&session);
+        } else if had_agent {
+            self.ended.insert(session);
+        }
+    }
+
+    /// Whether the agent that ran in `session` has ended and none has started there since:
+    /// the terminal's shell, if it has one, is what reads its input now.
+    #[must_use]
+    pub fn ended(&self, session: SessionId) -> bool {
+        self.ended.contains(&session)
+    }
+
+    /// The permission mode `session`'s agent is in, as the server's tree takes it, when it is
+    /// not the one last reported for the session. Call it after [`Self::apply`]: only a hook
+    /// the session's own agent sent moves the mode (a nested `claude -p` does not).
+    pub fn permission_mode_report(&mut self, session: SessionId) -> Option<AgentReport> {
+        let mode = self.sessions.get(&session)?.permission_mode.as_ref()?;
+        if self.reported_modes.get(&session) == Some(mode) {
+            return None;
+        }
+        self.reported_modes.insert(session, mode.clone());
+        Some(AgentReport::PermissionMode { session, mode: mode.clone() })
     }
 
     /// Take the pull request and worktree a status line named in `session`; what every client
@@ -1221,6 +1310,8 @@ impl AgentTable {
         let mut gone = Vec::new();
         self.parked.retain(|session, _conversation| live.contains(session));
         self.branches.retain(|session, _branch| live.contains(session));
+        self.ended.retain(|session| live.contains(session));
+        self.reported_modes.retain(|session, _mode| live.contains(session));
         self.sessions.retain(|session, _tracker| {
             if live.contains(session) {
                 return true;
@@ -1273,6 +1364,8 @@ impl AgentTable {
         self.sessions.remove(&session);
         self.parked.remove(&session);
         self.branches.remove(&session);
+        self.ended.remove(&session);
+        self.reported_modes.remove(&session);
     }
 
     /// The agent's process in `session`, once the worker has seen it in the foreground.
@@ -1595,7 +1688,8 @@ mod tests {
     /// reads as `Other`.
     #[test]
     fn an_event_is_spelled_as_its_name_and_a_new_one_reads_as_other() {
-        let ours = [HookEvent::Report, HookEvent::Statusline, HookEvent::Other];
+        let ours =
+            [HookEvent::Report, HookEvent::Statusline, HookEvent::Delivered, HookEvent::Other];
         for event in HOOK_EVENTS.into_iter().chain(ours) {
             let name = serde_json::json!(event.as_str());
             assert_eq!(serde_json::to_value(event).expect("json"), name, "{event}");
@@ -2348,6 +2442,47 @@ mod tests {
         assert!(!hook(r#"{"hook_event_name":"Stop","agent_type":""}"#).is_internal_subagent());
     }
 
+    /// The model's subagents and task list become the project tree's leaves; Claude Code's
+    /// own subagents, and hooks that say nothing of either, do not.
+    #[test]
+    fn subagent_and_task_hooks_report_the_tree_s_leaves() {
+        let session = SessionId::new();
+        let started =
+            hook(r#"{"hook_event_name":"SubagentStart","agent_id":"ag1","agent_type":"Explore"}"#);
+        assert_eq!(
+            started.report(session),
+            Some(AgentReport::SubagentStarted {
+                session,
+                agent: "ag1".to_owned(),
+                kind: "Explore".to_owned()
+            })
+        );
+        let stopped = hook(
+            r#"{"hook_event_name":"SubagentStop","agent_id":"ag1","agent_type":"Explore",
+            "agent_transcript_path":"/t/ag1.jsonl","last_assistant_message":"Found it.\nMore"}"#,
+        );
+        assert_eq!(
+            stopped.report(session),
+            Some(AgentReport::SubagentStopped {
+                session,
+                agent: "ag1".to_owned(),
+                transcript: Some("/t/ag1.jsonl".to_owned()),
+                last: Some("Found it.".to_owned()),
+            })
+        );
+        let done = hook(
+            r#"{"hook_event_name":"TaskCompleted","task_id":"3","task_subject":"Read the code"}"#,
+        );
+        let task =
+            NativeTask { id: "3".to_owned(), subject: "Read the code".to_owned(), done: true };
+        assert_eq!(done.report(session), Some(AgentReport::NativeTask { session, task }));
+        let internal =
+            hook(r#"{"hook_event_name":"SubagentStart","agent_id":"c","agent_type":""}"#);
+        assert_eq!(internal.report(session), None, "compaction is no node");
+        assert_eq!(hook(r#"{"hook_event_name":"SubagentStart"}"#).report(session), None);
+        assert_eq!(hook(r#"{"hook_event_name":"Stop"}"#).report(session), None);
+    }
+
     /// The relay keeps the count of work out, whatever it cuts of each entry's text.
     #[test]
     fn a_forwarded_stop_keeps_its_work_and_cuts_its_text() {
@@ -2434,5 +2569,48 @@ mod tests {
         let kept = unhooked.snapshot();
         assert_eq!(kept[0].status, AgentStatus::Idle, "the process's word stands");
         assert_eq!(kept[0].agent_session.as_deref(), Some("s-a"), "the conversation is known");
+    }
+
+    /// An agent that ends leaves its terminal marked until another starts there, whether its
+    /// hooks said so or the process table did; a terminal that never had one is not marked.
+    #[test]
+    fn a_terminal_whose_agent_ended_is_marked_until_another_starts() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        assert!(!table.ended(sid));
+        table.apply(sid, &hook(r#"{"hook_event_name":"SessionEnd","reason":"other"}"#));
+        assert!(!table.ended(sid), "nothing ran here");
+        table.apply(sid, &hook(r#"{"hook_event_name":"SessionStart","source":"startup"}"#));
+        assert!(!table.ended(sid));
+        table.apply(sid, &hook(r#"{"hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#));
+        assert!(table.ended(sid), "ended by its hooks");
+        table.observe(sid, &seen("claude", None)).expect("a new agent");
+        assert!(!table.ended(sid), "another started");
+        table.observe(sid, &seen("zsh", None)).expect("gone");
+        assert!(table.ended(sid), "ended by the process table");
+        table.forget(sid);
+        assert!(!table.ended(sid));
+    }
+
+    /// The mode is reported when a hook of the session's agent first names it and each time it
+    /// changes, never twice in a row; a nested `claude -p` in the terminal does not move it.
+    #[test]
+    fn a_permission_mode_is_reported_when_it_changes() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        let mut heard = |json: &str| {
+            table.apply(sid, &hook(json));
+            table.permission_mode_report(sid)
+        };
+        let mode =
+            |mode: &str| Some(AgentReport::PermissionMode { session: sid, mode: mode.into() });
+        assert_eq!(heard(r#"{"session_id":"a","hook_event_name":"SessionStart"}"#), None);
+        let plan =
+            r#"{"session_id":"a","hook_event_name":"UserPromptSubmit","permission_mode":"plan"}"#;
+        assert_eq!(heard(plan), mode("plan"));
+        assert_eq!(heard(plan), None, "the same mode again");
+        let nested = r#"{"session_id":"b","hook_event_name":"PreToolUse","tool_name":"Bash","permission_mode":"bypassPermissions"}"#;
+        assert_eq!(heard(nested), None, "another agent's hook, while this one works");
+        let edits =
+            r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"acceptEdits"}"#;
+        assert_eq!(heard(edits), mode("acceptEdits"));
     }
 }

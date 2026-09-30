@@ -32,7 +32,31 @@ pub enum Role {
     Agent {
         /// What it calls itself, for logs.
         name: String,
+        /// The terminal it speaks from, proven, when it runs in a task's.
+        vouch: Option<Vouch>,
     },
+    /// The CLI run inside a Slopty terminal (`SLOPTY_SESSION` set): a person's shell or an
+    /// agent's. The server treats it as an agent when an agent runs in that terminal or it
+    /// is on a project's task.
+    Shell {
+        /// What it calls itself, for logs.
+        name: String,
+        /// The terminal it runs in.
+        session: SessionId,
+        /// The token the server gave that terminal at its start
+        /// ([`crate::project::AGENT_TOKEN_ENV`]), when it has one.
+        token: Option<String>,
+    },
+}
+
+/// Proof that a link speaks from one terminal: the token the server gave that terminal when it
+/// started it for a task ([`crate::project::AGENT_TOKEN_ENV`]), which nothing else is given.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Vouch {
+    /// The terminal (`SLOPTY_SESSION`).
+    pub session: SessionId,
+    /// Its token.
+    pub token: String,
 }
 
 /// What a worker says about itself when it registers.
@@ -201,6 +225,13 @@ pub enum ToServer {
     Agent(AgentEvent),
     /// A worker's one-minute load average moved.
     Load(f32),
+    /// What a worker's agent did beyond its status: where its work lands, Claude Code's own
+    /// subagents and task list (`docs/decisions/projects.md`).
+    Report(crate::project::AgentReport),
+    /// What a worker is and has beyond its capabilities: its own facts, its person's labels
+    /// and probes (`docs/decisions/projects.md`). Sent after registering and when they change;
+    /// each replaces the last.
+    Facts(crate::project::Facts),
 }
 
 /// Server → dialer.
@@ -247,6 +278,24 @@ pub enum FromServer {
         worker: WorkerId,
         /// Its 1-minute load average.
         load: f32,
+    },
+    /// For a client or agent: every project's tree (its cards and its timeline's latest
+    /// entries), sent after the terminals in as many parts as keep each under a frame. The
+    /// first part replaces what the client showed; each change after the snapshot comes as a
+    /// [`crate::orchestration::Happening::Project`], and one whose event `seq` is at or below
+    /// the parts' `seq` is already in it and is dropped.
+    Projects(Box<crate::project::ProjectsPart>),
+    /// For a worker: reports ([`crate::project::Report`]) for the agent in `session`, which its
+    /// hooks hand it as context (`slopty hook reports`) and then acknowledge as
+    /// [`crate::project::AgentReport::Delivered`]. A later batch for the session replaces one
+    /// not yet handed over, and holds its reports too.
+    Deliver {
+        /// The agent's terminal on this worker.
+        session: SessionId,
+        /// Which batch.
+        batch: u64,
+        /// The reports, as the agent reads them.
+        context: String,
     },
 }
 

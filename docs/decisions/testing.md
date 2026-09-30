@@ -292,8 +292,9 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   (`Stack::launch_at_home`, the real path of `home` under the run's root), so the shells say
   `~/drop-here` and no temporary path of the machine's is in the render. It listens on the first
   pair of free ports from 47310 (`steady_port`; the app forwards a port its own machine holds on
-  the next one), which is 47310 → 47311 on a quiet machine. The upload's progress needs no hold:
-  a 2 GiB sparse file still reads 0% when the frame is taken. Three runs then differed from the
+  the next one), which is 47310 → 47311 on a quiet machine. The upload's progress did not
+  seem to need a hold, since a 2 GiB sparse file read 0% when the frame was taken; it later read
+  2% on another run (see "An upload a golden draws is held"). Three runs then differed from the
   golden by 0.008%, 0.008% and 0.009% (the `app` suite's `a_forwarded_port` test, run alone
   three times in `cargo xtask e2e app`'s environment; each run's `snapshot transfers` line), so
   it uses `snapshot::MAC_TOLERANCE` and `TRANSFERS_TOLERANCE` is gone.
@@ -314,6 +315,30 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   caps (the hello and every later `Caps`) from `slopty_e2e::WORKER_GRANTS_ENV`, and `spawn_app`
   names both, the state a working Mac is in. A test that wants a grant missing names fewer
   through `Stack::launch_with`. The warning itself is covered headless (`workspace::tests::facts`).
+
+- ✅ **An upload a golden draws is held** (2026-09-30). How far an upload got by a given frame is
+  up to the machine: `conversation-attachment` read "↑ 0%" on one run and "↑ 2%" on another.
+  `xfer::Table::hold_uploads` holds every upload on a link before its next chunk, and a cancel
+  still stops a held one. The e2e build's app holds each link's uploads when
+  `slopty_e2e::HOLD_UPLOADS_ENV` is set, and the attachment test launches with it, so the chip
+  reads 0% on every run. `slopty-client`'s `upload_hold` tests show a held upload sends no byte
+  until it is released, and that a cancelled one stops.
+
+- ✅ **A golden of a prompt waits for the caret the shell sets there** (2026-09-30). Slopty's
+  zsh integration writes the prompt (`133;A` to `133;B`) and then, from `zle-line-init`, the
+  bar (`ESC[5 q`), after the block `preexec` set for the command. The `terminal` golden once
+  held the block: 119 pixels. It was not a timing effect. When the bar came in a write of its
+  own, the engine sent no frame for it, because libghostty dirties no row for a caret changed
+  in place. The app then drew the block at the prompt until something else changed.
+  `slopty-engine` now remembers the caret its last frame carried and sends a frame when it
+  changes (`a_caret_changed_alone_sends_a_frame`; MEASUREMENTS, "a caret changed alone").
+  The harness still waits rather than widening the tolerance. The dump carries each
+  terminal's `cursor_shape` (the program's DECSCUSR) and `at_prompt` (the cursor's row carries
+  a prompt mark and no command runs). The `terminal` golden waits for
+  `TerminalInfo::reads_a_line` (at the prompt, under the bar). Every other golden helper
+  (`gallery::settled`, `tiles::golden`, the `note`, `server-unreachable` and `through-server`
+  renders) waits for `Dump::prompts_settled`: no shell stands at a prompt without its bar.
+  Each wait fails after `STEP` with the last dump, which is how the engine bug surfaced.
 
 - ✅ **A live test is `#[ignore]`d, not gated on a variable** (2026-09-28, audit finding 60).
   A live test used to return early when its variable was unset, so `cargo gate` counted it as
@@ -540,3 +565,127 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `the_drawn_screen_lists_its_windows_and_takes_a_resize` and
     `a_drawn_window_streams_at_its_own_size` (`slopty-worker`); `a_masked_pixel_is_neither_compared_nor_counted`
     and `a_scrolled_mix_is_near_and_a_blank_picture_is_far` (`slopty-e2e`).
+
+- ✅ **Live tests that drive the desktop run in a macOS guest under tart** (2026-09-30). The
+  person at this Mac works on it over Parsec, so no test here may move the real pointer, post
+  HID events, lock the screen, raise a prompt or reach the login window, and none may run on the
+  other Mac. A local macOS guest takes all of that: `cargo xtask vm` (`xtask/src/vm.rs`),
+  `docs/DEV.md` ▸ "Live lane in a VM". Verified against the primary sources on this date.
+  - **Tool: tart** (now `openai/tart`, `brew install openai/tools/tart`, 2.38.0, Developer ID
+    signed by Cirrus Labs, 89 MB with Softnet). Its licence is FSL-1.1-ALv2, whose permitted
+    purposes include internal use, which a test lane on one Mac is. What decided it:
+    - Cirrus's `macos-tahoe-base` (26.6.2) and `macos-golden-gate-base` (27.0) images come set
+      up: an `admin` account that logs in at boot, SSH, no sleep, screen saver or lock, Gatekeeper
+      and **SIP off**, and the tart guest agent as a LaunchAgent in the logged-in session with
+      Accessibility, Screen Recording and `PostEvent` granted in both TCC databases
+      (`macos-image-templates/scripts/update-tcc-database.sh`). `tart exec` runs a command
+      through that agent, so it sits in the session's window server with those grants, which is
+      where HID posting and an AppKit child app need to be. An SSH shell is outside the session.
+    - `tart clone` is an APFS clone: a clean guest per run in 30 ms, no disk until it writes.
+    - `TART_HOME` puts every image and guest on the external disk.
+  - **Rejected: lume** (trycua, MIT, 0.5.3). It can set a Tahoe guest up from an IPSW unattended
+    and turn SIP off through Recovery over VNC. But it has no macOS 27 preset, reaches a guest
+    only over SSH (outside the logged-in session, where cua's own GUI tests say not to run),
+    grants nothing in TCC, and sends telemetry unless told not to. Everything the base images
+    already are would be ours to build and keep working.
+  - **Rejected: Virtualization.framework from Rust** (objc2). It fits the pure-Rust rule, and
+    the entitlement is no obstacle (`com.apple.security.virtualization` works on an ad-hoc
+    signature; only bridged networking's is restricted). But a macOS 26 guest from an IPSW
+    stops at Setup Assistant with SIP on. `VZMacGuestProvisioningOptions` makes the account and
+    SSH only for guests from 27 on. Getting through Setup Assistant and Recovery means typing
+    into the guest's screen, which is what Cirrus's Packer templates do. Owning that for a test
+    lane is the wrong place for the effort; the images are rebuilt from Apple's IPSWs by public
+    templates and pinned here by digest.
+  - **Not from an IPSW here.** An IPSW install (19.8 GB for 26.6.2, 26.6 GB for 27.0.1) gives a
+    guest nobody has logged in to, SIP on, nothing granted: no HID test can run in it. The
+    pinned image is the same install with those steps done. ipsw.me lists the 26.x virtual Mac
+    IPSWs as no longer signed. A new image is taken on purpose, by changing the digest in
+    `Macos::image`, never by a tag moving.
+  - **TCC in the guest.** With SIP off, `create` writes rows for the installed worker's path
+    (`~/Library/Application Support/Slopty/bin/slopty-worker`) into the system and user
+    databases: Accessibility, Screen Recording, `PostEvent`, with no code requirement, so a
+    rebuilt worker keeps them. Under launchd the worker is its own responsible process and needs
+    its own rows. On 27 the user database sits in a ProtectedSystem container that tccd holds
+    open (found with `lsof`, as Cirrus does). A PPPC profile cannot grant Screen Recording and
+    needs MDM, and `tccutil` only resets, so neither is used.
+  - **Deploy is `slopty worker deploy`, unchanged.** The CLI takes an `ssh` program but no ssh
+    options. So xtask passes itself as that program and turns the CLI's `xtask vm <script>`
+    into `ssh` with the guest's key and options. Depending on `slopty-deploy` from xtask would
+    pull slopty-platform (objc2-app-kit, objc2-web-kit) into the gate's own binary, and would
+    break `cargo gate` whenever another lane has slopty-proto half-edited. A `--ssh-option`
+    flag on `slopty worker deploy` would retire the stand-in.
+  - **Network.** The guest sits on tart's shared NAT (`192.168.64.0/24`), and its worker's
+    `[worker] allow` admits this Mac's address as the guest sees it (`SSH_CONNECTION`). The
+    host-only network (`--net-host`) needs Softnet under passwordless sudo, which the lane does
+    not install.
+  - **Bounds.** Each guest has 4 of the 10 cores and 8 GB of the 32. The macOS licence allows two
+    more macOS instances, and Virtualization.framework refuses a third running guest. Spotlight
+    and scheduled software updates are off in the base.
+  - **What a run proves** (`cargo xtask vm e2e`): this Mac reaches the guest's worker over the
+    VM network, and the greeting says macOS 26 with capture and input granted, and a shell
+    echoes (`slopty-e2e`, `tests/vm.rs`). A real HID pointer move posted in the guest is read
+    back there (`slopty-input`,
+    `moves_the_real_pointer_on_a_display_stream`). A live test that would skip itself fails in
+    the guest (`slopty_testkit::live::skip` under `SLOPTY_VM`), because nothing is missing there.
+    That is decided in the test, not by reading its output: a scan for `skipped:` missed other
+    wordings and failed on stats fields named `skipped`.
+  - **Runs clean up after themselves, and only after themselves.** A run's guest carries its
+    pid (`-run-<pid>-`); it goes when the run ends or on SIGINT, SIGTERM or SIGHUP, and a run
+    killed outright leaves it for the next `live`, `e2e` or `prune`, which remove only guests
+    whose pid is gone (a zero signal). Run guests share two fixed MACs under a lock, so the
+    host's DHCP pool (a day's leases) is not spent a lease per run.
+  - **Next.** The drag-and-drop P0 spikes (`audio.md`, "live lane") run here with
+    `SLOPTY_DND_E2E=1`, which the lane sets. Screen lock and the login window are reachable
+    (`pmset displaysleepnow`, a fast user switch) but no test drives them yet. The 27 guest is
+    `vm create --macos 27` (a 34 GB pull).
+
+- ✅ **The tailnet's live tests run against real Go daemons that xtask drives on loopback**
+  (2026-09-30). Fakes of the `LocalAPI` (`slopty-tailnet`'s `fake`) prove what Slopty reads, but
+  not what Headscale and `tailscaled` actually write: whether a grant's `app` value reaches the
+  destination's whois verbatim, which path a ping reports, what the IPN bus sends. So
+  `cargo xtask tailnet up` runs a real tailnet on this Mac's loopback: Headscale 0.29.4 and two
+  userspace `tailscaled` nodes, `worker` (`tag:slopty-worker`) and `ci` (`tag:ci`), with a policy
+  that opens the tailnet and grants `ci` Slopty's capability with `roles: ["agent"]` on `worker`.
+  - **Go binaries are test fixtures, and no Go is written here.** Headscale is its release
+    binary, pinned by version and SHA-256. `tailscale` and `tailscaled` 1.102.5 are built once
+    with the local Go (`go install`, which checks every module against Go's checksum database)
+    and cached under `target/tailnet/tools`. Only the xtask, which is Rust, drives them. Without
+    Go it fails and says to install it.
+  - **Nothing leaves the Mac.** Headscale's HTTP, gRPC, metrics and embedded DERP/STUN listen on
+    free loopback ports, written to the fixture file, and the DERP map has no other region. The
+    nodes reach that DERP over HTTP (`TS_DEBUG_USE_DERP_HTTP`) and then each other directly over
+    127.0.0.1, and log uploads are off.
+  - **The user's own Tailscale is never reached.** Every call names its node's socket, which
+    also turns off the CLI's search for the macOS app's port. A node must answer as a fresh
+    daemon before login, and its control URL must be the fixture's after it. `TS_LOGS_DIR` keeps
+    `tailscaled` out of `/Library/Tailscale`. The build leaves out DNS (`ts_omit_dns`), because
+    at start a macOS `tailscaled` cleans up the system DNS that a root `tailscaled` would have set.
+  - **No daemon outlives `up`.** `up` holds everything in the foreground until Ctrl-C, SIGTERM,
+    SIGHUP or `down`. Each daemon runs under a guard, a hidden xtask subcommand in its own
+    process group, which stops the daemon when `up`'s end of a pipe closes. That holds even when
+    `up` is killed outright (checked with `kill -9`). `down` also stops any process whose command
+    line names the run dir, and nothing else.
+  - **Tests.** A test reads the JSON at `SLOPTY_TAILNET_FIXTURE` and skips through
+    `slopty_testkit::live::skip` when it is unset or the file is gone
+    (`crates/slopty-tailnet/tests/fixture.rs`). The first test proves that the worker's
+    `LocalApi::status` lists `ci` online with its tag, that `whois` from both of `ci`'s addresses
+    yields exactly the granted roles, and that nothing is granted the other way. It also holds
+    the fixture's capability equal to `policy::CAP`. The grant roles, ping path and IPN bus
+    items of `.research/tailscale-services-2026-09-30.md` build on this fixture.
+
+- ✅ **The encode engines and the GPU are measured from IOReport, without root** (2026-09-30,
+  M1 Max, macOS 27.0). `powermetrics` needs root, and a measurement run from a test has none,
+  so until now which engine a session ran on, and what the GPU did, were guessed from timings.
+  `slopty_testkit::soc` subscribes to the IOReport channels `powermetrics` reads, which any
+  process may read through `libIOReport.dylib`, and reports a span: each encode engine's
+  interrupts (`Interrupt Statistics (by index)`, `ave0 0` and `ave1 0`, about four a coded
+  frame) and DRAM traffic (`AMC Stats`, `VENC0` and `VENC1`), and the GPU's active share
+  (`GPU Stats`, `GPUPH` out of `OFF`) and energy (`Energy Model`, `GPU Energy`). The counters are
+  the whole Mac's, so a measurement reads an idle second first and reports what it added.
+  - Left out because they say nothing here: the encode block's energy (`Energy Model`, `AVE0`
+    reads 0 mJ over any span) and its power state (`SoC Stats`, `AVEMSR`, `ACT` idle or not).
+  - IOReport is private: no SDK header declares it, so the signatures are the ones root-free
+    monitors (macmon) call, and the reader lives in the test kit only, never in a shipped
+    binary. Off macOS it opens nothing. Test: `a_span_reads_back`. First use:
+    MEASUREMENTS "large streams on the encode engines", where it showed a session never spans
+    two engines and put another app's encoder on `ave1` while the Mac was otherwise idle.

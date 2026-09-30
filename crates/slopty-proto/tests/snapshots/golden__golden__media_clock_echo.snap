@@ -1,0 +1,7 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: "hex(&echo.datagram(7, 0xab))"
+---
+00 07 00 00 00 00 00 00 00 00 00 00 00 00 05 00
+ab 87 d6 12 00 00 00 00 00 06 05 04 03 02 01 00
+00 40 05 04 03 02 01 00 00

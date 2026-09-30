@@ -7,7 +7,12 @@
 //! long `WaitFor` holds up nothing), and when the server is down it dials again by the one
 //! redial rule every link follows ([`slopty_net::redial`]), forever. A server on a different
 //! build is asked again only after [`slopty_net::redial::WRONG_BUILD`].
+//!
+//! It also tells the server what this worker is and has ([`slopty_worker::facts`]), which the
+//! link only carries: gathered on a task of their own, they go out after each registration and
+//! whenever they change.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
@@ -20,6 +25,7 @@ use slopty_proto::WorkerMsg;
 use slopty_proto::agent::SessionAgent;
 use slopty_proto::codec::CodecError;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
+use slopty_proto::project::{AgentReport, Fact, Facts};
 use slopty_proto::server::{FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
 use slopty_worker::orchestrate::{Agents, Orchestrator};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -47,6 +53,30 @@ pub fn configured(
     Ok(Some(addr))
 }
 
+/// What the person says of this machine in `settings`, as [`slopty_worker::facts`] reports it.
+pub fn own_facts(settings: &slopty_settings::WorkerSettings) -> slopty_worker::facts::Own {
+    let labels = settings
+        .labels
+        .iter()
+        .filter_map(|(name, label)| Some((name.clone(), label_fact(label)?)))
+        .collect();
+    slopty_worker::facts::Own { labels, probes: settings.probes.clone() }
+}
+
+/// A label as a fact. A float that is not a number, or is infinite, is none: no rule can
+/// compare with it, and it would never equal itself, so the facts would never stop changing.
+fn label_fact(label: &slopty_settings::Label) -> Option<Fact> {
+    use slopty_settings::Label;
+    Some(match label {
+        Label::Bool(on) => Fact::Bool(*on),
+        Label::Int(n) => Fact::Int(*n),
+        Label::Float(x) if x.is_finite() => Fact::Float(*x),
+        Label::Float(_) => return None,
+        Label::Text(text) => Fact::Text(text.clone()),
+        Label::List(items) => Fact::List(items.iter().filter_map(label_fact).collect()),
+    })
+}
+
 /// The daemon's agent table, as orchestration reads it.
 pub struct DaemonAgents(pub Arc<parking_lot::Mutex<slopty_agent::AgentTable>>);
 
@@ -59,6 +89,19 @@ impl Agents for DaemonAgents {
     fn forget(&self, session: SessionId) {
         self.0.lock().forget(session);
     }
+
+    fn ended(&self, session: SessionId) -> bool {
+        self.0.lock().ended(session)
+    }
+}
+
+/// What a registration keeps sending as it changes.
+#[derive(Clone)]
+pub struct Watched {
+    /// What this worker can do.
+    pub caps: watch::Receiver<WorkerCaps>,
+    /// What it is and has; empty until first gathered.
+    pub facts: watch::Receiver<Facts>,
 }
 
 /// Stay registered with the server at `addr`, dialing from `endpoint`, until the daemon stops.
@@ -67,12 +110,12 @@ pub async fn run(
     orchestrator: Orchestrator,
     endpoint: slopty_net::Endpoint,
     addr: HostAddr,
-    caps: watch::Receiver<WorkerCaps>,
+    watched: Watched,
 ) -> ! {
     let mut redial = Redial::default();
     loop {
         let ended =
-            session(&daemon, &orchestrator, &endpoint, &addr, caps.clone(), &mut redial).await;
+            session(&daemon, &orchestrator, &endpoint, &addr, watched.clone(), &mut redial).await;
         match ended {
             Ok(why) => tracing::info!(server = %addr, why, "server link ended"),
             // It lets go of that link within the lease's idle timeout; the redials, two
@@ -127,11 +170,13 @@ async fn session(
     orchestrator: &Orchestrator,
     endpoint: &slopty_net::Endpoint,
     addr: &HostAddr,
-    mut caps: watch::Receiver<WorkerCaps>,
+    watched: Watched,
     redial: &mut Redial,
 ) -> Result<&'static str, Ended> {
+    let Watched { mut caps, mut facts } = watched;
     // Subscribed before the registration is taken: whatever happens after it is sent after it.
     let mut events = daemon.events.subscribe();
+    let mut reports = daemon.reports.subscribe();
     let now = caps.borrow_and_update().clone();
     let registration = Registration {
         worker: daemon.id,
@@ -162,6 +207,20 @@ async fn session(
     if out.send(ToServer::Load(load)).await.is_err() {
         return Ok("the writer stopped");
     }
+    // Nor where each agent's work lands, which the status lines said before this link.
+    let branches = daemon.agents.lock().branches();
+    for branch in branches {
+        if out.send(ToServer::Report(AgentReport::Branch(branch))).await.is_err() {
+            return Ok("the writer stopped");
+        }
+    }
+    // Nor what it is and has, once that is known.
+    let known = facts.borrow_and_update().clone();
+    if !known.is_empty() && out.send(ToServer::Facts(known)).await.is_err() {
+        return Ok("the writer stopped");
+    }
+    // A registration outlives a facts task that ended: the facts it sent stand.
+    let mut facts_watched = true;
     let mut requests = JoinSet::new();
     let why = loop {
         tokio::select! {
@@ -184,6 +243,24 @@ async fn session(
                         let _sent = out.send(ToServer::Reply { id, outcome }).await;
                     });
                 }
+                Ok(FromServer::Deliver { session, batch, context }) => {
+                    let dir = daemon.deliveries.clone();
+                    let kept = tokio::task::spawn_blocking(move || {
+                        let batch = slopty_agent::reports::Batch { batch, context };
+                        slopty_agent::reports::put(&dir, session, &batch)
+                    });
+                    match kept.await {
+                        Ok(Ok(())) => {
+                            tracing::debug!(%session, batch, "reports kept for the hooks");
+                            let (deliveries, inboxes) =
+                                (daemon.deliveries.clone(), daemon.inboxes.clone());
+                            let acks = daemon.reports.clone();
+                            tokio::spawn(hand_over(deliveries, inboxes, acks, session));
+                        }
+                        Ok(Err(e)) => tracing::warn!(%session, error = %e, "reports not kept"),
+                        Err(e) => tracing::warn!(%session, error = %e, "reports not kept"),
+                    }
+                }
                 Ok(other) => tracing::debug!(?other, "server message a worker does not take"),
                 Err(NetError::Closed) => break "the server closed the link",
                 Err(e) => return Err(e.into()),
@@ -192,13 +269,34 @@ async fn session(
                 let msg = match ev {
                     Ok(WorkerMsg::SessionChanged(summary)) => ToServer::SessionChanged(summary),
                     Ok(WorkerMsg::SessionClosed { session, reason }) => {
+                        let inboxes = daemon.inboxes.clone();
+                        drop(tokio::task::spawn_blocking(move || {
+                            slopty_agent::reports::forget_inbox(&inboxes, session)
+                        }));
                         ToServer::SessionClosed { session, reason }
                     }
                     Ok(WorkerMsg::Agent(event)) => ToServer::Agent(event),
                     Ok(WorkerMsg::Load(load)) => ToServer::Load(load),
+                    Ok(WorkerMsg::AgentBranch(branch)) => {
+                        ToServer::Report(AgentReport::Branch(branch))
+                    }
                     Ok(_) => continue,
                     // What was missed is in a fresh registration.
                     Err(broadcast::error::RecvError::Lagged(_)) => break "fell behind the daemon's events",
+                    Err(broadcast::error::RecvError::Closed) => break "the daemon is stopping",
+                };
+                if out.send(msg).await.is_err() {
+                    break "the writer stopped";
+                }
+            }
+            report = reports.recv() => {
+                let msg = match report {
+                    Ok(report) => ToServer::Report(report),
+                    // A subagent's start or stop the tree missed is only a leaf short.
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "agent reports dropped");
+                        continue;
+                    }
                     Err(broadcast::error::RecvError::Closed) => break "the daemon is stopping",
                 };
                 if out.send(msg).await.is_err() {
@@ -211,6 +309,17 @@ async fn session(
                 }
                 let now = caps.borrow_and_update().clone();
                 if out.send(ToServer::Caps(now)).await.is_err() {
+                    break "the writer stopped";
+                }
+            }
+            changed = facts.changed(), if facts_watched => {
+                if changed.is_err() {
+                    tracing::warn!("this worker's facts are no longer gathered");
+                    facts_watched = false;
+                    continue;
+                }
+                let now = facts.borrow_and_update().clone();
+                if out.send(ToServer::Facts(now)).await.is_err() {
                     break "the writer stopped";
                 }
             }
@@ -262,11 +371,74 @@ fn too_large(len: usize, max: usize) -> Outcome {
     }
 }
 
+/// How long posting to an agent's inbox may take before the batch waits for its hooks.
+const INBOX_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Hand the batch kept for `session` to its agent's inbox at once, when it noted one: claimed
+/// first, so its hooks never hand it over too, then acknowledged to the server as they would.
+/// A post that fails puts the batch back for the hooks, and forgets an inbox whose socket is
+/// gone.
+async fn hand_over(
+    deliveries: PathBuf,
+    inboxes: PathBuf,
+    acks: broadcast::Sender<AgentReport>,
+    session: SessionId,
+) {
+    use slopty_agent::reports;
+    let claimed = tokio::task::spawn_blocking({
+        let (deliveries, inboxes) = (deliveries.clone(), inboxes.clone());
+        move || -> std::io::Result<Option<(reports::Inbox, reports::Batch)>> {
+            let Some(inbox) = reports::inbox(&inboxes, session)? else { return Ok(None) };
+            Ok(reports::take(&deliveries, session)?.map(|batch| (inbox, batch)))
+        }
+    })
+    .await;
+    let (inbox, batch) = match claimed {
+        Ok(Ok(Some(claimed))) => claimed,
+        Ok(Ok(None)) => return,
+        Ok(Err(e)) => return tracing::warn!(%session, error = %e, "reports not claimed"),
+        Err(e) => return tracing::warn!(%session, error = %e, "reports not claimed"),
+    };
+    let text = reports::message(&inbox, &batch.context);
+    match tokio::time::timeout(INBOX_PATIENCE, post(&inbox.socket, text.as_bytes())).await {
+        Ok(Ok(())) => {
+            tracing::debug!(%session, batch = batch.batch, "reports posted to the agent's inbox");
+            let _sent = acks.send(AgentReport::Delivered { session, batch: batch.batch });
+        }
+        failed => {
+            let gone = matches!(&failed, Ok(Err(e)) if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            ));
+            tracing::debug!(%session, ?failed, gone, "reports wait for the agent's hooks");
+            let back = tokio::task::spawn_blocking(move || {
+                if gone {
+                    reports::forget_inbox(&inboxes, session)?;
+                }
+                reports::put_back(&deliveries, session, &batch)
+            });
+            if let Ok(Err(e)) | Err(e) = back.await.map_err(std::io::Error::other) {
+                tracing::warn!(%session, error = %e, "reports lost for the hooks");
+            }
+        }
+    }
+}
+
+/// Write `text` to the Unix socket at `socket` and close it.
+async fn post(socket: &Path, text: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+    let mut stream = tokio::net::UnixStream::connect(socket).await?;
+    stream.write_all(text).await?;
+    stream.shutdown().await
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_net::HostAddr;
+    use slopty_proto::project::Fact;
+    use slopty_settings::Label;
 
-    use super::configured;
+    use super::{configured, own_facts};
 
     #[test]
     fn the_flag_wins_over_the_settings_and_the_port_defaults_to_the_servers() {
@@ -279,5 +451,45 @@ mod tests {
         assert_eq!((flag.host(), flag.port()), ("100.64.0.9", 7000));
         assert_eq!(configured(Some(" "), &settings).unwrap(), None, "an empty flag opts out");
         configured(Some("a b"), &settings).unwrap_err();
+    }
+
+    /// Every label becomes the fact of its kind, a list keeps its order, a float no rule can
+    /// compare with is left out, and the probes pass as they are.
+    #[test]
+    fn labels_become_facts_and_probes_pass_through() {
+        let labels = [
+            ("fast-disk", Label::Bool(true)),
+            ("vram_gb", Label::Int(24)),
+            ("tflops", Label::Float(26.5)),
+            ("rack", Label::Text("b2".to_owned())),
+            ("odd", Label::Float(f64::NAN)),
+            (
+                "zones",
+                Label::List(vec![
+                    Label::Text("eu".to_owned()),
+                    Label::Float(f64::INFINITY),
+                    Label::Int(2),
+                ]),
+            ),
+        ]
+        .map(|(name, label)| (name.to_owned(), label))
+        .into();
+        let settings = slopty_settings::WorkerSettings {
+            labels,
+            probes: [("cuda".to_owned(), "nvidia-smi -L".to_owned())].into(),
+            ..slopty_settings::WorkerSettings::default()
+        };
+        let own = own_facts(&settings);
+        let want = [
+            ("fast-disk", Fact::Bool(true)),
+            ("vram_gb", Fact::Int(24)),
+            ("tflops", Fact::Float(26.5)),
+            ("rack", Fact::Text("b2".to_owned())),
+            ("zones", Fact::List(vec![Fact::Text("eu".to_owned()), Fact::Int(2)])),
+        ]
+        .map(|(name, fact)| (name.to_owned(), fact))
+        .into();
+        assert_eq!(own.labels, want);
+        assert_eq!(own.probes, settings.probes);
     }
 }

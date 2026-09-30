@@ -185,6 +185,9 @@ pub struct FrameInfo {
     pub discardable: bool,
     /// Worker capture timestamp, microseconds (low 32 bits).
     pub capture_ts_us: u32,
+    /// The stripes coded from this capture, bit `i` for stripe `i`; zero for one picture
+    /// ([`slopty_proto::media::FramePrefix::stripes`]).
+    pub stripes: u8,
     /// Needed parity or a retransmission.
     pub recovered: bool,
 }
@@ -781,7 +784,8 @@ impl Reassembler {
                     None => Ingest::Ignored(Ignored::Malformed),
                 }
             }
-            Some(Kind::Heartbeat) => Ingest::Heartbeat,
+            // A clock echo is the client's to read before this; here it only says the link is up.
+            Some(Kind::Heartbeat | Kind::Clock) => Ingest::Heartbeat,
             Some(Kind::Cursor) => {
                 parse_cursor(&payload).map_or(Ingest::Ignored(Ignored::Malformed), |update| {
                     Ingest::Cursor { seq: header.frame.get(), update }
@@ -1540,6 +1544,7 @@ fn assemble(
             ltr_refresh: f & flags::LTR_REFRESH != 0,
             discardable: partial.discardable,
             capture_ts_us: prefix.capture_ts_us.get(),
+            stripes: prefix.stripes,
             recovered: fec || partial.retransmitted,
         },
         data,
@@ -1647,6 +1652,7 @@ mod cost_tests {
                         ltr_refresh: false,
                         discardable: false,
                         capture_ts_us: n,
+                        stripes: 0,
                     };
                     packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()
                 })

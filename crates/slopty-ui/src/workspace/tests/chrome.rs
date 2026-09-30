@@ -847,3 +847,58 @@ fn measure_the_keyboard_moving_beside_the_chrome(cx: &mut TestAppContext) {
         pct(95)
     );
 }
+
+/// What the keyboard moving between two shells costs when a view of its own moves it (a click
+/// in a body, a find bar giving it back), with nothing in the workspace asked: over 60 shells
+/// and 60 notes with the navigator docked, the frame that draws the move, and how many times
+/// the workspace and the strip were built for it. Run by hand (it prints, it does not judge);
+/// `docs/MEASUREMENTS.md` has the numbers and the command.
+#[gpui::test]
+#[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+fn measure_the_keyboard_moving_on_its_own_beside_the_chrome(cx: &mut TestAppContext) {
+    const MOVES: usize = 400;
+    const WARM: usize = 20;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let sessions = crowd(&view, cx, &studio, 60, 60);
+    // Two shells on screen, so the move changes what the window shows.
+    let handles: Vec<FocusHandle> = view.read_with(cx, |v, cx| {
+        let shown = v.drawn.on_screen.borrow();
+        sessions
+            .iter()
+            .filter(|s| {
+                v.layout.tiles().any(|t| {
+                    shown.contains(&t.item)
+                        && v.item(t).is_some_and(|i| i.kind == ItemKind::Terminal { session: **s })
+                })
+            })
+            .take(2)
+            .filter_map(|s| v.terminal(*s).map(|t| t.read(cx).focus_handle(cx)))
+            .collect()
+    });
+    assert_eq!(handles.len(), 2, "two shells on screen");
+    let builds =
+        |cx: &mut VisualTestContext| view.read_with(cx, |v, _| (v.renders, v.drawn.builds.get()));
+    let mut took = Vec::with_capacity(MOVES);
+    let start_builds = builds(cx);
+    for n in 0..WARM + MOVES {
+        let handle = &handles[n % 2];
+        let start = Instant::now();
+        cx.update(|window, cx| window.focus(handle, cx));
+        cx.run_until_parked();
+        if n >= WARM {
+            took.push(start.elapsed());
+        }
+    }
+    let (workspace, strip) = builds(cx);
+    took.sort_unstable();
+    let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+    println!(
+        "MEASURE the keyboard moving on its own beside the chrome, 60 shells + 60 notes, {MOVES} \
+         moves: p50 {:.3} ms p95 {:.3} ms; the workspace built {} times, the strip {}",
+        pct(50),
+        pct(95),
+        workspace.saturating_sub(start_builds.0),
+        strip.saturating_sub(start_builds.1),
+    );
+}

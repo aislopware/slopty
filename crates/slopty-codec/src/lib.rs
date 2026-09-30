@@ -3,6 +3,8 @@
 //! * [`nal`] — pure length-prefixed NAL unit framing, used by both halves and on every platform.
 //! * [`conformance`] — the SPS conformance window that shows a picture coded at a padded size at
 //!   its true one.
+//! * [`stripes`] — one picture coded as two stripes on the two encode engines: the layout both ends
+//!   share, and on macOS the stripe pictures and the gate that says whether they pay.
 //! * [`video`] — the worker's encoder seam, [`VideoEncoder`] and [`AudioEncoder`], on every
 //!   platform; `VideoToolbox` and `Opus` implement it on macOS.
 //! * `Encoder` (macOS) — a `VTCompressionSession` tuned for interactive streaming: low-latency rate
@@ -28,6 +30,7 @@
 pub mod audio;
 pub mod conformance;
 pub mod nal;
+pub mod stripes;
 pub mod video;
 
 #[cfg(target_vendor = "apple")]
@@ -92,6 +95,17 @@ pub enum CodecError {
         /// The session's.
         session: (usize, usize),
     },
+    /// A picture in another pixel format than the one asked for (four-character codes).
+    #[error("a picture in {got:#010x} where {expected:#010x} was asked for")]
+    PixelFormat {
+        /// The format asked for.
+        expected: u32,
+        /// The picture's.
+        got: u32,
+    },
+    /// This encoder codes no stripes ([`VideoEncoder::stripe`]).
+    #[error("this encoder codes no stripes")]
+    NoStripes,
     /// This platform has no audio encoder (`docs/decisions/platform.md`, "Linux seams").
     #[error("no audio encoder on this platform")]
     NoAudio,

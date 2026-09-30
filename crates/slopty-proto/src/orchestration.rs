@@ -21,6 +21,11 @@
 //! and its permission prompts are answered through the same held hook
 //! ([`Verb::AnswerPermission`]). A file too large for one frame goes up in parts
 //! ([`Verb::Upload`]) and comes down in [`Verb::ReadFile`] ranges.
+//!
+//! Projects ([`crate::project`]) are the server's own: it answers the project and task verbs
+//! from its store, ranks the workers for a task by rules over their facts
+//! ([`Verb::PlacementSuggest`]), starts what runs for a task where it places it
+//! ([`Verb::TaskSpawn`]), and logs every change as a [`Happening::Project`].
 
 use std::time::Duration;
 
@@ -30,6 +35,10 @@ use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
 use crate::agent::{AgentEvent, AgentKind, AgentStatus, SessionAgent};
 use crate::conversation::{Entry, Meters, Origin, PermissionPrompt, Task, ThreadId, Verdict};
 use crate::items::{Item, ItemKind};
+use crate::project::{
+    LimitsChange, Placement, Project, ProjectId, ProjectStatus, ProjectUpdate, Report, Suggestion,
+    TaskChange, TaskId, TaskLaunch, TaskSpec, WorkerFacts,
+};
 use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use crate::search::{FileHits, SearchQuery, SearchSummary};
 use crate::server::{Liveness, WorkerInfo};
@@ -81,6 +90,26 @@ impl IdempotencyKey {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The key of the step `name` of a call made under this key: the same for every retry of
+    /// the call, and another for each step, so a call that makes a task and then starts it
+    /// makes one task however often it is sent.
+    #[must_use]
+    pub fn part(&self, name: &str) -> Self {
+        let whole = format!("{name}.{}", self.0);
+        if whole.len() <= Self::MAX_LEN && whole.bytes().all(|b| b.is_ascii_graphic()) {
+            return Self(whole);
+        }
+        // FNV-1a over the whole key keeps long keys apart once cut to fit.
+        let hash = whole.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+        let named: String = name.chars().filter(char::is_ascii_graphic).take(32).collect();
+        let mut short = format!("{named}.{hash:016x}.");
+        let room = Self::MAX_LEN.saturating_sub(short.len());
+        short.extend(self.0.chars().take(room));
+        Self(short)
     }
 
     /// The answer to a verb whose key an earlier verb with other arguments holds.
@@ -212,6 +241,10 @@ pub enum Verb {
         name: Option<String>,
         /// The grid until a client shows it and sizes it to its window; 120×36 when absent.
         size: Option<Size>,
+        /// The id the terminal takes, when the caller chooses it: a start whose answer was lost
+        /// is found by it, and a start again under an id the worker already runs answers that
+        /// terminal instead of opening a second.
+        session: Option<SessionId>,
     },
     /// Start an agent's TUI in a new terminal, optionally with a first prompt.
     SpawnAgent {
@@ -229,6 +262,12 @@ pub enum Verb {
         env: Vec<(String, String)>,
         /// The grid, as for [`Verb::OpenTerminal`].
         size: Option<Size>,
+        /// The id the terminal takes, as for [`Verb::OpenTerminal`].
+        session: Option<SessionId>,
+        /// The person allowed this agent flags and modes that loosen Claude Code's
+        /// permissions. Without it the worker locks bypass mode off in the agent's settings.
+        /// The server sets it from the person's policy on every start it forwards.
+        permission_flags: bool,
     },
     /// Type into a terminal.
     SendInput {
@@ -396,6 +435,10 @@ pub enum Verb {
         since: Option<u32>,
         /// At most this many entries, capped by the worker.
         max: u32,
+        /// Hold the agent's permission prompts for [`Verb::AnswerPermission`] from then on, as a
+        /// person following its conversation does. The server sets it, for the person alone:
+        /// an agent's read leaves every prompt in the agent's terminal.
+        hold: bool,
     },
     /// Answer a permission prompt held for orchestration ([`ConversationPage::held`]), through
     /// the agent's `PermissionRequest` hook as the conversation face answers it.
@@ -457,6 +500,148 @@ pub enum Verb {
         /// [`crate::search::MAX_LINES`].
         max_lines: u32,
     },
+    /// Make a project; answered by the server with [`Outcome::Project`].
+    ProjectCreate {
+        /// Its name, unique on the server.
+        project: ProjectId,
+        /// What it is for, in a line.
+        title: String,
+        /// The repository its tasks work in.
+        repo: String,
+        /// The branch finished work lands on.
+        target: String,
+        /// The command that says a task's work is right.
+        verifier: Option<String>,
+        /// The orchestrator's terminal.
+        orchestrator: Option<TermRef>,
+        /// Its limits over [`crate::project::Limits::default`], within the person's
+        /// [`crate::project::Bounds`].
+        limits: LimitsChange,
+        /// Anything its agents keep with it: the text of a JSON object.
+        metadata: Option<String>,
+    },
+    /// Change a project's orchestrator, verifier, limits or metadata; what is absent stays.
+    /// Answered with [`Outcome::Project`].
+    ProjectSet {
+        /// Which.
+        project: ProjectId,
+        /// The orchestrator's terminal.
+        orchestrator: Option<TermRef>,
+        /// The verifier command; empty for none.
+        verifier: Option<String>,
+        /// Its limits, within the person's [`crate::project::Bounds`].
+        limits: LimitsChange,
+        /// New metadata, in place of the old.
+        metadata: Option<String>,
+    },
+    /// Every project; answered with [`Outcome::Projects`].
+    ProjectList,
+    /// A project whole, its timeline from `since`, waiting up to `timeout_ms` for an entry
+    /// past it when there is none yet; answered with [`Outcome::Project`].
+    ProjectStatus {
+        /// Which.
+        project: ProjectId,
+        /// The first timeline entry wanted: the `next` of the previous answer. The last few
+        /// when absent.
+        since: Option<u64>,
+        /// Wait this long for an entry past `since`; capped as [`Verb::WaitFor`] is.
+        timeout_ms: u32,
+    },
+    /// Make a task; answered with [`Outcome::Task`]. Paths it owns are claimed as by
+    /// [`Verb::TaskClaim`]; a dependency that leads back to it, or a parent deeper than the
+    /// project's depth, is refused.
+    TaskCreate {
+        /// In which project.
+        project: ProjectId,
+        /// What it is.
+        spec: Box<TaskSpec>,
+    },
+    /// Take more paths for a task to own; refused with [`ErrorCode::Conflict`] when one
+    /// overlaps a path another task of the project still holds. Answered with
+    /// [`Outcome::Task`].
+    TaskClaim {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// Repository-relative paths; a directory owns everything under it.
+        paths: Vec<String>,
+    },
+    /// Move a task, record its branch or its verifier's word, or note something on its
+    /// timeline; answered with [`Outcome::Task`].
+    TaskUpdate {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// What changes.
+        change: Box<TaskChange>,
+    },
+    /// Tell the server which terminal's agent works on a task; answered with
+    /// [`Outcome::Task`].
+    TaskAssign {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// The agent's terminal.
+        term: TermRef,
+    },
+    /// Start what runs for a task on the worker its pin or placement chooses, with the project
+    /// and the task in its environment; answered with [`Outcome::Task`] once it runs, or
+    /// [`ErrorCode::Unplaced`] saying why each worker was passed over, or
+    /// [`ErrorCode::Limit`] naming the limit reached.
+    TaskSpawn {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// How to start it.
+        launch: TaskLaunch,
+    },
+    /// Rank every worker for a placement: a task's own, `placement` in its stead, or
+    /// `placement` alone. Answered with [`Outcome::Suggestions`], best first, each with the
+    /// reasons it fits or does not.
+    PlacementSuggest {
+        /// The project whose limits and tasks (for `near` and `avoid`) count.
+        project: Option<ProjectId>,
+        /// The task whose placement it is.
+        task: Option<TaskId>,
+        /// A placement to try, over the task's.
+        placement: Option<Placement>,
+    },
+    /// What the workers are and have; answered with [`Outcome::Facts`].
+    WorkerFacts {
+        /// This worker only; every one when absent.
+        worker: Option<WorkerId>,
+    },
+    /// One node of a project's tree in full: a task with its brief, paths, placement and
+    /// metadata, or the orchestrator's node, each with the natives Claude Code keeps in it.
+    /// Answered with [`Outcome::Node`].
+    TaskGet {
+        /// In which project.
+        project: ProjectId,
+        /// Which task; the orchestrator's node when absent.
+        task: Option<TaskId>,
+    },
+    /// A task's agent reports on its work to whoever split the task off (its parent task's
+    /// agent, or the project's orchestrator), delivered through that agent's hooks when the
+    /// report's kind says; answered with [`Outcome::Task`].
+    TaskReport {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// What it says.
+        report: Report,
+    },
+    /// What a terminal works on by the server's record, in any project: answered with
+    /// [`Outcome::WorkingOn`]. How a tool finds its caller's own project and task before the
+    /// caller's environment, which may be stale or inherited.
+    WorkingOn {
+        /// The terminal, by its session.
+        session: SessionId,
+    },
 }
 
 /// One step of a [`Verb::Upload`].
@@ -504,7 +689,15 @@ impl Verb {
             | Self::RenameItem { .. }
             | Self::RemoveItem { .. }
             | Self::PointAt { .. }
-            | Self::AnswerPermission { .. } => true,
+            | Self::AnswerPermission { .. }
+            | Self::ProjectCreate { .. }
+            | Self::ProjectSet { .. }
+            | Self::TaskCreate { .. }
+            | Self::TaskClaim { .. }
+            | Self::TaskUpdate { .. }
+            | Self::TaskAssign { .. }
+            | Self::TaskSpawn { .. }
+            | Self::TaskReport { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -524,6 +717,12 @@ impl Verb {
             | Self::ListWindows { .. }
             | Self::ReadConversation { .. }
             | Self::CaptureStill { .. }
+            | Self::ProjectList
+            | Self::ProjectStatus { .. }
+            | Self::PlacementSuggest { .. }
+            | Self::WorkerFacts { .. }
+            | Self::TaskGet { .. }
+            | Self::WorkingOn { .. }
             // A second magic packet wakes nothing that the first did not.
             | Self::Wake { .. }
             | Self::WakePeer { .. } => false,
@@ -620,6 +819,8 @@ pub enum Happening {
         /// Exit status, or the signal number negated.
         status: i32,
     },
+    /// A project or one of its tasks changed; boxed, being the largest by far.
+    Project(Box<ProjectUpdate>),
 }
 
 /// What kind of thing is at a path.
@@ -747,6 +948,31 @@ pub enum ErrorCode {
     Interrupted,
     /// The worker cannot do this at all: it may not capture its screen, or has none.
     Unsupported,
+    /// No such project.
+    UnknownProject,
+    /// No such task in the project.
+    UnknownTask,
+    /// It would take what another holds: a path another live task owns, a task another agent
+    /// works on.
+    Conflict,
+    /// No worker meets the task's placement now; the message says why each was passed over.
+    Unplaced,
+    /// A limit the project or the person set is reached, or would be passed; the message
+    /// names it and who may raise it.
+    Limit,
+    /// A placement expression or a metadata document does not parse or check.
+    BadExpression,
+    /// Nothing may type into the agent now: it waits on a person (a permission, a question),
+    /// or a person has typed into its composer and not sent it. The message says which.
+    AwaitsPerson,
+    /// The agent has not said it is ready: no hook of its session has arrived yet, so a
+    /// dialog of its own (trusting a folder, an MCP server) may be up.
+    AgentNotReady,
+    /// The agent's program has ended; what is typed would reach the shell below it.
+    AgentExited,
+    /// The caller may not do this: an agent answering a permission, or moving a task where
+    /// only the person or the merge queue may.
+    Forbidden,
 }
 
 /// The answer to a [`Verb`].
@@ -853,6 +1079,21 @@ pub enum Outcome {
         /// What it found; `capped` when there were more lines than it returned.
         summary: SearchSummary,
     },
+    /// For [`Verb::ProjectCreate`], [`Verb::ProjectSet`] and [`Verb::ProjectStatus`].
+    Project(Box<ProjectStatus>),
+    /// For [`Verb::ProjectList`]: every project, by name.
+    Projects(Vec<Project>),
+    /// For the task verbs: the task as it is now.
+    Task(Box<crate::project::Task>),
+    /// For [`Verb::PlacementSuggest`]: every worker, best first.
+    Suggestions(Vec<Suggestion>),
+    /// For [`Verb::WorkerFacts`].
+    Facts(Vec<WorkerFacts>),
+    /// For [`Verb::TaskGet`].
+    Node(Box<crate::project::NodeDetail>),
+    /// For [`Verb::WorkingOn`]: the project and the task, none for its orchestrator; none when
+    /// the terminal is on nothing.
+    WorkingOn(Option<(ProjectId, Option<TaskId>)>),
 }
 
 /// A page of an agent's conversation: the entries of one thread from `start`, what the face

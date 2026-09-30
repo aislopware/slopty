@@ -24,8 +24,9 @@ objc2-application-services.workspace = true
 objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
 # `CGDisplayStream` for the `kCGDisplayStreamYCbCrMatrix_*` values SCStream's colorMatrix takes,
-# `CGColor` for the black its backgroundColor paints a padded surface with.
-objc2-core-graphics = { workspace = true, features = [ "CGDisplayStream", "CGColor" ] }
+# `CGColor` for the black its backgroundColor paints a padded surface with, `CGSession` for
+# whether the Mac is locked or this session is off its screens (`console`).
+objc2-core-graphics = { workspace = true, features = [ "CGDisplayStream", "CGColor", "CGSession" ] }
 objc2-core-media.workspace = true
 objc2-core-video.workspace = true
 objc2-foundation.workspace = true
@@ -35,6 +36,8 @@ slopty-codec.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# A live test's skip, a failure in the VM lane (`slopty_testkit::live::skip`).
+slopty-testkit.workspace = true
 slopty-core.workspace = true
 slopty-proto.workspace = true
 objc2-core-foundation.workspace = true

@@ -291,7 +291,8 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         println!("▶ reusing the last build (--no-build)");
     } else {
         // Build every binary a suite may spawn up front, so a test never shells out to cargo.
-        // `slopty-e2e` is in there for its own helper binaries (the idle window).
+        // `slopty-e2e` is in there for its own helper binaries (the idle window), and
+        // `slopty-testkit` for the stand-in `claude` the agent and projects suites start.
         // The app carries the `e2e` feature (renderer access for `Render`). `--bins`, not
         // `--bin slopty-app`: a `--bin` filter applies to every selected package and would leave
         // the daemons stale.
@@ -299,13 +300,16 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             "build daemons and app",
             &cmd!(
                 sh,
-                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e --bins --features slopty/e2e"
+                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e"
             ),
         )?;
         std::fs::create_dir_all(&reuse)?;
         let metadata = cmd!(sh, "cargo metadata --format-version 1").quiet().read()?;
         std::fs::write(&cargo_metadata, metadata)?;
     }
+
+    // Every binary a suite spawns is built: `slopty_testkit::bins` looks no further.
+    let _fresh = sh.push_env(crate::gate::BINS_FRESH, "1");
 
     // The iOS case also needs the app in a booted simulator; the test launches it there.
     let simulator = matches!(opts.case, Case::Ios | Case::SmoothIos | Case::PairIos)

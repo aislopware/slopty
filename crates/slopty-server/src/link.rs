@@ -2,13 +2,14 @@
 //!
 //! A worker link holds a [`Lease`] for as long as it both reads and writes; what the server sends
 //! it (requests) goes through a queue to its writer. A client or agent link gets the fleet's
-//! state (the directory, then every terminal and the agent in it), then every change, and the
-//! answers to its requests, each request dispatched on a task of its own so a long `WaitFor`
+//! state (the directory, every terminal and the agent in it, every project), then every change, and
+//! the answers to its requests, each request dispatched on a task of its own so a long `WaitFor`
 //! holds up nothing behind it. A link that falls behind the changes gets the state again, which
 //! replaces everything it was told before.
 
 use std::net::IpAddr;
 
+use slopty_core::SessionId;
 use slopty_net::NetError;
 use slopty_net::framed::{FramedRecv, FramedSend};
 use slopty_net::server::{AcceptedLink, ServerListener};
@@ -19,7 +20,7 @@ use slopty_tailnet::LocalApi;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinSet;
 
-use crate::hub::{Hub, Lease};
+use crate::hub::{Hub, Lease, Speaker};
 
 /// Messages queued for one link before its sender waits.
 const LINK_QUEUE: usize = 256;
@@ -34,10 +35,34 @@ pub async fn serve(listener: ServerListener, hub: Hub) {
                     let tailscale = admission.local_api();
                     worker(hub, link, *registration, tailscale.as_ref()).await;
                 }
-                Role::Client { name, .. } | Role::Agent { name } => client(hub, link, name).await,
+                Role::Client { name, .. } => client(hub, link, name, Speaker::Person).await,
+                Role::Agent { name, vouch } => {
+                    let proven = vouch.filter(|v| proven(&hub, &name, v.session, &v.token));
+                    let speaker = proven.map_or(Speaker::Agent, |v| Speaker::Proven(v.session));
+                    client(hub, link, name, speaker).await;
+                }
+                Role::Shell { name, session, token } => {
+                    let speaker = match token {
+                        Some(token) if proven(&hub, &name, session, &token) => {
+                            Speaker::Proven(session)
+                        }
+                        _ => Speaker::Shell(session),
+                    };
+                    client(hub, link, name, speaker).await;
+                }
             }
         });
     }
+}
+
+/// Whether `token` proves the link `name` speaks from the terminal `session`; a token that does
+/// not is logged, and the link speaks as one that showed none.
+fn proven(hub: &Hub, name: &str, session: SessionId, token: &str) -> bool {
+    let proven = hub.vouches(session, token);
+    if !proven {
+        tracing::warn!(name, %session, "a link's token does not prove its terminal");
+    }
+    proven
 }
 
 async fn worker(
@@ -156,7 +181,7 @@ fn too_large(code: ErrorCode, len: usize, max: usize) -> Outcome {
     }
 }
 
-async fn client(hub: Hub, link: AcceptedLink, name: String) {
+async fn client(hub: Hub, link: AcceptedLink, name: String, speaker: Speaker) {
     let AcceptedLink { conn, remote, mut tx, rx, .. } = link;
     tracing::info!(%name, %remote, "client connected");
     // Subscribed before the state is read, so no change falls between the two.
@@ -169,7 +194,7 @@ async fn client(hub: Hub, link: AcceptedLink, name: String) {
         return;
     }
     let (out, mut replies) = mpsc::channel(LINK_QUEUE);
-    let mut reader = tokio::spawn(read_requests(hub.clone(), rx, out));
+    let mut reader = tokio::spawn(read_requests(hub.clone(), rx, out, speaker));
     loop {
         let msgs = tokio::select! {
             ended = &mut reader => {
@@ -203,6 +228,7 @@ async fn read_requests(
     hub: Hub,
     mut rx: FramedRecv<ToServer>,
     out: mpsc::Sender<FromServer>,
+    speaker: Speaker,
 ) -> NetError {
     // Dropped (returning or aborted) with the link, which aborts every request still running.
     let mut requests = JoinSet::new();
@@ -212,7 +238,7 @@ async fn read_requests(
                 while requests.try_join_next().is_some() {}
                 let (hub, out) = (hub.clone(), out.clone());
                 requests.spawn(async move {
-                    let outcome = hub.dispatch_keyed(key, verb).await;
+                    let outcome = hub.dispatch_as(speaker, key, verb).await;
                     let _gone = out.send(FromServer::Reply { id, outcome }).await;
                 });
             }
@@ -230,10 +256,15 @@ async fn tell(tx: &mut FramedSend<FromServer>, msgs: Vec<FromServer>) -> Result<
     Ok(())
 }
 
-/// The fleet's state: the directory, then every terminal and the agent in it.
+/// The fleet's state: the directory, then every terminal and the agent in it, then every
+/// project.
 fn state(hub: &Hub) -> Vec<FromServer> {
-    let (directory, terminals) = hub.state();
-    vec![FromServer::Directory(directory), FromServer::Terminals(terminals)]
+    let mut snapshot = hub.state();
+    let parts = Hub::project_parts(&mut snapshot);
+    let mut msgs =
+        vec![FromServer::Directory(snapshot.directory), FromServer::Terminals(snapshot.terminals)];
+    msgs.extend(parts.into_iter().map(|part| FromServer::Projects(Box::new(part))));
+    msgs
 }
 
 #[cfg(test)]
@@ -406,7 +437,7 @@ mod tests {
         let at = HostAddr::from(listener.local_addr().unwrap());
         let serving = tokio::spawn(serve(listener, hub.clone()));
         let endpoint = bind_client().unwrap();
-        let role = Role::Agent { name: "test".to_owned() };
+        let role = Role::Agent { name: "test".to_owned(), vouch: None };
         let mut link = connect(&endpoint, &at, role).await.unwrap();
         let verb = Verb::Events { since: None, timeout_ms: WAIT_CAP_MS, filter: EventFilter::All };
         link.tx.send(&ToServer::Request { id: 1, key: None, verb }).await.unwrap();

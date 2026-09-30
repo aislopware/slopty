@@ -9,7 +9,7 @@
 //! * `workers` — connecting, losing and forgetting a worker; the sync that follows.
 //! * `commands` — what the actions do.
 //! * `agents` — coding agents in terminals: badges, banners, "needs you".
-//! * `browsers` — web pages in tiles: opening them, and the native view over each.
+//! * `browsers` — web pages in tiles: opening them, and serving their ports here.
 //! * `folders` — folders in tiles, and a path opened as whatever it turns out to be.
 //! * `overlays` — the command palette, find in every tile, the window picker.
 //! * `toast` — the one-line notices, undo close, pointing.
@@ -21,6 +21,7 @@
 //! * `rollup` — what a folded worker or a workspace tab adds up to; the navigator's second line.
 //! * `statusbar` — the bar along the bottom: where the focused tile runs, the link, the agents.
 //! * `inbox` — the bell's list of what needs the human and what finished.
+//! * `projects` — the server's projects, each board shown in its orchestrator's tile.
 //!
 //! The navigator, the title bar and the status bar are views of their own (`ChromeView`),
 //! drawn cached: a terminal's echo draws the terminal and the strip around it, never the
@@ -44,7 +45,7 @@ mod navigator;
 mod overlays;
 mod popout;
 mod project_search;
-mod quick;
+mod projects;
 pub mod remote;
 mod rollup;
 mod statusbar;
@@ -65,7 +66,7 @@ use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window,
 };
-pub use quick::{QuickConfig, QuickToggle, TOGGLE_QUICK_TERMINAL};
+pub use projects::worker_key;
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
 use slopty_client::relay::RelayWatch;
@@ -266,6 +267,12 @@ pub enum WorkerStatus {
     Connected,
     /// Link up but nothing heard for this many seconds (keep-alives come every second).
     Silent(u64),
+    /// Link up, but the device was away or the path moved under it: a probe is out, and the
+    /// tiles are set back until it answers.
+    Checking,
+    /// The probe went unanswered and a new link is being dialled at once: the tiles keep what
+    /// they showed, set back, until it lands.
+    Relinking,
     /// Link lost or the attempt failed; retrying, with the reason.
     Reconnecting(String),
     /// The server says the worker went quiet; dialled again when it is back online.
@@ -290,6 +297,8 @@ impl WorkerStatus {
             Self::Silent(secs) => {
                 format!("silent {}", crate::kit::duration(Duration::from_secs(*secs)))
             }
+            Self::Checking => "checking…".to_owned(),
+            Self::Relinking => "reconnecting…".to_owned(),
             Self::Reconnecting(why) => format!("{why}; reconnecting…"),
             Self::Unreachable => "unreachable".to_owned(),
             Self::Gone => "gone".to_owned(),
@@ -298,10 +307,18 @@ impl WorkerStatus {
         }
     }
 
-    /// Whether the worker is reachable right now.
+    /// Whether the worker is reachable right now: a link being checked still is, as far as
+    /// anything knows.
     #[must_use]
     pub const fn is_up(&self) -> bool {
-        matches!(self, Self::Connected)
+        matches!(self, Self::Connected | Self::Checking)
+    }
+
+    /// Whether what its tiles show may be stale: its link is being checked or dialled again
+    /// after a resume. They show it set back, not hidden.
+    #[must_use]
+    pub const fn in_doubt(&self) -> bool {
+        matches!(self, Self::Checking | Self::Relinking)
     }
 }
 
@@ -330,6 +347,8 @@ struct Worker {
     name: String,
     status: WorkerStatus,
     link: Option<WorkerLink>,
+    /// How many links have come up to it: the self-test's proof that a relink landed.
+    links: u64,
     doc: ItemDoc,
     sessions: HashMap<SessionId, SessionSummary>,
     rtt: Option<Duration>,
@@ -380,6 +399,7 @@ impl Worker {
             name,
             status: WorkerStatus::Connecting,
             link: None,
+            links: 0,
             doc: ItemDoc::default(),
             sessions: HashMap::new(),
             rtt: None,
@@ -561,10 +581,6 @@ pub struct WorkspaceView {
     browsers: HashMap<ItemId, Entity<crate::browser::BrowserView>>,
     /// The link each browser tile's port is served by: a new link serves it anew.
     browser_links: HashMap<ItemId, std::sync::Weak<dyn slopty_client::remote::Remote>>,
-    /// The app draws a dialog over the workspace: a page's native view must hide under it.
-    covered: bool,
-    /// Where the toast was drawn, and in which frame: pages stop above it.
-    toast_drawn: crate::browser::Drawn,
     /// The line a file tile opened at, for a view not made yet.
     file_focus: HashMap<ItemId, u32>,
     /// A registry or a link changed since the notes, file tiles and pages were last matched
@@ -603,6 +619,9 @@ pub struct WorkspaceView {
     /// proof that a frame of motion is neither.
     #[cfg(test)]
     counts: (usize, usize),
+    /// How many times the workspace was built: the proof that the keyboard moving is not.
+    #[cfg(test)]
+    renders: usize,
     /// What the strip and the chrome show of the shells, streams and faces ([`facts`]).
     facts: facts::Facts,
     /// Holds the working marks' steps while a typed key waits for its echo.
@@ -694,6 +713,8 @@ pub struct WorkspaceView {
     pending_focus: Option<SessionId>,
     /// Agent terminals' conversation faces.
     faces: faces::Faces,
+    /// The server's projects and their boards.
+    projects: projects::ProjectsState,
     pending_focus_note: Option<ItemId>,
     /// The number the next `OpenSession` goes under, for its answer to name.
     next_open: std::cell::Cell<slopty_proto::RequestId>,
@@ -719,8 +740,6 @@ pub struct WorkspaceView {
     app_active: bool,
     /// Remote tiles shown in windows of their own.
     popouts: popout::PopOuts,
-    /// The quick terminal's shell and panel.
-    quick: quick::Quick,
     /// Workers told this client wants their clipboard.
     watching: std::collections::HashSet<WorkerKey>,
     /// Agents' pull requests, programs waiting on file tiles, and the shell told it has the
@@ -813,8 +832,6 @@ impl WorkspaceView {
             probes: Vec::new(),
             browsers: HashMap::new(),
             browser_links: HashMap::new(),
-            covered: false,
-            toast_drawn: Rc::default(),
             file_focus: HashMap::new(),
             items_dirty: true,
             drawn_waiting: Vec::new(),
@@ -837,6 +854,8 @@ impl WorkspaceView {
             chrome_due: std::cell::Cell::new(true),
             #[cfg(test)]
             counts: (0, 0),
+            #[cfg(test)]
+            renders: 0,
             facts: facts::Facts::default(),
             _keys: keys,
             titles: HashMap::new(),
@@ -888,6 +907,7 @@ impl WorkspaceView {
             park_pending: false,
             pending_focus: None,
             faces: faces::Faces::default(),
+            projects: projects::ProjectsState::default(),
             pending_focus_note: None,
             next_open: std::cell::Cell::new(1),
             pending_focus_file: None,
@@ -902,7 +922,6 @@ impl WorkspaceView {
             clip: None,
             app_active: true,
             popouts: popout::PopOuts::default(),
-            quick: quick::Quick::default(),
             watching: std::collections::HashSet::new(),
             handoff: handoffs::HandoffState::default(),
             kept: None,
@@ -1047,6 +1066,12 @@ impl WorkspaceView {
         self.workers.get(&worker)?.rtt
     }
 
+    /// How many links have come up to `worker` since the app started.
+    #[must_use]
+    pub fn links(&self, worker: WorkerKey) -> u64 {
+        self.workers.get(&worker).map_or(0, |w| w.links)
+    }
+
     /// Whether the palette is up.
     #[cfg(test)]
     #[must_use]
@@ -1088,12 +1113,6 @@ impl WorkspaceView {
             self.hardware_keyboard = attached;
             cx.notify();
         }
-    }
-
-    /// Whether the app draws a dialog over the workspace ([`Self::set_covered`]).
-    #[must_use]
-    pub const fn covered(&self) -> bool {
-        self.covered
     }
 
     /// Whether the app shows its key bar under the workspace ([`Self::set_key_bar_shown`]).
@@ -1250,6 +1269,9 @@ impl WorkspaceView {
         for view in self.faces.views.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
+        for view in self.projects.views.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
         if let Some((_, picker)) = &self.picker {
             picker.update(cx, |p, cx| p.set_theme(theme.clone(), cx));
         }
@@ -1313,6 +1335,7 @@ impl WorkspaceView {
         }
         self.titles_dirty = true;
         self.faces_dirty = true;
+        self.projects.dirty = true;
         self.prune_facts();
         self.drawn_waiting = self.needs_you();
         self.sync_clipboard_watch();
@@ -1399,6 +1422,7 @@ impl WorkspaceView {
             ("faces.held", self.faces.held.len()),
         ]
         .into_iter()
+        .chain(self.project_sizes())
         .chain(self.facts.lens())
         .chain(self.handoff.sizes())
         .collect()
@@ -1470,22 +1494,49 @@ impl WorkspaceView {
 
     /// Focus asked for since the last frame, now that there is a window to give it in.
     ///
-    /// A focus change draws every view again, but not one made while the window draws, as this
-    /// is: a view drawn from the last frame would keep the old focus (a field without its
-    /// caret). So when the focus moved, every view is drawn again once this frame is done.
-    fn apply_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let before = window.focused(cx);
+    /// Given here, so the views drawn after this one show it in this frame. GPUI builds again
+    /// the views whose answer to a focus question changed, asking each question again before a
+    /// frame, but asks for no frame when the focus moves while the window draws, as here: a view
+    /// replayed in this frame would keep the old focus (a field without its caret). So when
+    /// focus was asked for, the next frame is asked for by notifying the strip, whose tiles the
+    /// focus moves between. Whether it moved is not read: reading the focus as a whole here
+    /// would build the workspace again on every focus move anywhere.
+    ///
+    /// `given` says a face or a board already took the keyboard in this frame.
+    fn apply_pending_focus(&mut self, given: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let asked = given || self.focus_asked();
         self.give_pending_focus(window, cx);
-        if window.focused(cx) != before {
-            window.defer(cx, |window, _cx| window.refresh());
+        if asked {
+            let strip = self.strip_host.entity_id();
+            window.defer(cx, move |_window, cx| App::notify(cx, strip));
         }
+    }
+
+    /// Whether [`Self::give_pending_focus`] has any focus to give in this frame; a find and a
+    /// menu's run take theirs after it, when a focus move asks for its own frame.
+    const fn focus_asked(&self) -> bool {
+        self.pending_focus.is_some()
+            || self.pending_focus_picker
+            || self.pending_focus_self
+            || self.pending_focus_palette
+            || self.pending_focus_rename
+            || (self.rename.is_none() && self.rename_return.is_some())
+            || (self.palette.is_none() && self.palette_return.is_some())
+            || self.search.focus_asked()
+            || self.pending_focus_note.is_some()
+            || self.pending_focus_file.is_some()
+            || self.pending_focus_folder.is_some()
     }
 
     /// [`Self::apply_pending_focus`]'s work.
     fn give_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.pending_focus.take() {
-            // A tile showing its conversation takes the keyboard in its composer.
-            if let Some(face) = self.faces.views.get(&session).filter(|_| self.face_shown(session))
+            // A tile showing its project's board takes the keyboard in the board, one showing
+            // its conversation in its composer.
+            if let Some(board) = self.board_view(session).filter(|_| self.board_shown(session)) {
+                board.clone().update(cx, |v, cx| v.focus(window, cx));
+            } else if let Some(face) =
+                self.faces.views.get(&session).filter(|_| self.face_shown(session))
             {
                 face.clone().update(cx, |v, cx| v.focus(window, cx));
             } else if let Some(view) = self.terminals.get(&session) {
@@ -1579,6 +1630,10 @@ impl gpui::Render for WorkspaceView {
             Styled as _,
         };
 
+        #[cfg(test)]
+        {
+            self.renders = self.renders.saturating_add(1);
+        }
         let animate = self.animate && !reduced_motion();
         if self.layout.config().animate != animate {
             self.layout.set_animate(animate);
@@ -1587,10 +1642,9 @@ impl gpui::Render for WorkspaceView {
             self.reconcile_notes_and_files(window, cx);
             self.reconcile_browsers(cx);
         }
-        if std::mem::take(&mut self.faces_dirty) {
-            self.sync_faces(window, cx);
-        }
-        self.apply_pending_focus(window, cx);
+        let face_focused = std::mem::take(&mut self.faces_dirty) && self.sync_faces(window, cx);
+        let board_focused = self.sync_projects(window, cx);
+        self.apply_pending_focus(face_focused || board_focused, window, cx);
         // One clock for everything this frame draws: the bar's column marks and the strip,
         // which the strip's own view builds from the layout as it stands now.
         if self.advance(window) {
@@ -1618,7 +1672,7 @@ impl gpui::Render for WorkspaceView {
         let palette = self.palette.clone().or_else(|| self.palette_leaving.clone());
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add("Workspace");
-        if self.page_keys(cx) {
+        if self.page_keys(window, cx) {
             key_context.add("Page");
         }
         let root = gpui::div()
@@ -1638,6 +1692,7 @@ impl gpui::Render for WorkspaceView {
         let root = Self::register_layout_actions(root, cx);
         root.on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::toggle_conversation))
+            .on_action(cx.listener(Self::toggle_project_board))
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
@@ -1658,6 +1713,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::toggle_sized_display))
             .on_action(cx.listener(Self::toggle_system_keys))
             .on_action(cx.listener(Self::toggle_trackpad))
+            .on_action(cx.listener(Self::toggle_remote_gestures))
             .on_action(cx.listener(Self::find_in_active))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::rename_item))

@@ -154,6 +154,7 @@ impl Workspace {
         self.view.update(cx, |v, cx| {
             v.set_server_status(None, cx);
             v.forget_server_agents(None, cx);
+            v.forget_projects(cx);
         });
         if had_server && address.is_none() {
             self.directory_cache.send_replace(Cache::Remove);
@@ -233,6 +234,11 @@ impl Workspace {
                 self.server_down(why.text().to_owned(), refused_status(why), cx);
             }
             ServerEvent::Message(msg) => {
+                // The projects are the workspace's to mirror; the directory has no use for them.
+                if let FromServer::Projects(part) = *msg {
+                    self.view.update(cx, |v, cx| v.projects_part(*part, cx));
+                    return;
+                }
                 let listing = matches!(*msg, FromServer::Directory(_) | FromServer::Worker(_));
                 let changes = self.directory.apply(*msg);
                 for change in changes {
@@ -302,6 +308,10 @@ impl Workspace {
                 }
             }
             Change::Event(event) => match event.what {
+                Happening::Project(update) => {
+                    let seq = event.seq;
+                    self.view.update(cx, |v, cx| v.project_update(seq, *update, cx));
+                }
                 Happening::Agent { worker, event } => {
                     let key = worker_key(worker);
                     self.view.update(cx, |v, cx| v.server_agent_event(key, event, cx));

@@ -1,9 +1,8 @@
 //! The files a client reads, writes and watches, answered on tasks of their own: a read, a
 //! quick-open walk or a look at the watched files touches the disk, and none of it may hold up a
 //! terminal's echo on the same connection. A text too big for the control stream goes on a
-//! bulk stream after its announcement (`slopty_worker::file::announce`).
-
-use std::collections::HashMap;
+//! bulk stream after its announcement (`slopty_worker::file::announce`). The watched files are
+//! followed on the kernel's events (`slopty_worker::fswatch`).
 
 use slopty_core::{ClientId, WallMs};
 use slopty_net::{Connection, NetError, WorkerMsg};
@@ -17,8 +16,6 @@ type Handoffs = std::sync::Arc<parking_lot::Mutex<slopty_worker::handoff::Handof
 
 /// Paths the palette's quick open is answered with at most.
 const FILES_LISTED: usize = 8;
-/// How often the files behind a client's file tiles are looked at for a change.
-const FILES_PERIOD: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Read `path` and send what is there; `false` when the writer is gone.
 ///
@@ -77,8 +74,8 @@ pub async fn send_file(
 }
 
 /// Save a file tile and answer how it went. Every watcher of the file, the writer's own
-/// included, then hears the new contents from its next look ([`watch`]). A file a waiting edit
-/// shows is written in place, since the program waiting on it may hold it open.
+/// included, then hears the new contents from the save's own events ([`watch`]). A file a waiting
+/// edit shows is written in place, since the program waiting on it may hold it open.
 pub async fn write(
     handoffs: &Handoffs,
     client: ClientId,
@@ -156,87 +153,24 @@ pub async fn find(out: mpsc::Sender<WorkerMsg>, root: String, query: String) {
 }
 
 /// Watch the files behind a client's file tiles: each list `lists` holds replaces the last, and a
-/// file whose stamp moves is read and sent again. Ends with the connection.
+/// file that changes on disk is read and sent again, once per change however many writes it
+/// took. A send finishes before the next starts, so a file that changes during one is sent
+/// once more as it stands when that one ends. Ends with the connection.
 pub async fn watch(
     client: ClientId,
     conn: Connection,
     out: mpsc::Sender<WorkerMsg>,
-    mut lists: watch::Receiver<Vec<String>>,
+    lists: watch::Receiver<Vec<String>>,
 ) {
-    let mut watched: HashMap<String, Option<(u64, u128)>> = HashMap::new();
-    let mut tick = tokio::time::interval(FILES_PERIOD);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            changed = lists.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-                let paths = lists.borrow_and_update().clone();
-                watched = restamp(std::mem::take(&mut watched), paths).await;
-                tracing::debug!(%client, files = watched.len(), "watch files");
-            }
-            _ = tick.tick(), if !watched.is_empty() => {
-                if !poll(client, &conn, &out, &mut watched).await {
-                    return;
-                }
+    let span = tracing::debug_span!("watch files", %client);
+    let mut changes = span.in_scope(|| {
+        slopty_worker::fswatch::follow(lists, slopty_worker::fswatch::Limits::default())
+    });
+    while let Some(paths) = changes.next().await {
+        for path in paths {
+            if !send_file(client, &conn, &out, path).await {
+                return;
             }
         }
     }
-}
-
-/// The new watch list: a path kept keeps its stamp; a new one is stamped as it is now (the
-/// tile's own read shows that state).
-async fn restamp(
-    mut old: HashMap<String, Option<(u64, u128)>>,
-    paths: Vec<String>,
-) -> HashMap<String, Option<(u64, u128)>> {
-    let (kept, new): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| old.contains_key(p));
-    let mut watched: HashMap<_, _> =
-        kept.into_iter().filter_map(|p| old.remove_entry(&p)).collect();
-    let stamped = tokio::task::spawn_blocking(move || {
-        new.into_iter()
-            .map(|path| {
-                let stamp = slopty_worker::file::stamp(std::path::Path::new(&path));
-                (path, stamp)
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    .unwrap_or_default();
-    watched.extend(stamped);
-    watched
-}
-
-/// Look at every watched file; one whose stamp moved is read and sent again. `false` when the
-/// writer is gone.
-async fn poll(
-    client: ClientId,
-    conn: &Connection,
-    out: &mpsc::Sender<WorkerMsg>,
-    watched: &mut HashMap<String, Option<(u64, u128)>>,
-) -> bool {
-    let paths: Vec<String> = watched.keys().cloned().collect();
-    let stamps = tokio::task::spawn_blocking(move || {
-        paths
-            .into_iter()
-            .map(|path| {
-                let stamp = slopty_worker::file::stamp(std::path::Path::new(&path));
-                (path, stamp)
-            })
-            .collect::<Vec<_>>()
-    })
-    .await;
-    let Ok(stamps) = stamps else { return true };
-    for (path, stamp) in stamps {
-        let Some(seen) = watched.get_mut(&path) else { continue };
-        if *seen == stamp {
-            continue;
-        }
-        *seen = stamp;
-        if !send_file(client, conn, out, path).await {
-            return false;
-        }
-    }
-    true
 }

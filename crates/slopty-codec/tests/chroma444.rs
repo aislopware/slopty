@@ -1763,7 +1763,9 @@ mod tests {
             }
         }
         let Some(settings) = conferencing_settings else {
-            eprintln!("MEASURE preset the low-latency encoder offers no VideoConferencing preset");
+            slopty_testkit::live::skip(
+                "the low-latency encoder offers no VideoConferencing preset",
+            );
             return;
         };
         let settings = as_dict(&settings).expect("preset settings are a dictionary");

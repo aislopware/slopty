@@ -17,7 +17,6 @@
 "engine.fetch_lines_cost.4096_rows" = 103231334
 "engine.frame_cost.take_frame" = 21899
 "engine.frame_cost.write" = 849
-"engine.osc_scan_cost.per_osc" = 172
 "engine.osc_write_cost.per_osc" = 7221
 "engine.osc_write_cost.per_osc_raw_vt" = 6919
 "engine.png_decode_cost.rgb_1024x768" = 42581941
@@ -40,3 +39,10 @@
 "media.packetize_cost.p_frame.parity_200" = 210037
 "media.reassemble_cost.keyframe" = 209982
 "media.reassemble_cost.p_frame" = 46778
+"server.placement_cost.compile_4_rules" = 675751
+"server.placement_cost.rank_32_workers" = 3029310
+"server.projects_cost.agent_report" = 14049
+"server.projects_cost.file_write_compact" = 84309174
+"server.projects_cost.log_append" = 15020
+"server.projects_cost.snapshot" = 1496295
+"server.projects_cost.task_change" = 7579

@@ -815,8 +815,8 @@ impl SettingsForm {
     /// Record the next chord typed as command `ix`'s, or stop recording it when it is.
     ///
     /// The chord is taken before any binding sees it, so a chord the app binds (⌘T) is recorded
-    /// rather than run; a keystroke in another window (the quick terminal, a tile's own window)
-    /// is left alone. Leaving the control stops it.
+    /// rather than run; a keystroke in another window (a tile's own window) is left alone.
+    /// Leaving the control stops it.
     fn record_keys(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.recording.take().is_some_and(|r| r.command == ix) {
             cx.notify();

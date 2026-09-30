@@ -29,6 +29,8 @@ mod geometry;
 #[cfg(target_os = "macos")]
 mod sck;
 #[cfg(target_os = "macos")]
+mod session;
+#[cfg(target_os = "macos")]
 mod snapshot;
 pub mod source;
 #[cfg(target_os = "macos")]
@@ -51,11 +53,13 @@ pub use geometry::{
 #[cfg(target_os = "macos")]
 pub use sck::ScreenCaptureKit;
 #[cfg(target_os = "macos")]
+pub use session::console;
+#[cfg(target_os = "macos")]
 pub use snapshot::{Picture, PixelOrder};
 pub use source::{
     AUDIO_CHANNELS, AUDIO_RATE, AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource,
-    CapturedAudio, CapturedFrame, Crop, DefaultImage, PixelFormat, Rect, TargetWindow, Went,
-    WindowState, crop_for,
+    CapturedAudio, CapturedFrame, Console, Crop, DefaultImage, PixelFormat, Rect, TargetWindow,
+    Went, WindowState, crop_for,
 };
 #[cfg(target_os = "macos")]
 pub use stream::{Capture, SckDefaults, Target, host_now_us, sck_defaults};

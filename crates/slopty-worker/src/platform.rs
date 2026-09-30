@@ -14,7 +14,7 @@ use slopty_input::InputSink;
 /// One implementation of every seam a screen stream uses.
 pub trait Platform: 'static {
     /// Displays, windows and frames.
-    type Capture: CaptureSource;
+    type Capture: CaptureSource<Image: Clone>;
     /// The video encoder, which takes the capture's pictures as they come.
     type Video: VideoEncoder<Image = <Self::Capture as CaptureSource>::Image>;
     /// The audio encoder.

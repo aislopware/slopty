@@ -18,7 +18,7 @@
 
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU64, Ordering};
 
 use dispatch2::{DispatchQoS, DispatchQueue, DispatchQueueAttr, DispatchRetained, DispatchTime};
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType, Type as _};
@@ -37,10 +37,26 @@ use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, WindowInfo};
 
 use crate::geometry;
 use crate::source::{
-    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop,
+    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
     PixelFormat, Rect, TargetWindow, Went, WindowState,
 };
 use crate::stream::host_now_us;
+
+/// What the drawn Mac's screens show of its session ([`set_console`]), as a [`Console`]'s index.
+static CONSOLE: AtomicU8 = AtomicU8::new(0);
+
+/// Lock the drawn Mac, move its session off its screens, or bring it back.
+///
+/// It is what [`CaptureSource::console`] answers for every canvas in the process from here on.
+/// Its pictures go on as they were; a real capture's would not, and nothing may rely on that.
+pub fn set_console(console: Console) {
+    let index = match console {
+        Console::Shown => 0,
+        Console::Locked => 1,
+        Console::Away => 2,
+    };
+    CONSOLE.store(index, Ordering::Relaxed);
+}
 
 /// Blocks in the input strip: the low bits of the input count it spells.
 pub const MARK_BITS: u32 = 16;
@@ -707,6 +723,14 @@ impl CaptureSource for Canvas {
 
     fn now_us() -> u64 {
         host_now_us()
+    }
+
+    fn console() -> Option<Console> {
+        Some(match CONSOLE.load(Ordering::Relaxed) {
+            1 => Console::Locked,
+            2 => Console::Away,
+            _ => Console::Shown,
+        })
     }
 
     fn target_bounds(target: CaptureTarget) -> Option<Rect> {

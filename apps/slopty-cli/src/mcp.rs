@@ -39,7 +39,8 @@ To pin one: claude mcp add slopty -- slopty mcp --server studio";
 pub async fn run(server: Option<&str>, data_dir: &Path) -> Result<()> {
     let endpoint = bind_client()?;
     let address = link::locate(server, data_dir, &endpoint).await?;
-    let role = Role::Agent { name: format!("slopty mcp @ {}", crate::client::machine_name()) };
+    let name = format!("slopty mcp @ {}", crate::client::machine_name());
+    let role = Role::Agent { name, vouch: crate::verbs::vouch() };
     let (link, events) = Link::persistent(endpoint.clone(), address, role);
     let running = handler(link)
         .serve(rmcp::transport::stdio())

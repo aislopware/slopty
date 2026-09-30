@@ -4099,6 +4099,9 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
 }
 
 #[cfg(test)]
+mod paint_oracle;
+
+#[cfg(test)]
 mod tests {
     use gpui::{Entity, Pixels, TestAppContext, VisualTestContext, px, size};
     use slopty_grid::{Cell, Hyperlink, Line, RowUpdate, SemanticMark, Style, TermModes};
@@ -8089,6 +8092,206 @@ mod tests {
              screen a frame {replaced} · every cell on a background, unchanged {backed} · \
              words shaped {shaped}"
         );
+    }
+
+    /// What the grid's frames cost as a person meets them, on a focused 200 × 60 screen of dense
+    /// coloured text under a blinking block cursor: redrawn unchanged, the cursor blinking, a key
+    /// echoed at the prompt on the bottom row, a line of output a frame, `yes` (a screen of the
+    /// same line a frame), a screen of new text a frame, and a scroll through the scrollback a
+    /// line a frame. Each sample is the frame applied and drawn; beside the times it prints the
+    /// grid stretches GPUI painted and drew again from the last frame (`Window::paint_keyed`).
+    /// It runs twice: on GPUI's test text system, which rasterises nothing, so a glyph costs
+    /// its lookup and no sprite, and on the paint oracle's, whose every glyph is a sprite in the
+    /// scene as on the glass. Prints the numbers MEASUREMENTS records; run by hand, in release:
+    /// `cargo test -p slopty-ui --release --lib terminal_frames_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn terminal_frames_cost() {
+        let mut bare = TestAppContext::build(gpui::TestDispatcher::new(0), None);
+        let bare = frames_cost(&mut bare);
+        let mut glyphs = TestAppContext::build_with_text_system(
+            gpui::TestDispatcher::new(0),
+            None,
+            Arc::new(paint_oracle::Glyphs),
+        );
+        let glyphs = frames_cost(&mut glyphs);
+        println!(
+            "MEASURE terminal frames 200 × 60, frame applied and drawn (600 frames each after \
+             60)\n GPUI's test text system:\n  {bare}\n every glyph a sprite:\n  {glyphs}"
+        );
+    }
+
+    /// [`terminal_frames_cost`] on `cx`: one line per case.
+    fn frames_cost(cx: &mut TestAppContext) -> String {
+        const COLS: u16 = 200;
+        const ROWS: u16 = 60;
+        const FRAMES: usize = 600;
+        const WARM: usize = 60;
+        let rows = usize::from(ROWS);
+        let last = rows.saturating_sub(1);
+        let (tx, _rx) = mpsc::channel(1 << 16);
+        cx.update(gpui_kit::init);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let size = TermSize { cols: COLS, rows: ROWS, ..TermSize::default() };
+            let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
+            window.focus(&view.focus, cx);
+            view
+        });
+        cx.simulate_resize(size(px(2000.0), px(1400.0)));
+        cx.run_until_parked();
+        let pool = dense_rows(0x2545_f491, 4_000, COLS, false);
+        let yes = Line::from_text("y", COLS, Style::DEFAULT);
+        let prompt = |typed: usize| {
+            let text: String = std::iter::once("$ ")
+                .chain(std::iter::repeat_n("x", typed))
+                .collect::<Vec<_>>()
+                .concat();
+            Line::from_text(&text, COLS, Style::DEFAULT)
+        };
+        let cursor_at = |col: usize| Cursor {
+            row: ROWS - 1,
+            col: u16::try_from(col).unwrap(),
+            shape: slopty_grid::CursorShape::Block,
+            visible: true,
+            blink: true,
+        };
+        let frame = |seq: u64, first: usize, updates: Vec<RowUpdate>, cursor: Cursor| {
+            TermEvent::Frame(Frame {
+                seq,
+                full: seq == 1,
+                epoch: 0,
+                cols: COLS,
+                rows: ROWS,
+                cursor,
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(u64::try_from(first).unwrap()),
+                total_lines: u64::try_from(first.saturating_add(rows)).unwrap(),
+                input_ack: 0,
+                images: Vec::new(),
+                updates,
+            })
+        };
+        let row_of = |row: usize, line: &Line| RowUpdate {
+            row: u16::try_from(row).unwrap(),
+            line: line.clone().into(),
+        };
+        let pooled = |first: usize, range: std::ops::Range<usize>| -> Vec<RowUpdate> {
+            range
+                .map(|row| {
+                    row_of(row, &pool[first.wrapping_add(row).checked_rem(pool.len()).unwrap()])
+                })
+                .collect()
+        };
+        let (mut seq, mut first, mut typed) = (0_u64, 0_usize, 0_usize);
+        let draw = |change: &mut dyn FnMut(&mut TerminalView, &mut Context<TerminalView>),
+                    cx: &mut VisualTestContext| {
+            let started = Instant::now();
+            view.update_in(cx, |view, _window, cx| change(view, cx));
+            cx.run_until_parked();
+            started.elapsed()
+        };
+        seq = seq.saturating_add(1);
+        let opening = frame(seq, first, pooled(first, 0..rows), cursor_at(2));
+        draw(&mut |view, cx| view.apply(opening.clone(), cx), cx);
+        let mut report = Vec::new();
+        let mut run = |name: &str,
+                       step: &mut dyn FnMut(&mut TerminalView, &mut Context<TerminalView>),
+                       cx: &mut VisualTestContext| {
+            for _ in 0..WARM {
+                draw(step, cx);
+            }
+            cx.update(|window, _| window.reset_layout_stats());
+            let mut samples: Vec<Duration> =
+                std::iter::repeat_with(|| draw(step, cx)).take(FRAMES).collect();
+            let stats = cx.update(|window, _| window.layout_stats());
+            samples.sort_unstable();
+            let at = |q: usize| samples[(samples.len().saturating_sub(1)).saturating_mul(q) / 100];
+            let per = |n: u64| n.checked_div(u64::try_from(FRAMES).unwrap()).unwrap();
+            report.push(format!(
+                "{name}: p50 {:?} p95 {:?} p99 {:?} max {:?}, a frame {} stretches painted, {} \
+                 drawn again ({} of them moved); GPUI's prepaint {:?} and paint {:?} a frame",
+                at(50),
+                at(95),
+                at(99),
+                at(100),
+                per(stats.paints_keyed),
+                per(stats.paints_replayed),
+                per(stats.paints_moved),
+                stats.prepaint_time.checked_div(u32::try_from(FRAMES).unwrap()).unwrap(),
+                stats.paint_time.checked_div(u32::try_from(FRAMES).unwrap()).unwrap(),
+            ));
+        };
+        run("unchanged", &mut |_, cx| cx.notify(), cx);
+        run(
+            "cursor blinking",
+            &mut |view, cx| {
+                view.blink_on = !view.blink_on;
+                cx.notify();
+            },
+            cx,
+        );
+        run(
+            "a key echoed",
+            &mut |view, cx| {
+                typed = if typed >= 150 { 0 } else { typed.saturating_add(1) };
+                seq = seq.saturating_add(1);
+                let updates = vec![row_of(last, &prompt(typed))];
+                view.apply(frame(seq, first, updates, cursor_at(typed.saturating_add(2))), cx);
+            },
+            cx,
+        );
+        run(
+            "a line of output a frame",
+            &mut |view, cx| {
+                seq = seq.saturating_add(1);
+                first = first.saturating_add(1);
+                view.apply(frame(seq, first, pooled(first, last..rows), cursor_at(0)), cx);
+            },
+            cx,
+        );
+        run(
+            "yes, a screen of it a frame",
+            &mut |view, cx| {
+                seq = seq.saturating_add(1);
+                first = first.saturating_add(rows);
+                let updates = (0..rows).map(|row| row_of(row, &yes)).collect();
+                view.apply(frame(seq, first, updates, cursor_at(0)), cx);
+            },
+            cx,
+        );
+        run(
+            "a screen of new text a frame",
+            &mut |view, cx| {
+                seq = seq.saturating_add(1);
+                first = first.saturating_add(rows);
+                view.apply(frame(seq, first, pooled(first, 0..rows), cursor_at(0)), cx);
+            },
+            cx,
+        );
+        // Back to a line a frame, so the scrollback above the screen is dense text.
+        for _ in 0..rows.saturating_mul(3) {
+            draw(
+                &mut |view, cx| {
+                    seq = seq.saturating_add(1);
+                    first = first.saturating_add(1);
+                    view.apply(frame(seq, first, pooled(first, last..rows), cursor_at(0)), cx);
+                },
+                cx,
+            );
+        }
+        let mut scrolled = 0_usize;
+        run(
+            "scrolling the scrollback a line a frame",
+            &mut |view, cx| {
+                // Up 120 lines, down 120, over and over.
+                let up = scrolled % 240 < 120;
+                scrolled = scrolled.saturating_add(1);
+                view.scroll_lines(if up { 1 } else { -1 }, cx);
+            },
+            cx,
+        );
+        report.join("\n  ")
     }
 
     /// The program's `OSC 22` shape is the pointer over the grid, under a link's hand, and ⇧

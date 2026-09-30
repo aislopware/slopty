@@ -107,6 +107,7 @@ impl WorkspaceView {
                 .placed(self.tile_place(item));
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
+        items.extend(self.project_lines());
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
         // The shell a "run" would go to: its last few commands, to run again.
@@ -388,6 +389,10 @@ impl WorkspaceView {
                         let command = command.clone();
                         view.update(cx, |v, cx| v.run_text(command, cx));
                     }
+                }
+                PaletteEvent::Run(PaletteRun::Project(project)) => {
+                    this.palette_return = None;
+                    this.open_project(project, cx);
                 }
                 PaletteEvent::Run(PaletteRun::FindInFile { item, needle }) => {
                     this.palette_return = None;

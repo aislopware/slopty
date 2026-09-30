@@ -6,7 +6,7 @@
 //! every verb accepts back. Text output shortens it to `name/prefix`, which verbs accept too.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 use schemars::JsonSchema;
@@ -18,6 +18,7 @@ use slopty_proto::orchestration::{
     Command, DirEntry, FileKind, FileStat, Happening, HubEvent, ItemRef, Line, Port, Screen,
     TermRef, Waited,
 };
+use slopty_proto::project::WorkerFacts;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchSummary};
 use slopty_proto::server::{Liveness, Os, WorkerInfo};
@@ -26,6 +27,7 @@ use slopty_proto::terminal::{SessionState, SessionSummary};
 use crate::ops::{Chunk, EventPage};
 
 mod agents;
+pub mod projects;
 
 pub use agents::{
     ConversationView, HeldView, MovedView, StillView, ThreadView, conversation, conversation_text,
@@ -53,11 +55,13 @@ pub struct Overview {
     pub workers: Vec<WorkerInfo>,
     /// Every terminal on every worker.
     pub terminals: Vec<(WorkerId, SessionSummary)>,
+    /// What each worker is and has; none from a worker reached without a server.
+    pub facts: Vec<WorkerFacts>,
 }
 
 /// A worker, for JSON.
 #[derive(Debug, Serialize)]
-pub struct WorkerView {
+pub struct WorkerView<'a> {
     worker: WorkerId,
     name: String,
     liveness: &'static str,
@@ -74,6 +78,8 @@ pub struct WorkerView {
     last_seen_ms: WallMs,
     terminals: usize,
     waiting: Vec<WaitingView>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    facts: BTreeMap<&'a str, serde_json::Value>,
 }
 
 /// An agent that needs a human, for JSON.
@@ -312,10 +318,19 @@ pub struct EventView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<AgentView>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    detail: Option<&'a str>,
+    detail: Option<Cow<'a, str>>,
     /// A program's exit status, or its signal number negated.
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_status: Option<i32>,
+    /// A project's change: its name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<&'a str>,
+    /// A project's change: the task it concerns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task: Option<u32>,
+    /// A project's change: the task's state now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'static str>,
 }
 
 /// A new terminal, for JSON.
@@ -522,7 +537,7 @@ impl Overview {
     }
 
     /// The workers, for JSON.
-    pub fn json(&self) -> Vec<WorkerView> {
+    pub fn json(&self) -> Vec<WorkerView<'_>> {
         self.workers
             .iter()
             .map(|w| WorkerView {
@@ -541,6 +556,12 @@ impl Overview {
                 can_inject: w.caps.can_inject,
                 last_seen_ms: w.last_seen_ms,
                 terminals: self.terminal_count(w.worker),
+                facts: self
+                    .facts
+                    .iter()
+                    .find(|f| f.worker == w.worker)
+                    .map(|f| projects::facts(&f.facts))
+                    .unwrap_or_default(),
                 waiting: self
                     .waiting(w.worker)
                     .into_iter()
@@ -950,6 +971,9 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
         agent: None,
         detail: None,
         exit_status: None,
+        project: None,
+        task: None,
+        state: None,
     };
     match &e.what {
         Happening::Worker { worker, name, liveness: l } => {
@@ -987,7 +1011,28 @@ pub fn event(e: &HubEvent) -> EventView<'_> {
             view.worker = *worker;
             view.term = Some(term_string(TermRef { worker: *worker, session: event.session }));
             view.agent = Some(reported(event.kind, &event.status, None));
-            view.detail = event.detail.as_deref();
+            view.detail = event.detail.as_deref().map(Cow::Borrowed);
+        }
+        Happening::Project(update) => {
+            view.kind = "project";
+            view.project = Some(update.project.as_str());
+            let task = update.task.as_ref();
+            view.task = update
+                .entry
+                .as_ref()
+                .and_then(|e| e.task)
+                .or_else(|| task.map(|t| t.id))
+                .or_else(|| update.native.as_ref().and_then(|n| n.task))
+                .map(|t| t.0);
+            view.state = task.map(|t| projects::state_word(t.state));
+            let term = task.and_then(|t| t.assignment.as_ref()).map(|a| a.term);
+            let term = term.or_else(|| update.record.as_ref().and_then(|p| p.orchestrator));
+            if let Some(term) = term {
+                view.worker = term.worker;
+                view.term = Some(term_string(term));
+            }
+            view.title = task.map(|t| t.title.as_str());
+            view.detail = update.entry.as_ref().map(|e| Cow::Owned(projects::moment(&e.what).1));
         }
     }
     view
@@ -1016,6 +1061,26 @@ pub fn event_text<S: std::hash::BuildHasher>(
                 Some(detail) => format!("agent   {}  {said}: {detail}", term(&t)),
                 None => format!("agent   {}  {said}", term(&t)),
             }
+        }
+        Happening::Project(update) => {
+            let task = update
+                .entry
+                .as_ref()
+                .and_then(|e| e.task)
+                .or_else(|| update.task.as_ref().map(|t| t.id))
+                .or_else(|| update.native.as_ref().and_then(|n| n.task));
+            let task = task.map_or_else(String::new, |t| format!(" #{t}"));
+            let what = update.entry.as_ref().map_or_else(
+                || {
+                    update
+                        .task
+                        .as_ref()
+                        .map_or("changed", |t| projects::state_word(t.state))
+                        .to_owned()
+                },
+                |e| projects::moment(&e.what).1,
+            );
+            format!("project {}{task}  {what}", update.project)
         }
     };
     format!("{:>6}  {what}", e.seq)
@@ -1402,7 +1467,7 @@ mod tests {
                 ),
             ),
         ];
-        Overview { workers, terminals }
+        Overview { workers, terminals, facts: Vec::new() }
     }
 
     #[test]

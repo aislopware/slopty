@@ -24,9 +24,11 @@ tracing.workspace = true
 # The input source is selected on the main queue (`sources`).
 dispatch2.workspace = true
 objc2.workspace = true
-objc2-app-kit.workspace = true
+# The live gesture test's own app follows a swipe as Safari does (`tests/support/gesture_app.rs`).
+objc2-app-kit = { workspace = true, features = [ "block2" ] }
+block2.workspace = true
 # A copied file named by reference resolved to its path (`pasteboard`).
-objc2-foundation = { workspace = true, features = [ "NSURL" ] }
+objc2-foundation = { workspace = true, features = [ "NSURL", "NSRunLoop" ] }
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
 # Caps Lock through the HID system (`backend`).
@@ -38,6 +40,8 @@ slopty-platform.workspace = true
 [dev-dependencies]
 slopty-core.workspace = true
 slopty-proto.workspace = true
+# A live test's skip, which the VM lane counts as a failure (`slopty_testkit::live`).
+slopty-testkit.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = [ "macros", "rt-multi-thread", "test-util", "time" ] }
 
@@ -46,3 +50,12 @@ tokio = { workspace = true, features = [ "macros", "rt-multi-thread", "test-util
 [[test]]
 name = "key_path"
 harness = false
+
+# The live gesture test's own app, which it spawns and posts to: the one process a test here
+# posts gestures to (`tests/inject.rs`).
+[[bin]]
+name = "slopty-gesture-app"
+path = "tests/support/gesture_app.rs"
+test = false
+doc = false
+bench = false

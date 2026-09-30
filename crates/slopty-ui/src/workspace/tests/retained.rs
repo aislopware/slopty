@@ -181,6 +181,7 @@ fn a_remote_window_follows_a_resize_as_from_scratch(cx: &mut TestAppContext) {
                 width: 1280,
                 height: 800,
                 scale: 2.0,
+                stripes: Vec::new(),
             },
             cx,
         );
@@ -456,4 +457,78 @@ fn a_file_tiles_caret_blinks_without_building_the_strip(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(builds(cx), before, "the strip was not built for the caret or the key");
     assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_some(), "the dot still shows");
+}
+
+/// The keyboard moved by a view of its own (a click in a body, a find bar giving it back)
+/// builds neither the workspace nor the strip: nothing of theirs reads where the keyboard is
+/// as a whole. The two shells it moves between are built again for their carets and rings, a
+/// third is not, and every frame is the one drawn from scratch.
+#[gpui::test]
+fn the_keyboard_moving_on_its_own_builds_neither_the_workspace_nor_the_strip(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(first, _), (second, two), (third, _)] = three_shells(&view, cx, &fake);
+    let terminals: Vec<Entity<TerminalView>> = [first, second, third]
+        .iter()
+        .filter_map(|session| view.read_with(cx, |v, _| v.terminal(*session).cloned()))
+        .collect();
+    let built = |cx: &mut VisualTestContext| -> (usize, u64, Vec<u32>) {
+        let (workspace, strip) = view.read_with(cx, |v, _| (v.renders, v.drawn.builds.get()));
+        let shells = terminals.iter().map(|t| t.read_with(cx, |t, _| t.renders())).collect();
+        (workspace, strip, shells)
+    };
+    view.update_in(cx, |v, _w, cx| v.focus_tile(two, cx));
+    fresh(cx, "the middle shell has the keyboard");
+    for (to, from, left_alone) in [(0, 1, 2), (1, 0, 2)] {
+        let before = built(cx);
+        let handle = terminals[to].read_with(cx, Focusable::focus_handle);
+        cx.update(|window, cx| window.focus(&handle, cx));
+        cx.run_until_parked();
+        let after = built(cx);
+        let step = format!("the keyboard moved from shell {from} to shell {to}");
+        assert!(terminal_focused(&view, cx, [first, second][to]), "{step}");
+        assert_eq!((after.0, after.1), (before.0, before.1), "{step}: workspace and strip");
+        assert!(after.2[to] > before.2[to], "{step}: the shell it came to was drawn again");
+        assert!(after.2[from] > before.2[from], "{step}: the shell it left was drawn again");
+        assert_eq!(after.2[left_alone], before.2[left_alone], "{step}: the third was not");
+        fresh(cx, &step);
+    }
+}
+
+/// The keyboard moving from one shell to another draws the two of them again (the caret each
+/// shows, the ring and header that say which has it) and not a shell it never touched: GPUI
+/// builds again only the views whose answer to a focus question changed, and the frame after is
+/// the one drawn from scratch.
+#[gpui::test]
+fn the_keyboard_moving_builds_only_the_shells_it_moves_between(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let [(first, _), (second, two), (third, _)] = three_shells(&view, cx, &fake);
+    let terminals: Vec<Entity<TerminalView>> = [first, second, third]
+        .iter()
+        .filter_map(|session| view.read_with(cx, |v, _| v.terminal(*session).cloned()))
+        .collect();
+    let renders = |cx: &mut VisualTestContext| -> Vec<u32> {
+        terminals.iter().map(|t| t.read_with(cx, |t, _| t.renders())).collect()
+    };
+    view.update_in(cx, |v, _w, cx| v.focus_tile(two, cx));
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, second));
+    fresh(cx, "the middle shell has the keyboard");
+    let before = renders(cx);
+    // The keyboard alone, as a shell's find bar closing hands it back: the strip stays put.
+    view.update_in(cx, |v, _w, cx| {
+        v.pending_focus = Some(first);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, first), "the first shell has the keyboard");
+    // Counted before the check, which draws every view from scratch to compare.
+    let after = renders(cx);
+    fresh(cx, "the keyboard moved");
+    assert!(after[0] > before[0], "the shell it moved to was drawn again: {before:?} {after:?}");
+    assert!(after[1] > before[1], "the shell it left was drawn again: {before:?} {after:?}");
+    assert_eq!(after[2], before[2], "the shell it never touched was not built again");
 }

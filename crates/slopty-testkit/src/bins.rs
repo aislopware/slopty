@@ -1,0 +1,54 @@
+//! The daemons and doubles a test spawns, from the same build as the test.
+//!
+//! A test that spawns `slopty-ptyd`, `slopty-worker`, `slopty-server`, `slopty` or the stand-in
+//! `claude` finds each beside its own binary. Under `cargo xtask` (the gate's tests, the e2e
+//! suites) they are built before any test starts, which sets [`FRESH`], so no test shells out to
+//! cargo: one that did would wait on cargo's locks for as long as any other build on the machine
+//! held them. A bare `cargo nextest run` builds them once per test process instead, fresh, since
+//! one left from an older build would test the old code.
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// Set by `cargo xtask` once every binary in [`PACKAGES`] is built into the profile directory
+/// the tests run from.
+pub const FRESH: &str = "SLOPTY_BINS_FRESH";
+
+/// The packages whose binaries a test may spawn. `cargo xtask` builds the same list (`--bins`).
+pub const PACKAGES: [&str; 5] =
+    ["slopty-ptyd", "slopty-workerd", "slopty-serverd", "slopty-cli", "slopty-testkit"];
+
+/// The binary `name` from this build, beside `anchor`: a binary of the calling test's own
+/// package, as `env!("CARGO_BIN_EXE_<bin>")` names it.
+///
+/// # Panics
+///
+/// When [`FRESH`] is unset and the build of [`PACKAGES`] fails.
+#[must_use]
+pub fn bin(anchor: &str, name: &str) -> PathBuf {
+    let anchor = Path::new(anchor);
+    if std::env::var_os(FRESH).is_none() {
+        static BUILT: OnceLock<()> = OnceLock::new();
+        BUILT.get_or_init(|| build(anchor));
+    }
+    anchor.with_file_name(name)
+}
+
+fn build(anchor: &Path) {
+    let release = anchor.parent().is_some_and(|dir| dir.ends_with("release"));
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut build = std::process::Command::new(cargo);
+    build.arg("build").arg("--bins");
+    for package in PACKAGES {
+        build.args(["-p", package]);
+    }
+    if release {
+        build.arg("--release");
+    }
+    let status = build.status();
+    assert!(
+        status.as_ref().is_ok_and(std::process::ExitStatus::success),
+        "build the binaries tests spawn ({}): {status:?}",
+        PACKAGES.join(", ")
+    );
+}

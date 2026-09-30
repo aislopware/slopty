@@ -16,17 +16,24 @@
 //! ([`PacingStats::skipped`]). Those two counters are the double-present / skipped-present
 //! pattern; on a steady source matched to the display both stay near zero.
 //!
-//! Where the worker's clock is this process's too (loopback: the host time clock the worker stamps
+//! Every frame is also timed from its capture on the worker to the glass. On any link the
+//! capture time is placed on this process's clock by a `slopty_media::ClockSync`, which
+//! estimates the worker's clock from probes the stream echoes ([`FrameStamp::captured`]). Where
+//! the worker's clock is this process's too (loopback: the host time clock the worker stamps
 //! captures with and [`Instant`] both read mach absolute time), a [`ClockAnchor`] given to
-//! [`Pacer::share_clock`] lets the ring time each frame from its capture as well, and inputs the
-//! caller marks with [`Pacer::input_sent`] and [`Pacer::input_visible`] are timed from their send
-//! to the first frame shown that has them ([`Pacer::glass`]).
+//! [`Pacer::share_clock`] converts exactly instead, which is how the estimate is checked. Inputs
+//! the caller marks with [`Pacer::input_sent`] and [`Pacer::input_visible`] are timed from their
+//! send to the first frame shown that has them ([`Pacer::glass`]).
 //!
 //! Everything here is pure: the caller supplies the clock ([`Clock`]), so the policy is testable
 //! without a window.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+/// The worker's clock placed on this one, as [`Pacer::share_clock`] and a stream's stats
+/// ([`crate::screen::ScreenStats::clock`]) carry it; `slopty_media::ClockSync` estimates it.
+pub use slopty_media::{ClockAnchor, ClockEstimate};
 
 /// Presented frames kept for the percentiles: four seconds at 60 fps.
 pub const RING: usize = 240;
@@ -61,6 +68,10 @@ pub struct FrameStamp {
     pub arrived: Instant,
     /// When the decoder handed the picture back.
     pub decoded: Instant,
+    /// When the worker captured it, on this process's clock, as the link's
+    /// `slopty_media::ClockSync` placed the capture timestamp; `None` until a clock probe has
+    /// come back.
+    pub captured: Option<Instant>,
 }
 
 /// Widens the wire's 32-bit capture timestamp into a monotonic one.
@@ -108,33 +119,6 @@ impl CaptureClock {
     }
 }
 
-/// One moment read on both the worker's capture clock and this process's.
-///
-/// Only meaningful where they are the same clock: the host time clock `slopty_capture::host_now_us`
-/// reads and [`Instant`] are both mach absolute time on one machine, so on loopback a capture
-/// timestamp converts exactly.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ClockAnchor {
-    /// The moment on this process's clock.
-    pub at: Instant,
-    /// The same moment on the worker's capture clock, microseconds.
-    pub host_us: u64,
-}
-
-impl ClockAnchor {
-    /// When a frame stamped `pts_us` was captured, on this process's clock. Only the low 32 bits
-    /// of the stamp are the wire's, so the stamp is read as the nearest moment to the anchor with
-    /// those bits: within 35 minutes of it either way.
-    #[must_use]
-    pub fn captured(&self, pts_us: u64) -> Option<Instant> {
-        #[expect(clippy::cast_possible_truncation, reason = "the wire's low 32 bits by design")]
-        let (pts, anchor) = (pts_us as u32, self.host_us as u32);
-        let ahead = pts.wrapping_sub(anchor).cast_signed();
-        let by = Duration::from_micros(u64::from(ahead.unsigned_abs()));
-        if ahead >= 0 { self.at.checked_add(by) } else { self.at.checked_sub(by) }
-    }
-}
-
 /// p50, p95 and the worst of one ring of durations.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Spread {
@@ -164,8 +148,8 @@ impl Spread {
 /// The two end-to-end timings, over the last [`RING`] samples of each.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct GlassStats {
-    /// Capture on the worker → the display showing the frame; empty unless the clocks are
-    /// shared ([`Pacer::share_clock`]).
+    /// Capture on the worker → the display showing the frame; empty until the clocks are
+    /// shared ([`Pacer::share_clock`]) or estimated ([`FrameStamp::captured`]).
     pub capture: Spread,
     /// Input sent → the display showing the first frame that has it.
     pub input: Spread,
@@ -288,7 +272,8 @@ impl<C: Clock> Pacer<C> {
     }
 
     /// The worker's capture clock is this process's clock too (loopback), read together at
-    /// `anchor`: from here on every frame shown is timed from its capture as well.
+    /// `anchor`: from here on every frame shown is timed from its capture through it, exactly,
+    /// rather than through the estimate its stamp carries.
     pub const fn share_clock(&mut self, anchor: ClockAnchor) {
         self.anchor = Some(anchor);
     }
@@ -373,7 +358,8 @@ impl<C: Clock> Pacer<C> {
         self.ring.push_back(sample);
         self.shown_at = Some(at);
         self.stats.presented = self.stats.presented.saturating_add(1);
-        if let Some(captured) = self.anchor.and_then(|a| a.captured(stamp.pts_us)) {
+        let captured = self.anchor.map_or(stamp.captured, |a| a.captured(stamp.pts_us));
+        if let Some(captured) = captured {
             push_ring(&mut self.captures, at.saturating_duration_since(captured));
         }
         while let Some(input) = self.inputs.front().copied() {
@@ -515,6 +501,7 @@ mod tests {
             decode_seq: clock.next_seq(),
             arrived: clock.at(arrived),
             decoded: clock.at(arrived.saturating_add(decode)),
+            captured: None,
         }
     }
 
@@ -767,6 +754,7 @@ mod tests {
                 decode_seq: fake.next_seq(),
                 arrived: fake.now_instant(),
                 decoded: fake.now_instant(),
+                captured: None,
             };
             assert_eq!(pacer.offer(s), Pace::Present, "raw {raw} was refused");
             present(&mut pacer, &fake);
@@ -817,7 +805,9 @@ mod tests {
 
     /// With the clocks shared, a frame is timed from its capture too: captured 5 ms before it
     /// arrived and shown a refresh after that, it took 5 ms and a refresh from capture to glass.
-    /// Without an anchor there is no capture timing at all, never a guess.
+    /// Without an anchor it is timed from the capture its stamp's estimate places, and without
+    /// either there is no capture timing at all, never a guess. The shared clock wins over an
+    /// estimate, since it is exact.
     #[test]
     fn a_shared_clock_times_frames_from_their_capture() {
         let clock = FakeClock::new();
@@ -830,6 +820,7 @@ mod tests {
             decode_seq: clock.next_seq(),
             arrived: clock.at(arrived),
             decoded: clock.at(arrived + MS),
+            captured: None,
         };
         clock.advance(arrived + FRAME);
         pacer.offer(s);
@@ -838,23 +829,17 @@ mod tests {
 
         let mut shared = Pacer::new(&clock);
         shared.share_clock(anchor);
-        shared.offer(s);
+        // An estimate 2 ms off, which the exact anchor overrides.
+        shared.offer(FrameStamp { captured: Some(clock.at(17 * MS)), ..s });
         present(&mut shared, &clock);
         let glass = shared.glass();
         assert_eq!(glass.capture.count, 1);
         assert_eq!(glass.capture.max, 5 * MS + FRAME);
-    }
 
-    /// The anchor reads only the wire's low 32 bits, so a stamp from just past a wrap of the
-    /// worker's clock still converts to a moment right after the anchor, not 71 minutes off.
-    #[test]
-    fn the_anchor_reads_the_nearest_moment_across_a_wrap() {
-        let at = Instant::now();
-        let anchor = ClockAnchor { at, host_us: (1_u64 << 32) - 1_000 };
-        let captured = anchor.captured((1_u64 << 32) + 2_000).expect("in range");
-        assert_eq!(captured.saturating_duration_since(at), 3 * MS);
-        let before = anchor.captured((1_u64 << 32) - 4_000).expect("in range");
-        assert_eq!(at.saturating_duration_since(before), 3 * MS);
+        let mut estimated = Pacer::new(&clock);
+        estimated.offer(FrameStamp { captured: Some(clock.at(17 * MS)), ..s });
+        present(&mut estimated, &clock);
+        assert_eq!(estimated.glass().capture.max, 3 * MS + FRAME, "from the estimate");
     }
 
     /// An input is timed from its send to the first frame shown that has it. The frame found to

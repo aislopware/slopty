@@ -47,7 +47,7 @@ mod tests {
             System.is_active(pid)
         }
 
-        fn activate(&mut self, _pid: i32) -> Result<(), InputError> {
+        fn activate(&mut self, _pid: i32, _window: Option<u32>) -> Result<(), InputError> {
             Ok(())
         }
 
@@ -112,7 +112,8 @@ mod tests {
                 Event::Key { .. }
                 | Event::Scroll { .. }
                 | Event::Text { .. }
-                | Event::Media { .. } => (None, false),
+                | Event::Media { .. }
+                | Event::Gesture { .. } => (None, false),
             };
             let Some((handed_at, _)) = next.by_ref().find(|(_, want)| match (want, at) {
                 (Some(want), Some(at)) => {
@@ -210,7 +211,7 @@ mod tests {
     #[ignore = "measurement"]
     fn injection_cost_on_the_callers_thread() {
         let Some(window) = some_window() else {
-            eprintln!("skipped: no window on screen");
+            slopty_testkit::live::skip("no window on screen");
             return;
         };
         let target = CaptureTarget::Window(window);
@@ -285,7 +286,7 @@ mod tests {
             true
         }
 
-        fn activate(&mut self, _pid: i32) -> Result<(), InputError> {
+        fn activate(&mut self, _pid: i32, _window: Option<u32>) -> Result<(), InputError> {
             Ok(())
         }
 
@@ -360,5 +361,90 @@ mod tests {
         );
         quantiles("stalled handed → posted, every post", delays.all);
         quantiles("stalled handed → posted, releases", delays.releases);
+    }
+
+    /// A window's decisions with nothing posted, and the event clock as the real backend reads
+    /// it or never read.
+    #[derive(Debug)]
+    struct Decide {
+        clock: bool,
+    }
+
+    impl Backend for Decide {
+        fn owner_pid(&self, _target: CaptureTarget) -> Option<i32> {
+            Some(4242)
+        }
+
+        fn bounds(&mut self, _target: CaptureTarget) -> Option<Rect> {
+            Some(RECT)
+        }
+
+        fn is_active(&mut self, _pid: i32) -> bool {
+            true
+        }
+
+        fn activate(&mut self, _pid: i32, _window: Option<u32>) -> Result<(), InputError> {
+            Ok(())
+        }
+
+        fn post(&mut self, post: Post) -> Result<(), InputError> {
+            std::hint::black_box(post);
+            Ok(())
+        }
+
+        fn event_clock(&mut self) -> u64 {
+            if self.clock { slopty_capture::host_now_us().saturating_mul(1000) } else { 0 }
+        }
+    }
+
+    /// What the injector's own decisions cost one input on the stream's input thread, with
+    /// nothing built or posted: a trackpad scroll with its gesture, stamped at the client's
+    /// spacing or left to the system's clock, and a move outside and inside a drag
+    /// (`docs/MEASUREMENTS.md`, "a gesture's events keep the client's spacing").
+    #[test]
+    #[ignore = "measurement"]
+    fn the_injector_s_own_cost_per_input() {
+        const N: u32 = 200_000;
+        let target = CaptureTarget::Window(WindowId(9));
+        let per = |label: &str, clock: bool, drag: bool, scroll: bool| {
+            let mut injector = Injector::with_backend(target, 1.0, Decide { clock });
+            injector.inject(&ScreenInput::Gestures { remote: true }).expect("taken");
+            if drag {
+                injector.press_at(10.0, 10.0).expect("pressed");
+            }
+            let started = Instant::now();
+            for k in 0..N {
+                #[expect(clippy::cast_precision_loss, reason = "a small count")]
+                let x = (k % 1000) as f32;
+                let input = if scroll {
+                    ScreenInput::Scroll {
+                        dx: -1.0,
+                        dy: 0.0,
+                        precise: true,
+                        phase: if k == 0 {
+                            slopty_proto::screen::ScrollPhase::Began
+                        } else {
+                            slopty_proto::screen::ScrollPhase::Changed
+                        },
+                        momentum: slopty_proto::screen::ScrollPhase::None,
+                        x,
+                        y: 10.0,
+                        mods: Mods::empty(),
+                        time_us: k.wrapping_mul(8_333),
+                    }
+                } else {
+                    ScreenInput::Move { x, y: 10.0 }
+                };
+                injector.inject(std::hint::black_box(&input)).expect("taken");
+            }
+            let ns = started.elapsed().as_nanos() as f64 / f64::from(N);
+            eprintln!("{label}: {ns:.0} ns an input");
+        };
+        for _ in 0..3 {
+            per("scroll and its gesture, system's stamp", false, false, true);
+            per("scroll and its gesture, client's spacing", true, false, true);
+            per("move", false, false, false);
+            per("move in a drag", false, true, false);
+        }
     }
 }

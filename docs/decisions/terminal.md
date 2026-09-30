@@ -2248,7 +2248,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   moves queued while it works in one batch, each session once. Ten thousand reports over 1.5 s
   moved the summary 7 times (`a_flood_of_progress_moves_the_summary_a_bounded_number_of_times`).
 
-- ✅ **The prompt-mark scanner reads OSCs as libghostty does** (2026-09-30). ghostty `0538f7535`
+- ✅ **The prompt-mark scanner reads OSCs as libghostty does** (2026-09-30; superseded the same
+  day: the scanner is gone, see "Prompt marks come from libghostty's semantic prompt effect"). ghostty `0538f7535`
   (fork `29bbc6a`) makes CAN and SUB cancel an OSC in progress, as xterm does: `ESC ] 2 ; t CAN`
   no longer sets the title. The engine's OSC 133 scanner still counted a mark cut off that way,
   so a cancelled `133;D;1;` gave the next prompt a status the terminal never took. Checked
@@ -2620,6 +2621,92 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   both proven and small. DECSTR soft reset (#13333) and XTQMODKEYS (#13332) wait on
   requested changes. The mouse-mode grouping (#14439) is a large refactor. #11711 fixes a
   prompt click that Slopty handles itself.
+
+- ✅ **A saved cursor stays after its line through reflow: ghostty #14478 plus our follow-up**
+  (2026-09-30; upstream merged the PR the same day as `dc3f73a69`). A cursor saved (DECSC) while
+  waiting to wrap moved into the blank after its line on one widening, and a second widening
+  pulled it back onto the line's last character: `AAA|` then `X` printed `AAX|`. Reflow bounded
+  a tracked pin in a row's trailing blanks by the column the previous line ended at, even when
+  a hard line break or a pending wrap starts the row at column 0. fornwall's PR measures from
+  column 0 in those cases. Review found the same bound wrong in a
+  second way it leaves alone: it counts from where the row starts, so when narrowing wraps the
+  content past the first row, the bound falls inside the content and a restored cursor
+  overwrites a character (`abcdef`, saved at column 8, narrowed to 4: `abcX`/`ef` instead of
+  `abcd`/`ef X`). Our commit on top (`5543af3d1` since the rebase onto the merge) bounds the
+  pin by the end of the row where
+  the content ends, computed once per row so several pins get the same bound in any order.
+  Its Zig tests cover two pins, content filling a row exactly, a far pin, an overflowing soft
+  continuation, the live and restored cursor, and saved cursors on both screens (mode 1049)
+  through repeated widening; `zig build test-lib-vt` passes (6564 tests). The alternate screen
+  resizes without reflow and never had the bug. The fork was rebased onto upstream
+  `4da7523fa` (old head kept as `archive/main-2026-09-30-pre-4da7523`); the binding pins it at
+  `5f58ea39` (headers unchanged) and `vendor/ghostty` sits at `61eea99c7`. Engine tests:
+  `a_saved_cursor_survives_repeated_widening` (failed with `AAX|`) and
+  `a_saved_cursor_after_a_line_that_narrowing_wraps_stays_after_it` (failed with `abcX`). A
+  draft of the follow-up for upstream is in `.research/ghostty-upstream-prs.md`.
+
+- ✅ **Prompt marks come from libghostty's semantic prompt effect; our OSC 133 scanner is gone**
+  (2026-09-30, ghostty #14479, merged as `36ec90a07`). The engine scanned every PTY read for
+  OSC 133 on its own and fed the terminal up to each mark, so it knew the cursor at the mark.
+  That was a second parse on the output path, kept in step with libghostty's by hand, and it
+  held state libghostty also holds. Mitchell's PR reports each step the shell writes (prompt,
+  input, output, command end with its exit code and `err`, the decoded command line) and a
+  full reset (RIS), as effects called from inside `vt_write`. Review against the parser and
+  the stream:
+  - **Order**: the effect runs at the sequence's terminator, after the terminal applied it
+    and before any later byte. The PR's tests show the bytes before were applied; our fork's
+    test (`74bc7d05e`) feeds text, a `D`, text, a `P`, text, a RIS and text as one slice and
+    reads the cursor in each call.
+  - **Re-entrancy**: a callback may read the terminal but must not write to it. The Rust
+    binding hands it a `&Terminal`, so it cannot call `vt_write`, `reset` or `resize`.
+  - **What it leaves out**: `aid`, `cl`, `click_events`, `special_key`, and `redraw`. The
+    event describes what happened, not how the shell said it. Slopty uses none of these
+    except `redraw`, which now comes from the terminal's state (below). The exit code is
+    there as an `i32`, and the engine keeps it only when it fits a `u8`, as the scanner did.
+  - **Bug: a full reset turned prompt clearing back on.** libghostty-vt terminals start with
+    `shell_redraws_prompt = .false`, but `fullReset` rebuilt the flags from their Zig
+    default, `.true`. After a `reset` in bash, a resize cleared the prompt and bash did not
+    draw it again. Fixed on the fork (`7a0978f4f`): `Terminal.Options.default_prompt_redraw`,
+    which init applies and a reset restores. The C API passes `.false` for new terminals and
+    for terminals decoded from a snapshot.
+  - **Added: `GHOSTTY_TERMINAL_DATA_PROMPT_REDRAW`** (`bf9ba3300`), so the engine reads what
+    the terminal will clear on a resize instead of parsing `redraw=` itself. With the
+    existing `cursor_at_prompt` getter, the engine keeps no copy of either.
+  - **Bug: a step whose options overflow the OSC buffer was lost.** OSC 133 is captured into
+    the parser's fixed 2048-byte buffer, and a longer one went invalid. fish 4 sends the
+    command line as `C;cmdline_url=…`, so a command over about 2 KB lost its output start:
+    the row stayed in the prompt and no step was reported. Our scanner lost it past 128 bytes.
+    Fixed on the fork (`3ccf1b06a`): an overflowing 133 keeps the options that fit whole and
+    drops the one that was cut.
+
+  The engine now queues each mark with the cursor row tracked (`track_grid_ref`) and folds the
+  queue in order once the write has settled, so a mark keeps its row through whatever the
+  rest of the write scrolled or evicted. A RIS in the queue starts a new numbering and drops
+  the marks, statuses and blocks. Folding after the write showed that a renumbering (a
+  resize, a full reset, history evicted past the anchor) dropped an open command: a command
+  typed after a tile resize at a bash prompt was never tracked, and one running through a
+  resize never ended, so a waiter on it hung. A renumbering now keeps the newest block when
+  it has not ended, reopened at the cursor. That also lets a `reset` command end. Numbers
+  (MEASUREMENTS, "OSC 133 marks from libghostty's semantic prompt effect"): the engine's
+  overhead over the bare write fell 25 % on plain output and 40 % per OSC on OSC-heavy output.
+  One typed byte costs 5 % fewer instructions. Tests: `a_full_reset_drops_the_command_state`,
+  `a_full_reset_forgets_that_the_shell_redraws_its_prompt`,
+  `a_command_that_resets_the_terminal_still_ends`, `a_long_command_line_still_starts_the_output`,
+  `a_command_running_through_a_resize_still_ends` and
+  `a_command_typed_after_a_resize_at_the_prompt_is_tracked`. The last five failed on the
+  scanner engine. `a_command_whose_prompt_the_same_write_evicts_still_ends` and
+  `a_command_end_counts_when_libghostty_acts_on_it` replace the scanner's framing test. The
+  binding (`aislopware/libghostty-rs`) gains `on_semantic_prompt`, `on_reset` and
+  `prompt_redraw`. The event is borrowed for the call and allocates nothing. The command line
+  is bytes, since a decoded `cmdline_url` need not be UTF-8. Not taken yet: using the shell's
+  own command line for `CommandBlock.command`. Our shell integrations send none.
+- ✅ **RIS resets the palette: ghostty #14480** (korikhin, 2026-09-30, carried on the fork as
+  `efc6b01fe` and `cfd6fa8f7`). xterm's `ReallyReset` resets the ANSI colours on RIS and on
+  DECSTR, and keeps the dynamic ones (OSC 10, 11, 12). ghostty kept an OSC 4 change through
+  RIS. The PR has no test; the fork adds one (`f96ae0c96`). ghostty does not do a full DECSTR
+  yet (#13333 waits on requested changes), so only RIS resets the palette. The engine reports
+  the reset palette as a colour change: `a_full_reset_returns_the_palette_to_the_default`, and
+  `the_programs_colour_changes_are_reported_as_a_whole_set` now expects it.
 
 - ✅ **A shell starts from our own fork** (2026-09-30, crash report). `slopty-ptyd` died of
   SIGABRT on 2026-09-29 with "crashed on child side of fork pre-exec", parent `launchd`

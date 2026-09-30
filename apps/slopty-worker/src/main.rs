@@ -194,6 +194,15 @@ pub struct Daemon {
     /// Where a session's presence file is made (`true`) or removed, in order
     /// ([`handoff::presence`]).
     pub presence: tokio::sync::mpsc::UnboundedSender<(SessionId, bool)>,
+    /// What the hooks said of an agent that the server's project tree takes and no client
+    /// needs: Claude Code's own subagents and task list ([`ctl`]), for the server link.
+    pub reports: broadcast::Sender<slopty_proto::project::AgentReport>,
+    /// Where the reports the server sends an agent wait for its hooks to hand them over
+    /// ([`slopty_agent::reports`]), beside the control socket.
+    pub deliveries: PathBuf,
+    /// Where each agent's inbox is noted, which takes its reports at once
+    /// ([`slopty_agent::reports::Inbox`]).
+    pub inboxes: PathBuf,
 }
 
 impl Daemon {
@@ -283,21 +292,28 @@ impl slopty_worker::wake::Holds for Assertions {
     }
 }
 
-/// Register with the configured server, if there is one, on a task of its own that dials and
-/// keeps dialing (`server::run`), registering with the daemon's [`Daemon::caps`].
-fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) {
+/// The server to register with: `--server`, `SLOPTY_SERVER` or the settings file; `None` to
+/// run on our own.
+fn server_address(flag: Option<&str>, data_dir: &std::path::Path) -> Option<slopty_net::HostAddr> {
     let settings = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings;
-    let addr = match server::configured(flag, &settings) {
-        Ok(Some(addr)) => addr,
+    match server::configured(flag, &settings) {
+        Ok(Some(addr)) => Some(addr),
         Ok(None) => {
             tracing::info!("no server configured; running on our own");
-            return;
+            None
         }
         Err(e) => {
             tracing::warn!(error = %e, "server address ignored; running on our own");
-            return;
+            None
         }
-    };
+    }
+}
+
+/// Register with the server at `addr` on a task of its own that dials and keeps dialing
+/// (`server::run`), registering with the daemon's [`Daemon::caps`], and gather this worker's
+/// facts for it on another ([`slopty_worker::facts::watch`]), the person's labels and probes
+/// read from the settings under `data_dir` each time.
+fn join_server(daemon: &Daemon, addr: slopty_net::HostAddr, data_dir: &std::path::Path) {
     let endpoint = match slopty_net::client::bind_client() {
         Ok(endpoint) => endpoint,
         Err(e) => {
@@ -317,8 +333,13 @@ fn join_server(daemon: &Daemon, flag: Option<&str>, data_dir: &std::path::Path) 
         launch,
         Arc::new(follow::Orchestrated(daemon.clone())),
     );
-    let caps = daemon.caps.clone();
-    tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, caps));
+    let (facts_tx, facts) = tokio::sync::watch::channel(slopty_proto::project::Facts::new());
+    let settings = slopty_settings::path_in(data_dir);
+    let own =
+        move || server::own_facts(&slopty_settings::Settings::load(&settings).settings.worker);
+    tokio::spawn(slopty_worker::facts::watch(facts_tx, own));
+    let watched = server::Watched { caps: daemon.caps.clone(), facts };
+    tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, watched));
 }
 
 /// Keep `caps` and `load` current (the agents' versions follow once their `--version`
@@ -431,6 +452,11 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
+    // Following files holds a descriptor per watched path on macOS, past launchd's 256.
+    match slopty_worker::fswatch::raise_descriptor_limit() {
+        Ok(limit) => tracing::debug!(limit, "descriptor limit"),
+        Err(e) => tracing::warn!(error = %e, "descriptor limit not raised; watches may run short"),
+    }
     // Sharp timers for the whole daemon: screen capture, encode and QUIC heartbeats all run on
     // timers macOS would otherwise coalesce for a background process.
     let _activity = slopty_platform::Activity::latency_critical("Slopty worker");
@@ -484,6 +510,13 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     };
     let presence_dir = data_dir.join("presence");
     let (presence, presence_changes) = tokio::sync::mpsc::unbounded_channel();
+    let (reports, _none) = broadcast::channel(EVENT_BUFFER);
+    // The server sends again what it sent and was not handed over.
+    let deliveries = slopty_agent::reports::dir(&ctl_path);
+    let inboxes = slopty_agent::reports::inboxes(&ctl_path);
+    if let Err(e) = slopty_agent::reports::clear(&deliveries) {
+        tracing::warn!(error = %e, "reports of an earlier run left in place");
+    }
     let daemon = Daemon {
         worker,
         listener,
@@ -511,7 +544,10 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         follows: Arc::default(),
         handoffs: Arc::default(),
         presence,
+        reports,
         claude_mod,
+        deliveries,
+        inboxes,
         displays,
         sources,
     };
@@ -577,6 +613,12 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     // and a `claude` typed in one finds the mod (the shell integration's `claude` function).
     let mut session_env =
         vec![("SLOPTY_WORKER_SOCKET".to_owned(), ctl_path.to_string_lossy().into_owned())];
+    // And the server this worker registers with, so `slopty mcp` and the CLI in any of them,
+    // an agent's tools included, reach the fleet with no flag.
+    let server = server_address(args.server.as_deref(), &data_dir);
+    if let Some(addr) = &server {
+        session_env.push((slopty_proto::project::SERVER_ENV.to_owned(), addr.to_string()));
+    }
     if let Some(installed) = &daemon.claude_mod {
         session_env.extend(installed.session_env());
         tokio::spawn(modsock::serve(daemon.clone(), mod_path));
@@ -593,7 +635,9 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     }
     tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
 
-    join_server(&daemon, args.server.as_deref(), &data_dir);
+    if let Some(addr) = server {
+        join_server(&daemon, addr, &data_dir);
+    }
 
     let allow: Vec<String> =
         daemon.listener.admission().ranges().iter().map(ToString::to_string).collect();

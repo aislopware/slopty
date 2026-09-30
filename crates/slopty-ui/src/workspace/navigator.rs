@@ -310,6 +310,8 @@ pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'st
         WorkerStatus::Connected => None,
         WorkerStatus::Connecting => Some((Status::Working, "connecting")),
         WorkerStatus::Silent(_) => Some((Status::Away, "silent")),
+        WorkerStatus::Checking => Some((Status::Working, "checking")),
+        WorkerStatus::Relinking => Some((Status::Working, "reconnecting")),
         WorkerStatus::Reconnecting(_) => Some((Status::Away, "reconnecting")),
         WorkerStatus::Unreachable => Some((Status::Away, "unreachable")),
         WorkerStatus::Gone => Some((Status::Away, "gone")),

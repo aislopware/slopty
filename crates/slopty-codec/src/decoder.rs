@@ -45,6 +45,13 @@ unsafe impl Send for PixelBuffer {}
 // SAFETY: as above; every accessor used through `&PixelBuffer` is a read.
 unsafe impl Sync for PixelBuffer {}
 
+impl Clone for PixelBuffer {
+    /// Another reference to the same picture: a retain, never a copy of its pixels.
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 impl PixelBuffer {
     /// Take ownership of a retained buffer.
     #[must_use]
@@ -83,8 +90,8 @@ impl std::fmt::Debug for PixelBuffer {
     }
 }
 
-/// One decoded frame.
-#[derive(Debug)]
+/// One decoded frame. A clone is another reference to the same picture.
+#[derive(Clone, Debug)]
 pub struct DecodedFrame {
     /// The picture, IOSurface-backed and Metal-compatible.
     pub image: PixelBuffer,

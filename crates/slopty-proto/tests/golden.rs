@@ -177,6 +177,9 @@ mod golden {
             Feedback::Refresh { stream: StreamId(7), last_good_frame: 300, keyframe: true };
         let bytes = ClientDatagram::Feedback(refresh).encode().expect("encodes");
         insta::assert_snapshot!("client_refresh", hex(&bytes));
+        let probe = Feedback::Clock { stream: StreamId(7), sent_us: 1_234_567 };
+        let bytes = ClientDatagram::Feedback(probe).encode().expect("encodes");
+        insta::assert_snapshot!("client_clock_probe", hex(&bytes));
     }
 
     /// A keystroke's copy: the session, its place among the session's inputs, the request.
@@ -955,6 +958,54 @@ mod golden {
         );
     }
 
+    /// The trackpad's gestures for the app under the pointer: a pinch, a rotation, smart zoom
+    /// and a swipe.
+    #[test]
+    fn screen_gestures() {
+        use slopty_proto::screen::{ScrollPhase, SwipeDirection};
+        let input = |input| ClientMsg::Screen(ScreenRequest::Input { stream: StreamId(7), input });
+        snap(
+            "client_screen_magnify",
+            &input(ScreenInput::Magnify {
+                delta: 0.125,
+                phase: ScrollPhase::Changed,
+                x: 10.5,
+                y: 20.0,
+                time_us: 0x0123_4567,
+            }),
+        );
+        snap(
+            "client_screen_rotate",
+            &input(ScreenInput::Rotate {
+                degrees: -12.5,
+                phase: ScrollPhase::Began,
+                x: 10.5,
+                y: 20.0,
+                time_us: 0x0123_4567,
+            }),
+        );
+        snap("client_screen_smart_magnify", &input(ScreenInput::SmartMagnify { x: 10.5, y: 20.0 }));
+        snap(
+            "client_screen_swipe",
+            &input(ScreenInput::Swipe { direction: SwipeDirection::Down, x: 10.5, y: 20.0 }),
+        );
+        snap("client_screen_gestures_remote", &input(ScreenInput::Gestures { remote: true }));
+        snap(
+            "client_screen_scroll",
+            &input(ScreenInput::Scroll {
+                dx: -10.0,
+                dy: 0.5,
+                precise: true,
+                phase: ScrollPhase::Changed,
+                momentum: ScrollPhase::None,
+                x: 10.5,
+                y: 20.0,
+                mods: Mods::SHIFT,
+                time_us: 0x0123_4567,
+            }),
+        );
+    }
+
     /// A quality that asks for colour at every pixel.
     #[test]
     fn screen_quality_full_chroma() {
@@ -1011,6 +1062,66 @@ mod golden {
         );
     }
 
+    /// A stream opened as one picture, one opened as two stripes (the lower on its own media
+    /// stream), a resize that moves the seam, and a frame prefix naming the stripes coded from
+    /// its capture.
+    #[test]
+    fn screen_stripes() {
+        use slopty_proto::media::FramePrefix;
+        use slopty_proto::screen::{CaptureTarget, Stripe, VideoCodec};
+        use zerocopy::IntoBytes as _;
+        use zerocopy::little_endian::{U32, U64};
+        let stream = StreamId(7);
+        let stripes = |height: u32, seam: u32| {
+            vec![
+                Stripe {
+                    media: Stripe::media_of(stream, 0),
+                    coded_top: 0,
+                    coded_rows: seam + 64,
+                    shown_top: 0,
+                    shown_rows: seam,
+                },
+                Stripe {
+                    media: Stripe::media_of(stream, 1),
+                    coded_top: seam - 64,
+                    coded_rows: height - (seam - 64),
+                    shown_top: seam,
+                    shown_rows: height - seam,
+                },
+            ]
+        };
+        let opened = |stripes| {
+            WorkerMsg::Screen(ScreenEvent::Opened {
+                stream,
+                target: CaptureTarget::Display(slopty_core::DisplayId(1)),
+                codec: VideoCodec::Hevc,
+                width: 3840,
+                height: 2160,
+                scale: 1.0,
+                stripes,
+            })
+        };
+        snap("worker_screen_opened", &opened(Vec::new()));
+        snap("worker_screen_opened_striped", &opened(stripes(2160, 1088)));
+        snap(
+            "worker_screen_geometry_striped",
+            &WorkerMsg::Screen(ScreenEvent::Geometry {
+                stream,
+                width: 5120,
+                height: 2880,
+                stripes: stripes(2880, 1408),
+            }),
+        );
+        let prefix = FramePrefix {
+            len: U32::new(1200),
+            capture_ts_us: U32::new(0x0102_0304),
+            ltr_token: U64::new(0),
+            stripes: 0b11,
+            reserved: [0; 3],
+        };
+        insta::assert_snapshot!("frame_prefix_striped", hex(prefix.as_bytes()));
+    }
+
     #[test]
     fn receiver_report_and_rate() {
         snap(
@@ -1042,6 +1153,20 @@ mod golden {
             &WorkerMsg::Screen(ScreenEvent::Source {
                 stream: StreamId(7),
                 state: slopty_proto::screen::SourceState::Idle,
+            }),
+        );
+        snap(
+            "worker_screen_source_locked",
+            &WorkerMsg::Screen(ScreenEvent::Source {
+                stream: StreamId(7),
+                state: slopty_proto::screen::SourceState::Locked,
+            }),
+        );
+        snap(
+            "worker_screen_source_away",
+            &WorkerMsg::Screen(ScreenEvent::Source {
+                stream: StreamId(7),
+                state: slopty_proto::screen::SourceState::Away,
             }),
         );
         snap(
@@ -1088,6 +1213,15 @@ mod golden {
             send_ms_lo: 0xab,
         };
         insta::assert_snapshot!("media_heartbeat", hex(header.as_bytes()));
+    }
+
+    /// A clock probe's echo: the header, then the probe's own stamp and the worker's two
+    /// readings, fixed-width little-endian.
+    #[test]
+    fn media_clock_echo() {
+        use slopty_proto::media::ClockEcho;
+        let echo = ClockEcho::new(1_234_567, 0x0000_0102_0304_0506, 0x0000_0102_0304_0540);
+        insta::assert_snapshot!("media_clock_echo", hex(&echo.datagram(7, 0xab)));
     }
 
     #[test]
@@ -1427,6 +1561,28 @@ mod golden {
                 })),
             },
         );
+        snap(
+            "server_agent_hello",
+            &ToServer::Hello {
+                role: Role::Agent {
+                    name: "slopty mcp @ studio".to_owned(),
+                    vouch: Some(slopty_proto::server::Vouch {
+                        session: session(),
+                        token: "9f86d081884c7d65".to_owned(),
+                    }),
+                },
+            },
+        );
+        snap(
+            "server_shell_hello",
+            &ToServer::Hello {
+                role: Role::Shell {
+                    name: "slopty @ studio".to_owned(),
+                    session: session(),
+                    token: None,
+                },
+            },
+        );
         let term = TermRef { worker, session: session() };
         snap(
             "server_refused_not_granted",
@@ -1575,6 +1731,8 @@ mod orchestration {
                 args: vec!["--model".to_owned(), "opus".to_owned()],
                 env: vec![("A".to_owned(), "1".to_owned())],
                 size,
+                session: Some(term().session),
+                permission_flags: false,
             }),
         );
         let resize = Verb::ResizeTerminal { term: term(), size: Size { cols: 100, rows: 30 } };
@@ -1757,6 +1915,7 @@ mod orchestration {
             thread: ThreadId::Main,
             since: Some(40),
             max: 50,
+            hold: true,
         };
         snap("server_request_read_conversation", &request(read));
         let text = |s: &str| Clipped { text: s.to_owned(), lines: 1, chars: 7, full: None };

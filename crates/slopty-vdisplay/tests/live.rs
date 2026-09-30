@@ -10,7 +10,7 @@ mod tests {
     #[ignore = "creates a display, rearranging the screens of whoever uses this Mac"]
     fn a_virtual_display_takes_its_mode_rotates_and_goes_away() {
         if std::env::var_os("SLOPTY_VDISPLAY_E2E").is_none_or(|v| v != "1") {
-            eprintln!("SLOPTY_VDISPLAY_E2E=1 unset; not creating a display");
+            slopty_testkit::live::skip("set SLOPTY_VDISPLAY_E2E=1 to create a display");
             return;
         }
         let out = Command::new(env!("CARGO_BIN_EXE_slopty-vdisplay-probe")).output().unwrap();

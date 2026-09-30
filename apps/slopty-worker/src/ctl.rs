@@ -156,14 +156,20 @@ async fn heard(daemon: &Daemon, session: SessionId, payload: &str) -> Result<(Ho
     if daemon.worker.get(session).is_err() {
         return Err("no such session".to_owned());
     }
-    daemon.follows.lock().board.heard(session, &hook);
-    let (mut event, branch) = {
+    // Reports handed over are the server's business, not a follower's.
+    if hook.event != slopty_agent::HookEvent::Delivered {
+        daemon.follows.lock().board.heard(session, &hook);
+    }
+    let (mut event, branch, mode) = {
         let mut agents = daemon.agents.lock();
         let event = agents.apply(session, &hook);
-        (event, agents.branch(session, &hook))
+        (event, agents.branch(session, &hook), agents.permission_mode_report(session))
     };
     if let Some(branch) = branch {
         let _sent = daemon.events.send(WorkerMsg::AgentBranch(branch));
+    }
+    for report in hook.report(session).into_iter().chain(mode) {
+        let _sent = daemon.reports.send(report);
     }
     // A question or an elicitation the notification did not spell out (a `Stop` always carries
     // its last message): the transcript tail has the line. Read off the runtime's blocking

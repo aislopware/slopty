@@ -155,6 +155,10 @@ pub struct Prepared {
     blinking: bool,
     /// Images the program placed (kitty graphics), clipped to the grid.
     images: Vec<PreparedImage>,
+    /// What every row's stretch keys hold of the frame: the font, cell, palette, zoom, raster
+    /// size, scale and the element's size. `None` while the zoom is in motion, when every
+    /// frame paints another size and a key would only cost.
+    stretches: Option<u64>,
     /// The grid's place in the hit test: a touch that lands on an overlay above it (the find
     /// bar, a menu) is not the grid's.
     hitbox: Hitbox,
@@ -220,6 +224,86 @@ struct RowParts {
     sprites: Vec<SpriteCell>,
     /// A cell of it carries SGR 5: its colours follow the blink phase.
     blinks: bool,
+    /// Everything the parts paint, relative to the row's origin, hashed: what its keyed
+    /// stretches are named by ([`RowParts::sealed`]), so equal rows share it whatever line
+    /// they came from.
+    key: u64,
+    /// It has decorations under the glyphs, and over them.
+    under: bool,
+    over: bool,
+}
+
+impl RowParts {
+    /// The parts with their key: `words` is the row's words' keys hashed in order with their
+    /// columns, and the rest is hashed here.
+    fn sealed(mut self, words: u64) -> Self {
+        let mut h = FxHasher::default();
+        words.hash(&mut h);
+        for &(start, end, color) in &self.quads {
+            (start, end).hash(&mut h);
+            hash_color(color, &mut h);
+        }
+        for d in &self.decorations {
+            (d.start, d.end, d.pattern, d.over).hash(&mut h);
+            (f32::from(d.y).to_bits(), f32::from(d.thickness).to_bits()).hash(&mut h);
+            hash_color(d.color, &mut h);
+        }
+        for sprite in &self.sprites {
+            (sprite.col, sprite.ch).hash(&mut h);
+            hash_color(sprite.fg, &mut h);
+            sprite.tile.as_ref().map(|tile| &tile.path).hash(&mut h);
+        }
+        self.key = h.finish();
+        self.under = self.decorations.iter().any(|d| !d.over);
+        self.over = self.decorations.iter().any(|d| d.over);
+        self
+    }
+}
+
+/// A colour into a hash, by its bits.
+fn hash_color(color: Hsla, h: &mut FxHasher) {
+    for v in [color.h, color.s, color.l, color.a] {
+        v.to_bits().hash(h);
+    }
+}
+
+/// The stretches a row paints under keys ([`Window::paint_keyed`]), in the order the element
+/// paints them: each is one pass over the rows, so the glyphs of every row still lie over the
+/// backgrounds of every row, as painting the grid whole lays them.
+#[derive(Clone, Copy, Hash)]
+enum Pass {
+    /// Cell backgrounds, then the selection and search hits.
+    Backgrounds,
+    /// Underlines.
+    Under,
+    /// Box drawing, blocks, Braille and Powerline.
+    Sprites,
+    /// The words.
+    Glyphs,
+    /// Strikethroughs.
+    Over,
+}
+
+/// The key of `pass` over `row`: the frame's part ([`Prepared::stretches`]), the row's parts
+/// and `extra`, what the pass paints on this row beyond its parts.
+fn stretch_key(frame: u64, pass: Pass, row: &PreparedRow, extra: u64) -> u64 {
+    let mut h = FxHasher::default();
+    (frame, pass, row.parts.key, extra).hash(&mut h);
+    h.finish()
+}
+
+/// Paints `paint`, relative to `origin`, as the stretch named `key`: drawn again from the last
+/// frame when GPUI still holds it, painted as it is without a key.
+fn stretch(
+    window: &mut Window,
+    key: Option<u64>,
+    origin: Point<Pixels>,
+    paint: impl FnOnce(&mut Window),
+) {
+    match key {
+        Some(key) => window.paint_keyed(key, origin, paint),
+        None => paint(window),
+    }
 }
 
 /// Everything besides the line's cells that a row's [`RowParts`] depend on.
@@ -350,7 +434,7 @@ struct Decoration {
 }
 
 /// How a stroke runs along its cells.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Pattern {
     /// One line: a single or double underline, a strikethrough.
     Solid,
@@ -1598,7 +1682,9 @@ impl Element for TerminalElement {
                             &mut cache.contrast,
                         );
                         let segments = vec![(0, Rc::new(word))];
-                        Rc::new(RowParts { segments, ..RowParts::default() })
+                        let mut words = FxHasher::default();
+                        (0_u16, segment_hash(base, &cells, false)).hash(&mut words);
+                        Rc::new(RowParts { segments, ..RowParts::default() }.sealed(words.finish()))
                     });
                     let parts = Rc::clone(filler);
                     prepared_rows.push(PreparedRow {
@@ -1728,10 +1814,12 @@ impl Element for TerminalElement {
                             );
                         }
                     }
+                    let mut words = FxHasher::default();
                     let segments = segments(cells)
                         .map(|(col, word)| {
                             blinks |= self::blinks(word);
                             let key = segment_hash(base, word, blink_off);
+                            (col, key).hash(&mut words);
                             let shaped_word = cache.words.get_or_shape(key, || {
                                 #[cfg(test)]
                                 {
@@ -1751,7 +1839,15 @@ impl Element for TerminalElement {
                             (col, shaped_word)
                         })
                         .collect();
-                    Rc::new(RowParts { quads, decorations, segments, sprites, blinks })
+                    let parts = RowParts {
+                        quads,
+                        decorations,
+                        segments,
+                        sprites,
+                        blinks,
+                        ..RowParts::default()
+                    };
+                    Rc::new(parts.sealed(words.finish()))
                 };
                 blinking |= parts.blinks;
                 // The selection paints over cell backgrounds and under the text.
@@ -1932,6 +2028,21 @@ impl Element for TerminalElement {
                     .unwrap_or_default(),
                 blinking,
                 images,
+                stretches: (!self.zooming).then(|| {
+                    let mut h = FxHasher::default();
+                    row_frame.hash(&mut h);
+                    for v in [
+                        zoom,
+                        f32::from(font_size),
+                        f32::from(raster_size),
+                        f32::from(grid.baseline),
+                        f32::from(bounds.size.width),
+                        f32::from(bounds.size.height),
+                    ] {
+                        v.to_bits().hash(&mut h);
+                    }
+                    h.finish()
+                }),
                 hitbox,
             }
         };
@@ -2061,13 +2172,30 @@ impl Element for TerminalElement {
             let rule = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, px(1.0)));
             window.paint_quad(fill(rule, prepared.rule));
         }
+        // Each pass over the rows paints a row as a stretch under a key, which GPUI draws
+        // again from the last frame while the key holds: a row that did not change, or only
+        // moved, is copied rather than painted. What else a frame paints (the cursor, the
+        // bands, the overlay) is painted every frame, between the passes as before.
+        let frame = prepared.stretches;
+        let at = |row: &PreparedRow| point(m.origin.x, row.y);
         for row in &prepared.rows {
-            for (start, end, color) in row.parts.quads.iter().chain(&row.marks) {
-                let x = m.origin.x + m.cell_width * f32::from(*start);
-                let w = m.cell_width * f32::from(end.saturating_sub(*start));
-                window
-                    .paint_quad(fill(Bounds::new(point(x, row.y), size(w, m.line_height)), *color));
+            if row.parts.quads.is_empty() && row.marks.is_empty() {
+                continue;
             }
+            let mut marks = FxHasher::default();
+            for &(start, end, color) in &row.marks {
+                (start, end).hash(&mut marks);
+                hash_color(color, &mut marks);
+            }
+            let key = frame.map(|frame| stretch_key(frame, Pass::Backgrounds, row, marks.finish()));
+            stretch(window, key, at(row), |window| {
+                for (start, end, color) in row.parts.quads.iter().chain(&row.marks) {
+                    let x = m.origin.x + m.cell_width * f32::from(*start);
+                    let w = m.cell_width * f32::from(end.saturating_sub(*start));
+                    let cells = Bounds::new(point(x, row.y), size(w, m.line_height));
+                    window.paint_quad(fill(cells, *color));
+                }
+            });
         }
         // Images under the text (kitty `z < 0`), over the cell backgrounds.
         for image in prepared.images.iter().filter(|i| !i.over_text) {
@@ -2096,8 +2224,11 @@ impl Element for TerminalElement {
         }
         // Underlines, under the glyphs so a descender crosses the line rather than being
         // cut by it (ghostty draws them in the same order).
-        for row in &prepared.rows {
-            paint_decorations(window, &m, row, Layer::Under);
+        for row in prepared.rows.iter().filter(|row| row.parts.under) {
+            let key = frame.map(|frame| stretch_key(frame, Pass::Under, row, 0));
+            stretch(window, key, at(row), |window| {
+                paint_decorations(window, &m, row, Layer::Under);
+            });
         }
         // Box drawing, blocks, Braille and Powerline: drawn from the cell in its colours, so a
         // border never seams between rows and a heavy line keeps its weight. Settled, each is
@@ -2110,25 +2241,39 @@ impl Element for TerminalElement {
             scale: m.pixel_scale,
         };
         let cursor_text = prepared.cursor_text;
+        // The text under a block cursor takes its colour on the cursor's row alone.
+        let under_cursor = |row: &PreparedRow| {
+            let mut h = FxHasher::default();
+            if let Some(c) = cursor_text.filter(|c| c.row == row.row) {
+                (c.start, c.end).hash(&mut h);
+                hash_color(c.color, &mut h);
+            }
+            h.finish()
+        };
         // One layer for them, as for the glyphs below.
         if prepared.rows.iter().any(|row| !row.parts.sprites.is_empty()) {
             window.paint_layer(bounds, |window| {
-                for row in &prepared.rows {
-                    for sprite in &row.parts.sprites {
-                        let x = m.origin.x + m.cell_width * f32::from(sprite.col);
-                        let origin = point(x, row.y);
-                        let color = CursorText::over(cursor_text, row.row, sprite.col, sprite.fg);
-                        let Some(tile) = &sprite.tile else {
-                            paint_sprite(window, origin, cell, sprite.ch, color);
-                            continue;
-                        };
-                        let bounds = Bounds::new(origin, size(m.cell_width, m.line_height));
-                        let (path, svg) = (tile.path.clone(), Some(&*tile.svg));
-                        let unit = TransformationMatrix::unit();
-                        if let Err(e) = window.paint_svg(bounds, path, svg, unit, color, cx) {
-                            tracing::debug!(error = %e, "paint sprite");
+                for row in prepared.rows.iter().filter(|row| !row.parts.sprites.is_empty()) {
+                    let key = frame
+                        .map(|frame| stretch_key(frame, Pass::Sprites, row, under_cursor(row)));
+                    stretch(window, key, at(row), |window| {
+                        for sprite in &row.parts.sprites {
+                            let x = m.origin.x + m.cell_width * f32::from(sprite.col);
+                            let origin = point(x, row.y);
+                            let color =
+                                CursorText::over(cursor_text, row.row, sprite.col, sprite.fg);
+                            let Some(tile) = &sprite.tile else {
+                                paint_sprite(window, origin, cell, sprite.ch, color);
+                                continue;
+                            };
+                            let bounds = Bounds::new(origin, size(m.cell_width, m.line_height));
+                            let (path, svg) = (tile.path.clone(), Some(&*tile.svg));
+                            let unit = TransformationMatrix::unit();
+                            if let Err(e) = window.paint_svg(bounds, path, svg, unit, color, cx) {
+                                tracing::debug!(error = %e, "paint sprite");
+                            }
                         }
-                    }
+                    });
                 }
             });
         }
@@ -2139,33 +2284,27 @@ impl Element for TerminalElement {
         // still land above the quads painted before and below what is painted after.
         let (zoom, font_size, raster) = (prepared.zoom, prepared.font_size, prepared.raster_size);
         window.paint_layer(bounds, |window| {
-            for row in &prepared.rows {
-                let baseline = row.y + grid.baseline;
-                for (col, word) in &row.parts.segments {
-                    let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
-                    for glyph in &word.glyphs {
-                        let at = glyph_origin(origin, glyph.position, zoom);
-                        let cell = col.saturating_add(glyph.col);
-                        let color = CursorText::over(cursor_text, row.row, cell, glyph.color);
-                        let painted = if glyph.emoji {
-                            window.paint_emoji(at, glyph.font, glyph.id, font_size)
-                        } else if raster == font_size {
-                            window.paint_glyph(at, glyph.font, glyph.id, font_size, color)
-                        } else {
-                            // In motion: the nearest rung's raster, stretched (the fork).
-                            let (f, g) = (glyph.font, glyph.id);
-                            window.paint_glyph_scaled(at, f, g, raster, font_size, color)
-                        };
-                        if let Err(e) = painted {
-                            tracing::debug!(error = %e, "paint glyph");
-                        }
-                    }
-                }
+            for row in prepared.rows.iter().filter(|row| !row.parts.segments.is_empty()) {
+                let key =
+                    frame.map(|frame| stretch_key(frame, Pass::Glyphs, row, under_cursor(row)));
+                stretch(window, key, at(row), |window| {
+                    paint_words(
+                        window,
+                        &m,
+                        row,
+                        grid.baseline,
+                        cursor_text,
+                        (zoom, font_size, raster),
+                    );
+                });
             }
         });
         // Strikethroughs, over the glyphs, where the font's metrics put them.
-        for row in &prepared.rows {
-            paint_decorations(window, &m, row, Layer::Over);
+        for row in prepared.rows.iter().filter(|row| row.parts.over) {
+            let key = frame.map(|frame| stretch_key(frame, Pass::Over, row, 0));
+            stretch(window, key, at(row), |window| {
+                paint_decorations(window, &m, row, Layer::Over);
+            });
         }
         // Images over the text (kitty `z ≥ 0`, the default: a picture covers what it sits on).
         for image in prepared.images.iter().filter(|i| i.over_text) {
@@ -2336,6 +2475,40 @@ fn paint_sprite(
                 if let Ok(path) = path.build() {
                     window.paint_path(path, color);
                 }
+            }
+        }
+    }
+}
+
+/// Paint one row's words on the baseline `baseline` below its top, at `font_size` from the
+/// raster at `raster` (the same but while the zoom is in motion), the glyphs scaled by `zoom`
+/// from the base-size shaping; those under a block cursor in its text colour.
+fn paint_words(
+    window: &mut Window,
+    m: &CellMetrics,
+    row: &PreparedRow,
+    baseline: Pixels,
+    cursor_text: Option<CursorText>,
+    (zoom, font_size, raster): (f32, Pixels, Pixels),
+) {
+    let baseline = row.y + baseline;
+    for (col, word) in &row.parts.segments {
+        let origin = point(m.origin.x + m.cell_width * f32::from(*col), baseline);
+        for glyph in &word.glyphs {
+            let at = glyph_origin(origin, glyph.position, zoom);
+            let cell = col.saturating_add(glyph.col);
+            let color = CursorText::over(cursor_text, row.row, cell, glyph.color);
+            let painted = if glyph.emoji {
+                window.paint_emoji(at, glyph.font, glyph.id, font_size)
+            } else if raster == font_size {
+                window.paint_glyph(at, glyph.font, glyph.id, font_size, color)
+            } else {
+                // In motion: the nearest rung's raster, stretched (the fork).
+                let (f, g) = (glyph.font, glyph.id);
+                window.paint_glyph_scaled(at, f, g, raster, font_size, color)
+            };
+            if let Err(e) = painted {
+                tracing::debug!(error = %e, "paint glyph");
             }
         }
     }

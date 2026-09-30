@@ -24,6 +24,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# A live test's skip, a failure in the VM lane (`slopty_testkit::live::skip`).
+slopty-testkit.workspace = true
 parking_lot.workspace = true
 insta.workspace = true
 tempfile.workspace = true

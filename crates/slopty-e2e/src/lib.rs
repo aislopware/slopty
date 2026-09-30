@@ -22,6 +22,8 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "harness")]
+pub mod cut;
+#[cfg(feature = "harness")]
 pub mod driver;
 #[cfg(feature = "harness")]
 pub mod harness;
@@ -70,6 +72,13 @@ pub fn granted(grants: &str, grant: &str) -> bool {
     grants.split(',').any(|g| g.trim() == grant)
 }
 
+/// Environment variable that, set, has the e2e build's app hold every upload before its first
+/// byte.
+///
+/// How far an upload got by a given frame is up to the machine's speed; held, a drawn upload
+/// reads 0% on every machine. A cancel still stops a held upload.
+pub const HOLD_UPLOADS_ENV: &str = "SLOPTY_HOLD_UPLOADS";
+
 /// A pointer button, as the driver names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +98,13 @@ pub enum Button {
 pub enum Command {
     /// Liveness.
     Ping,
+    /// Hand the app a resume, as the system's watch would (`slopty_platform::resume`):
+    /// `woke`, `screens-woke`, `session-active`, `unlocked`, `foreground` or `path-changed`.
+    /// Nothing sleeps and no network changes.
+    Resume {
+        /// The resume's name.
+        what: String,
+    },
     /// Add a worker by address and connect, as the add-worker panel would.
     AddWorker {
         /// `host[:port]`.
@@ -203,9 +219,11 @@ pub enum Command {
         /// An http or https address.
         url: String,
     },
-    /// Give the page of the browser tile for `url` the keyboard and show the key monitor
-    /// `keys` (a chord such as `cmd-a` or `cmd-shift-z`) as a key down on its window; replies
-    /// with an error when the monitor let the key through.
+    /// Deliver `keys` (a chord such as `cmd-a` or `cmd-shift-z`) to the window of the page of
+    /// the browser tile for `url`, while the page holds the keyboard, as AppKit delivers a key
+    /// press: through the application's key equivalents and menu bar when the window is key,
+    /// else to the window itself. Replies with an error when the page does not hold the
+    /// keyboard (macOS).
     PageKeys {
         /// The tile's address, as its item names it.
         url: String,
@@ -239,6 +257,12 @@ pub enum Command {
     NotificationResponse {
         /// The banner's tag, which is the session UUID.
         tag: String,
+    },
+    /// Keep the app's main thread busy for `ms` milliseconds, as a hang does: nothing is drawn
+    /// and no input is answered meanwhile. The hang monitor's case.
+    HoldMain {
+        /// How long, in milliseconds.
+        ms: u64,
     },
     /// Resize the window's content area. iOS cannot resize its window from inside the app, so
     /// there the app lays itself out in this size at the window's top left: the stand-in for
@@ -472,7 +496,8 @@ pub struct Dump {
     /// Which kind of tile holds the keyboard (the workspace's own notion).
     pub focus: Option<String>,
     /// Who has the keyboard: `workspace`, `terminal:<session>`, `screen:<stream>`,
-    /// `file:<item>` (its editor), `browser:<item>` (the page itself), `other`, or `none`.
+    /// `file:<item>` (its editor), `browser:<item>` (the page itself), `project:<name>` (a
+    /// board), `other`, or `none`.
     pub focused: String,
     /// The active workspace's name.
     #[serde(default)]
@@ -503,6 +528,9 @@ pub struct Dump {
     /// This app's client id on the wire (what the worker's `screens` listing names).
     #[serde(default)]
     pub client: String,
+    /// The server's projects as the app mirrors them, by name.
+    #[serde(default)]
+    pub projects: Vec<ProjectInfo>,
 }
 
 /// The UI frame-time probe (`slopty_ui::frames`), in microseconds.
@@ -610,6 +638,32 @@ pub struct WorkerInfo {
     /// This client asked the worker for its clipboard's changes (its tile has the keyboard
     /// and the app is frontmost); the worker may not have heard it yet.
     pub clipboard_watched: bool,
+    /// How many links have come up to it since the app started: a relink shows here.
+    #[serde(default)]
+    pub links: u64,
+}
+
+/// One project as the app mirrors it, and its board.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct ProjectInfo {
+    /// Its name.
+    pub id: String,
+    /// Its title.
+    pub title: String,
+    /// Its orchestrator's session, when it has one.
+    pub orchestrator: Option<String>,
+    /// Each lane that holds a task, left to right, with the tasks' numbers.
+    pub lanes: Vec<(String, Vec<u32>)>,
+    /// Each task's number and state, as the server said.
+    pub tasks: Vec<(u32, String)>,
+    /// How many timeline entries the app holds.
+    pub timeline: usize,
+    /// Its orchestrator's tile shows the board.
+    pub shown: bool,
+    /// The board's lens, once it has been made.
+    pub lens: Option<String>,
+    /// The node the board's keyboard stands on: a task's number, or `orchestrator`.
+    pub picked: Option<String>,
 }
 
 /// One tile.
@@ -658,9 +712,10 @@ pub struct BrowserItemInfo {
     pub loading: bool,
     /// Why the page failed, if it did.
     pub failed: Option<String>,
-    /// The native view is on screen.
+    /// The web view is on screen, as the platform shows it.
     pub shown: bool,
-    /// A picture of the page is ready for when it is hidden.
+    /// A picture of the page is ready for where the tile is drawn without it (the overview,
+    /// a render).
     pub snapshot: bool,
 }
 
@@ -703,6 +758,12 @@ pub struct TerminalInfo {
     pub size: [u16; 2],
     /// Cursor column and row.
     pub cursor: [u16; 2],
+    /// The cursor's shape as the program last set it (DECSCUSR), by its variant's name (`Bar`,
+    /// `Block`, …): what a focused caret draws unless the theme fixes one.
+    pub cursor_shape: String,
+    /// The cursor stands on a prompt row (OSC 133;A) and no command runs: the shell waits for
+    /// a line.
+    pub at_prompt: bool,
     /// The visible rows, top to bottom, trailing spaces trimmed.
     pub rows: Vec<String>,
     /// The line-numbering epoch of the latest frame (a reflow, reset or alt-screen switch
@@ -743,6 +804,16 @@ pub struct TerminalInfo {
 }
 
 impl TerminalInfo {
+    /// The shell waits at its prompt with the bar zle sets while it reads a line.
+    ///
+    /// The prompt and that bar reach the app as separate writes (PS1, then `zle-line-init`),
+    /// after the block the command ran under, so a frame taken on the prompt alone can still
+    /// hold the block. A picture of a prompt waits for both.
+    #[must_use]
+    pub fn reads_a_line(&self) -> bool {
+        self.at_prompt && self.cursor_shape == "Bar"
+    }
+
     /// The window point at the middle of column `col` of visible row `row`, once laid out.
     #[must_use]
     pub fn cell_center(&self, col: usize, row: usize) -> Option<(f32, f32)> {
@@ -961,6 +1032,14 @@ impl Dump {
     #[must_use]
     pub fn rtt_sampled(&self) -> bool {
         self.workers.iter().filter(|w| w.status == "connected").all(|w| w.rtt_us.is_some())
+    }
+
+    /// Every terminal whose cursor stands at a prompt has its caret settled there
+    /// ([`TerminalInfo::reads_a_line`]): a golden of a prompt holds the caret the next run
+    /// draws too, not whichever of the shell's writes had landed.
+    #[must_use]
+    pub fn prompts_settled(&self) -> bool {
+        self.terminals.iter().all(|t| !t.at_prompt || t.reads_a_line())
     }
 
     /// Every visible terminal row that contains `needle`.

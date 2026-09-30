@@ -305,7 +305,7 @@ fn flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
 async fn probe(port: u16) -> Result<String> {
     let endpoint = slopty_net::client::bind_client()?;
     let address = HostAddr::new("127.0.0.1", port);
-    let role = Role::Agent { name: "slopty server".to_owned() };
+    let role = Role::Agent { name: "slopty server".to_owned(), vouch: None };
     let name = match slopty_net::server::connect(&endpoint, &address, role).await {
         Ok(link) => {
             link.close();

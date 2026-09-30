@@ -12,7 +12,13 @@
 //! actor without ptyd behind it.
 //!
 //! A verb that changes something and comes with an idempotency key is done once per key
-//! ([`idempotency`]).
+//! ([`idempotency`]). A start under an id the caller chose is done once per id: asked again,
+//! it answers the terminal that id already names.
+//!
+//! Nothing is typed into an agent's terminal while the agent cannot take it ([`may_type`]):
+//! while it waits on a person, while a person has a line typed and unsent, before its first
+//! hook, or after it ended. An agent's first prompt waits for its hooks to say it is at its
+//! prompt, and is never typed blind.
 //!
 //! An agent's conversation and its held permission prompts come through the daemon's
 //! [`Conversations`] ([`conversation`]); a still picture from ScreenCaptureKit ([`still`]); a
@@ -25,6 +31,7 @@ pub mod still;
 pub mod upload;
 mod wait;
 
+use std::collections::HashSet;
 use std::io::{Read as _, Seek as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
@@ -85,9 +92,12 @@ pub const MAX_DIR_ENTRIES: u32 = 10_000;
 const MIN_SIZE: Size = Size { cols: 10, rows: 2 };
 const MAX_SIZE: Size = Size { cols: 1000, rows: 500 };
 
-/// How long a spawned agent's first prompt waits for the agent to say it is at its prompt
-/// before it is typed anyway.
-const PROMPT_FALLBACK: Duration = Duration::from_secs(20);
+/// How long a spawned agent's first prompt waits for the agent's hooks to say it is at its
+/// prompt.
+///
+/// A person may be answering a dialog of its own first (trusting a folder, an MCP server), so
+/// this is long; past it the prompt is left unsent, never typed blind.
+pub const PROMPT_READY_WITHIN: Duration = Duration::from_mins(10);
 
 /// Between a pasted prompt and the Enter that submits it. Ink-based TUIs (Claude Code) read
 /// a paste and an Enter that arrive in one read as one paste, and the Enter is swallowed.
@@ -106,6 +116,11 @@ pub trait Agents: Send + Sync {
     fn status(&self, session: SessionId) -> Option<SessionAgent>;
     /// `session` is gone; drop what was known about it.
     fn forget(&self, session: SessionId);
+    /// The agent that ran in `session` has ended and none has started there since. A table
+    /// that keeps no such history says no.
+    fn ended(&self, _session: SessionId) -> bool {
+        false
+    }
 }
 
 /// A verb that failed: the code and the words for whoever asked.
@@ -152,12 +167,20 @@ struct Inner {
     launch: Launch,
     conversations: Arc<dyn Conversations>,
     once: idempotency::Ledger,
+    /// Terminals orchestration started as an agent's: an agent's before it is first seen, and
+    /// after it ends.
+    agent_terms: parking_lot::Mutex<HashSet<SessionId>>,
+    /// Held while a start under a chosen id looks for it and opens it, so two starts under one
+    /// id open one terminal.
+    choosing: tokio::sync::Mutex<()>,
 }
 
 /// What an agent the orchestrator starts is given.
 #[derive(Clone, Debug, Default)]
 pub struct Launch {
-    /// The `slopty hook` relay it reports through, registered on its `--settings`.
+    /// The `slopty` binary beside the worker: the `slopty hook` relay it reports through,
+    /// registered on its `--settings`, and `slopty mcp`, which serves it Slopty's tools on its
+    /// `--mcp-config` (`docs/decisions/projects.md`).
     pub relay: Option<PathBuf>,
     /// Slopty's Claude Code mod, loaded with its flag and environment.
     pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
@@ -182,8 +205,17 @@ impl Orchestrator {
         launch: Launch,
         conversations: Arc<dyn Conversations>,
     ) -> Self {
-        let once = idempotency::Ledger::default();
-        let inner = Inner { id, worker, items, events, launch, conversations, once };
+        let inner = Inner {
+            id,
+            worker,
+            items,
+            events,
+            launch,
+            conversations,
+            once: idempotency::Ledger::default(),
+            agent_terms: parking_lot::Mutex::default(),
+            choosing: tokio::sync::Mutex::default(),
+        };
         Self { inner: Arc::new(inner) }
     }
 
@@ -211,10 +243,24 @@ impl Orchestrator {
             | Verb::ListTerminals { .. }
             | Verb::Events { .. }
             | Verb::ForgetWorker { .. }
-            | Verb::Wake { .. } => {
+            | Verb::Wake { .. }
+            | Verb::ProjectCreate { .. }
+            | Verb::ProjectSet { .. }
+            | Verb::ProjectList
+            | Verb::ProjectStatus { .. }
+            | Verb::TaskCreate { .. }
+            | Verb::TaskClaim { .. }
+            | Verb::TaskUpdate { .. }
+            | Verb::TaskAssign { .. }
+            | Verb::TaskSpawn { .. }
+            | Verb::PlacementSuggest { .. }
+            | Verb::WorkerFacts { .. }
+            | Verb::TaskGet { .. }
+            | Verb::TaskReport { .. }
+            | Verb::WorkingOn { .. } => {
                 Err(Failure::new(ErrorCode::Invalid, "the server answers this, not a worker"))
             }
-            Verb::OpenTerminal { worker, cwd, command, env, name, size } => {
+            Verb::OpenTerminal { worker, cwd, command, env, name, size, session } => {
                 self.mine(worker)?;
                 let req = OpenSession {
                     size: term_size(size)?,
@@ -224,16 +270,38 @@ impl Orchestrator {
                     title: name,
                     attach: false,
                 };
-                let handle = self.open(&req, ORCHESTRATOR).await?;
+                let _choosing = self.choosing(session).await;
+                if let Some(running) = self.running(session) {
+                    return Ok(Outcome::Opened(TermRef { worker, session: running }));
+                }
+                let handle = self.open_as(session, &req, ORCHESTRATOR).await?;
                 Ok(Outcome::Opened(TermRef { worker, session: handle.id() }))
             }
-            Verb::SpawnAgent { worker, agent, cwd, prompt, args, env, size } => {
+            Verb::SpawnAgent {
+                worker,
+                agent,
+                cwd,
+                prompt,
+                args,
+                env,
+                size,
+                session,
+                permission_flags,
+            } => {
                 self.mine(worker)?;
-                let spawn = Spawn { cwd, args, env, size: term_size(size)? };
-                self.spawn_agent(agent, spawn, prompt).await
+                let spawn = Spawn { cwd, args, env, size: term_size(size)?, permission_flags };
+                let _choosing = self.choosing(session).await;
+                if let Some(running) = self.running(session) {
+                    return Ok(Outcome::Opened(TermRef { worker, session: running }));
+                }
+                self.spawn_agent(agent, spawn, prompt, session).await
             }
             Verb::SendInput { term, input } => {
-                send_input(&self.session(term)?, &input).await?;
+                let handle = self.session(term)?;
+                let agents = inner.worker.agents();
+                let expects_agent = inner.agent_terms.lock().contains(&term.session);
+                let guard = || may_type(&handle, agents, expects_agent);
+                write_input(&handle, &input, guard).await?;
                 Ok(Outcome::Done)
             }
             Verb::ReadScreen { term } => {
@@ -355,9 +423,9 @@ impl Orchestrator {
                     Err(e) => Err(Failure::new(ErrorCode::Failed, e.to_string())),
                 }
             }
-            Verb::ReadConversation { term, thread, since, max } => {
+            Verb::ReadConversation { term, thread, since, max, hold } => {
                 self.session(term)?;
-                let held = inner.conversations.follow(term.session);
+                let held = if hold { inner.conversations.follow(term.session) } else { Vec::new() };
                 let sources = inner.conversations.sources(term.session);
                 let mut page =
                     blocking(move || conversation::read_page(&sources, &thread, since, max))
@@ -431,8 +499,21 @@ impl Orchestrator {
         req: &OpenSession,
         by: ClientId,
     ) -> Result<SessionHandle, WorkerError> {
+        self.open_as(None, req, by).await
+    }
+
+    /// [`Self::open`], under the id `id` names when it names one.
+    async fn open_as(
+        &self,
+        id: Option<SessionId>,
+        req: &OpenSession,
+        by: ClientId,
+    ) -> Result<SessionHandle, WorkerError> {
         let inner = &self.inner;
-        let handle = inner.worker.open(req).await?;
+        let handle = match id {
+            Some(id) => inner.worker.open_as(id, req).await?,
+            None => inner.worker.open(req).await?,
+        };
         // A fresh terminal: output matching starts at its first byte, so a program's banner
         // printed before the first wait still counts.
         handle.mark_if_unset(Position { line: 0, col: 0, epoch: 0 });
@@ -450,6 +531,7 @@ impl Orchestrator {
     async fn close(&self, session: SessionId) -> Result<(), WorkerError> {
         let inner = &self.inner;
         inner.worker.close(session).await?;
+        inner.agent_terms.lock().remove(&session);
         inner.worker.agents().forget(session);
         inner.conversations.forget(session);
         let reason = CloseReason::Requested;
@@ -460,14 +542,20 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Start the agent's TUI; with a prompt, type it once the agent is at its prompt. It gets
-    /// the hook relay and the mod ([`Launch`]); the caller's own settings, arguments and
-    /// variables are kept, and its variables win.
+    /// Start the agent's TUI, under `chosen` when the caller chose the id; with a prompt, type
+    /// it once the agent's hooks say it is at its prompt ([`type_when_ready`]). It gets the
+    /// hook relay, Slopty's tools and the mod ([`Launch`]), a conversation id of its own
+    /// (`--session-id`, [`slopty_agent::resume::with_session_id`]), and unless the person
+    /// allowed it flags that loosen permissions, a lock on the mode that asks none
+    /// ([`slopty_agent::hooks::without_bypass`]). The caller's own settings, MCP servers,
+    /// arguments and variables are kept, and its variables win. The server it asks for tools
+    /// is the session's own `SLOPTY_SERVER`.
     async fn spawn_agent(
         &self,
         agent: AgentKind,
         spawn: Spawn,
         prompt: Option<String>,
+        chosen: Option<SessionId>,
     ) -> Result<Outcome, Failure> {
         let program = match agent {
             AgentKind::ClaudeCode => "claude",
@@ -475,14 +563,28 @@ impl Orchestrator {
         // Subscribed before the spawn: the agent may report itself ready before the open
         // returns.
         let events = self.inner.events.subscribe();
-        let Spawn { cwd, args, env, size } = spawn;
+        let Spawn { cwd, args, env, size, permission_flags } = spawn;
         let launch = &self.inner.launch;
-        let args = match launch.relay.as_deref() {
-            Some(relay) => {
-                let relay = relay.to_string_lossy().into_owned();
-                let dir = crate::file::expand_home(Path::new(&cwd));
-                blocking(move || Ok(slopty_agent::hooks::with_relay(args, &relay, &dir))).await?
+        let (args, conversation) = slopty_agent::resume::with_session_id(args);
+        let relay = launch.relay.as_deref().map(|relay| relay.to_string_lossy().into_owned());
+        let dir = crate::file::expand_home(Path::new(&cwd));
+        let args = blocking({
+            let relay = relay.clone();
+            move || {
+                let args = match &relay {
+                    Some(relay) => slopty_agent::hooks::with_relay(args, relay, &dir),
+                    None => args,
+                };
+                Ok(if permission_flags {
+                    args
+                } else {
+                    slopty_agent::hooks::without_bypass(args, &dir)
+                })
             }
+        })
+        .await?;
+        let args = match &relay {
+            Some(relay) => slopty_agent::hooks::with_mcp(args, relay),
             None => args,
         };
         let (args, env) = match &launch.claude_mod {
@@ -499,10 +601,10 @@ impl Orchestrator {
             title: None,
             attach: false,
         };
-        let handle = self.open(&req, ORCHESTRATOR).await?;
+        let handle = self.open_as(chosen, &req, ORCHESTRATOR).await?;
         let session = handle.id();
-        // Orchestration started it, so orchestration answers what it asks.
-        self.inner.conversations.follow(session);
+        self.inner.agent_terms.lock().insert(session);
+        tracing::info!(%session, conversation = ?conversation, "agent started");
         if let Some(prompt) = prompt {
             let agents = self.inner.worker.shared_agents();
             tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, agents }));
@@ -520,6 +622,20 @@ impl Orchestrator {
                 format!("this is worker {}, not {worker}", self.inner.id),
             ))
         }
+    }
+
+    /// Held while a start under the id `chosen` names looks for it and opens it; nothing when
+    /// the start chose none.
+    async fn choosing(&self, chosen: Option<SessionId>) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        match chosen {
+            Some(_) => Some(self.inner.choosing.lock().await),
+            None => None,
+        }
+    }
+
+    /// The chosen id, when this worker runs a session under it already.
+    fn running(&self, chosen: Option<SessionId>) -> Option<SessionId> {
+        chosen.filter(|id| self.inner.worker.get(*id).is_ok())
     }
 
     /// The live session `term` names, on this worker.
@@ -540,6 +656,8 @@ struct Spawn {
     args: Vec<String>,
     env: Vec<(String, String)>,
     size: TermSize,
+    /// It may be given flags and modes that loosen its permissions.
+    permission_flags: bool,
 }
 
 /// The session size a verb asks for, [`ORCHESTRATED_SIZE`] when it names none.
@@ -583,39 +701,157 @@ pub async fn resize(handle: &SessionHandle, size: TermSize) -> Result<(), Failur
     Ok(())
 }
 
-/// Type a spawned agent's first prompt once it says it is at its prompt, from a signal that
-/// only comes once its TUI is drawn (the title, the transcript, a hook), or after
-/// [`PROMPT_FALLBACK`] without one.
+/// Whether orchestration may type into the terminal `handle` reaches now, read at the moment
+/// of the write.
+///
+/// A terminal with an agent in it (the table holds one, or orchestration started it as an
+/// agent's: `expects_agent`) takes input only while the agent can:
+///
+/// - not while it waits on a person: a permission, a question, an elicitation
+///   ([`ErrorCode::AwaitsPerson`]; the person answers, never an agent);
+/// - not while a person has typed into it and not sent it ([`SessionHandle::draft_pending`];
+///   [`ErrorCode::AwaitsPerson`]), which would be merged into their line;
+/// - not before a hook of its session has spoken ([`ErrorCode::AgentNotReady`]): until then a
+///   dialog of its own may be up, and typing would answer it;
+/// - not once it has ended ([`ErrorCode::AgentExited`]): the shell below it would run the text.
+///
+/// A terminal with no agent takes anything.
+///
+/// # Errors
+///
+/// The refusal, as above.
+pub fn may_type(
+    handle: &SessionHandle,
+    agents: &dyn Agents,
+    expects_agent: bool,
+) -> Result<(), Failure> {
+    let session = handle.id();
+    let agent = agents.status(session).filter(|a| a.status != AgentStatus::None);
+    let ended = agents.ended(session);
+    if agent.is_none() && !expects_agent && !ended {
+        return Ok(());
+    }
+    // A program that exited may leave its last status behind: nothing reads the input now.
+    let exited = handle.activity().borrow().exited;
+    let Some(agent) = agent.filter(|_| !exited) else {
+        if exited || ended {
+            return Err(Failure::new(
+                ErrorCode::AgentExited,
+                "the agent in this terminal has exited, so its shell would get the input; \
+                 start the agent again or close the terminal",
+            ));
+        }
+        return Err(not_ready());
+    };
+    if let AgentStatus::Blocked(why) = &agent.status {
+        let what = match why {
+            BlockReason::Permission { .. } => Some("a permission prompt"),
+            BlockReason::Question => Some("a question"),
+            BlockReason::Elicitation => Some("an MCP server's question"),
+            BlockReason::IdlePrompt => None,
+        };
+        if let Some(what) = what {
+            return Err(Failure::new(
+                ErrorCode::AwaitsPerson,
+                format!(
+                    "the agent waits on {what}, which is the person's to answer; wait for them"
+                ),
+            ));
+        }
+    }
+    if agent.source != AgentSource::Hook {
+        return Err(not_ready());
+    }
+    if handle.draft_pending() {
+        return Err(Failure::new(
+            ErrorCode::AwaitsPerson,
+            "a person is typing into this agent's prompt; wait until they send it",
+        ));
+    }
+    Ok(())
+}
+
+fn not_ready() -> Failure {
+    Failure::new(
+        ErrorCode::AgentNotReady,
+        "the agent has not reported through its hooks yet, so a dialog of its own may be up; \
+         wait for it (wait_for agent_needs_input) and try again",
+    )
+}
+
+/// Whether an agent is at its prompt, by its hooks' word: at rest after its `SessionStart` or
+/// a turn. A weaker signal (its process, its title, its transcript) may come before its TUI
+/// takes input, or while a dialog of its own is up.
+fn at_its_prompt(agent: &SessionAgent) -> bool {
+    agent.source == AgentSource::Hook
+        && matches!(
+            agent.status,
+            AgentStatus::Idle
+                | AgentStatus::Done
+                | AgentStatus::Waiting { .. }
+                | AgentStatus::Blocked(BlockReason::IdlePrompt)
+        )
+}
+
+/// Type a spawned agent's first prompt once its hooks say it is at its prompt and nothing
+/// stands in the way ([`may_type`]), trying again at each report of the agent until
+/// [`PROMPT_READY_WITHIN`] has passed. Never typed blind: when the agent never gets there, or
+/// has ended, the prompt is left unsent and the log says why.
 async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentFeed) {
     let session = handle.id();
-    let ready = |status: &AgentStatus, source: AgentSource| {
-        source != AgentSource::Process
-            && matches!(status, AgentStatus::Idle | AgentStatus::Blocked(BlockReason::IdlePrompt))
+    let Some(deadline) = tokio::time::Instant::now().checked_add(PROMPT_READY_WITHIN) else {
+        return;
     };
-    let deadline = tokio::time::Instant::now().checked_add(PROMPT_FALLBACK);
-    let wait = async {
-        loop {
-            match feed.events.recv().await {
-                Ok(WorkerMsg::Agent(ev))
-                    if ev.session == session && ready(&ev.status, ev.source) =>
-                {
+    let mut activity = handle.activity();
+    let mut held = not_ready();
+    loop {
+        if feed.agents.status(session).is_some_and(|a| at_its_prompt(&a)) {
+            match may_type(&handle, &*feed.agents, true) {
+                Ok(()) => break,
+                Err(refused) if refused.code == ErrorCode::AgentExited => {
+                    tracing::warn!(%session, why = %refused.message, "first prompt left unsent");
                     return;
                 }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    if feed.agents.status(session).is_some_and(|a| ready(&a.status, a.source)) {
-                        return;
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
+                Err(refused) => held = refused,
             }
         }
-    };
-    let waited = match deadline {
-        Some(at) => tokio::time::timeout_at(at, wait).await.is_ok(),
-        None => false,
-    };
-    tracing::info!(%session, ready = waited, "typing the agent's first prompt");
+        let reported = async {
+            loop {
+                match feed.events.recv().await {
+                    Ok(WorkerMsg::Agent(ev)) if ev.session == session => return true,
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => return true,
+                    Err(broadcast::error::RecvError::Closed) => return false,
+                }
+            }
+        };
+        let exited = async {
+            while !activity.borrow_and_update().exited {
+                if activity.changed().await.is_err() {
+                    return;
+                }
+            }
+        };
+        let woke = tokio::select! {
+            reported = tokio::time::timeout_at(deadline, reported) => reported,
+            () = exited => Ok(false),
+        };
+        match woke {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(%session, "first prompt left unsent: the agent's terminal ended");
+                return;
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    %session, within = ?PROMPT_READY_WITHIN, why = %held.message,
+                    "first prompt left unsent: the agent never became ready for it"
+                );
+                return;
+            }
+        }
+    }
+    tracing::info!(%session, "typing the agent's first prompt");
     if let Err(e) =
         handle.request(ORCHESTRATOR, TermRequest::Paste { text: prompt, confirmed: true })
     {
@@ -623,8 +859,10 @@ async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentF
         return;
     }
     tokio::time::sleep(SUBMIT_PAUSE).await;
-    if let Err(e) = send_input(&handle, &Input::Keys(vec!["enter".to_owned()])).await {
-        tracing::warn!(%session, error = %e.message, "first prompt not submitted");
+    let enter = Input::Keys(vec!["enter".to_owned()]);
+    let guard = || may_type(&handle, &*feed.agents, true);
+    if let Err(e) = write_input(&handle, &enter, guard).await {
+        tracing::warn!(%session, error = %e.message, "first prompt typed but not submitted");
     }
 }
 
@@ -641,6 +879,20 @@ async fn type_when_ready(handle: SessionHandle, prompt: String, mut feed: AgentF
 /// [`ErrorCode::Invalid`] for a key name that does not parse; [`ErrorCode::UnknownTerminal`]
 /// when the session is gone.
 pub async fn send_input(handle: &SessionHandle, input: &Input) -> Result<(), Failure> {
+    write_input(handle, input, || Ok(())).await
+}
+
+/// [`send_input`], with `guard` asked right before the first byte is queued, after everything
+/// the write waits for: what it refuses is refused as the input would have landed.
+///
+/// # Errors
+///
+/// As [`send_input`], and whatever `guard` refuses.
+pub async fn write_input(
+    handle: &SessionHandle,
+    input: &Input,
+    guard: impl Fn() -> Result<(), Failure>,
+) -> Result<(), Failure> {
     let requests: Vec<TermRequest> = match input {
         Input::Text(text) => text_requests(text),
         Input::Paste(text) => vec![TermRequest::Paste { text: text.clone(), confirmed: true }],
@@ -650,9 +902,11 @@ pub async fn send_input(handle: &SessionHandle, input: &Input) -> Result<(), Fai
             .collect::<Result<_, _>>()
             .map_err(|message| Failure::new(ErrorCode::Invalid, message))?,
     };
+    guard()?;
     if handle.mark().is_none() {
         handle.mark_if_unset(position(handle).await?);
     }
+    guard()?;
     for req in requests {
         handle.request(ORCHESTRATOR, req)?;
     }

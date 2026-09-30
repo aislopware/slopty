@@ -16,6 +16,10 @@
 //!   crashed image when the build UUIDs match. [`reports`] does the same for the binary that calls
 //!   it.
 //!
+//! - **A hang** of the app's main thread, which the app's hang monitor measures, is written by
+//!   [`record_hang`] as a `.hang` report: how long the thread was held and by what. The process
+//!   lives on; hangs are kept apart from crashes, so a run of them never pushes a crash out.
+//!
 //! [`reports`] lists the newest reports first, together with macOS's own reports of the same
 //! processes from `~/Library/Logs/DiagnosticReports` (see [`ips`]); a `.ips` of a process that
 //! left a report of its own is linked to it rather than listed twice. Each process keeps its
@@ -46,6 +50,7 @@ mod native;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 pub use report::{Build, Frame, Kind, Report};
 pub use store::KEPT_PER_PROCESS;
@@ -102,6 +107,9 @@ pub fn crash_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("crashes")
 }
 
+/// Where [`install`] files this process's reports, for [`record_hang`].
+static INSTALLED: OnceLock<(Process, PathBuf, Build)> = OnceLock::new();
+
 /// Starts reporting this process's crashes into `crash_dir(data_dir)`. Call it once, first
 /// thing in `main`; later calls do nothing.
 ///
@@ -109,14 +117,15 @@ pub fn crash_dir(data_dir: &Path) -> PathBuf {
 /// platforms, and turns records a previous run of this binary left into reports on a background
 /// thread when there are any. With [`TRIGGER_ENV`] set, the process then crashes as asked.
 pub fn install(process: Process, data_dir: &Path) {
-    static INSTALLED: OnceLock<()> = OnceLock::new();
     let mut first = false;
-    INSTALLED.get_or_init(|| first = true);
+    let (_, dir, build) = INSTALLED.get_or_init(|| {
+        first = true;
+        (process, crash_dir(data_dir), Build::current())
+    });
     if !first {
         return;
     }
-    let dir = crash_dir(data_dir);
-    let build = Build::current();
+    let (dir, build) = (dir.clone(), build.clone());
     #[cfg(target_vendor = "apple")]
     native::install(process, &dir, &build);
     #[cfg(target_vendor = "apple")]
@@ -125,6 +134,58 @@ pub fn install(process: Process, data_dir: &Path) {
     if let Some(trigger) = std::env::var_os(TRIGGER_ENV) {
         probe::fire(&trigger.to_string_lossy());
     }
+}
+
+/// A hang of this process's main thread, as its hang monitor measured it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Hang {
+    /// The longest single piece of main-thread work: the freeze as a user saw it.
+    pub stall: Duration,
+    /// From what started it to the frame that ended it.
+    pub active: Duration,
+    /// That longest piece of work, in words: `a task spawned at src/x.rs:12`, `the action
+    /// file::SaveFile`, `drawing a window`.
+    pub cause: String,
+    /// No single piece of work was past the threshold: many short ones filled one frame's time.
+    pub piled_up: bool,
+    /// Where the work that held it came from, longest first, as far as the monitor knows it (a
+    /// task's spawn site); the frames of a crash, for a hang.
+    pub frames: Vec<Frame>,
+}
+
+/// Files `hang` as a report of this process, next to its crashes, where `slopty crashes` lists
+/// it; the report's path.
+///
+/// # Errors
+///
+/// Before [`install`], or when the report could not be written.
+pub fn record_hang(hang: Hang) -> std::io::Result<PathBuf> {
+    let (process, dir, build) = INSTALLED
+        .get()
+        .ok_or_else(|| std::io::Error::other("the crash reporter is not installed"))?;
+    write_hang(dir, *process, build.clone(), hang)
+}
+
+/// [`record_hang`] into the crash directory `dir`.
+fn write_hang(dir: &Path, process: Process, build: Build, hang: Hang) -> std::io::Result<PathBuf> {
+    let millis = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    let report = Report {
+        process: process.name().to_owned(),
+        pid: std::process::id(),
+        time_ms: time::now_ms(),
+        thread: Some("main".to_owned()),
+        kind: Kind::Hang {
+            stall_ms: millis(hang.stall),
+            active_ms: millis(hang.active),
+            cause: hang.cause,
+            piled_up: hang.piled_up,
+        },
+        frames: hang.frames,
+        build,
+        ips: None,
+        path: PathBuf::new(),
+    };
+    store::write_new(dir, &report)
 }
 
 /// Every report of every process sharing `data_dir`, newest first.
@@ -143,4 +204,57 @@ pub fn reports_with(crash_dir: &Path, diagnostic_reports: Option<&Path>) -> Vec<
     #[cfg(target_vendor = "apple")]
     native::finalize(crash_dir);
     store::list(crash_dir, diagnostic_reports)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{Build, Frame, Hang, KEPT_PER_PROCESS, Kind, Process, reports_with, write_hang};
+
+    fn hang(stall_ms: u64) -> Hang {
+        Hang {
+            stall: Duration::from_millis(stall_ms),
+            active: Duration::from_millis(stall_ms.saturating_add(20)),
+            cause: "a task spawned at crates/slopty-ui/src/file.rs:12".to_owned(),
+            piled_up: false,
+            frames: vec![Frame {
+                file: Some("crates/slopty-ui/src/file.rs".to_owned()),
+                line: Some(12),
+                ..Frame::default()
+            }],
+        }
+    }
+
+    /// A hang is listed with the crashes, says how long and by what, and a run of hangs keeps
+    /// its own newest without pushing a crash out.
+    #[test]
+    fn a_hang_is_listed_and_never_pushes_a_crash_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let crash = crate::report::Report {
+            process: Process::App.name().to_owned(),
+            pid: 1,
+            time_ms: 1,
+            thread: Some("main".to_owned()),
+            kind: Kind::Panic { message: "boom".to_owned(), location: None, aborted: false },
+            frames: Vec::new(),
+            build: Build::default(),
+            ips: None,
+            path: std::path::PathBuf::new(),
+        };
+        crate::store::write_new(dir.path(), &crash).unwrap();
+        for ms in 0..30 {
+            write_hang(dir.path(), Process::App, Build::default(), hang(300 + ms)).unwrap();
+        }
+        let listed = reports_with(dir.path(), None);
+        let hangs: Vec<_> = listed.iter().filter(|r| matches!(r.kind, Kind::Hang { .. })).collect();
+        assert_eq!(hangs.len(), KEPT_PER_PROCESS, "the newest hangs are kept");
+        assert!(listed.iter().any(|r| matches!(r.kind, Kind::Panic { .. })), "the crash stays");
+        // Reports written in one millisecond take the next free one, so the order is the
+        // files', not the writes'.
+        let said =
+            "hang: main thread held 329 ms by a task spawned at crates/slopty-ui/src/file.rs:12";
+        let last = hangs.iter().find(|r| r.headline() == said).expect("the last hang is kept");
+        assert_eq!(last.frames.first().and_then(|f| f.line), Some(12), "where it came from");
+    }
 }

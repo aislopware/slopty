@@ -19,17 +19,17 @@ use slopty_codec::audio::{Arrival as AudioArrival, Conceal, OpusDecoder, Player}
 use slopty_codec::{DecodeFailure, DecodedFrame, Decoder};
 use slopty_core::StreamId;
 use slopty_media::{
-    Action, Config, Ingest, MAX_AUDIO_COPIES, Reassembler, ReassemblerStats, STALL_GAP,
+    Action, ClockSync, Config, Ingest, MAX_AUDIO_COPIES, Reassembler, ReassemblerStats, STALL_GAP,
     StallAttribution,
 };
 use slopty_proto::ClientMsg;
 use slopty_proto::datagram::ClientDatagram;
-use slopty_proto::media::{MAX_DATAGRAM, MediaHeader};
-use slopty_proto::screen::{Feedback, ScreenRequest, VideoCodec};
+use slopty_proto::media::{ClockEcho, Kind, MAX_DATAGRAM, MediaHeader, flags};
+use slopty_proto::screen::{Feedback, ReceiverReport, ScreenRequest, Stripe, VideoCodec};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use crate::pacing::{CaptureClock, FrameStamp};
+use crate::pacing::{CaptureClock, ClockAnchor, ClockEstimate, FrameStamp};
 
 pub mod display;
 
@@ -64,6 +64,13 @@ const IDLE_TICK: Duration = Duration::from_millis(25);
 /// which is where waiting on a first picture stops being the expected thing (MEASUREMENTS.md, "a
 /// refresh asked for while the keyframe is encoded").
 const FIRST_KEYFRAME_WAIT: Duration = Duration::from_millis(400);
+
+/// Clock probes sent one a report at the start of a stream, so the first pictures are timed
+/// from their capture within a few round trips; after these, one every [`PROBE_EVERY`] reports.
+const PROBES_AT_ONCE: u64 = 8;
+/// Reports between clock probes once the estimate has its first probes: four a second, which
+/// fills [`slopty_media::CLOCK_WINDOW`] with 120 of them for a few dozen bytes a second.
+const PROBE_EVERY: u64 = 5;
 
 /// RTT assumed before the transport has measured one.
 const DEFAULT_RTT: Duration = Duration::from_millis(20);
@@ -201,7 +208,8 @@ impl ScreenRouter {
                 continue;
             }
             let Some((header, _payload)) = MediaHeader::parse(&datagram) else { continue };
-            let stream = StreamId(header.stream.get());
+            // A stripe's media stream goes to its stream's task, which tells them apart.
+            let (stream, _stripe) = Stripe::stream_of(StreamId(header.stream.get()));
             routes.get_or_insert_with(|| self.inner.lock()).deliver(stream, (now, datagram));
         }
     }
@@ -246,10 +254,46 @@ const ARRIVALS: usize = 128;
 /// to pace and to say how old what it paints is.
 #[derive(Debug)]
 pub struct Presentable {
-    /// The picture.
+    /// The picture: the whole of it, or for a striped stream the top stripe's.
     pub frame: DecodedFrame,
     /// Arrival of the datagram that completed the frame, and when the decoder returned it.
     pub stamp: FrameStamp,
+    /// For a striped stream, the lower stripe and where the two meet; `None` for one picture.
+    pub stripes: Option<Stitched>,
+}
+
+/// The two stripes of one capture, each decoded by a session of its own, to be shown one over
+/// the other with no copy between them (`docs/decisions/video.md`, "Two stripes").
+///
+/// Each stripe's picture holds the rows it codes, which run [`slopty_codec::stripes::OVERLAP`]
+/// past the seam into the other's. The top one ([`Presentable::frame`]) shows its first
+/// [`Self::top_rows`]; the lower one shows its rows from [`Self::lower_from`] down, right under
+/// them.
+#[derive(Clone, Debug)]
+pub struct Stitched {
+    /// The lower stripe's picture.
+    pub lower: DecodedFrame,
+    /// Rows of the top stripe's picture shown: the rows above the seam.
+    pub top_rows: u32,
+    /// The first row of the lower stripe's picture shown: the rows it codes above the seam
+    /// are the top stripe's.
+    pub lower_from: u32,
+}
+
+impl Presentable {
+    /// The picture's size in pixels, both stripes together.
+    #[must_use]
+    pub fn size(&self) -> (usize, usize) {
+        let width = self.frame.image.width();
+        match &self.stripes {
+            None => (width, self.frame.image.height()),
+            Some(stitched) => {
+                let top = usize::try_from(stitched.top_rows).unwrap_or(usize::MAX);
+                let from = usize::try_from(stitched.lower_from).unwrap_or(usize::MAX);
+                (width, top.saturating_add(stitched.lower.image.height().saturating_sub(from)))
+            }
+        }
+    }
 }
 
 /// Shows a decoded picture on the decoder's own thread, the moment it comes out
@@ -276,6 +320,8 @@ struct Parked {
     restarts: bool,
     /// Nothing later refers to it: failing on it leaves every reference intact.
     discardable: bool,
+    /// The stripes coded from its capture ([`slopty_proto::media::FramePrefix::stripes`]).
+    stripes: u8,
 }
 
 /// What the decoder callback leaves for the stream worker: the frames it is working on, the
@@ -304,18 +350,11 @@ struct Failed {
 }
 
 impl Inflight {
-    fn park(
-        &mut self,
-        pts_us: u64,
-        arrived: Instant,
-        ltr_token: Option<u64>,
-        restarts: bool,
-        discardable: bool,
-    ) {
+    fn park(&mut self, parked: Parked) {
         if self.parked.len() >= ARRIVALS {
             self.parked.pop_front();
         }
-        self.parked.push_back(Parked { pts_us, arrived, ltr_token, restarts, discardable });
+        self.parked.push_back(parked);
     }
 
     /// The frame with this timestamp, and everything older forgotten with it.
@@ -324,11 +363,12 @@ impl Inflight {
         self.parked.drain(..=at).next_back()
     }
 
-    /// The decoder returned this frame's picture: its arrival, and its token is now held.
-    fn decoded(&mut self, pts_us: u64) -> Option<Instant> {
+    /// The decoder returned this frame's picture: its arrival and the stripes coded from its
+    /// capture, and its token is now held.
+    fn decoded(&mut self, pts_us: u64) -> Option<(Instant, u8)> {
         let parked = self.take(pts_us)?;
         self.acks.extend(parked.ltr_token);
-        Some(parked.arrived)
+        Some((parked.arrived, parked.stripes))
     }
 
     /// The decoder returned no picture for this frame: its token is never acknowledged. A frame
@@ -370,7 +410,7 @@ pub struct CursorState {
 /// Receiver-side counters, refreshed with every report.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ScreenStats {
-    /// Frames delivered to the decoder.
+    /// Frames delivered to the decoder: of a striped stream, the top stripe's, one a capture.
     pub frames: u64,
     /// Frames recovered by FEC.
     pub frames_fec: u64,
@@ -399,6 +439,11 @@ pub struct ScreenStats {
     pub decode_errors: u64,
     /// Datagrams seen.
     pub datagrams: u64,
+    /// The stream is coded as two stripes now ([`Stitched`]).
+    pub striped: bool,
+    /// Captures of a striped stream that went up with one stripe's previous picture: its
+    /// stripe was late past a display refresh (`STITCH_WAIT`).
+    pub seam_tears: u64,
     /// Bytes received in datagrams (video, cursor, audio, parity).
     pub bytes: u64,
     /// Opus packets played.
@@ -451,6 +496,9 @@ pub struct ScreenStats {
     pub jitter: Duration,
     /// Frames the worker is holding in order behind a missing one, as last reported.
     pub queue_depth: u8,
+    /// The worker's capture clock placed on this one by the stream's clock probes; `None` until
+    /// one has come back.
+    pub clock: Option<ClockEstimate>,
 }
 
 /// Playback for one stream, created on its first audio packet.
@@ -617,6 +665,11 @@ impl std::fmt::Debug for Uplink {
 }
 
 /// Start receiving `stream`: reassembly, decode, reports and NACK/refresh feedback on `uplink`.
+///
+/// A striped stream's lower stripe comes on a media stream of its own
+/// ([`Stripe::media_of`]), which the router hands this task with the stream's own: each is
+/// reassembled and decoded on its own, and a `Stitch` puts the two stripes of a capture up
+/// together.
 #[must_use]
 pub fn spawn_screen(
     runtime: &tokio::runtime::Handle,
@@ -631,70 +684,27 @@ pub fn spawn_screen(
     let (stats_tx, stats) = watch::channel(ScreenStats::default());
     let muted = Arc::new(AtomicBool::new(false));
     let source_live = Arc::new(AtomicBool::new(true));
-    let first_decoded = Arc::new(Mutex::new(None));
-    let decoded_at = Arc::clone(&first_decoded);
-    let inflight = Arc::new(Mutex::new(Inflight::default()));
-    let parked = Arc::clone(&inflight);
-    let news = Arc::new(AtomicBool::new(false));
-    let left = Arc::clone(&news);
-    let failed = Arc::new(Notify::new());
-    let wake = Arc::clone(&failed);
-    // Counted here, on the decoder's side of the newest-only channel, so the element can tell
-    // how many pictures the channel swallowed before it looked.
-    let decode_seq = Arc::new(AtomicU64::new(0));
-    let seq = Arc::clone(&decode_seq);
     let present = Arc::<PresentSlot>::default();
-    let presenter = Arc::clone(&present);
-    let decoder = Decoder::with_outcomes(codec, move |outcome| {
-        let frame = match outcome {
-            Ok(frame) => frame,
-            Err(failure) => {
-                parked.lock().failed(failure);
-                left.store(true, Ordering::Release);
-                wake.notify_one();
-                return;
-            }
-        };
-        let decoded = Instant::now();
-        decoded_at.lock().get_or_insert(decoded);
-        // A picture whose arrival is no longer parked (a duplicate from the decoder, or one
-        // that outlived the ring) is still shown; its timing simply does not enter the ring.
-        let arrived = parked.lock().decoded(frame.pts_us).unwrap_or(decoded);
-        left.store(true, Ordering::Release);
-        let stamp = FrameStamp {
-            pts_us: frame.pts_us,
-            decode_seq: seq.fetch_add(1, Ordering::Relaxed),
-            arrived,
-            decoded,
-        };
-        let picture = Arc::new(Presentable { frame, stamp });
-        let present = presenter.0.lock().clone();
-        if let Some(present) = present {
-            present(&picture);
-        }
-        let _no_receiver = frames_tx.send(Some(picture));
+    let output = Arc::new(Output {
+        frames: frames_tx,
+        present: Arc::clone(&present),
+        decode_seq: AtomicU64::new(0),
+        anchor: Mutex::new(None),
+        first_decoded: Mutex::new(None),
+        stitch: Mutex::new(Stitch::default()),
     });
+    let failed = Arc::new(Notify::new());
     let rtt = (uplink.rtt)().unwrap_or(DEFAULT_RTT);
+    let top = Lane::new(Stripe::media_of(stream, 0), 0, codec, &output, &failed);
     let worker = Worker {
         stream,
+        codec,
         datagrams,
-        // The loop below ticks after every branch, so the longest it goes without one is the
-        // idle sleep; the reassembler needs that number to tell a link that held datagrams
-        // from a runtime that did not run this task.
-        reassembler: Reassembler::new(
-            stream,
-            Config {
-                tick_period: IDLE_TICK,
-                first_repeat_after: FIRST_KEYFRAME_WAIT,
-                ..Config::default()
-            },
-            Instant::now(),
-        ),
-        decoder,
-        inflight,
-        news,
+        top,
+        lower: None,
+        top_whole: false,
+        output,
         failed,
-        restart_pts: None,
         out: uplink.control,
         feedback: uplink.feedback,
         path_rtt: uplink.rtt,
@@ -703,12 +713,14 @@ pub fn spawn_screen(
         stats: stats_tx,
         cursor_seq: None,
         counters: ScreenStats::default(),
+        lower_counters: ReassemblerStats::default(),
         audio: AudioSlot::Unopened,
         muted: Arc::clone(&muted),
         source_live: Arc::clone(&source_live),
         source_hint: true,
-        first_decoded,
         capture_clock: CaptureClock::new(),
+        clock: ClockSync::new(Instant::now()),
+        reports: 0,
     };
     let task = runtime.spawn(worker.run());
     let task = Some(task);
@@ -725,9 +737,195 @@ pub fn spawn_screen(
     }
 }
 
-struct Worker {
-    stream: StreamId,
-    datagrams: mpsc::Receiver<Arrival>,
+/// How long the stitch waits for a capture's other stripe once one has decoded: a display
+/// refresh. Past it the capture goes up with that stripe's previous picture, a seam tear
+/// counted ([`ScreenStats::seam_tears`]), and the late stripe goes up when it comes.
+const STITCH_WAIT: Duration = Duration::from_micros(16_667);
+
+/// Where decoded pictures go, from every coded picture's decoder: the stitch, the present hook
+/// and the newest-picture channel.
+struct Output {
+    frames: watch::Sender<Option<Arc<Presentable>>>,
+    present: Arc<PresentSlot>,
+    /// Counted here, on the decoder's side of the newest-only channel, so the element can tell
+    /// how many pictures the channel swallowed before it looked.
+    decode_seq: AtomicU64,
+    /// Read on the decoder's thread for every picture, written by the worker once an echo.
+    anchor: Mutex<Option<ClockAnchor>>,
+    /// When the first picture came back.
+    first_decoded: Mutex<Option<Instant>>,
+    stitch: Mutex<Stitch>,
+}
+
+impl Output {
+    /// Coder `index`'s decoder returned `frame`, which the datagram that completed it brought
+    /// at `arrived`, one of the `stripes` coded from its capture (zero for one picture).
+    fn decoded(&self, index: usize, frame: DecodedFrame, arrived: Instant, stripes: u8) {
+        let decoded = Instant::now();
+        self.first_decoded.lock().get_or_insert(decoded);
+        let captured = self.anchor.lock().and_then(|anchor| anchor.captured(frame.pts_us));
+        // Numbered as it goes up, in [`Self::show`]: the pacer reads a gap as a skipped picture,
+        // and a capture's two stripes are one picture.
+        let stamp = FrameStamp { pts_us: frame.pts_us, decode_seq: 0, arrived, decoded, captured };
+        let picture = if stripes == 0 {
+            if index != 0 {
+                return;
+            }
+            self.stitch.lock().whole();
+            Some(Presentable { frame, stamp, stripes: None })
+        } else {
+            self.stitch.lock().decoded(index, frame, stamp, stripes, decoded)
+        };
+        if let Some(picture) = picture {
+            self.show(picture);
+        }
+    }
+
+    /// A capture whose other stripe is late past [`STITCH_WAIT`] goes up at `now` without it.
+    fn expire(&self, now: Instant) {
+        let picture = self.stitch.lock().expire(now);
+        if let Some(picture) = picture {
+            self.show(picture);
+        }
+    }
+
+    fn show(&self, mut picture: Presentable) {
+        picture.stamp.decode_seq = self.decode_seq.fetch_add(1, Ordering::Relaxed);
+        let picture = Arc::new(picture);
+        let present = self.present.0.lock().clone();
+        if let Some(present) = present {
+            present(&picture);
+        }
+        let _no_receiver = self.frames.send(Some(picture));
+    }
+}
+
+/// A stripe's newest picture.
+#[derive(Clone, Debug)]
+struct Shown {
+    frame: DecodedFrame,
+    stamp: FrameStamp,
+}
+
+/// Puts the two stripes of a capture up together.
+///
+/// Each stripe's session decodes on its own thread. The frame prefix names the stripes coded
+/// from a capture: once every one it names has decoded that capture, the two go up as one
+/// picture. A stripe it does not name keeps the picture it has (a refresh or a refinement
+/// codes only the stripe that needed it), and so does one whose media stream waits for a
+/// refresh ([`Self::set_stalled`]): the other stripe goes on without it. One that is merely
+/// late is waited for [`STITCH_WAIT`].
+#[derive(Debug, Default)]
+struct Stitch {
+    /// Each stripe's newest picture, top first.
+    newest: [Option<Shown>; Stripe::MAX],
+    /// The capture waiting for a stripe: its stamp, the stripes still to decode it, and since
+    /// when.
+    waiting: Option<(u64, u8, Instant)>,
+    /// Stripes whose media stream waits for a refresh, bit `i` for stripe `i`.
+    stalled: u8,
+    /// Captures that went up with a stripe's previous picture.
+    tears: u64,
+}
+
+impl Stitch {
+    /// A picture of the whole stream came out: the stream is not striped (any more).
+    fn whole(&mut self) {
+        *self = Self { tears: self.tears, ..Self::default() };
+    }
+
+    /// Whether stripe `index`'s media stream waits for a refresh.
+    const fn set_stalled(&mut self, index: usize, stalled: bool) {
+        let bit = 1_u8 << index;
+        if stalled { self.stalled |= bit } else { self.stalled &= !bit }
+    }
+
+    /// Stripe `index` decoded `frame`, of a capture `stripes` names: the picture to put up,
+    /// when this was the last stripe of it to come.
+    fn decoded(
+        &mut self,
+        index: usize,
+        frame: DecodedFrame,
+        stamp: FrameStamp,
+        stripes: u8,
+        now: Instant,
+    ) -> Option<Presentable> {
+        let pts = stamp.pts_us;
+        if let Some(slot) = self.newest.get_mut(index) {
+            *slot = Some(Shown { frame, stamp });
+        }
+        let missing = self.missing(pts, stripes);
+        if missing == 0 {
+            self.waiting = None;
+            return self.picture(stamp);
+        }
+        let since = match self.waiting {
+            Some((waiting, _, since)) if waiting == pts => since,
+            _other => now,
+        };
+        self.waiting = Some((pts, missing, since));
+        None
+    }
+
+    /// The stripes of `stripes` that have not decoded capture `pts`, less the ones waiting for
+    /// a refresh.
+    fn missing(&self, pts: u64, stripes: u8) -> u8 {
+        let mut missing = 0;
+        for (i, newest) in self.newest.iter().enumerate() {
+            let bit = 1_u8 << i;
+            let has = newest.as_ref().is_some_and(|shown| shown.stamp.pts_us == pts);
+            if stripes & bit != 0 && self.stalled & bit == 0 && !has {
+                missing |= bit;
+            }
+        }
+        missing
+    }
+
+    /// The capture waiting past [`STITCH_WAIT`] at `now`, with the late stripe's previous
+    /// picture, or the one whose late stripe has since stalled.
+    fn expire(&mut self, now: Instant) -> Option<Presentable> {
+        let (pts, missing, since) = self.waiting?;
+        let stalled = missing & !self.stalled == 0;
+        if !stalled && now.saturating_duration_since(since) < STITCH_WAIT {
+            return None;
+        }
+        let stamp = self.newest.iter().flatten().find(|shown| shown.stamp.pts_us == pts)?.stamp;
+        self.waiting = None;
+        self.tears = self.tears.saturating_add(1);
+        self.picture(stamp)
+    }
+
+    /// Whether a capture waits for a stripe.
+    const fn waiting(&self) -> bool {
+        self.waiting.is_some()
+    }
+
+    /// The two stripes' newest pictures as one, stamped `stamp`: arrived when the later of the
+    /// two did. `None` until both stripes have a picture.
+    fn picture(&self, stamp: FrameStamp) -> Option<Presentable> {
+        let [Some(top), Some(lower)] = &self.newest else { return None };
+        let overlap = slopty_codec::stripes::OVERLAP;
+        let top_height = u32::try_from(top.frame.image.height()).unwrap_or(u32::MAX);
+        let arrived = if top.stamp.pts_us == lower.stamp.pts_us {
+            top.stamp.arrived.max(lower.stamp.arrived)
+        } else {
+            stamp.arrived
+        };
+        Some(Presentable {
+            frame: top.frame.clone(),
+            stamp: FrameStamp { arrived, ..stamp },
+            stripes: Some(Stitched {
+                lower: lower.frame.clone(),
+                top_rows: top_height.saturating_sub(overlap),
+                lower_from: overlap,
+            }),
+        })
+    }
+}
+
+/// One coded picture's way in: the whole picture, or one stripe of it, on its media stream.
+struct Lane {
+    media: StreamId,
     reassembler: Reassembler,
     decoder: Decoder,
     /// Frames parked for the decoder callback, and what the callback left behind.
@@ -735,11 +933,85 @@ struct Worker {
     /// Set by the decoder callback once it has left something in [`Self::inflight`], so a wake
     /// with nothing back from the decoder does not take the lock the callback takes.
     news: Arc<AtomicBool>,
-    /// The decoder callback failed on a frame.
-    failed: Arc<Notify>,
     /// Timestamp of the last frame that restarts decoding (a keyframe or an LTR refresh). A
     /// failure older than it was already answered by it.
     restart_pts: Option<u64>,
+}
+
+impl Lane {
+    /// Coder `index`'s lane, on `media`: its pictures go to `output`, and a failure wakes the
+    /// worker through `failed`.
+    fn new(
+        media: StreamId,
+        index: usize,
+        codec: VideoCodec,
+        output: &Arc<Output>,
+        failed: &Arc<Notify>,
+    ) -> Self {
+        let inflight = Arc::new(Mutex::new(Inflight::default()));
+        let parked = Arc::clone(&inflight);
+        let news = Arc::new(AtomicBool::new(false));
+        let left = Arc::clone(&news);
+        let wake = Arc::clone(failed);
+        let output = Arc::clone(output);
+        let decoder = Decoder::with_outcomes(codec, move |outcome| {
+            let frame = match outcome {
+                Ok(frame) => frame,
+                Err(failure) => {
+                    parked.lock().failed(failure);
+                    left.store(true, Ordering::Release);
+                    wake.notify_one();
+                    return;
+                }
+            };
+            // A picture whose arrival is no longer parked (a duplicate from the decoder, or one
+            // that outlived the ring) is still shown; its timing simply does not enter the ring.
+            let parked = parked.lock().decoded(frame.pts_us);
+            left.store(true, Ordering::Release);
+            let (arrived, stripes) = parked.unwrap_or_else(|| (Instant::now(), 0));
+            output.decoded(index, frame, arrived, stripes);
+        });
+        Self {
+            media,
+            // The loop ticks after every branch, so the longest it goes without one is the idle
+            // sleep; the reassembler needs that number to tell a link that held datagrams from
+            // a runtime that did not run this task.
+            reassembler: Reassembler::new(
+                media,
+                Config {
+                    tick_period: IDLE_TICK,
+                    first_repeat_after: FIRST_KEYFRAME_WAIT,
+                    ..Config::default()
+                },
+                Instant::now(),
+            ),
+            decoder,
+            inflight,
+            news,
+            restart_pts: None,
+        }
+    }
+
+    /// Frames waiting behind a missing one, or a refresh asked for and not yet answered.
+    fn busy(&self) -> bool {
+        self.reassembler.queue_depth() > 0 || self.reassembler.awaiting_refresh()
+    }
+}
+
+struct Worker {
+    stream: StreamId,
+    codec: VideoCodec,
+    datagrams: mpsc::Receiver<Arrival>,
+    /// The whole picture, or the top stripe: the stream's own media stream, which also carries
+    /// its audio, cursor, heartbeats and clock echoes.
+    top: Lane,
+    /// The lower stripe, from its first datagram until the stream is one picture again.
+    lower: Option<Lane>,
+    /// The top lane's newest frame was of the whole picture.
+    top_whole: bool,
+    output: Arc<Output>,
+    /// A decoder callback failed on a frame.
+    failed: Arc<Notify>,
     out: mpsc::Sender<ClientMsg>,
     feedback: Box<dyn Fn(Bytes) -> bool + Send>,
     /// Reads the path's round trip off the connection, under its lock: once a report.
@@ -750,6 +1022,8 @@ struct Worker {
     stats: watch::Sender<ScreenStats>,
     cursor_seq: Option<u32>,
     counters: ScreenStats,
+    /// The lower stripe's reassembler counters as of its last report.
+    lower_counters: ReassemblerStats,
     audio: AudioSlot,
     /// Decode but do not play while set.
     muted: Arc<AtomicBool>,
@@ -759,10 +1033,12 @@ struct Worker {
     /// overwrite what the stream itself proved (a video fragment means the source is live,
     /// whatever the worker last said).
     source_hint: bool,
-    /// Set by the decoder callback when the first picture comes back.
-    first_decoded: Arc<Mutex<Option<Instant>>>,
     /// Widens the wire's 32-bit capture timestamp, so ordering survives its ~71-minute wrap.
     capture_clock: CaptureClock,
+    /// Places the worker's capture clock on this one from the probes' echoes.
+    clock: ClockSync,
+    /// Reports sent so far: the probes ride on their schedule.
+    reports: u64,
 }
 
 impl Worker {
@@ -870,7 +1146,9 @@ impl Worker {
         let tick = tokio::time::sleep(IDLE_TICK);
         tokio::pin!(tick);
         loop {
-            let busy = self.reassembler.queue_depth() > 0 || self.reassembler.awaiting_refresh();
+            let busy = self.top.busy()
+                || self.lower.as_ref().is_some_and(Lane::busy)
+                || self.output.stitch.lock().waiting();
             let period = if busy { TICK } else { IDLE_TICK };
             let now = tokio::time::Instant::now();
             tick.as_mut().reset(now.checked_add(period).unwrap_or(now));
@@ -896,9 +1174,28 @@ impl Worker {
             // The tick's own `drain` can release a frame that was queued behind a lost one, and
             // on a still screen the next datagram is a heartbeat half a stall gap away: without
             // this the picture would wait for it.
-            self.deliver();
+            self.deliver(0);
+            self.deliver(1);
+            self.stitch();
         }
         tracing::debug!(stream = %self.stream, "screen worker finished");
+    }
+
+    /// Coder `index`'s lane: the top one, or the lower stripe's while there is one.
+    const fn lane(&mut self, index: usize) -> Option<&mut Lane> {
+        if index == 0 { Some(&mut self.top) } else { self.lower.as_mut() }
+    }
+
+    /// Tell the stitch which stripes wait for a refresh, and put up a capture whose other
+    /// stripe is late past [`STITCH_WAIT`].
+    fn stitch(&self) {
+        let lower = self.lower.as_ref().is_some_and(|lane| lane.reassembler.awaiting_refresh());
+        {
+            let mut stitch = self.output.stitch.lock();
+            stitch.set_stalled(0, self.top.reassembler.awaiting_refresh());
+            stitch.set_stalled(1, lower);
+        }
+        self.output.expire(Instant::now());
     }
 
     /// Feed one datagram that the connection handed over at `now`.
@@ -914,8 +1211,27 @@ impl Worker {
         if lag >= STALL_GAP {
             self.counters.reader_lag_over_gap = self.counters.reader_lag_over_gap.saturating_add(1);
         }
-        match self.reassembler.ingest(datagram, now) {
-            Ingest::Video => self.deliver(),
+        let Some((header, _payload)) = MediaHeader::parse(datagram) else { return };
+        let (_stream, index) = Stripe::stream_of(StreamId(header.stream.get()));
+        if index != 0 {
+            // A lower stripe's datagram still on its way when the stream went back to one
+            // picture opens no lane; a new striped session starts on its keyframe.
+            if self.lower.is_none() && self.top_whole && header.flags & flags::KEYFRAME == 0 {
+                return;
+            }
+            let media = StreamId(header.stream.get());
+            let lower = self.lower.get_or_insert_with(|| {
+                tracing::debug!(stream = %self.stream, %media, "the lower stripe's first datagram");
+                Lane::new(media, 1, self.codec, &self.output, &self.failed)
+            });
+            if lower.reassembler.ingest(datagram, now) == Ingest::Video {
+                self.deliver(1);
+            }
+            return;
+        }
+        self.clock_echo(datagram, now);
+        match self.top.reassembler.ingest(datagram, now) {
+            Ingest::Video => self.deliver(0),
             Ingest::Cursor { seq, update } => {
                 let newer =
                     self.cursor_seq.is_none_or(|last| seq.wrapping_sub(last) < u32::MAX / 2);
@@ -936,127 +1252,187 @@ impl Worker {
         }
     }
 
-    /// Push every frame that is now complete into the decoder.
-    fn deliver(&mut self) {
-        while let Some(frame) = self.reassembler.next_frame() {
-            self.counters.frames = self.counters.frames.saturating_add(1);
-            self.counters.first_frame_at.get_or_insert_with(Instant::now);
-            if frame.hold > self.counters.hold_max {
-                self.counters.hold_max = frame.hold;
+    /// Take a clock probe's echo that arrived at `now`: the arrival stamp is the connection
+    /// reader's, so the time this task took to get to it is not charged to the round trip.
+    fn clock_echo(&mut self, datagram: &Bytes, now: Instant) {
+        let Some((header, payload)) = MediaHeader::parse(datagram) else { return };
+        if header.kind() != Some(Kind::Clock) {
+            return;
+        }
+        let Some(echo) = ClockEcho::parse(payload) else { return };
+        self.clock.observe(echo.sent.get(), echo.received.get(), echo.echoed.get(), now);
+        *self.output.anchor.lock() = self.clock.estimate().map(|estimate| estimate.anchor);
+    }
+
+    /// Send a clock probe when one is due: every report at first, then every [`PROBE_EVERY`].
+    /// `false` once the connection is gone.
+    fn probe(&mut self) -> bool {
+        let due = self.reports < PROBES_AT_ONCE || self.reports.is_multiple_of(PROBE_EVERY);
+        self.reports = self.reports.saturating_add(1);
+        if !due {
+            return true;
+        }
+        let sent_us = self.clock.stamp(Instant::now());
+        (self.feedback)(encode_feedback(Feedback::Clock { stream: self.stream, sent_us }))
+    }
+
+    /// Push every frame of coder `index`'s lane that is now complete into its decoder. A frame
+    /// of the whole picture on the top lane says the stream is not striped: the lower stripe's
+    /// lane goes, so it asks for nothing more.
+    fn deliver(&mut self, index: usize) {
+        let Self { top, lower, counters, capture_clock, stream, top_whole, .. } = self;
+        let Some(lane) = (if index == 0 { Some(top) } else { lower.as_mut() }) else { return };
+        let (mut whole, mut frame_seen) = (false, false);
+        while let Some(frame) = lane.reassembler.next_frame() {
+            frame_seen = true;
+            if index == 0 {
+                counters.frames = counters.frames.saturating_add(1);
             }
+            counters.first_frame_at.get_or_insert_with(Instant::now);
+            if frame.hold > counters.hold_max {
+                counters.hold_max = frame.hold;
+            }
+            whole = index == 0 && frame.info.stripes == 0;
             // Widened here, at the one place the wire's 32-bit stamp becomes a u64: the decoder
             // echoes whatever it is given back to the callback, so the parked arrivals and the
             // pacer's ordering both inherit a timestamp that survives the wrap.
-            let pts = self.capture_clock.widen(frame.info.capture_ts_us);
+            let pts = capture_clock.widen(frame.info.capture_ts_us);
             // Park the frame before submitting: VideoToolbox may call back on another thread
             // before `decode` returns. Its token is acknowledged only once a picture comes back.
             let restarts = frame.info.keyframe || frame.info.ltr_refresh;
             let discardable = frame.info.discardable;
-            self.inflight.lock().park(
-                pts,
-                frame.arrived,
-                frame.info.ltr_token,
+            lane.inflight.lock().park(Parked {
+                pts_us: pts,
+                arrived: frame.arrived,
+                ltr_token: frame.info.ltr_token,
                 restarts,
                 discardable,
-            );
+                stripes: frame.info.stripes,
+            });
             if restarts {
-                self.restart_pts = Some(pts);
+                lane.restart_pts = Some(pts);
             }
-            if let Err(e) = self.decoder.decode(&frame.data, pts) {
-                let _gone = self.inflight.lock().take(pts);
-                self.counters.decode_errors = self.counters.decode_errors.saturating_add(1);
+            if let Err(e) = lane.decoder.decode(&frame.data, pts) {
+                let _gone = lane.inflight.lock().take(pts);
+                counters.decode_errors = counters.decode_errors.saturating_add(1);
                 let Some(keyframe) =
-                    refresh_after_refusal(discardable, self.decoder.ready(), restarts)
+                    refresh_after_refusal(discardable, lane.decoder.ready(), restarts)
                 else {
-                    tracing::debug!(stream = %self.stream, frame = frame.info.frame, error = %e, "decode of a frame nothing refers to");
+                    tracing::debug!(stream = %lane.media, frame = frame.info.frame, error = %e, "decode of a frame nothing refers to");
                     continue;
                 };
-                tracing::debug!(stream = %self.stream, frame = frame.info.frame, error = %e, keyframe, "decode");
-                self.reassembler.force_refresh(Instant::now(), keyframe);
+                tracing::debug!(stream = %lane.media, frame = frame.info.frame, error = %e, keyframe, "decode");
+                lane.reassembler.force_refresh(Instant::now(), keyframe);
             }
         }
+        if index == 0 && frame_seen {
+            *top_whole = whole;
+        }
+        counters.striped = lower.is_some() && !*top_whole;
+        if whole && lower.take().is_some() {
+            tracing::debug!(stream = %stream, "one picture again: the lower stripe's lane goes");
+        }
     }
 
-    /// Take what the decoder callback left: acknowledge the references it decoded, and ask for a
-    /// refresh when it failed on a frame the last restart did not already replace.
+    /// Take what the decoders' callbacks left: acknowledge the references they decoded, and ask
+    /// for a refresh when one failed on a frame the last restart did not already replace.
     fn outcomes(&mut self) {
-        if !self.news.swap(false, Ordering::Acquire) {
-            return;
+        for index in 0..Stripe::MAX {
+            let Self { top, lower, counters, .. } = self;
+            let Some(lane) = (if index == 0 { Some(top) } else { lower.as_mut() }) else {
+                continue;
+            };
+            if !lane.news.swap(false, Ordering::Acquire) {
+                continue;
+            }
+            let (acks, failed, failed_discardable) = {
+                let mut inflight = lane.inflight.lock();
+                (
+                    std::mem::take(&mut inflight.acks),
+                    inflight.failed.take(),
+                    std::mem::take(&mut inflight.failed_discardable),
+                )
+            };
+            for token in acks {
+                lane.reassembler.ack_ltr(token);
+            }
+            counters.decode_errors = counters.decode_errors.saturating_add(failed_discardable);
+            let Some(failed) = failed else { continue };
+            counters.decode_errors = counters.decode_errors.saturating_add(failed.count);
+            let Some(keyframe) = refresh_for(failed, lane.restart_pts, lane.decoder.ready()) else {
+                continue;
+            };
+            tracing::debug!(stream = %lane.media, ?failed, keyframe, "decoder returned no picture");
+            lane.reassembler.force_refresh(Instant::now(), keyframe);
         }
-        let (acks, failed, failed_discardable) = {
-            let mut inflight = self.inflight.lock();
-            (
-                std::mem::take(&mut inflight.acks),
-                inflight.failed.take(),
-                std::mem::take(&mut inflight.failed_discardable),
-            )
-        };
-        for token in acks {
-            self.reassembler.ack_ltr(token);
-        }
-        self.counters.decode_errors =
-            self.counters.decode_errors.saturating_add(failed_discardable);
-        let Some(failed) = failed else { return };
-        self.counters.decode_errors = self.counters.decode_errors.saturating_add(failed.count);
-        let Some(keyframe) = refresh_for(failed, self.restart_pts, self.decoder.ready()) else {
-            return;
-        };
-        tracing::debug!(stream = %self.stream, ?failed, keyframe, "decoder returned no picture");
-        self.reassembler.force_refresh(Instant::now(), keyframe);
     }
 
-    /// Run the reassembler's timers; `false` when the connection is gone.
+    /// Run the reassemblers' timers; `false` when the connection is gone.
     fn actions(&mut self) -> bool {
         let hint = self.source_live.load(Ordering::Relaxed);
-        if hint != self.source_hint {
-            self.source_hint = hint;
-            self.reassembler.set_source_live(hint);
-        }
-        for action in self.reassembler.tick(Instant::now(), self.rtt) {
-            let stream = self.stream;
-            let feedback = match action {
-                Action::Nack { frame, fragments } => {
-                    self.counters.nacks = self.counters.nacks.saturating_add(1);
-                    Feedback::Nack { stream, frame, fragments }
+        let hinted = hint != self.source_hint;
+        self.source_hint = hint;
+        for index in 0..Stripe::MAX {
+            let rtt = self.rtt;
+            let Some(lane) = self.lane(index) else { continue };
+            if hinted {
+                lane.reassembler.set_source_live(hint);
+            }
+            let media = lane.media;
+            let actions = lane.reassembler.tick(Instant::now(), rtt);
+            for action in actions {
+                let feedback = match action {
+                    Action::Nack { frame, fragments } => {
+                        self.counters.nacks = self.counters.nacks.saturating_add(1);
+                        Feedback::Nack { stream: media, frame, fragments }
+                    }
+                    Action::RequestRefresh { last_good_frame, keyframe } => {
+                        self.counters.refreshes = self.counters.refreshes.saturating_add(1);
+                        Feedback::Refresh { stream: media, last_good_frame, keyframe }
+                    }
+                };
+                if !(self.feedback)(encode_feedback(feedback)) {
+                    return false;
                 }
-                Action::RequestRefresh { last_good_frame, keyframe } => {
-                    self.counters.refreshes = self.counters.refreshes.saturating_add(1);
-                    Feedback::Refresh { stream, last_good_frame, keyframe }
-                }
-            };
-            if !(self.feedback)(encode_feedback(feedback)) {
-                return false;
             }
         }
         true
     }
 
-    /// Publish the counters and send the worker a receiver report. The report never waits for
-    /// room on the control channel: on a full one its counts and acknowledgements go into the
-    /// next report, [`REPORT_EVERY`] later, rather than holding reassembly and decode behind it.
+    /// Publish the counters and send the worker a receiver report for each media stream. A
+    /// report never waits for room on the control channel: on a full one its counts and
+    /// acknowledgements go into the next report, [`REPORT_EVERY`] later, rather than holding
+    /// reassembly and decode behind it.
     fn report(&mut self) {
         self.outcomes();
         self.rtt = (self.path_rtt)().unwrap_or(DEFAULT_RTT);
         let now = Instant::now();
-        let report = self.reassembler.take_report(now, 0);
-        let stats = self.reassembler.stats();
-        self.counters.frames_fec = stats.frames_fec;
-        self.counters.frames_retransmit = stats.frames_retransmit;
-        self.counters.frames_lost = stats.frames_lost;
-        self.counters.frames_skipped = stats.frames_skipped;
-        self.counters.datagrams_lost = stats.datagrams_lost;
+        let report = self.top.reassembler.take_report(now, 0);
+        let stats = self.top.reassembler.stats();
+        if let Some(lower) = &self.lower {
+            self.lower_counters = lower.reassembler.stats();
+        }
+        let lower = &self.lower_counters;
+        self.counters.frames_fec = stats.frames_fec.saturating_add(lower.frames_fec);
+        self.counters.frames_retransmit =
+            stats.frames_retransmit.saturating_add(lower.frames_retransmit);
+        self.counters.frames_lost = stats.frames_lost.saturating_add(lower.frames_lost);
+        self.counters.frames_skipped = stats.frames_skipped.saturating_add(lower.frames_skipped);
+        self.counters.datagrams_lost = stats.datagrams_lost.saturating_add(lower.datagrams_lost);
         self.counters.parity_permille = observed_parity(&stats);
-        self.counters.data_shards = stats.data_shards;
-        self.counters.parity_shards = stats.parity_shards;
+        self.counters.data_shards = stats.data_shards.saturating_add(lower.data_shards);
+        self.counters.parity_shards = stats.parity_shards.saturating_add(lower.parity_shards);
         self.counters.stalls = stats.stalls;
         self.counters.stalled_ms = stats.stalled_ms;
         self.counters.silences = stats.silences;
-        self.counters.stalled = self.reassembler.stalled(now);
+        self.counters.stalled = self.top.reassembler.stalled(now);
         self.counters.hold_p50 = report.hold_p50.to_std();
         self.counters.hold_p95 = report.hold_p95.to_std();
         self.counters.jitter = report.owd_jitter.to_std();
         self.counters.queue_depth = report.queue_depth;
-        self.counters.first_decoded_at = *self.first_decoded.lock();
+        self.counters.first_decoded_at = *self.output.first_decoded.lock();
+        self.counters.seam_tears = self.output.stitch.lock().tears;
+        self.counters.clock = self.clock.estimate();
         if let AudioSlot::Open(audio) = &self.audio {
             let playout = audio.player.stats();
             self.counters.audio_underruns = playout.underruns;
@@ -1066,11 +1442,32 @@ impl Worker {
         }
         self.stats.send_replace(self.counters);
         let stream = self.stream;
-        match self.out.try_send(ClientMsg::Screen(ScreenRequest::Report { stream, report })) {
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        if !self.send_report(stream, report) {
+            self.top.reassembler.take_back(&report);
+        }
+        if let Some(lower) = &mut self.lower {
+            let report = lower.reassembler.take_report(now, 0);
+            let media = lower.media;
+            let sent = self
+                .out
+                .try_send(ClientMsg::Screen(ScreenRequest::Report { stream: media, report }));
+            if let Err(mpsc::error::TrySendError::Full(_)) = sent {
+                lower.reassembler.take_back(&report);
+            }
+        }
+        // The connection going is the feedback's to notice: the next NACK or refresh sees it.
+        let _connected = self.probe();
+    }
+
+    /// Hand the control stream `report` for `media`: `false` when it was full, for the caller to
+    /// carry the report to the next.
+    fn send_report(&self, media: StreamId, report: ReceiverReport) -> bool {
+        match self.out.try_send(ClientMsg::Screen(ScreenRequest::Report { stream: media, report }))
+        {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::debug!(stream = %self.stream, "control channel full; report carried to the next");
-                self.reassembler.take_back(&report);
+                tracing::debug!(stream = %media, "control channel full; report carried to the next");
+                false
             }
         }
     }
@@ -1114,7 +1511,7 @@ fn encode_feedback(feedback: Feedback) -> Bytes {
         Feedback::Nack { stream, frame, .. } => {
             Feedback::Nack { stream, frame, fragments: Vec::new() }
         }
-        refresh @ Feedback::Refresh { .. } => refresh,
+        other @ (Feedback::Refresh { .. } | Feedback::Clock { .. }) => other,
     };
     encode(whole).unwrap_or_default()
 }
@@ -1132,6 +1529,17 @@ fn decode_feedback(bytes: &[u8]) -> Option<Feedback> {
 mod arrival_tests {
     use super::*;
 
+    /// A frame of one picture, parked.
+    pub(super) const fn parked(
+        pts_us: u64,
+        arrived: Instant,
+        ltr_token: Option<u64>,
+        restarts: bool,
+        discardable: bool,
+    ) -> Parked {
+        Parked { pts_us, arrived, ltr_token, restarts, discardable, stripes: 0 }
+    }
+
     /// The decoder's callback finds the arrival its frame was parked under, and the frames
     /// before it are forgotten with it (the decoder never goes back).
     #[test]
@@ -1140,11 +1548,11 @@ mod arrival_tests {
         let at = |ms: u64| epoch.checked_add(Duration::from_millis(ms)).unwrap();
         let mut arrivals = Inflight::default();
         for i in 0..4_u64 {
-            arrivals.park(i * 1_000, at(i * 16), None, false, false);
+            arrivals.park(parked(i * 1_000, at(i * 16), None, false, false));
         }
-        assert_eq!(arrivals.decoded(2_000), Some(at(32)));
+        assert_eq!(arrivals.decoded(2_000), Some((at(32), 0)));
         assert_eq!(arrivals.decoded(1_000), None, "older frames went with it");
-        assert_eq!(arrivals.decoded(3_000), Some(at(48)));
+        assert_eq!(arrivals.decoded(3_000), Some((at(48), 0)));
         assert_eq!(arrivals.decoded(3_000), None, "taken once");
     }
 
@@ -1155,14 +1563,14 @@ mod arrival_tests {
     fn a_token_is_acknowledged_by_its_picture_and_a_failure_is_kept() {
         let epoch = Instant::now();
         let mut inflight = Inflight::default();
-        inflight.park(1, epoch, Some(11), false, false);
-        inflight.park(2, epoch, Some(12), false, false);
-        inflight.park(3, epoch, None, false, false);
-        inflight.park(4, epoch, Some(14), false, false);
+        inflight.park(parked(1, epoch, Some(11), false, false));
+        inflight.park(parked(2, epoch, Some(12), false, false));
+        inflight.park(parked(3, epoch, None, false, false));
+        inflight.park(parked(4, epoch, Some(14), false, false));
         assert!(inflight.acks.is_empty(), "submitted is not decoded");
         let failure = |pts_us: u64, status: i32| DecodeFailure { pts_us, status };
         inflight.failed(failure(1, -12_909));
-        assert_eq!(inflight.decoded(2), Some(epoch));
+        assert_eq!(inflight.decoded(2), Some((epoch, 0)));
         inflight.failed(failure(3, -12_903));
         assert_eq!(inflight.acks, vec![12], "only the frame that came back");
         assert_eq!(
@@ -1170,7 +1578,7 @@ mod arrival_tests {
             Some(Failed { pts_us: 3, session_lost: true, restart: false, count: 2 }),
             "the newest failure, and the session is gone"
         );
-        assert_eq!(inflight.decoded(4), Some(epoch));
+        assert_eq!(inflight.decoded(4), Some((epoch, 0)));
         assert_eq!(inflight.acks, vec![12, 14]);
         assert!(inflight.parked.is_empty());
     }
@@ -1183,8 +1591,8 @@ mod arrival_tests {
         let epoch = Instant::now();
         let failure = |pts_us: u64| DecodeFailure { pts_us, status: -12_909 };
         let mut inflight = Inflight::default();
-        inflight.park(10, epoch, None, true, false);
-        inflight.park(11, epoch, None, false, false);
+        inflight.park(parked(10, epoch, None, true, false));
+        inflight.park(parked(11, epoch, None, false, false));
         inflight.failed(failure(10));
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(10), true), Some(true), "the refresh failed");
@@ -1192,13 +1600,13 @@ mod arrival_tests {
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(10), true), Some(false), "a frame after it failed");
         // Both fail before the worker looks: the fold keeps that the refresh was among them.
-        inflight.park(13, epoch, None, true, false);
-        inflight.park(14, epoch, None, false, false);
+        inflight.park(parked(13, epoch, None, true, false));
+        inflight.park(parked(14, epoch, None, false, false));
         inflight.failed(failure(13));
         inflight.failed(failure(14));
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(13), true), Some(true), "the refresh was among them");
-        inflight.park(12, epoch, None, false, false);
+        inflight.park(parked(12, epoch, None, false, false));
         inflight.failed(failure(12));
         let failed = inflight.failed.take().unwrap();
         assert_eq!(refresh_for(failed, Some(20), true), None, "already replaced");
@@ -1223,11 +1631,11 @@ mod arrival_tests {
     fn a_failed_frame_nothing_refers_to_asks_for_nothing_unless_the_session_went() {
         let epoch = Instant::now();
         let mut inflight = Inflight::default();
-        inflight.park(1, epoch, Some(11), false, true);
+        inflight.park(parked(1, epoch, Some(11), false, true));
         inflight.failed(DecodeFailure { pts_us: 1, status: -12_909 });
         assert_eq!((inflight.failed, inflight.failed_discardable), (None, 1));
         assert!(inflight.acks.is_empty(), "its token is not acknowledged");
-        inflight.park(2, epoch, None, false, true);
+        inflight.park(parked(2, epoch, None, false, true));
         inflight.failed(DecodeFailure { pts_us: 2, status: -12_903 });
         assert_eq!(
             inflight.failed,
@@ -1241,11 +1649,11 @@ mod arrival_tests {
         let epoch = Instant::now();
         let mut arrivals = Inflight::default();
         for i in 0..(u64::try_from(ARRIVALS).unwrap() + 10) {
-            arrivals.park(i, epoch, None, false, false);
+            arrivals.park(parked(i, epoch, None, false, false));
         }
         assert_eq!(arrivals.parked.len(), ARRIVALS);
         assert_eq!(arrivals.decoded(0), None);
-        assert_eq!(arrivals.decoded(u64::try_from(ARRIVALS).unwrap()), Some(epoch));
+        assert_eq!(arrivals.decoded(u64::try_from(ARRIVALS).unwrap()), Some((epoch, 0)));
     }
 }
 
@@ -1286,6 +1694,7 @@ mod feedback_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::arrival_tests::parked;
     use super::*;
 
     /// A datagram for `stream`, frame `frame`: the media channel byte, the rest of a
@@ -1435,15 +1844,15 @@ mod tests {
         let mut arrivals = Inflight::default();
         let t0 = Instant::now();
         let t = |n: u64| t0 + Duration::from_micros(n);
-        arrivals.park(10, t(1), None, false, false);
-        arrivals.park(20, t(2), None, false, false);
-        arrivals.park(30, t(3), None, false, false);
-        assert_eq!(arrivals.decoded(20), Some(t(2)));
+        arrivals.park(parked(10, t(1), None, false, false));
+        arrivals.park(parked(20, t(2), None, false, false));
+        arrivals.park(parked(30, t(3), None, false, false));
+        assert_eq!(arrivals.decoded(20), Some((t(2), 0)));
         assert_eq!(arrivals.decoded(10), None, "older than the one taken: forgotten with it");
-        assert_eq!(arrivals.decoded(30), Some(t(3)));
+        assert_eq!(arrivals.decoded(30), Some((t(3), 0)));
         assert!(arrivals.parked.is_empty());
         for n in 0..u64::try_from(ARRIVALS).unwrap_or(u64::MAX).saturating_add(5) {
-            arrivals.park(n, t(n), None, false, false);
+            arrivals.park(parked(n, t(n), None, false, false));
         }
         assert_eq!(arrivals.parked.len(), ARRIVALS, "bounded");
         assert_eq!(arrivals.decoded(0), None, "the oldest were dropped to make room");
@@ -1598,6 +2007,7 @@ mod worker_tests {
             ltr_refresh: false,
             discardable: false,
             capture_ts_us,
+            stripes: 0,
         };
         packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()
     }
@@ -1725,6 +2135,7 @@ mod worker_tests {
                 ltr_refresh: false,
                 discardable: false,
                 capture_ts_us: n.saturating_mul(16_667),
+                stripes: 0,
             };
             let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
             let x = i32::try_from(n).unwrap();
@@ -1987,6 +2398,80 @@ mod worker_tests {
         assert!(reports >= 2, "{reports} reports");
         // One read as the stream starts, and one for a report sent after the count.
         assert!(reads <= reports.saturating_add(2), "{reads} reads for {reports} reports");
+    }
+
+    /// A stream probes the worker's clock at once and then four times a second, and an echo
+    /// places the worker's capture clock on this one: the stats carry the estimate, and the
+    /// worker's clock reading 5 s ahead reads back as 5 s ahead within the round trip.
+    #[test]
+    fn clock_probes_go_out_and_an_echo_places_the_worker_clock() {
+        use slopty_proto::media::ClockEcho;
+        let mut h = Harness::start();
+        let probes = |h: &Harness| {
+            h.feedback
+                .lock()
+                .iter()
+                .filter_map(|f| match f {
+                    Feedback::Clock { stream, sent_us } => Some((*stream, *sent_us)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let seen = Arc::clone(&h.feedback);
+        h.wait_for("the first probes", FOR_THE_MACHINE, |_| {
+            seen.lock().iter().filter(|f| matches!(f, Feedback::Clock { .. })).count() >= 3
+        });
+        assert!(h.handle.stats().clock.is_none(), "no echo, no estimate");
+        let (stream, sent_us) = probes(&h)[2];
+        assert_eq!(stream, STREAM);
+        // The worker's clock is this process's plus 5 s: `sent_us` is on the stream's own epoch,
+        // so the worker reads the moment the probe left as its epoch-relative time plus that.
+        let epoch_on_worker = 5_000_000 + sent_us;
+        let echo = ClockEcho::new(sent_us, epoch_on_worker, epoch_on_worker + 30);
+        let routed_at = Instant::now();
+        h.route(echo.datagram(STREAM.0, 0));
+        h.wait_for("the estimate", FOR_THE_MACHINE, |handle| handle.stats().clock.is_some());
+        let estimate = h.handle.stats().clock.unwrap();
+        assert!(estimate.bound <= estimate.rtt, "{estimate:?}");
+        // The worker read `epoch_on_worker` as the probe left; the estimate puts that moment
+        // between the echo's arrival less the round trip and the arrival.
+        let left = estimate.anchor.captured(epoch_on_worker).unwrap();
+        assert!(left <= routed_at, "{estimate:?}");
+        assert!(left >= routed_at.checked_sub(estimate.rtt).unwrap(), "{estimate:?}");
+    }
+
+    /// What the clock probes add to the frame path, measured alone: the look at every datagram
+    /// for an echo (a video fragment, which is not one), and the anchor read the decoder's
+    /// callback makes for every picture. A measurement, run by hand: `docs/MEASUREMENTS.md`,
+    /// "capture to glass on any link".
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture"]
+    #[expect(clippy::cast_precision_loss, reason = "measurement arithmetic")]
+    fn clock_path_cost() {
+        use std::hint::black_box;
+        const N: u32 = 2_000_000;
+        let mut packetizer = Packetizer::new(STREAM);
+        let fragment = packetize(&mut packetizer, true, 1)[0].clone();
+        let anchor = Mutex::new(Some(ClockAnchor { at: Instant::now(), host_us: 1_000_000 }));
+        for round in 0..3 {
+            let started = Instant::now();
+            for _ in 0..N {
+                let fragment = black_box(&fragment);
+                let echo = MediaHeader::parse(fragment)
+                    .is_some_and(|(header, _)| header.kind() == Some(Kind::Clock));
+                black_box(echo);
+            }
+            let look = started.elapsed().as_nanos() as f64 / f64::from(N);
+            let started = Instant::now();
+            for pts in 0..u64::from(N) {
+                let captured = black_box(&anchor).lock().and_then(|a| a.captured(pts));
+                black_box(captured);
+            }
+            let read = started.elapsed().as_nanos() as f64 / f64::from(N);
+            eprintln!(
+                "MEASURE clock path, round {round}: echo look per datagram {look:.1} ns, anchor read per picture {read:.1} ns"
+            );
+        }
     }
 
     /// A control channel nobody drains fills up; the worker drops its reports and goes on

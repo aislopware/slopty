@@ -169,6 +169,8 @@ pub fn paste_paths(paths: &[String]) -> String {
 #[derive(Debug, Default)]
 pub struct Table {
     inner: Mutex<Tables>,
+    /// Woken when uploads are released or one is cancelled, for the uploads held before a chunk.
+    unheld: Notify,
 }
 
 #[derive(Debug, Default)]
@@ -177,6 +179,8 @@ struct Tables {
     offsets: HashMap<(XferId, String), oneshot::Sender<u64>>,
     /// Uploads that were cancelled; their tasks stop at the next chunk.
     cancelled: std::collections::HashSet<XferId>,
+    /// Uploads wait before their next chunk ([`Table::hold_uploads`]).
+    held: bool,
     /// Download attempts being received, by the transfer each fetch named.
     downloads: HashMap<XferId, Attempt>,
     /// Uploads being sent, shown off screen as the worker reports them received, of how many
@@ -268,10 +272,38 @@ impl Table {
     pub fn cancel(&self, xfer: XferId) {
         let mut inner = self.inner.lock();
         inner.cancelled.insert(xfer);
-        if let Some(d) = inner.downloads.remove(&xfer)
-            && let Some(done) = d.done
-        {
+        let attempt = inner.downloads.remove(&xfer);
+        drop(inner);
+        self.unheld.notify_waiters();
+        if let Some(Attempt { done: Some(done), .. }) = attempt {
             let _gone = done.send(Err(XferError::Cancelled));
+        }
+    }
+
+    /// Hold every upload before its next chunk while `held`: a test's way to draw an upload at
+    /// a known point, since how far one got by a given frame is up to the machine. A cancel
+    /// still stops a held upload.
+    pub fn hold_uploads(&self, held: bool) {
+        self.inner.lock().held = held;
+        self.unheld.notify_waiters();
+    }
+
+    /// Wait until `xfer` may send its next chunk: at once unless uploads are held, and an error
+    /// once it is cancelled.
+    async fn may_send(&self, xfer: XferId) -> Result<(), XferError> {
+        loop {
+            // Made before the check, so a release or a cancel between the two still wakes it.
+            let woken = self.unheld.notified();
+            {
+                let inner = self.inner.lock();
+                if inner.cancelled.contains(&xfer) {
+                    return Err(XferError::Cancelled);
+                }
+                if !inner.held {
+                    return Ok(());
+                }
+            }
+            woken.await;
         }
     }
 
@@ -586,9 +618,9 @@ async fn send_file(
     let mut stream = slopty_net::streams::open_bulk(&up.conn, header).await.map_err(cut)?;
     let mut buf = vec![0_u8; CHUNK];
     loop {
-        if up.table.cancelled(xfer) {
+        if let Err(stopped) = up.table.may_send(xfer).await {
             let _reset = stream.reset(0_u32.into());
-            return Err(XferError::Cancelled);
+            return Err(stopped);
         }
         let n = file.read(&mut buf).await.map_err(local)?;
         let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else { break };

@@ -1,8 +1,8 @@
 //! The crash directory: how reports are named, written, kept and listed.
 //!
 //! A report is `<ms>-<pid>-<process>.json`; a signal record not yet resolved is the same stem
-//! with `.native`. The time comes first so a listing sorts by it, and the process last because
-//! its name has dashes of its own.
+//! with `.native`, and a hang of a process that lived on is `.hang`, the same JSON. The time comes
+//! first so a listing sorts by it, and the process last because its name has dashes of its own.
 //!
 //! Two more names are in flight and never listed: `<record>.native.<pid>`, a record the process
 //! `<pid>` has claimed to resolve, and `<report>.json.partial.<pid>.<n>`, a report being
@@ -14,10 +14,14 @@ use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
-use crate::report::Report;
+use crate::report::{Kind, Report};
 
-/// How many reports each process keeps; older ones are deleted as new ones come.
+/// How many reports each process keeps, and as many hangs besides; older ones are deleted as
+/// new ones come. Hangs are kept apart so a run of them never pushes a crash out.
 pub const KEPT_PER_PROCESS: usize = 20;
+
+/// The extension of a hang's report.
+const HANG: &str = "hang";
 
 /// How far apart a report of ours and a `.ips` of the same pid may be and still be one crash.
 /// A pid comes round again, but not within a minute of the crash it named.
@@ -54,14 +58,27 @@ pub(crate) fn make_dir(dir: &Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
-/// Writes `report` as a new file in `dir`, then drops that process's oldest reports past
-/// [`KEPT_PER_PROCESS`]. Two reports of one process in one millisecond take the next free one.
+/// Writes `report` as a new file in `dir`, then drops that process's oldest reports of its
+/// class past [`KEPT_PER_PROCESS`]. Two reports of one process in one millisecond take the next
+/// one after its newest: never a gap the rotation left among the oldest, which the rotation
+/// that follows would take back at once.
 pub(crate) fn write_new(dir: &Path, report: &Report) -> io::Result<PathBuf> {
     make_dir(dir)?;
     let json = serde_json::to_vec_pretty(report).map_err(io::Error::other)?;
-    let mut time_ms = report.time_ms;
+    let ext = if matches!(report.kind, Kind::Hang { .. }) { HANG } else { "json" };
+    let newest = entries(dir)
+        .into_iter()
+        .filter(|(_, _, pid, process, e)| {
+            *pid == report.pid && *process == report.process && e == ext
+        })
+        .map(|(_, time_ms, ..)| time_ms)
+        .max();
+    let mut time_ms = match newest {
+        Some(newest) if newest >= report.time_ms => newest.saturating_add(1),
+        _ => report.time_ms,
+    };
     let path = loop {
-        let name = Name { time_ms, pid: report.pid, process: &report.process, ext: "json" };
+        let name = Name { time_ms, pid: report.pid, process: &report.process, ext };
         let path = dir.join(name.file());
         match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
             Ok(mut file) => {
@@ -166,7 +183,7 @@ pub(crate) fn read(path: &Path) -> Option<Report> {
     Some(report)
 }
 
-/// The report files in `dir` (`.json` and `.native`), with their names' parts.
+/// The report files in `dir` (`.json`, `.native` and `.hang`), with their names' parts.
 pub(crate) fn entries(dir: &Path) -> Vec<(PathBuf, u64, u32, String, String)> {
     let Ok(read) = fs::read_dir(dir) else {
         return Vec::new();
@@ -175,18 +192,19 @@ pub(crate) fn entries(dir: &Path) -> Vec<(PathBuf, u64, u32, String, String)> {
         .filter_map(|entry| {
             let file = entry.file_name();
             let name = Name::parse(file.to_str()?)?;
-            matches!(name.ext, "json" | "native").then(|| {
+            matches!(name.ext, "json" | "native" | HANG).then(|| {
                 (entry.path(), name.time_ms, name.pid, name.process.to_owned(), name.ext.to_owned())
             })
         })
         .collect()
 }
 
-/// Deletes each process's reports past its newest [`KEPT_PER_PROCESS`].
+/// Deletes each process's reports past its newest [`KEPT_PER_PROCESS`], and its hangs past
+/// their newest as many.
 pub(crate) fn rotate(dir: &Path) {
-    let mut by_process: HashMap<String, Vec<(u64, PathBuf)>> = HashMap::new();
-    for (path, time_ms, _, process, _) in entries(dir) {
-        by_process.entry(process).or_default().push((time_ms, path));
+    let mut by_process: HashMap<(String, bool), Vec<(u64, PathBuf)>> = HashMap::new();
+    for (path, time_ms, _, process, ext) in entries(dir) {
+        by_process.entry((process, ext == HANG)).or_default().push((time_ms, path));
     }
     for mut reports in by_process.into_values() {
         reports.sort_unstable_by(|a, b| b.cmp(a));
@@ -202,7 +220,7 @@ pub(crate) fn list(dir: &Path, diagnostic_reports: Option<&Path>) -> Vec<Report>
     let mut reports: Vec<Report> = entries(dir)
         .into_iter()
         .filter_map(|(path, _, _, _, ext)| match ext.as_str() {
-            "json" => read(&path),
+            "json" | HANG => read(&path),
             #[cfg(target_vendor = "apple")]
             "native" => crate::native::read_unresolved(&path),
             _ => None,
@@ -210,7 +228,8 @@ pub(crate) fn list(dir: &Path, diagnostic_reports: Option<&Path>) -> Vec<Report>
         .collect();
     for ips in diagnostic_reports.map(crate::ips::list).unwrap_or_default() {
         let own = reports.iter_mut().find(|r| {
-            r.pid == ips.pid
+            !matches!(r.kind, Kind::Hang { .. })
+                && r.pid == ips.pid
                 && r.process == ips.process
                 && r.time_ms.abs_diff(ips.time_ms) <= LINK_WINDOW_MS
         });

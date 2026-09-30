@@ -28,10 +28,11 @@ use gpui::{
 use slopty_core::{ItemId, SessionId};
 use slopty_e2e::{
     BrowserItemInfo, Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo,
-    LatencyInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
+    LatencyInfo, ProjectInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
 };
 use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason};
 use slopty_proto::items::ItemKind;
+use slopty_ui::project::ProjectView;
 use slopty_ui::screen::ScreenView;
 use slopty_ui::workspace::{KeyTarget, WorkerStatus};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -138,6 +139,11 @@ pub(crate) fn serve(
                     cx.update(|cx| cx.quit());
                     continue;
                 }
+                // From the async task too (no window leased): the key goes through AppKit, which
+                // hands it to GPUI's dispatch as the keyboard's would.
+                Command::PageKeys { url, keys } => {
+                    page_keys(&workspace, &url, &keys, window, cx).await
+                }
                 // At the UIKit boundary, from the async task (no window leased): the fork's
                 // delivery re-enters GPUI's dispatch exactly as a UIKit callback does. Then
                 // settle on a frame like any input.
@@ -209,6 +215,64 @@ async fn keep_dragged(parked: &Parked, into: String, runtime: &tokio::runtime::H
         Ok(Ok(())) => Reply::Ok,
         Ok(Err((name, why))) => Reply::Error { message: format!("{name}: {why}") },
         Err(e) => Reply::Error { message: format!("the keeper died: {e}") },
+    }
+}
+
+/// The page of the browser tile for `url`, given `keys` (a chord such as `cmd-a`) as AppKit
+/// delivers a key press, while the page holds the keyboard; replies after the frame that
+/// follows.
+async fn page_keys(
+    workspace: &Entity<Workspace>,
+    url: &str,
+    keys: &str,
+    window: AnyWindowHandle,
+    cx: &mut gpui::AsyncApp,
+) -> Reply {
+    let holds = cx.update(|cx| {
+        let view = workspace.read(cx).view.read(cx);
+        view.items().find_map(|(_, item)| match &item.kind {
+            ItemKind::Browser { url: u } if u == url => view.browser(item.id).map(|page| {
+                let page = page.read(cx);
+                #[cfg(target_os = "macos")]
+                let window = page.window_number();
+                #[cfg(not(target_os = "macos"))]
+                let window = None::<isize>;
+                (page.focused(), window)
+            }),
+            _ => None,
+        })
+    });
+    let window_number = match holds {
+        None => return Reply::Error { message: "no browser tile".to_owned() },
+        Some((false, _)) => {
+            return Reply::Error { message: "the page does not hold the keyboard".to_owned() };
+        }
+        Some((true, number)) => number,
+    };
+    let (mut command, mut shift, mut key) = (false, false, "");
+    for part in keys.split('-') {
+        match part {
+            "cmd" => command = true,
+            "shift" => shift = true,
+            other => key = other,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let delivered = window_number
+        .is_some_and(|number| slopty_platform::web::press(number, key, command, shift));
+    #[cfg(not(target_os = "macos"))]
+    let delivered = {
+        #[expect(
+            clippy::no_effect_underscore_binding,
+            reason = "no page takes keys off the Mac; the chord is read there only"
+        )]
+        let _chord = (window_number, key, command, shift);
+        false
+    };
+    if delivered {
+        after_frame(window, Reply::Ok, cx).await
+    } else {
+        Reply::Error { message: format!("no window to take {keys}") }
     }
 }
 
@@ -412,6 +476,13 @@ fn apply(
 ) -> Reply {
     match command {
         Command::Ping => Reply::Ok,
+        Command::Resume { what } => match slopty_platform::resume::Resume::named(&what) {
+            Some(resume) => {
+                workspace.read(cx).resume(resume);
+                Reply::Ok
+            }
+            None => Reply::Error { message: format!("no resume is called {what}") },
+        },
         Command::Keys { keys } => {
             for text in keys.split_whitespace() {
                 match Keystroke::parse(text) {
@@ -581,20 +652,6 @@ fn apply(
             view.update(cx, |view, cx| view.open_browser(None, &url, cx));
             Reply::Ok
         }
-        Command::PageKeys { url, keys } => {
-            let view = workspace.read(cx).view.clone();
-            let page = view.read(cx).items().find_map(|(_, item)| match &item.kind {
-                ItemKind::Browser { url: u } if *u == url => {
-                    view.read(cx).browser(item.id).cloned()
-                }
-                _ => None,
-            });
-            match page {
-                Some(page) if page.read(cx).press(&keys) => Reply::Ok,
-                Some(_) => Reply::Error { message: format!("the page did not take {keys}") },
-                None => Reply::Error { message: "no browser tile".to_owned() },
-            }
-        }
         Command::FramesReset => {
             slopty_ui::frames::reset(cx);
             Reply::Ok
@@ -625,6 +682,14 @@ fn apply(
             workspace.update(cx, |ws, cx| ws.open_notification(&tap, cx));
             Reply::Ok
         }
+        Command::HoldMain { ms } => {
+            // Busy, as a hang is: a sleep would give the thread back to the system.
+            let (started, held) = (std::time::Instant::now(), std::time::Duration::from_millis(ms));
+            while started.elapsed() < held {
+                std::hint::spin_loop();
+            }
+            Reply::Ok
+        }
         Command::Resize { width, height } => {
             if cfg!(target_os = "ios") {
                 // UIKit sizes the window; the app lays itself out in the size asked for.
@@ -642,6 +707,7 @@ fn apply(
         Command::Dump
         | Command::AddWorker { .. }
         | Command::KeepDragged { .. }
+        | Command::PageKeys { .. }
         | Command::Render { .. }
         | Command::Quit
         | Command::UiKeyPress { .. }
@@ -775,6 +841,8 @@ fn screen_info(item: ItemId, view: &ScreenView, window: &Window) -> ScreenInfo {
     let source = match view.source_state() {
         slopty_proto::screen::SourceState::Idle => "idle",
         slopty_proto::screen::SourceState::Live => "live",
+        slopty_proto::screen::SourceState::Locked => "locked",
+        slopty_proto::screen::SourceState::Away => "away",
     };
     let recovery = slopty_e2e::RecoveryInfo {
         frames: s.frames,
@@ -880,6 +948,7 @@ impl Workspace {
                 needs_you: view.needs_you_on(key),
                 rtt_us: view.rtt(key).map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX)),
                 clipboard_watched: watching.contains(&key),
+                links: view.links(key),
             })
             .collect();
         let status = if workers.is_empty() {
@@ -1049,6 +1118,14 @@ impl Workspace {
                     title: Some(view.terminal_title(session)),
                     size: [size.cols, size.rows],
                     cursor: [cursor.col, cursor.row],
+                    cursor_shape: format!("{:?}", cursor.shape),
+                    at_prompt: !terminal.state().command_running()
+                        && terminal
+                            .state()
+                            .screen()
+                            .lines()
+                            .get(usize::from(cursor.row))
+                            .is_some_and(|line| line.mark.is_prompt()),
                     rows: terminal.rows(),
                     epoch: terminal.state().epoch(),
                     agent: terminal.agent_status().map(agent_line),
@@ -1078,6 +1155,33 @@ impl Workspace {
                     }),
                 });
             }
+        }
+        for board in view.projects().boards() {
+            let orchestrator = board.project.orchestrator.map(|t| t.session);
+            let shown = orchestrator.is_some_and(|s| view.board_shown(s));
+            let board_view = orchestrator.and_then(|s| view.board_view(s)).map(|b| b.read(cx));
+            if board_view.is_some_and(|b| b.focus_handle(cx).is_focused(window)) {
+                focused = format!("project:{}", board.project.id);
+            }
+            dump.projects.push(ProjectInfo {
+                id: board.project.id.to_string(),
+                title: board.project.title.clone(),
+                orchestrator: orchestrator.map(|s| s.to_string()),
+                lanes: board
+                    .lanes()
+                    .into_iter()
+                    .map(|(lane, tasks)| {
+                        (lane.selector().to_owned(), tasks.into_iter().map(|t| t.0).collect())
+                    })
+                    .collect(),
+                tasks: board.tasks.values().map(|c| (c.id.0, format!("{:?}", c.state))).collect(),
+                timeline: board.timeline.len(),
+                shown,
+                lens: board_view.map(|b| b.lens().title().to_owned()),
+                picked: board_view.and_then(ProjectView::picked).map(|node| {
+                    node.map_or_else(|| "orchestrator".to_owned(), |t| t.0.to_string())
+                }),
+            });
         }
         dump.focused = focused;
         dump

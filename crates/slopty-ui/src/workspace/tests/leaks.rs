@@ -1,7 +1,9 @@
 //! Nothing a tile, an overlay or a worker made outlives it. Each case opens something and
 //! closes it, lets every wait that holds it run out, then asks GPUI's leak detector whether any
-//! entity made since is still held, and the workspace whether any of its maps and lists kept an
-//! entry. `LEAK_BACKTRACE=1` names where each surviving handle was made.
+//! entity made since is still held, GPUI whether it holds more callbacks (observers,
+//! subscriptions, release and window listeners) than before, and the workspace whether any of
+//! its maps and lists kept an entry. `LEAK_BACKTRACE=1` names where each surviving handle was
+//! made.
 
 use std::cell::Cell;
 
@@ -12,11 +14,11 @@ use crate::conversation::fixtures;
 
 /// Longer than every wait a closed thing is held for: the undo of a close, its toast, the
 /// palette's way out.
-const SETTLE: Duration = Duration::from_secs(10);
+pub(super) const SETTLE: Duration = Duration::from_secs(10);
 
 /// Every timer run out, then two frames drawn, so element state kept by the frames that showed
 /// the closed thing is gone with them.
-fn settle(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
+pub(super) fn settle(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
     cx.executor().advance_clock(SETTLE);
     cx.run_until_parked();
     for _ in 0..2 {
@@ -31,6 +33,19 @@ fn settle(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
 fn closes_clean(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
+    cycle: impl FnMut(&mut VisualTestContext),
+) {
+    closes_clean_times(view, cx, 1, cycle);
+}
+
+/// [`closes_clean`] with `times` runs between the snapshot and the check, each settled, so a
+/// leak too small to see once shows as growth. The callbacks GPUI holds are counted after the
+/// first run too: a view's are held until its window draws twice after it goes, which each
+/// settling does.
+pub(super) fn closes_clean_times(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    times: usize,
     mut cycle: impl FnMut(&mut VisualTestContext),
 ) {
     settle(view, cx);
@@ -38,20 +53,31 @@ fn closes_clean(
     cycle(cx);
     settle(view, cx);
     let snapshot = cx.update(|_, cx| cx.leak_detector_snapshot());
-    cycle(cx);
-    settle(view, cx);
+    let subscribed = cx.update(|_, cx| cx.subscription_counts());
+    for _ in 0..times {
+        cycle(cx);
+        settle(view, cx);
+    }
     cx.update(|_, cx| cx.assert_no_new_leaks(&snapshot));
+    let now = cx.update(|_, cx| cx.subscription_counts());
+    assert_eq!(
+        now,
+        subscribed,
+        "a callback outlived what it watched: {} against {}",
+        now.total(),
+        subscribed.total()
+    );
     assert_eq!(view.read_with(cx, |v, _| v.footprint()), before, "a collection kept an entry");
 }
 
 /// The next registry version, for the items a cycle brings.
-fn next(version: &Cell<u64>) -> u64 {
+pub(super) fn next(version: &Cell<u64>) -> u64 {
     version.set(version.get().saturating_add(1));
     version.get()
 }
 
 /// `tile` focused, then ⌘W.
-fn close(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) {
+pub(super) fn close(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     cx.run_until_parked();
     cx.simulate_keystrokes("cmd-w");
@@ -59,7 +85,9 @@ fn close(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, tile: TileRef
 }
 
 /// A workspace with one worker and one shell on it, which stays while the cases come and go.
-fn studio(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext, Fake) {
+pub(super) fn studio(
+    cx: &mut TestAppContext,
+) -> (Entity<WorkspaceView>, &mut VisualTestContext, Fake) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
@@ -102,6 +130,7 @@ fn a_closed_stream_leaves_nothing(cx: &mut TestAppContext) {
                 width: 1280,
                 height: 800,
                 scale: 2.0,
+                stripes: Vec::new(),
             };
             v.screen_event(key, opened, cx);
         });
@@ -249,6 +278,7 @@ fn a_removed_worker_with_open_tiles_leaves_nothing(cx: &mut TestAppContext) {
                 width: 1280,
                 height: 800,
                 scale: 2.0,
+                stripes: Vec::new(),
             };
             v.screen_event(key, opened, cx);
         });

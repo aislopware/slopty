@@ -1,10 +1,11 @@
-//! The browser tile's page: a `WKWebView` over the GPUI window (macOS and iOS).
+//! The browser tile's page: a `WKWebView` the GPUI window composes with its own content
+//! (macOS and iOS).
 //!
 //! GPUI draws every tile into one Metal layer, so a web page cannot be one of its elements.
-//! It is a native view instead: a clipping view (the strip's area) inside the GPUI view, and
-//! the web view inside that, placed over the tile's body every frame the strip draws. A
-//! native view always draws above GPUI, so the caller hides it whenever something GPUI
-//! draws should be on top (an overlay, the overview, the tile scrolled away).
+//! It is a native view instead, which the tile hands to a GPUI native host
+//! ([`WebView::view`]): the host puts it under GPUI's layer, where the tile's element places
+//! it, cut to what clips that element, and GPUI cuts a hole to show it. Whatever GPUI draws
+//! after the page (a menu, the palette, a toast) is over it, as over any element.
 //!
 //! One delegate object answers `WebKit` for a page: its navigations, its UI (pop-ups and a
 //! script's dialogs) and its downloads. The UI and download protocols are spoken by selector:
@@ -39,7 +40,7 @@ mod macos;
 #[cfg(target_os = "ios")]
 pub use ios::WebView;
 #[cfg(target_os = "macos")]
-pub use macos::WebView;
+pub use macos::{WebView, press};
 
 /// What a page tells the tile that shows it. Delivered on the main thread, from inside a
 /// framework callback: the receiver must only queue it.
@@ -49,11 +50,8 @@ pub enum WebEvent {
     Loaded,
     /// A navigation failed; the system's word for why.
     Failed(String),
-    /// The page was clicked or tapped: it has the keyboard now.
-    Clicked,
-    /// The keyboard went back to the GPUI view (a click outside, ⌃Tab, Esc twice).
-    Released,
-    /// A picture of the page, PNG, for when the view is hidden.
+    /// A picture of the page, PNG, for when GPUI draws the page's tile without it (the
+    /// overview, a render).
     Snapshot(Vec<u8>),
     /// A pop-up (`window.open`) or a `target=_blank` link asked for a new window on this
     /// address, as the page names it. No window is made here; the tile opens another.
@@ -260,41 +258,19 @@ pub fn is_attachment(disposition: Option<&str>) -> bool {
     })
 }
 
-/// An editing command a page with the keyboard takes from a ⌘ key. The GPUI view answers
-/// every key equivalent before its subviews see one, so these are handed to the page
-/// directly instead.
+/// An edit a page that holds the keyboard does itself. The Mac's menu bar has no item that
+/// sends these to a native view (⌘Z is "Undo close" there), so the tile's keymap hands them
+/// to the page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Edit {
-    /// ⌘C.
-    Copy,
-    /// ⌘X.
-    Cut,
-    /// ⌘V.
-    Paste,
-    /// ⌘A.
-    SelectAll,
-    /// ⌘Z.
+    /// Undo the page's last edit.
     Undo,
-    /// ⇧⌘Z.
+    /// Redo what undo took back.
     Redo,
-}
-
-/// The editing command of a key: `key` is the character it types without modifiers (so the
-/// layout decides, as it does for the Edit menu), `other` any of ⌃ and ⌥.
-#[must_use]
-pub fn edit_for(key: &str, command: bool, shift: bool, other: bool) -> Option<Edit> {
-    if !command || other {
-        return None;
-    }
-    match (key.to_lowercase().as_str(), shift) {
-        ("c", false) => Some(Edit::Copy),
-        ("x", false) => Some(Edit::Cut),
-        ("v", false) => Some(Edit::Paste),
-        ("a", false) => Some(Edit::SelectAll),
-        ("z", false) => Some(Edit::Undo),
-        ("z", true) => Some(Edit::Redo),
-        _ => None,
-    }
+    /// Cut the selection.
+    Cut,
+    /// Select all: the field with the caret, or the page.
+    SelectAll,
 }
 
 struct DelegateIvars {
@@ -718,22 +694,6 @@ fn zoom_in(web: &AnyObject, zoom: f64) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_edit_keys_go_to_the_page_and_nothing_else_does() {
-        assert_eq!(edit_for("c", true, false, false), Some(Edit::Copy));
-        assert_eq!(edit_for("x", true, false, false), Some(Edit::Cut));
-        assert_eq!(edit_for("v", true, false, false), Some(Edit::Paste));
-        assert_eq!(edit_for("a", true, false, false), Some(Edit::SelectAll));
-        assert_eq!(edit_for("z", true, false, false), Some(Edit::Undo));
-        assert_eq!(edit_for("Z", true, true, false), Some(Edit::Redo), "⇧ reports a capital");
-        assert_eq!(edit_for("c", false, false, false), None, "a plain c is typing");
-        assert_eq!(edit_for("c", true, false, true), None, "⌥⌘C is not copy");
-        assert_eq!(edit_for("v", true, true, false), None, "⇧⌘V is not paste");
-        assert_eq!(edit_for("t", true, false, false), None, "⌘T stays the workspace's");
-    }
-
-    /// A script's dialog is answered exactly once: OK with the text, Cancel with none, and a
-    /// dialog nobody answered (its tile closed) as Cancel when it goes.
     #[test]
     fn a_dialog_answers_once_and_a_dropped_one_cancels() {
         let answers: Rc<RefCell<Vec<Option<String>>>> = Rc::default();

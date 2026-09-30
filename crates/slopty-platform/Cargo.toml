@@ -51,6 +51,8 @@ objc2-foundation = { workspace = true, features = [
     "NSBundle",
     # The hotkey layer follows this app in and out of the front (`system_keys`).
     "NSNotification",
+    # The screen's unlock, heard from the login window (`resume`).
+    "NSDistributedNotificationCenter",
 ] }
 # Local notifications, their taps and the icon badge (`notify`).
 objc2-user-notifications = { workspace = true, features = [
@@ -99,6 +101,8 @@ objc2-app-kit = { workspace = true, features = [
     # The browser tile (`web`): its first responder, the key and click watch, the snapshot.
     "NSBitmapImageRep",
     "objc2-core-foundation",
+    # The Mac waking, its screens and its session (`resume`).
+    "NSWorkspace",
     # The Dock tile's progress bar (`dock`).
     "NSControl",
     "NSImageView",
@@ -140,9 +144,8 @@ objc2-ui-kit = { workspace = true, features = [
     "UIDocumentPickerViewController",
     "UIViewController",
     "UIWindow",
-    # The browser tile (`web`): its views, the tap that focuses it, the snapshot.
+    # The browser tile (`web`): its view and the snapshot.
     "UIView",
-    "UIEvent",
     # The refresh the terminal's guesses are timed against (`display_refresh`).
     "UIScene",
     "UIWindowScene",

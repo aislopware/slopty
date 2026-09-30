@@ -3,7 +3,7 @@
 //!
 //! A command lives in a scope, which `[keys.<scope>]` names (`workspace`, `terminal`, `file`),
 //! under a name of its own (`new_terminal`). The file gives it a chord in the palette's key
-//! syntax, read by the quick terminal's parser ([`Chord::read`]), a list of them, or none. What
+//! syntax (`chord`), a list of them, or none. What
 //! the file does not name keeps its default, so the table here is the one place a default is
 //! written.
 //!
@@ -24,10 +24,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{Action, App, KeyBinding, KeyBindingContextPredicate, KeyBindingMetaIndex};
-use slopty_platform::hotkey::{Chord, ChordError};
 use slopty_settings::KeySettings;
 
+use self::chord::Chord;
+pub use self::chord::ChordError;
 use crate::workspace::actions as ws;
+
+mod chord;
 
 /// Where a command's keys apply: `[keys.<name>]` in the file.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -48,15 +51,18 @@ pub enum Scope {
     Folder,
     /// Search in files.
     Search,
+    /// A project's board.
+    Project,
 }
 
 impl Scope {
     /// Every scope, in the order the Keyboard page lists them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::App,
         Self::Workspace,
         Self::Terminal,
         Self::Conversation,
+        Self::Project,
         Self::File,
         Self::Folder,
         Self::Search,
@@ -75,15 +81,16 @@ impl Scope {
             Self::Conversation => "conversation",
             Self::Folder => "folder",
             Self::Search => "search",
+            Self::Project => "project",
         }
     }
 
-    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows hold no text, so bare
-    /// keys walk them. Elsewhere a key alone is typed into the terminal or a field, and a chord
-    /// carries ⌘ or ⌃ (or is an F key).
+    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows and a board's hold no
+    /// text, so bare keys walk them. Elsewhere a key alone is typed into the terminal or a field,
+    /// and a chord carries ⌘ or ⌃ (or is an F key).
     #[must_use]
     pub const fn takes_bare_keys(self) -> bool {
-        matches!(self, Self::Folder)
+        matches!(self, Self::Folder | Self::Project)
     }
 
     fn named(name: &str) -> Option<Self> {
@@ -197,6 +204,8 @@ const FILE_SEARCH: Option<&str> = Some("FileSearch");
 const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
+/// A project's board: its rows hold no text, so bare keys walk them.
+const BOARD: Option<&str> = Some(crate::project::CTX);
 /// Search in files, its fields holding the keyboard.
 const SEARCH: Option<&str> = Some(crate::search::CTX);
 /// A tile's window of its own: its picture takes every chord but the one that puts it back.
@@ -204,6 +213,9 @@ const POP_OUT: Option<&str> = Some(ws::POP_OUT_CTX);
 /// A focused page that does not hold the keyboard: a page that does keeps ⌘← and ⌘→ for its
 /// own fields.
 const PAGE: Option<&str> = Some("Workspace && Page && !Screen");
+/// A page that holds the keyboard: its edit keys are the page's, before the workspace's
+/// (⌘Z is "Undo close" there).
+const PAGE_HELD: Option<&str> = Some("PageBody > NativeView");
 /// A page's find bar (Esc is the bar's own).
 const PAGE_SEARCH: Option<&str> = Some("PageSearch");
 const TERMINAL: Option<&str> = Some("Terminal");
@@ -220,7 +232,7 @@ const APP: &[Option<&str>] = &[None];
 #[must_use]
 #[expect(clippy::too_many_lines, reason = "the one table of every default chord")]
 pub fn defaults() -> Vec<Command> {
-    use Scope::{Conversation, File, Folder, Page, Search, Terminal, Workspace};
+    use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
 
     use crate::conversation::{CycleDensity, Interrupt};
     use crate::terminal as t;
@@ -318,8 +330,10 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "font_smaller", ws::FontSmaller, &["cmd--"], W),
         c(Workspace, "font_reset", ws::FontReset, &["cmd-0"], W),
         c(Workspace, "toggle_conversation", ws::ToggleConversation, &["cmd-j"], W),
+        c(Workspace, "toggle_project_board", ws::ToggleProjectBoard, &["cmd-shift-j"], W),
         c(Workspace, "edit_address", ws::EditAddress, &["cmd-l"], W),
         c(Workspace, "toggle_trackpad", crate::screen::ToggleTrackpad, &[], W),
+        c(Workspace, "toggle_remote_gestures", crate::screen::ToggleRemoteGestures, &[], W),
     ];
     for (index, key) in ('1'..='9').enumerate() {
         out.push(Command::new(
@@ -355,6 +369,12 @@ pub fn defaults() -> Vec<Command> {
         c(Page, "back", ws::PageBack, &["cmd-left"], &[PAGE]),
         c(Page, "forward", ws::PageForward, &["cmd-right"], &[PAGE]),
         c(Page, "reload", ws::ReloadPage, &[], &[PAGE]),
+        // AppKit's menu and WebKit take these nowhere a page's field would expect; the page
+        // does them itself (`browser::Edit`).
+        c(Page, "undo", ws::PageUndo, &["cmd-z"], &[PAGE_HELD]),
+        c(Page, "redo", ws::PageRedo, &["cmd-shift-z"], &[PAGE_HELD]),
+        c(Page, "cut", ws::PageCut, &["cmd-x"], &[PAGE_HELD]),
+        c(Page, "select_all", ws::PageSelectAll, &["cmd-a"], &[PAGE_HELD]),
         c(Page, "find_next", t::FindNext, &["cmd-g"], &[PAGE_SEARCH]),
         c(Page, "find_previous", t::FindPrev, &["cmd-shift-g"], &[PAGE_SEARCH]),
         c(Conversation, "cycle_density", CycleDensity, &["ctrl-o"], &[FACE, FACE_INPUT]),
@@ -376,6 +396,13 @@ pub fn defaults() -> Vec<Command> {
         c(Folder, "select_last", crate::folder::SelectLast, &["end"], &[FOLDER]),
         c(Folder, "open", crate::folder::OpenSelected, &["enter"], &[FOLDER]),
         c(Folder, "open_parent", crate::folder::OpenParent, &["backspace", "cmd-up"], &[FOLDER]),
+        // A board: the arrows walk its rows, ↩ opens one's agent, the digits pick a lens.
+        c(Project, "select_previous", crate::project::SelectPrevious, &["up", "k"], &[BOARD]),
+        c(Project, "select_next", crate::project::SelectNext, &["down", "j"], &[BOARD]),
+        c(Project, "open", crate::project::OpenNode, &["enter"], &[BOARD]),
+        c(Project, "show_tree", crate::project::ShowTree, &["1"], &[BOARD]),
+        c(Project, "show_board", crate::project::ShowBoard, &["2"], &[BOARD]),
+        c(Project, "show_timeline", crate::project::ShowTimeline, &["3"], &[BOARD]),
         // The search surface's toggles, VS Code's keys.
         c(Search, "toggle_match_case", crate::search::ToggleMatchCase, &["cmd-alt-c"], &[SEARCH]),
         c(Search, "toggle_whole_word", crate::search::ToggleWholeWord, &["cmd-alt-w"], &[SEARCH]),
@@ -591,7 +618,7 @@ fn binding(chord: &str, action: &dyn Action, context: Option<&str>) -> anyhow::R
     )?)
 }
 
-/// `text`, a chord in the palette's key syntax, read ([`Chord::read`]) and written as GPUI writes a
+/// `text`, a chord in the palette's key syntax, read (`Chord::read`) and written as GPUI writes a
 /// keystroke (`cmd-shift-t`), so one chord is one string however it was spelled.
 ///
 /// # Errors

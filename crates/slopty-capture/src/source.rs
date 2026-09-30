@@ -260,6 +260,40 @@ pub enum AxError {
     Unsupported,
 }
 
+/// What the Mac's screens show of the session the worker runs in.
+///
+/// A capture of a locked Mac or of a session moved off the screens shows nothing of the
+/// session's windows, and nothing the client does can change that: someone has to unlock the
+/// Mac, or switch back to the session, at the Mac itself. So the client is told, and shows it
+/// (`docs/decisions/video.md`, "The client is told when the Mac is locked").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Console {
+    /// The session is on the screens, unlocked.
+    Shown,
+    /// The session is on the screens behind the lock screen.
+    Locked,
+    /// Another session is on the screens: the login window, or another user's session after a
+    /// fast user switch.
+    Away,
+}
+
+impl Console {
+    /// The state a session dictionary's three flags make: whether the session is on the
+    /// console, whether its login has finished, and whether its screens are locked. An absent
+    /// flag reads as the unremarkable value (on the console, logged in, unlocked): the lock
+    /// flag is only in the dictionary while the screens are locked.
+    #[must_use]
+    pub fn of(on_console: Option<bool>, login_done: Option<bool>, locked: Option<bool>) -> Self {
+        if on_console == Some(false) || login_done == Some(false) {
+            Self::Away
+        } else if locked == Some(true) {
+            Self::Locked
+        } else {
+            Self::Shown
+        }
+    }
+}
+
 /// Where a worker's pictures come from: the displays and windows it can stream, a stream of
 /// frames from one of them, and what a window stream must know as its window moves, hides
 /// or is covered.
@@ -345,6 +379,12 @@ pub trait CaptureSource: 'static {
     fn stop(stream: &Self::Stream, done: impl FnOnce(Result<(), CaptureError>) + Send + 'static);
     /// Now on the clock frames are stamped with, microseconds.
     fn now_us() -> u64;
+    /// What the Mac's screens show of this process's session now; `None` when it cannot be
+    /// told, as on a platform with no screens of its own. Blocking: one window-server round
+    /// trip.
+    fn console() -> Option<Console> {
+        None
+    }
 
     /// The bounds of a display or window, in global points.
     fn target_bounds(target: CaptureTarget) -> Option<Rect>;
@@ -398,4 +438,24 @@ pub trait CaptureSource: 'static {
     fn pointer_location() -> (f64, f64);
     /// The cursor's picture at `scale` pixels per point, when there is one to read.
     fn cursor_shape(scale: u8) -> Option<CursorShape>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The session dictionary's flags: off the console or not logged in is another session on
+    /// the screens, whatever the lock says; otherwise the lock decides, and a flag the
+    /// dictionary leaves out (the lock, whenever the screens are unlocked) reads as nothing to
+    /// remark on.
+    #[test]
+    fn the_session_flags_say_what_the_screens_show() {
+        assert_eq!(Console::of(Some(true), Some(true), None), Console::Shown);
+        assert_eq!(Console::of(None, None, None), Console::Shown);
+        assert_eq!(Console::of(Some(true), Some(true), Some(false)), Console::Shown);
+        assert_eq!(Console::of(Some(true), Some(true), Some(true)), Console::Locked);
+        assert_eq!(Console::of(Some(false), Some(true), Some(true)), Console::Away);
+        assert_eq!(Console::of(Some(false), Some(true), None), Console::Away);
+        assert_eq!(Console::of(Some(true), Some(false), None), Console::Away);
+    }
 }
