@@ -200,6 +200,20 @@ fn open_master() -> io::Result<OwnedFd> {
             Mode::empty(),
         )
     })
+    .map_err(exhausted)
+}
+
+/// ENXIO from the clone device means every pseudo-terminal the system allows is open: said so,
+/// with the limit to raise, instead of "Device not configured".
+fn exhausted(error: io::Error) -> io::Error {
+    if error.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) {
+        io::Error::new(
+            io::ErrorKind::ResourceBusy,
+            "every pseudo-terminal the system allows is in use (kern.tty.ptmx_max)",
+        )
+    } else {
+        error
+    }
 }
 
 /// `open`, made again while it fails with [`REDRIVE_OPEN`], giving way to other threads in
@@ -832,6 +846,17 @@ mod tests {
         let path = dir.path().as_os_str().to_owned();
         let error = executable("slopty-unrunnable", Path::new("/"), Some(&path)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+    }
+
+    #[test]
+    fn running_out_of_pseudo_terminals_says_so() {
+        let enxio = io::Error::from_raw_os_error(rustix::io::Errno::NXIO.raw_os_error());
+        let error = exhausted(enxio);
+        assert_eq!(error.kind(), io::ErrorKind::ResourceBusy, "{error}");
+        assert!(error.to_string().contains("kern.tty.ptmx_max"), "{error}");
+        let other =
+            exhausted(io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()));
+        assert_eq!(other.raw_os_error(), Some(rustix::io::Errno::ACCESS.raw_os_error()));
     }
 
     /// An open the kernel asks to redo is made again until it takes; one it keeps asking for

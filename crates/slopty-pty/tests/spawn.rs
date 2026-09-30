@@ -34,10 +34,15 @@ mod spawn {
             .collect();
 
         let missing = std::env::temp_dir().join("slopty-no-such-dir-for-spawn");
+        // The race under test is spawns against threads that allocate and hold locks, not
+        // running the system out of pseudo-terminals, which a CI runner beside other PTY tests
+        // does at 120 open at once (ENXIO).
+        let in_flight = Arc::new(tokio::sync::Semaphore::new(16));
         let spawns: Vec<_> = (0..120_usize)
             .map(|i| {
-                let missing = missing.clone();
+                let (missing, in_flight) = (missing.clone(), Arc::clone(&in_flight));
                 tokio::spawn(async move {
+                    let _slot = in_flight.acquire_owned().await.unwrap();
                     let pty = Pty::open(TermSize::default()).unwrap();
                     let spec = SpawnSpec {
                         command: vec!["/bin/sh".into(), "-c".into(), "exit 7".into()],
