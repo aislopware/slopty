@@ -322,14 +322,17 @@ as `WorkerMsg::Handoff`, one after another, to the clients that declared they ta
 (`ClientMsg::HandoffCaps`), starting with the client focused on the session. A page opens
 without asking only on the client that just typed into the session. Otherwise, and always for
 a local or deceptive address, it is offered in a notice. The client answers
-`ClientMsg::Handoff`, and `slopty_client::handoff` decides what to do. An editor waits on the
+`ClientMsg::Handoff`, and `slopty_client::handoff` decides what to do. The link hands each one
+on as `LinkEvent::Handoff` with the `Instant` it read it, so whether a page is too late to open
+is measured on the client's clock alone. An editor waits on the
 socket until the person is done with the file tile, whose saves then go into the file in
 place. With no client that takes it, the program falls back at once to this machine's opener
 or `vi` (decisions, "A shell's browser and editor are the client's"). In the app,
 `slopty-ui::workspace::handoffs` declares the caps first on every link, keeps one
 `Handoffs` per worker across its links, opens a page (behind, while a remote window or display
 is in front) or holds it in a notice by its host, opens an edit as a file tile beside its
-shell (`FileView::set_waiting`, answered by `FileViewEvent::Edited`), and reports the shell in
+shell (`FileView::set_waiting`, answered by `FileViewEvent::Edited`; a tile that goes any way
+but a landed save answers `Cancelled`), and reports the shell in
 front of the person to its worker as `TermRequest::Focus` on every change of the workspace.
 
 **Deployment.** `slopty worker install` writes two LaunchAgents (`dev.aislopware.slopty.ptyd`,
@@ -395,7 +398,7 @@ SCStream(display | window-as-display-crop | window, 420f BT.709, minimumFrameInt
   → packetize (≤1200 B datagrams, 16 B header; the data sent, then reed-solomon-simd parity per frame)
   → QUIC datagrams                                      ── client: NACK/refresh datagrams; LTR acks + telemetry on the control stream
 client: reassemble/recover → VTDecompressionSession(RealTime) → CVPixelBuffer (IOSurface)
-  → gpui surface (CVMetalTextureCache, zero copy) → present on arrival (next vsync)
+  → VideoLayer on the decoder's thread (CVMetalTextureCache, zero copy) → next vsync
 ```
 
 Loss recovery order: FEC (free) → NACK inside the playout window → `ForceLTRRefresh` (small
@@ -511,27 +514,49 @@ VideoToolbox callback (`ScreenStats::encode`), p50/p95/max over the last 600 fra
 locally over the control socket (`slopty worker screens`; `slopty bench screen` appends them on
 loopback). Nothing of this crosses the wire.
 
+**Several streams, one Mac's encode engines.** Every stream has its own capture, session, encode
+thread and packetizer. The hardware engines are the one thing they share, and
+`slopty_worker::screen::engines` arbitrates them. A session made for 60 or more declares 120
+until its first frame, so VideoToolbox gives streams an engine each (`placement_fps`). A client
+says which tile has its keyboard in an active window (`ScreenRequest::Focused`, from
+`ScreenView::tell_focus`). When that stream's encoder watch would step its rung down, the
+unfocused streams step down a rung instead and hold it (`Engines::contended`), and they are
+asked again only after a settling second and two of its windows. Losing the last focus, or
+closing the focused stream, ends every hold (`Engines::unfocused`). Captures are not held back
+for the focused one (decisions, "A focused stream keeps its rate").
+
 **Presentation path.** The reassembler stamps every complete frame with the arrival of the
 datagram that finished it (`FrameOut::arrived`); the stream worker parks that instant under the
 frame's presentation timestamp, and the VideoToolbox callback — which is given nothing but that
-timestamp — picks it back up, so a decoded picture reaches the UI as a `Presentable`
-(`CVPixelBuffer` + arrival + decode instants) on a `watch` channel that keeps only the newest.
-In the element a `slopty_client::Pacer` owns the one decision left: **present on arrival**. A
-frame goes up on the first paint after the decoder returns it and is never queued for a later
-one — a queue would buy smoother spacing at the cost of a whole frame of latency on every frame,
-which is the wrong trade for a screen. When the decoder runs ahead of the display the pacer
-*replaces* the frame waiting to be painted instead of lining up behind it (`skipped`); when it
-runs behind, the paint shows the same picture again (`repeats`); a frame not newer than what is
-up is dropped (`late`). The pacer is also the instrument: a ring of the last 240 presented
-frames gives arrival → present p50/p95/max, the decoder's share of it, the spacing of the paints
-and that spacing's jitter — read by the ⌘⇧I overlay's fourth line (`hud_lines`) and by the app
-self-test's `dump` (`ScreenInfo`). The policy is pure and clock-injected
-(`slopty_client::pacing`), so it is unit-tested without a window; the element only feeds it a
-frame on one side and a paint on the other.
+timestamp — picks it back up as a `Presentable` (`CVPixelBuffer` + arrival + decode instants).
+The callback hands it to the view's presenter on its own thread (`ScreenHandle::set_present`)
+before the newest-only `watch` channel other readers use. The presenter
+(`slopty-ui::screen::glass`) gives the picture straight to the stream's `VideoLayer` (gpui-fast,
+`gpui_apple::fast::video_layer`): a `CAMetalLayer` in a native host under GPUI's layer, drawn on
+its own thread by GPUI's surface shader, with one picture at most on its way to the glass and
+the newest waiting in a one-picture mailbox. No GPUI frame is drawn for a picture. The view
+places the layer in its own frame at the picture's fitted (or zoomed) rectangle
+(`Window::paint_native`, no hitbox, so the pointer stays GPUI's), clipped by the tile and the
+strip, and draws the pointer, the zoom readout and the ⌘⇧I overlay over its hole; it draws again
+only when those change or the picture's size or chroma does. A tile the strip does not draw
+places no layer, which hides it. A `slopty_client::Pacer` beside the layer owns the one decision
+left, **present on arrival**: a picture older than the one up is dropped (`late`), one the
+layer's mailbox replaced before the glass is `skipped`. The pacer is also the instrument: the
+layer's report (`on_presented`, the window server's presentation) stops each picture's clock,
+and a ring of the last 240 gives arrival → glass p50/p95/max, the decoder's share, the spacing
+and its jitter — read by the overlay (`hud_lines`) and the app self-test's `dump`
+(`ScreenInfo`, with the layer's presented placement). The pacer is pure and clock-injected
+(`slopty_client::pacing`); the glass's bookkeeping and the placement are unit-tested with the
+test platform's native hosts. An e2e render cannot see the layer, so for that frame each stream
+draws its picture with GPUI too, over its hole (`screen::capture_pictures`).
 
 **Audio** rides the same stream: ScreenCaptureKit captures the target's audio (48 kHz stereo,
-this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 20 ms packets, 96 kb/s) →
-one `Audio` datagram per packet, no FEC and no NACK (a lost 20 ms is cheaper than a late one).
+this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 10 ms packets, 96 kb/s) →
+one `Audio` datagram per packet, never NACKed (a lost 10 ms is cheaper than a late one). While
+the client's reports show audio loss, each datagram also carries the one or two packets before
+it (`slopty_media::AudioCopies`, `audio_datagram`), and the client decodes those copies into a
+gap. What no copy covers is concealed by repeating the last pitch period of what played
+(`slopty_codec::audio::Conceal`, up to 60 ms).
 The worker stops sending 300 ms after the last non-silent sample, so silent apps cost nothing.
 The client decodes with `AudioConverter` and plays through an output audio unit whose render
 callback fills each device I/O buffer straight from a jitter buffer (`slopty-codec::audio`:
@@ -848,6 +873,23 @@ a hit is a line holding the text, smart-case (`file::hit_lines`), tinted in the 
 stepped with ⌘G/↩ and wrapped; Esc closes it and the editor takes the keyboard back. Inside
 the editor, ⌘F is the tile's find, not gpui-kit's, and ⌘⌥↑/↓ move the focus between tiles, not add
 carets (bindings in `FileEditor > Input`).
+
+**Hot exit.** An edit not yet saved is kept on this device as it is typed, so a quit, a crash
+or a SIGKILL loses none of it. `slopty_client::unsaved::Store` holds one backup per file tile,
+keyed by its worker and item, in `<data dir>/unsaved/` (the whole text, the version it started
+from, whether it was already a conflict). Each is written by `slopty_platform::fs::replace`,
+and every change is numbered so the later of two to one backup stands whichever thread lands
+it. `workspace/unsaved.rs` decides what to write: a tile's `FileView::backup_mark` moving
+(never a caret blink) brings on a pass, which compares marks on the UI thread and takes the
+editor's rope, shared, for a tile that is behind. The text is read out and written off the UI
+thread, at once after a quiet spell, then at most every 200 ms, or less often for a large edit
+(8 MiB a second at most). A failed write is tried again with a growing wait, and on quit what
+is left is written synchronously (`keep_unsaved_now`, from the app's `on_app_quit`). A tile's
+backup goes once the tile is clean, or closed for good after ⌘Z's window. At start the backups
+are read off the UI thread and each is laid over its own tile's first read
+(`FileView::restore`), as a conflict when the disk moved meanwhile. One whose tile went waits
+for its worker's first snapshot, then goes to a clean tile on its file or to a new tile
+(decisions, "An unsaved edit survives a quit or a crash").
 
 A **folder tile** (`ItemKind::Folder { path }`, `slopty-ui::folder`) browses a directory on the
 worker in place: `ClientMsg::ListFolder` → `WorkerMsg::Folder` (`slopty_worker::listing::folder`,

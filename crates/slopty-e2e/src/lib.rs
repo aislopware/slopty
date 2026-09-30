@@ -50,6 +50,26 @@ pub const TAILNET_STATUS_ENV: &str = "SLOPTY_TAILNET_STATUS";
 /// Without it the self-test offers no such entry.
 pub const THIS_MAC_ENV: &str = "SLOPTY_THIS_MAC";
 
+/// Environment variable naming the macOS permissions the e2e build's app takes every worker to
+/// hold: grant names ([`SCREEN_RECORDING`], [`ACCESSIBILITY`]) joined by commas, none when empty.
+///
+/// A worker reports what this machine granted its binary, which differs from Mac to Mac and
+/// from build to build, and the navigator says when a grant is missing. With this set, the app
+/// sees the grants the test chose and a render is the same on every machine.
+pub const WORKER_GRANTS_ENV: &str = "SLOPTY_WORKER_GRANTS";
+
+/// Screen Recording, in [`WORKER_GRANTS_ENV`].
+pub const SCREEN_RECORDING: &str = "screen-recording";
+
+/// Accessibility, in [`WORKER_GRANTS_ENV`].
+pub const ACCESSIBILITY: &str = "accessibility";
+
+/// Whether a [`WORKER_GRANTS_ENV`] value names `grant`: a whole name, not a prefix of one.
+#[must_use]
+pub fn granted(grants: &str, grant: &str) -> bool {
+    grants.split(',').any(|g| g.trim() == grant)
+}
+
 /// A pointer button, as the driver names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -662,7 +682,13 @@ pub struct FileItemInfo {
     pub trouble: Option<String>,
     /// Why the text cannot be edited, when it cannot.
     pub read_only: Option<String>,
+    /// The editor's text, when it is short ([`FILE_TEXT_SHOWN`] bytes or fewer).
+    #[serde(default)]
+    pub text: Option<String>,
 }
+
+/// The longest file text a dump carries: enough for a test's file, and no dump of a large one.
+pub const FILE_TEXT_SHOWN: usize = 4096;
 
 /// One terminal.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
@@ -839,9 +865,9 @@ pub struct FaceInfo {
 ///
 /// The timings are microseconds so a test can assert on them without floating point. They cover
 /// the client's own presentation path: `latency_*` starts at the arrival of the datagram that
-/// completed the frame and ends at the paint that showed it, `interval_*` is the spacing of
-/// those paints, and `skipped` / `repeats` are the two cadence faults (a frame the display never
-/// saw, a paint that showed the picture already up).
+/// completed the frame and ends when the window server reported the stream's layer showing it,
+/// `interval_*` is the spacing of those reports, and `skipped` / `repeats` are the two cadence
+/// faults (a frame the display never saw, a present that showed the picture already up).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 pub struct ScreenInfo {
     /// Item id.
@@ -850,9 +876,9 @@ pub struct ScreenInfo {
     pub stream: u32,
     /// Stream pixel size.
     pub size: [u32; 2],
-    /// Frames painted.
+    /// Pictures put up on the stream's layer.
     pub frames: u64,
-    /// Frames the pacer put on screen.
+    /// Pictures the layer reported shown.
     pub presented: u64,
     /// Frames replaced before they were ever painted.
     pub skipped: u64,
@@ -881,6 +907,10 @@ pub struct ScreenInfo {
     /// Loss-recovery counters from the client's `ScreenStats`, for the injected-loss table.
     #[serde(default)]
     pub recovery: RecoveryInfo,
+    /// The part of the stream's layer that shows, as the window last presented it, in whole
+    /// window points `[x, y, width, height]`; `None` when that frame placed it nowhere.
+    #[serde(default)]
+    pub layer: Option<[i32; 4]>,
 }
 
 /// The client's loss-recovery counters for one stream.
@@ -993,6 +1023,16 @@ mod tests {
         // Defaults keep the driver's JSON short.
         let short: Command = serde_json::from_str(r#"{"cmd":"click","x":1,"y":2}"#).unwrap();
         assert_eq!(short, Command::Click { x: 1.0, y: 2.0, button: Button::Left, count: 1 });
+    }
+
+    /// The grants list names whole grants: none when empty, spaces allowed, no prefixes.
+    #[test]
+    fn a_worker_holds_only_the_grants_named() {
+        assert!(!granted("", SCREEN_RECORDING));
+        assert!(granted("screen-recording, accessibility", ACCESSIBILITY));
+        assert!(granted("screen-recording", SCREEN_RECORDING));
+        assert!(!granted("screen-recording", ACCESSIBILITY));
+        assert!(!granted("screen", SCREEN_RECORDING));
     }
 
     #[test]

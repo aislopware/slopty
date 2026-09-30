@@ -262,6 +262,31 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   it grew, as before. A `Serialize` impl that encodes a frame while it is being encoded gets a
   fresh buffer instead of a borrow panic.
 
+**gpui-kit moves to upstream `201b55a4`, GPUI to the fork's `f994c345`.** ✅ 2026-09-30
+- gpui-kit's one new commit (#3320) takes `notify` 8.2 and keeps the theme watcher alive when
+  a watched theme file is replaced rather than written. Slopty watches no gpui-kit theme and
+  uses `notify` nowhere itself, so nothing changes here but the lock.
+- gpui-kit takes GPUI from the fork's branch, so the pin moved with it to fork main `f994c345`:
+  zed's GPUI-owned hang monitor (0f9c923e), upstream's hook rules (#19), and the fork's own
+  "take a line's content mask once, not once a glyph".
+
+**The ghostty fork moves to upstream `26e64dfb`.** ✅ 2026-09-30
+- Upstream merged #14458 (a live pending wrap is repaired after a resize), which the fork had
+  carried as a copy since `0386095`. The rebase dropped the copy for the merged commit and kept
+  the fork's own six on top: the five alt-screen commits and a new one for autowrap off. With
+  DECAWM off, the next character overwrites the last cell, as in xterm, so the fork leaves the
+  cursor there instead of moving it past the margin as #14458 does. That fix is drafted for
+  upstream in `.research/ghostty-upstream-prs.md`, not opened.
+- Pins: ghostty fork `741a800e`, libghostty-rs `8a452227` (bindings unchanged).
+  `without_autowrap_a_resize_keeps_the_cursor_on_the_last_cell` in slopty-engine fails on the
+  old pin and passes on the new one.
+- **Adopted, with no code in Slopty:** the rest of the batch. It is a prompt-click fix in the
+  app's `Surface.zig`, a GTK DPI warning, a renderer shader fix, list updates and an esctest
+  harness; only #14458 touches what libghostty-vt builds from.
+- The sync's lock refresh ran `git ls-files --error-unmatch Cargo.lock` in a repository without
+  a lock and printed git's pathspec error. It now stays quiet, and the missing lock still means
+  there is nothing to refresh.
+
 **The zed fork moves to upstream `dd510f99`, gpui-kit to `25d59c06`.** ✅ 2026-09-29
 - The zed fork now carries 33 commits on upstream `dd510f99`. The last sync had already
   rebased it onto `ee43be11` without moving `base` in `xtask/upstream.toml`, so 19 of the 27
@@ -618,3 +643,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     says where `vendor/ghostty` stands against the fork head and the commit this repository
     records. The review starts there. A commit in `src/terminal/` or `src/simd/` is measured
     with `cargo xtask bench --filter engine` before its bump lands.
+
+- ✅ **The audio ring is model-checked with loom** (2026-09-30). The ring between the decoder's
+  thread and the device's render callback (`crates/slopty-codec/src/audio.rs`, `Ring`) takes no
+  lock. Its samples are relaxed cells, `write` is published with a release store, and the device
+  and a mute both stop the run word with a compare-and-swap. A missing release or acquire there
+  shows only as a click or a torn sample on some interleaving. A test that runs the two threads
+  for real cannot be relied on to hit one, and ThreadSanitizer reports no race on atomics. So
+  `audio::ring_model` runs the ring's own code on loom's atomics (`--cfg slopty_loom`, with a
+  ring of four frames and a one-frame fade). `cargo xtask deep loom` explores three scenarios
+  exhaustively, with no preemption bound: a run filling while it plays, a mute racing a render
+  and the next run's fade-in, and running dry racing a mute. It checks every played sample
+  against where it came from. Why loom, checked on 2026-09-30:
+  - It is the only exhaustive checker for Rust that runs on this Mac and lets a load read a
+    stale store (any of the last seven of each atomic), which is where these bugs live.
+  - Shuttle models every atomic as `SeqCst`, so it cannot see a missing release.
+  - Kani compiles concurrent code as sequential.
+  - Miri's GenMC mode is more faithful, but it runs only on Linux, from a source build of Miri.
+  - Miri's `-Zmiri-many-seeds` samples interleavings at random. It also needs a test that runs
+    both threads without CoreAudio, which the codec does not have.
+
+  Loom's own limit is that it never reorders a thread's own relaxed operations. The release store
+  that publishes `write` makes that moot here. The model was proven against three planted bugs,
+  and each was caught within milliseconds:
+  - `write` published relaxed: a torn frame played.
+  - A run started relaxed: its front played before its fade-in, a click.
+  - The device not checking `run` again after its copy: the next run played unfaded after a mute.
+
+  The three scenarios take 61 s (MEASUREMENTS, "Deep checks widened, a stream soak, a loom
+  model"). The cfg is our own, because a global `--cfg loom` switches tokio's and other crates'
+  internals to loom as well.

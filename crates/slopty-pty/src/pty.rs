@@ -1,15 +1,12 @@
 //! Pseudo-terminal open/spawn/resize and async master I/O.
 
-use std::ffi::OsString;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use rustix::fs::{Mode, OFlags};
-use rustix::io::FdFlags;
-use rustix::pty::OpenptFlags;
 use rustix::termios::Winsize;
 use serde::{Deserialize, Serialize};
 use slopty_core::shell_quote;
@@ -19,6 +16,7 @@ use tokio::io::unix::AsyncFd;
 
 use crate::PtyError;
 use crate::shell_integration::{self, ShellIntegration};
+use crate::spawn::{Child, Launch};
 
 /// What to run on the PTY.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -37,14 +35,14 @@ pub struct SpawnSpec {
 #[derive(Debug)]
 pub struct Spawned {
     /// The child.
-    pub child: tokio::process::Child,
+    pub child: Child,
     /// Its `TERM`: [`default_term`] at the moment it was spawned, unless the spec's own
     /// variables named another. Whoever answers the child's terminal queries answers as this.
     pub term: String,
 }
 
-/// An open pseudo-terminal pair. The slave is opened once for the child and closed in the parent
-/// right after spawn.
+/// An open pseudo-terminal pair. The slave is opened once, handed to the child, and closed in
+/// the parent at [`Pty::into_master`].
 #[derive(Debug)]
 pub struct Pty {
     master: OwnedFd,
@@ -55,10 +53,7 @@ pub struct Pty {
 impl Pty {
     /// Open a new PTY at `size`.
     pub fn open(size: TermSize) -> Result<Self, PtyError> {
-        let master = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)
-            .map_err(|e| PtyError::os("posix_openpt", e))?;
-        // macOS posix_openpt has no O_CLOEXEC; set it so the child never inherits the master.
-        rustix::io::fcntl_setfd(&master, FdFlags::CLOEXEC).map_err(|e| PtyError::os("fcntl", e))?;
+        let master = open_master().map_err(|e| PtyError::os("open /dev/ptmx", e))?;
         rustix::pty::grantpt(&master).map_err(|e| PtyError::os("grantpt", e))?;
         rustix::pty::unlockpt(&master).map_err(|e| PtyError::os("unlockpt", e))?;
         let name =
@@ -82,6 +77,11 @@ impl Pty {
         &self.slave_path
     }
 
+    /// Borrow the slave, which the child is given.
+    pub(crate) fn slave(&self) -> BorrowedFd<'_> {
+        self.slave.as_fd()
+    }
+
     /// Borrow the master.
     #[must_use]
     pub fn master(&self) -> BorrowedFd<'_> {
@@ -102,25 +102,21 @@ impl Pty {
 
     /// [`Pty::spawn`], with `integration` (see [`crate::shell_integration`]) injected when the
     /// program is a shell it covers.
+    ///
+    /// Everything the child gets (its program, arguments, environment, directory) is settled
+    /// here, before [`crate::spawn`] forks: the child only makes system calls on it.
     pub fn spawn_with(
         &self,
         spec: &SpawnSpec,
         integration: Option<&ShellIntegration>,
     ) -> Result<Spawned, PtyError> {
-        let slave = self.slave.try_clone().map_err(|e| PtyError::os("dup slave", e))?;
-        let (program, args, arg0) = resolve_command(&spec.command);
+        let cwd = spec.cwd.clone().unwrap_or_else(home);
+        let (program, args, arg0) = resolve_command(&spec.command, &cwd);
         let injection = integration.map(|si| si.apply(&program, &args, arg0.as_deref(), &spec.env));
         let (args, arg0, extra_env) = match injection {
             Some(inj) => (inj.args, inj.arg0, inj.env),
             None => (args, arg0, Vec::new()),
         };
-
-        let mut cmd = std::process::Command::new(&program);
-        cmd.args(&args);
-        if let Some(arg0) = arg0 {
-            cmd.arg0(arg0);
-        }
-        cmd.current_dir(spec.cwd.clone().unwrap_or_else(home));
         // Decided once: `default_term` changes when the terminfo is installed, and the child's
         // `TERM` and the name reported with it must be the same. The spec's own variables come
         // last, so a `TERM` among them is the child's.
@@ -136,17 +132,18 @@ impl Pty {
                 io::Error::new(io::ErrorKind::InvalidInput, "longer than a terminfo name"),
             ));
         }
-        cmd.env("TERM", &term);
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "slopty");
-        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        let mut env = Env::inherited();
+        env.set("TERM", &term);
+        env.set("COLORTERM", "truecolor");
+        env.set("TERM_PROGRAM", "slopty");
+        env.set("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         // `TERM` and the search path have to agree: when the database is ours, point the child
         // at it; otherwise clear whatever we inherited and let ncurses use the usual places.
         match crate::terminfo::child_database() {
-            Some(dir) => cmd.env("TERMINFO", dir),
-            None => cmd.env_remove("TERMINFO"),
-        };
-        forget_parent_agent(&mut cmd);
+            Some(dir) => env.set("TERMINFO", dir),
+            None => env.remove("TERMINFO"),
+        }
+        forget_parent_agent(&mut env);
         // Web pages and editors go to the client, unless the session's own variables say
         // otherwise (they come after).
         let handoff = integration.map(|si| {
@@ -157,46 +154,112 @@ impl Pty {
         // One of Slopty's own commands inherited from a daemon started inside a Slopty session
         // is nobody's choice; a stale `VISUAL` would beat the user's `EDITOR`.
         for name in ["BROWSER", "EDITOR", "VISUAL"] {
-            if std::env::var(name).is_ok_and(|v| shell_integration::is_handoff_command(&v)) {
-                cmd.env_remove(name);
+            if env.get(name).is_some_and(shell_integration::is_handoff_command) {
+                env.remove(name);
             }
         }
         for (k, v) in handoff_env.into_iter().chain(extra_env) {
-            cmd.env(k, v);
+            env.set(k, v);
         }
         for (k, v) in &spec.env {
-            cmd.env(k, v);
+            env.set(k, v);
         }
         if let Some(path) = handoff_path {
-            cmd.env("PATH", path);
-        }
-        let dup = |what: &'static str| slave.try_clone().map_err(|e| PtyError::os(what, e));
-        cmd.stdin(Stdio::from(dup("dup slave for stdin")?));
-        cmd.stdout(Stdio::from(dup("dup slave for stdout")?));
-        cmd.stderr(Stdio::from(slave));
-
-        // SAFETY: `make_controlling_tty` only issues async-signal-safe raw syscalls (setsid,
-        // ioctl) between fork and exec.
-        unsafe {
-            cmd.pre_exec(make_controlling_tty);
+            env.set("PATH", path);
         }
 
-        let child = tokio::process::Command::from(cmd)
-            .kill_on_drop(false)
-            .spawn()
+        let child = executable(&program, &cwd, env.0.get(OsStr::new("PATH")))
+            .and_then(|executable| {
+                let argv = std::iter::once(arg0.unwrap_or(program)).chain(args);
+                Launch::new(&executable, argv, env.0, &cwd)
+            })
+            .and_then(|launch| launch.spawn(self.slave()))
             .map_err(|e| PtyError::os("spawn", e))?;
         Ok(Spawned { child, term })
     }
 }
 
-/// Runs in the forked child before exec: new session, slave (on fd 0) as controlling tty.
-fn make_controlling_tty() -> io::Result<()> {
-    rustix::process::setsid()?;
-    // SAFETY: `Command` dup2'd the slave onto fd 0 before running pre_exec, and fd 0 stays open
-    // for the child's lifetime, so the borrow is valid here.
-    let stdin = unsafe { BorrowedFd::borrow_raw(0) };
-    rustix::process::ioctl_tiocsctty(stdin)?;
-    Ok(())
+/// XNU's `EREDRIVEOPEN`: an open of a cloning device such as `/dev/ptmx` that raced another
+/// and has to be made again. The kernel means to redo it itself, but it reaches the caller
+/// (`posix_openpt` too): once in 80 000 opens from four threads at once, 23 times in 32 000
+/// from eight, and a soak met it after 1195 cycles. It never came twice in a row there.
+const REDRIVE_OPEN: i32 = -6;
+
+/// How many times [`redriven`] makes an open the kernel keeps asking to redo.
+const REDRIVES: usize = 64;
+
+/// A new master, close-on-exec from the start: set a moment later, a fork by another thread
+/// in between hands the master to that child for its whole life, and closing the tile then
+/// never hangs its shell up. `posix_openpt` is this `open` on macOS and Linux, and rustix
+/// passes it `O_CLOEXEC` only on Linux.
+fn open_master() -> io::Result<OwnedFd> {
+    redriven(|| {
+        rustix::fs::open(
+            c"/dev/ptmx",
+            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+    })
+}
+
+/// `open`, made again while it fails with [`REDRIVE_OPEN`], giving way to other threads in
+/// between, up to [`REDRIVES`] times; then `ResourceBusy`, naming the cause, rather than an
+/// errno no `strerror` knows. Any other result is returned as it is.
+fn redriven<T>(mut open: impl FnMut() -> rustix::io::Result<T>) -> io::Result<T> {
+    for _ in 0..REDRIVES {
+        match open() {
+            Err(e) if e.raw_os_error() == REDRIVE_OPEN => std::thread::yield_now(),
+            opened => return opened.map_err(io::Error::from),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::ResourceBusy,
+        format!("the kernel asked for the open to be made again {REDRIVES} times (EREDRIVEOPEN)"),
+    ))
+}
+
+/// A child's environment: the daemon's, with each change applied in turn, a later one winning.
+#[derive(Debug)]
+struct Env(BTreeMap<OsString, OsString>);
+
+impl Env {
+    fn inherited() -> Self {
+        Self(std::env::vars_os().collect())
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(OsStr::new(name)).and_then(|v| v.to_str())
+    }
+
+    fn set(&mut self, name: impl Into<OsString>, value: impl Into<OsString>) {
+        self.0.insert(name.into(), value.into());
+    }
+
+    fn remove(&mut self, name: &str) {
+        self.0.remove(OsStr::new(name));
+    }
+}
+
+/// The file `execve` runs for `program`: a path as given, a relative one taken from `cwd` (the
+/// directory the child starts in, as a shell would read it), a bare name from the child's
+/// `PATH` as `execvp` and std's `Command` search it, else from this process's, where
+/// [`resolve_command`] found it ([`on_path`] for how). A bare name on neither is an error, as
+/// `execvp` gives it: `execve` would take it for a file in `cwd`, which may be anybody's
+/// checkout.
+fn executable(program: &str, cwd: &Path, child_path: Option<&OsString>) -> io::Result<PathBuf> {
+    if program.contains('/') {
+        return Ok(cwd.join(program));
+    }
+    let daemon_path = std::env::var_os("PATH");
+    let mut failure = io::Error::new(io::ErrorKind::NotFound, format!("{program} is on no PATH"));
+    for path in [child_path, daemon_path.as_ref()].into_iter().flatten() {
+        match on_path(program, path, cwd) {
+            Ok(found) => return Ok(found),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => failure = e,
+            Err(_) => {}
+        }
+    }
+    Err(failure)
 }
 
 /// Apply `TIOCSWINSZ` to a PTY fd.
@@ -329,21 +392,23 @@ const PARENT_AGENT_ENV: [&str; 9] = [
 
 /// Start the child outside any Claude Code session the daemon was started from; a session's own
 /// environment (`SpawnSpec::env`) is applied after, so it can still set any of them.
-fn forget_parent_agent(cmd: &mut std::process::Command) {
+fn forget_parent_agent(env: &mut Env) {
     for name in PARENT_AGENT_ENV {
-        cmd.env_remove(name);
+        env.remove(name);
     }
 }
 
-/// `(program, args, arg0)`: an empty command means the login shell run as a login shell
-/// (`argv[0] = "-zsh"`), like Terminal.app. A bare program name the daemon cannot find on its
-/// own `PATH` (a `LaunchAgent` inherits launchd's `/usr/bin:/bin:…`) runs the way the user's
-/// terminal would run it: through the login shell, interactive, so the rc files' `PATH` and
-/// aliases apply (`claude` is often an alias).
-fn resolve_command(command: &[String]) -> (String, Vec<String>, Option<String>) {
+/// `(program, args, arg0)` for a child that starts in `cwd`: an empty command means the login shell
+/// run as a login shell (`argv[0] = "-zsh"`), like Terminal.app. A bare program name the daemon
+/// cannot find on its own `PATH` (a `LaunchAgent` inherits launchd's `/usr/bin:/bin:…`) runs the
+/// way the user's terminal would run it: through the login shell, interactive, so the rc files'
+/// `PATH` and aliases apply (`claude` is often an alias).
+fn resolve_command(command: &[String], cwd: &Path) -> (String, Vec<String>, Option<String>) {
     let shell = login_shell();
     if let Some((program, args)) = command.split_first() {
-        if program.contains('/') || on_path(program) {
+        let on_daemon_path =
+            || std::env::var_os("PATH").is_some_and(|path| on_path(program, &path, cwd).is_ok());
+        if program.contains('/') || on_daemon_path() {
             return (program.clone(), args.to_vec(), None);
         }
         let line = command.iter().map(|word| shell_quote(word)).collect::<Vec<_>>().join(" ");
@@ -398,14 +463,27 @@ fn account_shell() -> Option<String> {
     unsafe { std::ffi::CStr::from_ptr(shell) }.to_str().ok().map(str::to_owned)
 }
 
-/// Whether `program` is an executable file on this process's `PATH`.
-fn on_path(program: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| {
-            std::fs::metadata(dir.join(program))
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
+/// Where `program` is on `path` (a `PATH` value), searched as `execvp` searches it in a child
+/// standing in `cwd`: an empty or relative entry is taken from `cwd`, the first file there that
+/// may be run wins, and one that exists but may not be run makes the answer `PermissionDenied`
+/// rather than `NotFound`.
+fn on_path(program: &str, path: &OsStr, cwd: &Path) -> io::Result<PathBuf> {
+    let mut denied = false;
+    for dir in std::env::split_paths(path) {
+        let candidate = cwd.join(dir).join(program);
+        if !std::fs::metadata(&candidate).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        match rustix::fs::access(&candidate, rustix::fs::Access::EXEC_OK) {
+            Ok(()) => return Ok(candidate),
+            Err(rustix::io::Errno::ACCESS) => denied = true,
+            Err(_) => {}
+        }
+    }
+    Err(if denied {
+        io::Error::new(io::ErrorKind::PermissionDenied, format!("{program} on PATH may not be run"))
+    } else {
+        io::Error::new(io::ErrorKind::NotFound, format!("{program} is on no PATH"))
     })
 }
 
@@ -560,6 +638,124 @@ mod tests {
         eprintln!("line_discipline_cost: {} ns per tcgetattr on a master", each.as_nanos());
     }
 
+    /// The tty is the child's controlling terminal and the child leads its foreground group,
+    /// whatever the program: `dd` opens `/dev/tty`, which only a process with a controlling
+    /// terminal can, and does nothing to get one itself (bash would, hiding the difference).
+    #[tokio::test]
+    async fn the_tty_is_the_controlling_terminal_of_the_child() {
+        let spec = |command: &[&str]| SpawnSpec {
+            command: command.iter().map(|&word| word.to_owned()).collect(),
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        let pty = Pty::open(size()).unwrap();
+        let mut dd = pty.spawn(&spec(&["dd", "if=/dev/tty", "of=/dev/null", "count=1"])).unwrap();
+        let master = PtyMaster::new(pty.into_master()).unwrap();
+        master.write_all(b"line\n").await.unwrap();
+        // Its closing statistics go to the tty, and it cannot finish exiting until they are read.
+        read_until(&master, b"records out").await;
+        let status = dd.child.wait().await.unwrap();
+        assert_eq!(status.code(), Some(0), "dd could not open /dev/tty: {status:?}");
+
+        let pty = Pty::open(size()).unwrap();
+        let mut sleeper = pty.spawn(&spec(&["/bin/sleep", "30"])).unwrap().child;
+        let pid = sleeper.id().unwrap();
+        let foreground = rustix::termios::tcgetpgrp(pty.master()).unwrap();
+        assert_eq!(foreground.as_raw_nonzero().get().unsigned_abs(), pid, "its own group leads");
+        sleeper.kill().await.unwrap();
+    }
+
+    /// What starting a shell costs, from the call to the program running: all of
+    /// [`Pty::spawn`], its preparing alone (the spawn failing just before the fork), its fork
+    /// and exec alone, and std's `Command` with the `pre_exec` it used to take.
+    /// `SLOPTY_SPAWN_BALLAST_MB` grows this process first, as a daemon holding many sessions'
+    /// backlogs is. Run with `cargo nextest run -p slopty-pty --release --run-ignored only
+    /// spawn_cost --no-capture`.
+    #[tokio::test]
+    #[ignore = "measurement, run by hand"]
+    async fn spawn_cost() {
+        use std::os::unix::process::CommandExt as _;
+        use std::time::{Duration, Instant};
+
+        let ballast_mb: usize =
+            std::env::var("SLOPTY_SPAWN_BALLAST_MB").map_or(0, |mb| mb.parse().unwrap());
+        let ballast = vec![1_u8; ballast_mb << 20];
+        let spec = SpawnSpec {
+            command: vec!["/usr/bin/true".into()],
+            cwd: Some(std::env::temp_dir()),
+            env: Vec::new(),
+            size: size(),
+        };
+        let launch = Launch::new(
+            Path::new("/usr/bin/true"),
+            ["true"],
+            std::env::vars_os(),
+            &std::env::temp_dir(),
+        )
+        .unwrap();
+        // A NUL in the last variable fails the spawn after all the preparing, before the fork.
+        let prepare_only =
+            SpawnSpec { env: vec![("~SLOPTY_NUL".to_owned(), "\0".to_owned())], ..spec.clone() };
+        let rounds = 300;
+        let (mut ours, mut fork_only, mut std_command) = (Vec::new(), Vec::new(), Vec::new());
+        let mut preparing = Vec::new();
+        for _ in 0..rounds {
+            let pty = Pty::open(size()).unwrap();
+            let started = Instant::now();
+            pty.spawn(&prepare_only).unwrap_err();
+            preparing.push(started.elapsed());
+
+            let pty = Pty::open(size()).unwrap();
+            let started = Instant::now();
+            let mut child = pty.spawn(&spec).unwrap().child;
+            ours.push(started.elapsed());
+            child.wait().await.unwrap();
+
+            let pty = Pty::open(size()).unwrap();
+            let started = Instant::now();
+            let mut child = launch.spawn(pty.slave()).unwrap();
+            fork_only.push(started.elapsed());
+            child.wait().await.unwrap();
+
+            let pty = Pty::open(size()).unwrap();
+            let mut command = std::process::Command::new("/usr/bin/true");
+            command.current_dir(std::env::temp_dir());
+            command.stdin(pty.slave.try_clone().unwrap());
+            command.stdout(pty.slave.try_clone().unwrap());
+            command.stderr(pty.slave.try_clone().unwrap());
+            let controlling_tty = || -> io::Result<()> {
+                rustix::process::setsid()?;
+                // SAFETY: `Command` has put the slave on fd 0 by now.
+                let stdin = unsafe { BorrowedFd::borrow_raw(0) };
+                rustix::process::ioctl_tiocsctty(stdin)?;
+                Ok(())
+            };
+            // SAFETY: setsid and TIOCSCTTY, raw system calls, as the old spawn did.
+            unsafe {
+                command.pre_exec(controlling_tty);
+            }
+            let started = Instant::now();
+            let mut child = command.spawn().unwrap();
+            std_command.push(started.elapsed());
+            child.wait().unwrap();
+        }
+        let percentiles = |samples: &mut Vec<Duration>| {
+            samples.sort();
+            let at = |q: usize| samples[(samples.len() - 1) * q / 100].as_micros();
+            format!("p50 {} us p95 {} us p99 {} us", at(50), at(95), at(99))
+        };
+        eprintln!(
+            "spawn_cost ({ballast_mb} MiB ballast, {rounds} rounds): Pty::spawn {}; its preparing \
+             alone {}; Launch::spawn alone {}; std Command + pre_exec {}",
+            percentiles(&mut ours),
+            percentiles(&mut preparing),
+            percentiles(&mut fork_only),
+            percentiles(&mut std_command),
+        );
+        std::hint::black_box(ballast);
+    }
+
     #[tokio::test]
     async fn resize_through_the_master_is_visible() {
         let pty = Pty::open(size()).unwrap();
@@ -572,31 +768,32 @@ mod tests {
     /// the user's own Claude Code settings in the environment pass through.
     #[test]
     fn a_shell_forgets_the_claude_session_the_daemon_ran_in() {
-        let mut cmd = std::process::Command::new("/usr/bin/true");
-        forget_parent_agent(&mut cmd);
-        let removed: Vec<_> = cmd
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect();
-        for name in ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDECODE"] {
-            assert!(removed.iter().any(|r| r == name), "{name} kept: {removed:?}");
+        let names = ["CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDECODE"];
+        let mut env = Env(names
+            .iter()
+            .chain(&["CLAUDE_CODE_USE_BEDROCK"])
+            .map(|name| (OsString::from(name), OsString::from("1")))
+            .collect());
+        forget_parent_agent(&mut env);
+        for name in names {
+            assert_eq!(env.get(name), None, "{name} kept");
         }
-        assert!(!removed.iter().any(|r| r == "CLAUDE_CODE_USE_BEDROCK"), "settings pass");
+        assert_eq!(env.get("CLAUDE_CODE_USE_BEDROCK"), Some("1"), "settings pass");
     }
 
     #[test]
     fn login_shell_gets_dash_argv0() {
-        let (_, args, arg0) = resolve_command(&[]);
+        let (_, args, arg0) = resolve_command(&[], Path::new("/"));
         assert!(args.is_empty());
         assert!(arg0.unwrap().starts_with('-'));
-        let (p, a, explicit_arg0) = resolve_command(&["/bin/ls".to_owned(), "-l".to_owned()]);
+        let (p, a, explicit_arg0) =
+            resolve_command(&["/bin/ls".to_owned(), "-l".to_owned()], Path::new("/"));
         assert_eq!((p.as_str(), a.len(), explicit_arg0), ("/bin/ls", 1, None));
     }
 
     #[test]
     fn bare_program_on_path_runs_directly() {
-        let (p, a, arg0) = resolve_command(&["ls".to_owned(), "-l".to_owned()]);
+        let (p, a, arg0) = resolve_command(&["ls".to_owned(), "-l".to_owned()], Path::new("/"));
         assert_eq!((p.as_str(), a.as_slice(), arg0), ("ls", &["-l".to_owned()][..], None));
     }
 
@@ -610,9 +807,65 @@ mod tests {
         assert_eq!(choose_shell(None, || None), "/bin/sh");
     }
 
+    /// A bare name found on no `PATH` is an error, not a file of that name in the directory
+    /// the child starts in, which `execve` would run: that directory may be anybody's checkout.
+    #[test]
+    fn a_bare_name_on_no_path_is_not_run_from_the_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join("slopty-planted-program");
+        std::fs::write(&planted, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let nowhere = OsString::from("/nonexistent");
+        let error = executable("slopty-planted-program", dir.path(), Some(&nowhere)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+        let found = executable("sh", dir.path(), Some(&OsString::from("/bin"))).unwrap();
+        assert_eq!(found, Path::new("/bin/sh"));
+    }
+
+    /// A name on `PATH` whose file may not be run is `PermissionDenied`, as `execvp` reports
+    /// it, not `NotFound`.
+    #[test]
+    fn a_path_hit_that_may_not_run_is_permission_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("slopty-unrunnable"), "#!/bin/sh\n").unwrap();
+        let path = dir.path().as_os_str().to_owned();
+        let error = executable("slopty-unrunnable", Path::new("/"), Some(&path)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+    }
+
+    /// An open the kernel asks to redo is made again until it takes; one it keeps asking for
+    /// ends in a `ResourceBusy` that names the cause, never a panic or a bare -6; any other
+    /// failure comes back at once.
+    #[test]
+    fn an_open_the_kernel_asks_to_redo_is_redone_then_given_up_clearly() {
+        let redo = || rustix::io::Errno::from_raw_os_error(REDRIVE_OPEN);
+        let mut tries = 0_usize;
+        let opened = redriven(|| {
+            tries = tries.saturating_add(1);
+            if tries < 3 { Err(redo()) } else { Ok(tries) }
+        });
+        assert_eq!(opened.unwrap(), 3);
+
+        let error = redriven(|| Err::<(), _>(redo())).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ResourceBusy, "{error}");
+        assert!(error.to_string().contains("EREDRIVEOPEN"), "{error}");
+        let error = PtyError::os("open /dev/ptmx", redriven(|| Err::<(), _>(redo())).unwrap_err());
+        assert!(error.to_string().starts_with("open /dev/ptmx: the kernel asked"), "{error}");
+
+        let mut tries = 0_usize;
+        let error = redriven(|| {
+            tries = tries.saturating_add(1);
+            Err::<(), _>(rustix::io::Errno::NOENT)
+        })
+        .unwrap_err();
+        assert_eq!((error.kind(), tries), (io::ErrorKind::NotFound, 1));
+    }
+
     #[test]
     fn unknown_bare_program_goes_through_the_login_shell() {
-        let (p, a, arg0) = resolve_command(&["slopty-no-such-tool".to_owned(), "it's".to_owned()]);
+        let (p, a, arg0) =
+            resolve_command(&["slopty-no-such-tool".to_owned(), "it's".to_owned()], Path::new("/"));
         assert_eq!(p, login_shell());
         assert_eq!(a, vec!["-lic".to_owned(), "slopty-no-such-tool 'it'\\''s'".to_owned()]);
         assert_eq!(arg0, None);

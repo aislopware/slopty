@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{
     AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement as _,
@@ -24,12 +25,10 @@ use gpui::{
 };
 use slopty_client::handoff::Todo;
 use slopty_client::layout::WorkerKey;
-use slopty_core::{ItemId, SessionId, WallMs};
+use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentBranch, Review};
-use slopty_proto::handoff::{
-    EditFile, EditOutcome, HandoffEvent, HandoffId, OfferReason, OpenUrl, Wary,
-};
+use slopty_proto::handoff::{EditFile, EditOutcome, HandoffEvent, HandoffId, OfferReason, Wary};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
 
@@ -47,8 +46,6 @@ const OFFER_FOR: std::time::Duration = std::time::Duration::from_secs(20);
 pub(super) struct HandoffState {
     /// Each agent session's pull request and worktree, as its worker last said.
     branches: HashMap<SessionId, AgentBranch>,
-    /// The program waiting on a file tile whose view is not made yet.
-    file_waits: HashMap<ItemId, HandoffId>,
     /// The shell told it has this client's focus, and on which worker.
     focus: Option<(WorkerKey, SessionId)>,
     /// The page last held back, for "Open last offered page".
@@ -70,8 +67,8 @@ pub(super) struct Offer {
     url: String,
     /// Why it was held back.
     why: OfferReason,
-    /// When the shell asked, by the worker's clock.
-    asked_ms: WallMs,
+    /// When this client read it off the link.
+    received: Instant,
 }
 
 impl HandoffState {
@@ -82,8 +79,8 @@ impl HandoffState {
 
     /// How many entries each map holds, for the leak check.
     #[cfg(test)]
-    pub(super) fn sizes(&self) -> [(&'static str, usize); 2] {
-        [("handoff.branches", self.branches.len()), ("handoff.file_waits", self.file_waits.len())]
+    pub(super) fn sizes(&self) -> [(&'static str, usize); 1] {
+        [("handoff.branches", self.branches.len())]
     }
 }
 
@@ -116,13 +113,13 @@ impl Offer {
     }
 
     /// Why it was held back and how long ago it was asked, in one muted line.
-    fn detail(&self, now: WallMs) -> String {
+    fn detail(&self, now: Instant) -> String {
         let why = self.why.to_string();
         let mut chars = why.chars();
         let why = chars
             .next()
             .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect::<String>());
-        let age = crate::palette::age_label(now.since(self.asked_ms));
+        let age = crate::palette::age_label(now.saturating_duration_since(self.received));
         let age = if age == "now" { "just now".to_owned() } else { format!("{age} ago") };
         format!("{why} \u{b7} {age}")
     }
@@ -156,10 +153,17 @@ impl WorkspaceView {
         self.send(key, slopty_client::handoff::declare(true, true));
     }
 
-    /// A program in a shell on `key` handed this client a page or a file, or took one back.
-    pub fn handoff_event(&mut self, key: WorkerKey, event: HandoffEvent, cx: &mut Context<Self>) {
+    /// A program in a shell on `key` handed this client a page or a file, or took one back;
+    /// the link read it at `received`.
+    pub fn handoff_event(
+        &mut self,
+        key: WorkerKey,
+        event: HandoffEvent,
+        received: Instant,
+        cx: &mut Context<Self>,
+    ) {
         let Some(w) = self.workers.get_mut(&key) else { return };
-        match w.handoffs.heard(event, true, WallMs::now()) {
+        match w.handoffs.heard(event, true, received.elapsed()) {
             Todo::Open { url, reply } => {
                 self.open_page(&url, cx);
                 self.send(key, reply);
@@ -167,8 +171,7 @@ impl WorkspaceView {
             Todo::Offer { url, host, open, why, reply } => {
                 self.send(key, reply);
                 let asker = self.asker(key, open.session);
-                let OpenUrl { id, asked_ms, .. } = open;
-                let offer = Offer { worker: key, id, asker, host, url, why, asked_ms };
+                let offer = Offer { worker: key, id: open.id, asker, host, url, why, received };
                 self.offer_page(offer, cx);
             }
             Todo::Edit { edit, reply, again } => {
@@ -260,14 +263,11 @@ impl WorkspaceView {
             self.layout.focus(shell);
         }
         let Some(item) = self.show_file(Some(key), &edit.path, edit.line, cx) else { return };
-        if !edit.wait {
-            return;
-        }
-        match self.files.get(&item) {
-            Some(view) => view.update(cx, |v, cx| v.set_waiting(Some(edit.id), cx)),
-            None => {
-                self.handoff.file_waits.insert(item, edit.id);
-            }
+        // A view made later, once the tile is echoed, asks `waiting_on` itself.
+        if edit.wait
+            && let Some(view) = self.files.get(&item)
+        {
+            view.update(cx, |v, cx| v.set_waiting(Some(edit.id), cx));
         }
     }
 
@@ -275,16 +275,6 @@ impl WorkspaceView {
     /// an ordinary file tile. An id not known here is nothing.
     fn withdraw_handoff(&mut self, key: WorkerKey, id: HandoffId, cx: &mut Context<Self>) {
         self.dismiss_offer(key, id);
-        let pending: Vec<ItemId> = self
-            .handoff
-            .file_waits
-            .iter()
-            .filter(|(item, h)| **h == id && self.tile_of(**item).is_some_and(|t| t.worker == key))
-            .map(|(item, _)| *item)
-            .collect();
-        for item in pending {
-            self.handoff.file_waits.remove(&item);
-        }
         for view in self.waiting_views(key, id, cx) {
             view.update(cx, |v, cx| v.set_waiting(None, cx));
         }
@@ -316,9 +306,9 @@ impl WorkspaceView {
         }
     }
 
-    /// The program waiting on file view `id` that was made after the handoff arrived.
-    pub(super) fn take_file_wait(&mut self, id: ItemId) -> Option<HandoffId> {
-        self.handoff.file_waits.remove(&id)
+    /// The program on `worker` waiting on `path`, for a file view made after its handoff.
+    pub(super) fn file_wait(&self, worker: WorkerKey, path: &str) -> Option<HandoffId> {
+        self.workers.get(&worker)?.handoffs.waiting_on(path).map(|edit| edit.id)
     }
 
     /// Take down the notice of held-back page `id` from `worker`.
@@ -410,9 +400,17 @@ impl WorkspaceView {
                     .flex()
                     .min_w_0()
                     .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(SharedString::from(format!("{} wants to open\u{a0}", offer.asker)))
+                    .child(
+                        // The asker is a shell's title, as long as a program likes: it gives
+                        // way, cut short, and the host always shows whole.
+                        div()
+                            .flex_initial()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(offer.asker.clone())),
+                    )
+                    .child(div().flex_none().child("\u{a0}wants to open\u{a0}"))
                     .child(
                         div()
                             .debug_selector(|| "offer-host".to_owned())
@@ -429,7 +427,7 @@ impl WorkspaceView {
                     .text_ellipsis()
                     .text_size(px(theme.typography.meta()))
                     .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(offer.detail(WallMs::now()))),
+                    .child(SharedString::from(offer.detail(Instant::now()))),
             )
             .into_any_element()
     }

@@ -9,7 +9,7 @@
 //! enough to find the window, writes the new one, and copies every other bit as it was.
 
 use crate::CodecError;
-use crate::annexb::{hevc, nal_units};
+use crate::nal::{self, hevc};
 
 /// What an SPS says up to and including its conformance window (H.265 7.3.2.2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,7 +109,8 @@ fn head_of(rbsp: &[u8]) -> Option<Head> {
 /// outputs the top-left `shown` of the coded picture; every other bit is copied as it was.
 ///
 /// `None` when `sps` is not a well-formed SPS, or `shown` is larger than the coded picture or
-/// not a whole number of chroma units short of it (an odd side of a 4:2:0 picture).
+/// not a whole number of chroma units short of it (an odd side of a 4:2:0 picture), or the
+/// rewrite does not read back as showing `shown`.
 #[must_use]
 pub fn crop_sps(sps: &[u8], shown: (u32, u32)) -> Option<Vec<u8>> {
     if hevc::nal_type(sps)? != hevc::SPS {
@@ -140,7 +141,9 @@ pub fn crop_sps(sps: &[u8], shown: (u32, u32)) -> Option<Vec<u8>> {
     out.copy(&rbsp, head.after_window, stop.checked_add(1)?.checked_sub(head.after_window)?)?;
     let mut nal = header.to_vec();
     escape_into(&out.finish(), &mut nal);
-    Some(nal)
+    // The head is all of the syntax parsed here, so a last set bit that is syntax rather than
+    // the stop bit (a malformed SPS) was dropped above: the rewrite must read back as asked.
+    (self::head(&nal)?.shown() == Some(shown)).then_some(nal)
 }
 
 /// Offset units that crop `coded` to `shown`, `unit` luma samples each.
@@ -149,7 +152,8 @@ fn offset(coded: u32, shown: u32, unit: u32) -> Option<u32> {
     (cut.checked_rem(unit)? == 0 && shown > 0).then(|| cut.checked_div(unit)).flatten()
 }
 
-/// Rewrite, in place, every SPS among the parameter sets that open an Annex B access unit.
+/// Rewrite, in place, every SPS among the parameter sets that open an access unit, with its
+/// length ([`crate::nal`]).
 ///
 /// Each then shows the top-left `shown` of the coded pictures ([`crop_sps`]). A unit with no
 /// parameter sets is left as it is.
@@ -160,17 +164,21 @@ fn offset(coded: u32, shown: u32, unit: u32) -> Option<u32> {
 pub fn crop_access_unit(data: &mut Vec<u8>, shown: (u32, u32)) -> Result<(), CodecError> {
     let base = data.as_ptr().addr();
     let mut spans = Vec::new();
-    for nal in nal_units(data).take_while(|nal| hevc::is_parameter_set(nal)) {
+    for nal in nal::units(data).take_while(|nal| hevc::is_parameter_set(nal)) {
         if hevc::nal_type(nal) != Some(hevc::SPS) {
             continue;
         }
         let at = nal.as_ptr().addr().wrapping_sub(base);
-        let cropped = crop_sps(nal, shown).ok_or(CodecError::MalformedNal { offset: at })?;
-        spans.push((at, nal.len(), cropped));
+        let malformed = CodecError::MalformedNal { offset: at };
+        let cropped = crop_sps(nal, shown).ok_or(malformed)?;
+        let mut unit = Vec::with_capacity(cropped.len().saturating_add(4));
+        nal::push(&mut unit, &cropped)?;
+        let start = at.checked_sub(4).ok_or(malformed)?;
+        let end = at.checked_add(nal.len()).ok_or(malformed)?;
+        spans.push((start..end, unit));
     }
-    for (at, len, cropped) in spans.into_iter().rev() {
-        let end = at.checked_add(len).ok_or(CodecError::MalformedNal { offset: at })?;
-        data.splice(at..end, cropped);
+    for (span, unit) in spans.into_iter().rev() {
+        data.splice(span, unit);
     }
     Ok(())
 }

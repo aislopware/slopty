@@ -72,6 +72,14 @@ filter = '(package(slopty-codec) & test(player_starts_and_drains)) | (package(sl
 test-group = 'coreaudio'
 slow-timeout = { period = "60s", terminate-after = 3, grace-period = "5s" }
 
+# The loom models of the audio ring (`cargo xtask deep loom`; built only under `--cfg
+# slopty_loom`, so never in the gate) explore every interleaving: a minute or two each on a loaded
+# Mac. They open no VideoToolbox session, so they stay out of its group.
+[[profile.default.overrides]]
+filter = 'package(slopty-codec) & test(/^audio::ring_model::/)'
+slow-timeout = { period = "120s", terminate-after = 5 }
+test-group = '@global'
+
 # Each VideoToolbox session revalidates the test binary's signature through syspolicyd on this
 # volume (mounted noowners), so codec tests started all at once queue behind each other past the
 # timeout; one alone takes seconds. Two at a time keeps the hardware sessions from piling up.

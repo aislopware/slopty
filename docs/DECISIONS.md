@@ -27,3 +27,4 @@ One file per topic under `docs/decisions/`; an entry is cited by its bold title 
 - [Search](decisions/search.md)
 - [Prediction while editing](decisions/prediction-editing.md)
 - [Crash reports](decisions/crashes.md)
+- [Brand](decisions/brand.md)

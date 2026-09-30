@@ -2405,8 +2405,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `evil.com`, and it opens as `https://evil.com/@github.com`, so the host shown is the
       host visited. Anything but `http`/`https` with a host, over 8 KiB, or holding whitespace
       or a control character (which a browser would silently drop) is refused. The client
-      also offers rather than opens a page that reached it more than `LATE_AFTER` = 2 s after
-      it was asked, since by then the worker may be about to withdraw it.
+      also offers rather than opens a page it acts on more than `LATE_AFTER` = 2 s after its
+      link read it, since by then the worker may be about to withdraw it. That wait is
+      measured on the client's own clock: the link stamps each handoff with an `Instant` as it
+      reads it (`LinkEvent::Handoff { received }`), and the worker's `asked_ms` plays no part.
+      An earlier version compared `asked_ms` with the client's wall clock, so a worker whose
+      clock ran two seconds behind had every page offered, and one running ahead had a page
+      held up here opened anyway. The notice's "asked … ago" counts from the same stamp. Test:
+      `slopty-client` `handoff::tests::lateness_is_measured_on_this_clients_clock`.
   - **The editor waits for the tile, and the save lands where the program reads it.**
     `slopty edit --wait [+line] <file>` sends `CtlRequest::Edit` and keeps its socket open. A
     client that takes it shows the file beside the session's tile. The worker answers when the
@@ -2423,6 +2429,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - A client that drops has `LOST_AFTER` = 5 min to come back, and is asked again under the
       same id. After that the CLI hears `Lost` (exit 1). Closing the CLI withdraws the edit.
       An edit that ends while its client is away is withdrawn when the client returns.
+    - A waiting program is never left hanging by its tile going. Closing the tile answers
+      as "Done" would: save, then tell. When that save is refused, fails or loses its link,
+      the program hears `Cancelled` once ⌘Z's window has passed, and the edit stays kept on
+      the client (`docs/decisions/ui.md`, "An unsaved edit survives a quit or a crash").
+      While the save is still out, the window is extended until the answer arrives, so the
+      program hears how it ended. A tile removed by another client, or lost with its worker,
+      answers `Cancelled` too. Before this, such a tile went silently. Its client was still
+      connected, so `LOST_AFTER` never ran, and `git commit` waited with no end. A wait whose
+      tile is not made yet is looked up by path from the client's `Handoffs` when the tile
+      appears. The earlier map keyed by tile leaked an entry whenever the tile never came.
+      Tests (`slopty-ui` `workspace::tests::handoffs`):
+      `a_waiting_tile_closed_with_its_save_refused_gives_up_and_keeps_the_edit`,
+      `a_waiting_tile_removed_elsewhere_gives_up`,
+      `an_edit_withdrawn_before_its_tile_is_made_leaves_no_wait`.
   - **Fallbacks run here, at once.** With no worker, or `Nobody`, a page goes to the system's
     opener: the first `open` on `PATH` that is not ours, else `/usr/bin/open`. A file goes to
     `vi` with the same arguments, the editor git itself falls back to. Both are exec'd, so
@@ -2574,15 +2594,151 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `xtgettcap_is_answered_with_the_shells_term`, and the existing
   `a_checkpoint_waits_for_the_end_of_an_escape_sequence` over the new ground check.
 
-- ✅ **A pending wrap does not survive a resize that makes room: ghostty #14458 carried**
+- ✅ **A pending wrap does not survive a resize that makes room: ghostty #14458, now merged**
   (2026-09-30). A line that ends in the last column leaves the cursor waiting to wrap. When a
   resize then left room after it, ghostty kept the wait, so the next character started a new
   row: `123456789|`, widened, then `X`, printed `X` on the next row; narrowed to 8 columns it
   left a blank row. Tiles resize all the time (strip springs, window drags, a remote size),
   so output that ends at the edge hits it. fornwall's PR clears the wait and moves the cursor
-  to where the next character goes, as ghostty already did for the saved cursor. It is
-  cherry-picked onto `aislopware/ghostty`, which is now rebased onto ghostty `f9e827093`
-  (`038609517`; the old `7d0734aa8` is kept as `archive/main-2026-09-30-pre-f9e8270`), and the
-  commit says to drop it when the PR merges. `vendor/ghostty` and the binding's
-  `GHOSTTY_COMMIT` point at `038609517`; the headers did not move. Test: engine
+  to where the next character goes, as ghostty already did for the saved cursor. We carried
+  it on `aislopware/ghostty` until upstream merged it the same day (`26e64dfb4`). The
+  rebase onto that merge dropped our copy (the old `7d0734aa8` is kept as
+  `archive/main-2026-09-30-pre-f9e8270`). Test: engine
   `a_pending_wrap_does_not_survive_a_resize_that_makes_room` (both examples from the PR).
+  The PR steps the cursor past the last character even with autowrap (DECAWM) off. There,
+  ghostty's print never wraps and overwrites the cell under the cursor, as xterm does, so after
+  a widening resize the next character landed one cell too far, and a combining mark attached
+  to the wrong cell. Our commit on top (`741a800e8` after the rebase) gives `Screen.Resize` a `wraparound` flag,
+  which the terminal passes for both screens. Without autowrap it clears the stale wait but
+  leaves the live and saved cursors on the last cell, so turning autowrap back on does not
+  wrap mid-row. Its Zig tests also cover the alternate screen (resized without reflow) and a
+  wide character that reflow moves to the next row. `vendor/ghostty` and the binding's
+  `GHOSTTY_COMMIT` point at `741a800e8`; the headers did not move. Upstream has no PR for this
+  yet: a draft waits for the user in `.research/ghostty-upstream-prs.md`. Engine test:
+  `without_autowrap_a_resize_keeps_the_cursor_on_the_last_cell` (it failed on `038609517`
+  with `123456789|XY`). The same day, ghostty's open terminal PRs were weighed and none was
+  both proven and small. DECSTR soft reset (#13333) and XTQMODKEYS (#13332) wait on
+  requested changes. The mouse-mode grouping (#14439) is a large refactor. #11711 fixes a
+  prompt click that Slopty handles itself.
+
+- ✅ **A shell starts from our own fork** (2026-09-30, crash report). `slopty-ptyd` died of
+  SIGABRT on 2026-09-29 with "crashed on child side of fork pre-exec", parent `launchd`
+  (`slopty-ptyd-2026-09-29-231734.ips`). The frames are std's `Command::spawn`+2832 calling
+  `process::abort`: that offset, in a build of the same std, follows the 78-byte message
+  "fatal runtime error: assertion failed: output.write(&bytes).is_ok(), aborting". The forked
+  child could not `chdir` (its session's directory gone) and std writes the errno to the
+  parent over a pipe, `rtassert!`ing the write; the parent had been killed mid-spawn, so the
+  pipe had no reader, `SIGPIPE` was still ignored (std resets it only after `chdir`), and the
+  write's `EPIPE` became an abort. Reproduced: killing a spawner of `current_dir`-missing
+  commands 300 times gave 5 such reports with std's fork path, 0 with `posix_spawn`.
+  `posix_spawn` was measured and rejected: 388 µs against 919 µs p50 for fork and exec, but
+  on macOS its file actions run before `POSIX_SPAWN_SETSID`, so the tty never becomes the
+  controlling terminal (`zsh -c`, `dash -c`, `cat /dev/tty` all get `ENXIO`; bash hides it by
+  opening its tty at start-up; fish refuses to run). `crates/slopty-pty/src/spawn.rs` forks
+  itself: everything (program path, `argv`, `envp`, directory) is built before the fork, the
+  child makes system calls only (`chdir` first so a missing directory leaves the tty alone,
+  `setsid`, `dup2`, `TIOCSCTTY`, every other descriptor closed, every signal back to default,
+  `execve`, and `/bin/sh` for a file the kernel cannot run, as `execvp` does), and a failed
+  step is reported and ends in `_exit(127)`. Signals are blocked across the fork, so no
+  handler of the daemon runs in the child. The child is a `slopty_pty::Child` reaped on
+  `SIGCHLD`.
+
+  How the parent learns the outcome (a second review): a report pipe is close-on-exec only a
+  moment after it exists on macOS (no `pipe2`), and std and tokio start commands with
+  `posix_spawn`, which copies every descriptor not yet close-on-exec. A child the worker
+  started in that moment (`git`, `ps`, a long `ssh`) held the write end, the pipe never read as
+  closed, and the spawn blocked its tokio thread for as long as that child lived. So on macOS
+  there is no pipe: the child stores its report in a page shared with the parent (one word,
+  async-signal-safe), and the parent learns of the `exec` or the exit from the kernel through
+  `EVFILT_PROC` with `NOTE_EXEC | NOTE_EXIT`. An `exec` before the watch began shows as
+  `PROC_FLAG_EXEC` (a probe: set after `execve`, clear in a child just forked from a parent
+  that has it), read through `PROC_PIDT_SHORTBSDINFO`. The full `PROC_PIDTBSDINFO` is refused
+  with `EPERM` for a process whose effective user is not ours, which a setuid program is
+  right after its `exec` (a probe on `/usr/bin/login`: `EPERM` from the full view, the flag
+  from the short one). A third review caught that: a `sudo` or `login` that ran before the
+  watch looked not yet run, and the spawn waited on it for as long as it waited for someone
+  to type. A child gone before the watch makes the watch fail with `ESRCH`; one that exits
+  between the watch and the looks shows through `waitid(WNOWAIT)`. Linux keeps the pipe, made
+  close-on-exec from the start with `pipe2`. With nothing to guard, the lock that serialised
+  spawns is gone.
+
+  A hostile review against std's `do_exec` (1.98), portable-pty, alacritty and wezterm found
+  six faults in the first cut; each has a test that failed before its fix.
+  - A failed `fork` (the user at the process limit) became a `Child` of pid -1. rustix's
+    `Pid::from_raw` asserts against a negative only in debug builds, so a release build
+    would later `waitpid(-1)`, reaping any child, and `kill(-1, SIGKILL)`, killing every
+    process of the user. The -1 is checked first now.
+  - The master became close-on-exec only after `posix_openpt` returned, and a fork by
+    another thread in between handed it to that shell for good: closing the master's tile
+    then never hung its shell up. The test leaked one in 2 of 3 runs. The master is now
+    opened as `/dev/ptmx` with `O_CLOEXEC`, which is what `posix_openpt` does inside on macOS
+    and what rustix does on Linux (rustix passes `O_CLOEXEC` to `posix_openpt` only on Linux
+    and the BSDs). Under concurrent opens that `open` sometimes fails with errno -6, XNU's
+    in-kernel `EREDRIVEOPEN` ("open again") leaking out. A probe of 80 000 opens from four
+    threads saw it once through `open` and once through `posix_openpt`, so it predates the
+    change. With eight threads it came 23 times in 32 000 opens, never twice in a row. It
+    made the stress tests flaky, and a soak met it after 1195 cycles. `Pty::open` now makes
+    the open again, yielding in between, up to 64 times, and past that fails with a
+    `ResourceBusy` that names `EREDRIVEOPEN` rather than a bare -6
+    (`an_open_the_kernel_asks_to_redo_is_redone_then_given_up_clearly`).
+  - Close-on-exec alone does not cover a descriptor that gets it a moment after it exists,
+    and macOS has no atomic way for an accepted socket (no `accept4`), a received one (no
+    `MSG_CMSG_CLOEXEC`) or a pipe (no `pipe2`). So the child closes everything above 2 but
+    a report pipe (Linux), as wezterm and iTerm2 do. macOS has no `closefrom` and `OPEN_MAX` is a
+    million here, so the child lists its own descriptors with `proc_pidinfo(PROC_PIDLISTFDS)`
+    into a stack buffer. Linux uses `close_range`. An earlier reading that XNU leaks even
+    `O_CLOEXEC` descriptors across a fork was wrong: the spawn returns at `execve`, and the
+    new program's loader briefly opens files of its own. The test reads the descriptors once
+    `cat` has echoed a line.
+  - With fds 0 to 2 closed, the slave and the report pipe land on them. A slave on 1 kept
+    its close-on-exec through a `dup2` onto itself, and the shell lost its stdout. A pipe on
+    1 was overwritten by the tty, so a failed `exec` read as a success. Both move above 2
+    before the fork.
+  - A bare program name was looked up on the daemon's `PATH`, where std and `execvp` use the
+    child's, so a session's own `PATH` lost. A name on no `PATH` ran as a file of that name
+    in the session's directory. Now the child's `PATH` is searched first, then the daemon's,
+    and a name on neither is `NotFound`. The second review found three more gaps against
+    `execvp`, now closed. A relative or empty `PATH` entry was checked from the daemon's
+    directory, where the child's `execvp` reads it from the session's. A file on `PATH` that
+    may not be run gave `NotFound` where `execvp` gives `EACCES`. A file with no `#!` line
+    failed with `ENOEXEC` where `execvp` runs it with `/bin/sh`.
+  - Only caught signals went back to default. A daemon started under `nohup` or a script's
+    `&` gave every shell `SIGHUP`, or `SIGINT` and `SIGQUIT`, ignored, and `exec` keeps them
+    ignored. All are reset now, as ghostty, alacritty and wezterm do.
+
+  Checked and sound: nothing between the fork and the `exec` allocates, locks, panics or
+  runs a `Drop`. `setsid` comes before `TIOCSCTTY`. The report read retries `EINTR`, and its
+  five bytes are one atomic pipe write. A child that exits before its waiter subscribes to
+  `SIGCHLD` is found by the look after subscribing. A pid stays ours until we reap it. If the
+  thread's signal mask cannot be put back after the fork, the child is killed and reaped
+  rather than left without an owner. `vfork` was not taken: Rust has no `returns_twice`, and
+  libc marks `vfork` deprecated on Linux for the memory corruption that causes
+  (rust-lang/libc#1596). One gap is left open: a master the worker receives over its socket
+  becomes close-on-exec a moment after it arrives (macOS has no `MSG_CMSG_CLOEXEC`), and a
+  `git` the worker starts in that moment holds it until it exits. Cost: `MEASUREMENTS.md`,
+  "spawning a shell: the fork against std's".
+
+  Tests: `a_child_that_cannot_start_with_its_parent_gone_exits_quietly`,
+  `a_child_that_cannot_start_is_a_spawn_error`, `the_tty_is_the_controlling_terminal_of_the_child`
+  (fails without `TIOCSCTTY`), `a_bare_name_on_no_path_is_not_run_from_the_directory`,
+  `a_path_hit_that_may_not_run_is_permission_denied`, and the three ways the handshake
+  catches up with a child that got ahead of the watch, forced by a test hook that waits
+  inside the spawn for the child's state rather than sleeping:
+  `a_setuid_program_that_ran_before_the_watch_is_seen_running` (hung for good with the full
+  view), `a_child_gone_before_the_watch_is_caught_up_with` and
+  `a_child_that_exits_while_the_watch_is_made_is_caught_up_with`; `tests/spawn.rs`: 120 shells from four
+  threads while two others allocate under a lock, `no_descriptor_of_the_daemon_leaks_into_a_shell`,
+  `a_bare_program_is_found_on_the_path_of_the_child`,
+  `a_relative_path_entry_is_taken_from_the_directory_of_the_child`,
+  `a_script_without_an_interpreter_line_runs_in_the_shell`,
+  `a_shell_starts_with_every_signal_at_its_default` and `an_environment_with_a_nul_is_refused`.
+  `tests/spawn_process_state.rs` runs, in one process with no other children: failed spawns
+  leave no child; closed standard descriptors; a `fork` at `RLIMIT_NPROC` 1; 301 descriptors
+  without close-on-exec, one at fd 5000, past the child's batch of 256; and, through
+  `pthread_atfork` handlers, the crash itself made certain rather than timed (every pipe's
+  read end swapped for `/dev/null` before the child reports: it exits 127 every time, or on
+  macOS the spawn names the step). The same handlers hold a copy of every pipe's write end
+  at the fork, as a `posix_spawn`ed child would, and the spawn must still return within 5 s:
+  the pipe design failed it, and on macOS there is now no pipe to hold, so it stays as a
+  guard against one coming back. The ignored control `std_command_aborts_when_its_parent_is_gone`,
+  which writes a crash report, shows std's child dying of `SIGABRT` under the same harness.

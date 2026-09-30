@@ -306,6 +306,15 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   instead of the `LocalAPI`, and `spawn_app` writes an empty running tailnet there, so the panel
   says "Nothing answered on your tailnet" at once; `first-run` waits for those words.
 
+- ✅ **The app under test is told its workers' macOS grants** (2026-09-30). A worker reports
+  whether this machine granted its binary Screen Recording and Accessibility, and the navigator
+  says "Screen Recording off" under a worker without it. The navigator and conversation goldens
+  had been accepted on a machine that had not granted them, and failed on one that had: the line
+  moved every row below it by 12 pt. In the e2e build the app sets both grants in each worker's
+  caps (the hello and every later `Caps`) from `slopty_e2e::WORKER_GRANTS_ENV`, and `spawn_app`
+  names both, the state a working Mac is in. A test that wants a grant missing names fewer
+  through `Stack::launch_with`. The warning itself is covered headless (`workspace::tests::facts`).
+
 - ✅ **A live test is `#[ignore]`d, not gated on a variable** (2026-09-28, audit finding 60).
   A live test used to return early when its variable was unset, so `cargo gate` counted it as
   passed without running it. Now each one carries `#[ignore = "live: <the command that runs

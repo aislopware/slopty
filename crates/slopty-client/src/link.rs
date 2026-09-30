@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -16,6 +17,7 @@ use slopty_net::{ClientMsg, NetError, WorkerMsg};
 use slopty_proto::conversation::ConversationEvent;
 use slopty_proto::datagram::{ClientDatagram, split_term_datagram};
 use slopty_proto::file::INLINE_FILE_BYTES;
+use slopty_proto::handoff::HandoffEvent;
 use slopty_proto::handshake::HelloAck;
 #[cfg(target_vendor = "apple")]
 use slopty_proto::screen::VideoCodec;
@@ -78,6 +80,15 @@ pub enum LinkEvent {
         session: SessionId,
         /// Event.
         event: ConversationEvent,
+    },
+    /// A program in a worker's shell handed this client a page or a file, or took one back
+    /// (`crate::handoff`).
+    Handoff {
+        /// What it handed.
+        event: HandoffEvent,
+        /// When this client read it off the link, by its own clock: how late it is to act on
+        /// is measured from here, never from the worker's clock.
+        received: Instant,
     },
     /// The connection is gone; `WorkerLink` is dead after this.
     Disconnected(String),
@@ -161,6 +172,9 @@ impl WorkerLink {
                             break;
                         }
                         continue;
+                    }
+                    WorkerMsg::Handoff(event) => {
+                        LinkEvent::Handoff { event, received: Instant::now() }
                     }
                     WorkerMsg::Ports { session, ports } if forward => {
                         let forwards = forwards.lock().update(session, ports);
@@ -459,7 +473,7 @@ async fn read_datagrams(
             }
         };
         #[cfg(target_vendor = "apple")]
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         for datagram in batch.iter_mut().take(read) {
             let datagram = std::mem::take(datagram);
             match split_term_datagram(&datagram) {

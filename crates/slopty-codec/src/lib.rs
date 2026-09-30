@@ -1,14 +1,14 @@
 //! Hardware video codecs behind a small, callback-driven API.
 //!
-//! * [`annexb`] — pure NAL unit framing, used by both halves and on every platform.
+//! * [`nal`] — pure length-prefixed NAL unit framing, used by both halves and on every platform.
 //! * [`conformance`] — the SPS conformance window that shows a picture coded at a padded size at
 //!   its true one.
 //! * [`video`] — the worker's encoder seam, [`VideoEncoder`] and [`AudioEncoder`], on every
 //!   platform; `VideoToolbox` and `Opus` implement it on macOS.
 //! * `Encoder` (macOS) — a `VTCompressionSession` tuned for interactive streaming: low-latency rate
-//!   control, no reordering, infinite GOP with long-term references, Annex B out.
-//! * `Decoder` (macOS, iOS) — a `VTDecompressionSession` fed Annex B; it rebuilds its format
-//!   description from the parameter sets in front of each keyframe.
+//!   control, no reordering, infinite GOP with long-term references, length-prefixed units out.
+//! * `Decoder` (macOS, iOS) — a `VTDecompressionSession` fed the units as they arrive; it rebuilds
+//!   its format description from the parameter sets in front of each keyframe.
 //! * [`audio`] — Opus through `AudioConverter` (encode on the worker, decode anywhere) and a player
 //!   that renders from its jitter ring on the output unit's I/O thread.
 //!
@@ -24,10 +24,10 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
-pub mod annexb;
 #[cfg(target_vendor = "apple")]
 pub mod audio;
 pub mod conformance;
+pub mod nal;
 pub mod video;
 
 #[cfg(target_vendor = "apple")]

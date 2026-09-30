@@ -3,31 +3,32 @@
 //!
 //! A client that takes handoffs says so once its link is up, and again when that changes, with
 //! [`declare`]; the worker asks nobody else. The UI then feeds each [`HandoffEvent`] it receives
-//! (`LinkEvent::Control(WorkerMsg::Handoff)`) to [`Handoffs::heard`] and does what the [`Todo`]
-//! says, sending the answer it carries.
+//! (`LinkEvent::Handoff`) to [`Handoffs::heard`], with how long it waited since the link read
+//! it, and does what the [`Todo`] says, sending the answer it carries.
 //!
 //! This is the machine a page would open on, so it checks the page again whatever the worker
 //! did: an address that is not a plain web page is refused, and one to be wary of, one the
-//! worker said to offer, or one that arrived late is offered in a notice showing its host, never
-//! opened unasked. A waiting edit is remembered until the person is done with it
+//! worker said to offer, or one that waited here too long is offered in a notice showing its
+//! host, never opened unasked. How long it waited is measured on this client's clock alone: the
+//! worker's may be minutes off. A waiting edit is remembered until the person is done with it
 //! ([`Handoffs::edited`]) or the worker withdraws it; an edit asked again after a reconnect is
 //! recognised by its number and only answered.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use slopty_core::WallMs;
 use slopty_proto::ClientMsg;
 use slopty_proto::handoff::{
     EditFile, EditOutcome, HandoffCaps, HandoffEvent, HandoffId, HandoffReply, OfferReason,
     OpenUrl, page,
 };
 
-/// A page asked for longer ago than this, by the worker's clock, is offered rather than opened.
+/// A page that waited longer than this between the link reading it and the UI acting on it is
+/// offered rather than opened.
 ///
 /// The worker gives each client three seconds to answer before it withdraws the page and asks
-/// another. A page that arrives later than this might be answered too late, and open on two
-/// machines; the second left over is for the answer's way back.
+/// another. A page acted on later than this might be answered too late, and open on two
+/// machines; the second left over is for the way here and the answer's way back.
 pub const LATE_AFTER: Duration = Duration::from_secs(2);
 
 /// The message that tells a worker which handoffs this client takes: send it right after the
@@ -93,15 +94,16 @@ pub struct Handoffs {
 }
 
 impl Handoffs {
-    /// What to do about `event`, heard at `now`; `can_edit` when this client shows files now.
-    pub fn heard(&mut self, event: HandoffEvent, can_edit: bool, now: WallMs) -> Todo {
+    /// What to do about `event`, which `waited` since the link read it (`LinkEvent::Handoff`'s
+    /// `received`, by this client's clock); `can_edit` when this client shows files now.
+    pub fn heard(&mut self, event: HandoffEvent, can_edit: bool, waited: Duration) -> Todo {
         match event {
             HandoffEvent::Open(open) => {
                 let Some(page) = page(&open.url) else {
                     tracing::warn!(url = %open.url, "a worker asked to open something that is not a web page");
                     return Todo::Refuse { reply: reply(HandoffReply::Refused { id: open.id }) };
                 };
-                let late = now.since(open.asked_ms) > LATE_AFTER;
+                let late = waited > LATE_AFTER;
                 let why = page
                     .wary
                     .map(OfferReason::Wary)
@@ -160,14 +162,25 @@ const fn reply(reply: HandoffReply) -> ClientMsg {
 
 #[cfg(test)]
 mod tests {
+    use slopty_core::WallMs;
     use slopty_proto::handoff::Wary;
 
     use super::*;
 
-    const NOW: WallMs = WallMs::from_millis(1_790_000_000_000);
+    /// A handoff acted on as soon as it was read.
+    const NOW: Duration = Duration::ZERO;
 
     fn open(id: HandoffId, url: &str, offer: Option<OfferReason>) -> HandoffEvent {
-        HandoffEvent::Open(OpenUrl { id, session: None, url: url.to_owned(), asked_ms: NOW, offer })
+        asked_at(id, url, offer, WallMs::from_millis(1_790_000_000_000))
+    }
+
+    fn asked_at(
+        id: HandoffId,
+        url: &str,
+        offer: Option<OfferReason>,
+        asked_ms: WallMs,
+    ) -> HandoffEvent {
+        HandoffEvent::Open(OpenUrl { id, session: None, url: url.to_owned(), asked_ms, offer })
     }
 
     fn edit(id: HandoffId, wait: bool) -> EditFile {
@@ -206,12 +219,15 @@ mod tests {
         );
         let local = h.heard(open(4, "http://localhost:5173/", None), true, NOW);
         assert_eq!(offered(&local).map(|o| o.2), Some(OfferReason::Wary(Wary::Loopback)));
-        let later = NOW.saturating_add(LATE_AFTER + Duration::from_millis(1));
-        let late = h.heard(open(5, "https://github.com/", None), true, later);
+        let late = h.heard(
+            open(5, "https://github.com/", None),
+            true,
+            LATE_AFTER + Duration::from_millis(1),
+        );
         assert_eq!(offered(&late).map(|o| o.2), Some(OfferReason::Late));
         assert!(
             matches!(
-                h.heard(open(6, "https://github.com/", None), true, NOW.saturating_add(LATE_AFTER)),
+                h.heard(open(6, "https://github.com/", None), true, LATE_AFTER),
                 Todo::Open { .. }
             ),
             "on time"
@@ -228,6 +244,25 @@ mod tests {
             declare(true, false),
             ClientMsg::HandoffCaps(HandoffCaps { open: true, edit: false })
         );
+    }
+
+    /// Whether a page is late is this client's own measure: a worker whose clock is an hour
+    /// behind or ahead does not make a page read at once late, nor one held up here on time.
+    #[test]
+    fn lateness_is_measured_on_this_clients_clock() {
+        let mut h = Handoffs::default();
+        let hour = Duration::from_hours(1);
+        let now = WallMs::now();
+        let behind = asked_at(
+            1,
+            "https://github.com/",
+            None,
+            WallMs::from_millis(now.as_millis().saturating_sub(3_600_000)),
+        );
+        assert!(matches!(h.heard(behind, true, NOW), Todo::Open { .. }), "a slow clock");
+        let ahead = asked_at(2, "https://github.com/", None, now.saturating_add(hour));
+        let held_up = h.heard(ahead, true, LATE_AFTER + Duration::from_millis(1));
+        assert_eq!(offered(&held_up).map(|o| o.2), Some(OfferReason::Late), "a fast clock");
     }
 
     /// A waiting edit is kept until the person is done, recognised when asked again, and

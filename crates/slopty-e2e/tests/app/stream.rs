@@ -110,6 +110,20 @@ fn assert_bare_beside(frame: &image::RgbaImage, body: PixelRect, picture: PixelR
     seen
 }
 
+/// The stream's layer was last presented over `picture` (device pixels), to a pixel: the picture
+/// the render draws with GPUI for the golden is where the window server shows the layer's.
+fn assert_layer_on(dump: &Dump, picture: PixelRect) {
+    let layer = dump.screens.first().and_then(|s| s.layer).expect("the picture's layer placed");
+    let scale = dump.window.scale;
+    #[expect(clippy::cast_precision_loss, reason = "window points and pixels")]
+    let off = layer
+        .iter()
+        .zip(picture)
+        .map(|(points, pixels)| (*points as f32).mul_add(scale, -(pixels as f32)).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(off <= scale + 1.0, "layer at {layer:?} points, picture at {picture:?} pixels");
+}
+
 /// The part of a drawn picture that moves: `Canvas` scrolls its page in the middle half each
 /// way, grown by [`PAGE_MARGIN`].
 const fn page(picture: PixelRect) -> PixelRect {
@@ -133,6 +147,7 @@ async fn golden_stream(
 ) -> f64 {
     let dump = settled(drv).await;
     let (body, picture) = picture(&dump, label);
+    assert_layer_on(&dump, picture);
     let page = page(picture);
     let status = header_status(&dump, heading);
     let frame = drv.render(&dir.join(format!("{name}.png"))).await.unwrap();
@@ -478,7 +493,12 @@ mod frame_time {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn drawn_frames_reach_the_glass_on_loopback() {
-        let mut stack = Stack::launch_with("e2e-worker", &[SYNTHETIC]).await.unwrap();
+        // A display that reports no scan-out (Parsec's) needs the presented handler taken as
+        // the glass, or the app times nothing (`docs/MEASUREMENTS.md`, "Drawn frames to the
+        // glass"): passed on to the app when the run sets it.
+        let callback = std::env::var("GPUI_PRESENTED_AT_CALLBACK").unwrap_or_default();
+        let env = [SYNTHETIC, ("GPUI_PRESENTED_AT_CALLBACK", callback.as_str())];
+        let mut stack = Stack::launch_with("e2e-worker", &env).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         first_shell(drv).await;

@@ -94,6 +94,9 @@ pub(crate) fn serve(
                     // The frame the app draws with everything dispatched so far, as it draws
                     // it: only what was notified is built again. It must be the frame the same
                     // state drawn from scratch gives, or a view is showing an old state.
+                    // A stream's picture is on a layer of its own, which the render cannot see:
+                    // for this frame each stream draws it with GPUI too, over its layer.
+                    cx.update(|cx| slopty_ui::screen::capture_pictures(true, cx));
                     let (done_tx, done_rx) = oneshot::channel();
                     // `update_window` (not `WindowHandle::update`): the root view must not be
                     // leased while a dispatched action updates it.
@@ -102,12 +105,14 @@ pub(crate) fn serve(
                             let _sent = done_tx.send(render(window, cx, &path));
                         });
                     });
-                    match scheduled {
+                    let rendered = match scheduled {
                         Ok(()) => done_rx.await.unwrap_or_else(|_| Reply::Error {
                             message: "window closed before the frame".into(),
                         }),
                         Err(e) => error(&e),
-                    }
+                    };
+                    cx.update(|cx| slopty_ui::screen::capture_pictures(false, cx));
+                    rendered
                 }
                 Command::Dump => {
                     // Every dump also holds the frame the app draws against the same state
@@ -762,7 +767,7 @@ fn agent_line(status: &AgentStatus) -> String {
 }
 
 /// Everything a test may want to know about one remote window, timings in microseconds.
-fn screen_info(item: ItemId, view: &ScreenView) -> ScreenInfo {
+fn screen_info(item: ItemId, view: &ScreenView, window: &Window) -> ScreenInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
     let pacing = view.pacing();
     let size = view.size();
@@ -808,6 +813,17 @@ fn screen_info(item: ItemId, view: &ScreenView) -> ScreenInfo {
         interval_p50_us: us(pacing.interval_p50),
         interval_jitter_us: us(pacing.interval_jitter),
         window: pacing.window,
+        layer: view.layer_host().and_then(|id| {
+            let shows = window.presented_natives()?.placement(id)?.visible;
+            #[expect(clippy::cast_possible_truncation, reason = "window points")]
+            let points = |p: gpui::Pixels| f32::from(p).round() as i32;
+            Some([
+                points(shows.origin.x),
+                points(shows.origin.y),
+                points(shows.size.width),
+                points(shows.size.height),
+            ])
+        }),
     }
 }
 
@@ -952,6 +968,10 @@ impl Workspace {
                     read_only: view
                         .file(item.id)
                         .and_then(|v| v.read(cx).read_only().map(str::to_owned)),
+                    text: view
+                        .file(item.id)
+                        .map(|v| v.read(cx).text(cx))
+                        .filter(|t| t.len() <= slopty_e2e::FILE_TEXT_SHOWN),
                 }),
                 _ => None,
             };
@@ -1003,7 +1023,7 @@ impl Workspace {
                 if screen.focus_handle(cx).is_focused(window) {
                     focused = format!("screen:{}", screen.stream().0);
                 }
-                dump.screens.push(screen_info(item.id, screen));
+                dump.screens.push(screen_info(item.id, screen, window));
             }
             if view.file(item.id).is_some_and(|f| f.read(cx).focused(window, cx)) {
                 focused = format!("file:{}", item.id);

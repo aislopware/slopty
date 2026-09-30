@@ -198,7 +198,8 @@ enum Cmd {
     Bundle(bundle::BundleOpts),
     /// macOS: codesign the dev daemons so their TCC grants survive the next `cargo build`.
     Sign(sign::SignOpts),
-    /// Render `assets/icon.svg` into PNG files and an `.icns` under a directory, for a look.
+    /// Build `assets/icon.svg` into the Icon Composer document, compile it, and render the
+    /// system's pictures of it (every size, every appearance) under a directory, for a look.
     Icon {
         /// Output directory.
         #[arg(default_value = "target/icon")]

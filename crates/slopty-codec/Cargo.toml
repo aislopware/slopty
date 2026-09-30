@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "VideoToolbox HEVC/H.264 encode (macOS) and decode (macOS, iOS) with Annex B framing"
+description = "VideoToolbox HEVC/H.264 encode (macOS) and decode (macOS, iOS) with length-prefixed framing"
 
 [lints]
 workspace = true
@@ -17,11 +17,11 @@ workspace = true
 experiments = [  ]
 
 [dependencies]
-memchr.workspace = true
 slopty-proto.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
+bytes.workspace = true
 objc2-audio-toolbox.workspace = true
 objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
@@ -47,3 +47,8 @@ objc2-core-video.workspace = true
 # probe in `tests/chroma444.rs`.
 objc2-video-toolbox = { workspace = true, features = [ "VTVideoEncoderList" ] }
 objc2-core-media.workspace = true
+
+# The audio ring on loom's atomics, only under `--cfg slopty_loom`: `cargo xtask deep loom` runs
+# `audio::ring_model` (`docs/decisions/tooling.md`, "The audio ring is model-checked with loom").
+[target.'cfg(slopty_loom)'.dependencies]
+loom.workspace = true

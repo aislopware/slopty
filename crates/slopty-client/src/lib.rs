@@ -34,6 +34,8 @@
 //!   and the command that updates it.
 //! * [`search`] — [`search::SearchResults`]: a text search on a worker as its pages come in, in
 //!   path order, and the rows a results list draws.
+//! * [`unsaved`] — [`unsaved::Store`]: file tiles' edits not yet saved, kept on this device so a
+//!   quit or a crash loses none of them.
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -57,6 +59,7 @@ pub mod search;
 pub mod server;
 pub mod term;
 pub mod tunnel;
+pub mod unsaved;
 pub mod update;
 pub mod xfer;
 

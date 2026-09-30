@@ -39,7 +39,8 @@ pub struct FrameOptions {
     pub acked_ltr: Vec<u64>,
 }
 
-/// One encoded access unit, Annex B, parameter sets inline before keyframes.
+/// One encoded access unit: length-prefixed NAL units ([`crate::nal`]), the parameter sets in
+/// front of a keyframe.
 #[derive(Clone, PartialEq, Debug)]
 pub struct EncodedPacket {
     /// Bitstream.

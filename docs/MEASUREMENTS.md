@@ -9802,3 +9802,622 @@ fills it, best of five in a release example in the fork (not kept):
 | --- | --- | --- |
 | write | 1 902 µs, 688 611 bytes | 580 µs, 2 069 729 bytes |
 | restore into a fresh terminal | 2 259 µs | 2 628 µs |
+
+## 2026-09-30 — Annex B against length-prefixed on the wire
+
+Release, mac-studio, instructions per access unit (`slopty_testkit::bench`, 500 samples; wall
+p50 in brackets). `access_unit_framing_cost` (`crates/slopty-codec/src/decoder.rs`) splits the
+client's path from a reassembled access unit to the sample buffer VideoToolbox takes, on the
+synthetic 1 MB keyframe of `access_unit_conversion_cost` and on the worker's own session's
+output for scrolling text: its keyframe and its median P-frame at 1080p (16 Mbit/s) and 4K (40
+Mbit/s). Today's path is `annexb_parse` (the `memchr` scan for start codes) then `annexb_block`
+(the units written length-prefixed into a block CoreMedia allocates). Carried length-prefixed,
+as VideoToolbox writes it, the path is `lp_parse` (a walk over the lengths) and either `lp_copy`
+(the picture copied once into a CoreMedia block) or `lp_wrap` (the received bytes wrapped in a
+block with a custom block source that holds them, no copy).
+
+```sh
+cargo test -p slopty-codec --lib --release --no-run    # target/release/deps/slopty_codec-<hash>
+cp target/release/deps/slopty_codec-<hash> /tmp/codec_lib && cd /tmp && nice ./codec_lib --ignored --nocapture framing_cost
+```
+
+| access unit | bytes | annexb_parse | annexb_block | lp_parse | lp_copy | lp_wrap |
+| --- | --- | --- | --- | --- | --- | --- |
+| synthetic keyframe | 1 000 151 | 814 429 (34.5 µs) | 193 509 (21.4 µs) | 601 | 193 832 (23.6 µs) | 5 101 (0.3 µs) |
+| 1080p keyframe | 442 781 | 361 316 (15.4 µs) | 88 890 (8.3 µs) | 587 | 88 874 (8.0 µs) | 5 029 (0.3 µs) |
+| 1080p P-frame | 8 708 | 7 669 (0.3 µs) | 6 612 (0.5 µs) | 0 | 6 596 (0.5 µs) | 5 029 (0.3 µs) |
+| 4K keyframe | 1 383 552 | 1 125 758 (48.5 µs) | 265 531 (29.3 µs) | 371 | 265 130 (31.0 µs) | 4 500 (0.3 µs) |
+| 4K P-frame | 22 632 | 18 475 (0.8 µs) | 8 667 (0.7 µs) | 0 | 8 601 (0.7 µs) | 4 475 (0.3 µs) |
+
+The scan is 80 % of today's cost on a real keyframe (0.8 instructions a byte; real HEVC has no
+more start-code lookalikes than the synthetic bytes), the copy the other 20 %. A length walk
+costs nothing measurable, and wrapping the received bytes costs the same 4.5–5 k instructions
+whatever the size: CoreMedia's two objects. A 4K keyframe goes from 1.39 M instructions (78 µs)
+to 4.5 k (0.3 µs) on the client's stream task, ahead of the decode that restarts a stream after
+loss; a P-frame from 14–27 k to 4.5 k. Ruling: `docs/decisions/video.md`, "HEVC travels
+length-prefixed"; this bench went with the Annex B code.
+
+## 2026-09-30 — Opus concealment: ropus against fade-replay, and repetition
+
+Mac Studio M1 Max, macOS 27.0.1, load average 3.0–3.6 (an earlier run at 9.5–10.5 gave the same
+picture). A scratch crate outside the repository (`/tmp/slopty-opus-eval`, not kept in the tree:
+adopting `ropus` would change `Cargo.lock`) pulls in `slopty-codec` by path. It encodes with the
+shipped `OpusEncoder` (48 kHz stereo, 10 ms, 96 kbit/s; every packet came out CELT-only, TOC
+config 30), drops packets on a seeded trace, and builds the played timeline as the client's
+`play_audio` does: the stand-in goes in before the packet that arrived, and a gap over
+`MAX_CONCEALED` packets stays silent. Each method is scored against a clean decode by the same
+decoder. Signals: 30.1 s of `say` speech (Daniel and Samantha) and 20 s of synthetic music
+(three harmonic voices with vibrato and noise).
+
+```sh
+cd /tmp/slopty-opus-eval/data && say -v Daniel -o d.aiff "<text>" && say -v Samantha -o s.aiff "<text>"
+for f in d s; do afconvert -f WAVE -d LEF32@48000 -c 2 $f.aiff $f.wav; done
+cd /tmp && CARGO_TARGET_DIR=/tmp/slopty-opus-eval/target nice cargo build --release --manifest-path /tmp/slopty-opus-eval/Cargo.toml
+nice /tmp/slopty-opus-eval/target/release/slopty-opus-eval   # EVAL_ONLY=speech|music for one signal
+```
+
+At 50‰ random loss and at bursty loss of about 50‰ (Gilbert–Elliott, mean burst 2.3). SNR and
+segmental SNR over the lost segments (segLost) in dB; LSD is the log-spectral distance over the
+lost segments, lower is better; E is their energy against the clean decode; the jumps are the
+mean |sample step| entering and leaving a gap, where the clean signal's step is 0.0096 (speech)
+and 0.0053 (music).
+
+| signal, loss | method | SNR | segLost | LSD | E | jump in / out |
+| --- | --- | --- | --- | --- | --- | --- |
+| speech 50‰ | Apple decode + fade-replay (today) | 9.35 | -1.11 | 6.25 | -5.2 | 0.102 / 0.078 |
+| | ropus decode + ropus PLC | 11.05 | 2.03 | 5.63 | -1.1 | 0.0096 / 0.0086 |
+| | ropus decode + fade-replay | 9.35 | -1.11 | 6.25 | -5.2 | 0.102 / 0.078 |
+| | repetition + Apple + fade-replay | 22.73 | 33.01 | 0.26 | -0.3 | 0.013 / 0.0095 |
+| speech bursty | today | 9.66 | -1.41 | 7.99 | -5.5 | 0.158 / 0.116 |
+| | ropus + PLC | 11.00 | 0.13 | 7.41 | -2.9 | 0.026 / 0.022 |
+| | repetition + Apple + fade-replay | 11.60 | 6.66 | 5.08 | | |
+| music 50‰ | today | 10.04 | -1.22 | 9.97 | -4.9 | 0.052 / 0.035 |
+| | ropus + PLC | 8.92 | -2.50 | 9.41 | -1.1 | 0.0049 / 0.0042 |
+| | repetition + Apple + fade-replay | 27.43 | 33.53 | 0.26 | | |
+| music bursty | today | 11.60 | -1.25 | 12.48 | -4.7 | 0.051 / 0.037 |
+| | ropus + PLC | 11.04 | -1.96 | 11.19 | -1.7 | 0.0040 / 0.0031 |
+
+At 20‰ and 100‰ the pattern holds: speech SNR 13.62 → 17.66 and 6.61 → 8.51 with ropus PLC,
+music 14.82 → 13.87 and 7.37 → 6.76.
+
+- The decoder alone changes nothing: ropus's clean decode of Apple's packets is 74.98 dB
+  (speech) and 70.94 dB (music) from Apple's at a 120-frame lag (Apple drops Opus's pre-skip, its
+  first packet is 720 samples), and ropus with fade-replay scores exactly as today.
+- Fade-replay steps 8–15× the clean step at both edges of every gap: it restarts the old packet
+  and fades to zero before the next begins at full level. ropus PLC stays at the clean step and
+  keeps the level (-1 dB against -5). Waveform SNR, which rewards the quieter fade when the phase
+  is wrong, favours PLC on speech by 1.3–4 dB and fade-replay on the music by 0.6–1.1 dB.
+- Decode per 10 ms packet, p50 / p95: Apple 26.9 / 31.0 µs, ropus 22.3–22.9 / 25.7–28.1 µs
+  (0.83×), ropus PLC 53.3–59.9 / 62.0–69.8 µs (2.1–2.2× Apple's decode, paid only on a lost
+  packet; about 26 µs deeper into a burst).
+- Allocations per packet after warm-up (a counting global allocator): Apple 0; ropus float decode
+  35.1 (speech) and 16.2 (music), PLC 24.7. `decode_float` allocates a fresh `vec![0i16; …]` on
+  every call (`ropus-0.12.18/src/opus/decoder.rs`, near line 1402).
+- In-band FEC does not exist at this operating point: LBRR is SILK's, and the encoder turns it off
+  in CELT-only mode (`ropus/src/opus/encoder.rs:1027`, `if use_in_band_fec == 0 ||
+  packet_loss_perc == 0 || mode == MODE_CELT_ONLY { return 0; }`); the decoder falls back to PLC
+  on a CELT-only packet (`opus/decoder.rs:1252–1257`).
+- Repetition (each audio datagram also carrying the previous packet) recovers 97–98 % of the
+  losses at 20–50‰ random, 91–92 % at 100‰, 44–46 % in bursts. It costs +119 B (speech) and
+  +110 B (music) a datagram with a 2-byte length, about +89 % of the audio datagram and +88–95
+  kbit/s.
+
+Ruling: `docs/decisions/audio.md`, "Opus loss concealment stays fade-replay until a decoder
+conceals without allocating".
+
+## 2026-09-30 — several streams on the encode engines
+
+Mac Studio M1 Max (two `ave2` encode engines), macOS 27.0, from `/tmp` under `nice`. The load
+average is printed per row: other sessions were building, and some ran encoders of their own,
+which share the engines. `concurrent_sessions` in `crates/slopty-codec/tests/chroma444.rs` opens
+N of the worker's own sessions (`slopty_codec::Encoder`, 1080p unless stated, 16 Mbit/s), each on
+its own thread feeding the scrolling text picture on a 60 beat behind the worker's one-frame
+mailbox. Every beat falls on the same instants, as windows on one display are captured on its
+refresh. Stream 0 is "the focused one". Encode is submit → packet, in ms, p50 / p95 / max, over
+the frames after the first 10. `SLOPTY_PROBE_OPEN=sequential` opens the sessions one after
+another, as a client opens tiles.
+
+```sh
+cargo test -p slopty-codec --test chroma444 --no-run      # target/debug/deps/chroma444-<hash>
+cp target/debug/deps/chroma444-<hash> /tmp/slopty-conc/chroma444 && cd /tmp/slopty-conc
+SLOPTY_PROBE_PLACE_OWN=1 SLOPTY_PROBE_SIZES=1920x1088 SLOPTY_PROBE_STREAMS=1,2,3,4,5,6,8 nice ./chroma444 --ignored --nocapture --exact tests::concurrent_sessions
+SLOPTY_PROBE_PLACE_OWN=1 SLOPTY_PROBE_EXPECT=120 SLOPTY_PROBE_SIZES=1920x1088 SLOPTY_PROBE_STREAMS=1,2,3,4,5,6,8 nice ./chroma444 --ignored --nocapture --exact tests::concurrent_sessions
+SLOPTY_PROBE_OPEN=sequential SLOPTY_PROBE_SIZES=1920x1088 SLOPTY_PROBE_STREAMS=1,2,3,4,5,6,8 nice ./chroma444 --ignored --nocapture --exact tests::concurrent_sessions
+SLOPTY_PROBE_PLACE_OWN=1 SLOPTY_PROBE_SIZES=896x512,2560x1440,3840x2160 SLOPTY_PROBE_STREAMS=1,2,4,8 nice ./chroma444 --ignored --nocapture --exact tests::concurrent_sessions
+cargo test -p slopty-worker --lib --no-run && cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-conc/worker_lib
+cd /tmp/slopty-conc && SLOPTY_STREAMS=2,4 nice ./worker_lib --ignored --nocapture --exact screen::synthetic::tests::measure_concurrent_streams
+```
+
+The first two tables ran on the encoder as it was before this change: every session placed at
+its own rate. `SLOPTY_PROBE_PLACE_OWN=1` gives that now: sessions made for 59, which
+`placement_fps` leaves alone, and the declare knobs then act at once. The other knobs
+(`SLOPTY_PROBE_EXPECT_AT`, `_THEN`, `_FOCUS_EXPECT`, `_BACKGROUND_FPS`, `_YIELD`, `_RATE`,
+`_FPS`, `_PHASE`) are in the test's doc.
+
+**Each session declaring its own rate (before), load 2.3–3.1:**
+
+| streams | focused | all streams | frames a second each |
+| --- | --- | --- | --- |
+| 1 | 6.38 / 6.66 / 8.34 | 6.38 / 6.66 / 8.34 | 60 |
+| 2 | 8.18 / 11.79 / 12.07 | 6.92 / 11.84 / 12.39 | 60 |
+| 3 | 7.44 / 11.85 / 12.12 | 6.35 / 11.76 / 12.19 | 60 |
+| 4 | 6.14 / 6.51 / 6.77 | 10.86 / 16.61 / 17.68 | 60 |
+| 5 | 6.58 / 11.87 / 12.18 | 10.78 / 16.58 / 18.00 | 60 |
+| 6 | 21.95 / 22.25 / 31.86 | 21.78 / 22.18 / 31.86 | 45.7 (others 51.3) |
+| 8 | 22.26 / 22.44 / 25.28 | 22.25 / 22.44 / 51.66 | 45.1 (others 44.9) |
+
+Two sessions at 60 take turns: the second back 5–6 ms after the first, one frame's encode, as
+the stripes did at 1080p. Together they declare less than one engine's pixel rate, so the driver
+puts them on one. From six on, both engines are full (six 6.4 ms frames a period is 38 ms of
+work for 33 ms of two engines), and every stream falls to 45 frames a second.
+
+**Every session declaring 120** (`SLOPTY_PROBE_EXPECT=120`, load 3.1–4.5):
+
+| streams | focused | all streams | frames a second each |
+| --- | --- | --- | --- |
+| 1 | 6.53 / 6.72 / 7.47 | 6.53 / 6.72 / 7.47 | 60 |
+| 2 | 6.53 / 7.32 / 16.92 | 6.53 / 7.25 / 17.54 | 60 |
+| 3 | 10.37 / 12.03 / 12.47 | 6.48 / 11.99 / 12.47 | 60 |
+| 4 | 9.96 / 12.06 / 12.21 | 7.74 / 12.05 / 12.28 | 60 |
+| 5 | 12.34 / 16.52 / 16.73 | 12.34 / 16.74 / 19.96 | 60 |
+| 6 | 16.67 / 17.46 / 25.78 | 16.67 / 17.47 / 77.37 | 59.5 |
+| 8 | 28.43 / 31.11 / 35.33 | 21.24 / 30.12 / 79.46 | 34.4 (others 44.7) |
+
+Two streams run side by side, one on each engine, and six keep 60 frames a second.
+
+**When the rate places a session.** Two 1080p sessions opened one after the other, told their
+rates at different moments (`SLOPTY_PROBE_EXPECT_AT`, `_THEN`, `_FOCUS_EXPECT`), focused p95:
+
+| what the sessions were told | focused p95 | engines |
+| --- | --- | --- |
+| both 60 | 11.8 | shared |
+| the second 120, set only before `PrepareToEncodeFrames` | 11.9 (2 runs) | shared |
+| both 120 after the prepare, through the first frame | 6.6–7.3 (9 runs) | one each |
+| both 120 after the prepare, 60 just before the first frame | 11.7 | shared |
+| both 120 after the prepare, 60 after the first or the 12th frame | 6.7 | one each |
+| both 60, then 120 from the 12th frame | 11.9 | shared |
+| the first 60, the second 120 or 240 after the prepare | 6.6–7.8 in 7 runs, 10.2–12.2 in 9 | either |
+
+The driver places a session, and fixes its set-up, from the rate last set between the prepare
+and the first frame. The picture follows the same rate: a session placed at 120 codes the same
+text at 55.43 dB where one placed at 60 codes it at 55.70, whatever it is told later. Only
+sessions that all declare 120 were split every time.
+
+**What declaring 120 costs a stream alone** (one session, 6 s, luma PSNR from the encoder's own
+error, rate spent; own rate → 120):
+
+| size, target | 60 a second | 30 | 15 |
+| --- | --- | --- | --- |
+| 1080p, 3 Mbit/s | 48.18 → 48.47 dB, 2.77 → 2.74 Mbit/s | 51.49 → 50.92, 2.00 → 2.04 | 52.12 → 50.29, 1.15 → 1.35 |
+| 1080p, 8 Mbit/s | 54.86 → 54.26, 4.17 → 4.20 | 55.45 → 54.37, 2.14 → 2.38 | 56.79 → 54.66, 1.06 → 1.34 |
+| 1080p, 16 Mbit/s | 55.70 → 55.43, 4.25 → 4.39 | | |
+| 1440p, 16 Mbit/s | 56.08 → 55.68, 5.91 → 6.20 | | |
+| 4K, 40 Mbit/s | 55.51 → 55.07, 11.39 → 12.24 | | |
+
+Up to 0.6 dB and 4–7 % more bits at 60, all above 54 dB, and +0.3 dB where 3 Mbit/s binds;
+0.6–2.1 dB at 30 and 15. So a session made for 60 or more declares 120, and one made for less
+keeps its own rate.
+
+**Other sizes** (each declaring its own rate; p95 of all streams): 896 × 512 windows pack onto one
+engine even when declared at 120, and queue there: 2.87, 4.62, 8.27 and 17.54 ms for 1, 2, 4 and 8
+(declared 120: 3.20, 4.73, 8.67, 13.32, and 8 keep 60 where they made 58.9). At 2560 × 1440, two
+at 60 take turns (18.5 ms each, 54 frames a second); declared 120, 10.7 / 18.0 and 59. A 4K
+session alone already declares more than one engine: one or two ran at 20.6 ms p50 and 46–48
+frames a second either way.
+
+**Favouring the focused stream** (every session declaring 120 unless stated, focused p95):
+background streams that wait while the focused one has a frame in the encoder
+(`SLOPTY_PROBE_YIELD=wait`) held it at 6.57 ms with two others and 11.60 with four; at 30 frames a
+second the four others still gave 11.30–11.56. With four others at 60, two engines are full and
+some frame is always ahead of the focused one's. These runs were at load 7–10, and their spread
+between repeats was as wide as the differences.
+
+**As shipped** (`placement_fps` in `crates/slopty-codec/src/encoder.rs`: a session made for 60
+or more declares 120 from the prepare until its first frame, then its own rate). The probe with
+sessions opened one after another, before (`SLOPTY_PROBE_PLACE_OWN=1`) against after, p95 of all
+streams and frames a second:
+
+| streams | before | after | load |
+| --- | --- | --- | --- |
+| 4 | 16.75 and 16.72 ms, 59 | 12.67 and 12.04 ms, 60 | 7–24 |
+| 6 | 22.3–22.5 ms; focused 44–45, others 50–51 | 16.9 ms, 59.3–59.7 each | 39–53 |
+| 7 | 28.0 ms; focused 35–36, others 43–44 | 22.5–22.6 ms; focused 44–59, others 47–52 | 39–53 |
+| 8 | 28.2–29.7 ms; focused 50–59, others 42 | 22.6–22.9 ms, 44–45 each | 39–53 |
+
+Eight 1080p streams at 60 ask for 51 ms of encoding each 16.7 ms period, more than two engines
+have, so both ways fall to about 44 frames a second; after the change they share it evenly. Two
+streams alone could not be settled in the probe at load 20–30: other sessions' encoders were on
+the engines, and even one stream read 12–20 ms p95 in some runs.
+
+The worker end to end (`measure_concurrent_streams` in
+`crates/slopty-worker/src/screen/synthetic.rs`: N synthetic display streams through the real
+`Pipeline`, about 1920 wide, 4 s each, two rounds each way, load 20–29), encode p95 per stream:
+
+| streams | before | after |
+| --- | --- | --- |
+| 1 | 7.37; 6.58 | 7.51; 6.86 |
+| 2 | 10.68, 12.55; 9.20, 10.91 | 6.54, 6.58; 6.70, 6.74 |
+| 4 | 18.72, 18.63, 17.14, 8.90; 16.53, 16.53, 6.47, 16.84 | 11.55, 12.78, 9.21, 12.93; 10.81, 8.40, 6.78, 6.82 |
+| 8 | three at 22.3 and 58 fps, five at 28.2 and 36; all 22.9 and 42–45 fps | one at 22.4 and 58.5 fps, seven at 41.3 and 23; all 22.7 and 31–49 fps |
+
+The first eight-stream round after the change put seven streams on one engine; the probe's three
+rounds above never did, so it reads as the other encoders on the machine at the time, but it is
+recorded as seen. What a stream costs the worker's CPU, capture drawing included, is about 0.05
+of a core: 0.06–0.10, 0.11–0.15, 0.21–0.28 and 0.35–0.40 cores for 1, 2, 4 and 8. Nothing else
+is shared or duplicated at a cost that shows: each stream owns its session, its packetizer and
+its pacer, and the engines are the one shared resource.
+
+## 2026-09-30 — HEVC travels length-prefixed
+
+Release, mac-studio, load 8–15, instructions per call (`slopty_testkit::bench`; wall p50 in
+brackets, noisy with other sessions' encoders on the machine). Before is the Annex B build, after
+the length-prefixed one; both binaries were built from the same tree around the change and run
+twice, interleaved, with the same tests. `decode_cost` (`crates/slopty-codec/src/decoder.rs`)
+hands `Decoder::decode` a live session and the worker's own session's output for scrolling text:
+its keyframe, which is what restarts a stream after loss, and a P-frame. The submit is timed and
+the decode awaited outside it, so the figure is what the client's stream task spends.
+
+```sh
+cargo test -p slopty-codec --lib --release --no-run    # target/release/deps/slopty_codec-<hash>
+cp target/release/deps/slopty_codec-<hash> /tmp/codec_lib && cd /tmp
+nice ./codec_lib --ignored --nocapture decode_cost
+nice ./codec_lib --ignored --nocapture packet_conversion_cost access_unit_conversion_cost
+```
+
+| call | before | after |
+| --- | --- | --- |
+| decode, 1080p keyframe (442 781 B) | 724 860–736 655 | 284 543–285 886 |
+| decode, 4K keyframe (1 383 552 B) | 1 838 080–1 850 817 | 445 382–446 699 |
+| decode, 1080p P-frame (2 654 B) | 159 495–160 677 | 156 487–158 033 |
+| decode, 4K P-frame (16 472 B) | 205 110–207 813 | 185 816–188 749 |
+| to a sample buffer, 1 MB synthetic keyframe | 1 510 550 (56 µs) | 12 300 (0.4 µs) |
+| host, VideoToolbox's output to a packet, 300 KB keyframe | 58 847 (5.5 µs) | 58 449 (5.6 µs) |
+| host, the same, 62 KB P-frame | 14 214 (1.2 µs) | 13 762 (1.2 µs) |
+
+A 4K keyframe after loss costs the client a quarter of what it did: 1.4 M instructions less, the
+scan for start codes and the copy into CoreMedia's block. What is left, about 150 k for any
+P-frame and 280–450 k for a keyframe, is VideoToolbox's own submit. The host is unchanged: it
+used to rewrite each length to a start code in place, and now walks the same lengths to check
+them. `access_unit_framing_cost`, which compared the two framings on one build (the section
+above), went with the Annex B code; `decode_cost` measures the end result.
+
+## 2026-09-30 — the focused stream when the engines are full (first cut)
+
+Release, mac-studio, load 15–30, with other sessions' encoders on the machine.
+`measure_concurrent_streams` (`crates/slopty-worker/src/screen/synthetic.rs`) opens 7 and 8
+drawn display streams at 1920 × 1080, 60 frames a second, with the canvases now beating on a
+shared grid (`first_beat` in `slopty-capture`), and waits 3 s for the encoder watches to settle.
+It measures for 6 s. `SLOPTY_FOCUSED=1` has a client focus stream 0 (`screen/engines.rs`).
+There are two rounds each way. Encode p50 / p95 in ms and frames a second:
+
+| streams | nobody focused (stream 0; the rest) | stream 0 focused (stream 0; the rest) |
+| --- | --- | --- |
+| 7 | 16.6 / 16.9, 59.7; three at 59.7, four at 43–45 — and 22.1 / 22.6, 44.8 | 13.5 / 23.7, 60.0; 30 each (one 15) |
+| 8 | 21.0 / 22.6, 46.8; 37–46 — and 22.0 / 22.5, 45.2; 44–46 | 6.7 / 17.9, 60.0; 15 each — and 12.1 / 17.9, 60.0; 30 each |
+
+The focused stream keeps 60 frames a second where it had 45–47, and its median encode falls
+back towards its time alone. Two things are left, and neither is shipped yet. First, the
+background drops a second rung when the next window still reads short (15 frames a second at 8
+streams), so the give-way needs a settling period. Second, the focused p95 stays at 18–24 ms
+because background frames go into the engines on the same refresh; the fix is to hold them while
+a focused frame is in the submit.
+
+## 2026-09-30 — keeping an unsaved edit
+
+What hot exit (`docs/decisions/ui.md`, "An unsaved edit survives a quit or a crash") costs.
+Release, mac-studio's internal SSD, other sessions building (load 15–30). Medians of 21 rounds
+on the UI thread and of 7–40 rounds for the writes.
+
+```sh
+cargo nextest run -p slopty-ui --release --run-ignored only timing_of_a_backup --no-capture
+cargo nextest run -p slopty-client --release --run-ignored only put_cost --no-capture
+```
+
+**On the UI thread**, a 16 MiB file tile with an unsaved edit (two runs):
+
+| what a pass does per tile | time |
+|---|---|
+| `FileView::text()`, the whole text copied out (the first version read this) | 5047 / 4820 µs |
+| `FileView::backup_mark()`, when its backup is current | 0.042 µs |
+| `FileView::backup()`, the editor's `ropey::Rope` shared, when it is behind | 0.042 µs |
+| off the UI thread: the rope read out to a string (`Backup::unsaved`) | 3052 / 2757 µs |
+
+Sharing the rope keeps the copy off the frame: 5 ms is a third of a 60 Hz frame, paid on every
+pass while typing. The pass now reads nothing per byte on the UI thread.
+
+**Writing one backup**, ms. The first run measured the store as it was (`File::sync_all` before
+the rename, which is `F_FULLFSYNC` on Apple platforms). The second measured it on
+`slopty_platform::fs::replace` (`F_BARRIERFSYNC`, then a plain `fsync` of the directory). The
+three middle columns write the same JSON three ways, whatever the store does:
+
+| size | JSON | + `F_FULLFSYNC` | + barrier, directory `fsync` | unsynced | `Store::put` before → after |
+|---|---|---|---|---|---|
+| 4 KiB | 0.00 | 5.06 / 4.91 | 1.48 / 1.03 | 0.16 / 0.25 | 5.05 → 1.06 |
+| 1 MiB | 0.46 / 0.47 | 5.47 / 5.11 | 2.87 / 1.54 | 1.01 / 0.52 | → 2.11 |
+| 16 MiB | 8.48 / 27.12 | 9.85 / 12.29 | 6.58 / 4.86 | 3.92 / 4.10 | → 14.66 |
+
+(The first run's `Store::put` at 1 MiB and 16 MiB is missing: the harness numbered its changes
+from 1 for each size, so the store took them as overtaken and wrote nothing. Fixed for the
+second run. The 16 MiB JSON's 8 → 27 ms is the machine's load between runs.)
+
+What changed:
+- The store writes through `slopty_platform::fs::replace`, the codebase's one way to replace a
+  file (`docs/decisions/platform.md`, "One way to replace a file, one home"). A small backup
+  costs 1.1 ms where it cost 5.1, and no longer flushes the drive's cache up to five times a
+  second while someone types.
+- A tile brings on a pass only when its `backup_mark` moves. Before, every notify of a file
+  tile did, and the caret's blink notifies twice a second: a headless test counted 121 calls
+  to start a pass in 60 s of a tile doing nothing.
+- The passes space out for a large edit, so the backups write at most 8 MiB a second
+  (`KEEP_BYTES_PER_SEC`). A 16 MiB file typed into was rewritten every 200 ms, 80 MiB a second
+  of writes and about 20 ms of encoding and writing a pass; it is now kept every 2 s. A file
+  up to 1.6 MiB is still kept every 200 ms.
+
+## 2026-09-30 — spawning a shell: the fork against std's
+
+What a new tile's shell costs from `Pty::spawn` to the program running, after the review of
+`crates/slopty-pty/src/spawn.rs` (`docs/decisions/terminal.md`, "A shell starts from our own
+fork"). Four legs, interleaved in each of 300 rounds and run on `/usr/bin/true`: all of
+`Pty::spawn`; its preparing alone (the same spawn failing on a NUL in the last variable, just
+before the fork); `Launch::spawn` alone (fork, child steps, `execve`); and std's `Command` with
+the `pre_exec` the spawn used to take. Measured on mac-studio, main `c08d4c14` plus the
+uncommitted tree, release, under `nice -n 10`, with a load average of 26 to 35 from other
+builds:
+
+```
+cargo nextest run -p slopty-pty --release --run-ignored only spawn_cost --no-capture
+SLOPTY_SPAWN_BALLAST_MB=2048 cargo nextest run -p slopty-pty --release --run-ignored only spawn_cost --no-capture
+```
+
+| run | `Pty::spawn` p50 / p95 / p99 | preparing | `Launch::spawn` | std `Command` |
+|---|---|---|---|---|
+| 0 MiB | 1492 / 12876 / 27381 µs | 149 / 300 / 429 | 1382 / 9456 / 29128 | 1356 / 11988 / 19002 |
+| 0 MiB | 1906 / 15275 / 27742 | 154 / 331 / 491 | 1889 / 14987 / 25272 | 1831 / 12739 / 27075 |
+| 0 MiB (before the prep leg) | 2125 / 14623 / 27104 | | 1763 / 16528 / 37744 | 1690 / 15509 / 36624 |
+| 2 GiB ballast | 1879 / 13286 / 26003 | | 1683 / 14289 / 32745 | 1639 / 11672 / 31474 |
+
+- The fork is std's within 2 to 4 % at p50 in every run, and the p95s swap places between
+  runs. The load sets the tails, not the code. Closing inherited descriptors
+  (`proc_pidinfo` and a `close` each) is not visible at this resolution.
+- With 2 GiB of touched heap the fork was no slower, so a daemon holding many sessions'
+  backlogs pays nothing extra to spawn.
+- Preparing is 150 µs p50 in the loop. Warm, one step at a time (2000 calls each, a probe that
+  was not kept), it is 42 µs: 28 µs for `Launch::new` turning 182 variables into C strings,
+  12 µs to copy the environment, 1.8 µs for `default_term`'s `stat`s, under 1 µs for the
+  rest. The rest of the 150 is the first touches after the previous fork (copy-on-write
+  faults and cold caches). Caching the prepared environment would save at most about 40 µs
+  of a 1.4 to 1.9 ms spawn, under the noise here, and would need invalidating whenever the
+  daemon's environment changes. Not taken.
+- Faster ways to fork, weighed: `posix_spawn` (388 µs against 919 µs p50 when measured
+  before) cannot make the tty a controlling terminal on macOS. `vfork` in Rust has no
+  `returns_twice`, and libc marks it deprecated on Linux for the memory corruption that
+  follows (rust-lang/libc#1596). A shell's own start-up (tens of ms for zsh with rc files)
+  dwarfs the spawn anyway.
+
+After the second review, the parent learns of the `exec` through kqueue (`EVFILT_PROC`, a
+shared page for the report) instead of a pipe's end of file. The same command, twice, at load
+averages of 21 to 23:
+
+| run | `Pty::spawn` p50 / p95 / p99 | preparing | `Launch::spawn` | std `Command` |
+|---|---|---|---|---|
+| 0 MiB | 1646 / 9185 / 38600 µs | 141 / 311 / 402 | 1595 / 8541 / 30495 | 1581 / 8871 / 26896 |
+| 0 MiB, quieter | 1174 / 1426 / 2068 | 120 / 147 / 168 | 1072 / 1303 / 1570 | 1058 / 1329 / 4859 |
+
+The quieter run is the cleanest pair so far: the fork and exec are std's within 1.3 % at p50
+and 2 % faster at p95, so a `kqueue`, one `kevent` to watch, one `proc_pidinfo` and one to
+wait cost what a `pipe` and two `fcntl`s did.
+
+## 2026-09-30 — Opus concealment: pitch repeat
+
+Mac Studio M1 Max, macOS 27.0, load 15–35 (other sessions building; the scores do not depend
+on it, the timings do). The harness of "Opus concealment: ropus against fade-replay, and
+repetition" above, same signals, traces and scores, with two rows added: (f) Apple's decode with
+the new `Conceal` (the last pitch period repeated, and the next packet faded in from its
+continuation) and (g) the same with repetition. Row (a) is the fade-replay `Conceal` did before,
+kept in the harness as a copy. The harness calls `Conceal::fill` and `Conceal::take` as the
+client's `play_audio` does, and counts allocations with a counting global allocator.
+
+```sh
+cd /tmp && CARGO_TARGET_DIR=/tmp/slopty-opus-eval/target nice cargo build --release --manifest-path /tmp/slopty-opus-eval/Cargo.toml
+nice /tmp/slopty-opus-eval/target/release/slopty-opus-eval
+cargo nextest run -p slopty-codec --lib --run-ignored only --no-capture concealment_against_the_clean_decode
+```
+
+| signal, loss | method | SNR | segLost | LSD | E | jump in / out |
+| --- | --- | --- | --- | --- | --- | --- |
+| speech 20‰ | (a) fade-replay | 13.62 | -0.92 | 6.32 | -4.78 | 0.109 / 0.080 |
+| | (b) ropus + PLC | 17.66 | 3.40 | 4.74 | -0.83 | 0.0074 / 0.0082 |
+| | (f) pitch repeat | 17.56 | 5.10 | 5.21 | 0.04 | 0.029 / 0.0079 |
+| | (g) repetition + pitch | 47.83 | 33.83 | 0.16 | 0.01 | 0.0077 / 0.0095 |
+| speech 50‰ | (a) | 9.35 | -1.11 | 6.25 | -5.23 | 0.102 / 0.078 |
+| | (b) | 11.05 | 2.03 | 5.63 | -1.09 | 0.0096 / 0.0086 |
+| | (f) | 12.73 | 2.93 | 5.12 | -0.28 | 0.031 / 0.011 |
+| | (g) | 26.45 | 33.23 | 0.21 | -0.16 | 0.012 / 0.0095 |
+| speech bursty | (a) | 9.66 | -1.41 | 7.99 | -5.49 | 0.158 / 0.116 |
+| | (b) | 11.00 | 0.13 | 7.41 | -2.92 | 0.026 / 0.022 |
+| | (f) | 11.54 | 0.69 | 6.98 | -1.87 | 0.050 / 0.025 |
+| | (g) | 13.62 | 7.91 | 4.42 | -1.32 | 0.025 / 0.011 |
+| speech 100‰ | (a) | 6.61 | -1.16 | 6.49 | -5.26 | 0.094 / 0.072 |
+| | (b) | 8.51 | 2.22 | 5.73 | -1.46 | 0.0081 / 0.0081 |
+| | (f) | 9.53 | 2.67 | 5.56 | -0.47 | 0.034 / 0.0096 |
+| | (g) | 19.89 | 30.20 | 0.81 | -0.17 | 0.011 / 0.0088 |
+| music 20‰ | (a) | 14.82 | -0.84 | 9.89 | -5.10 | 0.043 / 0.030 |
+| | (b) | 13.87 | -2.07 | 8.77 | -1.53 | 0.0057 / 0.0044 |
+| | (f) | 13.62 | -2.89 | 8.63 | -0.71 | 0.046 / 0.0055 |
+| | (g) | 27.38 | 33.20 | 0.28 | -0.10 | 0.0072 / 0.0071 |
+| music 50‰ | (a) | 10.04 | -1.22 | 9.97 | -4.86 | 0.052 / 0.035 |
+| | (b) | 8.92 | -2.50 | 9.41 | -1.08 | 0.0049 / 0.0042 |
+| | (f) | 8.82 | -3.04 | 8.57 | -0.25 | 0.040 / 0.0054 |
+
+The clean signal's own step is 0.0095 (speech) and 0.0053–0.0070 (music).
+
+- On speech the pitch repeat matches ropus's concealment at 20‰ and beats it at 50‰, 100‰ and
+  in bursts, and keeps the level better (-0.3 dB against -1.1 at 50‰). On the music both lose
+  about 1.2 dB of waveform SNR to fade-replay while their spectra and levels are closer.
+- Leaving a gap steps as the clean signal does, thanks to the fade into the next packet.
+  Entering one still steps 3–5× the clean step (fade-replay: 8–15×): the repeat starts a period
+  back and cannot touch what was already played.
+- Per concealed packet: 22.5 µs p50, 23–26 µs p95 (Apple's decode is 27 µs), and no allocation
+  after the first gap (0.00–0.03 a packet, the first gap's buffers).
+- Repetition on top (g) is the best row on every speech trace. On the music it is 0.1–2 dB of
+  waveform SNR under repetition over fade-replay (d), the same trade as without repetition, with
+  a closer spectrum and level.
+- The in-crate measurement on a 140 Hz voice-like tone and a chord, one packet in 20 lost plus
+  pairs: over the gaps and the packet after them -1.3 → 3.4 dB and 0.0 → 2.9 dB; over the whole
+  6.1 → 9.7 dB and 7.8 → 10.5 dB.
+
+## 2026-09-30 — the focused stream when the engines are full
+
+Release, mac-studio, load 18–56, with other sessions' encoders on the machine. Same harness as
+the first cut above. After the others give way, the focused stream asks again only after 1 s and
+two of its own windows (`SETTLE_US`, `SETTLE_WINDOWS`). This was set against a variant that also
+held each background capture on its encode thread for up to 8 ms, until the focused capture of
+the same refresh had gone into its encoder. The three modes ran interleaved, three rounds each,
+4, 7 and 8 streams per mode per round. Stream 0's encode p95 in ms, its frames a second, and the
+rest's frames a second:
+
+```sh
+cargo test -p slopty-worker --release --lib --no-run   # copy the test binary to /tmp/slopty-conc
+SLOPTY_FOCUSED=1 SLOPTY_STREAMS=4,7,8 SLOPTY_GLASS_SECONDS=6 nice /tmp/slopty-conc/worker_lib \
+  --ignored --nocapture --exact screen::synthetic::tests::measure_concurrent_streams
+```
+
+| streams | settle, and held captures | settle only (shipped) | nobody focused |
+| --- | --- | --- | --- |
+| 4 | 13.0, 14.9, 12.1; 58–59; the rest 30 once, else 57–59 | 13.2, 12.8, 12.2; 58–60; the rest 59–60 | 13.3, 13.7, 12.3; 59; the rest 58–60 |
+| 7 | 18.0, 24.7, 28.7; 56–58; the rest 30, 19, 15 | 32.9, 20.1, 12.7; 57–59; the rest 15, 30, 30 | 29.8, 28.3, 22.8; 35–44; the rest 34–59 |
+| 8 | 25.8, 17.9, 28.2; 56–59; the rest 15–30, 15–30, 15 | 18.2, 18.3, 40.0; 56–59; the rest 30, 30, 15 | 26.6, 17.3, 22.8; 44–60; the rest 35–59 |
+
+- Focus keeps stream 0 at 56–60 frames a second with a p50 of 7–12 ms, where nobody focused
+  gets it 35–44 and 22–28 ms at 7 streams.
+- The p95 spread between rounds of one mode (12.7–32.9) is wider than the difference between
+  the modes. Held captures waited 1.1–3.2 ms a frame and left the rest at 15–20 frames a second
+  in five of six runs, against two of six with the settle alone. So only the settle ships.
+- Under this load the focused p95 is not below 16.7 ms at 7–8 streams. The frames that queue in
+  front of it are the rest's, coded at full size.
+
+## 2026-09-30 — Deep checks widened, a stream soak, a loom model
+
+mac-studio, load 20–30 from other sessions' builds and tests, all heavy work under `nice`. The
+wall times are this loaded machine's and are kept as a scale, not a budget.
+
+```
+cargo xtask deep sanitize address          # the widened crate set, two runs (see below)
+cargo xtask deep sanitize thread
+cargo xtask deep loom                      # needs target/quality/codec-loom.patch applied
+cargo xtask deep metal [--filter …]        # the app self-test under Metal validation
+cargo xtask deep leaks                     # daemon and wire test binaries under leaks --atExit
+cargo xtask soak --seconds 60 [--no-build] # now with one stream lane by default
+```
+
+**Sanitizers over every crate with `unsafe`.** `slopty-vdisplay`, `slopty-crash`,
+`slopty-tailnet`, `slopty-input` and `slopty-ptyd` joined the sanitized set. Neither
+sanitizer reported a memory error or a data race in any of them.
+- The four new crates alone: 139 tests, 117 s under ASan and 96 s under TSan, builds included.
+- The whole set under ASan: 680 tests in 72 s, plus 33 in `slopty-crash`'s own run. The lane
+  took 272 s with a warm build.
+- The whole set under TSan: 681 tests in 709 s, and 996 s for the lane.
+
+What failed, and why:
+- `slopty-crash`'s crash tests saw the child die of `SIGABRT` rather than the signal it raised.
+  The crate chains to the handler it finds, and under a sanitizer that is the runtime's, which
+  reports and aborts. The crate now runs apart with the runtime's handlers off
+  (`handle_segv=0:…`), and the two signal assertions pass.
+- Four of its tests still fail on frame names. With `debug = "line-tables-only"`, an inlined
+  frame is named from DWARF alone, without its path (`child`, `{closure#0}`). The sanitizer
+  builds inline `child` into its `FnOnce` shim, and the test's search for
+  `crash::crash::child` then finds the shim at `function.rs:250`. The gate passes only because
+  the test profile does not inline it. A release report names every inlined frame the same bare
+  way.
+- Five tests wait forever under TSan and pass under ASan, and are left out of the TSan run by
+  name (`deep.rs`, `TSAN_CANNOT_RUN`). Each waits on a child through `tokio::process`. TSan
+  holds the `SIGCHLD` handler until the thread calls a function it intercepts, and the runtime
+  is parked in `kevent`, which it does not intercept. The child was seen `<defunct>`, never
+  reaped, in all five.
+- A few worker and pty tests missed their deadlines under TSan's slowdown and passed alone.
+  One more fails alone too: `actor::a_viewer_whose_queue_was_dropped_gets_frames_again_once_it_reads`,
+  "never shown" after 11.5 s. It is not classified.
+
+**The loom model of the audio ring** (`audio::ring_model`, three scenarios, exhaustive with no
+preemption bound): 3 passed in 61 s, 142 s with the build. Three planted bugs were each caught
+within 10 ms: `write` published relaxed (a torn frame), the run word stored relaxed (the front
+played unfaded), and the device's second look at `run` removed (the next run played unfaded after
+a mute).
+
+**Metal validation** (`deep metal`, the quick terminal and a folder tile, a build each time):
+
+| run | wall of the two tests |
+| --- | --- |
+| plain | 13.6 s, 11.4 s |
+| API and shader validation | 11.4 s |
+
+The cost is within the noise. No API error asserted and no shader fault was reported. Warnings
+per run, from gpui-fast's Metal renderer: 16 redundant buffer bindings (the same 48-byte
+buffer bound again), 2 redundant texture bindings (the 1024 × 1024 A8 atlas), and 4 unused
+fragment bindings at buffer index 1. On the longer run (seven tile tests) there were 1 750 and
+449 of them.
+
+**The stream soak** (`soak --seconds 60`: 1 536 fill cycles and a minute of load, beside one
+lane streaming the drawn display and both windows in turn at scales 1.0, 0.75 and 0.5 for 3 s
+each):
+
+| | run 1 | run 2 |
+| --- | --- | --- |
+| streams / failed | 71 / 0 | 85 / 0 |
+| frames decoded (per stream p50, of 180) | 11 663 (175) | 14 444 (173) |
+| lost / decode errors / stalls | 0 / 0 / 0 | 0 / 0 / 0 |
+| worker dropped / captured | 52 / 12 295 (4.2 ‰) | 49 / 15 054 (3.3 ‰) |
+| first frame p50 / p95 / max | 111 / 148 / 346 ms | 127 / 324 / 444 ms |
+| worker peak footprint | 146 MiB | 149 MiB |
+| worker descriptors, threads before → after | 14 → 14, 18 → 17 | 14 → 14, 17 → 17 |
+| `leaks` (server, ptyd, worker) | 0, 0, 0 | 0, 0, 0 |
+| the whole soak | 275 s | 330 s |
+
+Without streams the worker peaked at 104 MiB. A stream lane adds about 42 MiB of capture
+surfaces and encoder pool, so the worker's peak budget grows by 64 MiB a lane
+(`STREAM_PEAK_MIB`). Its footprint was back at 36–40 MiB after the load, with a falling slope.
+A soak run earlier the same day stopped after 1 195 fill cycles on ptyd's
+`open /dev/ptmx: Unknown error: -6`. Another session was churning PTYs at the time, and the
+machine allows 511 (`kern.tty.ptmx_max`). A cycle that fails now ends the load but keeps the
+evidence: samples, counts, `leaks` and the summary.
+
+**Miri** (`deep miri`, unchanged): `slopty-predict`'s 23 unit tests pass in 385 s.
+`editing::random_editing_never_shows_a_wrong_line` ran past 20 minutes under the interpreter
+without finishing, so the nightly's Miri lane runs for hours as it stands.
+
+**`leaks --atExit` on test binaries** (`deep leaks`): `slopty-net`'s 49 tests take 13 s under it,
+against 5 s bare, with 0 leaks. The lane as shipped runs 35 test binaries of `slopty-net`,
+`slopty-ptyd`, `slopty-media`, `slopty-engine`, `slopty-grid`, `slopty-server` and
+`slopty-worker` in 224 s, with 0 leaks. Tests that drive a shell on a PTY cannot run under it
+(`LEAKS_CANNOT_RUN`, and `slopty-pty` as a whole), for the reason `docs/TESTING.md` gives.
+
+## 2026-09-30 — a stream's pictures on a layer of their own
+
+Debug build (the e2e's), mac-studio, macOS 27.0, a 60 Hz Parsec virtual display that reports no
+scan-out, other sessions building and testing (load 15–32). The app's tile shows the worker's
+drawn display (756×492 HEVC at the tile's width) for 20 s. The presented handler is taken as
+the glass (`GPUI_PRESENTED_AT_CALLBACK=1`, which the test passes on to the app). Two paths in one
+build, interleaved: the picture on the stream's `VideoLayer`, put up from the decoder's thread,
+against the picture drawn by GPUI's surface element in the view's frame and timed after that
+frame's paint (the path before, kept behind a switch for the runs and then removed).
+
+```sh
+GPUI_PRESENTED_AT_CALLBACK=1 nice cargo xtask e2e smooth --filter 'test(drawn_frames_reach_the_glass_on_loopback)'
+```
+
+| run | arrival → glass p50 / p95 / max ms | present spacing | GPUI frames in 20 s |
+| --- | --- | --- | --- |
+| layer, round 1 | 0.97 / 1.19 / 9.77 | 16.51 ± 1.94 | 160 |
+| surface, round 1 | 13.92 / 16.29 / 17.04 | 16.66 ± 0.68 | 1411 |
+| layer, round 2 | 1.19 / 3.29 / 8.56 | 16.52 ± 1.96 | 159 |
+| surface, round 2 | 12.18 / 14.18 / 14.45 | 16.66 ± 0.24 | 1426 |
+
+- The layer takes 11–13 ms off p50 and 11–15 ms off p95. The window draws no frame for a
+  picture: 160 frames in 20 s against about 1 420, each at 0.4 ms p50.
+- The drawn display beats on this Mac's own display clock, so every picture arrives at one
+  phase of the refresh, just before it. The layer puts it up on that refresh. GPUI's frame
+  waits for the next display tick and misses it. A source on another Mac arrives at any phase,
+  where the gain is the wait for the tick (half a refresh on average) and the frame itself.
+- Presents are a little less evenly spaced on the layer (±1.9 ms against ±0.2–0.7): each goes
+  up as it is decoded, not on the display's tick.
+- Every picture decoded was put up (1300–1322), 0–7 were skipped, and nothing was lost.

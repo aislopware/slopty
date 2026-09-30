@@ -137,23 +137,6 @@ pub fn run(sh: &Shell, cmd: &IosCmd) -> Result<()> {
 }
 
 /// Build the static library and the app bundle; returns the `.app` path.
-/// One 1024 px universal icon; Xcode derives every other size from it.
-const APPICON_CONTENTS: &str = r#"{
-  "images" : [
-    {
-      "filename" : "AppIcon.png",
-      "idiom" : "universal",
-      "platform" : "ios",
-      "size" : "1024x1024"
-    }
-  ],
-  "info" : {
-    "author" : "xcode",
-    "version" : 1
-  }
-}
-"#;
-
 fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let root = crate::tools::repo_root()?;
     let profile = if opts.release { "release" } else { "debug" };
@@ -190,11 +173,8 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
         bail!("static library missing: {lib}");
     }
 
-    let icon = crate::icon::Icon::load(sh)?;
-    let iconset = out.join("Assets.xcassets").join("AppIcon.appiconset");
-    sh.create_dir(&iconset)?;
-    sh.write_file(iconset.join("Contents.json"), APPICON_CONTENTS)?;
-    sh.write_file(iconset.join("AppIcon.png"), icon.png(1024)?)?;
+    // Xcode compiles the Icon Composer document (`wrapper.icon`) with the target's resources.
+    crate::icon::Art::load(sh)?.write_document(sh, &out)?;
     sh.write_file(out.join("project.yml"), project_spec(sdk, &lib, &link_object))?;
     step(
         "xcodegen generate",
@@ -257,7 +237,7 @@ settings:
     type: application
     platform: iOS
     sources:
-      - path: Assets.xcassets
+      - path: {icon}.icon
     info:
       path: Info.plist
       properties:
@@ -296,7 +276,7 @@ settings:
         PRODUCT_BUNDLE_IDENTIFIER: {BUNDLE_ID}
         PRODUCT_NAME: {PRODUCT}
         TARGETED_DEVICE_FAMILY: "1,2"
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_APPICON_NAME: {icon}
         DEAD_CODE_STRIPPING: YES
         LIBRARY_SEARCH_PATHS:
           - "{lib_dir}"
@@ -323,7 +303,8 @@ settings:
       - sdk: SystemConfiguration.framework
       - sdk: UIKit.framework
       - sdk: VideoToolbox.framework
-"#
+"#,
+        icon = crate::icon::NAME,
     )
 }
 

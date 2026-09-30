@@ -3,11 +3,12 @@
 //! It is the instrument for timing the frame path end to end where ScreenCaptureKit cannot run.
 //! A worker a test starts from a shell has no Screen Recording grant, and nothing may ask for
 //! one. [`Canvas`] stands in for every active display (CoreGraphics lists them without a grant).
-//! On the display's beat it hands the stream an `IOSurface`-backed full-range picture of the
-//! size and format asked for (NV12, or 10-bit 4:4:4 for a full-chroma stream), in a surface
-//! padded as a capture's is ([`CaptureConfig::surface`], black past the picture), stamped on the
-//! host time clock ScreenCaptureKit stamps with, into the same sink a real capture feeds. Nothing
-//! in the product names it: only a stream built on it draws.
+//! On the display's beat, which every canvas at one rate shares, it hands the stream an
+//! `IOSurface`-backed full-range picture of the size and format asked for (NV12, or 10-bit 4:4:4
+//! for a full-chroma stream), in a surface padded as a capture's is ([`CaptureConfig::surface`],
+//! black past the picture), stamped on the host time clock ScreenCaptureKit stamps with, into the
+//! same sink a real capture feeds. Nothing in the product names it: only a stream built on it
+//! draws.
 //!
 //! The picture is a dark desktop with a window of text scrolling in its middle, so every frame
 //! changes as a scrolling page does. A strip of [`MARK_BITS`] blocks along the top spells how
@@ -545,10 +546,25 @@ impl Beat {
             let skipped = behind.checked_div(self.period_us).unwrap_or(0).saturating_add(1);
             next = next.saturating_add(skipped.saturating_mul(self.period_us));
         }
-        let wait_ns = next.saturating_sub(now_us).saturating_mul(1_000);
+        self.tick_at(queue, next, now_us);
+    }
+
+    /// Run the beat due at `due_us`, `now_us` being now.
+    fn tick_at(self: Arc<Self>, queue: &DispatchRetained<DispatchQueue>, due_us: u64, now_us: u64) {
+        let wait_ns = due_us.saturating_sub(now_us).saturating_mul(1_000);
         let when = DispatchTime::NOW.time(i64::try_from(wait_ns).unwrap_or(i64::MAX));
         let again = queue.clone();
-        let _scheduled = queue.after(when, move || self.tick(&again, next));
+        let _scheduled = queue.after(when, move || self.tick(&again, due_us));
+    }
+}
+
+/// The first beat of a canvas started at `now_us`: the next multiple of the period on the host
+/// clock. Every canvas at one rate then beats on the same instants, as the windows of one
+/// display are captured on its one refresh, whenever each was started.
+const fn first_beat(now_us: u64, period_us: u64) -> u64 {
+    match now_us.checked_next_multiple_of(period_us) {
+        Some(due) => due,
+        None => now_us,
     }
 }
 
@@ -656,7 +672,8 @@ impl CaptureSource for Canvas {
         let again = queue.clone();
         queue.exec_async(move || {
             done(Ok(()));
-            first.tick(&again, host_now_us());
+            let now_us = host_now_us();
+            first.tick_at(&again, first_beat(now_us, period_us), now_us);
         });
         Ok(CanvasStream { beat, queue })
     }
@@ -882,5 +899,55 @@ mod tests {
         drop(b);
         let _c = painter.paint(0, 1_000 + 16_667).unwrap();
         assert_eq!(painter.scrolled, 3, "a 60 Hz beat scrolls three");
+    }
+
+    /// Two canvases at one rate, started half a period apart, deliver on the same instants, as
+    /// the windows of one display are captured on its one refresh.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test waits out real time for a source its own timers drive"
+    )]
+    fn canvases_at_one_rate_beat_together() {
+        let target = CanvasTarget { display: 0, native: (320, 180), scale: 1.0 };
+        let config = config(320, 180, PixelFormat::Nv12Full);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let start = |stream: usize| {
+            let tx = tx.clone();
+            Canvas::start(
+                &target,
+                &config,
+                move |frame| {
+                    let _gone = tx.send((stream, frame.capture_ts_us));
+                },
+                None,
+                |_error| {},
+                |_started| {},
+            )
+            .unwrap()
+        };
+        let first = start(0);
+        std::thread::sleep(std::time::Duration::from_micros(8_333));
+        let second = start(1);
+        // A canvas's first picture waits on CoreVideo's first surfaces, over a second on a busy
+        // machine, so the beats are counted rather than timed.
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while a.len().min(b.len()) < 20 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok((stream, at)) = rx.recv_timeout(left) else { break };
+            if stream == 0 { a.push(at) } else { b.push(at) }
+        }
+        for stream in [&first, &second] {
+            Canvas::stop(stream, |_stopped| {});
+        }
+        assert!(a.len() >= 20 && b.len() >= 20, "{} and {} beats", a.len(), b.len());
+        // The median distance to the other canvas's nearest beat: a timer's lateness moves one
+        // beat, a phase moves them all.
+        let mut apart: Vec<u64> =
+            b.iter().map(|&t| a.iter().map(|&s| t.abs_diff(s)).min().unwrap()).collect();
+        apart.sort_unstable();
+        let median = apart[apart.len() / 2];
+        assert!(median < 2_000, "the canvases beat {median} µs apart: {apart:?}");
     }
 }

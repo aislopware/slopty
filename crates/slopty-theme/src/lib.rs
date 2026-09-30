@@ -502,7 +502,14 @@ pub mod alpha {
     pub const SCRIM: f32 = 0.6;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
+    /// An unlit dot of the mark on a dark surface (the brand's ink plate).
+    pub const UNLIT: f32 = 0.2;
+    /// An unlit dot of the mark on a light surface, where 0.2 fades into the paper.
+    pub const UNLIT_ON_PAPER: f32 = 0.3;
 }
+
+/// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`).
+pub const BRAND: Rgb = Rgb::hex(0x004a_c06c);
 
 /// WCAG AA for body text: the least contrast chrome text has on any surface it lands on.
 const AA: f32 = 4.5;
@@ -577,6 +584,9 @@ pub struct Surfaces {
     /// Text on the accent fill: a primary button's label, a tick, a key that is on. White on a
     /// saturated blue in both variants, as a native primary button is.
     pub accent_ink: Rgb,
+    /// Slopty's green, the mark's lit dots: the same in both variants, as a brand colour is
+    /// (`docs/decisions/brand.md`, OKLCH 0.72 0.16 150).
+    pub brand: Rgb,
 }
 
 /// What a ladder step is mixed toward from the content.
@@ -770,6 +780,7 @@ impl Surfaces {
             error_fill: t.error_fill,
             fill_fg: t.fill_fg,
             accent_ink: t.accent_ink,
+            brand: BRAND,
         }
     }
 }
@@ -896,6 +907,9 @@ pub struct Motion {
     pub settle: std::time::Duration,
     /// A phone's palette sheet, the iPad's drawer, the composer turning into an approval.
     pub sheet: std::time::Duration,
+    /// Half a caret blink: shown this long, then hidden as long (Ghostty's cadence). The pace of
+    /// a blink, not a transition: nothing eases.
+    pub blink: std::time::Duration,
     /// The curve of everything but a sheet: fast out of the gate, a long soft landing.
     pub ease_out: Curve,
     /// A sheet's curve: a drawer's, which follows a finger's flick.
@@ -909,6 +923,7 @@ impl Motion {
         fade: std::time::Duration::from_millis(120),
         settle: std::time::Duration::from_millis(160),
         sheet: std::time::Duration::from_millis(240),
+        blink: std::time::Duration::from_millis(600),
         ease_out: Curve { p1: (0.22, 1.0), p2: (0.36, 1.0) },
         drawer: Curve { p1: (0.32, 0.72), p2: (0.0, 1.0) },
     };
@@ -1161,6 +1176,15 @@ impl Theme {
     pub const fn variant(&self) -> Variant {
         if self.terminal.bg.is_light() { Variant::Light } else { Variant::Dark }
     }
+
+    /// How lit an unlit dot of the mark is, over this theme's content.
+    #[must_use]
+    pub const fn brand_unlit(&self) -> f32 {
+        match self.variant() {
+            Variant::Light => alpha::UNLIT_ON_PAPER,
+            Variant::Dark => alpha::UNLIT,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1178,6 +1202,25 @@ mod tests {
         assert_eq!(p.palette(1), p.ansi[1]);
         assert_eq!(p.resolve(Color::Default, true), p.bg);
         assert_eq!(p.resolve(Color::Rgb(1, 2, 3), false), Rgb { r: 1, g: 2, b: 3 });
+    }
+
+    /// The mark is Slopty's green in both variants; its unlit dots stay visible without
+    /// competing: the brand's 0.2 on dark, 0.3 on paper. Its cursor blinks at the terminal's
+    /// cadence.
+    #[test]
+    fn the_mark_is_slopty_green_with_its_unlit_dots_set_back() {
+        let (dark, light) = (Theme::new(Variant::Dark), Theme::new(Variant::Light));
+        assert_eq!(dark.surfaces.brand, Rgb { r: 0x4a, g: 0xc0, b: 0x6c });
+        assert_eq!(light.surfaces.brand, dark.surfaces.brand);
+        let unlit = |theme: &Theme| {
+            let content = theme.content();
+            content.mix(theme.surfaces.brand, theme.brand_unlit()).contrast(content)
+        };
+        for theme in [&dark, &light] {
+            let set_back = unlit(theme);
+            assert!((1.2..2.0).contains(&set_back), "{:?}: {set_back}", theme.variant());
+        }
+        assert_eq!(Motion::DEFAULT.blink, std::time::Duration::from_millis(600));
     }
 
     #[test]

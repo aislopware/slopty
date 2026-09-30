@@ -804,6 +804,8 @@ mod tests {
         acked_ltr_len: 0,
         stalled_ms: 0,
         stalls: 0,
+        audio_received: 0,
+        audio_lost: 0,
     };
     /// Loss that outran the parity: a quarter of the frames never arrived whole.
     const LOSSY: ReceiverReport =

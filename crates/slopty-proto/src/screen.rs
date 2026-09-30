@@ -375,6 +375,15 @@ pub enum ScreenRequest {
         /// How.
         quality: Quality,
     },
+    /// Whether the stream's tile has this client's keyboard, in a key window of an active app.
+    /// Sent on each change, and again for the stream a reconnect opens; a stream starts
+    /// unfocused. The worker favours a focused stream when its encode engines are full.
+    Focused {
+        /// Stream.
+        stream: StreamId,
+        /// Focused.
+        focused: bool,
+    },
 }
 
 impl ScreenRequest {
@@ -392,6 +401,7 @@ impl ScreenRequest {
             | Self::Close(_)
             | Self::Report { .. }
             | Self::Focus(_)
+            | Self::Focused { .. }
             | Self::Resize { .. } => None,
         }
     }
@@ -462,6 +472,11 @@ pub struct ReceiverReport {
     pub stalled_ms: u16,
     /// Stalls that released in the window (packets held, then delivered together).
     pub stalls: u16,
+    /// Audio packets that arrived in the window.
+    pub audio_received: u16,
+    /// Audio packets missing from the sequence in the window, whether or not a copy an audio
+    /// datagram carried recovered them: the loss the worker sizes those copies by.
+    pub audio_lost: u16,
 }
 
 /// What the worker's bitrate controller made of its last decision window.

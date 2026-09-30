@@ -1213,13 +1213,38 @@ mod tests {
         assert_eq!(h.rx.ingest(&s0.datagrams[0], h.now), Ingest::Ignored(Ignored::Stale));
     }
 
+    /// The report counts the audio packets that arrived and the ones their sequence skipped; a
+    /// late one counts neither way, a malformed one is refused, and a report sent back is
+    /// counted again.
+    #[test]
+    fn audio_is_counted_for_the_report() {
+        let mut h = Harness::new();
+        for seq in [5, 6, 9, 8] {
+            let audio = slopty_media::audio_datagram(STREAM, seq, 0, &[7; 64], &[]).unwrap();
+            assert!(matches!(h.rx.ingest(&audio, h.now), Ingest::Audio { .. }));
+        }
+        let mut bad = slopty_media::audio_datagram(STREAM, 10, 0, &[7; 64], &[]).unwrap().to_vec();
+        bad[std::mem::offset_of!(MediaHeader, data_count)] = 9;
+        assert_eq!(h.rx.ingest(&Bytes::from(bad), h.now), Ingest::Ignored(Ignored::Malformed));
+        let report = h.rx.take_report(h.now, 0);
+        assert_eq!((report.audio_received, report.audio_lost), (3, 2), "5, 6, 9; 8 came late");
+        h.rx.take_back(&report);
+        let again = h.rx.take_report(h.now, 0);
+        assert_eq!((again.audio_received, again.audio_lost), (3, 2), "carried to the next");
+        assert_eq!(h.rx.take_report(h.now, 0).audio_received, 0);
+    }
+
     #[test]
     fn audio_and_cursor_pass_through() {
         let mut h = Harness::new();
-        let audio = slopty_media::audio_datagram(STREAM, 5, 0, &[7; 64]).unwrap();
+        let audio = slopty_media::audio_datagram(STREAM, 5, 0, &[7; 64], &[&[6; 60]]).unwrap();
         assert_eq!(
             h.rx.ingest(&audio, h.now),
-            Ingest::Audio { seq: 5, payload: Bytes::from(vec![7; 64]) }
+            Ingest::Audio {
+                seq: 5,
+                payload: Bytes::from(vec![7; 64]),
+                earlier: [Some(Bytes::from(vec![6; 60])), None],
+            }
         );
         let cursor = slopty_media::cursor_datagram(STREAM, 6, 0, 10, 20, true);
         match h.rx.ingest(&cursor, h.now) {

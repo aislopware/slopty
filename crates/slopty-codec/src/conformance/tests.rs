@@ -1,8 +1,8 @@
 use pretty_assertions::assert_eq;
 
 use super::*;
-use crate::annexb::tests::{SPS_420, SPS_444, SPS_444_10};
-use crate::annexb::{START_CODE, hevc};
+use crate::nal::hevc;
+use crate::nal::tests::{SPS_420, SPS_444, SPS_444_10, access_unit};
 
 #[test]
 fn exp_golomb_round_trips() {
@@ -85,7 +85,6 @@ fn a_cropped_sps_shows_the_size_asked_and_keeps_its_format() {
             let again = super::head(&cropped).unwrap();
             assert_eq!((again.width, again.height), coded, "the coded size is untouched");
             assert_eq!(again.window.is_some(), shown != coded, "no window when nothing is cut");
-            assert_eq!(nal_units(&[&START_CODE[..], &cropped].concat()).count(), 1);
         }
     }
     // 4:4:4 counts its window in single samples, so odd sides are fine.
@@ -109,14 +108,12 @@ fn an_access_unit_has_its_sps_rewritten_in_place() {
     let vps = [0x40, 0x01, 0x0c];
     let pps = [0x44, 0x01, 0xc0, 0x72];
     let idr = [0x26, 0x01, 0xaf, 0x00, 0x00, 0x03, 0x01, 0x55];
-    let unit = |sps: &[u8]| -> Vec<u8> {
-        [&START_CODE[..], &vps, &START_CODE, sps, &START_CODE, &pps, &START_CODE, &idr].concat()
-    };
+    let unit = |sps: &[u8]| -> Vec<u8> { access_unit(&[&vps, sps, &pps, &idr]) };
     let mut data = unit(&SPS_420);
     crop_access_unit(&mut data, (300, 170)).unwrap();
     assert_eq!(data, unit(&crop_sps(&SPS_420, (300, 170)).unwrap()));
 
-    let delta = [&START_CODE[..], &idr].concat();
+    let delta = access_unit(&[&idr]);
     let mut data = delta.clone();
     crop_access_unit(&mut data, (300, 170)).unwrap();
     assert_eq!(data, delta, "no parameter sets, nothing to do");
@@ -166,7 +163,8 @@ fn the_rewrite_is_the_encoders_own_sps_for_the_true_size() {
 fn keyframe_crop_time() {
     let sps = bytes(VT_3024X1968);
     let slices: Vec<u8> = (0..160_000_u32).map(|i| (i % 251) as u8 | 0x10).collect();
-    let unit = [&START_CODE[..], &sps, &START_CODE, &[0x26, 0x01], &slices].concat();
+    let idr = [&[0x26, 0x01][..], &slices].concat();
+    let unit = access_unit(&[&sps, &idr]);
     let rounds = 2_000_u32;
     let started = std::time::Instant::now();
     for _ in 0..rounds {
@@ -181,4 +179,18 @@ fn keyframe_crop_time() {
     }
     let copy_only = started.elapsed() / rounds;
     eprintln!("MEASURE crop keyframe=160kB crop+copy={with_crop:?} copy={copy_only:?}");
+}
+
+/// An SPS whose syntax runs up to its last set bit, with no stop bit behind it, is refused
+/// rather than rewritten into one that no longer parses: the rewrite took that bit for the stop
+/// bit and dropped it (fuzz target `nal`).
+#[test]
+fn an_sps_without_its_stop_bit_is_not_rewritten_into_a_broken_one() {
+    const SPS: [u8; 24] = [
+        0x43, 0x00, 0x00, 0x00, 0x18, 0x43, 0x01, 0x0c, 0x01, 0xff, 0x00, 0x06, 0x60, 0x00, 0x00,
+        0x13, 0x00, 0xb0, 0x00, 0x00, 0x3b, 0x0c, 0x01, 0x00,
+    ];
+    let shown = (320, 7936);
+    let cropped = crop_sps(&SPS, shown);
+    assert_eq!(cropped.as_deref().map(hevc::shown_size), cropped.as_ref().map(|_| Some(shown)));
 }

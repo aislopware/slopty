@@ -17,6 +17,7 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
+mod audio;
 mod cursor;
 mod heartbeat;
 mod layers;
@@ -26,12 +27,13 @@ mod reassemble;
 mod redundancy;
 mod refine;
 
+pub use audio::{AudioCopies, AudioPackets, MAX_AUDIO_COPIES, audio_datagram, parse_audio};
 pub use cursor::{cursor_datagram, parse_cursor};
 pub use heartbeat::{HEARTBEAT_AFTER, heartbeat_datagram};
 pub use layers::LayerGate;
 pub use packetize::{
     EncodedFrame, Layout, MAX_DATA_FRAGMENTS, MAX_PARITY_FRAGMENTS, MIN_PARITY_FRAGMENTS,
-    Packetizer, SentFrame, audio_datagram, layout,
+    Packetizer, SentFrame, layout,
 };
 pub use rate::{
     Cadence, ChromaGate, Decision, EncoderWatch, FULL_CHROMA_ENTER_BPS, FULL_CHROMA_HOLD,

@@ -1,6 +1,7 @@
 //! PTY plumbing shared by the worker daemon and the PTY custodian (`slopty-ptyd`).
 //!
 //! * [`pty`] — open a pseudo-terminal, spawn a child on it, resize it, do async I/O on the master.
+//! * [`spawn`] — fork and exec onto the tty, and the [`Child`] it gives back.
 //! * [`ring`] — the bounded byte ring ptyd drains output into while no worker is attached.
 //! * [`protocol`] — messages between the worker and ptyd, framed with [`slopty_proto::codec`].
 //! * [`fdpass`] — frames plus `SCM_RIGHTS` fds over the Unix socket.
@@ -23,12 +24,14 @@ pub mod protocol;
 pub mod pty;
 pub mod ring;
 pub mod shell_integration;
+pub mod spawn;
 pub mod ssh;
 pub mod terminfo;
 
 pub use client::PtydClient;
 pub use pty::{Pty, PtyMaster, SpawnSpec, Spawned};
 pub use ring::Ring;
+pub use spawn::Child;
 
 /// PTY errors.
 #[derive(Debug, thiserror::Error)]

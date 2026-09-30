@@ -3950,3 +3950,132 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::agents::tests::a_paused_turn_says_what_it_waits_on`, and the app self-test
     `a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request` (golden
     `agent-waiting-pull-request`).
+- ✅ **An unsaved edit survives a quit or a crash** (2026-09-30; hot exit). A file tile's edit
+  lived only in its editor, so a crash, a SIGKILL or a phone that ended the app lost it.
+  - **What the others do.** Zed (`decbf641`) writes each dirty buffer's whole text and the
+    mtime it was based on into its SQLite database, one pass at most every 200 ms
+    (`SERIALIZATION_THROTTLE_TIME`), and on restore lays the text over the disk's with the old
+    mtime put back, so a changed disk shows as a conflict. VS Code (`47a634e2`) writes the whole
+    text with mtime, size and etag to `Backups/<workspace>/<scheme>/<hash>` 1 s after typing
+    stops, deletes it once the document is clean, and restores it dirty with the old etag, so
+    the next save meets the conflict. Neither saves diffs. Zed keys its rows by the layout's
+    item, and its open issue #55726 loses unsaved buffers that are not in the layout.
+    Sublime's changelog records a lost very large file (4142) and a session torn by a crash
+    mid-save (4126).
+  - **What Slopty does** (`slopty_client::unsaved`, `workspace/unsaved.rs`). One backup per
+    file tile, `<data dir>/unsaved/<blake3 of worker and item>.json` (directory 0700, file
+    0600): the tile's item and path, the whole text, the final newline, the modification time
+    the edit started from, and whether the disk had already moved under it. The item is the
+    worker's, so the key outlives the app, and after a restart each backup goes back to its own
+    tile. One whose tile went (another client closed it, its worker was forgotten) is kept. It
+    gets a tile again at the first snapshot of its worker after the app next starts: a clean
+    tile on its file takes it, and otherwise a new tile is opened for it. It is written by
+    `slopty_platform::fs::replace`, the codebase's one way to replace a file: a temporary file
+    ordered on the device (`F_BARRIERFSYNC`) ahead of its rename, so a crash mid-write leaves
+    the backup before it. A temporary left behind is cleared at start.
+  - **When it is written.** The first change after a quiet spell is written at once, and the
+    rest no more often than every 200 ms (Zed's throttle; VS Code's debounce waits as long as
+    the typing goes on). A large edit is written less often still, so the backups write at
+    most 8 MiB a second: a 16 MiB file is kept every 2 s, not rewritten five times a second.
+    A tile brings on a pass only when where its edit stands moves (`FileView::backup_mark`),
+    never for its caret blinking. A pass reads no text on the UI thread: it compares marks, and
+    for a tile that is behind it takes the editor's rope, shared in O(1). The text is read
+    out, encoded and written off the UI thread, one pass at a time. On quit what is left is
+    written there and then. Nothing extra is written as the app goes to the background: the
+    next pass comes within 2 s at most, well inside iOS's background grace.
+  - **Races closed.**
+    - Changes to one file are numbered, and the store keeps the later of two whichever
+      thread reaches it first. A write still on its way off the UI thread is never laid over
+      the quit's, and a removal never lands after a later write.
+    - A change counts only once it has finished. The flush on quit writes again anything on
+      its way or failed. A failed write (the disk full for a moment) is tried again on its
+      own after 1 s, then after twice as long each time up to 30 s. Before, it waited for
+      another edit, so an edit left alone was only in memory until the next one.
+    - **Two tiles on one file keep both edits.** The first version kept one backup per file,
+      holding only the edit changed last, so an edit typed in a second tile on the file
+      silently replaced the first's. Where that can happen: backups live on each device and
+      only its own tiles write them, so two devices never meet in one store, and each app
+      process has one window. It happens when one app holds two items for the same file on
+      one worker. The worker's registry keys items by id alone, so that comes about in two
+      ways: two clients open the file at the same moment (each checks its own copy of the
+      registry before the other's item arrives), or ⌘Z brings a closed tile back after a new
+      tile was opened on the file. One buffer per file, the other way out, cannot be
+      enforced over a registry that clients share, and two edits made apart cannot be merged
+      without asking. So a backup is per tile, a tile closed for good lets go of its own
+      backup and no other, and a kept edit given a tile again is written under the new tile
+      before the old backup is removed. Tests: `two_tiles_on_one_file_keep_both_edits`
+      (failed on the per-file store, which kept one of the two),
+      `two_tiles_on_one_file_each_take_their_own_edit_back`.
+    - A save answered after the text moved on moves the backup's base with it, so the edit
+      comes back after a restart as no conflict.
+    - A crash after the worker wrote a save but before the backup went restores an edit the
+      disk already holds: it comes back clean, and the backup goes.
+    - Backups are read at start off the UI thread. A tile edited before they are read keeps its
+      own, later edit.
+  - A backup goes only when its tile is clean (saved and answered, reloaded) or closed for
+    good (after ⌘Z's window), never because a layout lacks it. A kept edit whose worker has not
+    come back for a week is mentioned at start, and the palette's "Discard unsaved edits over a
+    week old" lets such edits go. Nothing is dropped unasked.
+  - **A closed tile never leaves `$EDITOR` waiting.** A tile a program waits on answers it as
+    "Done" would on close: it saves, then tells. When that save is refused, fails or loses its
+    link, the program hears it was given up once ⌘Z's window has passed, and the edit stays
+    kept here. While the save is still out, the window is extended until the answer arrives
+    (`docs/decisions/terminal.md`, "A shell's browser and editor are the client's").
+  - **Restore.** The tile's first read takes the kept text, unsaved, over the disk's version.
+    When the disk moved since the edit started, the file is gone or not text, or the edit was
+    already in conflict, it comes back as "Changed on disk" with Reload and Overwrite: the
+    conflict is found when restoring, and a save meets the worker's own check in any case. An
+    edit the disk already holds comes back clean.
+  - **Cost** (`docs/MEASUREMENTS.md`, "keeping an unsaved edit"). With a 16 MiB edit on the UI
+    thread, a pass costs 0.04 µs per tile, against 5 ms to copy the text out as the first
+    version did. Off it, reading the rope out takes 3 ms and encoding it 8.5 ms. A 4 KiB backup
+    writes in 1.5 ms, against 5.1 ms with the full flush `File::sync_all` does on Apple
+    platforms, which the store used before. The tile holds at most `FILE_BYTES` (16 MiB).
+  - Tests: `slopty-client` `unsaved::tests` (one backup per tile on its worker, a write cut
+    short leaves the one before, a change overtaken by a later one is dropped, the user's alone);
+    `file::tests` (`a_kept_edit_over_the_version_it_started_from_is_unsaved`,
+    `a_kept_edit_over_a_moved_disk_is_a_conflict`); `workspace::unsaved::tests`
+    (`a_large_edit_is_kept_less_often`); `workspace::tests::unsaved` (kept as typed and let go
+    once saved, let go once closed for good, back on its tile or on a new one, a clean tile
+    keeps another's backup, closing for good lets go only of that tile's edit, a save under an
+    edit moves the base, a failed write written again on quit and tried again without another
+    edit); `workspace::tests::handoffs` (the waiting tile's three ways out); and the app
+    self-test `an_unsaved_edit_survives_the_app_being_killed`, which types into a file tile,
+    SIGKILLs the app, relaunches it and finds the edit back on the tile, unsaved, the worker's
+    file untouched.
+- ✅ **The empty workspace is placed by this frame's layout** (2026-09-30). The app self-test
+  failed at launch about six runs in ten with a stale frame: 127 glyphs of the empty workspace
+  painted 5 px lower than a frame from scratch put them. The page's top was
+  `drawn.viewport.height × MODAL_ANCHOR`, the strip's size as the last frame measured it. The
+  first worker added brings the 24 pt status bar and its hairline, and the strip loses 25 pt.
+  The strip's view is built in that frame from the old measure. Its paint records the new
+  one, and `strip_resized` then notified only the workspace, not the strip's view. The frame
+  drawn in between, 5 pt off (a fifth of 25), is what a `dump` then saw. It was not the gpui-fast
+  pin, the fonts or the media lane. Now the page starts under a spacer a fifth of its own
+  height, so layout places it in the frame it is drawn, and `strip_resized` also notifies the
+  strip's view, since the tiles are placed from the layout it just changed. Test:
+  `workspace::tests::the_empty_workspace_is_placed_by_this_frames_layout` draws one frame
+  after the measure is left stale, and it failed before. Evidence: the self-test
+  `a_twenty_thousand_line_file_is_edited_near_its_end_and_saved` failed 6 runs in 10 before and
+  0 in 10 after, and `an_unsaved_edit_survives_the_app_being_killed` also passed 10 in 10
+  (`cargo xtask e2e app --no-build --filter …` in a loop, logs in `target/logs/stale/`).
+- ✅ **Slopty's mark in the app** (2026-09-30; `docs/decisions/brand.md`). The prompt
+  `#.. / .#. / #.#` leads the empty workspace, centred over its words, and the About panel
+  ("About Slopty" in the palette), over the name, the version and the build.
+  - It is nine circles drawn with GPUI (`workspace::about::Mark`), lit in `surfaces.brand`
+    (`slopty_theme::BRAND`, `#4ac06c`, the same in both variants), with the unlit dots at
+    `Theme::brand_unlit`: the brand's 0.2 on a dark content and 0.3 on a light one, where 0.2
+    fades into the paper. Sizes come from the spacing scale, a dot twice its gap as in the
+    art: 8 pt dots on the page, 16 pt in the panel.
+  - The cursor dot (2,2) is lit while a worker's link is up and sits at the unlit level while
+    none is (`WorkspaceView::light_marks`, from the workspace's own notify). It blinks at the
+    terminal caret's cadence, `Motion::blink`, 600 ms each way (Ghostty's). Under Reduce
+    Motion it holds steady and its clock stops. The mark is a view of its own, so a blink
+    draws the mark alone and not the strip under it, and its clock runs only while it is
+    drawn. The About panel is a small modal on `kit::backdrop` that Esc or a click beside it
+    closes. It reuses the settings' version line (`settings_form::schema::about`).
+  - Tests: `slopty-theme` `the_mark_is_slopty_green_with_its_unlit_dots_set_back`;
+    `workspace::tests::about` (lit while a worker is reachable and dim when its link drops;
+    blinks at the cadence without building the strip, steady under Reduce Motion; the panel
+    opens from the palette's action and Esc closes it); goldens `empty-workspace` and `about`
+    (`about_slopty_leads_with_the_mark`).

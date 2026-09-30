@@ -115,7 +115,7 @@ mod tests {
         kVTVideoEncoderSpecification_EncoderID,
         kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
     };
-    use slopty_codec::annexb::hevc;
+    use slopty_codec::nal::hevc;
     use slopty_testkit::stats::Spread;
 
     // ---- CoreFoundation plumbing -------------------------------------------------------------
@@ -1979,9 +1979,9 @@ mod tests {
         sum / n.max(1) as f64
     }
 
-    /// The first SPS NAL unit of an Annex B unit.
+    /// The first SPS NAL unit of an access unit.
     fn sps_in(data: &[u8]) -> Option<Vec<u8>> {
-        slopty_codec::annexb::nal_units(data)
+        slopty_codec::nal::units(data)
             .find(|nal| hevc::nal_type(nal) == Some(hevc::SPS))
             .map(<[u8]>::to_vec)
     }
@@ -2046,7 +2046,7 @@ mod tests {
         });
         let mut last = None;
         for packet in &packets {
-            decoder.decode(&packet.data, packet.pts_us).expect("decode");
+            decoder.decode(&packet.data.clone().into(), packet.pts_us).expect("decode");
             last = Some(drx.recv_timeout(Duration::from_secs(10)).expect("a picture"));
         }
         let last = last.expect("a picture");
@@ -2754,7 +2754,9 @@ mod tests {
                     let mut shown = (0.0, 0.0);
                     for (i, packet) in packets.iter().enumerate() {
                         if let Some(packet) = packet {
-                            decoder.decode(&packet.data, packet.pts_us).expect("decode");
+                            decoder
+                                .decode(&packet.data.clone().into(), packet.pts_us)
+                                .expect("decode");
                             let decoded =
                                 drx.recv_timeout(Duration::from_secs(10)).expect("a picture");
                             shown = psnr(&pictures[i.min(MOVING - 1)], decoded.image.as_cv());
@@ -3677,7 +3679,7 @@ mod tests {
                         scored.push((0, f64::NAN));
                         continue;
                     };
-                    decoder.decode(&packet.data, packet.pts_us).expect("decode");
+                    decoder.decode(&packet.data.clone().into(), packet.pts_us).expect("decode");
                     let decoded = drx.recv_timeout(Duration::from_secs(10)).expect("a picture");
                     scored.push((packet.data.len(), psnr(&pictures[*i], decoded.image.as_cv()).0));
                 }
@@ -3692,6 +3694,374 @@ mod tests {
                     rest.len(),
                     rest.iter().map(|s| s.0 as f64).sum::<f64>() / rest.len() as f64,
                     rest.iter().map(|s| s.1).sum::<f64>() / rest.len() as f64,
+                );
+            }
+        }
+    }
+
+    /// One stream of [`concurrent_sessions`]: what its session gave back.
+    #[derive(Default)]
+    struct Concurrent {
+        /// Submit → the sink, per frame after the settling ones.
+        encode: Vec<Duration>,
+        /// Time inside `VTCompressionSessionEncodeFrame`, the part the caller's thread pays.
+        submit: Vec<Duration>,
+        /// Due on the beat → the sink.
+        late: Vec<Duration>,
+        /// Pictures submitted and packets that came back, after the settling ones.
+        submitted: usize,
+        encoded: usize,
+        /// Frames skipped because the focused stream had one in the encoder
+        /// (`SLOPTY_PROBE_YIELD`).
+        yielded: usize,
+        /// Frames the session dropped.
+        dropped: usize,
+        /// The luma PSNR the encoder measured on each frame after the settling ones.
+        psnr: Vec<f64>,
+        /// Beats whose capture a newer one replaced in the mailbox before the thread took it.
+        superseded: usize,
+        bytes: usize,
+    }
+
+    /// `n` of the worker's own sessions (`slopty_codec::Encoder`), each fed a scrolling text
+    /// picture on its own thread at its own beat for `seconds`, the way the worker runs one
+    /// encode thread per stream. Stream 0 is the focused one: at `fps`, the others at
+    /// `background_fps`. `aligned` puts every stream's beat on the same instants, as windows on
+    /// one display are captured on its refresh; otherwise the beats are spread evenly across a
+    /// period. The rest is in [`Knobs`].
+    fn concurrent_run(
+        (w, h): (usize, usize),
+        n: usize,
+        seconds: f64,
+        (fps, background_fps): (u32, u32),
+        knobs: Knobs,
+    ) -> (Vec<Concurrent>, f64) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        use slopty_codec::{Chroma, Encoder, EncoderConfig, FrameOptions};
+        use slopty_proto::screen::VideoCodec;
+
+        const SETTLE: usize = 10;
+        let Knobs { declared, aligned, yielding } = knobs;
+        // `SLOPTY_PROBE_PLACE_OWN=1`: sessions made for one frame a second less than their beat,
+        // below 60, place themselves at their own rate as every session did before 2026-09-30
+        // (`slopty_codec` `placement_fps`); the declare knobs act at once only on those.
+        let place_own = std::env::var("SLOPTY_PROBE_PLACE_OWN").is_ok_and(|p| p == "1");
+        let (_, images) = scrolling(w, h);
+        let images = Arc::new(
+            images.into_iter().map(slopty_codec::PixelBuffer::from_retained).collect::<Vec<_>>(),
+        );
+        // The focused stream's frames in the encoder: submitted, not yet back.
+        let focus_in_flight = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(n + 1));
+        let bitrate = std::env::var("SLOPTY_PROBE_RATE")
+            .ok()
+            .and_then(|r| r.parse().ok())
+            .unwrap_or(if w * h > 1920 * 1088 { 40_000_000 } else { 16_000_000 });
+        let start_at = Arc::new(parking_lot::Mutex::new(None::<Instant>));
+        // `SLOPTY_PROBE_OPEN=sequential`: stream k opens its session only once stream k - 1 has,
+        // as streams a client opens one after another do.
+        let sequential = std::env::var("SLOPTY_PROBE_OPEN").is_ok_and(|o| o == "sequential");
+        let opened = Arc::new(AtomicUsize::new(0));
+        #[expect(
+            clippy::needless_collect,
+            reason = "every stream's thread starts before any is joined"
+        )]
+        let threads: Vec<_> = (0..n)
+            .map(|k| {
+                let opened = Arc::clone(&opened);
+                let images = Arc::clone(&images);
+                let focus = Arc::clone(&focus_in_flight);
+                let barrier = Arc::clone(&barrier);
+                let start_at = Arc::clone(&start_at);
+                std::thread::spawn(move || {
+                    let rate = if k == 0 { fps } else { background_fps };
+                    let period = Duration::from_secs(1) / rate;
+                    let (tx, rx) = mpsc::channel::<(Instant, u64, usize, Option<f64>)>();
+                    let focus_back = (k == 0).then(|| Arc::clone(&focus));
+                    while sequential && opened.load(Ordering::Acquire) < k {
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "a measurement waiting its turn to open"
+                        )]
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let encoder = Encoder::new(
+                        EncoderConfig {
+                            width: w as u32,
+                            height: h as u32,
+                            codec: VideoCodec::Hevc,
+                            fps: rate as u16 - u16::from(place_own),
+                            bitrate_bps: bitrate,
+                            chroma: Chroma::Subsampled,
+                        },
+                        move |packet| {
+                            if let Some(focus) = &focus_back {
+                                focus.fetch_sub(1, Ordering::AcqRel);
+                            }
+                            let _gone = tx.send((
+                                Instant::now(),
+                                packet.pts_us,
+                                packet.data.len(),
+                                packet.mse.map(|m| m.luma_psnr()),
+                            ));
+                        },
+                    )
+                    .expect("the worker's session");
+                    let declare = if k == 0 { declared.0 } else { declared.1 };
+                    // `SLOPTY_PROBE_EXPECT_AT`: told on that beat instead, to see whether a
+                    // running session moves; with `SLOPTY_PROBE_EXPECT_THEN` as well, told
+                    // `declare` at the start and that rate on the beat, to see whether it stays.
+                    let then: Option<u16> =
+                        std::env::var("SLOPTY_PROBE_EXPECT_THEN").ok().and_then(|t| t.parse().ok());
+                    let declare_at: Option<usize> =
+                        std::env::var("SLOPTY_PROBE_EXPECT_AT").ok().and_then(|a| a.parse().ok());
+                    if let Some(declared) =
+                        declare.filter(|_| declare_at.is_none() || then.is_some())
+                    {
+                        encoder.set_frame_rate(declared).expect("ExpectedFrameRate");
+                    }
+                    opened.fetch_add(1, Ordering::AcqRel);
+                    // Twice: every session is open, then the first beat is set.
+                    barrier.wait();
+                    barrier.wait();
+                    let start = start_at.lock().expect("the start is set between the barriers");
+                    let phase = if aligned {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(1) / fps * k as u32 / n as u32
+                    };
+                    let frames = (seconds * f64::from(rate)) as usize;
+                    let mut out = Concurrent::default();
+                    // pts → (due, submitted)
+                    let mut sent = std::collections::HashMap::new();
+                    // The worker's one-frame mailbox: a capture that lands while the thread is
+                    // inside a submit replaces the one waiting, so a thread that comes back late
+                    // encodes the newest beat at once and the beats it missed are superseded.
+                    let first = start + phase;
+                    let mut last: Option<usize> = None;
+                    let mut told = false;
+                    loop {
+                        let now = Instant::now();
+                        let current = now
+                            .checked_duration_since(first)
+                            .map(|since| (since.as_nanos() / period.as_nanos()) as usize);
+                        let i = match (current, last) {
+                            (Some(c), Some(l)) if c > l => c,
+                            (Some(c), None) => c,
+                            _ => {
+                                let next = last.map_or(0, |l| l + 1);
+                                let due = first + period * next as u32;
+                                #[expect(
+                                    clippy::disallowed_methods,
+                                    reason = "a measurement's real-time beat, on its own thread"
+                                )]
+                                std::thread::sleep(due.saturating_duration_since(now));
+                                continue;
+                            }
+                        };
+                        if i >= frames {
+                            break;
+                        }
+                        if i >= SETTLE {
+                            out.superseded += i - last.map_or(i, |l| l + 1).min(i);
+                        }
+                        last = Some(i);
+                        let due = first + period * i as u32;
+                        if let Some(declared) =
+                            then.or(declare).filter(|_| declare_at.is_some_and(|at| i >= at))
+                            && !told
+                        {
+                            encoder.set_frame_rate(declared).expect("ExpectedFrameRate");
+                            told = true;
+                        }
+                        let busy = || k != 0 && i > 0 && focus.load(Ordering::Acquire) > 0;
+                        match yielding {
+                            Yield::Skip if busy() => {
+                                if i >= SETTLE {
+                                    out.yielded += 1;
+                                }
+                                continue;
+                            }
+                            Yield::No | Yield::Skip => {}
+                            Yield::Wait => {
+                                let gave_up = Instant::now() + period;
+                                let mut waited = false;
+                                while busy() && Instant::now() < gave_up {
+                                    waited = true;
+                                    #[expect(
+                                        clippy::disallowed_methods,
+                                        reason = "a measurement's stand-in for a notify"
+                                    )]
+                                    std::thread::sleep(Duration::from_micros(100));
+                                }
+                                if waited && i >= SETTLE {
+                                    out.yielded += 1;
+                                }
+                            }
+                        }
+                        let pts = (i as u64 + 1) * 1_000_000 / u64::from(rate);
+                        let options =
+                            FrameOptions { force_keyframe: i == 0, ..FrameOptions::default() };
+                        if k == 0 {
+                            focus.fetch_add(1, Ordering::AcqRel);
+                        }
+                        let submitted = Instant::now();
+                        encoder
+                            .encode(images[(i + 5 * k) % images.len()].as_cv(), pts, &options)
+                            .expect("submit");
+                        let took = submitted.elapsed();
+                        if i >= SETTLE {
+                            out.submit.push(took);
+                            out.submitted += 1;
+                            sent.insert(pts, (due, submitted));
+                        }
+                    }
+                    encoder.flush().expect("flush");
+                    out.dropped = usize::try_from(encoder.frames_dropped()).unwrap_or(usize::MAX);
+                    // A frame the session dropped never reaches the sink; it leaves the count.
+                    if k == 0 {
+                        focus.store(0, Ordering::Release);
+                    }
+                    while let Ok((at, pts, bytes, psnr)) = rx.try_recv() {
+                        let Some((due, submitted)) = sent.get(&pts) else { continue };
+                        out.encode.push(at.saturating_duration_since(*submitted));
+                        out.late.push(at.saturating_duration_since(*due));
+                        out.encoded += 1;
+                        out.bytes += bytes;
+                        out.psnr.extend(psnr.filter(|p| p.is_finite()));
+                    }
+                    out
+                })
+            })
+            .collect();
+        // Every session is open before the first beat, so none pays another's creation.
+        barrier.wait();
+        *start_at.lock() = Some(Instant::now() + Duration::from_millis(20));
+        let before = slopty_testkit::process::own().map_or(0, |u| u.cycles);
+        let began = Instant::now();
+        barrier.wait();
+        let results: Vec<Concurrent> =
+            threads.into_iter().map(|t| t.join().expect("a stream thread")).collect();
+        let cycles = slopty_testkit::process::own().map_or(0, |u| u.cycles) - before;
+        // Gigacycles a second of this process, every thread (VideoToolbox's included).
+        let load = cycles as f64 / 1e9 / began.elapsed().as_secs_f64();
+        (results, load)
+    }
+
+    fn spread_ms(samples: &[Duration]) -> String {
+        Spread::of_durations(samples).map_or_else(
+            || "-".to_owned(),
+            |s| format!("{:.2}/{:.2}/{:.2}", ms(s.p50), ms(s.p95), ms(s.max)),
+        )
+    }
+
+    /// How [`concurrent_run`] runs its sessions.
+    #[derive(Clone, Copy, Debug)]
+    struct Knobs {
+        /// The `ExpectedFrameRate` the focused and the other sessions are told, when not their own
+        /// rate.
+        declared: (Option<u16>, Option<u16>),
+        /// Every stream's beat on the same instants.
+        aligned: bool,
+        /// What a background stream does while the focused one has a frame in the encoder.
+        yielding: Yield,
+    }
+
+    /// What a background stream of [`concurrent_run`] does while the focused one has a frame in
+    /// the encoder.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Yield {
+        /// Nothing: every stream submits on its beat.
+        No,
+        /// Skips that beat.
+        Skip,
+        /// Waits for the focused frame to come back, a period at most, then submits.
+        Wait,
+    }
+
+    /// Several streams sharing the media engines (idea #14; MEASUREMENTS "several streams on
+    /// the encode engines"): 1, 2, 4 and 8 of the worker's sessions at once, each on its own
+    /// thread and beat, at 1080p and at 4K. For the focused stream (stream 0) and for all of
+    /// them together: submit → packet p50/p95/max, the time inside the submit call, due →
+    /// packet, frames encoded a second against those asked for, and the process's gigacycles a
+    /// second (VideoToolbox's threads in this process included).
+    ///
+    /// Knobs: `SLOPTY_PROBE_SIZES` (`1920x1088,3840x2160`), `SLOPTY_PROBE_STREAMS` (`1,2,4,8`),
+    /// `SLOPTY_PROBE_SECONDS` (4), `SLOPTY_PROBE_PHASE` (`aligned` or `spread`, default
+    /// aligned), `SLOPTY_PROBE_BACKGROUND_FPS` (the other streams' rate, default 60),
+    /// `SLOPTY_PROBE_PLACE_OWN=1` (each session placed at its own rate, as before 2026-09-30),
+    /// `SLOPTY_PROBE_EXPECT` (the `ExpectedFrameRate` every session is told, at once only with
+    /// `PLACE_OWN`), `SLOPTY_PROBE_FOCUS_EXPECT` (the focused one's, default the same),
+    /// `SLOPTY_PROBE_EXPECT_AT` and `_THEN` (when it is told, and what after), `SLOPTY_PROBE_OPEN`
+    /// (`sequential`), `SLOPTY_PROBE_RATE`, `SLOPTY_PROBE_FPS` and `SLOPTY_PROBE_YIELD` (`skip`
+    /// or `wait`: what a background stream does while the focused one has a frame in the
+    /// encoder).
+    #[test]
+    #[ignore = "a measurement; copy the binary off the Lacie volume and run with --ignored --nocapture"]
+    fn concurrent_sessions() {
+        let knob = |name: &str| std::env::var(name).ok();
+        let rate = |name: &str| knob(name).and_then(|s| s.parse::<u16>().ok());
+        let sizes = probe_sizes(&[(1920, 1088), (3840, 2160)]);
+        let counts: Vec<usize> = knob("SLOPTY_PROBE_STREAMS").map_or_else(
+            || vec![1, 2, 4, 8],
+            |s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect(),
+        );
+        let seconds: f64 = knob("SLOPTY_PROBE_SECONDS").and_then(|s| s.parse().ok()).unwrap_or(4.0);
+        let aligned = knob("SLOPTY_PROBE_PHASE").is_none_or(|p| p != "spread");
+        let focus_fps = u32::from(rate("SLOPTY_PROBE_FPS").unwrap_or(60));
+        let background_fps = u32::from(rate("SLOPTY_PROBE_BACKGROUND_FPS").unwrap_or(60));
+        let declared = (
+            rate("SLOPTY_PROBE_FOCUS_EXPECT").or_else(|| rate("SLOPTY_PROBE_EXPECT")),
+            rate("SLOPTY_PROBE_EXPECT"),
+        );
+        let yielding = match knob("SLOPTY_PROBE_YIELD").as_deref() {
+            Some("skip") => Yield::Skip,
+            Some("wait") => Yield::Wait,
+            _ => Yield::No,
+        };
+        for &(w, h) in &sizes {
+            for &n in &counts {
+                let knobs = Knobs { declared, aligned, yielding };
+                let (streams, load) =
+                    concurrent_run((w, h), n, seconds, (focus_fps, background_fps), knobs);
+                let all = |f: fn(&Concurrent) -> &Vec<Duration>| -> Vec<Duration> {
+                    streams.iter().flat_map(|s| f(s).iter().copied()).collect()
+                };
+                // The beats after the settling ones, at each stream's rate.
+                let measured = |fps: u32| seconds - 10.0 / f64::from(fps);
+                let focus = &streams[0];
+                let rest = &streams[1..];
+                let rest_fps = rest.iter().map(|s| s.encoded).sum::<usize>() as f64
+                    / rest.len().max(1) as f64
+                    / measured(background_fps);
+                let mbps = focus.bytes as f64 * 8.0 / measured(focus_fps) / 1e6
+                    + rest.iter().map(|s| s.bytes).sum::<usize>() as f64 * 8.0
+                        / measured(background_fps)
+                        / 1e6;
+                eprintln!(
+                    "MEASURE concurrent {w}x{h} n={n} {} declared {:?}/{:?}{} others at {background_fps} load={}: \
+                     focused at {focus_fps}: encode {} ms, late {} ms, {:.1} fps, {:.2} Mbit/s, {:.2} dB | all encode {} ms, submit {} \
+                     ms, late {} ms | others {:.1} fps each | superseded {}, yielded {}, dropped \
+                     {} | {mbps:.1} Mbit/s | process {load:.2} Gcycles/s",
+                    if aligned { "aligned" } else { "spread" },
+                    declared.0,
+                    declared.1,
+                    if yielding == Yield::No { String::new() } else { format!(" {yielding:?}") },
+                    load_average(),
+                    spread_ms(&focus.encode),
+                    spread_ms(&focus.late),
+                    focus.encoded as f64 / measured(focus_fps),
+                    focus.bytes as f64 * 8.0 / measured(focus_fps) / 1e6,
+                    focus.psnr.iter().sum::<f64>() / focus.psnr.len().max(1) as f64,
+                    spread_ms(&all(|s| &s.encode)),
+                    spread_ms(&all(|s| &s.submit)),
+                    spread_ms(&all(|s| &s.late)),
+                    rest_fps,
+                    streams.iter().map(|s| s.superseded).sum::<usize>(),
+                    rest.iter().map(|s| s.yielded).sum::<usize>(),
+                    streams.iter().map(|s| s.dropped).sum::<usize>(),
                 );
             }
         }

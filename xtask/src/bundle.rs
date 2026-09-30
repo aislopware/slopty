@@ -57,7 +57,8 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
         sh.remove_path(&app)?;
     }
     sh.create_dir(&macos)?;
-    sh.create_dir(contents.join("Resources"))?;
+    let resources = contents.join("Resources");
+    sh.create_dir(&resources)?;
     for bin in BINARIES {
         let from = built.join(bin);
         if !from.exists() {
@@ -67,10 +68,9 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Utf8PathBuf> {
     }
     let version = crate::release::current_version(sh)?;
     sh.write_file(contents.join("Info.plist"), info_plist(&version))?;
-    sh.write_file(
-        contents.join("Resources").join(format!("{PRODUCT}.icns")),
-        crate::icon::Icon::load(sh)?.icns()?,
-    )?;
+    // The document sits beside the app, not in it: only what actool makes of it ships.
+    let icon = crate::icon::Art::load(sh)?.write_document(sh, &out)?;
+    crate::icon::compile_macos(sh, &icon, &resources)?;
     sh.write_file(contents.join("PkgInfo"), "APPL????")?;
     let identity = opts.sign.as_deref().unwrap_or("-");
     // Sign the nested binaries first, then the bundle; `--deep` is deprecated for a reason.
@@ -107,7 +107,9 @@ fn info_plist(version: &str) -> String {
 	<key>CFBundleExecutable</key>
 	<string>slopty-app</string>
 	<key>CFBundleIconFile</key>
-	<string>{PRODUCT}</string>
+	<string>{icon}</string>
+	<key>CFBundleIconName</key>
+	<string>{icon}</string>
 	<key>CFBundleIdentifier</key>
 	<string>{BUNDLE_ID}</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -132,7 +134,8 @@ fn info_plist(version: &str) -> String {
 	<string>Slopty connects to your workers on the local network.</string>
 </dict>
 </plist>
-"#
+"#,
+        icon = crate::icon::NAME,
     )
 }
 

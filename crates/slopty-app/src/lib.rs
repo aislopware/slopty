@@ -1068,7 +1068,8 @@ impl Workspace {
                     }
                 };
                 redial.linked(std::time::Instant::now());
-                let net::Connected { me, ack, sender, mut events, link } = connected;
+                let net::Connected { me, mut ack, sender, mut events, link } = connected;
+                pin_grants(&mut ack.caps);
                 let link = std::sync::Arc::new(link);
                 let screen_link = std::sync::Arc::clone(&link);
                 let open_screen: slopty_ui::screen::ScreenFactory =
@@ -2621,7 +2622,8 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Path(path)) => {
             view.update(cx, |v, cx| v.set_link_path(key, path, cx));
         }
-        LinkEvent::Control(WorkerMsg::Caps(caps)) => {
+        LinkEvent::Control(WorkerMsg::Caps(mut caps)) => {
+            pin_grants(&mut caps);
             view.update(cx, |v, cx| v.set_worker_caps(key, caps, cx));
         }
         LinkEvent::Ports { session, forwards } => {
@@ -2636,17 +2638,21 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Permission(event)) => {
             view.update(cx, |v, cx| v.permission_event(event, cx));
         }
-        LinkEvent::Control(WorkerMsg::Handoff(event)) => {
-            view.update(cx, |v, cx| v.handoff_event(key, event, cx));
+        LinkEvent::Handoff { event, received } => {
+            view.update(cx, |v, cx| v.handoff_event(key, event, received, cx));
         }
         LinkEvent::Control(WorkerMsg::AgentBranch(branch)) => {
             view.update(cx, |v, cx| v.agent_branch(branch, cx));
         }
         // The handshake's ack was read when the link connected; the tick pings to draw a
-        // restarted worker's reset, so the pong carries nothing; and the app's link forwards
-        // ports itself (`LinkEvent::Ports`).
+        // restarted worker's reset, so the pong carries nothing; the app's link forwards
+        // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
+        // read (`LinkEvent::Handoff`).
         LinkEvent::Control(
-            WorkerMsg::HelloAck(_) | WorkerMsg::Pong { .. } | WorkerMsg::Ports { .. },
+            WorkerMsg::HelloAck(_)
+            | WorkerMsg::Pong { .. }
+            | WorkerMsg::Ports { .. }
+            | WorkerMsg::Handoff(_),
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
@@ -2868,6 +2874,23 @@ fn rebuild_app_menus(cx: &App) {
     }
 }
 
+/// In the e2e build, the worker's macOS grants as the harness names them
+/// (`slopty_e2e::WORKER_GRANTS_ENV`), in place of what this machine granted the worker's
+/// binary: a render must not depend on the machine it is drawn on.
+#[cfg(feature = "e2e")]
+fn pin_grants(caps: &mut slopty_proto::server::WorkerCaps) {
+    let Some(grants) = std::env::var_os(slopty_e2e::WORKER_GRANTS_ENV) else {
+        return;
+    };
+    let grants = grants.to_string_lossy();
+    caps.can_capture = slopty_e2e::granted(&grants, slopty_e2e::SCREEN_RECORDING);
+    caps.can_inject = slopty_e2e::granted(&grants, slopty_e2e::ACCESSIBILITY);
+}
+
+/// A worker's grants are what it reports, outside the e2e build.
+#[cfg(not(feature = "e2e"))]
+const fn pin_grants(_caps: &mut slopty_proto::server::WorkerCaps) {}
+
 /// Whether this launch is `cargo xtask e2e`'s, driven over its socket.
 #[cfg(feature = "e2e")]
 #[must_use]
@@ -2931,6 +2954,12 @@ pub fn open_workspace(
         let mut view = WorkspaceView::new(Theme::default(), saved, cx);
         view.extend_palette(app_palette_items(None));
         view.set_layout_path(layout_path());
+        // Beside the layout: the file tiles' edits not yet saved, taken back after a quit or a
+        // crash.
+        view.set_unsaved_store(
+            slopty_client::unsaved::Store::new(slopty_platform::dirs::data_dir().join("unsaved")),
+            cx,
+        );
         view.set_pasteboard(pasteboard());
         view.set_hardware_keyboard(hardware_keyboard_attached(), cx);
         #[cfg(feature = "e2e")]
@@ -2948,6 +2977,13 @@ pub fn open_workspace(
         ws
     });
     let root_view = workspace.clone();
+    // What the file tiles hold unsaved is written as the app quits, before anything goes.
+    let quitting = workspace.clone();
+    cx.on_app_quit(move |cx| {
+        quitting.update(cx, |ws, cx| ws.view.update(cx, |v, cx| v.keep_unsaved_now(cx)));
+        async {}
+    })
+    .detach();
     // Terminals and remote desktops stay at full rate while another app has the keyboard: a
     // second display is watched while typing elsewhere.
     // The self-test's window comes up in front but takes no keyboard: its keys arrive over the

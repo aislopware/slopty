@@ -869,7 +869,13 @@ fn reconcile_local(
 /// (upstream adds a dependency, our side's lock never saw it). Bring the lock up to the manifests
 /// without upgrading anything, and commit it when it moved, so the pushed head builds `--locked`.
 fn refresh_lock(sh: &Shell) -> Result<()> {
-    if cmd!(sh, "git ls-files --error-unmatch Cargo.lock").quiet().ignore_stdout().run().is_err() {
+    if cmd!(sh, "git ls-files --error-unmatch Cargo.lock")
+        .quiet()
+        .ignore_stdout()
+        .ignore_stderr()
+        .run()
+        .is_err()
+    {
         return Ok(());
     }
     step("cargo update -w", &cmd!(sh, "cargo update -w"))?;

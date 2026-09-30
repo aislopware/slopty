@@ -386,6 +386,12 @@ impl<C: Clock> Pacer<C> {
         }
     }
 
+    /// A picture put up never reached the display: a newer one replaced it first. It counts
+    /// as skipped, as a picture replaced before a paint does.
+    pub const fn unshown(&mut self) {
+        self.stats.skipped = self.stats.skipped.saturating_add(1);
+    }
+
     /// Age of the picture on screen: how long ago it reached the display.
     #[must_use]
     pub fn age(&self) -> Option<Duration> {
@@ -543,6 +549,24 @@ mod tests {
 
     /// Nearest rank: the median of an even count is the lower middle, a p99 of 100 samples is
     /// the 99th and not the largest, and a single sample is every percentile.
+    /// A picture put up and then replaced before the display showed it is skipped, and has no
+    /// latency: only what reached the glass is timed.
+    #[test]
+    fn a_picture_replaced_before_the_glass_is_skipped() {
+        let clock = FakeClock::new();
+        let mut pacer = Pacer::new(&clock);
+        clock.advance(FRAME);
+        assert_eq!(pacer.offer(stamp(&clock, 0, Duration::ZERO, MS)), Pace::Present);
+        let _replaced = pacer.painted().expect("put up");
+        assert_eq!(pacer.offer(stamp(&clock, 1, FRAME, MS)), Pace::Present);
+        let shown = pacer.painted().expect("put up");
+        pacer.unshown();
+        clock.advance(FRAME);
+        pacer.shown(shown, clock.now_instant());
+        let stats = pacer.stats();
+        assert_eq!((stats.presented, stats.skipped, stats.window), (1, 1, 1));
+    }
+
     #[test]
     fn percentiles_are_nearest_rank() {
         let v: Vec<Duration> = (1..=100).map(|i| i * MS).collect();

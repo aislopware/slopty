@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, Type as _,
@@ -45,7 +45,7 @@ use slopty_proto::screen::VideoCodec;
 
 use crate::cf::{self, check};
 use crate::video::{Chroma, EncodedPacket, EncoderConfig, FrameOptions, Mse, VideoEncoder};
-use crate::{CodecError, PixelBuffer, annexb};
+use crate::{CodecError, PixelBuffer, nal};
 
 /// The 10-bit 4:4:4 profile's `ProfileLevel` value. The low-latency HEVC encoder lists it in its
 /// own supported values (`VTCopySupportedPropertyDictionaryForEncoder`, macOS 27.0 on an M1 Max)
@@ -87,6 +87,26 @@ type Sink = Box<dyn Fn(EncodedPacket) + Send + Sync>;
 
 fn retain(value: &CFType) -> CFRetained<CFType> {
     CFType::retain(value)
+}
+
+/// What a session made for 60 frames a second or more declares as its frame rate until its
+/// first frame ([`placement_fps`]). VideoToolbox places a session on one of this Mac's encode
+/// engines, and fixes its internal set-up, from the `ExpectedFrameRate` last set between
+/// `PrepareToEncodeFrames` and the first frame: a value set only before the prepare places
+/// nothing, and nothing after the first frame moves the session. Two 1080p sessions declaring 60
+/// share one engine and take turns, 6.6 → 11.8 ms p95 for either. Declaring 120, they run on the
+/// two engines side by side at 6.7, and six keep 60 frames a second where they made 45. One
+/// declaring 60 beside one declaring 120 got an engine of its own only half the time. A lone
+/// session pays up to 0.6 dB at 60 frames a second, and only where the picture is already above
+/// 54 dB (MEASUREMENTS.md, "several streams on the encode engines"). The same as
+/// `MaximumRealTimeFrameRate`, the most any stream is fed.
+const PLACEMENT_FPS: u16 = 120;
+
+/// The rate a session made for `fps` declares until its first frame: [`PLACEMENT_FPS`] from 60
+/// up, its own below that, where declaring 120 costs 0.6–2 dB and the stream was asked to be
+/// slow.
+const fn placement_fps(fps: u16) -> u16 {
+    if fps >= 60 && fps < PLACEMENT_FPS { PLACEMENT_FPS } else { fps }
 }
 
 /// The share of frames in the base layer while temporal layers are on: every other frame is one
@@ -152,6 +172,12 @@ pub struct Encoder {
     config: EncoderConfig,
     rate_control: RateControl,
     ltr: bool,
+    /// Whether the session has had its first frame, from when on its declared rate places
+    /// nothing; true from the start for a session with no placement to make.
+    placed: AtomicBool,
+    /// The frame rate asked of an unplaced session ([`Self::set_frame_rate`]), told it once the
+    /// first frame placed it; 0 when nothing was asked.
+    asked_fps: AtomicU16,
     // Declared last so it outlives the session's `Drop` (the callback's refcon points at it).
     shared: Arc<Shared>,
 }
@@ -171,6 +197,7 @@ impl std::fmt::Debug for Encoder {
             .field("config", &self.config)
             .field("rate_control", &self.rate_control)
             .field("ltr", &self.ltr)
+            .field("placed", &self.placed)
             .finish_non_exhaustive()
     }
 }
@@ -260,11 +287,22 @@ impl Encoder {
         };
         // SAFETY: `create` returned a +1 reference.
         let session = unsafe { CFRetained::from_raw(raw) };
-        let mut encoder = Self { session, config, rate_control, ltr: false, shared };
+        let mut encoder = Self {
+            session,
+            config,
+            rate_control,
+            ltr: false,
+            placed: AtomicBool::new(placement_fps(config.fps) == config.fps),
+            asked_fps: AtomicU16::new(0),
+            shared,
+        };
         encoder.configure()?;
         // SAFETY: the session is fully configured; this only pre-allocates encoder resources.
         let status = unsafe { encoder.session.prepare_to_encode_frames() };
         check("VTCompressionSessionPrepareToEncodeFrames", status)?;
+        // Again after the prepare: set only before it, the rate places nothing, and the session
+        // lands wherever the driver likes ([`PLACEMENT_FPS`]).
+        encoder.declare_frame_rate(placement_fps(encoder.config.fps))?;
         Ok(encoder)
     }
 
@@ -504,7 +542,25 @@ impl Encoder {
     /// alone already gives the surviving frames the skipped ones' bytes. `ExpectedFrameRate` is
     /// the hint the rate controller sizes its first frames from; it would still describe the
     /// old cadence otherwise.
+    ///
+    /// A session made for 60 frames a second or more declares 120 until its first frame, which
+    /// gives it an encode engine of its own; a rate asked for before then is told after that
+    /// frame.
     pub fn set_frame_rate(&self, fps: u16) -> Result<(), CodecError> {
+        // Stored, then `placed` read again, against `place` swapping `placed` and then reading
+        // the rate, all sequentially consistent: at least one of the two sees the other, so a
+        // rate asked while the first frame goes in is told either way.
+        if !self.placed.load(Ordering::SeqCst) {
+            self.asked_fps.store(fps.max(1), Ordering::SeqCst);
+            if !self.placed.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+        }
+        self.declare_frame_rate(fps)
+    }
+
+    /// Set `ExpectedFrameRate`, and on a VBV session the window it sizes, to `fps`.
+    fn declare_frame_rate(&self, fps: u16) -> Result<(), CodecError> {
         let fps = f64::from(fps.max(1));
         // SAFETY: framework-provided constant string.
         let expected_key = unsafe { kVTCompressionPropertyKey_ExpectedFrameRate };
@@ -607,7 +663,25 @@ impl Encoder {
                 &raw mut flags,
             )
         };
+        if status == 0 {
+            self.place();
+        }
         check("VTCompressionSessionEncodeFrame", status)
+    }
+
+    /// After the first frame, which placed the session: tell it the rate it now runs at, the one
+    /// last asked of it or its own.
+    fn place(&self) {
+        if self.placed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let fps = match self.asked_fps.load(Ordering::SeqCst) {
+            0 => self.config.fps,
+            asked => asked,
+        };
+        if let Err(e) = self.declare_frame_rate(fps) {
+            tracing::warn!(fps, error = %e, "the frame rate after placement");
+        }
     }
 
     /// Wait for every submitted frame to come out of the sink.
@@ -694,8 +768,8 @@ unsafe extern "C-unwind" fn output_callback(
     }
 }
 
-/// VideoToolbox's output as a packet: the parameter sets in front of a keyframe, then the
-/// sample's bytes copied once and their length prefixes rewritten to start codes in place.
+/// VideoToolbox's output as a packet: the parameter sets in front of a keyframe, each behind its
+/// length, then the sample's length-prefixed units copied once, as they are.
 fn packet(
     sample: &CMSampleBuffer,
     codec: VideoCodec,
@@ -723,7 +797,9 @@ fn packet(
     let head =
         sets.iter().fold(0_usize, |sum, set| sum.saturating_add(4).saturating_add(set.len()));
     let mut data = Vec::with_capacity(head.saturating_add(body));
-    annexb::prepend_parameter_sets(&mut data, sets.iter().copied());
+    for set in &sets {
+        nal::push(&mut data, set)?;
+    }
     if body > 0
         && let Some(spare) = NonNull::new(data.spare_capacity_mut().as_mut_ptr())
     {
@@ -737,8 +813,7 @@ fn packet(
             data.set_len(head.saturating_add(body));
         }
     }
-    let units = data.get_mut(head..).unwrap_or_default();
-    annexb::length_prefixed_to_annexb_in_place(units)?;
+    nal::check(data.get(head..).unwrap_or_default())?;
     Ok(EncodedPacket {
         data,
         keyframe,
@@ -825,7 +900,7 @@ fn mse(dict: &CFDictionary<CFString, CFType>) -> Option<Mse> {
 }
 
 /// The parameter sets of a format description, borrowed from it. The stream's NAL lengths must
-/// be four bytes, the size of a start code, for the in-place rewrite; VideoToolbox's are.
+/// be four bytes, the wire's ([`nal`]), since its units travel as written; VideoToolbox's are.
 fn parameter_sets(
     format: &CMFormatDescription,
     codec: VideoCodec,
@@ -1234,6 +1309,44 @@ mod tests {
         assert_eq!(encoder.frames_dropped(), 0);
     }
 
+    /// A session made for 60 frames a second declares 120 through its first frame, whatever
+    /// rate is asked of it before then, and the last rate asked once that frame is in; a session
+    /// made for 30 declares its own rate from the start and takes a new one at once.
+    #[test]
+    fn a_session_declares_the_placement_rate_until_its_first_frame() {
+        // SAFETY: framework-provided constant string.
+        let key = unsafe { kVTCompressionPropertyKey_ExpectedFrameRate };
+        let open = |fps: u16| {
+            let config = EncoderConfig {
+                width: u32::try_from(W).unwrap(),
+                height: u32::try_from(H).unwrap(),
+                codec: VideoCodec::Hevc,
+                fps,
+                bitrate_bps: 2_000_000,
+                chroma: Chroma::Subsampled,
+            };
+            Encoder::new(config, |_packet| {}).unwrap()
+        };
+
+        let interactive = open(60);
+        assert_eq!(read_number(&interactive, key), Some(120.0), "placed as a 120 session");
+        interactive.set_frame_rate(30).unwrap();
+        assert_eq!(
+            read_number(&interactive, key),
+            Some(120.0),
+            "a rate asked before the frame waits"
+        );
+        interactive.encode(&frame(0), 0, &FrameOptions::default()).unwrap();
+        assert_eq!(read_number(&interactive, key), Some(30.0), "and is told after it");
+        interactive.set_frame_rate(60).unwrap();
+        assert_eq!(read_number(&interactive, key), Some(60.0), "then every rate at once");
+
+        let slow = open(30);
+        assert_eq!(read_number(&slow, key), Some(30.0), "its own rate");
+        slow.set_frame_rate(15).unwrap();
+        assert_eq!(read_number(&slow, key), Some(15.0), "a new rate at once");
+    }
+
     /// The other two sessions the worker opens take layers as the 4:2:0 HEVC one does.
     #[test]
     fn layers_on_the_full_chroma_and_h264_sessions() {
@@ -1276,7 +1389,7 @@ mod tests {
         encoder.flush().unwrap();
         let packets = collect(&rx, 3);
         let keyframe = packets.first().filter(|p| p.keyframe).expect("a keyframe first");
-        let unit = annexb::AccessUnit::parse(&keyframe.data, annexb::hevc::is_parameter_set);
+        let unit = nal::AccessUnit::parse(&keyframe.data, nal::hevc::is_parameter_set).unwrap();
         let sets: Vec<Vec<u8>> = unit.parameter_sets().iter().map(|s| s.to_vec()).collect();
         let format = crate::decoder::format_description(VideoCodec::Hevc, &sets).unwrap();
         // SAFETY: framework-provided constant string; the description is valid.
@@ -1301,7 +1414,7 @@ mod tests {
             let _receiver_gone = dtx.send((format, matrix));
         });
         for p in &packets {
-            decoder.decode(&p.data, p.pts_us).unwrap();
+            decoder.decode(&p.data.clone().into(), p.pts_us).unwrap();
         }
         let (format, matrix) =
             drx.recv_timeout(std::time::Duration::from_secs(60)).expect("a decoded frame");
@@ -1403,13 +1516,10 @@ mod tests {
         let packets = collect(&rx, frames);
         assert_eq!(packets.len(), frames);
         let keyframe = packets.first().filter(|p| p.keyframe).expect("a keyframe first");
-        let unit = annexb::AccessUnit::parse(&keyframe.data, annexb::hevc::is_parameter_set);
-        let formats: Vec<annexb::hevc::SampleFormat> = unit
-            .parameter_sets()
-            .iter()
-            .filter_map(|set| annexb::hevc::sample_format(set))
-            .collect();
-        let full = annexb::hevc::SampleFormat { chroma_format_idc: 3, bit_depth: 10 };
+        let unit = nal::AccessUnit::parse(&keyframe.data, nal::hevc::is_parameter_set).unwrap();
+        let formats: Vec<nal::hevc::SampleFormat> =
+            unit.parameter_sets().iter().filter_map(|set| nal::hevc::sample_format(set)).collect();
+        let full = nal::hevc::SampleFormat { chroma_format_idc: 3, bit_depth: 10 };
         assert_eq!(formats, vec![full], "the SPS says 4:4:4, 10-bit");
 
         let (dtx, drx) = std::sync::mpsc::channel();
@@ -1440,7 +1550,7 @@ mod tests {
             let _receiver_gone = dtx.send((format, cb));
         });
         for p in &packets {
-            decoder.decode(&p.data, p.pts_us).unwrap();
+            decoder.decode(&p.data.clone().into(), p.pts_us).unwrap();
         }
         let (format, cb) =
             drx.recv_timeout(std::time::Duration::from_secs(60)).expect("a decoded frame");

@@ -27,22 +27,25 @@ mod ptyd_link {
         fn forget(&self, _session: SessionId) {}
     }
 
-    /// `slopty-ptyd` from this build's profile directory, built on demand: `-p slopty-worker`
-    /// alone does not build it.
+    /// `slopty-ptyd` in this build's profile, built on demand (`-p slopty-worker` alone does not
+    /// build it). Cargo names the executable: where a final binary lands relative to a test's
+    /// own executable changes with the build-dir layout.
     fn ptyd_bin() -> PathBuf {
         let exe = std::env::current_exe().unwrap();
-        let profile = exe.parent().and_then(Path::parent).unwrap();
-        let path = profile.join("slopty-ptyd");
-        if !path.exists() {
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let mut build = std::process::Command::new(cargo);
-            build.args(["build", "-p", "slopty-ptyd", "--bin", "slopty-ptyd"]);
-            if profile.ends_with("release") {
-                build.arg("--release");
-            }
-            assert!(build.status().unwrap().success(), "build slopty-ptyd");
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let mut build = std::process::Command::new(cargo);
+        build.args(["build", "-p", "slopty-ptyd", "--bin", "slopty-ptyd", "--message-format=json"]);
+        if exe.components().any(|c| c.as_os_str() == "release") {
+            build.arg("--release");
         }
-        path
+        let output = build.stderr(Stdio::inherit()).output().unwrap();
+        assert!(output.status.success(), "build slopty-ptyd");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|m| m["reason"] == "compiler-artifact" && m["target"]["name"] == "slopty-ptyd")
+            .and_then(|m| m["executable"].as_str().map(PathBuf::from))
+            .expect("cargo reports slopty-ptyd's executable")
     }
 
     /// A ptyd on its own socket in `dir`, killed when the child drops.

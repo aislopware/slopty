@@ -15,10 +15,14 @@ anyhow.workspace = true
 core-foundation.workspace = true
 core-video.workspace = true
 gpui.workspace = true
+# A stream's `VideoLayer` (`screen::glass`).
+gpui_apple.workspace = true
 gpui-kit.workspace = true
 # The formats the model reads, for fitting a pasted picture (`terminal::attachment`); GPUI
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
+# What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
+parking_lot.workspace = true
 rustc-hash.workspace = true
 # The native view under the window, where a browser tile's page goes (`browser`).
 raw-window-handle.workspace = true

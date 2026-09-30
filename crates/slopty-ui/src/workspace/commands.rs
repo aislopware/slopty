@@ -802,14 +802,10 @@ impl WorkspaceView {
             // closed tile, so ⌘Z brings back the edit and not the disk's text.
             // A program waiting on the file is answered as "Done" would: saved, then told.
             ItemKind::File { .. } => {
-                let file = self.files.get(&tile.item).cloned();
-                if let Some(view) = &file {
+                if let Some(view) = self.files.get(&tile.item).cloned() {
                     view.update(cx, crate::file::FileView::finish_edit);
                 }
                 self.remember_closed(tile, item, None, cx);
-                if let Some(closed) = self.closed.last_mut() {
-                    closed.file = file;
-                }
             }
         }
         cx.notify();
@@ -843,9 +839,16 @@ impl WorkspaceView {
         let seq = self.closed_seq;
         let title = self.tile_title(&item);
         let at = self.layout.position(tile);
-        self.closed.push(ClosedTile { tile, item, at, session, file: None, seq });
+        // A file tile's editor goes with it before the tile leaves, so its going is a close.
+        let file = self.files.get(&tile.item).cloned();
+        self.closed.push(ClosedTile { tile, item, at, session, file, seq });
         self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
         self.show_toast_for(ToastKind::Closed { seq, title }, UNDO_CLOSE, cx);
+        Self::forget_closed_after(seq, cx);
+    }
+
+    /// Forget closing `seq` once [`UNDO_CLOSE`] has passed.
+    fn forget_closed_after(seq: u64, cx: &Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(UNDO_CLOSE).await;
             let _gone = this.update(cx, |this, cx| this.forget_closed(seq, cx));
@@ -853,10 +856,30 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// [`UNDO_CLOSE`] passed: a shell's session is closed by the worker and its view goes.
+    /// [`UNDO_CLOSE`] passed: a shell's session is closed by the worker and its view goes; a
+    /// file tile's edit goes with it. A file tile a program waits on stays while its save is
+    /// out, so the program hears how that ended; one whose save did not land (refused,
+    /// failed, its link lost) tells the program it was given up and keeps its edit here.
     fn forget_closed(&mut self, seq: u64, cx: &mut Context<Self>) {
         let Some(ix) = self.closed.iter().position(|c| c.seq == seq) else { return };
+        let waits = |v: &crate::file::FileView| v.waiting().is_some();
+        if self
+            .closed
+            .get(ix)
+            .and_then(|c| c.file.as_ref())
+            .is_some_and(|f| waits(f.read(cx)) && f.read(cx).saving())
+        {
+            Self::forget_closed_after(seq, cx);
+            return;
+        }
         let closed = self.closed.remove(ix);
+        if let Some(view) = &closed.file {
+            if waits(view.read(cx)) {
+                self.file_tile_gone(view, cx);
+            } else {
+                self.let_go_unsaved(view, cx);
+            }
+        }
         if let Some(session) = closed.session {
             if self.summary(session).is_some() {
                 self.close_session_on(closed.tile.worker, session);

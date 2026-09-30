@@ -26,6 +26,7 @@
 //! drawn cached: a terminal's echo draws the terminal and the strip around it, never the
 //! chrome, which draws again only when the workspace itself changes or its own clock ticks.
 
+mod about;
 pub mod actions;
 mod agents;
 pub mod attention;
@@ -51,6 +52,7 @@ mod strip;
 mod tile;
 mod titlebar;
 mod toast;
+mod unsaved;
 mod workers;
 
 use std::collections::{BTreeMap, HashMap};
@@ -724,6 +726,13 @@ pub struct WorkspaceView {
     /// Agents' pull requests, programs waiting on file tiles, and the shell told it has the
     /// focus.
     handoff: handoffs::HandoffState,
+    /// The file tiles' unsaved edits, kept on this device; `None` where nothing is kept (a
+    /// test without a store).
+    kept: Option<unsaved::Kept>,
+    /// Slopty's mark over the empty workspace.
+    empty_mark: Entity<about::Mark>,
+    /// The About panel, while it is open.
+    about: Option<about::AboutPanel>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
     /// The landing of the drop being handed to the tiles, for the tile that takes it to upload
@@ -782,6 +791,9 @@ impl WorkspaceView {
             if let Some(until) = until {
                 crate::icons::hold_steps(cx, until);
             }
+        });
+        let empty_mark = gpui::AppContext::new(cx, |_| {
+            about::Mark::new(theme.clone(), about::MarkSize::Page, "empty", false)
         });
         Self {
             base_theme: theme.clone(),
@@ -893,6 +905,9 @@ impl WorkspaceView {
             quick: quick::Quick::default(),
             watching: std::collections::HashSet::new(),
             handoff: handoffs::HandoffState::default(),
+            kept: None,
+            empty_mark,
+            about: None,
             uploads: HashMap::new(),
             drop_landing: None,
             #[cfg(target_os = "macos")]
@@ -1252,6 +1267,7 @@ impl WorkspaceView {
             }
         }
         self.theme = theme;
+        self.theme_marks(cx);
         cx.notify();
     }
 
@@ -1302,6 +1318,7 @@ impl WorkspaceView {
         self.sync_clipboard_watch();
         self.sync_focus_report();
         self.sync_approvals(cx);
+        self.light_marks(cx);
         self.chrome.notify(cx);
         self.chrome_due.set(true);
     }
@@ -1628,6 +1645,8 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::open_folder_palette))
             .on_action(cx.listener(Self::open_url_palette))
             .on_action(cx.listener(Self::open_last_offer))
+            .on_action(cx.listener(Self::discard_old_unsaved))
+            .on_action(cx.listener(Self::about))
             .on_action(cx.listener(Self::list_workers))
             .on_action(cx.listener(Self::list_ports))
             .on_action(cx.listener(Self::close_item))
@@ -1677,6 +1696,7 @@ impl gpui::Render for WorkspaceView {
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
             .children(self.search_drawn())
+            .children(self.render_about(window, cx))
     }
 }
 

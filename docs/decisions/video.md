@@ -1162,7 +1162,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Before building it, measure encode, bitrate and decode for a 5K display at native against a
   phone-sized region, and the time from `SetRegion` to the first frame of the new region.
 
-- ✅ **A cursor sample draws only what it moves, and rides the frames** (2026-09-28). The view
+- ✅ **A cursor sample draws only what it moves, and rides the frames** (2026-09-28; the riding
+  superseded 2026-09-30 by **Pictures go to a layer of their own, not through a GPUI frame**:
+  frames no longer draw the view, so a sample that moves the pointer draws at once). The view
   drew on every cursor sample, up to 120 a second. It did so in trackpad mode, where the
   trackpad's pointer is drawn and not the sample, and when the worker's pointer was off the
   target and nothing was drawn. Frames drew separately. A cursor-only draw just before a frame
@@ -1993,3 +1995,151 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     of each other and under 14 ms, from `/tmp`; `Stitch` with both stripes, one late past a
     refresh, and one stripe's refresh; an e2e on the drawn 4K display with stripes forced on,
     the seam rows' PSNR in the golden.
+
+- ✅ **Every interactive session declares 120 until its first frame, so streams get an encode
+  engine each** (2026-09-30, M1 Max with two `ave2` engines, macOS 27.0; MEASUREMENTS "several
+  streams on the encode engines").
+  - Every stream has its own ScreenCaptureKit stream, low-latency session, encode thread,
+    packetizer and timers. They share the engines, and that is where a second stream's cost
+    went. The worker's own CPU is about 0.05 of a core per 1080p stream at 60, the drawn
+    stand-in for capture included.
+  - VideoToolbox packs two 1080p sessions declaring 60 onto one engine. Captured on the same
+    refresh, as windows on one display are, they take turns: either stream's encode p95 goes
+    from 6.6 ms alone to 11.8, while the other engine sits idle. Six such streams fall to 45
+    frames a second.
+  - The engine a session gets, and its internal set-up, follow the `ExpectedFrameRate` last set
+    between `PrepareToEncodeFrames` and its first frame. A rate set only before the prepare
+    places nothing, and nothing after the first frame moves the session.
+  - Two sessions declaring 120 ran on both engines in every run, at 6.6–6.7 ms p95 each, and
+    six kept 60 frames a second. Eight ask for more than two engines hold and fall to about
+    44 frames a second either way, but now every stream gets the same share. One declaring 60 beside one declaring 120 (or 240) got an
+    engine of its own in about half the runs, so the second stream alone cannot ask for it.
+  - So every session made for 60 frames a second or more (`placement_fps`) declares 120 after
+    the prepare. It is told its own rate once its first frame is in, and a `set_frame_rate`
+    before then is held until after it.
+  - The cost falls on a stream alone: up to 0.6 dB at 60 frames a second, with 4–7 % more bits,
+    and only where the picture is above 54 dB. At a rate that binds it was +0.3 dB. A session
+    made for less than 60 keeps its own rate, because there declaring 120 cost 0.6–2 dB.
+  - A 4K session already declares more than one engine, and two ran side by side before too.
+    Small windows (896 × 512) pack onto one engine even at 120, and their frames queue there:
+    2.9, 4.6 and 8.2 ms p95 for 1, 2 and 4 streams.
+  - Favouring the focused stream came later, once the client said which one it is ("A focused
+    stream keeps its rate").
+  - Test: `a_session_declares_the_placement_rate_until_its_first_frame` (slopty-codec).
+    Measurements: `concurrent_sessions` in `crates/slopty-codec/tests/chroma444.rs` and
+    `measure_concurrent_streams` in the worker's `screen/synthetic.rs`, both ignored.
+
+- ✅ **HEVC travels length-prefixed** (2026-09-30; MEASUREMENTS "Annex B against length-prefixed
+  on the wire" and "HEVC travels length-prefixed"). A wire change: the video payload's framing.
+  - VideoToolbox writes each NAL unit behind a 4-byte length and wants them back that way. The
+    worker used to rewrite the lengths to start codes, and the client scanned for the start
+    codes and wrote the lengths back into a block CoreMedia allocated. On a real 4K keyframe that
+    cost 1.39 M instructions on the client's stream task, 80 % of it the scan, right before the
+    decode that restarts a stream after loss.
+  - An access unit now travels as VideoToolbox writes it (`slopty_codec::nal`). A keyframe
+    carries its parameter sets in front as units of their own, so it still describes itself and
+    a receiver can build its decoder from any keyframe it reassembles. The host copies the
+    sample's bytes once, as before, and walks the lengths to check them where it used to rewrite
+    them; a length that runs past the end still drops the frame. The SPS rewrite
+    (`conformance::crop_access_unit`) replaces the unit and its length together.
+  - `Decoder::decode` takes the reassembled frame's `Bytes`. A walk over the lengths finds the
+    parameter sets; the picture's units behind them become the sample's block as they are, a
+    block whose custom source (`CMBlockBufferCustomBlockSource`) holds a reference to the bytes
+    until CoreMedia frees it. A 4K keyframe's submit went from 1.84 M instructions to 0.45 M,
+    and what is left is VideoToolbox's own.
+  - Annex B is gone from the code, not kept beside it: nothing on the wire is versioned, and
+    every binary is rebuilt together.
+  - The walk refuses what a peer could send to trip it: a length that runs past the end, a
+    tail too short for a length, a length a `usize` cannot hold, and a unit of no bytes, which
+    has no header and which no encoder writes. The 4-byte prefix is the one the decoder's format
+    description declares (`NALUnitHeaderLength` 4), and the host refuses a session whose
+    parameter sets say otherwise. The fuzz target `nal` holds the three walks (`check`, `units`,
+    `AccessUnit::parse`) to one answer on any bytes, and runs the SPS reads and the SPS rewrite
+    on them. On its first run it found the rewrite (`crop_sps`) writing an SPS that no longer
+    parsed: on a malformed SPS whose last set bit was syntax, the rewrite took that bit for the
+    stop bit. The rewrite now reads itself back and is refused unless it shows the size asked
+    for. Only the host's own encoder output reaches it.
+  - Tests: `units_come_back_without_their_lengths`, `a_malformed_length_is_an_error`,
+    `an_empty_unit_is_malformed`, `an_sps_without_its_stop_bit_is_not_rewritten_into_a_broken_one`
+    (with its input under `fuzz/regressions/nal/`),
+    `the_parameter_sets_in_front_are_split_from_the_picture` (`nal`),
+    `a_sample_holds_the_received_bytes_until_it_is_released` (the block is the received bytes,
+    released with the sample), `an_access_unit_has_its_sps_rewritten_in_place`, and the round
+    trip, which checks every packet's lengths end to end. Measurement: `decode_cost`.
+
+- ✅ **A focused stream keeps its rate; the others give way a rung** (2026-09-30, M1 Max,
+  macOS 27.0; MEASUREMENTS "the focused stream when the engines are full", and its first cut).
+  A wire change: `ScreenRequest::Focused`.
+  - The client says whether a stream's tile has the keyboard in an active window
+    (`ScreenRequest::Focused(bool)`, sent from `ScreenView::tell_focus` once per change). A
+    press (`ScreenRequest::Focus`) could not say that a tile lost focus.
+  - Past what the two engines hold (seven 1080p streams at 60), every stream fell to about 44
+    frames a second, the one being worked in with the rest. Now, when the focused stream's
+    encoder watch would step down, the streams nobody focuses step down a rung instead and hold
+    it for 10 s (`Engines::contended`). The focused stream keeps 56–60 frames a second with a
+    p50 of 7–12 ms, where it had 35–44 and 22–28 ms.
+  - The first cut asked again at the next window that still read short, while that window still
+    counted frames queued before the give-way, and the rest fell a second rung to 15. The next
+    give-way now waits 1 s and two of the focused stream's own windows (`SETTLE_US`,
+    `SETTLE_WINDOWS`).
+  - Losing the last focus ends every hold at once, and so does closing a focused stream. Before,
+    a stream that closed while focused left the others held for the rest of the 10 s.
+  - Not taken: holding each background capture for up to 8 ms, until the focused capture of
+    the same refresh has gone into its encoder. An engine codes its sessions' frames in the
+    order they arrive, so this should have put the focused frame first. Over three interleaved
+    rounds its p95 moved less than the rounds differed from each other. It cost the rest 1–3 ms
+    a frame and left them at 15–20 frames a second more often.
+  - Not available: a priority between sessions. VideoToolbox has no such key. `RealTime`,
+    `MaximumRealTimeFrameRate`, `PrioritizeEncodingSpeedOverQuality` and `MaxFrameDelayCount`
+    act on a session's own pipeline, not its place on the engine. Every session already asks
+    for all four (a delay count of 0, at most 120 frames a second), where the encoder takes
+    them.
+  - Open: under a machine load of 20–55 the focused p95 is 13–40 ms at 7–8 streams, not under
+    16.7. What queues in front of it on the engine is the rest's frames, coded at full size.
+    The next idea to measure is giving way by scale rather than rate, so each background frame
+    holds the engine for less time.
+  - Tests: `the_unfocused_streams_give_way_until_they_have_no_rung_left`,
+    `the_hold_ends_when_nothing_is_focused` (worker `screen/engines.rs`),
+    `the_worker_hears_the_tiles_focus_once_per_change`,
+    `a_tile_drawn_focused_in_an_active_window_is_focused_at_once` (slopty-ui `screen.rs`), and the
+    `ScreenRequest::Focused` golden. Measurement: `measure_concurrent_streams`, ignored.
+
+- ✅ **Pictures go to a layer of their own, not through a GPUI frame** (2026-09-30, gpui-fast's
+  `VideoLayer`; MEASUREMENTS "a stream's pictures on a layer of their own").
+  - Each picture drew the whole window again: the pump took it on the main thread, the view
+    drew it with GPUI's surface element, and it reached the glass with that frame on the
+    display's next tick. Now the decoder's callback hands it to the stream's presenter on its
+    own thread (`ScreenHandle::set_present`). The presenter gives it to a `VideoLayer`, a
+    `CAMetalLayer` in a native host under GPUI's layer, drawn on its own thread with GPUI's
+    surface shader, one picture at most on its way to the glass, and the newest waiting
+    (`slopty-ui::screen::glass`).
+  - The view places the layer in its own frame (`Window::paint_native`) at the picture's
+    fitted or zoomed rectangle, worked out from the body as that frame lays it out. The body and
+    the strip clip it. It has no hitbox, so GPUI keeps the pointer and the view forwards it. A
+    tile not drawn places nothing, which hides the layer. A tile moved to another window gets a
+    host there, and its layer moves with it.
+  - The view draws again only for what is GPUI's: the pointer, the zoom readout, the overlay,
+    and a picture of a new size or chroma. A cursor sample that moves the pointer draws it at
+    once. The fold that held it for the next frame is gone, since no frame is coming.
+  - On loopback, arrival → glass fell from 12.2–13.9 to 1.0–1.2 ms p50 and from 14.2–16.3 to
+    1.2–3.3 ms p95, and the window drew 160 frames in 20 s instead of about 1 420. The drawn
+    display beats in phase with this Mac's refresh, which is the layer's best case. A remote
+    source's gain is the wait for the display tick plus the frame itself.
+  - The pacer's clock now stops at the layer's report (`on_presented`). A picture the layer's
+    mailbox replaced counts as skipped. A picture drawn that the display did not time is left
+    untimed, as GPUI's own frames were. A remote desktop's virtual display reports no scan-out,
+    and counting those as skipped would have marked every stream "Frames late".
+  - A render of the window cannot see a layer. For the e2e's `Render`, each stream draws its
+    newest picture with GPUI too, over its hole, for that frame (`capture_pictures`). The
+    shader is the layer's, so the goldens keep checking the picture, and a check holds the
+    layer's presented placement to the picture drawn there (`assert_layer_on`).
+  - Tests: `a_picture_costs_the_view_no_frame`, `the_layer_goes_where_the_picture_is_drawn`,
+    `the_layer_follows_its_tile_through_the_strip`,
+    `samples_draw_at_once_and_pictures_draw_nothing` (`screen`),
+    `a_report_times_its_picture_or_counts_it_skipped`,
+    `an_untimed_report_is_skipped_only_when_the_mailbox_replaced_it`,
+    `pictures_wait_for_a_layer` (`screen::glass`),
+    `a_picture_replaced_before_the_glass_is_skipped` (`pacing`), and the stream goldens.
+  - Open: the test platform presents no frames, so a test sees where the view placed the layer
+    and not what the window did with it. A test-mode present in the fork would let tests read
+    the hosts. The iOS simulator's layer reports nothing, so its stream shows no timings.

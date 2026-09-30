@@ -30,6 +30,11 @@ actions!(
         OpenUrl,
         /// Open the page a shell last asked to open that was held back in a notice.
         OpenLastOffer,
+        /// Let go of the unsaved edits kept on this device for over a week without a tile to
+        /// take them (their worker has not come back).
+        DiscardOldUnsaved,
+        /// The About panel: the mark, the version and the build.
+        About,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
         /// on the Mac, the Files export sheet on iPhone and iPad.
         SaveCopy,
@@ -234,6 +239,8 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w(SAVE_A_COPY, IconName::Download, Box::new(SaveCopy)),
         w("Open URL…", IconName::Globe, Box::new(OpenUrl)),
         w("Open last offered page", IconName::ExternalLink, Box::new(OpenLastOffer)),
+        w("Discard unsaved edits over a week old", IconName::Eraser, Box::new(DiscardOldUnsaved)),
+        w("About Slopty", IconName::Info, Box::new(About)),
         w("Edit page address", IconName::Link, Box::new(EditAddress)),
         w("Page back", IconName::ArrowLeft, Box::new(PageBack)),
         w("Page forward", IconName::ArrowRight, Box::new(PageForward)),

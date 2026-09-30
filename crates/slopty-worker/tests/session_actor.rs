@@ -17,7 +17,7 @@ mod actor {
         TermSize { cols, rows, metrics: CellMetrics { cell_width: 8, cell_height: 16 } }
     }
 
-    fn start(command: &[&str]) -> (session::SessionHandle, tokio::process::Child) {
+    fn start(command: &[&str]) -> (session::SessionHandle, slopty_pty::Child) {
         let (handle, child, _tap) = start_tapped(command, Vec::new());
         (handle, child)
     }
@@ -25,7 +25,7 @@ mod actor {
     fn start_tapped(
         command: &[&str],
         checkpoint: Vec<u8>,
-    ) -> (session::SessionHandle, tokio::process::Child, mpsc::Receiver<Tap>) {
+    ) -> (session::SessionHandle, slopty_pty::Child, mpsc::Receiver<Tap>) {
         start_with(command, checkpoint, None)
     }
 
@@ -33,7 +33,7 @@ mod actor {
         command: &[&str],
         checkpoint: Vec<u8>,
         moves: Option<mpsc::UnboundedSender<SessionId>>,
-    ) -> (session::SessionHandle, tokio::process::Child, mpsc::Receiver<Tap>) {
+    ) -> (session::SessionHandle, slopty_pty::Child, mpsc::Receiver<Tap>) {
         start_keeping(command, checkpoint, moves, 1000)
     }
 
@@ -42,7 +42,7 @@ mod actor {
         checkpoint: Vec<u8>,
         moves: Option<mpsc::UnboundedSender<SessionId>>,
         scrollback_lines: u32,
-    ) -> (session::SessionHandle, tokio::process::Child, mpsc::Receiver<Tap>) {
+    ) -> (session::SessionHandle, slopty_pty::Child, mpsc::Receiver<Tap>) {
         let (tap, tap_rx) = mpsc::channel(64);
         let pty = Pty::open(size(40, 6)).unwrap();
         let slopty_pty::Spawned { child, term } = pty
@@ -1208,7 +1208,7 @@ done"#
         lines: u32,
         width: u16,
         at: TermSize,
-    ) -> (session::SessionHandle, tokio::process::Child, Vec<mpsc::Receiver<Outbound>>, Vec<Outbound>)
+    ) -> (session::SessionHandle, slopty_pty::Child, Vec<mpsc::Receiver<Outbound>>, Vec<Outbound>)
     {
         let script = format!(
             "read x; pad=$(printf '%0{width}d' 0); i=0; while [ $i -lt {lines} ]; do \

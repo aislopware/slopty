@@ -1,14 +1,16 @@
 //! `ScreenView`: one remote window or display, painted from the newest decoded frame.
 //!
-//! The frame arrives as a `slopty_client::Presentable`: an IOSurface-backed `CVPixelBuffer`
-//! plus the instants that got it here. GPUI's `surface` element samples it through
-//! `CVMetalTextureCache`, so nothing is copied on the client, and a `slopty_client::Pacer`
-//! decides when it goes up (present on arrival, never a queue) and measures how long the
-//! journey took. The pointer is drawn here in the worker's cursor picture: at this client's own
-//! pointer while this client drives it (always on a window stream), else where the cursor
-//! channel says the worker's is. Pointer, scroll and key events inside the view go to the worker
-//! as `ScreenInput` in stream pixels; the worker injects them. ⌘ chords the workspace binds
-//! (⌘T/⌘O/⌘W, the text size) never reach the view because GPUI runs key bindings before key
+//! The picture never goes through a GPUI frame. The decoder hands each IOSurface-backed
+//! `CVPixelBuffer` to the stream's `VideoLayer` on its own thread (`glass`), and the layer draws
+//! it on the next refresh; a `slopty_client::Pacer` there drops a picture older than the one up
+//! and times each from its arrival to the window server's report of it. The view places the
+//! layer where the picture goes, clipped by the tile, in its own frame, and draws over it what is
+//! GPUI's: the pointer, the zoom readout and the stats overlay. It draws again only when those
+//! change or the picture's size does. The pointer is drawn here in the worker's cursor picture:
+//! at this client's own pointer while this client drives it (always on a window stream), else
+//! where the cursor channel says the worker's is. Pointer, scroll and key events inside the view go
+//! to the worker as `ScreenInput` in stream pixels; the worker injects them. ⌘ chords the workspace
+//! binds (⌘T/⌘O/⌘W, the text size) never reach the view because GPUI runs key bindings before key
 //! listeners; every other chord (⌘C, ⌘V, ⌘Z, ⌘S…) is forwarded to the remote window. The view also
 //! asks the worker for a smaller stream when it is painted small (a narrow column, the overview),
 //! quantised so the encoder is not rebuilt on every step.
@@ -26,20 +28,21 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use core_foundation::base::TCFType as _;
+#[cfg(test)]
 use core_video::pixel_buffer::CVPixelBuffer;
+use gpui::composition::{NativeHost, NativeHostOptions};
 use gpui::{
     Animation, AnimationExt as _, App, Autocapitalize, Bounds, Context, CursorStyle,
-    ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
+    ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Global,
     InteractiveElement as _, IntoElement, Keystroke, LongPressEvent, Modifiers, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, Path, PathBuilder,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Path, PathBuilder,
     PinchEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString,
     Size, StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
     TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
-    px, size, surface,
+    px, size,
 };
-use slopty_client::pacing::{Pace, Pacer, PacingStats};
-use slopty_client::{CursorState, Presentable, ScreenHandle, ScreenStats};
+use slopty_client::pacing::PacingStats;
+use slopty_client::{CursorState, ScreenHandle, ScreenStats};
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
@@ -53,6 +56,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use crate::colors::hsla;
 use crate::{keys, kit};
 
+mod glass;
 mod health;
 mod keyboard;
 mod touch;
@@ -257,10 +261,6 @@ fn moved(path: &Path<Pixels>, by: Point<Pixels>) -> Path<Pixels> {
 /// the pointer went without this client (another user, an app's warp).
 const LOCAL_HOLD: Duration = Duration::from_millis(200);
 
-/// Half a 60 Hz refresh: how late past its due time a frame may be before a pointer change that
-/// waits for it is drawn on its own.
-const FOLD: Duration = Duration::from_micros(8_333);
-
 /// How long a fling may go quiet before the worker is told its momentum ended. Both platforms say
 /// so themselves (`ScrollWheelEvent::momentum_phase`), so this is the backstop for a lost or
 /// dropped close. Momentum events arrive about a frame apart, which makes this several frames of
@@ -285,12 +285,12 @@ pub struct ScreenView {
     stream: StreamId,
     target: CaptureTarget,
     handle: ScreenHandle,
-    /// The newest frame's picture. The wrapper holds its own retain on the decoder's buffer, so
-    /// the frame it came in needs no keeping.
-    latest: Option<CVPixelBuffer>,
-    /// How much colour the newest picture carries, read off its pixel format; `None` before
-    /// the first.
-    chroma: Option<Chroma>,
+    /// The pictures' way to the glass, and what the view knows of them.
+    glass: Arc<glass::Glass>,
+    /// The newest picture's size and colour; `None` before the first.
+    shape: Option<glass::Shape>,
+    /// Where the picture's layer is placed from, in the window the view last drew in.
+    host: Option<Host>,
     /// Stream size in pixels as opened.
     size: (u32, u32),
     /// Native pixel size of the target (stream size at scale 1).
@@ -310,10 +310,6 @@ pub struct ScreenView {
     /// Where the last render drew the pointer, in fractions of the picture; `None` when it drew
     /// none.
     drawn: Option<(f32, f32)>,
-    /// When the last frame went up, on the executor's clock.
-    last_frame: Option<Instant>,
-    /// When a pointer change waiting for a frame to carry it is drawn on its own.
-    fold: Option<Instant>,
     /// The picture's accessible label.
     label: SharedString,
     /// Renders so far.
@@ -321,6 +317,13 @@ pub struct ScreenView {
     /// The body's bounds as the last render read them (tests).
     #[cfg(test)]
     rendered_at: Bounds<Pixels>,
+    /// Pictures a test put up.
+    #[cfg(test)]
+    test_pictures: u64,
+    /// Where the last paint placed the layer, and the mask that clipped it (tests: the test
+    /// platform presents no frames, so its hosts record no placement).
+    #[cfg(test)]
+    layer_at: LayerAt,
     /// The stream size the worker maps input with: the size last asked for, or last told by
     /// `Geometry`. The worker takes a new scale in order with the input behind it, so frames
     /// still in flight at the old scale must not move it (unlike `size`, the picture's).
@@ -329,7 +332,6 @@ pub struct ScreenView {
     theme: Theme,
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
-    frames: u64,
     /// When the painted rate was last worked out, the count then, and the rate: the status bar
     /// reads it every draw, and it is worked out at most once a second.
     fps_sample: std::cell::Cell<(Instant, u64, f32)>,
@@ -359,6 +361,9 @@ pub struct ScreenView {
     /// registered with the window the view renders in (the constructor has none), and again
     /// when it renders in another: a tile popped out into a window of its own.
     let_go: Option<(gpui::AnyWindowHandle, [Subscription; 4])>,
+    /// What the worker was last told of this tile's focus ([`ScreenRequest::Focused`]); a
+    /// stream starts unfocused there.
+    focus_told: bool,
     /// The screen the view's window is on, and its refresh in hertz (0 when it does not say);
     /// `None` until the view renders.
     screen: Option<(Option<u32>, u16)>,
@@ -373,9 +378,6 @@ pub struct ScreenView {
     /// What is wrong with the stream, as last read.
     health: Option<Health>,
     _health: Task<()>,
-    /// Decides when a decoded frame goes up and measures arrival → present. The element only
-    /// feeds it: a frame on one side, a paint on the other.
-    pacer: Pacer,
     /// Link RTT from the workspace, for the overlay.
     rtt: Option<Duration>,
     /// Holds the device out of idle sleep (the Mac) or its screen on (the phone) for as long as
@@ -682,7 +684,7 @@ impl std::fmt::Debug for ScreenView {
             .field("stream", &self.stream)
             .field("target", &self.target)
             .field("size", &self.size)
-            .field("frames", &self.frames)
+            .field("frames", &self.frames())
             .finish_non_exhaustive()
     }
 }
@@ -809,13 +811,20 @@ impl ScreenView {
         handle: ScreenHandle,
         out: mpsc::Sender<ClientMsg>,
         theme: Theme,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
         let Opened { stream, target, size, quality } = opened;
         // A cursor picture's texture lives in every window's atlas until it is dropped from it.
         cx.on_release(|view, cx| view.pointer.drop_image(cx)).detach();
         handle.set_muted(theme.behaviour.stream.muted);
-        let pump = Self::pump(handle.frames(), handle.cursor(), Self::take_frame, cx);
+        let glass = glass::Glass::new();
+        let presenter = Arc::clone(&glass);
+        handle.set_present(Some(Arc::new(move |frame| {
+            presenter.offer(glass::Picture::of(frame), frame.stamp);
+        })));
+        let pump = Self::pump(glass.shapes(), handle.cursor(), cx);
+        // A render that captures the window draws the picture itself ([`capture_pictures`]).
+        cx.observe_global::<CapturePictures>(|_view, cx| cx.notify()).detach();
         // Somebody is watching a remote window: the platform must not dim or sleep under it.
         let acquisition = cx.prevent_idle_sleep("Slopty remote window");
         let awake = cx.spawn(async move |_this, _cx| match acquisition.await {
@@ -832,8 +841,9 @@ impl ScreenView {
             stream,
             target,
             handle,
-            latest: None,
-            chroma: None,
+            glass,
+            shape: None,
+            host: None,
             system_keys: false,
             typing: VecDeque::new(),
             typer: None,
@@ -846,8 +856,6 @@ impl ScreenView {
             pointer: Pointer::Arrow,
             placed: None,
             drawn: None,
-            last_frame: None,
-            fold: None,
             label: match target {
                 CaptureTarget::Display(id) => format!("Remote display {}", id.0).into(),
                 CaptureTarget::Window(id) => format!("Remote window {}", id.0).into(),
@@ -855,18 +863,22 @@ impl ScreenView {
             renders: 0,
             #[cfg(test)]
             rendered_at: Bounds::default(),
+            #[cfg(test)]
+            test_pictures: 0,
+            #[cfg(test)]
+            layer_at: Rc::default(),
             mapped: size,
             out: Outbox::new(out, cx),
             theme,
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
-            frames: 0,
             fps_sample: std::cell::Cell::new((Instant::now(), 0, 0.0)),
             held: Vec::new(),
             buttons: Vec::new(),
             pointer_at: (0.0, 0.0),
             modifiers: Modifiers::default(),
             let_go: None,
+            focus_told: false,
             screen: None,
             paste_hook: None,
             paste_hold: (0, Vec::new()),
@@ -883,7 +895,6 @@ impl ScreenView {
             #[cfg(target_os = "macos")]
             _display: (!cfg!(test))
                 .then(|| slopty_platform::Activity::display_awake("Slopty remote window")),
-            pacer: Pacer::default(),
             rate: None,
             source: SourceState::Live,
             scrolling: Scrolling::Idle,
@@ -931,17 +942,17 @@ impl ScreenView {
         (self.bounds, self.rendered_at)
     }
 
-    /// Take what the stream hands over: each frame `take` puts up draws the view, and a cursor
-    /// sample draws it only when the pointer drawn moves ([`Self::pointer_changed`]), at a time
-    /// that function picks. Generic over the frame so a test can feed pictures of its own.
-    fn pump<F: Clone + 'static>(
-        mut frames: watch::Receiver<F>,
+    /// Take what the stream hands over: a new shape of picture (the first, a new size) draws
+    /// the view, and a cursor sample draws it only when the pointer drawn moves
+    /// ([`Self::pointer_changed`]), at a time that function picks. The pictures themselves go
+    /// to the layer without the view ([`glass`]).
+    fn pump(
+        mut shapes: watch::Receiver<Option<glass::Shape>>,
         mut cursor: watch::Receiver<CursorState>,
-        take: fn(&mut Self, F, &mut Context<Self>) -> bool,
         cx: &Context<Self>,
     ) -> Task<()> {
-        enum Step<F> {
-            Frame(F),
+        enum Step {
+            Shape(Option<glass::Shape>),
             Cursor(CursorState),
             Due,
         }
@@ -958,11 +969,11 @@ impl ScreenView {
                     }
                 };
                 let step = tokio::select! {
-                    changed = frames.changed() => {
+                    changed = shapes.changed() => {
                         if changed.is_err() {
                             break;
                         }
-                        Step::Frame(frames.borrow_and_update().clone())
+                        Step::Shape(*shapes.borrow_and_update())
                     }
                     changed = cursor.changed() => {
                         if changed.is_err() {
@@ -975,11 +986,9 @@ impl ScreenView {
                 let next = this.update(cx, |view, cx| {
                     let now = cx.background_executor().now();
                     match step {
-                        // A picture the pacer drops (late, or the one already up) changes
-                        // nothing on screen: no frame for it.
-                        Step::Frame(frame) => {
-                            if take(view, frame, cx) {
-                                view.last_frame = Some(now);
+                        Step::Shape(shape) => {
+                            if let Some(shape) = shape {
+                                view.shaped(shape, cx);
                             }
                             due
                         }
@@ -998,44 +1007,19 @@ impl ScreenView {
         })
     }
 
-    /// Something the drawn pointer follows changed: a cursor sample, a hold that ran out, a
-    /// fold that came due. The view draws again only when the pointer it would draw is not the
-    /// one on screen. While frames flow, the change waits for the next frame, which draws it
-    /// anyway, and draws on its own only when that frame is [`FOLD`] late: a draw of its own
-    /// just before a frame makes the frame the second in its refresh, and a `CAMetalLayer`
-    /// shows that a refresh late (`docs/MEASUREMENTS.md`, "echo, key → glass"). Returns when
-    /// to look again.
-    fn pointer_changed(&mut self, now: Instant, cx: &mut Context<Self>) -> Option<Instant> {
+    /// Something the drawn pointer follows changed: a cursor sample, or a hold that ran out.
+    /// The view draws again, at once, only when the pointer it would draw is not the one on
+    /// screen: the picture is on a layer of its own, so no frame of GPUI's is coming that would
+    /// carry the change. Returns when to look again.
+    fn pointer_changed(&self, now: Instant, cx: &mut Context<Self>) -> Option<Instant> {
         let recheck = match self.target {
             CaptureTarget::Display(_) => self.hold_end().filter(|end| now < *end),
             CaptureTarget::Window(_) => None,
         };
-        if self.pointer_drawn(now) == self.drawn {
-            self.fold = None;
-            return recheck;
+        if self.pointer_drawn(now) != self.drawn {
+            cx.notify();
         }
-        let fold =
-            self.fold.or_else(|| self.next_frame_due(now).and_then(|due| due.checked_add(FOLD)));
-        if let Some(at) = fold
-            && now < at
-        {
-            self.fold = Some(at);
-            return Some(recheck.map_or(at, |end| end.min(at)));
-        }
-        self.fold = None;
-        cx.notify();
         recheck
-    }
-
-    /// When the next frame is due, one period of the rate asked for after the last; `None`
-    /// once two periods have passed without one (a still window sends none).
-    fn next_frame_due(&self, now: Instant) -> Option<Instant> {
-        let period = Duration::from_secs(1).checked_div(u32::from(self.quality.fps))?;
-        let last = self.last_frame?;
-        if now.saturating_duration_since(last) >= period.saturating_mul(2) {
-            return None;
-        }
-        last.checked_add(period)
     }
 
     /// When this client's hold on a display's pointer ends ([`LOCAL_HOLD`]).
@@ -1087,7 +1071,7 @@ impl ScreenView {
     /// or the worker's pointer is off the target).
     fn pointer_drawn(&self, now: Instant) -> Option<(f32, f32)> {
         let (at, shown) = self.pointer_spot(now);
-        (shown && self.latest.is_some()).then_some(at)
+        (shown && self.shape.is_some()).then_some(at)
     }
 
     /// Draw again when the pointer this client just placed is not where the last render drew it.
@@ -1097,10 +1081,16 @@ impl ScreenView {
         }
     }
 
-    /// Frames painted so far.
+    /// The native host the picture's layer is placed from, in the window the view last drew in.
     #[must_use]
-    pub const fn frames(&self) -> u64 {
-        self.frames
+    pub fn layer_host(&self) -> Option<gpui::composition::NativeId> {
+        self.host.as_ref().map(|host| host.native.id())
+    }
+
+    /// Pictures put up on the layer so far.
+    #[must_use]
+    pub fn frames(&self) -> u64 {
+        self.glass.put_up()
     }
 
     /// Stream pixel size of the picture last painted.
@@ -1118,9 +1108,10 @@ impl ScreenView {
         if elapsed < Duration::from_secs(1) {
             return fps;
         }
+        let now_frames = self.frames();
         #[expect(clippy::cast_precision_loss, reason = "frames painted in a second or so")]
-        let fps = self.frames.saturating_sub(frames) as f32 / elapsed.as_secs_f32();
-        self.fps_sample.set((Instant::now(), self.frames, fps));
+        let fps = now_frames.saturating_sub(frames) as f32 / elapsed.as_secs_f32();
+        self.fps_sample.set((Instant::now(), now_frames, fps));
         fps
     }
 
@@ -1162,7 +1153,7 @@ impl ScreenView {
     /// Read the counters; a change of health is the header's news. The overlay, while it shows,
     /// is drawn again with them: a still stream draws no frame that would.
     fn read_health(&mut self, cx: &mut Context<Self>) {
-        let health = self.probe.read(&self.handle.stats(), &self.pacer.stats(), Instant::now());
+        let health = self.probe.read(&self.handle.stats(), &self.glass.pacing(), Instant::now());
         if health != self.health {
             self.health = health;
             cx.emit(ScreenViewEvent::Health);
@@ -1316,16 +1307,16 @@ impl ScreenView {
             let fps = stats.frames.saturating_sub(hud.sample.frames) as f64 / secs;
             #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
             let mbps = stats.bytes.saturating_sub(hud.sample.bytes) as f64 * 8.0 / secs / 1e6;
-            let pacing = self.pacer.stats();
+            let pacing = self.glass.pacing();
             let input = HudInput {
                 size: self.size,
                 scale: self.quality.scale,
-                chroma: self.chroma,
+                chroma: self.shape.map(|shape| shape.chroma),
                 target_fps: self.quality.fps,
                 fps,
                 mbps,
                 rtt: self.rtt,
-                frame_age: self.pacer.age(),
+                frame_age: self.glass.age(),
                 rate: self.rate,
                 stats: &stats,
                 pacing: &pacing,
@@ -1436,54 +1427,49 @@ impl ScreenView {
         self.native
     }
 
-    /// A decoded frame came off the stream. The pacer decides whether it goes up (it always
-    /// does unless it is older than the picture already showing); nothing is queued for a later
-    /// paint, so the frame on screen is always the newest one that had arrived by paint time.
-    /// Whether it went up.
-    fn take_frame(&mut self, frame: Option<Arc<Presentable>>, cx: &mut Context<Self>) -> bool {
-        let Some(frame) = frame else { return false };
-        if self.pacer.offer(frame.stamp) == Pace::Drop {
-            return false;
+    /// The picture's shape changed (the first picture, a new size or chroma): what the view
+    /// draws around it is laid out again.
+    fn shaped(&mut self, shape: glass::Shape, cx: &mut Context<Self>) {
+        if self.shape == Some(shape) {
+            return;
         }
-        let raw = std::ptr::from_ref(frame.frame.image.as_cv())
-            .cast_mut()
-            .cast::<core_video::buffer::__CVBuffer>();
-        // SAFETY: `raw` is a live `CVPixelBufferRef` owned by `frame`; `wrap_under_get_rule`
-        // takes its own retain, so the wrapper stays valid even if `frame` is dropped first.
-        let buffer = unsafe { CVPixelBuffer::wrap_under_get_rule(raw) };
-        self.show(buffer, cx);
-        true
-    }
-
-    /// Put `buffer` up as the picture, drawn in the next frame.
-    fn show(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
-        #[expect(clippy::cast_possible_truncation, reason = "pixel counts")]
-        let size = (buffer.get_width() as u32, buffer.get_height() as u32);
-        self.size = size;
-        self.chroma = Some(chroma_of(buffer.get_pixel_format()));
-        self.latest = Some(buffer);
-        self.frames = self.frames.saturating_add(1);
-        if self.frames == 1 {
+        let first = self.shape.is_none();
+        self.shape = Some(shape);
+        self.size = shape.size;
+        if first {
             cx.emit(ScreenViewEvent::Ready);
         }
         cx.notify();
     }
 
-    /// Put `buffer` up as the picture, as a frame off the stream would (for the workspace's
-    /// frame measurements).
+    /// Put `buffer` up as a picture off the stream would be (tests and the workspace's frame
+    /// measurements): on the layer, with the view told of its shape at once.
     #[cfg(test)]
     pub(crate) fn show_picture(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
-        self.show(buffer, cx);
+        let picture = glass::Picture::new(buffer);
+        let shape = glass::Shape::of(&picture);
+        self.glass.offer(picture, glass::test_stamp(self.test_pictures));
+        self.test_pictures = self.test_pictures.saturating_add(1);
+        self.shaped(shape, cx);
     }
 
-    /// Arrival → present numbers for the last frames (the overlay and the app self-test).
+    /// Arrival → glass numbers for the last pictures (the overlay and the app self-test).
     #[must_use]
     pub fn pacing(&self) -> PacingStats {
-        self.pacer.stats()
+        self.glass.pacing()
     }
 
     fn send(&self, req: ScreenRequest) {
         self.out.send(ClientMsg::Screen(req));
+    }
+
+    /// Tell the worker whether this tile has the keyboard in an active window, on a change
+    /// only: it favours the focused stream when its encoders are full.
+    fn tell_focus(&mut self, focused: bool) {
+        if focused != self.focus_told {
+            self.focus_told = focused;
+            self.send(ScreenRequest::Focused { stream: self.stream, focused });
+        }
     }
 
     /// Send `input` after the keys taken ahead of it (`keyboard`).
@@ -2188,6 +2174,33 @@ impl ScreenView {
         self.press(chord("c"), cx);
     }
 
+    /// Keep a native host in the window the view draws in, `here`, and the pictures' layer on
+    /// it once there is a picture: a view drawn in another window (a tile popped out) gets a
+    /// host there, and its layer moves to it.
+    fn place_layer(&mut self, here: gpui::AnyWindowHandle, window: &mut Window, cx: &mut App) {
+        if self.host.as_ref().is_none_or(|host| host.window != here) {
+            self.glass.detach();
+            self.host = None;
+            let options = NativeHostOptions {
+                opaque: true,
+                interactive: false,
+                label: Some(self.label.clone()),
+            };
+            match window.create_native_host(options, cx) {
+                Ok(native) => self.host = Some(Host { window: here, native, tried: false }),
+                Err(error) => tracing::warn!(%error, "no native host for the picture's layer"),
+            }
+        }
+        let Some(host) = self.host.as_mut() else { return };
+        if self.shape.is_none() || host.tried {
+            return;
+        }
+        host.tried = true;
+        if let Err(error) = self.glass.attach(&host.native) {
+            tracing::warn!(%error, "no video layer for the picture");
+        }
+    }
+
     /// The pointer drawn at `spot`, a point of the picture: the worker's cursor picture when it
     /// has sent one, else a drawn arrow. An element of the pointer's own extent, which tests
     /// find where it is drawn (`screen-pointer`).
@@ -2244,6 +2257,54 @@ impl ScreenView {
     }
 }
 
+/// Where a paint placed the layer and the mask that clipped it (tests).
+#[cfg(test)]
+type LayerAt = Rc<std::cell::Cell<Option<(Bounds<Pixels>, Bounds<Pixels>)>>>;
+
+/// The native host a view places its picture's layer from, in one window.
+struct Host {
+    window: gpui::AnyWindowHandle,
+    native: NativeHost,
+    /// A layer was attached to it, or tried: a failure is not tried again every frame.
+    tried: bool,
+}
+
+/// Where the picture of `picture` pixels is drawn in a body at `body`: the frame it fits at
+/// ([`zoom::fit`]), or `zoom.scale()` times that with its top-left at `zoom.origin()` in the
+/// frame's fractions.
+fn picture_bounds(body: Bounds<Pixels>, picture: (u32, u32), zoom: Zoom) -> Bounds<Pixels> {
+    let frame = zoom::fit((f32::from(body.size.width), f32::from(body.size.height)), picture);
+    let (u, v) = zoom.origin();
+    let scale = zoom.scale();
+    Bounds {
+        origin: body.origin
+            + point(
+                px(u.mul_add(frame.size.0, frame.origin.0)),
+                px(v.mul_add(frame.size.1, frame.origin.1)),
+            ),
+        size: size(px(frame.size.0 * scale), px(frame.size.1 * scale)),
+    }
+}
+
+/// Whether every stream's picture is drawn by GPUI too, over its layer ([`capture_pictures`]).
+#[derive(Default)]
+struct CapturePictures(bool);
+
+impl Global for CapturePictures {}
+
+/// While `on`, every stream draws its newest picture in GPUI's own frame too, over its layer.
+///
+/// A render of the window (`Window::render_to_image`) has GPUI's drawable only, and the layers
+/// are the window server's to composite. The surface shader is the layer's, so the picture is
+/// the one on the glass.
+pub fn capture_pictures(on: bool, cx: &mut App) {
+    cx.set_global(CapturePictures(on));
+}
+
+fn capturing(cx: &App) -> bool {
+    cx.try_global::<CapturePictures>().is_some_and(|capture| capture.0)
+}
+
 /// What the pointer overlay paints.
 enum PointerPaint {
     Image(Arc<RenderImage>),
@@ -2252,6 +2313,8 @@ enum PointerPaint {
 
 impl Drop for ScreenView {
     fn drop(&mut self) {
+        self.handle.set_present(None);
+        self.glass.detach();
         self.send(ScreenRequest::Close(self.stream));
     }
 }
@@ -2384,23 +2447,32 @@ impl Render for ScreenView {
             if self.let_go.is_some() {
                 self.let_go(cx);
             }
-            let blur = cx.on_blur(&self.focus, window, |this, _window, cx| this.let_go(cx));
+            let blur = cx.on_blur(&self.focus, window, |this, _window, cx| {
+                this.tell_focus(false);
+                this.let_go(cx);
+            });
             // Taking the keyboard tells the worker this device's input source and Caps Lock.
-            let focus = cx.on_focus(&self.focus, window, |this, _window, _cx| {
+            let focus = cx.on_focus(&self.focus, window, |this, window, _cx| {
                 this.keyboard_focused();
+                this.tell_focus(window.is_window_active());
             });
             let inactive = cx.observe_window_activation(window, |this, window, cx| {
                 if !window.is_window_active() {
+                    this.tell_focus(false);
                     this.let_go(cx);
                 } else if this.focus.is_focused(window) {
                     this.keyboard_focused();
+                    this.tell_focus(true);
                 }
             });
             let moved =
                 cx.observe_window_bounds(window, |this, window, cx| this.follow_screen(window, cx));
             self.let_go = Some((here, [blur, focus, inactive, moved]));
+            // A view made for a stream a reconnect opened may have the keyboard already.
+            self.tell_focus(self.focus.is_focused(window) && window.is_window_active());
             self.follow_screen(window, cx);
         }
+        self.place_layer(here, window, cx);
         self.renders = self.renders.wrapping_add(1);
         #[cfg(test)]
         {
@@ -2410,7 +2482,6 @@ impl Render for ScreenView {
         // waited for a frame has it.
         let drawn = self.pointer_drawn(cx.background_executor().now());
         self.drawn = drawn;
-        self.fold = None;
         let entity = cx.entity();
         let handler = cx.entity();
         let focus = self.focus.clone();
@@ -2421,9 +2492,9 @@ impl Render for ScreenView {
                 #[expect(clippy::float_cmp, reason = "any change of scale is news")]
                 let moved = this.bounds != bounds || this.scale_factor != scale_factor;
                 if moved {
-                    // The picture's place and the pointer were laid out at the old bounds in
-                    // this frame: the next one lays them out at these, and asks for the
-                    // stream's size again at the width it is now drawn.
+                    // The pointer was laid out at the old bounds in this frame (the layer is
+                    // placed from the body as painted): the next one lays it out at these, and
+                    // asks for the stream's size again at the width it is now drawn.
                     entity.update(cx, |this, _| {
                         this.bounds = bounds;
                         this.scale_factor = scale_factor;
@@ -2440,13 +2511,6 @@ impl Render for ScreenView {
             // Registering as a text input is what raises the soft keyboard on iOS and lets an
             // input method compose; typed text arrives in `replace_text_in_range`.
             move |bounds, (), window, cx| {
-                // What this paint put up is timed when the display shows it.
-                if let Some(stamp) = handler.update(cx, |view, _cx| view.pacer.painted()) {
-                    let view = handler.clone();
-                    crate::shown::after_paint(window, cx, move |shown, cx| {
-                        view.update(cx, |view, _cx| view.pacer.shown(stamp, shown.presented));
-                    });
-                }
                 window.handle_input(&focus, ElementInputHandler::new(bounds, handler.clone()), cx);
                 let dragger = handler.clone();
                 window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
@@ -2474,12 +2538,34 @@ impl Render for ScreenView {
         .absolute()
         .inset_0();
 
-        let waited = self.latest.is_none() && past_grace("screen-waiting", window, cx);
-        let picture = self.latest.as_ref().map_or_else(
-            || {
-                if !waited {
-                    return div().size_full().into_any_element();
-                }
+        let waited = self.shape.is_none() && past_grace("screen-waiting", window, cx);
+        let picture = match (self.shape, &self.host) {
+            (Some(shape), Some(host)) => {
+                let native = host.native.clone();
+                let zoom = self.zoom;
+                let captured = capturing(cx).then(|| self.glass.last()).flatten();
+                #[cfg(test)]
+                let layer_at = Rc::clone(&self.layer_at);
+                // The layer goes where the picture is drawn, from the body as this frame lays
+                // it out, clipped by the body and whatever clips the tile. GPUI keeps the
+                // pointer over it (no hitbox): the view forwards it to the worker.
+                canvas(
+                    |_bounds, _window, _cx| {},
+                    move |body, (), window, _cx| {
+                        let at = picture_bounds(body, shape.size, zoom);
+                        window.paint_native(&native, at, gpui::Corners::default(), None);
+                        #[cfg(test)]
+                        layer_at.set(Some((at, window.content_mask().bounds)));
+                        if let Some(picture) = captured {
+                            window.paint_surface(at, picture.buffer());
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0()
+                .into_any_element()
+            }
+            (None, _) if waited => {
                 let text = waiting_text(self.source);
                 div()
                     // A status, not a picture: it is the only thing a screen reader can be told
@@ -2496,31 +2582,9 @@ impl Render for ScreenView {
                     .font_family(self.theme.typography.ui_family.clone())
                     .child(text)
                     .into_any_element()
-            },
-            |buffer| {
-                // At fit the surface keeps the picture's aspect in whatever the body is laid
-                // out to, which is the frame the pointer maps through (`frame`).
-                if self.zoom.is_fit() {
-                    return surface(buffer.clone())
-                        .object_fit(ObjectFit::Contain)
-                        .size_full()
-                        .into_any_element();
-                }
-                // Zoomed, it is placed from the frame the last paint laid out: `scale` times it,
-                // at `origin` in its fractions.
-                let (left, top) = self.frame_to_body(self.zoom.origin());
-                let (w, h) = self.frame_size();
-                let s = self.zoom.scale();
-                surface(buffer.clone())
-                    .object_fit(ObjectFit::Fill)
-                    .absolute()
-                    .left(left)
-                    .top(top)
-                    .w(px(w * s))
-                    .h(px(h * s))
-                    .into_any_element()
-            },
-        );
+            }
+            _ => div().size_full().into_any_element(),
+        };
         let readout = self.readout.zip(self.readout()).map(|(state, text)| {
             let theme = &self.theme;
             // A pill over a picture floats: over a remote desktop's own white or black a
@@ -2566,7 +2630,7 @@ impl Render for ScreenView {
             // The tile's body surface: a picture of another aspect sits on the page it would
             // be, not in a grey well.
             .bg(hsla(self.theme.content()))
-            .cursor(local_pointer(self.latest.is_some()))
+            .cursor(local_pointer(self.shape.is_some()))
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
@@ -3405,6 +3469,76 @@ mod tests {
         cx.simulate_resize(size(px(400.0), px(300.0)));
         cx.run_until_parked();
         (view, rx, cx)
+    }
+
+    /// The `Focused` requests the worker was sent for the test views' stream.
+    fn told_focus(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<bool> {
+        sent(rx)
+            .into_iter()
+            .filter_map(|req| match req {
+                ScreenRequest::Focused { stream: StreamId(4), focused } => Some(focused),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The worker hears whether the tile has the keyboard in an active window, once per change:
+    /// a focused tile in a window that is not active is not focused, and becomes so when the
+    /// window does; losing the keyboard and taking it back, and the window going inactive and
+    /// active again, each say so once. (The test platform opens windows inactive; macOS makes a
+    /// window opened with `focus` key, and the same activation reaches the view.)
+    #[gpui::test]
+    fn the_worker_hears_the_tiles_focus_once_per_change(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        assert_eq!(told_focus(&mut rx), [false; 0], "the window is not active");
+        cx.update(|window, _cx| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(told_focus(&mut rx), [true], "the window became active");
+        cx.update(Window::blur);
+        cx.run_until_parked();
+        cx.update(Window::blur);
+        cx.run_until_parked();
+        assert_eq!(told_focus(&mut rx), [false], "said once");
+        view.update_in(cx, |v, window, cx| window.focus(&v.focus, cx));
+        cx.run_until_parked();
+        assert_eq!(told_focus(&mut rx), [true]);
+        cx.deactivate_window();
+        assert_eq!(told_focus(&mut rx), [false], "the window went inactive");
+        cx.update(|window, _cx| window.activate_window());
+        cx.run_until_parked();
+        assert_eq!(told_focus(&mut rx), [true], "and active again, still focused");
+    }
+
+    /// A tile first drawn with the keyboard in a window that is already active, as one a
+    /// reconnect opens or one added to the workspace, is told focused by its first render: no
+    /// focus or activation event comes for it.
+    #[gpui::test]
+    fn a_tile_drawn_focused_in_an_active_window_is_focused_at_once(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|window, _cx| window.activate_window());
+        cx.run_until_parked();
+        let (out, mut rx) = mpsc::channel(64);
+        let opened = Opened {
+            stream: StreamId(4),
+            target: CaptureTarget::Display(DisplayId(2)),
+            size: (800, 600),
+            quality: Quality { scale: 1.0, ..Quality::default() },
+        };
+        cx.update(|window, cx| {
+            window.replace_root(cx, |window, cx| {
+                let view = ScreenView::new(
+                    opened,
+                    ScreenHandle::detached(StreamId(4)),
+                    out,
+                    Theme::default(),
+                    cx,
+                );
+                window.focus(&view.focus, cx);
+                view
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(told_focus(&mut rx), [true]);
     }
 
     /// A fling reaches the worker shaped the way macOS shapes one: the gesture begins, changes and
@@ -4279,8 +4413,8 @@ mod tests {
             None,
         )
         .expect("pixel buffer");
-        view.update(cx, |v, _| {
-            v.latest = Some(buffer);
+        view.update(cx, |v, cx| {
+            v.show_picture(buffer, cx);
             v.native = (5120.0, 2880.0);
             v.cursor = CursorState { x: 400, y: 300, visible: true };
         });
@@ -4338,7 +4472,8 @@ mod tests {
         };
         assert_eq!(chroma_of(kCVPixelFormatType_444YpCbCr8BiPlanarFullRange), Chroma::Full);
         let (view, _rx) = view(cx);
-        let chroma = |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.chroma);
+        let chroma =
+            |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.shape.map(|s| s.chroma));
         assert_eq!(chroma(cx), None, "no picture yet");
         let full =
             CVPixelBuffer::new(kCVPixelFormatType_444YpCbCr10BiPlanarFullRange, 64, 48, None)
@@ -4351,17 +4486,128 @@ mod tests {
         assert_eq!(chroma(cx).map(chroma_label), Some("4:2:0"));
     }
 
-    /// A picture put up is drawn in the next frame whoever put it up: under retention a view
-    /// changed without a notify keeps the frame it drew.
+    /// Pictures go to the layer, not through the view: the first draws the view once (the
+    /// layer is placed), more of the same shape draw nothing, and a picture of a new size draws
+    /// it once more (the layer is placed again).
     #[gpui::test]
-    fn a_picture_put_up_is_drawn(cx: &mut gpui::TestAppContext) {
+    fn a_picture_costs_the_view_no_frame(cx: &mut gpui::TestAppContext) {
         let (view, _rx, cx) = windowed(cx);
-        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
-        cx.run_until_parked();
         let drawn = renders(&view, cx);
         view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
         cx.run_until_parked();
-        assert_eq!(renders(&view, cx), drawn.saturating_add(1), "the second picture, drawn");
+        assert_eq!(renders(&view, cx), drawn.saturating_add(1), "the first picture places it");
+        for _ in 0..10 {
+            view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+            cx.run_until_parked();
+        }
+        assert_eq!(renders(&view, cx), drawn.saturating_add(1), "ten more, no frame");
+        assert_eq!(view.read_with(cx, |v, _| v.frames()), 11, "all went up on the layer");
+        view.update(cx, |v, cx| v.show_picture(picture(400, 300), cx));
+        cx.run_until_parked();
+        assert_eq!(renders(&view, cx), drawn.saturating_add(2), "a new size, placed again");
+    }
+
+    /// Where the frames drawn since the last look placed the stream's layer, and the part of it
+    /// that shows; `None` when none placed it.
+    fn layer(
+        view: &gpui::Entity<ScreenView>,
+        cx: &gpui::VisualTestContext,
+    ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        view.read_with(cx, |v, _| v.layer_at.take()).map(|(at, mask)| (at, at.intersect(&mask)))
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds { origin: point(px(x), px(y)), size: size(px(w), px(h)) }
+    }
+
+    /// The layer goes where the picture is drawn: at fit its aspect kept and centred in the
+    /// 400 × 300 body, zoomed twice about the middle past the body on every side, clipped to it.
+    /// Before the first picture it is placed nowhere.
+    #[gpui::test]
+    fn the_layer_goes_where_the_picture_is_drawn(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        assert_eq!(layer(&view, cx), None, "no picture, no layer");
+        view.update(cx, |v, cx| v.show_picture(picture(800, 400), cx));
+        cx.run_until_parked();
+        let fit = rect(0., 50., 400., 200.);
+        assert_eq!(layer(&view, cx), Some((fit, fit)), "fit, centred");
+
+        view.update(cx, |v, cx| v.set_zoom(Zoom::FIT.about((0.5, 0.5), 2.0, 8.0), cx));
+        cx.run_until_parked();
+        let zoomed = rect(-200., -50., 800., 400.);
+        assert_eq!(
+            layer(&view, cx),
+            Some((zoomed, rect(0., 0., 400., 300.))),
+            "clipped to the body"
+        );
+    }
+
+    /// A tile the strip holds.
+    struct Strip {
+        screen: gpui::Entity<ScreenView>,
+        left: f32,
+        shown: bool,
+    }
+
+    impl Render for Strip {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().overflow_hidden().children(self.shown.then(|| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(self.left))
+                    .w(px(400.0))
+                    .h(px(300.0))
+                    .child(self.screen.clone())
+            }))
+        }
+    }
+
+    /// The layer follows its tile as the strip scrolls it, in the frame that moves it; half off
+    /// the viewport it is clipped to what shows, and a tile the strip no longer draws places it
+    /// nowhere, which hides it.
+    #[gpui::test]
+    fn the_layer_follows_its_tile_through_the_strip(cx: &mut gpui::TestAppContext) {
+        let (out, _rx) = mpsc::channel(64);
+        let opened = Opened {
+            stream: StreamId(4),
+            target: CaptureTarget::Display(DisplayId(2)),
+            size: (800, 600),
+            quality: Quality { scale: 1.0, ..Quality::default() },
+        };
+        let (strip, cx) = cx.add_window_view(|_window, cx| {
+            let handle = ScreenHandle::detached(StreamId(4));
+            let screen = cx.new(|cx| ScreenView::new(opened, handle, out, Theme::default(), cx));
+            Strip { screen, left: 0.0, shown: true }
+        });
+        cx.simulate_resize(size(px(600.0), px(300.0)));
+        let view = strip.read_with(cx, |s, _| s.screen.clone());
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        let whole = rect(0., 0., 400., 300.);
+        assert_eq!(layer(&view, cx), Some((whole, whole)));
+
+        for left in [40.0, 120.0, 400.0] {
+            strip.update(cx, |s, cx| {
+                s.left = left;
+                s.screen.update(cx, |_, cx| cx.notify());
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let shows = (600.0 - left).min(400.0);
+            assert_eq!(
+                layer(&view, cx),
+                Some((rect(left, 0., 400., 300.), rect(left, 0., shows, 300.))),
+                "moved with the tile, clipped to the viewport"
+            );
+        }
+
+        strip.update(cx, |s, cx| {
+            s.shown = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(layer(&view, cx), None, "a tile not drawn places no layer");
     }
 
     /// The stats overlay on a still stream is drawn again with each reading of the counters,
@@ -4402,25 +4648,15 @@ mod tests {
         .expect("pixel buffer")
     }
 
-    /// Senders for the frames and cursor samples the view's pump reads, as the stream's own.
+    /// A sender for the cursor samples the view's pump reads, as the stream's own.
     fn pumped(
         view: &gpui::Entity<ScreenView>,
         cx: &mut gpui::VisualTestContext,
-    ) -> (watch::Sender<Option<CVPixelBuffer>>, watch::Sender<CursorState>) {
-        fn take(
-            view: &mut ScreenView,
-            frame: Option<CVPixelBuffer>,
-            cx: &mut Context<ScreenView>,
-        ) -> bool {
-            let Some(buffer) = frame else { return false };
-            view.show(buffer, cx);
-            true
-        }
-        let (frames_tx, frames) = watch::channel(None);
+    ) -> watch::Sender<CursorState> {
         let (cursor_tx, cursor) = watch::channel(CursorState::default());
         #[expect(clippy::used_underscore_binding, reason = "the pump is kept, not read, but here")]
-        view.update(cx, |v, cx| v._pump = ScreenView::pump(frames, cursor, take, cx));
-        (frames_tx, cursor_tx)
+        view.update(cx, |v, cx| v._pump = ScreenView::pump(v.glass.shapes(), cursor, cx));
+        cursor_tx
     }
 
     /// Where the pointer is drawn, in window coordinates, when it is.
@@ -4452,7 +4688,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
-        let (_frames, cursor) = pumped(&view, cx);
+        let cursor = pumped(&view, cx);
         let shape = CursorShape { w: 8, h: 8, hot_x: 2, hot_y: 2, bgra: vec![0; 256], scale: 2 };
         view.update(cx, |v, cx| {
             v.show_picture(picture(800, 600), cx);
@@ -4496,7 +4732,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, _rx, cx) = windowed(cx);
-        let (_frames, cursor) = pumped(&view, cx);
+        let cursor = pumped(&view, cx);
         view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
         cx.run_until_parked();
         assert_eq!(arrow_drawn(cx), None, "the worker's pointer is off the display");
@@ -4535,17 +4771,18 @@ mod tests {
         assert_eq!(arrow_drawn(cx), Some(arrow_at(warped)), "moved on the worker alone");
     }
 
-    /// Frames at 60 Hz with cursor samples at 120 Hz, the worker moving the pointer: each sample
-    /// rides the frame after it, so the view draws once a frame, not once a frame and once a
-    /// sample. A sample whose frame is late draws on its own, [`FOLD`] past the frame's due
-    /// time; with frames stopped, a sample draws at once.
+    /// Pictures at 60 Hz with cursor samples at 120 Hz, the worker moving the pointer: the
+    /// pictures go to the layer and draw nothing, and every sample that moves the pointer draws
+    /// it at once. A sample that moves nothing drawn draws nothing: the same place, or hidden
+    /// and hidden.
     #[gpui::test]
-    fn cursor_samples_ride_the_frames_while_they_flow(cx: &mut gpui::TestAppContext) {
+    fn samples_draw_at_once_and_pictures_draw_nothing(cx: &mut gpui::TestAppContext) {
         const FRAMES: u64 = 60;
         const SAMPLES: u64 = 120;
         let (view, _rx, cx) = windowed(cx);
-        let (frames, cursor) = pumped(&view, cx);
-        let buffer = picture(800, 600);
+        let cursor = pumped(&view, cx);
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
         let before = renders(&view, cx);
         let mut events: Vec<(u64, bool)> = (0..FRAMES)
             .map(|k| (k.saturating_mul(16_667), true))
@@ -4557,55 +4794,29 @@ mod tests {
             cx.executor().advance_clock(Duration::from_micros(at.saturating_sub(clock)));
             clock = at;
             if frame {
-                frames.send(Some(buffer.clone())).expect("the pump listens");
+                view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
             } else {
                 x = x.saturating_add(3);
                 cursor.send(CursorState { x, y: 300, visible: true }).expect("the pump listens");
             }
             cx.run_until_parked();
         }
-        // The last two samples came after the last frame; it has no next, so they draw on their
-        // own once it is late.
-        cx.executor().advance_clock(Duration::from_millis(30));
-        cx.run_until_parked();
         let draws = renders(&view, cx).saturating_sub(before);
-        println!("MEASURE {FRAMES} frames at 60 Hz and {SAMPLES} samples at 120 Hz: {draws} draws");
-        assert_eq!(draws, u32::try_from(FRAMES).expect("small").saturating_add(1));
+        println!(
+            "MEASURE {FRAMES} pictures at 60 Hz and {SAMPLES} samples at 120 Hz: {draws} draws"
+        );
+        assert_eq!(draws, u32::try_from(SAMPLES).expect("small"), "one a sample, none a picture");
         #[expect(clippy::cast_precision_loss, reason = "a small coordinate")]
         let last = x as f32 / 800.0;
         near_px(offset(&view, cx), (last * 400.0, 150.0));
 
-        // A frame, then a sample, and the next frame late.
-        frames.send(Some(buffer)).expect("the pump listens");
-        cx.run_until_parked();
         let drawn = renders(&view, cx);
-        cx.executor().advance_clock(Duration::from_millis(4));
-        cursor.send(CursorState { x: 100, y: 100, visible: true }).expect("the pump listens");
-        cx.run_until_parked();
-        cx.executor().advance_clock(Duration::from_millis(20));
-        cx.run_until_parked();
-        assert_eq!(renders(&view, cx), drawn, "waiting for the frame, 24 ms on");
-        cx.executor().advance_clock(Duration::from_millis(2));
-        cx.run_until_parked();
-        assert_eq!(
-            renders(&view, cx),
-            drawn.saturating_add(1),
-            "late by more than the fold: drawn alone"
-        );
-
-        // Frames stopped: a sample draws at once.
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cursor.send(CursorState { x: 200, y: 100, visible: true }).expect("the pump listens");
-        cx.run_until_parked();
-        assert_eq!(renders(&view, cx), drawn.saturating_add(2), "no frames: at once");
-
-        // A sample that moves nothing drawn draws nothing: the same place, or hidden and hidden.
-        cursor.send(CursorState { x: 200, y: 100, visible: true }).expect("the pump listens");
+        cursor.send(CursorState { x, y: 300, visible: true }).expect("the pump listens");
         cx.run_until_parked();
         cursor.send(CursorState { x: 0, y: 0, visible: false }).expect("the pump listens");
         cx.run_until_parked();
         cursor.send(CursorState { x: 5, y: 5, visible: false }).expect("the pump listens");
         cx.run_until_parked();
-        assert_eq!(renders(&view, cx), drawn.saturating_add(3), "only the hiding drew");
+        assert_eq!(renders(&view, cx), drawn.saturating_add(1), "only the hiding drew");
     }
 }

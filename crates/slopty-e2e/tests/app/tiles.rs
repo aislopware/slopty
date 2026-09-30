@@ -177,6 +177,82 @@ async fn a_twenty_thousand_line_file_is_edited_near_its_end_and_saved() {
     stack.shutdown().await;
 }
 
+/// An edit made in a file tile and never saved survives the app being killed mid-edit
+/// (SIGKILL: no quit, no goodbye, as a crash or a dead battery would leave it). Relaunched, the
+/// tile on the same file takes the edit back, unsaved, and the file on the worker is as it was.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn an_unsaved_edit_survives_the_app_being_killed() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let file = stack.dir.path().join("notes.md");
+    std::fs::write(&file, "# Notes\n").unwrap();
+    let kept = stack.dir.path().join("app").join("unsaved");
+    first_shell(&mut stack.driver).await;
+    let drv = &mut stack.driver;
+    drv.open_file(&file.display().to_string(), Some(1)).await.unwrap();
+    drv.wait_for("the file in its editor, with the keyboard", STEP, |d| {
+        file_of(d).is_some_and(|f| f.text.as_deref() == Some("# Notes"))
+            && d.focused.starts_with("file:")
+    })
+    .await
+    .unwrap();
+    drv.type_text("draft ").await.unwrap();
+    drv.wait_for("the edit, unsaved", STEP, |d| {
+        file_of(d).is_some_and(|f| f.edited && f.text.as_deref() == Some("draft # Notes"))
+    })
+    .await
+    .unwrap();
+    // Kept within a moment of the keystroke: the kill comes once it is on this device's disk,
+    // and before anything else could write it.
+    let started = std::time::Instant::now();
+    while std::fs::read_dir(&kept).map_or(0, Iterator::count) == 0 && started.elapsed() < STEP {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    println!(
+        "MEASURE hot exit: the edit was kept {} ms after its echo",
+        started.elapsed().as_millis()
+    );
+
+    stack.kill_app().await.unwrap();
+    stack.relaunch_app().await.unwrap();
+    let drv = &mut stack.driver;
+    let dump = drv
+        .wait_for("the edit back on its tile, unsaved", STEP, |d| {
+            file_of(d).is_some_and(|f| f.edited && f.text.as_deref() == Some("draft # Notes"))
+        })
+        .await
+        .unwrap();
+    let info = file_of(&dump).unwrap();
+    assert!(info.trouble.is_none(), "the disk did not move: no conflict: {info:?}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "# Notes\n", "nothing saved on its own");
+    stack.shutdown().await;
+}
+
+/// "About Slopty" from the palette: the panel leads with the mark, its cursor lit while the
+/// worker is reachable (steady: the self-test runs under Reduce Motion), then the name and the
+/// version. Esc gives the workspace back.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn about_slopty_leads_with_the_mark() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.keys("cmd-shift-p").await.unwrap();
+    drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+        .await
+        .unwrap();
+    drv.type_text("About Slopty").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    let about = |d: &Dump| d.a11y_node("Dialog", Some("About Slopty")).is_some();
+    drv.wait_for("the About panel", STEP, about).await.unwrap();
+    golden(drv, &dir, "about").await;
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("the workspace back", STEP, |d| !about(d)).await.unwrap();
+    stack.shutdown().await;
+}
+
 /// The test page, served on localhost by the test itself, to every request.
 const PAGE: &str = "<!doctype html><html><head><meta charset=utf-8>\
 <title>Slopty test page</title></head>\

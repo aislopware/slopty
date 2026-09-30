@@ -7,7 +7,9 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use slopty_core::{Duration, StreamId};
-use slopty_media::{EncodedFrame, Packetizer, PathSample, RateController, Redundancy};
+use slopty_media::{
+    AudioCopies, EncodedFrame, MAX_AUDIO_COPIES, Packetizer, PathSample, RateController, Redundancy,
+};
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::media::{MediaHeader, flags};
 use slopty_proto::screen::{Feedback, ReceiverReport};
@@ -55,6 +57,8 @@ struct Report {
     acked_ltr_len: u8,
     stalled_ms: u16,
     stalls: u16,
+    audio_received: u16,
+    audio_lost: u16,
 }
 
 impl From<&Report> for ReceiverReport {
@@ -74,6 +78,8 @@ impl From<&Report> for ReceiverReport {
             acked_ltr_len: r.acked_ltr_len,
             stalled_ms: r.stalled_ms,
             stalls: r.stalls,
+            audio_received: r.audio_received,
+            audio_lost: r.audio_lost,
         }
     }
 }
@@ -93,6 +99,9 @@ struct Worker {
     rate: RateController,
     ceiling: u32,
     redundancy: Redundancy,
+    audio: AudioCopies,
+    /// Reports taken, each a 50 ms report period on the audio copies' clock.
+    reports: u64,
 }
 
 impl Worker {
@@ -104,6 +113,8 @@ impl Worker {
             rate: RateController::new(plan.max_bps),
             ceiling: plan.max_bps.max(MIN_BPS),
             redundancy: Redundancy::default(),
+            audio: AudioCopies::default(),
+            reports: 0,
         }
     }
 
@@ -117,6 +128,7 @@ impl Worker {
                     ltr_token: None,
                     ltr_refresh: false,
                     capture_ts_us: 0,
+                    discardable: false,
                 };
                 let _sent = self.packetizer.packetize(&frame, 0, |_| {});
             }
@@ -145,6 +157,9 @@ impl Worker {
                     (Redundancy::MIN..=Redundancy::MAX).contains(&permille),
                     "parity ratio {permille}‰ outside its bounds"
                 );
+                self.reports = self.reports.saturating_add(1);
+                let copies = self.audio.on_report(&report, self.reports.saturating_mul(50_000));
+                assert!(copies <= MAX_AUDIO_COPIES, "{copies} audio copies");
             }
             Op::Ceiling(max) => {
                 self.rate.set_max(*max);

@@ -1333,7 +1333,7 @@ mod tests {
         let mut line = String::new();
         let mut failed = 0;
         for packet in &packets {
-            let submitted = decoder.decode(&packet.data, packet.pts_us).is_ok();
+            let submitted = decoder.decode(&packet.data.clone().into(), packet.pts_us).is_ok();
             let decoded = submitted && drx.recv_timeout(Duration::from_secs(5)) == Ok(true);
             failed += usize::from(!decoded);
             let index = (packet.pts_us / 16_667).saturating_sub(1);
@@ -1558,5 +1558,142 @@ mod tests {
             }
         });
         slopty_capture::synthetic::set_still(false);
+    }
+
+    /// A transport that takes every datagram and counts it: the streams of
+    /// [`measure_concurrent_streams`] are timed on the worker alone.
+    #[derive(Default)]
+    struct Counting {
+        bytes: std::sync::atomic::AtomicU64,
+    }
+
+    impl DatagramSink for Counting {
+        fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused> {
+            let sent: usize = datagrams.iter().map(Bytes::len).sum();
+            self.bytes.fetch_add(sent as u64, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn max_size(&self) -> Option<usize> {
+            Some(MAX_DATAGRAM)
+        }
+
+        fn held(&self) -> usize {
+            0
+        }
+
+        fn cwnd(&self) -> u64 {
+            0
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// This process's CPU time, user and system, all threads.
+    fn cpu_time() -> Duration {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: POSIX rule: `getrusage` fills the `rusage` it is given for `RUSAGE_SELF`.
+        let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(status, 0, "getrusage");
+        // SAFETY: filled by the successful call above.
+        let usage = unsafe { usage.assume_init() };
+        let time = |t: libc::timeval| {
+            Duration::from_secs(t.tv_sec.cast_unsigned())
+                + Duration::from_micros(u64::from(t.tv_usec.cast_unsigned()))
+        };
+        time(usage.ru_utime) + time(usage.ru_stime)
+    }
+
+    /// Several streams served at once, each its own capture, encoder session, packetizer and
+    /// timers (idea #14; `docs/MEASUREMENTS.md`, "several streams on the encode engines"). For
+    /// 1, 2, 4 and 8 streams of the drawn display at about 1080p and 60 frames a second, opened
+    /// one after another as a client opens tiles, into a transport that only counts: each
+    /// stream's draw (the stand-in for ScreenCaptureKit), submit → packet, capture → packetized
+    /// and frames encoded a second, and the worker's CPU a second, every thread. The first
+    /// stream's encode against its time alone is the number the engines' sharing moves.
+    /// `SLOPTY_STREAMS` picks the counts, `SLOPTY_GLASS_SECONDS` the run (default 4), after 3 s
+    /// for the encoder watches to settle; `SLOPTY_FOCUSED=1` has a client focus the first
+    /// stream (`engines`).
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_concurrent_streams() {
+        slopty_platform::user_interactive_thread();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let seconds: u64 =
+            std::env::var("SLOPTY_GLASS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+        let counts: Vec<u32> = std::env::var("SLOPTY_STREAMS").map_or_else(
+            |_unset| vec![1, 2, 4, 8],
+            |s| s.split(',').filter_map(|n| n.trim().parse().ok()).collect(),
+        );
+        let focused = std::env::var("SLOPTY_FOCUSED").is_ok_and(|v| v == "1");
+        runtime.block_on(async {
+            let ScreenEvent::Listing { displays, .. } = Pipeline::<Drawn>::listing().await.unwrap()
+            else {
+                panic!("no listing")
+            };
+            let display = displays.first().expect("a display");
+            let scale = (1920.0 / (display.w * display.scale)).min(1.0);
+            for &n in &counts {
+                let sink = Arc::new(Counting::default());
+                let mut streams = Vec::new();
+                for k in 0..n {
+                    let (stream, opened) = Pipeline::<Drawn>::open(
+                        StreamId(k + 1),
+                        CaptureTarget::Display(display.id),
+                        Quality { fps: 60, scale, ..Quality::default() },
+                        Arc::<Counting>::clone(&sink),
+                        |_event| {},
+                    )
+                    .await
+                    .unwrap();
+                    if k == 0 {
+                        let ScreenEvent::Opened { width, height, .. } = opened else {
+                            panic!("{opened:?}")
+                        };
+                        eprintln!(
+                            "MEASURE concurrent streams at {width}×{height}, stream 0 {}, load {}",
+                            if focused { "focused" } else { "like the rest" },
+                            load_average()
+                        );
+                        stream.set_focused(focused);
+                    }
+                    streams.push(stream);
+                }
+                // The encoder watches settle the rungs over a few half-second windows.
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                let before: Vec<u64> = streams.iter().map(|s| s.stats().encoded).collect();
+                let (cpu0, bytes0, at) = (cpu_time(), sink.bytes.load(Ordering::Relaxed), Instant::now());
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+                let elapsed = at.elapsed().as_secs_f64();
+                let cpu = cpu_time().saturating_sub(cpu0).as_secs_f64() / elapsed;
+                let wire = (sink.bytes.load(Ordering::Relaxed) - bytes0) as f64 * 8.0 / elapsed / 1e6;
+                let q = |q: &slopty_proto::ctl::Quantiles| {
+                    format!("{:.2}/{:.2}/{:.2}", q.p50_us as f64 / 1e3, q.p95_us as f64 / 1e3, q.max_us as f64 / 1e3)
+                };
+                for (k, (stream, before)) in streams.iter().zip(&before).enumerate() {
+                    let s = stream.stats();
+                    eprintln!(
+                        "  n={n} stream {k}: draw {} ms, encode {} ms, capture → packetized mean {:.2} max {:.2} ms, {:.1} fps encoded, {} superseded",
+                        q(&s.capture),
+                        q(&s.encode),
+                        s.latency_sum_us as f64 / s.encoded.max(1) as f64 / 1e3,
+                        s.latency_max_us as f64 / 1e3,
+                        (s.encoded - before) as f64 / elapsed,
+                        stream.shared.counters.superseded.load(Ordering::Relaxed),
+                    );
+                }
+                eprintln!("  n={n}: worker CPU {cpu:.2} cores, {wire:.1} Mbit/s out");
+                for stream in streams {
+                    stream.close().await;
+                }
+            }
+        });
     }
 }

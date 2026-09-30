@@ -880,6 +880,19 @@ mod golden {
         );
     }
 
+    /// A tile taking the keyboard and letting it go.
+    #[test]
+    fn screen_focused() {
+        snap(
+            "client_screen_focused",
+            &ClientMsg::Screen(ScreenRequest::Focused { stream: StreamId(7), focused: true }),
+        );
+        snap(
+            "client_screen_unfocused",
+            &ClientMsg::Screen(ScreenRequest::Focused { stream: StreamId(7), focused: false }),
+        );
+    }
+
     #[test]
     fn screen_resize() {
         snap(
@@ -1019,6 +1032,8 @@ mod golden {
                     acked_ltr_len: 1,
                     stalled_ms: 180,
                     stalls: 1,
+                    audio_received: 98,
+                    audio_lost: 2,
                 },
             }),
         );

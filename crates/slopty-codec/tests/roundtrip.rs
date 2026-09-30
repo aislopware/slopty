@@ -20,7 +20,7 @@ mod tests {
         CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
         CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     };
-    use slopty_codec::annexb::{hevc, nal_units};
+    use slopty_codec::nal::{self, hevc};
     use slopty_codec::{Decoder, Encoder, EncoderConfig, FrameOptions};
     use slopty_proto::screen::VideoCodec;
 
@@ -107,7 +107,11 @@ mod tests {
         assert!(packets.len() >= frames - 1, "got {} packets", packets.len());
         let first = &packets[0].1;
         assert!(first.keyframe, "first packet is an IDR");
-        let types: Vec<u8> = nal_units(&first.data).filter_map(hevc::nal_type).collect();
+        let types: Vec<u8> = nal::units(&first.data).filter_map(hevc::nal_type).collect();
+        assert!(
+            packets.iter().all(|(_, p)| nal::check(&p.data).is_ok()),
+            "every packet is length-prefixed units, end to end"
+        );
         assert!(types.contains(&hevc::VPS) && types.contains(&hevc::SPS), "{types:?}");
         assert!(types.contains(&hevc::PPS), "{types:?}");
         assert!(types.iter().any(|t| matches!(*t, hevc::IDR_W_RADL | hevc::IDR_N_LP)), "{types:?}");
@@ -129,7 +133,7 @@ mod tests {
             let _sent = dtx.send((f.image.width(), f.image.height(), f.pts_us));
         });
         for (_, p) in &packets {
-            decoder.decode(&p.data, p.pts_us).expect("decode");
+            decoder.decode(&p.data.clone().into(), p.pts_us).expect("decode");
         }
         let mut decoded = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -235,7 +239,7 @@ mod tests {
     #[test]
     fn decoder_rejects_p_frames_before_parameter_sets() {
         let mut decoder = Decoder::new(VideoCodec::Hevc, |_f| {});
-        let err = decoder.decode(&[0, 0, 0, 1, 0x02, 0x01, 0xaa], 0).unwrap_err();
+        let err = decoder.decode(&vec![0, 0, 0, 3, 0x02, 0x01, 0xaa].into(), 0).unwrap_err();
         assert!(matches!(err, slopty_codec::CodecError::NoParameterSets), "{err}");
     }
 }

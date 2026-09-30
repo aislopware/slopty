@@ -18,7 +18,7 @@ fn handoff(
     key: WorkerKey,
     event: HandoffEvent,
 ) {
-    view.update_in(cx, |v, _w, cx| v.handoff_event(key, event, cx));
+    view.update_in(cx, |v, _w, cx| v.handoff_event(key, event, Instant::now(), cx));
     cx.run_until_parked();
 }
 
@@ -421,4 +421,112 @@ fn an_agents_pull_request_rides_on_its_header_while_the_agent_runs(cx: &mut Test
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("pr", tile.item)).is_none(), "gone with the agent");
+}
+
+/// A waiting tile closed while its save is refused is not left hanging: once it is closed for
+/// good the program hears it was given up, and the edit is still kept on this device.
+#[gpui::test]
+fn a_waiting_tile_closed_with_its_save_refused_gives_up_and_keeps_the_edit(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let store = slopty_client::unsaved::Store::new(dir.path().join("unsaved"));
+    let (view, cx) = workspace(cx);
+    view.update(cx, |v, cx| v.set_unsaved_store(store.clone(), cx));
+    cx.run_until_parked();
+    let mut studio = connect(&view, cx, 1, "studio");
+    let asker = SessionId::new();
+    opens(&view, cx, &studio, asker, studio.me, 1);
+    handoff(&view, cx, studio.key, commit_edit(6, asker));
+    message_read(&view, cx, studio.key);
+    cx.simulate_input("wip");
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    let refused = WriteResult::Conflict { modified_ms: WallMs::from_millis(3_000) };
+    view.update_in(cx, |v, _w, cx| v.file_written(studio.key, COMMIT_MSG, &refused, cx));
+    cx.run_until_parked();
+    studio.drain();
+    cx.executor().advance_clock(Duration::from_secs(30));
+    cx.run_until_parked();
+    assert_eq!(
+        replies(&studio.drain()),
+        [HandoffReply::Edited { id: 6, outcome: EditOutcome::Cancelled }],
+        "the program is let go"
+    );
+    let kept: Vec<String> = store.all().into_iter().map(|u| u.text).collect();
+    assert_eq!(kept.len(), 1, "the unsaved edit is kept");
+    assert!(kept[0].starts_with("wip"), "{kept:?}");
+}
+
+/// A waiting tile another client removes answers the program as given up.
+#[gpui::test]
+fn a_waiting_tile_removed_elsewhere_gives_up(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let asker = SessionId::new();
+    opens(&view, cx, &studio, asker, studio.me, 1);
+    handoff(&view, cx, studio.key, commit_edit(8, asker));
+    let (tile, _) = focused_file(&view, cx).expect("a focused file tile");
+    studio.drain();
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        let by = ClientId::new();
+        v.apply_sync(key, ItemSync::Delta { version: 9, by, op: ItemOp::Remove(tile.item) }, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        replies(&studio.drain()),
+        [HandoffReply::Edited { id: 8, outcome: EditOutcome::Cancelled }]
+    );
+}
+
+/// An edit taken back before its tile was made leaves nothing behind: the tile, made later,
+/// does not wait.
+#[gpui::test]
+fn an_edit_withdrawn_before_its_tile_is_made_leaves_no_wait(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let asker = SessionId::new();
+    opens(&view, cx, &studio, asker, studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.handoff_event(key, commit_edit(12, asker), Instant::now(), cx);
+        v.handoff_event(key, HandoffEvent::Withdrawn { id: 12 }, Instant::now(), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(focused_file(&view, cx).map(|(_, w)| w), Some(None), "a plain tile");
+    let leaks = view.read_with(cx, |v, _| v.footprint());
+    assert!(leaks.iter().all(|(name, n)| !name.starts_with("handoff.") || *n == 0), "{leaks:?}");
+}
+
+/// A shell whose program titled it at length still leaves the host in the offer's row.
+#[gpui::test]
+fn a_long_title_leaves_the_offers_host_in_view(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    opens(&view, cx, &studio, session, studio.me, 1);
+    let title = "t".repeat(300);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        let mut named = summary(session, None);
+        named.title.clone_from(&title);
+        v.session_opened(key, named, cx);
+    });
+    cx.run_until_parked();
+    let open = HandoffEvent::Open(OpenUrl {
+        id: 1,
+        session: Some(session),
+        url: "https://example.test/".to_owned(),
+        asked_ms: WallMs::now(),
+        offer: Some(OfferReason::NotTyped),
+    });
+    handoff(&view, cx, key, open);
+    let host = cx.debug_bounds("offer-host").expect("the host is drawn");
+    let toast = cx.debug_bounds("offered").expect("the notice");
+    assert!(host.size.width > px(0.0), "{host:?}");
+    assert!(
+        host.right() <= toast.right() && host.left() >= toast.left(),
+        "the host inside its notice: {host:?} in {toast:?}"
+    );
 }

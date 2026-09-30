@@ -36,7 +36,7 @@ pub(crate) const HISTORY_FRAMES: usize = 32;
 /// One encoded frame handed to the packetizer.
 #[derive(Clone, Copy, Debug)]
 pub struct EncodedFrame<'a> {
-    /// The bitstream (an access unit in Annex B or length-prefixed form; opaque here).
+    /// The bitstream: one access unit, opaque here.
     pub data: &'a [u8],
     /// IDR frame.
     pub keyframe: bool,
@@ -349,39 +349,12 @@ const fn frame_flags(frame: &EncodedFrame<'_>, previous_discardable: bool) -> u8
     f
 }
 
-fn datagram(header: &MediaHeader, payload: &[u8]) -> Bytes {
-    let mut buf = BytesMut::with_capacity(HEADER_BYTES.saturating_add(payload.len()));
-    buf.put_slice(header.as_bytes());
-    buf.put_slice(payload);
-    buf.freeze()
-}
-
 fn retransmission(original: &Bytes) -> Bytes {
     let mut buf = BytesMut::from(original.as_ref());
     if let Ok((header, _payload)) = MediaHeader::mut_from_prefix(buf.as_mut()) {
         header.flags |= flags::RETRANSMIT;
     }
     buf.freeze()
-}
-
-/// One Opus packet as a datagram, or `None` when it does not fit.
-#[must_use]
-pub fn audio_datagram(stream: StreamId, seq: u32, send_ms_lo: u8, opus: &[u8]) -> Option<Bytes> {
-    if opus.len() > MAX_PAYLOAD {
-        return None;
-    }
-    let header = MediaHeader {
-        channel: Channel::Media as u8,
-        stream: U32::new(stream.0),
-        frame: U32::new(seq),
-        index: U16::new(0),
-        data_count: U16::new(1),
-        parity_count: 0,
-        kind: Kind::Audio as u8,
-        flags: 0,
-        send_ms_lo,
-    };
-    Some(datagram(&header, opus))
 }
 
 #[cfg(test)]
@@ -536,16 +509,6 @@ mod tests {
         let (h, _) = MediaHeader::parse(&some[0]).unwrap();
         assert_eq!(h.index.get(), 2);
         assert_eq!(h.flags & flags::RETRANSMIT, flags::RETRANSMIT);
-    }
-
-    #[test]
-    fn audio_fits_or_is_refused() {
-        let dg = audio_datagram(StreamId(1), 5, 0, &[9; 120]).unwrap();
-        let (h, payload) = MediaHeader::parse(&dg).unwrap();
-        assert_eq!(h.kind(), Some(Kind::Audio));
-        assert_eq!(payload.len(), 120);
-        assert!(audio_datagram(StreamId(1), 5, 0, &[9; MAX_PAYLOAD]).is_some(), "a full one fits");
-        assert!(audio_datagram(StreamId(1), 5, 0, &[9; MAX_PAYLOAD + 1]).is_none());
     }
 
     /// The fragment cap is inclusive; the ratio clamps at one and is read back as set; the

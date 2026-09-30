@@ -19,7 +19,8 @@ use slopty_codec::audio::{Arrival as AudioArrival, Conceal, OpusDecoder, Player}
 use slopty_codec::{DecodeFailure, DecodedFrame, Decoder};
 use slopty_core::StreamId;
 use slopty_media::{
-    Action, Config, Ingest, Reassembler, ReassemblerStats, STALL_GAP, StallAttribution,
+    Action, Config, Ingest, MAX_AUDIO_COPIES, Reassembler, ReassemblerStats, STALL_GAP,
+    StallAttribution,
 };
 use slopty_proto::ClientMsg;
 use slopty_proto::datagram::ClientDatagram;
@@ -251,6 +252,20 @@ pub struct Presentable {
     pub stamp: FrameStamp,
 }
 
+/// Shows a decoded picture on the decoder's own thread, the moment it comes out
+/// ([`ScreenHandle::set_present`]): a presenter with a layer of its own waits for no UI frame.
+pub type Present = Arc<dyn Fn(&Presentable) + Send + Sync>;
+
+/// Where the decoder's thread finds the [`Present`], if one is set.
+#[derive(Default)]
+struct PresentSlot(Mutex<Option<Present>>);
+
+impl std::fmt::Debug for PresentSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("PresentSlot").field(&self.0.lock().is_some()).finish()
+    }
+}
+
 /// A frame handed to the decoder, parked by presentation timestamp for its callback.
 #[derive(Clone, Copy, Debug)]
 struct Parked {
@@ -390,8 +405,11 @@ pub struct ScreenStats {
     pub audio_packets: u64,
     /// Opus packets missing from the sequence (or too late to play).
     pub audio_lost: u64,
-    /// Lost packets papered over with the previous packet fading out (short gaps only).
+    /// Lost packets papered over by concealment (short gaps only;
+    /// [`slopty_codec::audio::Conceal`]).
     pub audio_concealed: u64,
+    /// Lost packets decoded from a copy a later audio datagram carried.
+    pub audio_recovered: u64,
     /// Times playback ran dry under sound (see [`slopty_codec::audio::PlayoutStats`]).
     pub audio_underruns: u64,
     /// Audio dropped to keep the delay at the target.
@@ -479,6 +497,8 @@ impl Audio {
 pub struct ScreenHandle {
     stream: StreamId,
     frames: watch::Receiver<Option<Arc<Presentable>>>,
+    /// Handed every picture before [`Self::frames`] is, on the decoder's thread.
+    present: Arc<PresentSlot>,
     cursor: watch::Receiver<CursorState>,
     stats: watch::Receiver<ScreenStats>,
     /// Audio is decoded but not played while set (shared with the worker).
@@ -503,6 +523,12 @@ impl ScreenHandle {
     #[must_use]
     pub fn frames(&self) -> watch::Receiver<Option<Arc<Presentable>>> {
         self.frames.clone()
+    }
+
+    /// Hand every picture to `present` on the decoder's thread as it comes out, before
+    /// [`Self::frames`] has it; `None` stops. Only pictures decoded from here on reach it.
+    pub fn set_present(&self, present: Option<Present>) {
+        *self.present.0.lock() = present;
     }
 
     /// Worker pointer position.
@@ -563,6 +589,7 @@ impl ScreenHandle {
         Self {
             stream,
             frames,
+            present: Arc::default(),
             cursor,
             stats,
             muted: Arc::new(AtomicBool::new(false)),
@@ -616,6 +643,8 @@ pub fn spawn_screen(
     // how many pictures the channel swallowed before it looked.
     let decode_seq = Arc::new(AtomicU64::new(0));
     let seq = Arc::clone(&decode_seq);
+    let present = Arc::<PresentSlot>::default();
+    let presenter = Arc::clone(&present);
     let decoder = Decoder::with_outcomes(codec, move |outcome| {
         let frame = match outcome {
             Ok(frame) => frame,
@@ -638,7 +667,12 @@ pub fn spawn_screen(
             arrived,
             decoded,
         };
-        let _no_receiver = frames_tx.send(Some(Arc::new(Presentable { frame, stamp })));
+        let picture = Arc::new(Presentable { frame, stamp });
+        let present = presenter.0.lock().clone();
+        if let Some(present) = present {
+            present(&picture);
+        }
+        let _no_receiver = frames_tx.send(Some(picture));
     });
     let rtt = (uplink.rtt)().unwrap_or(DEFAULT_RTT);
     let worker = Worker {
@@ -678,7 +712,17 @@ pub fn spawn_screen(
     };
     let task = runtime.spawn(worker.run());
     let task = Some(task);
-    ScreenHandle { stream, frames, cursor, stats, muted, source_live, router: router.clone(), task }
+    ScreenHandle {
+        stream,
+        frames,
+        present,
+        cursor,
+        stats,
+        muted,
+        source_live,
+        router: router.clone(),
+        task,
+    }
 }
 
 struct Worker {
@@ -747,9 +791,17 @@ impl Worker {
     }
 
     /// Decode and queue one Opus packet that arrived at `at`; late duplicates are dropped, gaps
-    /// counted. A packet that lands while the player is still opening (or after it failed) is
-    /// lost to playback and counted as such.
-    fn play_audio(&mut self, seq: u32, payload: &Bytes, at: Instant) {
+    /// counted. The end of a gap that `earlier` (the packets before it, carried again, nearest
+    /// first) covers is decoded from those copies, and only the rest is concealed. A packet that
+    /// lands while the player is still opening (or after it failed) is lost to playback and
+    /// counted as such.
+    fn play_audio(
+        &mut self,
+        seq: u32,
+        payload: &Bytes,
+        earlier: &[Option<Bytes>; MAX_AUDIO_COPIES],
+        at: Instant,
+    ) {
         self.open_audio();
         let AudioSlot::Open(audio) = &mut self.audio else {
             self.counters.audio_lost = self.counters.audio_lost.saturating_add(1);
@@ -763,21 +815,41 @@ impl Worker {
         if audio.seq != 0 && gap > 1 {
             let missing = gap.saturating_sub(1);
             self.counters.audio_lost = self.counters.audio_lost.saturating_add(u64::from(missing));
+            let copies = earlier.iter().take_while(|copy| copy.is_some()).count();
+            let recovered = missing.min(u32::try_from(copies).unwrap_or(0));
+            let concealed = missing.saturating_sub(recovered);
             audio.stand_in.clear();
-            audio.conceal.fill(missing, &mut audio.stand_in);
-            if !audio.stand_in.is_empty() {
-                if !self.muted.load(Ordering::Relaxed) {
-                    audio.player.conceal(&audio.stand_in);
+            if concealed > 0 {
+                audio.conceal.fill(concealed, &mut audio.stand_in);
+                if !audio.stand_in.is_empty() {
+                    self.counters.audio_concealed =
+                        self.counters.audio_concealed.saturating_add(u64::from(concealed));
                 }
-                self.counters.audio_concealed =
-                    self.counters.audio_concealed.saturating_add(u64::from(missing));
+            }
+            // Oldest first; like a stand-in, a recovered packet keeps the gap's time and reads
+            // no depth: it arrived with the packet after it, not late.
+            let copies = earlier.get(..usize::try_from(recovered).unwrap_or(0)).unwrap_or_default();
+            for copy in copies.iter().rev().flatten() {
+                match audio.decoder.decode(copy) {
+                    Ok(pcm) => {
+                        audio.stand_in.extend_from_slice(audio.conceal.take(pcm));
+                        self.counters.audio_recovered =
+                            self.counters.audio_recovered.saturating_add(1);
+                    }
+                    Err(e) => {
+                        tracing::debug!(stream = %self.stream, error = %e, "opus decode of a copy");
+                    }
+                }
+            }
+            if !audio.stand_in.is_empty() && !self.muted.load(Ordering::Relaxed) {
+                audio.player.conceal(&audio.stand_in);
             }
         }
         audio.seq = seq;
         let arrival = AudioArrival { seq, at };
         match audio.decoder.decode(payload) {
             Ok(pcm) => {
-                audio.conceal.remember(pcm);
+                let pcm = audio.conceal.take(pcm);
                 if self.muted.load(Ordering::Relaxed) {
                     audio.player.hold(arrival);
                 } else {
@@ -857,7 +929,9 @@ impl Worker {
                     self.cursor.send_replace(state);
                 }
             }
-            Ingest::Audio { seq, payload } => self.play_audio(seq, &payload, now),
+            Ingest::Audio { seq, payload, earlier } => {
+                self.play_audio(seq, &payload, &earlier, now);
+            }
             Ingest::Heartbeat | Ingest::Ignored(_) => {}
         }
     }
@@ -1496,10 +1570,12 @@ mod worker_tests {
         }
     }
 
-    /// A 3000-byte HEVC-shaped access unit with no parameter sets: the decoder rejects it, which
-    /// is what a unit test can see of "the frame reached the decoder".
+    /// A 3000-byte HEVC-shaped access unit with no parameter sets, one unit behind its length:
+    /// the decoder rejects it, which is what a unit test can see of "the frame reached the
+    /// decoder".
     fn frame_bytes() -> Vec<u8> {
-        let mut data = vec![0, 0, 0, 1, 0x02, 0x01];
+        let mut data = 2996_u32.to_be_bytes().to_vec();
+        data.extend([0x02, 0x01]);
         data.resize(3000, 0xaa);
         data
     }
@@ -1824,7 +1900,7 @@ mod worker_tests {
         }
         assert_eq!(packets.len(), 3);
         let mut seq = 1;
-        h.route(audio_datagram(STREAM, seq, 0, &packets[0]).unwrap());
+        h.route(audio_datagram(STREAM, seq, 0, &packets[0], &[]).unwrap());
         let mut packetizer = Packetizer::new(STREAM);
         packetizer.set_parity_permille(0);
         for d in packetize(&mut packetizer, true, 1_000) {
@@ -1838,7 +1914,7 @@ mod worker_tests {
             seq += 1;
             routed.fetch_add(1, Ordering::Relaxed);
             router.route(
-                audio_datagram(STREAM, seq, 0, &opus[seq as usize % 3]).unwrap(),
+                audio_datagram(STREAM, seq, 0, &opus[seq as usize % 3], &[]).unwrap(),
                 Instant::now(),
             );
             handle.stats().audio_packets >= 1
@@ -1847,15 +1923,22 @@ mod worker_tests {
         assert!(before.audio_lost >= 1, "the packets that landed while opening: {before:?}");
         // A gap of one, then a late duplicate.
         seq += 2;
-        h.route(audio_datagram(STREAM, seq, 0, &packets[0]).unwrap());
+        h.route(audio_datagram(STREAM, seq, 0, &packets[0], &[]).unwrap());
         let after = h.settle();
         assert_eq!(after.audio_packets, before.audio_packets + 1);
         assert_eq!(after.audio_lost, before.audio_lost + 1, "one missing");
         assert_eq!(after.audio_concealed, before.audio_concealed + 1, "and concealed");
-        h.route(audio_datagram(STREAM, seq - 1, 0, &packets[1]).unwrap());
+        h.route(audio_datagram(STREAM, seq - 1, 0, &packets[1], &[]).unwrap());
         let late = h.settle();
         assert_eq!(late.audio_lost, after.audio_lost + 1, "too late to play");
         assert_eq!(late.audio_packets, after.audio_packets, "not played");
+        // A gap of two that the datagram after it carries again: decoded, not concealed.
+        seq += 3;
+        h.route(audio_datagram(STREAM, seq, 0, &packets[2], &[&packets[1], &packets[0]]).unwrap());
+        let recovered = h.settle();
+        assert_eq!(recovered.audio_lost, late.audio_lost + 2, "missing from the sequence");
+        assert_eq!(recovered.audio_recovered, late.audio_recovered + 2, "both from the copies");
+        assert_eq!(recovered.audio_concealed, late.audio_concealed, "nothing concealed");
     }
 
     /// The round trip is read off the connection once a report, not on every wake: the read

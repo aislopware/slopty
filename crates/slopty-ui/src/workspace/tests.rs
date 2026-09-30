@@ -1474,6 +1474,7 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+mod about;
 mod address;
 mod away;
 mod bars;
@@ -1506,6 +1507,7 @@ mod strip_marks;
 mod tab_strip;
 mod tiles;
 mod touch;
+mod unsaved;
 
 /// A worker that comes up with nothing on it is given a shell beside the rest, and the focus
 /// stays where the human is typing: keys meant for one machine never land on another. The
@@ -1528,3 +1530,36 @@ fn a_new_workers_shell_opens_beside_without_taking_the_focus(cx: &mut TestAppCon
 }
 
 mod chrome;
+
+/// The empty workspace sits where this frame's layout puts it, never where the strip's size as
+/// the last frame measured it would. When chrome comes or goes (the status bar, with the first
+/// worker) the strip changes size, and a page placed from the old size stayed there until
+/// something else drew the strip again: the app self-test's stale frame at launch, its text
+/// 5 px low, a fifth of the 25 px bar.
+#[gpui::test]
+fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1280.0), px(800.0)));
+    let _studio = connect(&view, cx, 1, "studio");
+    cx.run_until_parked();
+    // One frame, drawn from scratch and nothing after it: what the window shows until the
+    // next.
+    let frame = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            crate::retained::painted(window)
+        })
+    };
+    let settled = frame(cx);
+    assert!(cx.debug_bounds("empty-worker-0").is_some(), "the empty workspace lists the worker");
+    // What a strip laid out taller in the last frame leaves for this one.
+    view.update(cx, |v, _cx| {
+        let mut was = v.drawn.viewport.get();
+        was.size.height += px(25.0);
+        v.drawn.viewport.set(was);
+    });
+    let first = frame(cx);
+    let moved = first.iter().filter(|line| !settled.contains(line)).count();
+    assert_eq!(moved, 0, "painted from the last frame's measure");
+}

@@ -195,7 +195,7 @@ impl WorkspaceView {
         self.disconnect_worker(key, WorkerStatus::Connecting, cx);
         let Some(w) = self.workers.remove(&key) else { return };
         for item in w.doc.items() {
-            self.drop_item_views(item.id);
+            self.drop_item_views(item.id, cx);
             if let ItemKind::Terminal { session } = item.kind {
                 self.finished.remove(&session);
             }
@@ -203,7 +203,12 @@ impl WorkspaceView {
         for session in w.sessions.keys() {
             self.finished.remove(session);
         }
-        self.closed.retain(|c| c.tile.worker != key);
+        let (gone, closed): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.closed).into_iter().partition(|c| c.tile.worker == key);
+        self.closed = closed;
+        for view in gone.iter().filter_map(|c| c.file.as_ref()) {
+            self.file_tile_gone(view, cx);
+        }
         let workers = &self.workers;
         self.recency.retain(|id| workers.values().any(|w| w.doc.get(*id).is_some()));
         // Added again, it is a new worker: an empty registry is given its shell again.
@@ -341,6 +346,7 @@ impl WorkspaceView {
         self.item_changed(key, change, cx);
         if snapshot {
             self.first_snapshot(key, cx);
+            self.reopen_kept(key, cx);
         }
     }
 
@@ -384,7 +390,7 @@ impl WorkspaceView {
                     .filter(|id| self.tile_of(*id).is_none())
                     .collect();
                 for id in gone {
-                    self.drop_item_views(id);
+                    self.drop_item_views(id, cx);
                 }
             }
             ItemChange::Added { id, by_me } => {
@@ -406,7 +412,7 @@ impl WorkspaceView {
             ItemChange::Removed(id) => {
                 self.layout.remove(TileRef { worker: key, item: id });
                 self.recency.retain(|r| *r != id);
-                self.drop_item_views(id);
+                self.drop_item_views(id, cx);
                 self.after_focus_moved(cx);
             }
             ItemChange::Changed(_) | ItemChange::Echo | ItemChange::Pointed(_) => {}
@@ -453,9 +459,11 @@ impl WorkspaceView {
         self.open_session_on(key, None, Vec::new(), None, cx);
     }
 
-    fn drop_item_views(&mut self, id: ItemId) {
+    fn drop_item_views(&mut self, id: ItemId, cx: &mut Context<Self>) {
         self.notes.remove(&id);
-        self.files.remove(&id);
+        if let Some(view) = self.files.remove(&id) {
+            self.file_tile_gone(&view, cx);
+        }
         self.folders.remove(&id);
         self.screens.remove(&id);
         self.titles.remove(&id);
@@ -1011,7 +1019,13 @@ impl WorkspaceView {
         for (key, id, path) in new_files {
             self.make_file(key, id, path, window, cx);
         }
-        self.files.retain(|id, _| file_ids.contains(id));
+        let gone: Vec<ItemId> =
+            self.files.keys().filter(|id| !file_ids.contains(id)).copied().collect();
+        for id in gone {
+            if let Some(view) = self.files.remove(&id) {
+                self.file_tile_gone(&view, cx);
+            }
+        }
         self.reconcile_folders(cx);
     }
 
@@ -1042,7 +1056,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let theme = self.theme.clone();
-        let view = cx.new(|cx| FileView::new(id, &path, theme, window, cx));
+        let view = cx.new(|cx| FileView::new(id, worker, &path, theme, window, cx));
         let file = path.clone();
         cx.subscribe(&view, move |this, view, event, cx| {
             match event {
@@ -1075,17 +1089,28 @@ impl WorkspaceView {
         .detach();
         // The status bar says where the focused file's caret is: it draws again as it moves,
         // and only for the focused file.
-        cx.observe(&view, move |this, _view, cx| {
+        // Most of the tile's redraws are its caret blinking: its backup is looked at only when
+        // where its edit stands has moved.
+        let mut marked = None;
+        cx.observe(&view, move |this, view, cx| {
             if this.focused().is_some_and(|t| t.item == id) {
                 App::notify(cx, this.chrome.statusbar.entity_id());
             }
             this.file_changed(id, cx);
+            let mark = view.read(cx).backup_mark();
+            if mark != marked {
+                marked = mark;
+                this.keep_unsaved(cx);
+            }
         })
         .detach();
         if let Some(line) = self.file_focus.remove(&id) {
             view.update(cx, |v, cx| v.focus_line(Some(line), cx));
         }
-        if let Some(waits) = self.take_file_wait(id) {
+        if let Some(kept) = self.take_kept(worker, id) {
+            view.update(cx, |v, cx| v.restore(kept, cx));
+        }
+        if let Some(waits) = self.file_wait(worker, &path) {
             view.update(cx, |v, cx| v.set_waiting(Some(waits), cx));
         }
         self.files.insert(id, view);

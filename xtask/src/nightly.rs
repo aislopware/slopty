@@ -164,6 +164,9 @@ fn checks(opts: &NightlyOpts, dir: &Utf8Path, xtask: &str) -> Vec<Check> {
         deep("coverage", &["coverage"], Some(Need::Tool("cargo-llvm-cov"))),
         deep("features", &["features"], Some(Need::Tool("cargo-hack"))),
         deep("fuzz", &["fuzz"], Some(Need::NightlyTool("cargo-fuzz"))),
+        deep("loom", &["loom"], None),
+        deep("leaks", &["leaks"], Some(Need::Tool("leaks"))),
+        deep("metal", &["metal"], Some(Need::Tool("xcodebuild"))),
     ]
 }
 
@@ -411,6 +414,8 @@ mod tests {
             checks
                 .iter()
                 .filter(|c| c.args.first().is_some_and(|a| a == "deep"))
+                // loom is a crate the check builds on stable: there is nothing to install.
+                .filter(|c| c.name != "loom")
                 .all(|c| c.needs.is_some())
         );
     }

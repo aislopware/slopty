@@ -33,7 +33,7 @@ pub fn ring(color: Rgb) -> Outline {
 /// Make `el` one stop of the keyboard ring (see the module docs).
 pub fn tab_stop<E: StatefulInteractiveElement + Styled>(el: E, ring_color: Rgb) -> E {
     el.tab_index(0)
-        .focus_visible(move |style| style.outline(ring(ring_color)))
+        .focus_visible(move |style| style.outline_ring(ring(ring_color)))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
         .on_key_down(|event, window, cx| {
             if cycle(event, window, cx) {

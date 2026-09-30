@@ -23,8 +23,19 @@
 //! - a hook report fails, or a CLI call cannot reach the server (it is sent again once, so the load
 //!   goes on).
 //!
-//! No display stream runs: the worker has no switch that puts its synthetic capture behind a
-//! stream, and a real one needs Screen Recording. Nothing is drawn, captured or played.
+//! Beside the terminals, `--stream-lanes` lanes (one by default) stream the worker's drawn screen
+//! (`SLOPTY_SYNTHETIC_SCREEN`: one display and two windows, drawn and encoded by VideoToolbox as
+//! a captured one would be, with no Screen Recording grant) through the fill and the load. Each
+//! stream is a `slopty bench screen` run straight to the worker for [`STREAM_SECONDS`]: open,
+//! decode, close. They take the display and the windows in turn, at each of [`STREAM_SCALES`] in
+//! turn, so every open builds the worker's capture and encoder and the client's decoder at
+//! another size, and the fill's sessions and the load's streams overlap. The soak also fails when
+//! - a stream fails to open or run, or decodes no frame;
+//! - a stream reports a decode error, or loses more than [`LOST_PERMILLE`] of its frames on
+//!   loopback, where nothing drops them;
+//! - the worker's own counters show it dropped more than [`DROPPED_PERMILLE`] of what it captured.
+//!
+//! Nothing is captured from the Mac, played or shown.
 //!
 //! `leaks` cannot read a hardened-runtime binary, and `cargo xtask sign` signs the dev daemons
 //! with the hardened runtime. So the daemons are copied under `target/deep/soak/bin` and signed
@@ -35,7 +46,7 @@ use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -53,6 +64,11 @@ const SLOPE_KIB_PER_MIN: f64 = 64.0;
 /// The largest footprint each daemon may reach, in MiB: a few times the first soak's peaks
 /// (server 4, ptyd 24, worker 28; MEASUREMENTS, "the first soak").
 const PEAK_MIB: [(&str, u64); 3] = [("server", 32), ("ptyd", 64), ("worker", 128)];
+
+/// What each stream lane may add to the worker's peak, in MiB: a stream's capture surfaces and its
+/// encoder's pool. The first stream soak put the worker's peak 42 MiB over the terminals' alone
+/// (104 to 146 MiB; MEASUREMENTS, "Deep checks widened, a stream soak, a loom model").
+const STREAM_PEAK_MIB: u64 = 64;
 
 /// How long the daemons are left alone before a count is compared: past tokio's blocking-pool
 /// keep-alive (10 s), so a thread that is only idle has gone.
@@ -78,6 +94,20 @@ const FILL_CYCLES: u32 = 1_536;
 /// worker's peak budget (eight at once peaked at 173 MiB).
 const FILL_LANES: usize = 4;
 
+/// Seconds each stream of a stream lane runs before it is closed and the next one opened.
+const STREAM_SECONDS: u64 = 3;
+
+/// The capture scales a stream lane opens at, in turn: each builds the capture, the encoder and
+/// the decoder at another size.
+const STREAM_SCALES: [&str; 3] = ["1.0", "0.75", "0.5"];
+
+/// Frames a stream may lose, per thousand it decoded, over the soak: loopback drops nothing, so
+/// a loss is the worker or the client falling behind.
+const LOST_PERMILLE: u64 = 5;
+
+/// Frames the worker may drop, per thousand it captured, over the soak.
+const DROPPED_PERMILLE: u64 = 50;
+
 #[derive(Args, Debug, Clone)]
 pub struct SoakOpts {
     /// How long the load runs, in seconds (the nightly run gives 1200).
@@ -89,10 +119,19 @@ pub struct SoakOpts {
     /// Soak the debug build instead of the release one.
     #[arg(long)]
     pub debug: bool,
+    /// Soak what the last build left in the profile's directory, without calling cargo: a rerun
+    /// that does not wait on the other sessions' builds, or on a crate someone is halfway
+    /// through.
+    #[arg(long)]
+    pub no_build: bool,
     /// Give the daemons `MallocStackLogging`, so `leaks` shows where a leak was allocated (the
     /// footprint then includes the log, so its slope and peak read high).
     #[arg(long)]
     pub stacks: bool,
+    /// Lanes streaming the worker's drawn screen through the fill and the load, one stream after
+    /// another; 0 soaks the terminals alone.
+    #[arg(long, default_value_t = 1)]
+    pub stream_lanes: usize,
     /// Where the samples, logs and summary go (default `target/deep/soak/last`).
     #[arg(long)]
     pub out: Option<Utf8PathBuf>,
@@ -108,7 +147,7 @@ pub fn run(sh: &Shell, opts: &SoakOpts) -> Result<()> {
         std::fs::remove_dir_all(&out).with_context(|| format!("clearing {out}"))?;
     }
     std::fs::create_dir_all(&out).with_context(|| format!("creating {out}"))?;
-    let bin = build(sh, opts.debug)?;
+    let bin = build(sh, opts.debug, opts.no_build)?;
     let mut stack = Stack::start(&bin, out.as_std_path(), opts.stacks)?;
     let result = soak(&stack, opts, out.as_std_path());
     stack.stop();
@@ -124,16 +163,18 @@ pub fn run(sh: &Shell, opts: &SoakOpts) -> Result<()> {
 }
 
 /// Build the daemons and the CLI, and copy them where they are signed to be read by `leaks`.
-fn build(sh: &Shell, debug: bool) -> Result<Utf8PathBuf> {
+fn build(sh: &Shell, debug: bool, no_build: bool) -> Result<Utf8PathBuf> {
     let (flags, profile): (&[&str], &str) =
         if debug { (&[], "debug") } else { (&["--release"], "release") };
-    step(
-        "build the daemons and the CLI",
-        &cmd!(
-            sh,
-            "nice -n 10 cargo build {flags...} -p slopty-serverd -p slopty-ptyd -p slopty-workerd -p slopty-cli"
-        ),
-    )?;
+    if !no_build {
+        step(
+            "build the daemons and the CLI",
+            &cmd!(
+                sh,
+                "nice -n 10 cargo build {flags...} -p slopty-serverd -p slopty-ptyd -p slopty-workerd -p slopty-cli"
+            ),
+        )?;
+    }
     let root = repo_root()?;
     let dir = root.join("target/deep/soak/bin");
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir}"))?;
@@ -167,9 +208,13 @@ struct Stack {
     /// Calls that could not reach the server at the first try, and the first one's error.
     unreached: AtomicU64,
     first_unreached: OnceLock<String>,
+    /// Numbers the streams, so the lanes take the targets and scales in turn.
+    streams: AtomicUsize,
     slopty_bin: PathBuf,
     cli: PathBuf,
     server: String,
+    /// The worker's own address, which a stream dials without the server.
+    worker: String,
     daemons: Vec<(&'static str, Child)>,
 }
 
@@ -201,6 +246,8 @@ impl Stack {
             ("SLOPTY_DROP_DIR", root.join("drops").into_os_string()),
             ("SLOPTY_WORKER_NAME", "soak".into()),
             ("BASH_SILENCE_DEPRECATION_WARNING", "1".into()),
+            // The worker streams its drawn screen, never the Mac's.
+            ("SLOPTY_SYNTHETIC_SCREEN", "1".into()),
         ];
         if stacks {
             env.push(("MallocStackLogging", "1".into()));
@@ -212,7 +259,9 @@ impl Stack {
             calls: AtomicU64::new(0),
             unreached: AtomicU64::new(0),
             first_unreached: OnceLock::new(),
+            streams: AtomicUsize::new(0),
             server: String::new(),
+            worker: String::new(),
             daemons: Vec::new(),
         };
         let spawn = |name: &'static str, program: &str, args: &[&str]| -> Result<Child> {
@@ -279,7 +328,9 @@ impl Stack {
         )?;
         let listening = first_line(&mut worker, out, "worker");
         stack.daemons.push(("worker", worker));
-        listening?;
+        let listening: std::net::SocketAddr =
+            listening?.parse().context("the worker printed no address")?;
+        stack.worker = format!("127.0.0.1:{}", listening.port());
         let online = wait_for(
             || {
                 stack.slopty(&["workers"]).is_ok_and(|w| {
@@ -457,6 +508,212 @@ fn cycle(stack: &Stack, n: u32, missed: &mut Vec<String>) -> Result<()> {
     Ok(())
 }
 
+/// A stream's target as `slopty bench screen` takes it: `--display <id>` or `--window <id>`.
+type Target = [String; 2];
+
+/// What the worker's drawn screen offers to stream.
+fn stream_targets(stack: &Stack) -> Result<Vec<Target>> {
+    let listed = stack.call(&["bench", "screen", "--worker", &stack.worker, "--list"], &[])?;
+    let listed = String::from_utf8_lossy(&listed);
+    let targets = parse_targets(&listed);
+    ensure!(!targets.is_empty(), "the worker listed nothing to stream:\n{listed}");
+    Ok(targets)
+}
+
+/// The targets in `slopty bench screen --list`'s lines: `display display#<id> …` (a `DisplayId`
+/// prints itself so) and `window <id> …`.
+fn parse_targets(listed: &str) -> Vec<Target> {
+    listed
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let flag = match words.next()? {
+                "display" => "--display",
+                "window" => "--window",
+                _ => return None,
+            };
+            let id = words.next()?.rsplit('#').next()?;
+            id.parse::<u32>().ok()?;
+            Some([flag.to_owned(), id.to_owned()])
+        })
+        .collect()
+}
+
+/// One stream as `slopty bench screen` reports it, with the worker's own counters for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct StreamRun {
+    target: String,
+    first_frame_ms: u64,
+    decoded: u64,
+    lost: u64,
+    decode_errors: u64,
+    stalls: u64,
+    captured: u64,
+    dropped: u64,
+}
+
+impl StreamRun {
+    /// Read the bench's report (`apps/slopty-cli/src/bench/screen.rs`). A line it no longer
+    /// prints is an error, so a changed report cannot pass as a clean stream.
+    fn parse(report: &str) -> Result<Self> {
+        let line = |start: &str| {
+            report
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with(start))
+                .with_context(|| format!("no line starting {start:?}"))
+        };
+        let first = line("first frame after")?;
+        let datagrams = line("datagrams")?;
+        let stalls = line("stalls")?;
+        let worker = line("worker captured")?;
+        Ok(Self {
+            target: String::new(),
+            first_frame_ms: number_after(first, "first frame after")?,
+            decoded: number_after(first, ";")?,
+            lost: number_after(datagrams, "lost")?,
+            decode_errors: number_after(datagrams, "decode errors")?,
+            stalls: number_after(stalls, "stalls")?,
+            captured: number_after(worker, "worker captured")?,
+            dropped: number_after(worker, "dropped")?,
+        })
+    }
+}
+
+/// The whole number that follows `key` in `line`, its fraction dropped.
+fn number_after(line: &str, key: &str) -> Result<u64> {
+    let (_, rest) = line.split_once(key).with_context(|| format!("no {key:?} in {line:?}"))?;
+    let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().with_context(|| format!("no number after {key:?} in {line:?}"))
+}
+
+/// Open the next stream in turn (the targets, then the scales), run it for
+/// [`STREAM_SECONDS`] and close it.
+fn stream(stack: &Stack, targets: &[Target]) -> Result<StreamRun> {
+    let n = stack.streams.fetch_add(1, Ordering::Relaxed);
+    let [flag, id] = targets.get(n.checked_rem(targets.len()).unwrap_or(0)).context("a target")?;
+    let turn = n.checked_div(targets.len()).unwrap_or(0);
+    let scale =
+        STREAM_SCALES.get(turn.checked_rem(STREAM_SCALES.len()).unwrap_or(0)).context("a scale")?;
+    let seconds = STREAM_SECONDS.to_string();
+    let socket = stack.root.join("worker.sock").to_string_lossy().into_owned();
+    let args = [
+        "bench",
+        "screen",
+        "--worker",
+        &stack.worker,
+        flag,
+        id,
+        "--seconds",
+        &seconds,
+        "--scale",
+        scale,
+    ];
+    // The worker's counters for the stream come from its control socket.
+    let out = stack.call(&args, &[("SLOPTY_WORKER_SOCKET", &socket)])?;
+    let report = String::from_utf8_lossy(&out);
+    let mut run = StreamRun::parse(&report)
+        .with_context(|| format!("`slopty bench screen` printed:\n{report}"))?;
+    run.target = format!("{flag} {id} at {scale}");
+    Ok(run)
+}
+
+/// Stream one after another until `stop` is set. A stream that fails ends the lane: it is a
+/// finding, and the terminals' load goes on without it.
+fn stream_lane(stack: &Stack, targets: &[Target], stop: &AtomicBool) -> Vec<Result<StreamRun>> {
+    let mut runs = Vec::new();
+    while !stop.load(Ordering::Relaxed) {
+        let run = stream(stack, targets);
+        let failed = run.is_err();
+        runs.push(run);
+        if failed {
+            break;
+        }
+    }
+    runs
+}
+
+/// Run `load` beside `lanes` stream lanes, which stop once it returns.
+fn with_streams<T>(
+    stack: &Stack,
+    targets: &[Target],
+    lanes: usize,
+    streams: &mut Vec<Result<StreamRun>>,
+    load: impl FnOnce() -> T,
+) -> T {
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let running: Vec<_> =
+            std::iter::repeat_with(|| scope.spawn(|| stream_lane(stack, targets, &stop)))
+                .take(lanes)
+                .collect();
+        let loaded = load();
+        stop.store(true, Ordering::Relaxed);
+        for lane in running {
+            match lane.join() {
+                Ok(runs) => streams.extend(runs),
+                Err(_panic) => streams.push(Err(anyhow::anyhow!("a stream lane panicked"))),
+            }
+        }
+        loaded
+    })
+}
+
+/// The streams' totals, and a failure for each budget they broke.
+fn judge_streams(runs: &[Result<StreamRun>], failures: &mut Vec<String>) -> Value {
+    let ran: Vec<&StreamRun> = runs.iter().filter_map(|r| r.as_ref().ok()).collect();
+    let failed: Vec<String> =
+        runs.iter().filter_map(|r| r.as_ref().err()).map(|e| format!("{e:#}")).collect();
+    let sum = |f: fn(&StreamRun) -> u64| ran.iter().map(|r| f(r)).fold(0_u64, u64::saturating_add);
+    let (decoded, lost, errors) = (sum(|r| r.decoded), sum(|r| r.lost), sum(|r| r.decode_errors));
+    let (captured, dropped, stalls) = (sum(|r| r.captured), sum(|r| r.dropped), sum(|r| r.stalls));
+    if let Some(first) = failed.first() {
+        failures.push(format!("{} streams failed; the first: {first}", failed.len()));
+    }
+    let blank: Vec<&str> =
+        ran.iter().filter(|r| r.decoded == 0).map(|r| r.target.as_str()).collect();
+    if !blank.is_empty() {
+        failures.push(format!("{} streams decoded no frame: {}", blank.len(), blank.join(", ")));
+    }
+    if errors > 0 {
+        failures.push(format!("streams: {errors} decode errors"));
+    }
+    if lost.saturating_mul(1000) > decoded.saturating_mul(LOST_PERMILLE) {
+        failures.push(format!(
+            "streams: {lost} frames lost of {decoded} decoded, over {LOST_PERMILLE}‰"
+        ));
+    }
+    if dropped.saturating_mul(1000) > captured.saturating_mul(DROPPED_PERMILLE) {
+        failures.push(format!(
+            "streams: the worker dropped {dropped} of {captured} captured, over {DROPPED_PERMILLE}‰"
+        ));
+    }
+    let mut first_ms: Vec<u64> = ran.iter().map(|r| r.first_frame_ms).collect();
+    let mut decoded_each: Vec<u64> = ran.iter().map(|r| r.decoded).collect();
+    let first = slopty_testkit::stats::Spread::of(&mut first_ms);
+    let each = slopty_testkit::stats::Spread::of(&mut decoded_each);
+    println!(
+        "  streams: {} run, {} failed; {decoded} frames decoded ({}), {lost} lost, {errors} decode errors, {stalls} stalls; worker captured {captured}, dropped {dropped}; first frame ms {}",
+        ran.len(),
+        failed.len(),
+        each.map_or_else(String::new, |s| format!("per stream {s}")),
+        first.map_or_else(String::new, |s| s.to_string()),
+    );
+    json!({
+        "streams": ran.len(),
+        "failed": failed.len(),
+        "seconds_each": STREAM_SECONDS,
+        "decoded": decoded,
+        "decoded_each": each.map(|s| json!({"min": s.min, "p50": s.p50, "max": s.max})),
+        "lost": lost,
+        "decode_errors": errors,
+        "stalls": stalls,
+        "worker_captured": captured,
+        "worker_dropped": dropped,
+        "first_frame_ms": first.map(|s| json!({"p50": s.p50, "p95": s.p95, "max": s.max})),
+    })
+}
+
 /// One reading of one daemon.
 #[derive(Debug, Clone, Copy)]
 struct Sample {
@@ -594,36 +851,61 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     let mut samples = Vec::new();
     let mut missed = Vec::new();
     let mut n = 0_u32;
-    println!("▶ warm up: two cycles, then {SETTLE:?} alone");
+    let lanes = opts.stream_lanes;
+    let mut streams = Vec::new();
+    let targets = if lanes == 0 { Vec::new() } else { stream_targets(stack)? };
+    println!("▶ warm up: two cycles and a stream of each target, then {SETTLE:?} alone");
     for _ in 0..2 {
         n = n.wrapping_add(1);
         cycle(stack, n, &mut missed)?;
     }
+    for _ in &targets {
+        streams.push(stream(stack, &targets));
+    }
     settle(stack, &mut samples, started, interval, "warm");
     let unfilled = sample(stack, started, "unfilled");
     samples.extend(unfilled.iter().copied());
-    println!("▶ fill the bounded stores: {FILL_CYCLES} cycles, {FILL_LANES} at a time");
+    println!(
+        "▶ fill the bounded stores: {FILL_CYCLES} cycles, {FILL_LANES} at a time, beside {lanes} stream lanes"
+    );
+    // A cycle that fails ends the load, not the soak: the samples up to it, the counts once the
+    // daemons have settled and `leaks` are the evidence of why it failed.
+    let mut aborted: Option<String> = None;
     let fill_started = Instant::now();
-    n = fill(stack, &mut samples, &mut missed, started, interval, n)?;
+    match with_streams(stack, &targets, lanes, &mut streams, || {
+        fill(stack, &mut samples, &mut missed, started, interval, n)
+    }) {
+        Ok(last) => n = last,
+        Err(e) => aborted = Some(format!("the fill stopped: {e:#}")),
+    }
     let fill_took = fill_started.elapsed();
     settle(stack, &mut samples, started, interval, "filled");
     let baseline = sample(stack, started, "baseline");
     samples.extend(baseline.iter().copied());
-    println!("▶ load for {} s", opts.seconds);
+    if aborted.is_none() {
+        println!("▶ load for {} s beside {lanes} stream lanes", opts.seconds);
+    }
     let load_started = Instant::now();
     let deadline =
         load_started.checked_add(Duration::from_secs(opts.seconds)).unwrap_or(load_started);
-    let mut next = Instant::now();
     let mut cycles = Vec::new();
-    while Instant::now() < deadline {
-        n = n.wrapping_add(1);
-        let began = Instant::now();
-        cycle(stack, n, &mut missed)?;
-        cycles.push(began.elapsed());
-        if Instant::now() >= next {
-            samples.extend(sample(stack, started, "load"));
-            next = next.checked_add(interval).unwrap_or(next);
+    let load_lanes = if aborted.is_some() { 0 } else { lanes };
+    let loaded = with_streams(stack, &targets, load_lanes, &mut streams, || -> Result<()> {
+        let mut next = Instant::now();
+        while aborted.is_none() && Instant::now() < deadline {
+            n = n.wrapping_add(1);
+            let began = Instant::now();
+            cycle(stack, n, &mut missed)?;
+            cycles.push(began.elapsed());
+            if Instant::now() >= next {
+                samples.extend(sample(stack, started, "load"));
+                next = next.checked_add(interval).unwrap_or(next);
+            }
         }
+        Ok(())
+    });
+    if let Err(e) = loaded {
+        aborted = Some(format!("the load stopped: {e:#}"));
     }
     println!("▶ settle for {SETTLE:?}, then leaks");
     settle(stack, &mut samples, started, interval, "settle");
@@ -631,6 +913,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     samples.extend(end.iter().copied());
 
     let mut failures = Vec::new();
+    failures.extend(aborted);
     if let Some(first) = missed.first() {
         failures.push(format!(
             "{} of {} hook reports failed; the first: {first}",
@@ -645,6 +928,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
             stack.calls.load(Ordering::Relaxed)
         ));
     }
+    let streamed = if lanes == 0 { Value::Null } else { judge_streams(&streams, &mut failures) };
     let mut daemons = serde_json::Map::new();
     for (name, pid) in stack.pids() {
         let empty = unfilled.iter().find(|s| s.daemon == name).context("an unfilled sample")?;
@@ -658,8 +942,12 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
         let tail = load.get(load.len() / 3..).unwrap_or_default();
         let slope = slope_kib_per_min(tail);
         let peak = samples.iter().filter(|s| s.daemon == name).map(|s| s.peak).max().unwrap_or(0);
-        let peak_budget =
-            PEAK_MIB.iter().find(|(d, _)| *d == name).map_or(u64::MAX, |(_, m)| m << 20);
+        let streaming =
+            if name == "worker" { STREAM_PEAK_MIB.saturating_mul(lanes as u64) } else { 0 };
+        let peak_budget = PEAK_MIB
+            .iter()
+            .find(|(d, _)| *d == name)
+            .map_or(u64::MAX, |(_, m)| m.saturating_add(streaming) << 20);
         let (clean, verdict) = leaks(&sh, pid, &out.join(format!("leaks-{name}.txt")))?;
         if slope.is_some_and(|s| s > SLOPE_KIB_PER_MIN) {
             failures.push(format!(
@@ -738,6 +1026,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
         "calls_unreached": unreached,
         "cycle_ms": spread.map(|s| json!({"p50": s.p50, "p95": s.p95, "max": s.max})),
         "slope_budget_kib_per_min": SLOPE_KIB_PER_MIN,
+        "streams": streamed,
         "daemons": daemons,
         "failures": failures,
     });
@@ -763,5 +1052,82 @@ mod tests {
         let flat: Vec<(f64, f64)> = (0..10).map(|s| (f64::from(s), 5.0)).collect();
         assert!(slope_kib_per_min(&flat).unwrap().abs() < 1e-9, "flat");
         assert_eq!(slope_kib_per_min(&rising[..2]), None, "two points fit anything");
+    }
+
+    /// The lines of `slopty bench screen` the soak reads, as `bench/screen.rs` prints them.
+    const REPORT: &str = "\
+soak: Display(DisplayId(1)) → 1920×1080 Hevc 60 fps 30 Mbit/s scale 0.75
+  first frame after 142 ms; 171 frames decoded in 2.86 s = 59.8 fps
+  capture→decoded (worker clock; loopback only): p50 9.1 ms
+  datagrams 2210  fec-recovered 0  lost 3  nacks 1  refreshes 0  decode errors 2
+  stalls 1 (40 ms stalled)
+  audio packets 0  lost 9
+  worker captured 180 (display-crop path 0), dropped 4, encoded 176, refused 0
+";
+
+    #[test]
+    fn a_stream_report_reads_back() {
+        let run = StreamRun::parse(REPORT).unwrap();
+        assert_eq!(
+            run,
+            StreamRun {
+                target: String::new(),
+                first_frame_ms: 142,
+                decoded: 171,
+                lost: 3,
+                decode_errors: 2,
+                stalls: 1,
+                captured: 180,
+                dropped: 4,
+            },
+            "the video's losses, not the audio's"
+        );
+    }
+
+    #[test]
+    fn a_report_without_a_counter_is_an_error_not_a_clean_stream() {
+        let no_worker: String = REPORT
+            .lines()
+            .filter(|l| !l.contains("worker captured"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = StreamRun::parse(&no_worker).unwrap_err();
+        assert!(format!("{err:#}").contains("worker captured"), "{err:#}");
+        let renamed = REPORT.replace("decode errors 2", "errors 2");
+        assert!(StreamRun::parse(&renamed).is_err(), "a renamed counter");
+    }
+
+    #[test]
+    fn the_listing_gives_the_display_and_the_windows() {
+        let listed = "display display#1    1920×1080 @2x 60 Hz\n\
+                      window  7            800×600  Canvas — page\n\
+                      window  8            640×480  Canvas — blocks\n";
+        let targets = parse_targets(listed);
+        let flat: Vec<String> = targets.iter().map(|t| t.join(" ")).collect();
+        assert_eq!(flat, ["--display 1", "--window 7", "--window 8"]);
+    }
+
+    #[test]
+    fn streams_are_judged_on_every_budget() {
+        let clean = StreamRun { decoded: 1000, captured: 1000, ..StreamRun::default() };
+        let mut failures = Vec::new();
+        judge_streams(&[Ok(clean.clone())], &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+        let broken = [
+            Ok(StreamRun { lost: 6, decode_errors: 1, dropped: 51, ..clean }),
+            Ok(StreamRun { target: "--window 7 at 0.5".to_owned(), ..StreamRun::default() }),
+            Err(anyhow::anyhow!("the open was refused")),
+        ];
+        judge_streams(&broken, &mut failures);
+        let all = failures.join("\n");
+        for expected in [
+            "1 streams failed; the first: the open was refused",
+            "decoded no frame: --window 7 at 0.5",
+            "1 decode errors",
+            "6 frames lost of 1000 decoded",
+            "dropped 51 of 1000 captured",
+        ] {
+            assert!(all.contains(expected), "{expected:?} in:\n{all}");
+        }
     }
 }

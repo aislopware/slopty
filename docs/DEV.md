@@ -195,9 +195,8 @@ test-runner"`.
 under `target/deep/`:
 - `miri` — the pure crates' tests under Miri (nightly; `PROPTEST_CASES=8`, isolation off for
   insta). `-p <crate>` narrows it.
-- `sanitize [address|thread]` — the tests of the daemons, the codec, `slopty-platform` and
-  `slopty-capture` (the crates with the most `unsafe`) built with `-Zsanitizer` and
-  `-Zbuild-std` on nightly.
+- `sanitize [address|thread]` — the tests of every crate with `unsafe` built with
+  `-Zsanitizer` and `-Zbuild-std` on nightly (`SANITIZED` in `xtask/src/deep.rs`).
 - `sanitize realtime` — the codec's tests under `RealtimeSanitizer`, with the audio render
   callback marked real-time (`--cfg slopty_rtsan`): an allocation, lock or blocking call
   reached from it aborts. One test proves it trips, on an allocation armed in a child process.
@@ -208,6 +207,10 @@ under `target/deep/`:
 - `mutants -p <crate> [--timeout s]` — `cargo mutants` on one crate; the surviving mutants are
   the lines no test would notice changing.
 - `fuzz [--time s]` — every fuzz target for 30 s (`cargo xtask fuzz` below).
+- `loom` — the audio ring on loom's atomics (`--cfg slopty_loom`), every interleaving of its
+  scenarios checked.
+- `leaks` — the daemon and wire test binaries under `leaks --atExit`: a leaked allocation fails.
+- `metal [--filter …]` — the app self-test with Metal API and shader validation on.
 
 `cargo xtask fuzz [<target>] [--time s] [--jobs n]` builds `fuzz/` with cargo-fuzz (nightly,
 AddressSanitizer, debug assertions; `cargo binstall cargo-fuzz`) and runs each target, or the one

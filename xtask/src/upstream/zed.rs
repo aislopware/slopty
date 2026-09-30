@@ -675,11 +675,22 @@ pub(super) fn sync(
     let (missing, stale) = unwired(&workspace_members(&manifest)?, &tracked);
     let work = HandWork { conflicts, ports, missing, stale };
     if work.is_empty() {
+        refresh_lock(sh, fork)?;
         cmd!(sh, "git -C {fork} commit --quiet --no-edit").run()?;
         println!("  merged {}{}", short(&vendor), if clean { "" } else { " (conflicts resolved)" });
         return Ok(head);
     }
     bail!("{}", work.report(fork, &recorded.import_commit, &vendor))
+}
+
+/// Stage the fork's `Cargo.lock` as the imported manifests resolve it. Zed bumps crate versions
+/// and dependencies inside the tracked directories, and a merge that leaves the lock behind breaks
+/// every `--locked` build of the fork.
+fn refresh_lock(sh: &Shell, fork: &Utf8Path) -> Result<()> {
+    let _dir = sh.push_dir(fork);
+    cmd!(sh, "cargo update --workspace --quiet").run()?;
+    cmd!(sh, "git add Cargo.lock").run()?;
+    Ok(())
 }
 
 /// What an import leaves to a person or an agent.
@@ -744,8 +755,8 @@ impl HandWork {
             );
         }
         out.push_str(
-            "\n  then `git commit` the merge there and run `cargo xtask upstream sync --only \
-             gpui-fast` again",
+            "\n  then `cargo update --workspace`, `git add Cargo.lock`, `git commit` the merge there \
+             and run `cargo xtask upstream sync --only gpui-fast` again",
         );
         out
     }
@@ -1197,7 +1208,12 @@ mod tests {
         );
 
         // Finish by hand, then a rerun has nothing to import.
-        write(&fork, "Cargo.toml", "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n");
+        write(
+            &fork,
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n[workspace.dependencies]\nb = { \
+             path = \"crates/b\" }\n",
+        );
         write(&fork, "crates/a/src/fast/x.rs", "// ours, from v2\n");
         cmd!(sh, "git -C {fork} add -A").run().expect("add");
         cmd!(sh, "git -C {fork} commit -q --no-edit").run().expect("commit merge");
@@ -1211,6 +1227,8 @@ mod tests {
         assert_eq!(merged.sha, fourth, "imported");
         let recorded = Recorded::at(&sh, &fork, "HEAD").expect("UPSTREAM");
         assert_eq!(recorded.zed_commit, fourth, "committed with the merge");
+        let lock = cmd!(sh, "git -C {fork} show HEAD:Cargo.lock").read().expect("lock committed");
+        assert!(lock.contains("name = \"b\""), "the lock resolves the imported crates: {lock}");
         let second_parent = cmd!(sh, "git -C {fork} rev-parse HEAD^2").read().expect("merge");
         assert_eq!(
             recorded.import_commit, second_parent,

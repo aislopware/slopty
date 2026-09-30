@@ -52,7 +52,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   identity.
 
 - ✅ **Short audio gaps are concealed by replaying the last packet with a fade** (2026-09-12,
-  `slopty_codec::audio::Conceal`). Apple's Opus decoder takes no empty packet for its own
+  `slopty_codec::audio::Conceal`; the replay superseded 2026-09-30 by **A lost packet is the
+  last pitch period repeated**). Apple's Opus decoder takes no empty packet for its own
   concealment, so the client keeps the last decoded packet and, on a sequence gap of up to
   `MAX_CONCEALED` = 3 packets (60 ms; 6 of 10 ms since 2026-09-29), pushes it again faded linearly to silence across the
   gap before the packet that arrived: a lost packet is a dip, not a click, and the ring keeps
@@ -703,3 +704,94 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Not in this stage: files as File Provider placeholders (S2 on), and the exception for a
     copy made in a streamed window just before its client switched tiles, which is still not
     announced to that client.
+
+- ⏸ **Opus loss concealment stays fade-replay until a decoder conceals without allocating**
+  (2026-09-30; MEASUREMENTS "Opus concealment: ropus against fade-replay, and repetition").
+  Fade-replay itself superseded the same day by **A lost packet is the last pitch period
+  repeated**, and the repetition below taken by **Audio datagrams carry earlier packets while
+  the client reports loss**; ropus stays deferred on the reasons given here.
+  - `ropus` 0.12.18 (a pure-Rust port of libopus, fixed-point) decodes Apple's packets to within
+    71–75 dB of Apple's own decode. Its concealment is better by every measure that follows what
+    is heard. It adds no click at either edge of a gap, where fade-replay steps 8–15× the
+    signal's own step. It keeps the level, -1 dB where fade-replay loses 5, and its spectrum is
+    closer. Waveform SNR prefers it on speech (+1.3 to +4 dB) and fade-replay on the synthetic
+    music (-0.6 to -1.1 dB).
+  - Not adopted, for two reasons:
+    - its decoder allocates 16–35 times a packet, and its concealment 25 times;
+    - a concealed packet costs 2.1–2.2× Apple's decode.
+    Both fail the bar the library audit set: no new allocation a packet, and at most 2× Apple's
+    decode. The client's stream task decodes every packet. Adopt it once a decode path that
+    allocates nothing exists, upstream or in a fork, with the crate added to `Cargo.lock` then.
+  - In-band FEC is not available at this operating point. LBRR is a SILK feature, and at 96
+    kbit/s in 10 ms packets every packet is CELT-only, where libopus switches it off.
+  - Sending each packet again in the next audio datagram recovers 97–98 % of the losses at
+    20–50‰ random loss and 44–46 % in bursts. At 50‰ that is 9.4 → 22.7 dB on speech and 10.0 →
+    27.4 on music. It costs about +89 % of the audio datagram (+88–95 kbit/s) and no latency:
+    the recovered packet arrives when today's stand-in is queued. It is a wire change, so it
+    waits on a ruling; sent only while the receiver reports loss, it would cost nothing on a
+    clean link.
+  - A cheaper fix to fade-replay itself, unmeasured: continue the waveform into the gap instead
+    of restarting the old packet, and crossfade into the packet after it. That removes most of
+    the jump at each edge.
+
+- ✅ **A lost packet is the last pitch period repeated** (2026-09-30, `slopty_codec::audio::Conceal`;
+  MEASUREMENTS "Opus loss concealment").
+  - Replaying the last 10 ms whole lands out of phase with whatever was playing, so a gap was a
+    dip with a seam at each end. A tone at 170 Hz, whose period is no whole number of frames,
+    came back from the replay at -4.2 dB against the lost packet: worse than silence.
+  - Now the client keeps the last 60 ms it played. On a gap it finds the pitch period of their
+    end: the lag from 2.5 to 15 ms at which the last 10 ms best match what came before them
+    (normalised cross-correlation on a mono downmix at 12 kHz, refined at 48 kHz). It repeats
+    that period, several times over when it is under 5 ms, because a short cycle repeated alone
+    buzzes. Each wrap of the cycle crossfades into what preceded its start (a quarter of the
+    cycle, at most 2.5 ms). This follows ITU-T G.711 Appendix I.
+  - The first 10 ms play at full level, and the rest fade to silence by `MAX_CONCEALED` (60 ms).
+    A longer gap is a pause, as before, and the history before it is forgotten.
+  - The packet after a gap fades in from the stand-in's continuation over 2.5 ms
+    (`Conceal::take`). Apple's decoder resumes from a state that never saw the lost packet, so
+    that seam is there even when the stand-in is right.
+  - Scored on the harness that measured ropus (MEASUREMENTS "Opus concealment: pitch repeat"),
+    against a clean decode by the same decoder. On speech the SNR went from 13.6 to 17.6 dB at
+    20‰ random loss and from 9.4 to 12.7 at 50‰: level with ropus's own concealment at 20‰ (0.1
+    dB short) and ahead of it at 50‰, 100‰ and in bursts. The lost segments went from -0.9 to +5.1 dB (segmental), and the
+    level from -4.8 dB to 0.0. Leaving a gap now steps as the clean signal does, and entering one
+    steps 3× the clean step where fade-replay stepped 11×. On the synthetic music, waveform SNR
+    is 1.2 dB lower, as with ropus's: a continued waveform whose phase drifts scores worse than
+    a quieter fade. Its spectrum and level are closer.
+  - It costs 22.5 µs a concealed packet (Apple's decode is 27 µs) and allocates nothing after
+    its first gap, which meets the bar the library audit set and ropus did not.
+  - Not taken yet: Opus's own concealment and in-band FEC (LBRR). Apple's decoder does neither,
+    and a pure-Rust decoder (ropus, library audit item 11) is a dependency to weigh on its own.
+  - Tests: `a_periodic_sound_is_continued_in_phase`, `the_next_packet_fades_in_from_the_stand_in`,
+    `a_long_stand_in_fades_to_silence_by_the_cap`, `nothing_is_concealed_without_history_or_past_the_cap`,
+    `a_short_history_is_repeated_as_it_is`. Measurement: `concealment_against_the_clean_decode`
+    (ignored).
+
+- ✅ **Audio datagrams carry earlier packets while the client reports loss** (2026-09-30,
+  `slopty_media::audio`; MEASUREMENTS "Opus concealment: pitch repeat"). A wire change: the
+  audio datagram's payload and two fields of `ReceiverReport`.
+  - An audio datagram carries up to two earlier Opus packets, nearest first, each behind its
+    2-byte length, and the header's `data_count` is one more than the copies. The client decodes
+    the copies that cover the end of a gap, and conceals only what is left. A recovered packet
+    goes to the player as a stand-in does: it keeps the gap's time and says nothing of the
+    depth, because it arrived with the packet after it, not late.
+  - The client's report says how many audio packets arrived in the window and how many the
+    sequence skipped (`audio_received`, `audio_lost`), counted where the datagrams are
+    reassembled. A skipped packet counts as lost even when a copy brought it back, because
+    that is the loss the copies are sized by. Counting only what stayed lost would turn them off
+    as soon as they worked.
+  - `AudioCopies` on the worker turns those counts into none, one or two copies. A lone packet
+    lost now and then stays with concealment. About two in a second (a decaying count with a
+    1 s half-life) turn one copy on, and a pair in one report or about five in a second turn on
+    two. A copy goes 10 s after the loss that asked for it, one at a time, as parity does.
+  - At 20–50‰ random loss one copy brings back 97–98 % of the lost packets, and speech rises
+    from 12.7 to 26.5 dB with pitch concealment for the rest. A copy costs about 120 bytes a
+    datagram, 95 kbit/s, and only while the client reports loss. In bursts one copy recovers
+    44–46 %, which is what the second copy is for.
+  - Tests: `the_copies_come_back_nearest_first`, `the_layout_is_fixed`,
+    `copies_that_do_not_fit_are_left_off`, `a_malformed_audio_payload_is_refused`,
+    `the_copies_follow_the_reported_loss`, `steady_loss_keeps_the_copies` (`slopty-media`),
+    `audio_is_counted_for_the_report` (pipeline), the client's
+    `audio_waits_for_the_player_without_holding_video_and_counts_gaps`, which ends on a gap the
+    copies fill, and the `client_screen_report` golden. The fuzz targets `reassemble` and
+    `feedback` carry copies and drive `AudioCopies`.

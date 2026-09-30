@@ -1,17 +1,18 @@
-//! `VTDecompressionSession` fed Annex B; rebuilds itself from in-band parameter sets, and
-//! again from the next keyframe's after the system took the session away.
+//! `VTDecompressionSession` fed length-prefixed units as they arrive; rebuilds itself from
+//! in-band parameter sets, and again from the next keyframe's after the system took the session
+//! away.
 
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bytes::Bytes;
 use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_media::{
-    CMBlockBuffer, CMFormatDescription, CMSampleBuffer, CMSampleTimingInfo, CMTime,
-    CMVideoFormatDescriptionCreateFromH264ParameterSets,
-    CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMBlockBufferAssureMemoryNowFlag,
-    kCMTimeInvalid,
+    CMBlockBuffer, CMBlockBufferCustomBlockSource, CMFormatDescription, CMSampleBuffer,
+    CMSampleTimingInfo, CMTime, CMVideoFormatDescriptionCreateFromH264ParameterSets,
+    CMVideoFormatDescriptionCreateFromHEVCParameterSets, kCMTimeInvalid,
 };
 use objc2_core_video::{
     CVImageBuffer, CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetWidth,
@@ -28,8 +29,8 @@ use objc2_video_toolbox::{
 use slopty_proto::screen::VideoCodec;
 
 use crate::CodecError;
-use crate::annexb::{AccessUnit, h264, hevc};
 use crate::cf::{self, check};
+use crate::nal::{AccessUnit, h264, hevc};
 
 /// A decoded picture that may cross threads.
 ///
@@ -226,16 +227,21 @@ impl Decoder {
         self.session.is_some()
     }
 
-    /// Decode one Annex B access unit. Output arrives asynchronously through the sink.
+    /// Decode one access unit ([`crate::nal`]). Output arrives asynchronously through the sink.
     ///
-    /// One scan finds the parameter sets and the picture's units; the units are written once,
-    /// length-prefixed, straight into the sample's block buffer.
+    /// A walk over the lengths finds the parameter sets in front; the picture's units behind
+    /// them go to VideoToolbox as they arrived, in a block that holds `access_unit` until
+    /// CoreMedia lets it go, so nothing is scanned or copied.
     ///
     /// A lost session (see [`session_lost`]) is dropped with its parameter sets. A keyframe that
     /// finds it lost rebuilds it and is submitted again, so the frame that could restart the
     /// stream is not the one spent finding out; anything else fails until a keyframe comes, and
     /// [`Self::ready`] turns false to say so.
-    pub fn decode(&mut self, annexb: &[u8], pts_us: u64) -> Result<(), CodecError> {
+    ///
+    /// # Errors
+    ///
+    /// A length that runs past the end, no parameter sets yet, or VideoToolbox's refusal.
+    pub fn decode(&mut self, access_unit: &Bytes, pts_us: u64) -> Result<(), CodecError> {
         if self.shared.lost.load(Ordering::Acquire) {
             tracing::info!("decoder session lost; waiting for a keyframe");
             self.reset();
@@ -244,7 +250,7 @@ impl Decoder {
             VideoCodec::Hevc => hevc::is_parameter_set,
             VideoCodec::H264 => h264::is_parameter_set,
         };
-        let unit = AccessUnit::parse(annexb, is_ps);
+        let unit = AccessUnit::parse(access_unit, is_ps)?;
         let sets = unit.parameter_sets();
         if !sets.is_empty()
             && !sets.iter().copied().eq(self.parameter_sets.iter().map(Vec::as_slice))
@@ -254,16 +260,17 @@ impl Decoder {
         if self.session.is_none() {
             return Err(CodecError::NoParameterSets);
         }
-        if unit.length_prefixed_len() == 0 {
+        let picture = access_unit.slice(unit.picture_at()..);
+        if picture.is_empty() {
             return Ok(());
         }
-        let mut status = self.submit(&unit, pts_us)?;
+        let mut status = self.submit(&picture, pts_us)?;
         if session_lost(status) {
             self.reset();
             if !sets.is_empty() {
                 tracing::info!(status, "decoder session lost; rebuilt from the keyframe");
                 self.rebuild(sets)?;
-                status = self.submit(&unit, pts_us)?;
+                status = self.submit(&picture, pts_us)?;
                 if session_lost(status) {
                     self.reset();
                 }
@@ -282,12 +289,13 @@ impl Decoder {
         Ok(())
     }
 
-    /// Hand one picture to the session; VideoToolbox's status for the submission.
-    fn submit(&self, unit: &AccessUnit<'_>, pts_us: u64) -> Result<i32, CodecError> {
+    /// Hand one picture (its length-prefixed units) to the session; VideoToolbox's status for
+    /// the submission.
+    fn submit(&self, picture: &Bytes, pts_us: u64) -> Result<i32, CodecError> {
         let (Some(session), Some(format)) = (self.session.as_ref(), self.format.as_ref()) else {
             return Err(CodecError::NoParameterSets);
         };
-        let sample = sample_buffer(unit, format, cf::time_us(pts_us))?;
+        let sample = sample_buffer(picture.clone(), format, cf::time_us(pts_us))?;
         let mut info = VTDecodeInfoFlags::empty();
         // SAFETY: the sample buffer is valid and owned by us; the session outlives the call.
         // Frames are returned through the output callback, so no source refcon is needed.
@@ -493,27 +501,49 @@ pub(crate) fn format_description(
     Ok(unsafe { CFRetained::from_raw(out) })
 }
 
-/// A sample buffer holding `unit`'s picture as length-prefixed NAL units, written straight
-/// into the block buffer CoreMedia allocates.
+/// Releases the bytes a block held once CoreMedia disposes of it.
+unsafe extern "C-unwind" fn release_held(
+    refcon: *mut c_void,
+    _block: NonNull<c_void>,
+    _size: usize,
+) {
+    // SAFETY: the refcon is the `Box<Bytes>` `sample_buffer` leaked for this block; CoreMedia
+    // calls `FreeBlock` once, when the block is disposed (CMBlockBuffer.h,
+    // `CMBlockBufferCustomBlockSource`).
+    drop(unsafe { Box::from_raw(refcon.cast::<Bytes>()) });
+}
+
+/// A sample buffer of `picture`'s length-prefixed NAL units with no copy: its block is the
+/// received bytes, which it holds until CoreMedia lets go of them.
 fn sample_buffer(
-    unit: &AccessUnit<'_>,
+    picture: Bytes,
     format: &CMFormatDescription,
     pts: CMTime,
 ) -> Result<CFRetained<CMSampleBuffer>, CodecError> {
-    let size = unit.length_prefixed_len();
+    let size = picture.len();
+    let data = picture.as_ptr().cast_mut().cast::<c_void>();
+    let source = CMBlockBufferCustomBlockSource {
+        version: 0,
+        AllocateBlock: None,
+        FreeBlock: Some(release_held),
+        refCon: Box::into_raw(Box::new(picture)).cast::<c_void>(),
+    };
     let mut block: *mut CMBlockBuffer = ptr::null_mut();
-    // SAFETY: a NULL memory block asks CoreMedia to allocate `size` bytes itself, now
-    // (`kCMBlockBufferAssureMemoryNowFlag`); the out-pointer is valid.
+    // SAFETY: CoreMedia rule: a supplied memory block of `size` readable bytes, which a decoder
+    // only reads; the custom source's `FreeBlock` releases it, and its refcon keeps the bytes
+    // alive until then. The call copies the source struct (CMBlockBuffer.h). Should it fail, the
+    // refcon is left leaked rather than freed twice: CoreMedia does not say whether a failed
+    // create calls `FreeBlock`.
     let status = unsafe {
         CMBlockBuffer::create_with_memory_block(
             None,
-            ptr::null_mut(),
+            data,
             size,
             None,
-            ptr::null(),
+            &raw const source,
             0,
             size,
-            kCMBlockBufferAssureMemoryNowFlag,
+            0,
             NonNull::from(&mut block),
         )
     };
@@ -523,20 +553,6 @@ fn sample_buffer(
     };
     // SAFETY: +1 reference from the create call.
     let block = unsafe { CFRetained::from_raw(block) };
-    let mut contiguous: usize = 0;
-    let mut data: *mut c_char = ptr::null_mut();
-    // SAFETY: CoreMedia rule: the out-pointers are valid; the pointer returned addresses
-    // `contiguous` bytes owned by the block buffer, which lives past the write below.
-    let status =
-        unsafe { block.data_pointer(0, &raw mut contiguous, ptr::null_mut(), &raw mut data) };
-    check("CMBlockBufferGetDataPointer", status)?;
-    if data.is_null() || contiguous < size {
-        return Err(CodecError::Os { call: "CMBlockBufferGetDataPointer", status: -1 });
-    }
-    // SAFETY: `data` addresses `contiguous >= size` writable bytes of the block buffer's one
-    // allocation, which nothing else references yet.
-    let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), size) };
-    unit.write_length_prefixed(out)?;
     let timing = CMSampleTimingInfo {
         // SAFETY: framework-provided constant.
         duration: unsafe { kCMTimeInvalid },
@@ -678,12 +694,13 @@ mod recovery_tests {
         // after it names a reference the decoder never saw: the state a new session is in when
         // anything but a keyframe reaches it.
         let mut sets_only = Vec::new();
-        for set in AccessUnit::parse(&packets[0].data, hevc::is_parameter_set).parameter_sets() {
-            sets_only.extend_from_slice(&crate::annexb::START_CODE);
-            sets_only.extend_from_slice(set);
+        for set in
+            AccessUnit::parse(&packets[0].data, hevc::is_parameter_set).unwrap().parameter_sets()
+        {
+            crate::nal::push(&mut sets_only, set).unwrap();
         }
-        decoder.decode(&sets_only, 0).unwrap();
-        decoder.decode(&packets[1].data, 1).unwrap();
+        decoder.decode(&sets_only.into(), 0).unwrap();
+        decoder.decode(&Bytes::from(packets[1].data.clone()), 1).unwrap();
         settle(&decoder);
         let failed = next(&rx).unwrap_err();
         assert_eq!(failed.pts_us, 1);
@@ -706,9 +723,12 @@ mod recovery_tests {
         }
         let lost = next(&rx).unwrap_err();
         assert_eq!((lost.pts_us, lost.session_lost()), (2, true));
-        assert!(matches!(decoder.decode(&packets[1].data, 3), Err(CodecError::NoParameterSets)));
+        assert!(matches!(
+            decoder.decode(&Bytes::from(packets[1].data.clone()), 3),
+            Err(CodecError::NoParameterSets)
+        ));
         assert!(!decoder.ready(), "the session went with the verdict");
-        decoder.decode(&packets[2].data, 4).unwrap();
+        decoder.decode(&Bytes::from(packets[2].data.clone()), 4).unwrap();
         settle(&decoder);
         assert_eq!(next(&rx), Ok(4), "the next keyframe decodes on a new session");
     }
@@ -721,25 +741,25 @@ mod recovery_tests {
         let packets = stream(&[true, false, false, true, false, true]);
         let (mut decoder, rx) = decoder();
         for (pts, packet) in (0..).zip(&packets[..2]) {
-            decoder.decode(&packet.data, pts).unwrap();
+            decoder.decode(&Bytes::from(packet.data.clone()), pts).unwrap();
         }
         settle(&decoder);
         assert_eq!((next(&rx), next(&rx)), (Ok(0), Ok(1)));
 
         decoder.kill_session();
-        let refused = decoder.decode(&packets[2].data, 2);
+        let refused = decoder.decode(&Bytes::from(packets[2].data.clone()), 2);
         assert!(
             matches!(refused, Err(CodecError::Os { status, .. }) if session_lost(status)),
             "{refused:?}"
         );
         assert!(!decoder.ready());
-        decoder.decode(&packets[3].data, 3).unwrap();
-        decoder.decode(&packets[4].data, 4).unwrap();
+        decoder.decode(&Bytes::from(packets[3].data.clone()), 3).unwrap();
+        decoder.decode(&Bytes::from(packets[4].data.clone()), 4).unwrap();
         settle(&decoder);
         assert_eq!((next(&rx), next(&rx)), (Ok(3), Ok(4)));
 
         decoder.kill_session();
-        decoder.decode(&packets[5].data, 5).unwrap();
+        decoder.decode(&Bytes::from(packets[5].data.clone()), 5).unwrap();
         settle(&decoder);
         assert_eq!(next(&rx), Ok(5), "the keyframe that found it dead was not wasted");
         assert!(rx.try_recv().is_err(), "nothing else came back");
@@ -750,21 +770,20 @@ mod recovery_tests {
 mod tests {
     use super::*;
 
-    /// A 1 MB Annex B keyframe: the warm-up parameter sets, then four slices of noise-free
-    /// bytes with no start-code lookalikes.
+    /// A 1 MB keyframe: the warm-up parameter sets, then four slices of noise-free bytes.
     fn keyframe() -> Vec<u8> {
         let mut out = Vec::new();
         for set in WARM_UP_HEVC {
-            out.extend_from_slice(&crate::annexb::START_CODE);
-            out.extend_from_slice(set);
+            crate::nal::push(&mut out, set).unwrap();
         }
         for n in 0..4_usize {
-            out.extend_from_slice(&crate::annexb::START_CODE);
-            out.push(0x26);
-            out.extend(
-                (0..250_000_usize)
-                    .map(|i| u8::try_from(i.wrapping_add(n) % 250).unwrap_or(0).wrapping_add(1)),
-            );
+            let slice: Vec<u8> =
+                std::iter::once(0x26)
+                    .chain((0..250_000_usize).map(|i| {
+                        u8::try_from(i.wrapping_add(n) % 250).unwrap_or(0).wrapping_add(1)
+                    }))
+                    .collect();
+            crate::nal::push(&mut out, &slice).unwrap();
         }
         out
     }
@@ -775,20 +794,224 @@ mod tests {
     #[test]
     #[ignore = "a measurement; run with `cargo xtask bench`"]
     fn access_unit_conversion_cost() {
-        let unit = keyframe();
+        let unit = Bytes::from(keyframe());
         let sets: Vec<Vec<u8>> = WARM_UP_HEVC.iter().map(|s| s.to_vec()).collect();
         let format = format_description(VideoCodec::Hevc, &sets).unwrap();
         let mut convert = slopty_testkit::bench::Bench::new("codec.access_unit_conversion_cost")
             .series("keyframe");
         for _ in 0..500 {
             convert.time(|| {
-                let access = AccessUnit::parse(&unit, hevc::is_parameter_set);
+                let access = AccessUnit::parse(&unit, hevc::is_parameter_set).unwrap();
                 assert_eq!(access.parameter_sets().len(), 3);
-                let sample = sample_buffer(&access, &format, cf::time_us(0)).unwrap();
-                drop(sample);
+                let picture = unit.slice(access.picture_at()..);
+                drop(sample_buffer(picture, &format, cf::time_us(0)).unwrap());
             });
         }
         eprintln!("keyframe {} B", unit.len());
         convert.report().unwrap();
+    }
+
+    /// The block holds the received bytes, not a copy, and lets them go with the sample.
+    #[test]
+    fn a_sample_holds_the_received_bytes_until_it_is_released() {
+        use std::ffi::c_char;
+
+        let unit = Bytes::from(keyframe());
+        let sets: Vec<Vec<u8>> = WARM_UP_HEVC.iter().map(|s| s.to_vec()).collect();
+        let format = format_description(VideoCodec::Hevc, &sets).unwrap();
+        let access = AccessUnit::parse(&unit, hevc::is_parameter_set).unwrap();
+        let picture = unit.slice(access.picture_at()..);
+        let (at, len) = (picture.as_ptr(), picture.len());
+        let sample = sample_buffer(picture, &format, cf::time_us(0)).unwrap();
+        // SAFETY: CoreMedia rule: a valid sample buffer.
+        let block = unsafe { sample.data_buffer() }.unwrap();
+        let mut data: *mut c_char = ptr::null_mut();
+        let mut contiguous = 0_usize;
+        // SAFETY: CoreMedia rule: valid out-pointers; the pointer is only compared.
+        let status =
+            unsafe { block.data_pointer(0, &raw mut contiguous, ptr::null_mut(), &raw mut data) };
+        assert_eq!((status, contiguous), (0, len));
+        assert_eq!(data.cast::<u8>().cast_const(), at, "the received bytes, not a copy");
+        drop(block);
+        assert!(!unit.is_unique(), "the sample still holds them");
+        drop(sample);
+        assert!(unit.is_unique(), "released with the sample");
+    }
+}
+
+/// What handing a received access unit to the decoder costs, on the worker's own session's
+/// output (`docs/MEASUREMENTS.md`, "HEVC travels length-prefixed").
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    reason = "a measurement fixture: pixel and byte arithmetic on small, bounded values"
+)]
+mod decode_cost {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use objc2_core_video::{
+        CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
+        CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+        CVPixelBufferUnlockBaseAddress,
+    };
+    use slopty_testkit::bench::Bench;
+
+    use super::*;
+    use crate::{EncodedPacket, Encoder, EncoderConfig, FrameOptions};
+
+    fn hash(mut x: u64) -> u64 {
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        x ^ (x >> 33)
+    }
+
+    /// A full-range NV12 picture of text: 8 × 16 cells of one-pixel strokes on a dark ground,
+    /// some tokens coloured, lines of ragged length, shifted up `scroll` rows.
+    fn text(w: usize, h: usize, scroll: usize) -> CFRetained<CVPixelBuffer> {
+        let mut raw: *mut CVPixelBuffer = ptr::null_mut();
+        // SAFETY: CoreVideo rule: a valid out-pointer and no attributes.
+        let status = unsafe {
+            CVPixelBufferCreate(
+                None,
+                w,
+                h,
+                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                None,
+                NonNull::from(&mut raw),
+            )
+        };
+        assert_eq!(status, 0, "CVPixelBufferCreate");
+        // SAFETY: +1 reference from the create call.
+        let image = unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) };
+        // SAFETY: CoreVideo rule: lock before touching the planes.
+        let locked =
+            unsafe { CVPixelBufferLockBaseAddress(&image, CVPixelBufferLockFlags::empty()) };
+        assert_eq!(locked, 0, "lock");
+        let cols = w / 8;
+        let (luma, chroma) = (
+            CVPixelBufferGetBaseAddressOfPlane(&image, 0).cast::<u8>(),
+            CVPixelBufferGetBaseAddressOfPlane(&image, 1).cast::<u8>(),
+        );
+        let (luma_stride, chroma_stride) = (
+            CVPixelBufferGetBytesPerRowOfPlane(&image, 0),
+            CVPixelBufferGetBytesPerRowOfPlane(&image, 1),
+        );
+        for y in 0..h {
+            // SAFETY: the planes are locked; row `y < h` of luma starts inside it.
+            let row = unsafe { luma.add(y * luma_stride) };
+            // SAFETY: and row `y / 2` of chroma inside its plane.
+            let colour = unsafe { chroma.add(y / 2 * chroma_stride) };
+            // SAFETY: the luma row spans `w` writable bytes of its locked plane.
+            let row = unsafe { std::slice::from_raw_parts_mut(row, w) };
+            // SAFETY: so does the chroma row of its own, which the luma row does not overlap.
+            let colour = unsafe { std::slice::from_raw_parts_mut(colour, w) };
+            row.fill(30);
+            if y % 2 == 0 {
+                colour.fill(128);
+            }
+            let sy = y + scroll;
+            let (line, gy) = (sy / 16, sy % 16);
+            let line_len = (hash(line as u64) % cols as u64) as usize;
+            if !(2..14).contains(&gy) {
+                continue;
+            }
+            for col in 0..line_len {
+                let token = hash(((line as u64) << 20) | (col as u64 / 5));
+                if token.is_multiple_of(7) {
+                    continue;
+                }
+                let glyph = hash(((line as u64) << 32) | col as u64 | (1 << 60));
+                let row_in = gy - 2;
+                for gx in 1..7 {
+                    let on = gx == 1 + (glyph % 3) as usize
+                        || (gx == 4 + (glyph >> 2) as usize % 3 && !(glyph >> 9).is_multiple_of(3))
+                        || row_in == (glyph >> 4) as usize % 4
+                        || (row_in == 11 && (glyph >> 13).is_multiple_of(2));
+                    if on {
+                        row[col * 8 + gx] = 180 + (token % 60) as u8;
+                        if y % 2 == 0 && !token.is_multiple_of(3) {
+                            let x = (col * 8 + gx) & !1;
+                            colour[x] = 64 + (token >> 8) as u8 % 128;
+                            colour[x + 1] = 64 + (token >> 16) as u8 % 128;
+                        }
+                    }
+                }
+            }
+        }
+        // SAFETY: matches the lock above.
+        let unlocked =
+            unsafe { CVPixelBufferUnlockBaseAddress(&image, CVPixelBufferLockFlags::empty()) };
+        assert_eq!(unlocked, 0, "unlock");
+        image
+    }
+
+    /// The worker's session fed `frames` pictures of text scrolling a line a frame: a keyframe,
+    /// then P-frames.
+    fn encoded(w: usize, h: usize, bitrate_bps: u32, frames: usize) -> Vec<EncodedPacket> {
+        let (tx, rx) = mpsc::channel();
+        let config = EncoderConfig {
+            width: w as u32,
+            height: h as u32,
+            codec: VideoCodec::Hevc,
+            fps: 60,
+            bitrate_bps,
+            chroma: crate::Chroma::Subsampled,
+        };
+        let encoder = Encoder::new(config, move |packet| {
+            let _receiver_gone = tx.send(packet);
+        })
+        .unwrap();
+        for i in 0..frames {
+            let options = FrameOptions { force_keyframe: i == 0, ..FrameOptions::default() };
+            encoder.encode(&text(w, h, i * 16), i as u64 * 16_667, &options).unwrap();
+        }
+        encoder.flush().unwrap();
+        let packets: Vec<EncodedPacket> =
+            (0..frames).map_while(|_| rx.recv_timeout(Duration::from_secs(30)).ok()).collect();
+        assert_eq!(packets.len(), frames, "every picture encoded");
+        packets
+    }
+
+    /// What `Decoder::decode` costs the client's stream task for the keyframe that restarts a
+    /// stream after loss, and for a P-frame: the worker's own session's output for scrolling
+    /// text at 1080p and 4K, handed to a live session, the submit timed and the decode awaited
+    /// outside it. `cargo xtask bench --filter decode_cost` runs it.
+    #[test]
+    #[ignore = "a measurement; run with `cargo xtask bench`"]
+    fn decode_cost() {
+        let bench = Bench::new("codec.decode_cost");
+        for (w, h, bps, label) in
+            [(1920, 1088, 16_000_000, "1080p"), (3840, 2160, 40_000_000, "4k")]
+        {
+            let packets: Vec<Bytes> =
+                encoded(w, h, bps, 30).into_iter().map(|p| Bytes::from(p.data)).collect();
+            let mut decoder = Decoder::new(VideoCodec::Hevc, |_frame| {});
+            decoder.decode(&packets[0], 0).unwrap();
+            let mut pts = 1;
+            for (kind, packet) in [("key", &packets[0]), ("p", &packets[1])] {
+                let mut series = bench.series(&format!("{kind}_{label}"));
+                for _ in 0..200 {
+                    if kind == "key" {
+                        series.time(|| decoder.decode(packet, pts).unwrap());
+                    } else {
+                        decoder.decode(&packets[0], pts).unwrap();
+                        pts += 1;
+                        series.time(|| decoder.decode(packet, pts).unwrap());
+                    }
+                    pts += 1;
+                    let session = decoder.session.as_ref().unwrap();
+                    // SAFETY: VideoToolbox rule: a live session; the call blocks until every
+                    // frame submitted has been emitted.
+                    assert_eq!(unsafe { session.wait_for_asynchronous_frames() }, 0);
+                }
+                eprintln!("{kind}_{label}: {} B", packet.len());
+                series.report().unwrap();
+            }
+        }
     }
 }

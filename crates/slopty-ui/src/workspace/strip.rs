@@ -491,6 +491,9 @@ impl WorkspaceView {
     fn strip_resized(&mut self, size: gpui::Size<Pixels>, cx: &mut Context<Self>) {
         self.layout.set_viewport(f32::from(size.width), f32::from(size.height));
         cx.notify();
+        // The tiles are placed from the layout just changed, and the strip's view is drawn
+        // again only when told.
+        App::notify(cx, self.strip_host.entity_id());
     }
 
     /// The tiles on screen in this build: `visible`, remote ones first seen off screen from
@@ -961,7 +964,7 @@ impl WorkspaceView {
                             width: px(OVERVIEW_EDGE),
                             offset: px(0.0),
                         };
-                        kit::elevate(el, theme).outline(ring)
+                        kit::elevate(el, theme).outline_ring(ring)
                     } else {
                         el.border_1().border_color(hsla(s.border))
                     }
@@ -1158,8 +1161,9 @@ impl WorkspaceView {
                 .child(section("empty-workers", "Workers").children(workers))
         };
         // The strip is the content step with or without a tile on it: the empty workspace is
-        // the page a tile would be, not a hole down to the bars' `canvas`.
-        let top = f32::from(self.drawn.viewport.get().size.height) * kit::MODAL_ANCHOR;
+        // the page a tile would be, not a hole down to the bars' `canvas`. It starts a fifth of
+        // the way down, where a dialog sits, by this frame's layout: the strip's size as the
+        // last frame measured it is a frame behind chrome that comes or goes.
         div()
             .id("empty-workspace")
             .absolute()
@@ -1170,11 +1174,13 @@ impl WorkspaceView {
             .flex_col()
             .items_center()
             .px(px(spacing.md))
-            .pt(px(top))
-            .pb(px(spacing.xl))
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
-            .child(column)
+            .child(div().flex_none().w_full().h(gpui::relative(kit::MODAL_ANCHOR)))
+            // Slopty's mark, centred over the page's words: its cursor lit while a worker is
+            // reachable ([`super::about::Mark`]).
+            .child(div().flex_none().pb(px(spacing.xl)).child(self.empty_mark.clone()))
+            .child(column.pb(px(spacing.xl)))
             .into_any_element()
     }
 

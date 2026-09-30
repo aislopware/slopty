@@ -467,6 +467,10 @@ stage quit
 
 /// Start one app process named `name` under `root` (its data directory is `root/<name>`, its
 /// test socket `root/<name>.sock`) and connect to its socket. `env` overrides the defaults.
+/// The grants every app is told its workers hold unless a test says otherwise: all of them, the
+/// state a working Mac is in, whatever this machine granted the worker's binary.
+const ALL_GRANTED: &str = "screen-recording,accessibility";
+
 async fn spawn_app(
     root: &Path,
     name: &str,
@@ -486,6 +490,7 @@ async fn spawn_app(
         // Local echo would put predicted text in the rows before the worker confirms it.
         .env("SLOPTY_PREDICT", "never")
         .env(crate::TAILNET_STATUS_ENV, &tailnet)
+        .env(crate::WORKER_GRANTS_ENV, ALL_GRANTED)
         .envs(env.iter().copied())
         .env(PASTEBOARD_ENV, pasteboard_name(root, name))
         .stdin(Stdio::null())
@@ -567,6 +572,7 @@ async fn spawn_simulator_app(
         .env("SIMCTL_CHILD_SLOPTY_DATA_DIR", &app_dir)
         .env(format!("SIMCTL_CHILD_{}", crate::SOCKET_ENV), &app_sock)
         .env("SIMCTL_CHILD_SLOPTY_PREDICT", "never")
+        .env(format!("SIMCTL_CHILD_{}", crate::WORKER_GRANTS_ENV), ALL_GRANTED)
         // Glass only: the key bar stays in the frame whatever the simulator has attached.
         .env("SIMCTL_CHILD_SLOPTY_HARDWARE_KEYBOARD", "0")
         .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))

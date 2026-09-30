@@ -16,6 +16,8 @@
 //! on a bulk stream and goes back on one, which the link does out of sight. A file past the cap
 //! says so and offers to open it in a terminal instead, in `$EDITOR` or `$PAGER`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -25,8 +27,10 @@ use gpui::{
 };
 use gpui_kit::component::input::{
     Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, RopeExt as _,
+    RangeDecorationStyle, Rope, RopeExt as _,
 };
+use slopty_client::layout::WorkerKey;
+use slopty_client::unsaved::Unsaved;
 use slopty_core::{ItemId, WallMs};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_proto::handoff::{EditOutcome, HandoffId};
@@ -150,6 +154,91 @@ pub enum Trouble {
     Failed(String),
 }
 
+/// Numbers every change to a tile's text across all tiles, so of two tiles' edits to one file
+/// the later is known. Zero is an edit kept from before the app started.
+static EDITS: AtomicU64 = AtomicU64::new(0);
+
+fn next_edit() -> u64 {
+    EDITS.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+}
+
+/// Where a tile's unsaved edit stands, told apart without reading its text: the backup of it
+/// is behind when this differs from the one it was written with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark {
+    /// The text's last change, numbered across all tiles; of two edits to one file, the later
+    /// has the larger.
+    pub edit: u64,
+    /// The file ends with a newline.
+    pub newline: bool,
+    /// The modification time of the version the edit is based on.
+    pub base_modified_ms: Option<WallMs>,
+    /// The disk moved on under the edit.
+    pub conflict: bool,
+}
+
+/// A tile's unsaved edit as its backup keeps it, taken without copying the text: the editor's
+/// rope is shared in O(1), and read out into a string off the UI thread ([`Self::unsaved`]).
+#[derive(Clone)]
+pub struct Backup {
+    /// The worker the file is on.
+    pub worker: WorkerKey,
+    /// The file tile it was typed in.
+    pub item: ItemId,
+    /// Its path there.
+    pub path: String,
+    /// The editor's text, without the final newline.
+    pub text: Rope,
+    /// Where the edit stands.
+    pub mark: Mark,
+}
+
+impl std::fmt::Debug for Backup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Backup")
+            .field("worker", &self.worker)
+            .field("item", &self.item)
+            .field("path", &self.path)
+            .field("bytes", &self.text.len())
+            .field("mark", &self.mark)
+            .finish()
+    }
+}
+
+impl Backup {
+    /// A backup read back from the store: an edit from before this run ([`Mark::edit`] zero).
+    #[must_use]
+    pub fn kept(unsaved: &Unsaved) -> Self {
+        Self {
+            worker: unsaved.worker,
+            item: unsaved.item,
+            path: unsaved.path.clone(),
+            text: Rope::from_str(&unsaved.text),
+            mark: Mark {
+                edit: 0,
+                newline: unsaved.newline,
+                base_modified_ms: unsaved.base_modified_ms,
+                conflict: unsaved.conflict,
+            },
+        }
+    }
+
+    /// What the store writes, the text read out whole: kept at `kept_ms`.
+    #[must_use]
+    pub fn unsaved(&self, kept_ms: WallMs) -> Unsaved {
+        Unsaved {
+            worker: self.worker,
+            item: self.item,
+            path: self.path.clone(),
+            text: self.text.to_string(),
+            newline: self.mark.newline,
+            base_modified_ms: self.mark.base_modified_ms,
+            conflict: self.mark.conflict,
+            kept_ms,
+        }
+    }
+}
+
 /// A program waiting on the tile's file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Waiting {
@@ -229,6 +318,8 @@ pub fn pager_command(path: &str) -> String {
 /// The view of one file item.
 pub struct FileView {
     id: ItemId,
+    /// The worker the file is on.
+    worker: WorkerKey,
     path: String,
     /// What the worker last said, `None` until it answers.
     read: Option<FileRead>,
@@ -271,6 +362,11 @@ pub struct FileView {
     /// The program in a shell that waits for this file (`$EDITOR` handed it here), until the
     /// person is done with it or the program goes away.
     waiting: Option<Waiting>,
+    /// An edit kept from before the app last ended, laid over the first read
+    /// ([`Self::restore`]).
+    restoring: Option<Backup>,
+    /// The text's last change, numbered across all tiles ([`Mark::edit`]).
+    edit: u64,
     /// The grammar the path (or first line) names; none for a file the bundle cannot colour.
     syntax: Option<Syntax>,
     /// The editor's events, and its every change marking this view dirty: the tile draws
@@ -291,9 +387,10 @@ impl std::fmt::Debug for FileView {
 }
 
 impl FileView {
-    /// A tile for `path`, waiting on the worker.
+    /// A tile for `path` on `worker`, waiting on the worker.
     pub fn new(
         id: ItemId,
+        worker: WorkerKey,
         path: &str,
         theme: Theme,
         window: &mut Window,
@@ -314,6 +411,7 @@ impl FileView {
         let redraw = cx.observe(&editor, |_this, _editor, cx| cx.notify());
         Self {
             id,
+            worker,
             path: path.to_owned(),
             read: None,
             base: None,
@@ -335,6 +433,8 @@ impl FileView {
             theme,
             search: None,
             waiting: None,
+            restoring: None,
+            edit: 0,
             syntax: None,
             _editor_events: [events, redraw],
         }
@@ -476,6 +576,7 @@ impl FileView {
 
     /// The editor's text changed by a keystroke (a replace from here emits nothing).
     fn edited(&mut self, cx: &mut Context<Self>) {
+        self.edit = next_edit();
         let dirty = self.base.as_ref().is_some_and(|base| {
             // Most keystrokes change the length, which settles it without reading the text.
             let text = self.editor.read(cx).text();
@@ -500,6 +601,14 @@ impl FileView {
 
     /// The worker read the file (the first time, after a change on disk, or on "Reload").
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
+        if !matches!(read, FileRead::Streamed { .. })
+            && let Some(kept) = self.restoring.take()
+        {
+            self.restore_over(&read, &kept, cx);
+            self.read = Some(read);
+            cx.notify();
+            return;
+        }
         match &read {
             FileRead::Text { text, modified_ms, final_newline, .. } => {
                 let incoming = Version::of(text, *final_newline, *modified_ms);
@@ -555,6 +664,100 @@ impl FileView {
         if !stale {
             self.trouble = Some(Trouble::Conflict);
         }
+    }
+
+    /// Lay `kept`, an edit from before the app last ended, over the first read: the tile holds
+    /// it unsaved, based on what the disk has now. When the disk moved on since the edit
+    /// started (or was already said to), or no longer holds text, it is a conflict: "Reload"
+    /// takes the disk's, "Overwrite" the edit.
+    fn restore_over(&mut self, read: &FileRead, kept: &Backup, cx: &mut Context<Self>) {
+        let disk = match read {
+            FileRead::Text { text, modified_ms, final_newline, .. } => {
+                Version::of(text, *final_newline, *modified_ms)
+            }
+            _ => Version {
+                text: String::new(),
+                newline: kept.mark.newline,
+                modified_ms: WallMs::ZERO,
+            },
+        };
+        let text_read = matches!(read, FileRead::Text { .. });
+        if text_read && kept.text == *disk.text {
+            tracing::info!(path = %self.path, "a kept edit the disk already has");
+            self.replace(disk, cx);
+            return;
+        }
+        let Mark { conflict, base_modified_ms, .. } = kept.mark;
+        tracing::info!(path = %self.path, conflict, "an unsaved edit restored");
+        let moved = !text_read || conflict || base_modified_ms != Some(disk.modified_ms);
+        self.replace(disk, cx);
+        self.pending_text = Some(kept.text.to_string());
+        self.pending_line = self.focus;
+        self.changed.clear();
+        self.dirty = true;
+        self.edit = kept.mark.edit;
+        if moved {
+            self.trouble = Some(Trouble::Conflict);
+        }
+    }
+
+    /// Lay `kept`, an edit from before the app last ended, over the file: at once when the
+    /// first read is in, else when it comes ([`Self::set_read`]). A tile already edited keeps
+    /// its own edit, the later one.
+    pub fn restore(&mut self, kept: Backup, cx: &mut Context<Self>) {
+        if self.dirty {
+            return;
+        }
+        match self.read.take() {
+            Some(read) if !matches!(read, FileRead::Streamed { .. }) => {
+                self.restore_over(&read, &kept, cx);
+                self.read = Some(read);
+                cx.notify();
+            }
+            read => {
+                self.read = read;
+                self.restoring = Some(kept);
+            }
+        }
+    }
+
+    /// The worker the file is on.
+    #[must_use]
+    pub const fn worker(&self) -> WorkerKey {
+        self.worker
+    }
+
+    /// Where the unsaved edit stands, while there is one not on disk; `None` when the tile is
+    /// clean, or has no text yet. Reads no text: a pass over every tile costs nothing per byte.
+    #[must_use]
+    pub fn backup_mark(&self) -> Option<Mark> {
+        if let Some(kept) = &self.restoring {
+            return Some(kept.mark);
+        }
+        let base = self.base.as_ref().filter(|_| self.dirty)?;
+        Some(Mark {
+            edit: self.edit,
+            newline: base.newline,
+            base_modified_ms: (base.modified_ms != WallMs::ZERO).then_some(base.modified_ms),
+            conflict: self.trouble == Some(Trouble::Conflict),
+        })
+    }
+
+    /// The edit as a backup keeps it, while there is one not on disk: the whole text, the
+    /// final newline, the version it started from, and whether the disk moved on under it.
+    /// One still waiting to be laid over the first read is that edit. The text is shared with
+    /// the editor, not copied.
+    #[must_use]
+    pub fn backup(&self, cx: &gpui::App) -> Option<Backup> {
+        if let Some(kept) = &self.restoring {
+            return Some(kept.clone());
+        }
+        let mark = self.backup_mark()?;
+        let text = match &self.pending_text {
+            Some(text) => Rope::from_str(text),
+            None => self.editor.read(cx).text().clone(),
+        };
+        Some(Backup { worker: self.worker, item: self.id, path: self.path.clone(), text, mark })
     }
 
     /// The text becomes `incoming`, the edit (if any) dropped.

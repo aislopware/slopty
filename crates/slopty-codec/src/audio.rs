@@ -13,9 +13,14 @@ use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
+#[cfg(not(slopty_loom))]
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 use std::time::{Duration, Instant};
 
+// The ring on loom's atomics, which `ring_model` checks over every interleaving.
+#[cfg(slopty_loom)]
+use loom::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 use objc2_audio_toolbox::{
     AURenderCallbackStruct, AudioComponentDescription, AudioComponentFindNext,
     AudioComponentInstanceDispose, AudioComponentInstanceNew, AudioConverterDispose,
@@ -64,43 +69,223 @@ const SAMPLE_BYTES: usize = size_of::<f32>();
 /// longer sounds worse than silence, and the ring underruns to silence on its own.
 pub const MAX_CONCEALED: u32 = 6;
 
+/// Frames a packet lasts.
+const PACKET_FRAMES: usize = FRAME_SAMPLES as usize;
+/// What [`Conceal`] keeps of what was played, frames: 60 ms, twice the longest cycle it repeats
+/// and the search's window behind the longest period.
+const HISTORY_FRAMES: usize = 6 * PACKET_FRAMES;
+/// The shortest and longest pitch period searched, frames: 2.5 ms (400 Hz) to 15 ms (67 Hz).
+const MIN_PERIOD: usize = 120;
+const MAX_PERIOD: usize = 720;
+/// The stretch the period is matched over, frames (10 ms).
+const PITCH_WINDOW: usize = PACKET_FRAMES;
+/// The coarse search runs on a mono downmix at a quarter of the rate.
+const DECIMATE: usize = 4;
+/// The shortest cycle repeated, frames (5 ms): a short period is repeated as several, which
+/// buzzes less than one repeated alone.
+const MIN_CYCLE: usize = 240;
+/// The longest crossfade at a cycle's wrap, frames.
+const MAX_WRAP_FADE: usize = 120;
+/// How much of a stand-in plays at full level before it fades, frames (10 ms); it reaches
+/// silence at [`MAX_CONCEALED`] packets.
+const FULL_LEVEL_FRAMES: usize = PACKET_FRAMES;
+/// The crossfade from a stand-in into the next real packet, frames (2.5 ms).
+const MERGE_FRAMES: usize = 120;
+
 /// Packet-loss concealment without the decoder's help.
 ///
-/// Apple's Opus decoder takes no empty packet for it, so the last decoded packet stands in for
-/// a short gap, replayed with a linear fade to silence across the gap: a lost packet is a dip
-/// instead of a click. The stand-in keeps the ring's timing too: the gap took 10 ms per packet
-/// on the worker, and playing that long keeps the next real packet from arriving early.
+/// Apple's Opus decoder takes no empty packet for its own concealment, so a short gap is
+/// filled here by repeating the last pitch period of what was played (in the manner of ITU-T
+/// G.711 Appendix I). The period is the lag at which the last 10 ms best match what came before
+/// them, found on a mono downmix at 12 kHz and refined at 48 kHz. A period under 5 ms is
+/// repeated as several, and each wrap of the cycle is crossfaded into what preceded its start.
+/// The first 10 ms play at full level, and the rest fade to silence by [`MAX_CONCEALED`]
+/// packets. The next real packet is crossfaded in from the stand-in's continuation over
+/// 2.5 ms ([`Self::take`]): Apple's decoder also resumes from a state that never saw the lost
+/// packet. The stand-in keeps the ring's timing too: the gap took 10 ms per packet on the
+/// worker, and playing that long keeps the next real packet from arriving early.
 #[derive(Debug, Default)]
 pub struct Conceal {
-    last: Vec<f32>,
+    /// What was played, interleaved, the newest last; at most [`HISTORY_FRAMES`].
+    history: Vec<f32>,
+    /// The stand-in's continuation past the gap, for the next packet to fade in from.
+    tail: Vec<f32>,
+    /// The next packet with the continuation faded into it.
+    merged: Vec<f32>,
+    /// The mono downmix the coarse search runs on.
+    mono: Vec<f32>,
+    /// The mono downmix the search is refined on, at the full rate.
+    full: Vec<f32>,
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "frame counts and indices bounded by HISTORY_FRAMES and MAX_CONCEALED packets, \
+              which no usize overflows; every sample read goes through `get`"
+)]
 impl Conceal {
-    /// Remember the packet just decoded.
-    pub fn remember(&mut self, pcm: &[f32]) {
-        self.last.clear();
-        self.last.extend_from_slice(pcm);
+    /// The packet to play for `pcm`, just decoded: crossfaded in from the stand-in before it,
+    /// when a gap was concealed, and remembered.
+    pub fn take<'a>(&'a mut self, pcm: &'a [f32]) -> &'a [f32] {
+        if self.tail.is_empty() || pcm.len() < self.tail.len() {
+            self.tail.clear();
+            self.keep(pcm);
+            return pcm;
+        }
+        self.merged.clear();
+        self.merged.extend_from_slice(pcm);
+        let frames = self.tail.len() / SAMPLES_PER_FRAME;
+        for (i, (out, from)) in self.merged.iter_mut().zip(&self.tail).enumerate() {
+            let w = ramp(i / SAMPLES_PER_FRAME, frames);
+            *out = from.mul_add(1.0 - w, *out * w);
+        }
+        self.tail.clear();
+        let merged = std::mem::take(&mut self.merged);
+        self.keep(&merged);
+        self.merged = merged;
+        &self.merged
     }
 
-    /// Append samples standing in for `missing` packets, oldest first: the remembered packet
-    /// fading from full level to silence over `min(missing, MAX_CONCEALED)` packets. Nothing
-    /// when nothing was remembered or the gap is longer than that.
-    pub fn fill(&self, missing: u32, out: &mut Vec<f32>) {
-        if missing == 0 || missing > MAX_CONCEALED || self.last.is_empty() {
-            return;
-        }
-        let len = self.last.len();
-        let total = usize::try_from(missing).unwrap_or(1).saturating_mul(len).max(1);
-        out.reserve(total);
-        #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
-        let total_f = total as f32;
-        for i in 0..total {
-            let sample = self.last.get(i.checked_rem(len).unwrap_or(0)).copied().unwrap_or(0.0);
-            #[expect(clippy::cast_precision_loss, reason = "sample counts are small")]
-            let gain = 1.0 - (i as f32 + 1.0) / total_f;
-            out.push(sample * gain);
+    /// Append `played` to the history, dropping what falls out of it.
+    fn keep(&mut self, played: &[f32]) {
+        self.history.extend_from_slice(played);
+        let cap = HISTORY_FRAMES * SAMPLES_PER_FRAME;
+        if let Some(excess) = self.history.len().checked_sub(cap) {
+            self.history.drain(..excess);
         }
     }
+
+    /// Append samples standing in for `missing` packets. Nothing when nothing was played yet or
+    /// the gap is longer than [`MAX_CONCEALED`]: that is a pause, which the ring plays as
+    /// silence, and what came before it is forgotten.
+    pub fn fill(&mut self, missing: u32, out: &mut Vec<f32>) {
+        self.tail.clear();
+        if missing > MAX_CONCEALED {
+            self.history.clear();
+            return;
+        }
+        let frames = self.history.len() / SAMPLES_PER_FRAME;
+        if missing == 0 || frames == 0 {
+            return;
+        }
+        let cycle = self.cycle(frames);
+        let wrap_fade = (cycle / 4).min(MAX_WRAP_FADE);
+        let base = frames - cycle;
+        let at = |frame: usize, channel: usize| {
+            self.history.get(frame * SAMPLES_PER_FRAME + channel).copied().unwrap_or(0.0)
+        };
+        let gap = usize::try_from(missing).unwrap_or(0) * PACKET_FRAMES;
+        let limit = usize::try_from(MAX_CONCEALED).unwrap_or(0) * PACKET_FRAMES;
+        let start = out.len();
+        out.reserve((gap + MERGE_FRAMES) * SAMPLES_PER_FRAME);
+        for t in 0..gap + MERGE_FRAMES {
+            let j = t % cycle;
+            let gain = level(t, limit);
+            // Near the wrap, towards what preceded the cycle's start, which the wrap returns to.
+            let into_wrap = (j + wrap_fade).checked_sub(cycle).filter(|_| base >= cycle);
+            for channel in 0..SAMPLES_PER_FRAME {
+                let mut sample = at(base + j, channel);
+                if let Some(k) = into_wrap {
+                    let w = ramp(k, wrap_fade);
+                    sample = sample.mul_add(1.0 - w, at(base + j - cycle, channel) * w);
+                }
+                out.push(sample * gain);
+            }
+        }
+        let end = start + gap * SAMPLES_PER_FRAME;
+        self.tail.extend(out.drain(end..));
+        self.keep(out.get(start..).unwrap_or_default());
+    }
+
+    /// The stretch repeated, frames: the pitch period, as many times over as reach
+    /// [`MIN_CYCLE`], and no more than half the history, so a wrap has what preceded the
+    /// cycle to fade into. With too little history for a search, what there is.
+    fn cycle(&mut self, frames: usize) -> usize {
+        if frames < PITCH_WINDOW + MAX_PERIOD {
+            return frames;
+        }
+        let period = self.pitch(frames);
+        let cycle = period * MIN_CYCLE.div_ceil(period);
+        if cycle * 2 <= frames { cycle } else { period }
+    }
+
+    /// The pitch period of the history's end, frames: the lag at which the last
+    /// [`PITCH_WINDOW`] frames best match (normalised cross-correlation) the ones before them.
+    fn pitch(&mut self, frames: usize) -> usize {
+        let span = PITCH_WINDOW + MAX_PERIOD;
+        let first = frames - span;
+        self.mono.clear();
+        self.mono.extend(
+            self.history
+                .get(first * SAMPLES_PER_FRAME..)
+                .unwrap_or_default()
+                .as_chunks::<{ DECIMATE * SAMPLES_PER_FRAME }>()
+                .0
+                .iter()
+                .map(|block| block.iter().sum::<f32>()),
+        );
+        let coarse = best_lag(
+            &self.mono,
+            PITCH_WINDOW / DECIMATE,
+            MIN_PERIOD / DECIMATE..=MAX_PERIOD / DECIMATE,
+        );
+        let mono = |frame: usize| {
+            let i = (first + frame) * SAMPLES_PER_FRAME;
+            self.history.get(i..i + SAMPLES_PER_FRAME).map_or(0.0, |f| f.iter().sum::<f32>())
+        };
+        let mut full = std::mem::take(&mut self.full);
+        full.clear();
+        full.extend((0..span).map(mono));
+        let around = coarse * DECIMATE;
+        let lags =
+            around.saturating_sub(DECIMATE).max(MIN_PERIOD)..=(around + DECIMATE).min(MAX_PERIOD);
+        let lag = best_lag(&full, PITCH_WINDOW, lags);
+        self.full = full;
+        lag
+    }
+}
+
+/// The lag in `lags` at which the last `window` samples of `x` best match the `window` before
+/// it by that lag: the largest normalised cross-correlation. `x` holds `window` plus the
+/// longest lag.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "frame counts and indices bounded by HISTORY_FRAMES and MAX_CONCEALED packets, \
+              which no usize overflows; every sample read goes through `get`"
+)]
+fn best_lag(x: &[f32], window: usize, lags: std::ops::RangeInclusive<usize>) -> usize {
+    let end = x.len();
+    let target = x.get(end.saturating_sub(window)..).unwrap_or_default();
+    let mut best = (*lags.start(), f32::MIN);
+    for lag in lags {
+        let Some(from) = end.checked_sub(window + lag) else { break };
+        let earlier = x.get(from..from + window).unwrap_or_default();
+        let (dot, energy) = target
+            .iter()
+            .zip(earlier)
+            .fold((0.0_f32, 0.0_f32), |(d, e), (a, b)| (a.mul_add(*b, d), b.mul_add(*b, e)));
+        let score = dot / energy.max(f32::EPSILON).sqrt();
+        if score > best.1 {
+            best = (lag, score);
+        }
+    }
+    best.0
+}
+
+/// The weight of the incoming side `k` frames into a crossfade of `len`, rising towards 1.
+fn ramp(k: usize, len: usize) -> f32 {
+    #[expect(clippy::cast_precision_loss, reason = "frame counts under a few thousand")]
+    let w = (k as f32 + 1.0) / (len as f32 + 1.0);
+    w
+}
+
+/// The level of a stand-in `t` frames into it: full for [`FULL_LEVEL_FRAMES`], then falling
+/// linearly to silence at `limit`.
+fn level(t: usize, limit: usize) -> f32 {
+    let Some(past) = t.checked_sub(FULL_LEVEL_FRAMES) else { return 1.0 };
+    #[expect(clippy::cast_precision_loss, reason = "frame counts under a few thousand")]
+    let fall = past as f32 / limit.saturating_sub(FULL_LEVEL_FRAMES).max(1) as f32;
+    (1.0 - fall).max(0.0)
 }
 
 /// A byte or sample count as the `u32` the C structs carry; saturates on nonsense sizes.
@@ -682,7 +867,11 @@ const RECENT_MIN: usize = 20;
 /// Frames dropped or played twice per correction: 5 ms, half a packet.
 const SLICE_FRAMES: usize = 240;
 /// Frames each join is crossfaded over: 2.5 ms, long enough that no step is a click.
+#[cfg(not(slopty_loom))]
 const FADE_FRAMES: usize = 120;
+/// One frame under loom, so the model stays small enough to explore every interleaving.
+#[cfg(slopty_loom)]
+const FADE_FRAMES: usize = 1;
 /// A sample above this is sound: the host's gate floor, -80 dBFS.
 const LOUD: f32 = 1e-4;
 
@@ -1246,8 +1435,13 @@ const MAX_FRAMES_PER_SLICE: u32 = 4096;
 /// Samples the ring holds, allocated once: 341 ms, past the deepest it gets (the 120 ms ceiling
 /// and a packet more while it fills, a stall's backlog as it is being cut, 60 ms of
 /// concealment). A power of two, so a position finds its cell with a mask.
+#[cfg(not(slopty_loom))]
 const RING_SAMPLES: usize = 1 << 15;
+/// Four frames under loom.
+#[cfg(slopty_loom)]
+const RING_SAMPLES: usize = 8;
 const RING_MASK: usize = RING_SAMPLES - 1;
+#[cfg(not(slopty_loom))]
 const _: () = assert!(RING_SAMPLES >= PACKET_SAMPLES * 26, "260 ms at least");
 /// Room for the largest packet a decoder returns, played with a slice twice.
 const PACKET_ROOM: usize = PACKET_SAMPLES * 3 + SLICE_FRAMES * SAMPLES_PER_FRAME;
@@ -1473,7 +1667,13 @@ impl Drop for Player {
     }
 }
 
+/// The ring under loom: `cargo xtask deep loom`.
+#[cfg(slopty_loom)]
 #[cfg(test)]
+mod ring_model;
+
+#[cfg(test)]
+#[cfg(not(slopty_loom))]
 mod tests {
     use super::*;
 
@@ -1626,37 +1826,218 @@ mod tests {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::arithmetic_side_effects,
+    reason = "test signals: small sample counts and bounded arithmetic"
+)]
 mod conceal_tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
-    /// One lost packet is the last one replayed, fading to silence by its end.
-    #[test]
-    fn a_short_gap_is_the_last_packet_fading_out() {
-        let mut c = Conceal::default();
-        c.remember(&[1.0, 1.0, 1.0, 1.0]);
-        let mut out = Vec::new();
-        c.fill(1, &mut out);
-        assert_eq!(out, vec![0.75, 0.5, 0.25, 0.0]);
-        out.clear();
-        c.fill(2, &mut out);
-        assert_eq!(out.len(), 8);
-        assert!((out[0] - 0.875).abs() < 1e-6 && out[7] == 0.0, "{out:?}");
-        assert!(out.windows(2).all(|w| w[0] >= w[1]), "monotone fade: {out:?}");
+    /// A stereo sine of `hz` at half scale, frames `from..to`.
+    fn sine(hz: f32, from: usize, to: usize) -> Vec<f32> {
+        (from..to)
+            .flat_map(|i| {
+                let s = (i as f32 * hz * std::f32::consts::TAU / SAMPLE_RATE as f32).sin() * 0.5;
+                [s, s]
+            })
+            .collect()
     }
 
-    /// Nothing to replay, no gap, or a gap too long to paper over: silence from the ring.
+    /// Play `packets` packets of `signal(from, to)` through `c`.
+    fn play(c: &mut Conceal, packets: usize, signal: impl Fn(usize, usize) -> Vec<f32>) {
+        for k in 0..packets {
+            let pcm = signal(k * PACKET_FRAMES, (k + 1) * PACKET_FRAMES);
+            assert_eq!(c.take(&pcm), &*pcm, "no gap: played as decoded");
+        }
+    }
+
+    fn snr_db(reference: &[f32], got: &[f32]) -> f32 {
+        let signal: f32 = reference.iter().map(|x| x * x).sum();
+        let noise: f32 = reference.iter().zip(got).map(|(r, g)| (r - g) * (r - g)).sum();
+        10.0 * (signal / noise.max(f32::EPSILON)).log10()
+    }
+
+    /// A lost packet of a periodic sound goes on in phase with it: a 170 Hz tone (a period of
+    /// 282.4 frames, no whole number) continues within 20 dB of what was lost, where replaying
+    /// the last packet whole lands out of phase with it.
     #[test]
-    fn nothing_is_concealed_without_a_packet_or_past_the_cap() {
+    fn a_periodic_sound_is_continued_in_phase() {
+        let tone = |from, to| sine(170.0, from, to);
+        let mut c = Conceal::default();
+        play(&mut c, 6, tone);
+        let mut out = Vec::new();
+        c.fill(1, &mut out);
+        let lost = tone(6 * PACKET_FRAMES, 7 * PACKET_FRAMES);
+        assert_eq!(out.len(), lost.len());
+        let replayed = tone(5 * PACKET_FRAMES, 6 * PACKET_FRAMES);
+        let (pitched, replay) = (snr_db(&lost, &out), snr_db(&lost, &replayed));
+        assert!(pitched > 20.0, "the stand-in is {pitched:.1} dB from the lost packet");
+        assert!(replay < 3.0, "the replay would be {replay:.1} dB: out of phase");
+    }
+
+    /// The packet after a concealed gap fades in from the stand-in's continuation over 2.5 ms,
+    /// and is played as decoded after that; it is remembered as played.
+    #[test]
+    fn the_next_packet_fades_in_from_the_stand_in() {
+        let tone = |from, to| sine(170.0, from, to);
+        let mut c = Conceal::default();
+        play(&mut c, 6, tone);
+        let mut out = Vec::new();
+        c.fill(1, &mut out);
+        let tail = c.tail.clone();
+        assert_eq!(tail.len(), MERGE_FRAMES * SAMPLES_PER_FRAME);
+        // A decoder resuming from a state that never saw the lost packet: here, silence.
+        let next = vec![0.0; PACKET_SAMPLES];
+        let played = c.take(&next).to_vec();
+        let w = ramp(0, MERGE_FRAMES);
+        assert!(tail[0].mul_add(w - 1.0, played[0]).abs() < 1e-6, "starts from the stand-in");
+        let after = MERGE_FRAMES * SAMPLES_PER_FRAME;
+        assert_eq!(&played[after..], &next[after..], "then the packet as decoded");
+        let steps = played.windows(2).take(after).map(|p| (p[1] - p[0]).abs());
+        assert!(steps.fold(0.0_f32, f32::max) < 0.05, "no click into the packet");
+        assert!(c.tail.is_empty());
+        assert_eq!(c.take(&next), &*next, "one merge per gap");
+    }
+
+    /// A stand-in plays its first 10 ms at full level and fades to silence by the cap.
+    #[test]
+    fn a_long_stand_in_fades_to_silence_by_the_cap() {
+        let mut c = Conceal::default();
+        play(&mut c, 6, |from, to| sine(170.0, from, to));
+        let mut out = Vec::new();
+        c.fill(MAX_CONCEALED, &mut out);
+        assert_eq!(out.len(), MAX_CONCEALED as usize * PACKET_SAMPLES);
+        let peak = |part: &[f32]| part.iter().fold(0.0_f32, |m, x| m.max(x.abs()));
+        assert!(peak(&out[..PACKET_SAMPLES]) > 0.45, "full level first");
+        assert!(peak(&out[out.len() - 2 * SAMPLES_PER_FRAME..]) < 0.01, "silent at the cap");
+        let halves = out.chunks(PACKET_SAMPLES).map(peak).collect::<Vec<_>>();
+        assert!(halves.windows(2).all(|p| p[1] <= p[0] + 1e-3), "fading: {halves:?}");
+    }
+
+    /// Nothing played yet, no gap, or a gap too long to paper over: silence from the ring, and
+    /// after a long gap what came before it is forgotten.
+    #[test]
+    fn nothing_is_concealed_without_history_or_past_the_cap() {
         let mut out = Vec::new();
         Conceal::default().fill(1, &mut out);
         assert!(out.is_empty());
         let mut c = Conceal::default();
-        c.remember(&[0.5, 0.5]);
+        play(&mut c, 3, |from, to| sine(170.0, from, to));
         c.fill(0, &mut out);
         c.fill(MAX_CONCEALED + 1, &mut out);
         assert!(out.is_empty());
-        c.fill(MAX_CONCEALED, &mut out);
-        assert_eq!(out.len(), 2 * MAX_CONCEALED as usize);
+        c.fill(1, &mut out);
+        assert!(out.is_empty(), "the pause forgot what came before it");
+    }
+
+    /// With less history than a pitch search needs (the first packet), what there is repeats.
+    #[test]
+    fn a_short_history_is_repeated_as_it_is() {
+        let mut c = Conceal::default();
+        let first = sine(170.0, 0, PACKET_FRAMES);
+        let _played = c.take(&first);
+        let mut out = Vec::new();
+        c.fill(1, &mut out);
+        assert_eq!(out, first, "one packet of history, played again at full level");
+    }
+
+    /// What concealment is worth through the real codec: 4 s of a voice-like sound (a 140 Hz
+    /// fundamental with a vibrato and falling harmonics) and of a chord, encoded, then decoded
+    /// with packets dropped (one in 20, and pairs), each gap filled by the fade-replay this
+    /// replaced and by the pitch repeat. SNR against the clean decode over the gaps and the 10 ms
+    /// after them, and over the whole, in dB (`docs/MEASUREMENTS.md`, "Opus loss
+    /// concealment").
+    #[test]
+    #[ignore = "a measurement; run with --ignored --nocapture"]
+    fn concealment_against_the_clean_decode() {
+        let frames = 4 * SAMPLE_RATE as usize;
+        let voice: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                let depth = 8.0 / (5.0 * std::f32::consts::TAU);
+                let phase = depth.mul_add(1.0 - (t * 5.0 * std::f32::consts::TAU).cos(), 140.0 * t);
+                let s: f32 = (1..=12)
+                    .map(|h| (h as f32 * phase * std::f32::consts::TAU).sin() / h as f32)
+                    .sum::<f32>()
+                    * 0.2;
+                [s, s]
+            })
+            .collect();
+        let chord: Vec<f32> = (0..frames)
+            .flat_map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                let s = [261.63_f32, 329.63, 392.0]
+                    .iter()
+                    .map(|f| (f * t * std::f32::consts::TAU).sin())
+                    .sum::<f32>()
+                    * 0.15;
+                [s, s * 0.8]
+            })
+            .collect();
+        for (name, pcm) in [("voice", voice), ("chord", chord)] {
+            let mut enc = OpusEncoder::new().unwrap();
+            let mut packets = Vec::new();
+            enc.push(&pcm, |p| packets.push(p.to_vec())).unwrap();
+            let mut dec = OpusDecoder::new().unwrap();
+            let clean: Vec<Vec<f32>> =
+                packets.iter().map(|p| dec.decode(p).unwrap().to_vec()).collect();
+            let lost = |k: usize| k > 10 && (k % 20 == 7 || k % 50 == 23 || k % 50 == 24);
+            let mut row = format!("MEASURE conceal {name}:");
+            for pitched in [false, true] {
+                let mut dec = OpusDecoder::new().unwrap();
+                let mut conceal = Conceal::default();
+                let mut last = Vec::new();
+                let mut out: Vec<Vec<f32>> = Vec::new();
+                let mut gap = 0_u32;
+                for (k, p) in packets.iter().enumerate() {
+                    if lost(k) {
+                        gap += 1;
+                        continue;
+                    }
+                    if gap > 0 {
+                        let mut stand_in = Vec::new();
+                        if pitched {
+                            conceal.fill(gap, &mut stand_in);
+                        } else {
+                            // What this replaced: the last packet again, fading to silence.
+                            let total = gap as usize * last.len();
+                            for i in 0..total {
+                                let gain = 1.0 - (i as f32 + 1.0) / total as f32;
+                                stand_in.push(last[i % last.len()] * gain);
+                            }
+                        }
+                        out.extend(stand_in.chunks(PACKET_SAMPLES).map(<[f32]>::to_vec));
+                        gap = 0;
+                    }
+                    let decoded = dec.decode(p).unwrap().to_vec();
+                    let played = if pitched { conceal.take(&decoded).to_vec() } else { decoded };
+                    last.clone_from(&played);
+                    out.push(played);
+                }
+                let (mut gaps_ref, mut gaps_got, mut all_ref, mut all_got) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for (k, (r, g)) in clean.iter().zip(&out).enumerate() {
+                    all_ref.extend_from_slice(r);
+                    all_got.extend_from_slice(g);
+                    if lost(k) || (k > 0 && lost(k - 1)) {
+                        gaps_ref.extend_from_slice(r);
+                        gaps_got.extend_from_slice(g);
+                    }
+                }
+                write!(
+                    row,
+                    " {} gaps {:.1} dB, whole {:.1} dB;",
+                    if pitched { "pitch" } else { "fade-replay" },
+                    snr_db(&gaps_ref, &gaps_got),
+                    snr_db(&all_ref, &all_got)
+                )
+                .unwrap();
+            }
+            eprintln!("{row}");
+        }
     }
 }
 
@@ -1676,6 +2057,7 @@ mod rtsan_probe {
 }
 
 #[cfg(test)]
+#[cfg(not(slopty_loom))]
 #[expect(
     clippy::arithmetic_side_effects,
     reason = "test fixture arithmetic on traces of a few minutes"

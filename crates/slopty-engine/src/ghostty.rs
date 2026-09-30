@@ -3836,6 +3836,21 @@ mod tests {
         }
     }
 
+    /// With autowrap off a full line leaves the cursor on its last cell, which the next
+    /// character overwrites. A resize that makes room keeps the cursor there, as xterm does,
+    /// and autowrap turned back on does not wrap mid-row (carried in aislopware/ghostty).
+    #[test]
+    fn without_autowrap_a_resize_keeps_the_cursor_on_the_last_cell() {
+        let mut e = engine(10, 4);
+        e.write(b"\x1b[?7l123456789|");
+        e.resize(TermSize { cols: 12, ..e.size() }).unwrap();
+        e.write(b"X\x1b[?7hY");
+        let f = e.full_frame(0).unwrap();
+        let text: Vec<String> = f.updates.iter().map(|u| u.line.text()).collect();
+        assert_eq!(text[0], "123456789XY");
+        assert!(text[1..].iter().all(String::is_empty), "{text:?}");
+    }
+
     #[test]
     fn wide_characters_get_spacer_tails() {
         let mut e = engine(6, 1);

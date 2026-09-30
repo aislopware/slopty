@@ -69,9 +69,9 @@ use slopty_core::{DisplayId, StreamId};
 use slopty_input::{InputError, InputSink as _, Pointer, PointerChanges, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, Fed, HEARTBEAT_AFTER, LayerGate,
-    MediaError, Pace, Packetizer, RateController, Redundancy, Refine, audio_datagram,
-    cursor_datagram, heartbeat_datagram,
+    AudioCopies, Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, Fed, HEARTBEAT_AFTER,
+    LayerGate, MAX_AUDIO_COPIES, MediaError, Pace, Packetizer, RateController, Redundancy, Refine,
+    audio_datagram, cursor_datagram, heartbeat_datagram, slower_rung,
 };
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::MAX_DATAGRAM;
@@ -84,6 +84,7 @@ use tokio::task::JoinHandle;
 
 use crate::platform::{Native, Platform};
 
+mod engines;
 pub mod sized;
 #[cfg(target_os = "macos")]
 pub mod synthetic;
@@ -1139,6 +1140,10 @@ struct Shared<P: Platform = Native> {
     pending: Mutex<Pending>,
     packetizer: Mutex<Packetizer>,
     redundancy: Mutex<Redundancy>,
+    /// How many earlier Opus packets each audio datagram carries, from the audio loss the client
+    /// reports ([`AudioCopies`]), and the packets sent last, nearest first.
+    audio_copies: Mutex<AudioCopies>,
+    audio_sent: Mutex<[Bytes; MAX_AUDIO_COPIES]>,
     rate: Mutex<RateController>,
     /// Whether the encoder should write temporal layers, from the link's loss and the frames
     /// a layered session drops ([`LayerGate`]); the next encode tells the session.
@@ -1168,6 +1173,15 @@ struct Shared<P: Platform = Native> {
     fps_asked: std::sync::atomic::AtomicU16,
     /// Whether the encoder keeps up with the rung in force ([`EncoderWatch`]).
     watch: Mutex<EncoderWatch>,
+    /// A client has this stream's tile focused: its encoder falling behind steps the other
+    /// streams down first ([`engines`]).
+    focused: AtomicBool,
+    /// `host_now_us()` until which the ceiling stays where it stepped down for a focused
+    /// stream, `0` when it holds for none ([`engines::Contender::give_way`]).
+    give_way_until_us: AtomicU64,
+    /// The watch's windows closed since the others last gave way for this stream: it asks
+    /// again only after [`engines::SETTLE_WINDOWS`].
+    windows_since_gave: std::sync::atomic::AtomicU32,
     /// Frames a second the encoder was fed over the last window at the rung in force, `0` until
     /// one closes ([`Fed`]): what the congestion guard budgets a frame from.
     fed_fps: std::sync::atomic::AtomicU16,
@@ -1287,6 +1301,8 @@ impl<P: Platform> Shared<P> {
             pending: Mutex::new(Pending { keyframe: true, ..Pending::default() }),
             packetizer: Mutex::new(Packetizer::new(id)),
             redundancy: Mutex::new(Redundancy::new()),
+            audio_copies: Mutex::new(AudioCopies::default()),
+            audio_sent: Mutex::new(Default::default()),
             rate: Mutex::new(RateController::new(max_bps)),
             layers: Mutex::new(LayerGate::default()),
             layers_wanted: AtomicBool::new(false),
@@ -1299,6 +1315,9 @@ impl<P: Platform> Shared<P> {
             fps_ceiling: std::sync::atomic::AtomicU16::new(fps),
             fps_asked: std::sync::atomic::AtomicU16::new(fps),
             watch: Mutex::new(EncoderWatch::default()),
+            focused: AtomicBool::new(false),
+            give_way_until_us: AtomicU64::new(0),
+            windows_since_gave: std::sync::atomic::AtomicU32::new(engines::SETTLE_WINDOWS),
             fed_fps: std::sync::atomic::AtomicU16::new(0),
             encoder_bps: std::sync::atomic::AtomicU32::new(0),
             last_encoded_us: AtomicU64::new(0),
@@ -1560,8 +1579,31 @@ impl<P: Platform> Shared<P> {
     fn watch_encoder(&self, encode_us: u64, keyframe: bool) {
         let fps = self.fps.load(Ordering::Relaxed);
         let slower = self.watch.lock().returned(encode_us, fps, keyframe);
-        if let Some(ceiling) = slower {
+        if let Some(ceiling) = slower
+            && !self.others_give_way()
+        {
             self.lower_ceiling(ceiling, "encoder queueing: fewer frames");
+        }
+    }
+
+    /// This stream's encoder fell behind: when a client focuses it, the streams nobody focuses
+    /// step down in its place, or did so lately enough that what it sees is the queue from
+    /// before ([`engines::SETTLE_US`]). Whether this stream keeps its rung.
+    fn others_give_way(&self) -> bool {
+        if !self.focused.load(Ordering::Relaxed) {
+            return false;
+        }
+        if self.windows_since_gave.load(Ordering::Relaxed) < engines::SETTLE_WINDOWS {
+            return true;
+        }
+        match engines::ENGINES.contended(now::<P>()) {
+            engines::Claim::Gave => {
+                self.windows_since_gave.store(0, Ordering::Relaxed);
+                tracing::debug!(stream = %self.id, "encoder behind: the unfocused streams give way");
+                true
+            }
+            engines::Claim::Settling => true,
+            engines::Claim::Spent => false,
         }
     }
 
@@ -1572,7 +1614,13 @@ impl<P: Platform> Shared<P> {
     fn fed(&self, fps: u16) {
         let verdict = self.watch.lock().fed(fps);
         let Some(Fed { fps: fed, ceiling }) = verdict else { return };
+        let _windows =
+            self.windows_since_gave
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_add(1)));
         match ceiling {
+            Some(ceiling) if ceiling < fps && self.others_give_way() => {
+                self.fed_fps.store(fed, Ordering::Relaxed);
+            }
             Some(ceiling) if ceiling < fps => {
                 self.lower_ceiling(ceiling, "encoder busy: the rung follows what it was fed");
             }
@@ -1587,6 +1635,10 @@ impl<P: Platform> Shared<P> {
     /// The encoder codes well over the rung: the ceiling rises to `ceiling`, no further than the
     /// client asked, and the cadence climbs under it as the rate allows.
     fn raise_ceiling(&self, ceiling: u16) {
+        // Held down for a focused stream: the room it sees is the room given way.
+        if now::<P>() < self.give_way_until_us.load(Ordering::Relaxed) {
+            return;
+        }
         let ceiling = ceiling.min(self.fps_asked.load(Ordering::Relaxed));
         let was = self.fps_ceiling.load(Ordering::Relaxed);
         if ceiling <= was {
@@ -1966,10 +2018,7 @@ impl<P: Platform> Shared<P> {
     fn on_audio(&self, chunk: &CapturedAudio) {
         let now = now::<P>();
         let Some(packets) = self.encode_audio(&chunk.samples, now) else { return };
-        let datagrams: Vec<Bytes> = packets
-            .iter()
-            .filter_map(|(seq, packet)| audio_datagram(self.id, *seq, send_ms_lo(now), packet))
-            .collect();
+        let datagrams = self.audio_datagrams(&packets, now);
         self.last_audio_us.store(now, Ordering::Relaxed);
         let taken = self.send(&datagrams);
         self.counters.audio_packets.fetch_add(taken.datagrams, Ordering::Relaxed);
@@ -2011,6 +2060,25 @@ impl<P: Platform> Shared<P> {
         let floor = self.counters.bitrate_bps.load(Ordering::Relaxed) / 8;
         let batch = lane.take(held, lane.budget(floor));
         lane.expected = lane.expected.saturating_add(self.send(&batch).bytes);
+    }
+
+    /// Opus `packets` as datagrams, each carrying again the packets before it the client's
+    /// reported audio loss asks for ([`AudioCopies`]).
+    fn audio_datagrams(&self, packets: &[(u32, Bytes)], now: u64) -> Vec<Bytes> {
+        let copies = self.audio_copies.lock().copies();
+        let mut sent = self.audio_sent.lock();
+        let mut datagrams = Vec::with_capacity(packets.len());
+        for (seq, packet) in packets {
+            let [near, far] = &*sent;
+            let earlier: [&[u8]; MAX_AUDIO_COPIES] = [near, far];
+            let earlier = earlier.get(..copies).unwrap_or_default();
+            datagrams.extend(audio_datagram(self.id, *seq, send_ms_lo(now), packet, earlier));
+            sent.rotate_right(1);
+            if let Some(nearest) = sent.first_mut() {
+                nearest.clone_from(packet);
+            }
+        }
+        datagrams
     }
 
     /// Run the silence gate and the encoder under the audio lock; `None` when nothing goes out.
@@ -2166,6 +2234,29 @@ impl<P: Platform> Shared<P> {
     }
 }
 
+impl<P: Platform> engines::Contender for Shared<P> {
+    fn focused(&self) -> bool {
+        self.focused.load(Ordering::Relaxed)
+    }
+
+    fn give_way(&self, until_us: u64) -> bool {
+        self.give_way_until_us.store(until_us, Ordering::Relaxed);
+        if until_us == 0 {
+            // Back to what the client asked: the encoder's own windows bring it down again if
+            // it still cannot keep that.
+            self.raise_ceiling(self.fps_asked.load(Ordering::Relaxed));
+            return false;
+        }
+        let ceiling = self.fps_ceiling.load(Ordering::Relaxed);
+        let slower = slower_rung(ceiling);
+        if slower >= ceiling {
+            return false;
+        }
+        self.lower_ceiling(slower, "a focused stream's encoder fell behind: giving way");
+        true
+    }
+}
+
 /// What became of an attempt to encode the held capture.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Attempt {
@@ -2214,6 +2305,13 @@ impl<P: Platform> Shared<P> {
         let previous = self.sent_at_report.swap(sent_total, Ordering::Relaxed);
         let sent = u32::try_from(sent_total.saturating_sub(previous)).unwrap_or(u32::MAX);
         let permille = self.redundancy.lock().on_report(report, sent);
+        let (was, copies) = {
+            let mut control = self.audio_copies.lock();
+            (control.copies(), control.on_report(report, now::<P>()))
+        };
+        if copies != was {
+            tracing::debug!(stream = %self.id, was, copies, lost = report.audio_lost, "audio copies");
+        }
         self.follow_layers(permille > Redundancy::MIN);
         let parity_moved = {
             let mut packetizer = self.packetizer.lock();
@@ -3149,6 +3247,8 @@ impl<P: Platform> Pipeline<P> {
             sized.1.fps,
             path == WindowPath::DisplayCrop,
         ));
+        let contender = Arc::downgrade(&shared);
+        engines::ENGINES.join(contender);
         let chroma = shared.ask_chroma(asked(&quality), &sized.1);
         let (mut capture_config, mut encoder_config) = carrying(chroma, sized);
         capture_config.crop = Source::<P>::crop(&resolved);
@@ -3764,6 +3864,15 @@ impl<P: Platform> Pipeline<P> {
         Ok(self.injector.focus()?)
     }
 
+    /// Whether a client has this stream's tile focused. A focused stream's encoder falling
+    /// behind steps the streams nobody focuses down before it steps down itself (`engines`).
+    pub fn set_focused(&self, focused: bool) {
+        let was = self.shared.focused.swap(focused, Ordering::Relaxed);
+        if was && !focused {
+            engines::ENGINES.unfocused();
+        }
+    }
+
     /// Let go of every key and button the client holds down on the worker: the stream is
     /// ending. Returns at once, so call it ahead of [`Self::close`], which waits on
     /// ScreenCaptureKit's stop before it drops the input sink.
@@ -3866,6 +3975,9 @@ impl<P: Platform> Pipeline<P> {
 
     /// Stop capturing and tear down.
     pub async fn close(mut self) {
+        // First: the streams holding a lower rung for this one, or waiting their turn behind
+        // it, are let go now rather than when their hold runs out.
+        self.set_focused(false);
         self.cursor.abort();
         self.shape.abort();
         self.beat.abort();

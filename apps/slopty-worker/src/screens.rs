@@ -89,6 +89,7 @@ impl slopty_worker::DatagramSink for QuicSink {
 pub enum Command {
     Input(ScreenInput),
     Focus,
+    Focused(bool),
     SetQuality(Quality),
     Resize { width: u32, height: u32, scale: Option<f32> },
     Close,
@@ -516,6 +517,7 @@ fn apply<P: Platform>(stream: &mut Pipeline<P>, client: ClientId, command: Comma
                 tracing::debug!(%client, stream = %id, error = %e, "focus");
             }
         }
+        Command::Focused(focused) => stream.set_focused(focused),
         Command::Resize { width, height, .. } => {
             let Some((window, w, h)) = stream.resize_points(width, height) else {
                 tracing::debug!(%client, stream = %id, "resize: not a window stream");

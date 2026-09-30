@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
+use slopty_client::unsaved::Unsaved;
 use slopty_core::WallMs;
 
 use super::*;
@@ -33,7 +34,7 @@ fn tile<'a>(
     });
     let path = path.to_owned();
     let (view, cx) = cx.add_window_view(|window, cx| {
-        FileView::new(ItemId::new(), &path, Theme::default(), window, cx)
+        FileView::new(ItemId::new(), WorkerKey::new(1), &path, Theme::default(), window, cx)
     });
     let events: Events = Rc::default();
     let sink = Rc::clone(&events);
@@ -469,6 +470,51 @@ fn timing_of_a_large_file(cx: &mut TestAppContext) {
     }
 }
 
+/// What keeping a 16 MiB unsaved edit costs the UI thread: [`FileView::text`] (the whole text
+/// copied out, as a backup read it before) against [`FileView::backup_mark`] (what a pass
+/// reads of a tile whose backup is current) and [`FileView::backup`] (the rope shared, for one
+/// that is behind); and, off the UI thread, [`Backup::unsaved`] reading the rope out. Median
+/// of 21 rounds.
+#[gpui::test]
+#[ignore = "timing: cargo nextest run -p slopty-ui --release --run-ignored only timing_of_a_backup --no-capture"]
+fn timing_of_a_backup(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+
+    fn median(mut f: impl FnMut()) -> Duration {
+        let mut took: Vec<Duration> = std::iter::repeat_with(|| {
+            let t = Instant::now();
+            f();
+            t.elapsed()
+        })
+        .take(21)
+        .collect();
+        took.sort();
+        took.get(10).copied().unwrap_or_default()
+    }
+
+    let (view, _events, cx) = tile(cx, "/w/src/big.rs");
+    let mut body = source(240_000);
+    body.truncate(usize::try_from(FILE_BYTES).unwrap_or(usize::MAX).saturating_sub(1));
+    arrives(&view, cx, text_read(&body, false, 1));
+    types(&view, cx, "x");
+    let bytes = view.read_with(cx, |v, cx| v.text(cx).len());
+    assert!(view.read_with(cx, |v, _| v.dirty()), "an unsaved edit");
+    let text = view.read_with(cx, |v, cx| median(|| drop(std::hint::black_box(v.text(cx)))));
+    let mark = view.read_with(cx, |v, _| median(|| _ = std::hint::black_box(v.backup_mark())));
+    let backup = view.read_with(cx, |v, cx| median(|| drop(std::hint::black_box(v.backup(cx)))));
+    let kept = view.read_with(cx, FileView::backup).expect("a backup");
+    let read_out = median(|| drop(std::hint::black_box(kept.unsaved(WallMs::ZERO))));
+    let us = |d: Duration| d.as_secs_f64() * 1e6;
+    println!(
+        "{bytes} B, UI thread: text() {:.0} µs, backup_mark() {:.3} µs, backup() {:.3} µs; \
+         off it, the rope read out {:.0} µs",
+        us(text),
+        us(mark),
+        us(backup),
+        us(read_out)
+    );
+}
+
 fn edited(events: &Events) -> Vec<(HandoffId, EditOutcome)> {
     events
         .borrow()
@@ -533,4 +579,67 @@ fn a_save_lost_with_the_link_leaves_the_program_waiting(cx: &mut TestAppContext)
     assert!(!view.read_with(cx, |v, _| v.finishing()), "no longer finishing");
     assert_eq!(view.read_with(cx, |v, _| v.waiting()), Some(4), "still waiting");
     assert!(edited(&events).is_empty());
+}
+
+fn kept(text: &str, base_ms: Option<u64>, conflict: bool) -> Backup {
+    Backup::kept(&Unsaved {
+        worker: WorkerKey::new(1),
+        item: ItemId::new(),
+        path: "/r/a.md".to_owned(),
+        text: text.to_owned(),
+        newline: true,
+        base_modified_ms: base_ms.map(WallMs::from_millis),
+        conflict,
+        kept_ms: WallMs::from_millis(5_000),
+    })
+}
+
+/// An edit kept from before the app ended comes back over the same version of the file as an
+/// unsaved edit, the disk's version its base: ⌘S saves it as any edit.
+#[gpui::test]
+fn a_kept_edit_over_the_version_it_started_from_is_unsaved(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/r/a.md");
+    view.update(cx, |v, cx| v.restore(kept("draft\nmore", Some(1_000), false), cx));
+    arrives(&view, cx, text_read("draft", true, 1_000));
+    assert_eq!(text(&view, cx), "draft\nmore");
+    assert!(view.read_with(cx, |v, _| v.dirty()), "unsaved");
+    assert_eq!(view.read_with(cx, |v, _| v.trouble().cloned()), None);
+    view.update(cx, FileView::save);
+    let saved = events.borrow().iter().any(|e| {
+        matches!(e, FileViewEvent::Save { text, base_modified_ms: Some(ms) }
+            if text == "draft\nmore\n" && *ms == WallMs::from_millis(1_000))
+    });
+    assert!(saved, "{:?}", events.borrow());
+    let backup = view.read_with(cx, |v, cx| v.backup(cx).map(|b| b.text.to_string()));
+    assert_eq!(backup.as_deref(), Some("draft\nmore"), "still kept while saving");
+}
+
+/// A tile given `kept`, then its first read `read`: its text, whether it is unsaved, and what
+/// stops a save.
+fn restored(
+    cx: &mut TestAppContext,
+    kept: Backup,
+    read: FileRead,
+) -> (String, bool, Option<Trouble>) {
+    let (view, _events, cx) = tile(cx, &kept.path.clone());
+    view.update(cx, |v, cx| v.restore(kept, cx));
+    arrives(&view, cx, read);
+    view.read_with(cx, |v, cx| (v.text(cx), v.dirty(), v.trouble().cloned()))
+}
+
+/// Over a file that changed on disk since the edit started, or that is gone, the kept edit
+/// comes back as a conflict: the person picks the disk's text or theirs. One already marked a
+/// conflict stays one. One the disk already holds is no edit at all.
+#[gpui::test]
+fn a_kept_edit_over_a_moved_disk_is_a_conflict(cx: &mut TestAppContext) {
+    let conflict = Some(Trouble::Conflict);
+    let moved = restored(cx, kept("mine", Some(1_000), false), text_read("theirs", true, 2_000));
+    assert_eq!(moved, ("mine".to_owned(), true, conflict.clone()));
+    let gone = FileRead::Missing { error: "No such file".to_owned() };
+    let gone = restored(cx, kept("mine", Some(1_000), false), gone);
+    assert_eq!(gone, ("mine".to_owned(), true, conflict.clone()), "shown whatever the disk has");
+    let marked = restored(cx, kept("mine", Some(1_000), true), text_read("theirs", true, 1_000));
+    assert_eq!(marked, ("mine".to_owned(), true, conflict));
+    let same = restored(cx, kept("same", Some(1_000), false), text_read("same", true, 3_000));
+    assert_eq!(same, ("same".to_owned(), false, None), "the disk has it: clean");
 }

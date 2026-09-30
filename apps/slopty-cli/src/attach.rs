@@ -102,10 +102,11 @@ fn enter_raw() -> Result<RawGuard> {
 fn handoff(
     handoffs: &mut slopty_client::handoff::Handoffs,
     event: slopty_proto::handoff::HandoffEvent,
+    received: std::time::Instant,
 ) -> Option<ClientMsg> {
     use slopty_client::handoff::Todo;
     use slopty_proto::handoff::HandoffReply;
-    match handoffs.heard(event, false, slopty_core::WallMs::now()) {
+    match handoffs.heard(event, false, received.elapsed()) {
         Todo::Open { url, reply } => {
             let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
             // Tokio reaps it once it exits, which `open` does at once.
@@ -193,8 +194,8 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
                 }
                 // This terminal is on the person's own machine: a page opens here. It has no
                 // file tiles, so an edit goes to another client, or to `vi` in the shell.
-                Some(LinkEvent::Control(WorkerMsg::Handoff(event))) => {
-                    if let Some(reply) = handoff(&mut handoffs, event) {
+                Some(LinkEvent::Handoff { event, received }) => {
+                    if let Some(reply) = handoff(&mut handoffs, event, received) {
                         link.send(reply).await?;
                     }
                 }

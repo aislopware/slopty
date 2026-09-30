@@ -123,10 +123,40 @@ measurement sits in `frame_time` and runs under `smooth`, alone. The live tests 
 ## Beyond the layers: the deep checks
 `cargo xtask deep <check>` (and the weekly `Deep` workflow) runs what no layer above can see
 in the gate's budget: Miri over the pure crates (undefined behaviour under the interpreter),
-ThreadSanitizer/AddressSanitizer builds of the daemons and the codec, `cargo hack
---each-feature` (every feature alone and together), `cargo llvm-cov` line coverage per crate,
-and `cargo mutants` on one crate to find the lines no test would notice changing. A finding
-there becomes a test in the layer that can hold it. `docs/DEV.md` has the commands.
+ThreadSanitizer/AddressSanitizer builds of every crate with a share of the workspace's `unsafe`
+(the daemons, the codec, capture, platform, the virtual display, input, the crash reporter and
+the tailnet reader), `cargo hack --each-feature` (every feature alone and together), `cargo
+llvm-cov` line coverage per crate, and `cargo mutants` on one crate to find the lines no test
+would notice changing. A finding there becomes a test in the layer that can hold it.
+`docs/DEV.md` has the commands.
+
+Four deep checks see what the rest cannot:
+- **Sanitizers and signals.** A sanitizer's runtime installs its own fatal-signal handlers, and
+  `slopty-crash` chains to the handler it finds, so its tests that die of a signal run apart with
+  the runtime's handlers off (`deep.rs`, `OWN_SIGNALS`). ThreadSanitizer holds a signal's handler
+  until the thread next calls a function it intercepts, and it does not intercept `kevent`. A
+  tokio runtime parked in its I/O driver never hears `SIGCHLD` then, so a test that waits on a
+  child through `tokio::process` waits forever with the child `<defunct>`. Such a test fails
+  under `sanitize thread` for that reason alone, and passes under `sanitize address`.
+- **Loom models** (`deep loom`). A lock-free structure whose correctness rests on its orderings
+  gets a model beside it, behind `cfg(slopty_loom)`, which swaps its atomics for loom's. Loom
+  then explores every interleaving, with loads free to read stale stores. A model is proven by
+  planting the bug it guards against (an ordering weakened, a check dropped) and watching it
+  fail. The audio ring is the first (`docs/decisions/tooling.md`, "The audio ring is
+  model-checked with loom").
+- **Metal validation** (`deep metal`). GPUI's headless tests draw on no GPU, so the app
+  self-test is the one layer where the renderer runs. This check runs it with Metal's API and
+  shader validation on. An API error asserts, and a shader fault aborts the app, which fails the
+  test that drew it. A warning (a redundant or unused binding) is logged in the app's output.
+- **Leaks in the tests' own paths** (`deep leaks`). The daemons' and the wire's test binaries run
+  one test at a time under `leaks --atExit`. It reads the heap once they are done, and a binary
+  fails on memory left unreachable. This is macOS's own tool with no instrumented build: Apple's
+  sanitizer runtime has no `LeakSanitizer` here. A binary still running after ten minutes is
+  killed and fails.
+  A test that drives a shell on a PTY cannot run under it. `leaks` turns on `MallocStackLogging`
+  in the process it launches, and libmalloc's notice then reaches the terminal the test reads.
+  Such targets are left out by name (`deep.rs`, `LEAKS_CANNOT_RUN`), and so is `slopty-pty`, whose
+  terminal tests hang under it. The soak reads ptyd's heap live with `leaks <pid>`.
 
 **Fuzzing.** Every decoder a peer's bytes reach has a libFuzzer target in `fuzz/`, a crate
 outside the workspace (nightly, AddressSanitizer, debug assertions). The control stream both
@@ -163,7 +193,11 @@ Wall time is not a pass or fail on a machine other sessions load, so the budgets
   trend.
 - **Footprint, descriptors, threads and leaks**, in `cargo xtask soak`: the real daemons under
   a scripted load, sampled for `ri_phys_footprint`, open descriptors and threads, with
-  `leaks <pid>` at the end.
+  `leaks <pid>` at the end. Beside the terminals, a stream lane opens, decodes and closes the
+  worker's drawn screen (`SLOPTY_SYNTHETIC_SCREEN`) one stream after another. The streams take
+  the display and both windows in turn, at three capture scales, so every open builds the
+  capture, the encoder and the decoder at another size. The soak fails on a stream that did not
+  open or decoded nothing, on a decode error, and on frames lost or dropped past their budgets.
 
 `cargo xtask nightly` runs the soak, the bench's wall times, the property tests at
 `PROPTEST_CASES` cases, `slopty-ui`'s tests under `ITERATIONS` scheduler seeds and the deep

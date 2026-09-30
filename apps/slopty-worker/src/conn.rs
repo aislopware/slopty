@@ -1407,6 +1407,9 @@ impl Peer<'_> {
                 self.input(Input::Window(stream, input));
             }
             ScreenRequest::Focus(stream) => self.command(stream, Command::Focus),
+            ScreenRequest::Focused { stream, focused } => {
+                self.command(stream, Command::Focused(focused));
+            }
             ScreenRequest::Resize { stream, width, height, scale } => {
                 self.command(stream, Command::Resize { width, height, scale });
             }

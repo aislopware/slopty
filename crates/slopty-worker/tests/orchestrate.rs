@@ -63,7 +63,7 @@ mod orchestrate {
 
     struct Shell {
         handle: SessionHandle,
-        child: tokio::process::Child,
+        child: slopty_pty::Child,
         _dir: tempfile::TempDir,
     }
 
