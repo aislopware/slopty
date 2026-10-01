@@ -396,6 +396,17 @@ fn changed_lines_point_at_inserts_replacements_and_deletions() {
     assert_eq!(changed_lines("a\nb\nc", "a\nc"), [1]);
     assert_eq!(changed_lines("a\nb", "a"), [0], "a deleted tail points at the last line");
     assert_eq!(changed_lines("a", "a"), Vec::<usize>::new());
+    // Past the exact diff's size every line between the common head and tail is tinted, the
+    // same lines on every run however long the diff would have taken.
+    let lines = |tag: &str| (0..1_500).map(|n| format!("{tag}{n}")).collect::<Vec<_>>().join("\n");
+    let (old, new) = (format!("head\n{}\ntail", lines("a")), format!("head\n{}\ntail", lines("b")));
+    assert_eq!(changed_lines(&old, &new), (1..1_501).collect::<Vec<_>>());
+    let gone = format!("head\n{}\ntail", lines("a"));
+    assert_eq!(
+        changed_lines(&gone, "head\ntail"),
+        [1],
+        "a deletion past the size points at its place"
+    );
 }
 
 /// Before the worker answers, the tile is blank for the loading grace, so a read that lands
@@ -908,4 +919,23 @@ fn timing_of_a_page_flip(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(from, MouseButton::Left, Modifiers::none());
     assert!(view.read_with(cx, |v, _| v.selected_text()).is_some(), "the drag selected");
     println!("page flip: {}; drag step: {}", spread(flips), spread(steps));
+}
+
+/// What a reload's exact diff costs at its size bound, in the worst case: two middles of
+/// `DIFF_EXACT_LINES / 2` lines each with nothing in common, so Myers walks every diagonal.
+#[test]
+#[ignore = "measurement, run by hand"]
+fn measure_the_reload_diff_at_its_bound() {
+    let half = 1_000;
+    let lines = |tag: &str| (0..half).map(|n| format!("{tag}{n}")).collect::<Vec<_>>().join("\n");
+    let (old, new) = (lines("a"), lines("b"));
+    let mut took = Vec::new();
+    for _ in 0..21 {
+        let started = std::time::Instant::now();
+        let changed = std::hint::black_box(changed_lines(&old, &new));
+        took.push(started.elapsed());
+        assert_eq!(changed.len(), half);
+    }
+    took.sort();
+    eprintln!("exact diff of {half} against {half} lines: p50 {:?}, max {:?}", took[10], took[20]);
 }

@@ -12780,3 +12780,19 @@ calls, the terminal's login shell, and the 2 s progress read, which a short run 
 because the exit wakes the lane. Nothing on this path is a hot path for input or frames, so no
 optimisation follows. A real verifier (`cargo gate`, about a minute warm) dwarfs it.
 
+
+## 2026-10-01 — a reload's diff
+
+A file tile tints the lines a reload changed. The diff ran under an 8 ms wall-clock timeout and
+fell back to tinting more lines when it passed it, so a loaded machine tinted differently: CI
+run 36861354571 tinted an unchanged line in
+`a_clean_tile_takes_a_change_on_disk_and_tints_the_lines`. It is now bounded by size instead:
+the common head and tail are trimmed, and a middle of up to `DIFF_EXACT_LINES` (2 000) lines is
+compared exactly, with no clock. Larger middles tint every line between head and tail.
+
+Mac Studio M1 Max, release, the worst case at the bound (two 1 000-line middles with nothing in
+common), 21 runs: p50 0.22 ms, max 0.82 ms.
+
+```sh
+cargo test -p slopty-ui --release --lib measure_the_reload_diff_at_its_bound -- --ignored --nocapture
+```

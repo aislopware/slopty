@@ -1506,10 +1506,11 @@ impl FileView {
     }
 }
 
-/// How long a reload's diff may run on the UI thread before it settles for an approximation
-/// (more lines tinted than changed). A small change to a large file ends well before it: the
-/// common head and tail are trimmed first.
-const DIFF_WITHIN: std::time::Duration = std::time::Duration::from_millis(8);
+/// The most lines a reload's diff compares exactly, once the common head and tail are trimmed.
+/// Myers' worst case is quadratic in it; past it every line between the head and the tail is
+/// tinted. The approximation is chosen by size, never by the clock, so a reload always tints
+/// the same lines however busy the machine is (MEASUREMENTS, "a reload's diff").
+const DIFF_EXACT_LINES: usize = 2_000;
 
 /// Lines (0-based) of `new` that differ from `old`.
 ///
@@ -1519,19 +1520,36 @@ const DIFF_WITHIN: std::time::Duration = std::time::Duration::from_millis(8);
 pub fn changed_lines(old: &str, new: &str) -> Vec<usize> {
     let old: Vec<&str> = old.split('\n').collect();
     let new: Vec<&str> = new.split('\n').collect();
-    let diff = similar::TextDiff::configure().timeout(DIFF_WITHIN).diff_slices(&old, &new);
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let old_rest = old.get(head..).unwrap_or_default();
+    let new_rest = new.get(head..).unwrap_or_default();
+    let tail = old_rest.iter().rev().zip(new_rest.iter().rev()).take_while(|(a, b)| a == b).count();
+    let old_mid = old_rest.get(..old_rest.len().saturating_sub(tail)).unwrap_or_default();
+    let new_mid = new_rest.get(..new_rest.len().saturating_sub(tail)).unwrap_or_default();
+    let last = new.len().saturating_sub(1);
+    let deleted_at = |at: usize| at.min(last);
+    if old_mid.is_empty() && new_mid.is_empty() {
+        return Vec::new();
+    }
+    if old_mid.len().saturating_add(new_mid.len()) > DIFF_EXACT_LINES {
+        return if new_mid.is_empty() {
+            vec![deleted_at(head)]
+        } else {
+            (head..head.saturating_add(new_mid.len())).collect()
+        };
+    }
+    let diff = similar::TextDiff::configure().diff_slices(old_mid, new_mid);
     let mut changed = Vec::new();
     for op in diff.ops() {
         match *op {
             similar::DiffOp::Equal { .. } => {}
             similar::DiffOp::Insert { new_index, new_len, .. }
             | similar::DiffOp::Replace { new_index, new_len, .. } => {
-                changed.extend(new_index..new_index.saturating_add(new_len));
+                let from = head.saturating_add(new_index);
+                changed.extend(from..from.saturating_add(new_len));
             }
             similar::DiffOp::Delete { new_index, .. } => {
-                if !new.is_empty() {
-                    changed.push(new_index.min(new.len().saturating_sub(1)));
-                }
+                changed.push(deleted_at(head.saturating_add(new_index)));
             }
         }
     }
