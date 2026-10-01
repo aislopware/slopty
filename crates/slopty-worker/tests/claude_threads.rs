@@ -77,9 +77,10 @@ mod claude_threads {
             Host::open(&self.dir.path().join("threads"), Limits::default()).unwrap()
         }
 
-        fn observe(&self, host: &Host) -> tokio::task::JoinHandle<()> {
+        fn observe(&self, host: &Host) -> (tokio::task::JoinHandle<()>, claude::Driver) {
             let sources: Arc<dyn Sources> = Arc::<Fake>::clone(&self.seen);
-            claude::spawn(host.clone(), self.events.subscribe(), sources)
+            let (driver, asks) = claude::Driver::channel();
+            (claude::spawn(host.clone(), self.events.subscribe(), sources, asks), driver)
         }
 
         fn status(&self, status: AgentStatus) {
@@ -109,6 +110,16 @@ mod claude_threads {
                     std::fs::copy(&agent, to.join(agent.file_name().unwrap())).unwrap();
                 }
             }
+            self.heard();
+        }
+
+        /// The agent writes `transcript` as its main one, and a hook fires.
+        fn write_main(&self, transcript: &str) {
+            std::fs::write(&self.main, transcript).unwrap();
+            self.heard();
+        }
+
+        fn heard(&self) {
             self.seen.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
         }
     }
@@ -164,7 +175,7 @@ mod claude_threads {
     async fn a_session_becomes_a_thread_and_comes_back_after_a_restart() {
         let rig = Rig::new();
         let host = rig.host();
-        let observer = rig.observe(&host);
+        let (observer, _driver) = rig.observe(&host);
         let thread = thread_of(NATIVE);
         rig.status(AgentStatus::Working);
         rig.write("tools");
@@ -222,6 +233,68 @@ mod claude_threads {
         let after = host.state(thread).unwrap().1;
         assert_ne!(after.epoch, before.epoch, "read again under a new epoch");
         assert_eq!(state.open_requests().count(), 0, "a prompt is not carried over a restart");
+    }
+
+    /// A text the thread carries clipped is read whole from the transcript through the driver;
+    /// a reference nothing answers for is gone. The `tools` capture's first tool result is
+    /// made long enough to clip.
+    #[tokio::test]
+    async fn a_clipped_text_expands_from_the_transcript() {
+        use slopty_proto::thread::wire::Expanded;
+        use slopty_proto::thread::{Clipped, ContentRef, ItemBody};
+        let rig = Rig::new();
+        let host = rig.host();
+        let (_observer, driver) = rig.observe(&host);
+        let thread = thread_of(NATIVE);
+        rig.status(AgentStatus::Working);
+        let captured = fixture("conversation", "tools").join("transcript.jsonl");
+        let long = (0..200).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+        let mut lengthened = false;
+        let records: Vec<String> = std::fs::read_to_string(captured)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let Ok(mut record) = serde_json::from_str::<serde_json::Value>(line) else {
+                    return line.to_owned();
+                };
+                if let Some(blocks) = record["message"]["content"].as_array_mut()
+                    && let Some(result) = blocks.iter_mut().find(|b| b["type"] == "tool_result")
+                    && !lengthened
+                {
+                    result["content"] = long.clone().into();
+                    lengthened = true;
+                }
+                record.to_string()
+            })
+            .collect();
+        assert!(lengthened, "the capture has a tool result");
+        rig.write_main(&format!("{}\n", records.join("\n")));
+        let want = entries("tools");
+        let state = until(&host, thread, |s| ids(s) == want).await;
+        let clipped: Vec<&Clipped> = state
+            .items
+            .iter()
+            .filter_map(|i| match &i.body {
+                ItemBody::Tool(call) => Some(std::iter::once(&call.input).chain(&call.output)),
+                _ => None,
+            })
+            .flatten()
+            .filter(|c| c.is_clipped())
+            .collect();
+        let clip = clipped.first().expect("the fixture clips a tool's text");
+        let content = clip.full.clone().expect("a clipped text says where its whole is");
+        let Expanded::Text(whole) = driver.expand(rig.terminal, content).await else {
+            panic!("the whole text");
+        };
+        assert_eq!(whole.trim_end(), long, "the whole of it");
+        assert!(clip.text.len() < whole.len());
+        let unknown = ContentRef("not a reference".to_owned());
+        assert_eq!(driver.expand(rig.terminal, unknown).await, Expanded::Gone);
+        assert_eq!(
+            driver.expand(SessionId::new(), clip.full.clone().unwrap()).await,
+            Expanded::Gone,
+            "no Claude Code observed in that terminal"
+        );
     }
 
     /// Where the mod is heard, what the model writes shows as items before the transcript has

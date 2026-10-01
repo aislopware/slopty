@@ -339,6 +339,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         screen_order: ScreenOrder::default(),
         copies: slopty_net::echo::Copies::from_env(),
         follows: HashMap::new(),
+        threads: crate::threads::Following::default(),
         searches: slopty_worker::search::Searches::default(),
         saves,
     };
@@ -897,6 +898,8 @@ struct Peer<'d> {
     /// The agents' conversations this client follows: each one's task takes its requests
     /// here, and ends when the sender goes.
     follows: HashMap<SessionId, mpsc::UnboundedSender<crate::follow::Command>>,
+    /// The threads this client keeps a table of and follows.
+    threads: crate::threads::Following,
     /// The text search this client runs, stopped by its next one and with the connection.
     searches: slopty_worker::search::Searches,
     /// This client's saves and edit ends, taken in order ([`crate::files::save_in_order`]).
@@ -1051,6 +1054,18 @@ impl Peer<'_> {
             ClientMsg::Clip(msg) => self.clip(msg),
             ClientMsg::Xfer(msg) => self.xfer(msg),
             ClientMsg::Conversation(req) => self.conversation(req),
+            ClientMsg::Thread(req) => {
+                let mut at = crate::threads::Origin {
+                    daemon: self.daemon,
+                    conn: &self.conn,
+                    out: &self.out,
+                    link: self.link,
+                    client: self.client,
+                    tasks: &mut self.tasks,
+                };
+                let conversations = &self.follows;
+                self.threads.handle(&mut at, req, &|session| conversations.contains_key(&session));
+            }
             ClientMsg::InstallHooks => {
                 let (client, out) = (self.client, self.out.clone());
                 self.tasks.spawn(async move {
@@ -1171,6 +1186,9 @@ impl Peer<'_> {
             return;
         }
         tracing::info!(client = %self.client, %session, "unfollow");
+        if self.threads.follows_session(session) {
+            return;
+        }
         let released = self.daemon.follows.lock().holds.unfollow(session, self.link);
         crate::follow::release(self.daemon, released);
     }

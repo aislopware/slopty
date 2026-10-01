@@ -81,6 +81,9 @@ async fn take(
         Uni::Conversation { session, .. } => {
             tracing::debug!(%client, %session, "a client opened a conversation stream; ignored");
         }
+        Uni::Thread { thread, .. } => {
+            tracing::debug!(%client, %thread, "a client opened a thread stream; ignored");
+        }
         Uni::Bulk { header, mut rx } => match header.purpose.clone() {
             Purpose::Upload => receive(daemon, header, rx, out).await,
             Purpose::Rep { rep } => {

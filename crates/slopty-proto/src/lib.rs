@@ -10,7 +10,9 @@
 //!   input goes back on the control stream so it is never head-of-line blocked behind a large
 //!   frame. A bulk stream (either way, lower priority) carries a file or a large clipboard
 //!   representation as raw bytes. A conversation stream (worker → client, one per followed agent
-//!   session, below the session streams) carries [`conversation::ConversationEvent`]s.
+//!   session, below the session streams) carries [`conversation::ConversationEvent`]s, and a thread
+//!   stream (worker → client, one per followed agent thread, at the same priority) carries
+//!   [`thread::wire::ThreadFrame`]s.
 //! * **Tunnel streams** — client-opened bidirectional streams after the control stream, one per
 //!   forwarded TCP connection, opening with [`transfer::TunnelOpen`].
 //! * **Datagrams** — unreliable QUIC datagrams, each opening with one [`datagram::Channel`] byte.
@@ -165,6 +167,9 @@ pub enum ClientMsg {
         /// Directories on the worker, as `ListFolder` names them.
         paths: Vec<String>,
     },
+    /// Something asked of the worker's agent threads ([`thread`]): the thread table, a
+    /// thread to follow from a cursor, an intent.
+    Thread(thread::wire::ThreadRequest),
 }
 
 impl ClientMsg {
@@ -192,6 +197,7 @@ impl ClientMsg {
             Self::Handoff(_) => "Handoff",
             Self::HandoffCaps(_) => "HandoffCaps",
             Self::WatchFolders { .. } => "WatchFolders",
+            Self::Thread(_) => "Thread",
         }
     }
 }
@@ -316,6 +322,11 @@ pub enum WorkerMsg {
     /// The pull request and worktree an agent's status line names, the whole of it each time
     /// it changes; both `None` once the agent has neither or is gone.
     AgentBranch(agent::AgentBranch),
+    /// The worker's thread table, whole or the rows changed since the client's cursor
+    /// (`ClientMsg::Thread`'s `Table`), and each change after it.
+    Threads(thread::wire::TableFrame),
+    /// How an intent this client sent went (`ClientMsg::Thread`'s `Intent` and `Start`).
+    IntentDone(thread::wire::IntentDone),
 }
 
 impl WorkerMsg {
@@ -348,6 +359,8 @@ impl WorkerMsg {
             Self::Search(_) => "Search",
             Self::Handoff(_) => "Handoff",
             Self::AgentBranch(_) => "AgentBranch",
+            Self::Threads(_) => "Threads",
+            Self::IntentDone(_) => "IntentDone",
         }
     }
 }

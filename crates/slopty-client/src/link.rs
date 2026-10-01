@@ -22,6 +22,8 @@ use slopty_proto::handshake::HelloAck;
 #[cfg(target_vendor = "apple")]
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::terminal::{Frame, TermEvent, TermRequest, frame_head};
+use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::ThreadFrame;
 use slopty_proto::transfer::{BulkHeader, Purpose};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -80,6 +82,15 @@ pub enum LinkEvent {
         session: SessionId,
         /// Event.
         event: ConversationEvent,
+    },
+    /// A frame of a thread this client follows, in the order the worker sent it. The stream
+    /// ending (an unfollow, the thread gone, the link lost) sends nothing more; following
+    /// again from the last frame's cursor resumes where it stopped.
+    Thread {
+        /// The thread.
+        thread: ThreadId,
+        /// Frame.
+        frame: ThreadFrame,
     },
     /// A program in a worker's shell handed this client a page or a file, or took one back
     /// (`crate::handoff`).
@@ -242,6 +253,13 @@ impl WorkerLink {
                             while let Ok(event) = rx.recv().await {
                                 let event = LinkEvent::Conversation { session, event };
                                 if events.send(event).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(Uni::Thread { thread, mut rx }) => {
+                            while let Ok(frame) = rx.recv().await {
+                                if events.send(LinkEvent::Thread { thread, frame }).await.is_err() {
                                     break;
                                 }
                             }

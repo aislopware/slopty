@@ -215,6 +215,7 @@ mod tests {
             Uni::Session { session, rx } => (session, rx),
             Uni::Bulk { header, .. } => panic!("a bulk stream, not a session: {header:?}"),
             Uni::Conversation { .. } => panic!("a conversation stream"),
+            Uni::Thread { .. } => panic!("a thread stream"),
         }
     }
 
@@ -4148,6 +4149,7 @@ mod tests {
                 Uni::Bulk { header, rx } => (header, rx),
                 Uni::Session { .. } => panic!("a bulk stream"),
                 Uni::Conversation { .. } => panic!("a conversation stream"),
+                Uni::Thread { .. } => panic!("a thread stream"),
             }
         };
         let digest_of = |xfer: XferId, want: &'static str| {

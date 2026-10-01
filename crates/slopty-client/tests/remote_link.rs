@@ -77,6 +77,7 @@ mod tests {
             Uni::Bulk { header, rx } => (header, rx),
             Uni::Session { .. } => panic!("a bulk stream"),
             Uni::Conversation { .. } => panic!("a conversation stream"),
+            Uni::Thread { .. } => panic!("a thread stream"),
         }
     }
 

@@ -257,6 +257,9 @@ pub struct Page {
     pub older: bool,
 }
 
+/// The most of a text one [`Expanded::Text`] carries, in chars: the rest is cut.
+pub const EXPANDED_CHARS: usize = 1_000_000;
+
 /// The whole of something clipped.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Expanded {

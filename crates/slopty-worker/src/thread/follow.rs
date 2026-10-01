@@ -57,13 +57,20 @@ impl Follower {
         }
     }
 
+    /// The thread followed.
+    #[must_use]
+    pub const fn thread(&self) -> ThreadId {
+        self.thread
+    }
+
     /// Where the client stands once it has applied the frames sent so far.
     #[must_use]
     pub const fn cursor(&self) -> Option<Cursor> {
         self.cursor
     }
 
-    /// The next frame, or `None` once the thread is gone.
+    /// The next frame, or `None` once the thread is gone. Cancel safe: a call cut short
+    /// leaves the cursor where it was, and the next one catches up from it.
     pub async fn next(&mut self) -> Option<ThreadFrame> {
         loop {
             let Some(feed) = self.feed.as_mut() else {

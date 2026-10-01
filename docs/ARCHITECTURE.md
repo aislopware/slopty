@@ -1124,8 +1124,14 @@ Claude Code is mapped into it by its observed adapter: a sans-IO codec,
 `slopty_agent::observed`, over the transcript decoder, the tracker's status, the held prompts,
 the status line and the mod's board. Its IO, `slopty_worker::thread::claude`, runs one task per
 terminal session beside the face's own path, and makes one thread per Claude Code session,
-named by the session's id, with a linked thread per subagent. The model lands beside today's Claude path, described below, which it replaces once the clients
-switch over.
+named by the session's id, with a linked thread per subagent. On the link, `ClientMsg::Thread`
+carries the requests and the control stream carries the table (`WorkerMsg::Threads`) and each
+intent's outcome (`WorkerMsg::IntentDone`). A followed thread streams on a unidirectional
+stream of its own (`UniHead::Thread`), one task per thread on the worker
+(`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. Following a
+thread holds its terminal's permission prompts, as following its conversation does. The model
+lands beside today's Claude path, described below, which it replaces once the clients switch
+over.
 
 Claude Code only, for now, and always through its own TUI, which stays the source of truth.
 Slopty reads the agent's state and points the human at the terminal that needs them. It is

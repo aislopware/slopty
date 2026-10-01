@@ -78,6 +78,12 @@ pub enum UniHead {
         /// The terminal session the agent runs in.
         session: SessionId,
     },
+    /// Worker → client: the [`crate::thread::wire::ThreadFrame`]s of one followed agent thread
+    /// follow, with the same framing.
+    Thread {
+        /// The thread.
+        thread: crate::thread::ThreadId,
+    },
 }
 
 /// First message on a tunnel: a client-opened bidirectional stream other than the control one.

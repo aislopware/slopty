@@ -614,6 +614,32 @@ mod golden_thread {
         snap("frame_tool_details", &ThreadFrame::Page(Page { turns: vec![], items, older: false }));
     }
 
+    /// The thread messages as they ride the control stream and open a stream of their own.
+    #[test]
+    fn on_the_link() {
+        use slopty_proto::transfer::UniHead;
+        use slopty_proto::{ClientMsg, WorkerMsg};
+        let follow = ThreadRequest::Follow {
+            thread: thread(),
+            have: Some(Cursor { epoch: 1, seq: 7 }),
+            turns: 20,
+            max_latency_ms: 16,
+        };
+        snap("link_client_thread", &ClientMsg::Thread(follow));
+        let row = state().row(ms(2_500));
+        let delta = TableFrame::Delta {
+            cursor: Cursor { epoch: 1, seq: 4 },
+            rows: vec![row],
+            removed: vec![],
+        };
+        snap("link_worker_threads", &WorkerMsg::Threads(delta));
+        snap(
+            "link_worker_intent_done",
+            &WorkerMsg::IntentDone(IntentDone { id: intent(), outcome: Outcome::Accepted }),
+        );
+        snap("link_uni_thread", &UniHead::Thread { thread: thread() });
+    }
+
     #[test]
     fn table() {
         let row = state().row(ms(2_500));

@@ -2814,13 +2814,17 @@ fn apply_link_event(
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
-        // read (`LinkEvent::Handoff`).
+        // read (`LinkEvent::Handoff`). Nothing here asks for the threads yet, so none of their
+        // frames come.
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_),
-        ) => {}
+            | WorkerMsg::Handoff(_)
+            | WorkerMsg::Threads(_)
+            | WorkerMsg::IntentDone(_),
+        )
+        | LinkEvent::Thread { .. } => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
             view.update(cx, |v, cx| v.disconnect_worker(key, status, cx));

@@ -1,4 +1,5 @@
-//! The streams beside the control stream: session rows, bulk bytes and TCP tunnels.
+//! The streams beside the control stream: session rows, conversations and threads, bulk bytes
+//! and TCP tunnels.
 //!
 //! Every unidirectional stream opens with a [`UniHead`]; a tunnel is a client-opened
 //! bidirectional stream that opens with a [`TunnelOpen`]. After a bulk or tunnel header the
@@ -12,6 +13,8 @@ use noq::{Connection, RecvStream, SendStream};
 use slopty_core::SessionId;
 use slopty_proto::conversation::ConversationEvent;
 use slopty_proto::terminal::TermEvent;
+use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::ThreadFrame;
 use slopty_proto::transfer::{BulkHeader, TunnelOpen, UniHead};
 
 use crate::NetError;
@@ -49,10 +52,15 @@ pub const BULK_PRIORITY: i32 = -2;
 /// on its way; ahead of files, since a person is reading it now.
 pub const CONVERSATION_PRIORITY: i32 = TUNNEL_PRIORITY;
 
+/// Send priority of thread streams, level with tunnels, for the reason conversations are.
+pub const THREAD_PRIORITY: i32 = TUNNEL_PRIORITY;
+
 const _: () = assert!(
     BULK_PRIORITY < TUNNEL_PRIORITY
         && BULK_PRIORITY < CONVERSATION_PRIORITY
         && CONVERSATION_PRIORITY < AHEAD_OF_DATAGRAMS
+        && BULK_PRIORITY < THREAD_PRIORITY
+        && THREAD_PRIORITY < AHEAD_OF_DATAGRAMS
         && TUNNEL_PRIORITY < AHEAD_OF_DATAGRAMS
         && AHEAD_OF_DATAGRAMS < ECHO_PRIORITY,
     "files, then tunnels and conversations, then everything that goes ahead of video, then an echo"
@@ -107,6 +115,13 @@ pub enum Uni {
         session: SessionId,
         /// Its events.
         rx: FramedRecv<ConversationEvent>,
+    },
+    /// A followed agent thread's frames (worker → client).
+    Thread {
+        /// The thread.
+        thread: ThreadId,
+        /// Its frames.
+        rx: FramedRecv<ThreadFrame>,
     },
 }
 
@@ -191,6 +206,25 @@ pub async fn open_conversation(
         .map_err(|_elapsed| NetError::TimedOut("opening a conversation stream"))?
 }
 
+/// Open a followed thread's stream to a client, at [`THREAD_PRIORITY`], and write its header,
+/// giving up after `wait` as [`open_session`] does.
+pub async fn open_thread(
+    conn: &Connection,
+    thread: ThreadId,
+    wait: Duration,
+) -> Result<FramedSend<ThreadFrame>, NetError> {
+    let open = async {
+        let send = conn.open_uni().await.map_err(|e| NetError::stream(&e))?;
+        send.set_priority(THREAD_PRIORITY).map_err(|e| NetError::stream(&e))?;
+        let mut head = FramedSend::<UniHead>::new(send);
+        head.send(&UniHead::Thread { thread }).await?;
+        Ok(head.retype())
+    };
+    tokio::time::timeout(wait, open)
+        .await
+        .map_err(|_elapsed| NetError::TimedOut("opening a thread stream"))?
+}
+
 /// Accept the next unidirectional stream the peer opens and read its header.
 ///
 /// The header may be lost and retransmitted; an accept loop that must not wait on one stream's
@@ -208,6 +242,7 @@ pub async fn read_uni(recv: RecvStream) -> Result<Uni, NetError> {
         UniHead::Session { session } => Uni::Session { session, rx: head.retype() },
         UniHead::Bulk(header) => Uni::Bulk { header, rx: head.into_raw() },
         UniHead::Conversation { session } => Uni::Conversation { session, rx: head.retype() },
+        UniHead::Thread { thread } => Uni::Thread { thread, rx: head.retype() },
     })
 }
 

@@ -22,7 +22,7 @@ mod ports;
 mod screens;
 mod server;
 pub mod tailnet;
-mod threads;
+pub mod threads;
 mod tunnel;
 mod xfer;
 
@@ -217,6 +217,9 @@ pub struct Daemon {
     /// The key every session's token is made under, kept in the data directory: the token
     /// proves which session a program speaks from, to this daemon and to the server.
     pub session_key: slopty_agent::vouch::SessionKey,
+    /// The agents' threads, kept under the data dir, and served to clients; `None` when they
+    /// could not be opened there.
+    pub threads: Option<threads::Threads>,
 }
 
 impl Daemon {
@@ -545,6 +548,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     let transfers = Arc::new(slopty_worker::xfer::Transfers::new(
         args.drop_dir.clone().unwrap_or_else(slopty_worker::xfer::Transfers::default_drop_root),
     ));
+    let (threads, observing) = threads::open(&data_dir.join("threads")).unzip();
     let daemon = Daemon {
         worker,
         listener,
@@ -580,6 +584,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         session_key,
         displays,
         sources,
+        threads,
     };
     let transfers = Arc::clone(&daemon.transfers);
     tokio::task::spawn_blocking(move || {
@@ -592,7 +597,9 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     tokio::spawn(ports::watch(daemon.clone(), port_hints));
     // Agents the hooks never report: the foreground process, the title, the transcript.
     tokio::spawn(agents::watch(daemon.clone()));
-    threads::start(&daemon, &data_dir.join("threads"));
+    if let Some(asks) = observing {
+        threads::start(&daemon, asks);
+    }
 
     // A terminal whose program exits stays, its last screen and its status kept, until a client
     // closes it (`docs/decisions/terminal.md`, "An exited shell stays until it is closed"). The

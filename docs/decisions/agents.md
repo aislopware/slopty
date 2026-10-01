@@ -197,3 +197,30 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     begins anew, since the transcript has none of them.
   - **Not carried yet:** the agent's version (the mod's hello has it), and a session's working
     directory until its shell next reports one after the worker starts.
+
+- ✅ **Threads ride the link beside the conversation path, which keeps working unchanged**
+  (2026-10-02, `apps/slopty-worker/src/threads.rs`, `crates/slopty-net/src/streams.rs`;
+  goldens in `crates/slopty-proto/tests/golden_thread.rs`, proved end to end by
+  `apps/slopty-worker/tests/threads.rs`).
+  - **Additive on the wire.** `ClientMsg::Thread` carries every `ThreadRequest`.
+    `WorkerMsg::Threads` carries the table and `WorkerMsg::IntentDone` an intent's outcome,
+    both on the control stream. A followed thread gets a unidirectional stream of its own
+    (`UniHead::Thread`, at the conversation streams' priority) carrying `ThreadFrame`s. Each
+    variant is appended last, so no existing golden changed.
+  - **One stream per followed thread, as the conversation has.** Its task sends what the
+    `Follower` makes from the client's cursor, and answers `Page` and `Expand` between frames
+    on the same stream. A follow of a thread already followed is ignored. Unfollowing ends the
+    task, and the stream finishes. The table is one task per connection, replaced by the next
+    `Table` ask: what the client lacks from its cursor, then a frame at each change.
+  - **Following a thread holds its terminal's prompts, as following its conversation does.**
+    The connection joins the session's followers, so a `PermissionRequest` waits for it. It
+    leaves when neither path follows that session any more.
+  - **Intents act under the host's lock, once per id.** `Answer` and `Release` go through the
+    held prompts the conversation path answers. A repeat, after a reconnect or from another
+    client, gets the first outcome back and touches nothing. An intent the thread's caps lack
+    is `Unsupported`. Those the worker cannot act on yet (send, interrupt, model and the rest)
+    are `Unsupported` too, until the composer moves to the worker. `Start` is refused and not
+    recorded.
+  - **Expansion asks the adapter.** The Claude driver answers an `Expand` from the session's
+    own transcripts, on the blocking pool: a text cut at `EXPANDED_CHARS`, a picture's bytes,
+    or `Gone`.

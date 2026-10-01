@@ -19,14 +19,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use slopty_agent::conversation::Transcripts;
-use slopty_agent::observed::{Observed, Out};
+use slopty_agent::conversation::{Part, Transcripts};
+use slopty_agent::observed::{self, Observed, Out};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentEvent, AgentKind};
 use slopty_proto::conversation::PermissionEvent;
-use slopty_proto::thread::{Action, Liveness, Phase, Status, ThreadState};
-use tokio::sync::{broadcast, mpsc, watch};
+use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
+use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadState};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::Host;
@@ -51,19 +52,63 @@ enum Input {
     Permission(PermissionEvent),
     /// The terminal's working directory, as its shell last said.
     Cwd(String),
+    /// The whole of a clipped text or picture, asked through a [`Driver`].
+    Expand(ContentRef, oneshot::Sender<Expanded>),
 }
 
-/// Observe every Claude Code session the daemon's `events` speak of, into `host`.
+/// What is asked of the observed sessions beyond what the daemon's events tell them. Cheap to
+/// clone.
+#[derive(Clone, Debug)]
+pub struct Driver(mpsc::UnboundedSender<(SessionId, Input)>);
+
+/// Where a [`Driver`]'s asks wait for [`spawn`].
+#[derive(Debug)]
+pub struct Asks(mpsc::UnboundedReceiver<(SessionId, Input)>);
+
+impl Driver {
+    /// A driver, and the asks [`spawn`] takes from it.
+    #[must_use]
+    pub fn channel() -> (Self, Asks) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Self(tx), Asks(rx))
+    }
+
+    /// The whole of `content`, clipped in a thread observed in terminal `session`:
+    /// [`Expanded::Gone`] when its transcript no longer has it, or nothing is observed there.
+    pub async fn expand(&self, session: SessionId, content: ContentRef) -> Expanded {
+        let (tx, rx) = oneshot::channel();
+        if self.0.send((session, Input::Expand(content, tx))).is_err() {
+            return Expanded::Gone;
+        }
+        rx.await.unwrap_or(Expanded::Gone)
+    }
+}
+
+/// Observe every Claude Code session the daemon's `events` speak of, into `host`, and answer
+/// the `asks` of its [`Driver`].
 pub fn spawn(
     host: Host,
     mut events: broadcast::Receiver<WorkerMsg>,
     sources: Arc<dyn Sources>,
+    Asks(mut asks): Asks,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut sessions: HashMap<SessionId, mpsc::UnboundedSender<Input>> = HashMap::new();
         let mut cwds: HashMap<SessionId, String> = HashMap::new();
         loop {
-            let (session, input) = match events.recv().await {
+            let heard = tokio::select! {
+                heard = events.recv() => heard,
+                // An ask of a session observed nowhere is dropped, and its asker hears so.
+                Some((session, input)) = asks.recv() => {
+                    if let Some(tx) = sessions.get(&session)
+                        && tx.send(input).is_err()
+                    {
+                        sessions.remove(&session);
+                    }
+                    continue;
+                }
+            };
+            let (session, input) = match heard {
                 Ok(WorkerMsg::Agent(event)) if event.kind == AgentKind::ClaudeCode => {
                     (event.session, Input::Status(Box::new(event)))
                 }
@@ -144,6 +189,9 @@ async fn observe(
                         let outs = observed.permission(&event);
                         take(&on.host, outs);
                     }
+                }
+                Some(Input::Expand(content, reply)) => {
+                    let _gone = reply.send(on.expand(&content).await);
                 }
             },
             changed = seen.changed(), if watching => match changed {
@@ -262,6 +310,37 @@ impl Session {
             take(&self.host, observed.transcript(&changes, &outputs));
         }
     }
+}
+
+impl Session {
+    /// The whole of `content`, read from the transcripts on the blocking pool.
+    async fn expand(&mut self, content: &ContentRef) -> Expanded {
+        let Some((thread, at)) = observed::text_ref(content) else { return Expanded::Gone };
+        let Some(transcripts) = self.transcripts.take() else { return Expanded::Gone };
+        let read = tokio::task::spawn_blocking(move || {
+            let body = if matches!(at.part, Part::Image { .. }) {
+                transcripts.image(&thread, &at).map(Expanded::Bytes)
+            } else {
+                transcripts.full_text(&thread, &at).map(|text| Expanded::Text(clip(text)))
+            };
+            (transcripts, body.unwrap_or(Expanded::Gone))
+        })
+        .await;
+        let Ok((transcripts, body)) = read else {
+            self.transcripts = Some(Transcripts::default());
+            return Expanded::Gone;
+        };
+        self.transcripts = Some(transcripts);
+        body
+    }
+}
+
+/// `text` cut at [`EXPANDED_CHARS`].
+fn clip(mut text: String) -> String {
+    if let Some((at, _)) = text.char_indices().nth(EXPANDED_CHARS) {
+        text.truncate(at);
+    }
+    text
 }
 
 fn stem(path: &Path) -> Option<String> {

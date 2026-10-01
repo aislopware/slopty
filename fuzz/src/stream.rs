@@ -14,6 +14,7 @@ use slopty_proto::conversation::ConversationEvent;
 use slopty_proto::ctl::{CtlReply, CtlRequest};
 use slopty_proto::server::{FromServer, ToServer};
 use slopty_proto::terminal::TermEvent;
+use slopty_proto::thread::wire::ThreadFrame;
 use slopty_proto::transfer::UniHead;
 use slopty_proto::{ClientMsg, WorkerMsg, codec};
 use slopty_testkit::alloc;
@@ -39,13 +40,15 @@ pub fn server_msg(data: &[u8]) {
 }
 
 /// Either end reading a unidirectional stream: its [`UniHead`], then what the head says
-/// follows, as the reader retypes it (terminal events, conversation events, or raw bytes).
+/// follows, as the reader retypes it (terminal events, conversation events, thread frames, or
+/// raw bytes).
 pub fn uni_stream(data: &[u8]) {
     let mut feed = Feed::new(data);
     let Some(head) = feed.next::<UniHead>() else { return };
     match head {
         UniHead::Session { .. } => while feed.next::<TermEvent>().is_some() {},
         UniHead::Conversation { .. } => while feed.next::<ConversationEvent>().is_some() {},
+        UniHead::Thread { .. } => while feed.next::<ThreadFrame>().is_some() {},
         UniHead::Bulk(_) => {}
     }
 }
