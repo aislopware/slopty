@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2_foundation::NSError;
-use objc2_screen_capture_kit::{SCDisplay, SCShareableContent, SCWindow};
+use objc2_screen_capture_kit::{SCDisplay, SCRunningApplication, SCShareableContent, SCWindow};
 use parking_lot::Mutex;
 use slopty_core::WindowId;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
@@ -56,6 +56,17 @@ impl Shareable {
         let windows = unsafe { self.inner.windows() };
         // SAFETY: `windowID` is a plain getter.
         windows.iter().find(|w| unsafe { w.windowID() } == id.0)
+    }
+
+    /// The running applications of processes `pids`; one that has quit is left out.
+    pub(crate) fn applications(
+        &self,
+        pids: &std::collections::BTreeSet<i32>,
+    ) -> Vec<Retained<SCRunningApplication>> {
+        // SAFETY: valid object; the array is a snapshot.
+        let apps = unsafe { self.inner.applications() };
+        // SAFETY: `processID` is a plain getter.
+        apps.iter().filter(|app| pids.contains(&unsafe { app.processID() })).collect()
     }
 
     pub(crate) fn display(&self, id: u32) -> Option<Retained<SCDisplay>> {

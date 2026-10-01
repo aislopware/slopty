@@ -21,10 +21,10 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use parking_lot::Mutex;
-use slopty_capture::synthetic::{Canvas, CanvasStream, CanvasTarget};
+use slopty_capture::synthetic::{Canvas, CanvasStream, CanvasTarget, Tone};
 use slopty_capture::{
     AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
-    Rect, TargetWindow, Went, WindowState,
+    Heard, Rect, TargetWindow, Went, WindowState,
 };
 use slopty_codec::PixelBuffer;
 use slopty_core::{DisplayId, WindowId};
@@ -217,6 +217,7 @@ impl<const HZ: u16, const W: u16, const H: u16> CaptureSource for StudioAt<HZ, W
     type Content = Scene;
     type HideWatch = ();
     type Image = PixelBuffer;
+    type Sound = Tone;
     type Stream = CanvasStream;
     type Target = CanvasTarget;
 
@@ -271,14 +272,34 @@ impl<const HZ: u16, const W: u16, const H: u16> CaptureSource for StudioAt<HZ, W
         target: &CanvasTarget,
         config: &CaptureConfig,
         sink: impl Fn(CapturedFrame<PixelBuffer>) + Send + Sync + 'static,
-        audio: Option<AudioSink>,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<CanvasStream, CaptureError> {
         // The beat is the listed display's, not that of whichever panel shares its id here.
         let config =
             CaptureConfig { fps: if config.fps == 0 { HZ } else { config.fps }, ..*config };
-        Canvas::start(target, &config, sink, audio, on_stop, done)
+        Canvas::start(target, &config, sink, on_stop, done)
+    }
+
+    fn start_sound(
+        heard: &Heard,
+        sink: AudioSink,
+        on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+        done: impl FnOnce(Result<Tone, CaptureError>) + Send + 'static,
+    ) {
+        Canvas::start_sound(heard, sink, on_stop, done);
+    }
+
+    fn hear(
+        sound: &Tone,
+        heard: &Heard,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) {
+        Canvas::hear(sound, heard, done);
+    }
+
+    fn stop_sound(sound: &Tone, done: impl FnOnce(Result<(), CaptureError>) + Send + 'static) {
+        Canvas::stop_sound(sound, done);
     }
 
     fn update(
@@ -753,7 +774,7 @@ mod tests {
                         {
                             to_paint.push(at.saturating_duration_since(stamp.decoded));
                             to_glass.push(at.saturating_duration_since(captured));
-                            if let Some(estimated) = stamp.captured {
+                            if let Some(estimated) = stamp.captured.map(|c| c.at) {
                                 to_glass_estimated.push(at.saturating_duration_since(estimated));
                                 estimate_error.push(estimated.duration_since(captured).max(captured.duration_since(estimated)));
                             }
@@ -1136,8 +1157,9 @@ mod tests {
     /// behind 5 ms each way: the drawn screen streamed through the real encoder and decoder,
     /// the probes answered by the stream's control as the connection answers them, and each
     /// decoded picture's estimated capture compared with the exact one (both clocks are this
-    /// Mac's). Within a millisecond at the median, and never further off than the bound the
-    /// estimate states plus the width of the two clock reads.
+    /// Mac's). Within a millisecond at the median, and each never further off than the bound
+    /// the estimate that timed it stated, plus the width of the two clock reads: the estimate
+    /// read at the end may be tighter than the one a frame early on was placed by.
     #[test]
     fn the_clock_probes_time_captures_as_the_shared_clock_does() {
         let runtime =
@@ -1186,6 +1208,7 @@ mod tests {
                 // A stream that stops handing out pictures ([`next_or_stopped`]), or whose probes
                 // never come back while it does, fails with what both ends saw.
                 let mut errors = Vec::new();
+                let mut widest = Duration::ZERO;
                 let mut seen = 0_u32;
                 while errors.len() < 60 {
                     let timed = errors.len();
@@ -1200,23 +1223,30 @@ mod tests {
                         assert!(seen < 600, "{seen} pictures and no probe back: {:?}", handle.stats());
                         continue;
                     };
-                    errors.push(estimated.duration_since(exact).max(exact.duration_since(estimated)));
+                    let off = estimated.at.duration_since(exact).max(exact.duration_since(estimated.at));
+                    assert!(
+                        off <= estimated.within + Duration::from_millis(1),
+                        "{off:?} off, placed within {:?}, {one_way:?} each way",
+                        estimated.within
+                    );
+                    widest = widest.max(estimated.within);
+                    errors.push(off);
                 }
                 let estimate = handle.stats().clock.expect("the probes came back");
                 let max = errors.iter().max().copied().unwrap_or_default();
                 errors.sort_unstable();
                 let p50 = percentile(&errors, 50);
                 eprintln!(
-                    "MEASURE clock estimate at {:.0} ms each way: off the shared clock p50 {:.3} / max {:.3} ms over {} frames, bound {:.3} ms, rtt {:.3} ms",
+                    "MEASURE clock estimate at {:.0} ms each way: off the shared clock p50 {:.3} / max {:.3} ms over {} frames, widest bound a frame was placed within {:.3} ms, last bound {:.3} ms, rtt {:.3} ms",
                     ms(one_way),
                     ms(p50),
                     ms(max),
                     errors.len(),
+                    ms(widest),
                     ms(estimate.bound),
                     ms(estimate.rtt)
                 );
                 assert!(p50 <= Duration::from_millis(1), "p50 {p50:?}, {estimate:?}");
-                assert!(max <= estimate.bound + Duration::from_millis(1), "max {max:?}, {estimate:?}");
                 drop(handle);
                 drain.abort();
                 stream.close().await;
@@ -2561,5 +2591,147 @@ mod tests {
         drop(handle);
         drain.abort();
         stream.close().await;
+    }
+
+    /// The audio datagrams on `line`, as (when, media stream, sequence), from batches sent since
+    /// the last look.
+    fn sound_on(
+        line: &mut mpsc::UnboundedReceiver<(Instant, Vec<Bytes>)>,
+    ) -> Vec<(Instant, u32, u32)> {
+        let mut heard = Vec::new();
+        while let Ok((at, batch)) = line.try_recv() {
+            for datagram in batch {
+                let Some((header, _)) = slopty_proto::media::MediaHeader::parse(&datagram) else {
+                    continue;
+                };
+                if header.kind() == Some(slopty_proto::media::Kind::Audio) {
+                    heard.push((at, header.stream.get(), header.frame.get()));
+                }
+            }
+        }
+        heard
+    }
+
+    /// The desktop and two windows of one app, each its own stream hearing through `listen` as
+    /// a worker's connection has them, are one sound on the wire: one capture hearing every
+    /// app, one sequence on the sound's media stream at one packet per 10 ms, none on the
+    /// streams' own. The windows closing changes nothing it hears and leaves no gap.
+    #[test]
+    fn a_display_and_two_windows_of_one_app_are_one_sound_on_the_wire() {
+        use slopty_capture::Heard;
+
+        use crate::screen::sound::Sound;
+
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let (line_tx, mut line) = mpsc::unbounded_channel();
+            let wire = Arc::new(Wire::new(ScreenRouter::new(), Some(line_tx), None));
+            let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+            let sound = Sound::<Synthetic>::new(Arc::clone(&sink));
+            let targets = [
+                CaptureTarget::Display(DISPLAY.id),
+                CaptureTarget::Window(WINDOWS[0].id),
+                CaptureTarget::Window(WINDOWS[1].id),
+            ];
+            let mut streams = Vec::new();
+            for (id, target) in (1..).map(StreamId).zip(targets) {
+                let opened =
+                    Pipeline::<Synthetic>::open(id, target, Quality::default(), Arc::clone(&sink), |_e| {});
+                let (mut stream, _opened) = opened.await.unwrap();
+                stream.listen(&sound);
+                streams.push(stream);
+            }
+            // The first chunk makes the Opus encoder, which a loaded machine takes seconds over.
+            let mut heard = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(100);
+            while heard.is_empty() {
+                assert!(Instant::now() < deadline, "no sound: {:?}", sound.stats());
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                heard.extend(sound_on(&mut line));
+            }
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            heard.extend(sound_on(&mut line));
+            let closed_at = Instant::now();
+            let display = streams.remove(0);
+            for window in streams {
+                window.close().await;
+            }
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            heard.extend(sound_on(&mut line));
+            let stats = sound.stats();
+            assert_eq!(
+                (stats.starts, stats.hears, stats.stops, stats.heard),
+                (1, 0, 0, Some(Heard::Every)),
+                "one capture of every app, changed by nothing"
+            );
+            assert!(heard.iter().all(|&(_, media, _)| media == slopty_proto::media::SOUND.0));
+            let seqs: Vec<u32> = heard.iter().map(|&(_, _, seq)| seq).collect();
+            assert_eq!(seqs, (1..).take(seqs.len()).collect::<Vec<u32>>(), "one sequence");
+            let span = heard.last().unwrap().0.saturating_duration_since(heard[0].0);
+            let per_second = (seqs.len() - 1) as f64 / span.as_secs_f64();
+            assert!((80.0..=120.0).contains(&per_second), "{per_second:.0} packets a second");
+            let gap = heard
+                .windows(2)
+                .filter(|w| w[1].0 >= closed_at)
+                .map(|w| w[1].0.saturating_duration_since(w[0].0))
+                .max()
+                .unwrap();
+            assert!(gap < Duration::from_millis(60), "a {gap:?} gap when the windows went");
+            eprintln!(
+                "MEASURE one sound for a display and two windows: {} packets at {per_second:.1} a second, the longest wait after the windows closed {:.1} ms",
+                seqs.len(),
+                gap.as_secs_f64() * 1e3
+            );
+            display.close().await;
+        });
+    }
+
+    /// What a worker's one sound costs it for 1, 2, 4 and 8 streams hearing through it: the
+    /// canvas's tone, the one Opus encoder and the datagrams, as the process's CPU over
+    /// `SLOPTY_SOUND_SECONDS` (default 4) after a second to settle. Streams of one client used to
+    /// cost a capture tap and an Opus encoder each (`docs/MEASUREMENTS.md`, "streams from one
+    /// worker: what they could share", about 0.016 of a core a stream with its client's
+    /// decoder); now they cost one between them.
+    #[test]
+    #[ignore = "a measurement: cargo test -p slopty-worker --release --lib -- --ignored --nocapture one_sound_costs"]
+    fn one_sound_costs_the_same_for_any_number_of_streams() {
+        use slopty_capture::Heard;
+
+        use crate::screen::sound::{Listen as _, Sound};
+
+        let seconds: u64 =
+            std::env::var("SLOPTY_SOUND_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            for n in [1_usize, 2, 4, 8] {
+                let (line_tx, mut line) = mpsc::unbounded_channel();
+                let wire: Arc<dyn DatagramSink> =
+                    Arc::new(Wire::new(ScreenRouter::new(), Some(line_tx), None));
+                let sound = Sound::<Synthetic>::new(wire);
+                // A display among them hears every app; the others are windows of two apps.
+                let listening: Vec<_> = (0..n)
+                    .map(|i| match i % 3 {
+                        0 => Heard::Every,
+                        pid => Heard::Apps(std::iter::once(i32::try_from(pid).unwrap_or(1)).collect()),
+                    })
+                    .map(|heard| sound.listen(heard))
+                    .collect();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let _settling = sound_on(&mut line);
+                let (cpu, at) = (cpu_time(), Instant::now());
+                tokio::time::sleep(Duration::from_secs(seconds)).await;
+                let (cpu, wall) = (cpu_time().saturating_sub(cpu), at.elapsed());
+                let packets = sound_on(&mut line).len();
+                eprintln!(
+                    "MEASURE one sound, {n} streams: {:.4} of a core, {:.1} packets a second, {} capture",
+                    cpu.as_secs_f64() / wall.as_secs_f64(),
+                    packets as f64 / wall.as_secs_f64(),
+                    sound.stats().starts,
+                );
+                drop(listening);
+            }
+        });
     }
 }

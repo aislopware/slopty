@@ -231,6 +231,8 @@ objc2-screen-capture-kit = { version = "=0.3.2", default-features = false, featu
     "SCError",
     "block2",
     "dispatch2",
+    # `SCRunningApplication.processID`, which a sound capture picks its applications by.
+    "libc",
     "objc2-core-foundation",
     "objc2-core-graphics",
     "objc2-core-media",

@@ -9,29 +9,28 @@
 //! frame and cursor position on `watch` channels the UI polls at paint time.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use slopty_codec::audio::{Arrival as AudioArrival, Conceal, OpusDecoder, Player};
 use slopty_codec::{DecodeFailure, DecodedFrame, Decoder};
 use slopty_core::StreamId;
 use slopty_media::{
-    Action, ClockSync, Config, Ingest, MAX_AUDIO_COPIES, Reassembler, ReassemblerStats, STALL_GAP,
-    StallAttribution,
+    Action, ClockSync, Config, Ingest, Reassembler, ReassemblerStats, STALL_GAP, StallAttribution,
 };
 use slopty_proto::ClientMsg;
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::media::{ClockEcho, Kind, MAX_DATAGRAM, MediaHeader, flags};
 use slopty_proto::screen::{Feedback, ReceiverReport, ScreenRequest, Stripe, VideoCodec};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::pacing::{CaptureClock, ClockAnchor, ClockEstimate, FrameStamp};
+use crate::pacing::{CaptureClock, Captured, ClockEstimate, FrameStamp};
 
 pub mod display;
+mod sound;
 
 /// Datagrams buffered per attached stream before the task must drain them.
 const STREAM_DEPTH: usize = 2048;
@@ -89,6 +88,11 @@ pub struct ScreenRouter {
     /// tests in `apps/slopty-worker/tests/e2e.rs`.
     drop_permille: Arc<AtomicU32>,
     lcg: Arc<AtomicU64>,
+    /// The worker's sound, while a stream of the connection holds it.
+    sound: Arc<Mutex<Weak<sound::Sound>>>,
+    /// Its mute, for the connection's life: a sound started again by a new tile after the last
+    /// one closed keeps the choice.
+    muted: Arc<sound::Muted>,
 }
 
 impl Default for ScreenRouter {
@@ -97,6 +101,8 @@ impl Default for ScreenRouter {
             inner: Arc::default(),
             drop_permille: Arc::new(AtomicU32::new(0)),
             lcg: Arc::new(AtomicU64::new(LOSS_SEED)),
+            sound: Arc::default(),
+            muted: Arc::default(),
         }
     }
 }
@@ -227,6 +233,23 @@ impl ScreenRouter {
         }
         routes.attached.insert(stream, tx);
         rx
+    }
+
+    /// The worker's sound, started on `runtime` when no stream holds it, reporting on
+    /// `control`.
+    fn sound(
+        &self,
+        runtime: &tokio::runtime::Handle,
+        control: &mpsc::Sender<ClientMsg>,
+    ) -> Arc<sound::Sound> {
+        let mut slot = self.sound.lock();
+        if let Some(sound) = slot.upgrade() {
+            return sound;
+        }
+        let sound =
+            Arc::new(sound::Sound::spawn(runtime, self, Arc::clone(&self.muted), control.clone()));
+        *slot = Arc::downgrade(&sound);
+        sound
     }
 
     /// Stop routing `stream`: what is in flight for it from here on is dropped, not kept for
@@ -453,9 +476,10 @@ pub struct ScreenStats {
     /// Captures of a striped stream that went up with one stripe's previous picture: its
     /// stripe was late past a display refresh (`STITCH_WAIT`).
     pub seam_tears: u64,
-    /// Bytes received in datagrams (video, cursor, audio, parity).
+    /// Bytes received in datagrams (video, cursor, parity).
     pub bytes: u64,
-    /// Opus packets played.
+    /// Opus packets of the worker's sound played: every stream of the worker counts the same
+    /// one sound, as do the other `audio_` counters.
     pub audio_packets: u64,
     /// Opus packets missing from the sequence (or too late to play).
     pub audio_lost: u64,
@@ -510,44 +534,6 @@ pub struct ScreenStats {
     pub clock: Option<ClockEstimate>,
 }
 
-/// Playback for one stream, created on its first audio packet.
-enum AudioSlot {
-    /// No audio has arrived yet.
-    Unopened,
-    /// The player is being created on a blocking thread: `CoreAudio`'s first client in a process
-    /// initialises the HAL, which took ~7 s on the mac-studio (`docs/MEASUREMENTS.md`,
-    /// 2026-09-13), and the worker must keep reassembling and reporting meanwhile.
-    Opening(oneshot::Receiver<Result<Audio, slopty_codec::CodecError>>),
-    /// Playing.
-    Open(Audio),
-    /// Playback could not start; packets are dropped.
-    Failed,
-}
-
-/// Decoder, player and sequence state.
-struct Audio {
-    decoder: OpusDecoder,
-    player: Player,
-    /// Last sequence played.
-    seq: u32,
-    /// The previous packet, for short gaps.
-    conceal: Conceal,
-    /// Scratch for the stand-in samples.
-    stand_in: Vec<f32>,
-}
-
-impl Audio {
-    fn new() -> Result<Self, slopty_codec::CodecError> {
-        Ok(Self {
-            decoder: OpusDecoder::new()?,
-            player: Player::new()?,
-            seq: 0,
-            conceal: Conceal::default(),
-            stand_in: Vec::new(),
-        })
-    }
-}
-
 /// A live client-side stream. Dropping it stops the task and unroutes the stream; the caller
 /// still sends `ScreenRequest::Close` so the worker stops capturing.
 #[derive(Debug)]
@@ -558,8 +544,8 @@ pub struct ScreenHandle {
     present: Arc<PresentSlot>,
     cursor: watch::Receiver<CursorState>,
     stats: watch::Receiver<ScreenStats>,
-    /// Audio is decoded but not played while set (shared with the worker).
-    muted: Arc<AtomicBool>,
+    /// The worker's sound, which every stream of the connection shares.
+    sound: Arc<sound::Sound>,
     /// The worker's capture target is producing pictures (shared with the worker).
     source_live: Arc<AtomicBool>,
     router: ScreenRouter,
@@ -594,22 +580,29 @@ impl ScreenHandle {
         self.cursor.clone()
     }
 
-    /// Counters.
+    /// Counters, the audio ones the worker's sound's.
     #[must_use]
     pub fn stats(&self) -> ScreenStats {
-        *self.stats.borrow()
+        self.sound.stats().over(*self.stats.borrow())
     }
 
-    /// Whether audio is silenced on this client. Packets keep arriving and are still decoded
-    /// (the Opus state stays continuous), only playback stops; other clients are unaffected.
+    /// Whether the worker's sound is silenced on this client. Packets keep arriving and are
+    /// still decoded (the Opus state stays continuous), only playback stops; other clients are
+    /// unaffected. One switch for every stream of the worker: it has one sound.
     #[must_use]
     pub fn muted(&self) -> bool {
-        self.muted.load(Ordering::Relaxed)
+        self.sound.muted().get()
     }
 
-    /// Silence or resume audio playback for this stream on this client.
+    /// Silence or resume the worker's sound on this client, for every one of its streams.
     pub fn set_muted(&self, muted: bool) {
-        self.muted.store(muted, Ordering::Relaxed);
+        self.sound.muted().set(muted);
+    }
+
+    /// Silence or resume the worker's sound as the settings prefer, unless it was already
+    /// chosen on this connection: a new tile of a worker silenced by hand stays silent.
+    pub fn mute_by_default(&self, muted: bool) {
+        self.sound.muted().default_to(muted);
     }
 
     /// The worker's `ScreenEvent::Source`: whether the capture target is drawing anything. While
@@ -640,18 +633,33 @@ impl ScreenHandle {
     /// headless UI tests, which need a stream to exist, not to show pictures.
     #[must_use]
     pub fn detached(stream: StreamId) -> Self {
+        Self::detached_on(&ScreenRouter::default(), stream)
+    }
+
+    /// A handle with no worker behind it, on `router`: the handles of one router share their
+    /// worker's sound, and its mute, as a connection's do.
+    #[must_use]
+    pub fn detached_on(router: &ScreenRouter, stream: StreamId) -> Self {
         let (_frames_tx, frames) = watch::channel(None);
         let (_cursor_tx, cursor) = watch::channel(CursorState::default());
         let (_stats_tx, stats) = watch::channel(ScreenStats::default());
+        let sound = {
+            let mut slot = router.sound.lock();
+            slot.upgrade().unwrap_or_else(|| {
+                let sound = Arc::new(sound::Sound::detached(Arc::clone(&router.muted)));
+                *slot = Arc::downgrade(&sound);
+                sound
+            })
+        };
         Self {
             stream,
             frames,
             present: Arc::default(),
             cursor,
             stats,
-            muted: Arc::new(AtomicBool::new(false)),
+            sound,
             source_live: Arc::new(AtomicBool::new(true)),
-            router: ScreenRouter::default(),
+            router: router.clone(),
             task: None,
         }
     }
@@ -687,18 +695,18 @@ pub fn spawn_screen(
     codec: VideoCodec,
     uplink: Uplink,
 ) -> ScreenHandle {
+    let sound = router.sound(runtime, &uplink.control);
     let datagrams = router.attach(stream);
     let (frames_tx, frames) = watch::channel(None);
     let (cursor_tx, cursor) = watch::channel(CursorState::default());
     let (stats_tx, stats) = watch::channel(ScreenStats::default());
-    let muted = Arc::new(AtomicBool::new(false));
     let source_live = Arc::new(AtomicBool::new(true));
     let present = Arc::<PresentSlot>::default();
     let output = Arc::new(Output {
         frames: frames_tx,
         present: Arc::clone(&present),
         decode_seq: AtomicU64::new(0),
-        anchor: Mutex::new(None),
+        estimate: Mutex::new(None),
         first_decoded: Mutex::new(None),
         stitch: Mutex::new(Stitch::default()),
     });
@@ -723,8 +731,6 @@ pub fn spawn_screen(
         cursor_seq: None,
         counters: ScreenStats::default(),
         lower_counters: ReassemblerStats::default(),
-        audio: AudioSlot::Unopened,
-        muted: Arc::clone(&muted),
         source_live: Arc::clone(&source_live),
         source_hint: true,
         capture_clock: CaptureClock::new(),
@@ -739,7 +745,7 @@ pub fn spawn_screen(
         present,
         cursor,
         stats,
-        muted,
+        sound,
         source_live,
         router: router.clone(),
         task,
@@ -768,7 +774,7 @@ struct Output {
     /// how many pictures the channel swallowed before it looked.
     decode_seq: AtomicU64,
     /// Read on the decoder's thread for every picture, written by the worker once an echo.
-    anchor: Mutex<Option<ClockAnchor>>,
+    estimate: Mutex<Option<ClockEstimate>>,
     /// When the first picture came back.
     first_decoded: Mutex<Option<Instant>>,
     stitch: Mutex<Stitch>,
@@ -780,7 +786,7 @@ impl Output {
     fn decoded(&self, index: usize, frame: DecodedFrame, arrived: Instant, coded: Coded) {
         let decoded = Instant::now();
         self.first_decoded.lock().get_or_insert(decoded);
-        let captured = self.anchor.lock().and_then(|anchor| anchor.captured(frame.pts_us));
+        let captured = self.estimate.lock().and_then(|e| Captured::by(&e, frame.pts_us));
         // Numbered as it goes up, in [`Self::show`]: the pacer reads a gap as a skipped picture,
         // and a capture's two stripes are one picture.
         let stamp = FrameStamp { pts_us: frame.pts_us, decode_seq: 0, arrived, decoded, captured };
@@ -1065,7 +1071,7 @@ struct Worker {
     codec: VideoCodec,
     datagrams: mpsc::Receiver<Arrival>,
     /// The whole picture, or the top stripe: the stream's own media stream, which also carries
-    /// its audio, cursor, heartbeats and clock echoes.
+    /// its cursor, heartbeats and clock echoes.
     top: Lane,
     /// The lower stripe, from its first datagram until the stream is one picture again.
     lower: Option<Lane>,
@@ -1086,9 +1092,6 @@ struct Worker {
     counters: ScreenStats,
     /// The lower stripe's reassembler counters as of its last report.
     lower_counters: ReassemblerStats,
-    audio: AudioSlot,
-    /// Decode but do not play while set.
-    muted: Arc<AtomicBool>,
     /// The worker says its capture target is producing pictures.
     source_live: Arc<AtomicBool>,
     /// The last hint handed to the reassembler, so a hint that has not changed does not
@@ -1104,101 +1107,6 @@ struct Worker {
 }
 
 impl Worker {
-    /// Move the player towards open: start creating it on the first packet, pick it up once
-    /// the blocking thread is done. Never waits.
-    fn open_audio(&mut self) {
-        self.audio = match std::mem::replace(&mut self.audio, AudioSlot::Failed) {
-            AudioSlot::Unopened => {
-                let (tx, rx) = oneshot::channel();
-                drop(tokio::task::spawn_blocking(move || {
-                    let _no_worker = tx.send(Audio::new());
-                }));
-                AudioSlot::Opening(rx)
-            }
-            AudioSlot::Opening(mut rx) => match rx.try_recv() {
-                Ok(Ok(audio)) => AudioSlot::Open(audio),
-                Ok(Err(e)) => {
-                    tracing::warn!(stream = %self.stream, error = %e, "audio playback unavailable");
-                    AudioSlot::Failed
-                }
-                Err(oneshot::error::TryRecvError::Empty) => AudioSlot::Opening(rx),
-                Err(oneshot::error::TryRecvError::Closed) => AudioSlot::Failed,
-            },
-            open_or_failed => open_or_failed,
-        };
-    }
-
-    /// Decode and queue one Opus packet that arrived at `at`; late duplicates are dropped, gaps
-    /// counted. The end of a gap that `earlier` (the packets before it, carried again, nearest
-    /// first) covers is decoded from those copies, and only the rest is concealed. A packet that
-    /// lands while the player is still opening (or after it failed) is lost to playback and
-    /// counted as such.
-    fn play_audio(
-        &mut self,
-        seq: u32,
-        payload: &Bytes,
-        earlier: &[Option<Bytes>; MAX_AUDIO_COPIES],
-        at: Instant,
-    ) {
-        self.open_audio();
-        let AudioSlot::Open(audio) = &mut self.audio else {
-            self.counters.audio_lost = self.counters.audio_lost.saturating_add(1);
-            return;
-        };
-        let gap = seq.wrapping_sub(audio.seq);
-        if audio.seq != 0 && (gap == 0 || gap > u32::MAX / 2) {
-            self.counters.audio_lost = self.counters.audio_lost.saturating_add(1);
-            return;
-        }
-        if audio.seq != 0 && gap > 1 {
-            let missing = gap.saturating_sub(1);
-            self.counters.audio_lost = self.counters.audio_lost.saturating_add(u64::from(missing));
-            let copies = earlier.iter().take_while(|copy| copy.is_some()).count();
-            let recovered = missing.min(u32::try_from(copies).unwrap_or(0));
-            let concealed = missing.saturating_sub(recovered);
-            audio.stand_in.clear();
-            if concealed > 0 {
-                audio.conceal.fill(concealed, &mut audio.stand_in);
-                if !audio.stand_in.is_empty() {
-                    self.counters.audio_concealed =
-                        self.counters.audio_concealed.saturating_add(u64::from(concealed));
-                }
-            }
-            // Oldest first; like a stand-in, a recovered packet keeps the gap's time and reads
-            // no depth: it arrived with the packet after it, not late.
-            let copies = earlier.get(..usize::try_from(recovered).unwrap_or(0)).unwrap_or_default();
-            for copy in copies.iter().rev().flatten() {
-                match audio.decoder.decode(copy) {
-                    Ok(pcm) => {
-                        audio.stand_in.extend_from_slice(audio.conceal.take(pcm));
-                        self.counters.audio_recovered =
-                            self.counters.audio_recovered.saturating_add(1);
-                    }
-                    Err(e) => {
-                        tracing::debug!(stream = %self.stream, error = %e, "opus decode of a copy");
-                    }
-                }
-            }
-            if !audio.stand_in.is_empty() && !self.muted.load(Ordering::Relaxed) {
-                audio.player.conceal(&audio.stand_in);
-            }
-        }
-        audio.seq = seq;
-        let arrival = AudioArrival { seq, at };
-        match audio.decoder.decode(payload) {
-            Ok(pcm) => {
-                let pcm = audio.conceal.take(pcm);
-                if self.muted.load(Ordering::Relaxed) {
-                    audio.player.hold(arrival);
-                } else {
-                    audio.player.push(pcm, arrival);
-                }
-                self.counters.audio_packets = self.counters.audio_packets.saturating_add(1);
-            }
-            Err(e) => tracing::debug!(stream = %self.stream, error = %e, "opus decode"),
-        }
-    }
-
     async fn run(mut self) {
         let mut report = tokio::time::interval(REPORT_EVERY);
         report.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1307,10 +1215,8 @@ impl Worker {
                     self.cursor.send_replace(state);
                 }
             }
-            Ingest::Audio { seq, payload, earlier } => {
-                self.play_audio(seq, &payload, &earlier, now);
-            }
-            Ingest::Heartbeat | Ingest::Ignored(_) => {}
+            // The worker's sound comes on its own media stream ([`sound`]).
+            Ingest::Audio { .. } | Ingest::Heartbeat | Ingest::Ignored(_) => {}
         }
     }
 
@@ -1323,7 +1229,7 @@ impl Worker {
         }
         let Some(echo) = ClockEcho::parse(payload) else { return };
         self.clock.observe(echo.sent.get(), echo.received.get(), echo.echoed.get(), now);
-        *self.output.anchor.lock() = self.clock.estimate().map(|estimate| estimate.anchor);
+        *self.output.estimate.lock() = self.clock.estimate();
     }
 
     /// Send a clock probe when one is due: every report at first, then every [`PROBE_EVERY`].
@@ -1509,13 +1415,6 @@ impl Worker {
         self.counters.first_decoded_at = *self.output.first_decoded.lock();
         self.counters.seam_tears = self.output.stitch.lock().tears;
         self.counters.clock = self.clock.estimate();
-        if let AudioSlot::Open(audio) = &self.audio {
-            let playout = audio.player.stats();
-            self.counters.audio_underruns = playout.underruns;
-            self.counters.audio_trimmed = playout.trimmed;
-            self.counters.audio_stretched = playout.stretched;
-            self.counters.audio_target = playout.target;
-        }
         self.stats.send_replace(self.counters);
         let stream = self.stream;
         if !self.send_report(stream, report) {
@@ -2113,10 +2012,10 @@ mod tests {
 mod worker_tests {
     use std::sync::atomic::AtomicBool;
 
-    use slopty_codec::audio::{CHANNELS, FRAME_SAMPLES, OpusEncoder};
-    use slopty_media::{EncodedFrame, Packetizer, audio_datagram, cursor_datagram};
+    use slopty_media::{EncodedFrame, Packetizer, cursor_datagram};
 
     use super::*;
+    use crate::pacing::ClockAnchor;
 
     const STREAM: StreamId = StreamId(5);
 
@@ -2541,65 +2440,38 @@ mod worker_tests {
         assert!(h.router.inner.lock().attached.is_empty(), "dropping the handle unroutes");
     }
 
-    /// Audio, muted: the first packet starts opening the player off the worker, which keeps
-    /// delivering video meanwhile; once it is open a gap is counted and concealed and a late
-    /// duplicate is not played. The only test here that opens `CoreAudio` (the `coreaudio` test
-    /// group), so nothing else waits on the machine's audio stack.
+    /// A worker has one sound: its three tiles' streams share it, so a mute in one is the mute
+    /// in all, and a tile opened later reads it. The choice outlives the sound itself: a tile
+    /// opened after the last one closed starts a new one, still silenced, and the settings'
+    /// preference does not undo a choice made by hand.
     #[test]
-    fn audio_waits_for_the_player_without_holding_video_and_counts_gaps() {
-        let mut h = Harness::start();
-        assert!(!h.handle.muted());
-        h.handle.set_muted(true);
-        assert!(h.handle.muted());
-        let mut enc = OpusEncoder::new().unwrap();
-        let tone: Vec<f32> = (0..u16::try_from(FRAME_SAMPLES * CHANNELS).unwrap())
-            .map(|i| (f32::from(i) * 0.05).sin() * 0.5)
-            .collect();
-        let mut packets = Vec::new();
-        for _ in 0..3 {
-            enc.push(&tone, |p| packets.push(p.to_vec())).unwrap();
-        }
-        assert_eq!(packets.len(), 3);
-        let mut seq = 1;
-        h.route(audio_datagram(STREAM, seq, 0, &packets[0], &[]).unwrap());
-        let mut packetizer = Packetizer::new(STREAM);
-        packetizer.set_parity_permille(0);
-        for d in packetize(&mut packetizer, true, 1_000) {
-            h.route(d);
-        }
-        h.wait_for("a frame while the player opens", 3, |handle| handle.stats().frames == 1);
-        let router = h.router.clone();
-        let routed = Arc::clone(&h.routed);
-        let opus = packets.clone();
-        h.wait_for("the player", FOR_THE_MACHINE, |handle| {
-            seq += 1;
-            routed.fetch_add(1, Ordering::Relaxed);
-            router.route(
-                audio_datagram(STREAM, seq, 0, &opus[seq as usize % 3], &[]).unwrap(),
-                Instant::now(),
-            );
-            handle.stats().audio_packets >= 1
-        });
-        let before = h.settle();
-        assert!(before.audio_lost >= 1, "the packets that landed while opening: {before:?}");
-        // A gap of one, then a late duplicate.
-        seq += 2;
-        h.route(audio_datagram(STREAM, seq, 0, &packets[0], &[]).unwrap());
-        let after = h.settle();
-        assert_eq!(after.audio_packets, before.audio_packets + 1);
-        assert_eq!(after.audio_lost, before.audio_lost + 1, "one missing");
-        assert_eq!(after.audio_concealed, before.audio_concealed + 1, "and concealed");
-        h.route(audio_datagram(STREAM, seq - 1, 0, &packets[1], &[]).unwrap());
-        let late = h.settle();
-        assert_eq!(late.audio_lost, after.audio_lost + 1, "too late to play");
-        assert_eq!(late.audio_packets, after.audio_packets, "not played");
-        // A gap of two that the datagram after it carries again: decoded, not concealed.
-        seq += 3;
-        h.route(audio_datagram(STREAM, seq, 0, &packets[2], &[&packets[1], &packets[0]]).unwrap());
-        let recovered = h.settle();
-        assert_eq!(recovered.audio_lost, late.audio_lost + 2, "missing from the sequence");
-        assert_eq!(recovered.audio_recovered, late.audio_recovered + 2, "both from the copies");
-        assert_eq!(recovered.audio_concealed, late.audio_concealed, "nothing concealed");
+    fn a_workers_streams_share_one_sound_and_its_mute() {
+        let h = Harness::start();
+        let open = |stream| {
+            let (control, _gone) = mpsc::channel(4);
+            let uplink =
+                Uplink { control, feedback: Box::new(|_bytes| true), rtt: Box::new(|| None) };
+            spawn_screen(h.rt.handle(), &h.router, stream, VideoCodec::Hevc, uplink)
+        };
+        let (second, third) = (open(StreamId(7)), open(StreamId(9)));
+        assert!(Arc::ptr_eq(&h.handle.sound, &second.sound));
+        assert!(Arc::ptr_eq(&h.handle.sound, &third.sound));
+        h.handle.mute_by_default(false);
+        third.set_muted(true);
+        assert!(h.handle.muted() && second.muted(), "one tile silences the worker's sound");
+        second.mute_by_default(false);
+        assert!(third.muted(), "a later tile's preference does not undo the choice");
+        let Harness { handle, router, rt, .. } = h;
+        drop((handle, second, third));
+        assert!(router.sound.lock().upgrade().is_none(), "the last stream ends the sound");
+        assert!(router.inner.lock().attached.is_empty(), "and lets go of its lane");
+        let (control, _gone) = mpsc::channel(4);
+        let uplink = Uplink { control, feedback: Box::new(|_bytes| true), rtt: Box::new(|| None) };
+        let again = spawn_screen(rt.handle(), &router, StreamId(11), VideoCodec::Hevc, uplink);
+        again.mute_by_default(false);
+        assert!(again.muted(), "a new sound keeps the connection's choice");
+        again.set_muted(false);
+        assert!(!again.muted());
     }
 
     /// The round trip is read off the connection once a report, not on every wake: the read
@@ -2706,7 +2578,12 @@ mod worker_tests {
         const N: u32 = 2_000_000;
         let mut packetizer = Packetizer::new(STREAM);
         let fragment = packetize(&mut packetizer, true, 1)[0].clone();
-        let anchor = Mutex::new(Some(ClockAnchor { at: Instant::now(), host_us: 1_000_000 }));
+        let estimate = Mutex::new(Some(ClockEstimate {
+            anchor: ClockAnchor { at: Instant::now(), host_us: 1_000_000 },
+            bound: Duration::from_micros(150),
+            rtt: Duration::from_micros(300),
+            drift_ppm: 12,
+        }));
         for round in 0..3 {
             let started = Instant::now();
             for _ in 0..N {
@@ -2718,12 +2595,20 @@ mod worker_tests {
             let look = started.elapsed().as_nanos() as f64 / f64::from(N);
             let started = Instant::now();
             for pts in 0..u64::from(N) {
-                let captured = black_box(&anchor).lock().and_then(|a| a.captured(pts));
+                let captured = black_box(&estimate).lock().and_then(|e| Captured::by(&e, pts));
                 black_box(captured);
             }
             let read = started.elapsed().as_nanos() as f64 / f64::from(N);
+            // The read before each picture carried its estimate's bound: the anchor alone.
+            let anchor = Mutex::new(estimate.lock().map(|e| e.anchor));
+            let started = Instant::now();
+            for pts in 0..u64::from(N) {
+                let captured = black_box(&anchor).lock().and_then(|a| a.captured(pts));
+                black_box(captured);
+            }
+            let anchor_only = started.elapsed().as_nanos() as f64 / f64::from(N);
             eprintln!(
-                "MEASURE clock path, round {round}: echo look per datagram {look:.1} ns, anchor read per picture {read:.1} ns"
+                "MEASURE clock path, round {round}: echo look per datagram {look:.1} ns, capture placed with its bound per picture {read:.1} ns (the anchor alone {anchor_only:.1} ns)"
             );
         }
     }

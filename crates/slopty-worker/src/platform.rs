@@ -55,8 +55,8 @@ pub mod headless {
     use std::time::Instant;
 
     use slopty_capture::{
-        AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Rect,
-        TargetWindow, Went, WindowState,
+        AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Heard,
+        Rect, TargetWindow, Went, WindowState,
     };
     use slopty_codec::{
         AudioEncoder, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder,
@@ -98,6 +98,7 @@ pub mod headless {
         type Content = ();
         type HideWatch = Never;
         type Image = ();
+        type Sound = Never;
         type Stream = Never;
         type Target = Never;
 
@@ -141,11 +142,34 @@ pub mod headless {
             target: &Never,
             _config: &CaptureConfig,
             _sink: impl Fn(CapturedFrame<()>) + Send + Sync + 'static,
-            _audio: Option<AudioSink>,
             _on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
             _done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
         ) -> Result<Never, CaptureError> {
             target.absurd()
+        }
+
+        fn start_sound(
+            _heard: &Heard,
+            _sink: AudioSink,
+            _on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+            done: impl FnOnce(Result<Never, CaptureError>) + Send + 'static,
+        ) {
+            done(Err(CaptureError::Unsupported));
+        }
+
+        fn hear(
+            sound: &Never,
+            _heard: &Heard,
+            _done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+        ) {
+            sound.absurd()
+        }
+
+        fn stop_sound(
+            sound: &Never,
+            _done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+        ) {
+            sound.absurd()
         }
 
         fn update(

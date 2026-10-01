@@ -533,6 +533,10 @@ pub enum ScreenRequest {
         /// Focused.
         focused: bool,
     },
+    /// What the client's player of the worker's sound heard, at the receiver reports' cadence
+    /// while it plays (`docs/decisions/audio.md`, "One sound per worker on a client, not one
+    /// per stream").
+    SoundReport(SoundReport),
 }
 
 impl ScreenRequest {
@@ -551,6 +555,7 @@ impl ScreenRequest {
             | Self::Report { .. }
             | Self::Focus(_)
             | Self::Focused { .. }
+            | Self::SoundReport(_)
             | Self::Resize { .. } => None,
         }
     }
@@ -634,11 +639,17 @@ pub struct ReceiverReport {
     pub stalled_ms: u16,
     /// Stalls that released in the window (packets held, then delivered together).
     pub stalls: u16,
+}
+
+/// What the client's one player of a worker's sound ([`crate::media::SOUND`]) heard since its
+/// last report.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
+pub struct SoundReport {
     /// Audio packets that arrived in the window.
-    pub audio_received: u16,
+    pub received: u16,
     /// Audio packets missing from the sequence in the window, whether or not a copy an audio
     /// datagram carried recovered them: the loss the worker sizes those copies by.
-    pub audio_lost: u16,
+    pub lost: u16,
 }
 
 /// What the worker's bitrate controller made of its last decision window.

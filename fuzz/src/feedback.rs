@@ -1,14 +1,15 @@
 //! Both ends of a client's feedback.
 //!
 //! On the worker, NACKs are answered from the packetizer's history, receiver reports are folded
-//! into the bitrate controller and the parity ratio, and clock probes are echoed; on the client,
-//! the echoes are placed on its clock.
+//! into the bitrate controller and the parity ratio, sound reports into the audio copies, and
+//! clock probes are echoed; on the client, the echoes are placed on its clock.
 //!
 //! Every field is the peer's to choose. A retransmission must be a datagram of the frame asked
 //! for, a data fragment of it, marked as a retransmission; the bitrate must stay between the
-//! floor and the client's ceiling; the parity ratio must stay within its bounds. A probe's echo
-//! must read back as sent, and whatever echoes come, the clock estimate must keep its drift
-//! within what it follows and never state a bound tighter than half the fastest round trip.
+//! floor and the client's ceiling; the parity ratio and the audio copies must stay within their
+//! bounds. A probe's echo must read back as sent, and whatever echoes come, the clock estimate
+//! must keep its drift within what it follows and never state a bound tighter than half the
+//! fastest round trip.
 
 use std::time::Instant;
 
@@ -20,7 +21,7 @@ use slopty_media::{
 };
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::media::{ClockEcho, Kind, MediaHeader, flags};
-use slopty_proto::screen::{Feedback, ReceiverReport};
+use slopty_proto::screen::{Feedback, ReceiverReport, SoundReport};
 
 const STREAM: StreamId = StreamId(3);
 
@@ -44,6 +45,8 @@ enum Op {
     Datagram(Vec<u8>),
     /// A receiver report, with the path the transport sees when it arrives.
     Report { report: Report, datagrams_sent: u32, rtt_ns: Option<(u64, u64)> },
+    /// A report of the worker's sound, as its fields.
+    Sound { received: u16, lost: u16 },
     /// The client's ceiling moves.
     Ceiling(u32),
     /// A media datagram reaches the client `arrived_us` after its clock's epoch: a clock echo
@@ -70,8 +73,6 @@ struct Report {
     acked_ltr_len: u8,
     stalled_ms: u16,
     stalls: u16,
-    audio_received: u16,
-    audio_lost: u16,
 }
 
 impl From<&Report> for ReceiverReport {
@@ -91,8 +92,6 @@ impl From<&Report> for ReceiverReport {
             acked_ltr_len: r.acked_ltr_len,
             stalled_ms: r.stalled_ms,
             stalls: r.stalls,
-            audio_received: r.audio_received,
-            audio_lost: r.audio_lost,
         }
     }
 }
@@ -113,7 +112,7 @@ struct Worker {
     ceiling: u32,
     redundancy: Redundancy,
     audio: AudioCopies,
-    /// Reports taken, each a 50 ms report period on the audio copies' clock.
+    /// Sound reports taken, each a 50 ms report period on the audio copies' clock.
     reports: u64,
     /// The client's clock estimate, and the moment its probes are stamped from.
     clock: ClockSync,
@@ -192,8 +191,11 @@ impl Worker {
                     (Redundancy::MIN..=Redundancy::MAX).contains(&permille),
                     "parity ratio {permille}‰ outside its bounds"
                 );
+            }
+            Op::Sound { received, lost } => {
                 self.reports = self.reports.saturating_add(1);
-                let copies = self.audio.on_report(&report, self.reports.saturating_mul(50_000));
+                let report = SoundReport { received: *received, lost: *lost };
+                let copies = self.audio.on_report(report, self.reports.saturating_mul(50_000));
                 assert!(copies <= MAX_AUDIO_COPIES, "{copies} audio copies");
             }
             Op::Ceiling(max) => {

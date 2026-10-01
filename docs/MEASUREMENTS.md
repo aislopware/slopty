@@ -12575,3 +12575,60 @@ taskpolicy -b ./slopty_worker-<hash> --exact --nocapture \
   screen::synthetic::tests::a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on \
   screen::synthetic::tests::a_session_taken_away_is_replaced_and_the_stream_goes_on
 ```
+
+## 2026-10-01 — one sound per worker on a client
+
+Mac Studio M1 Max, macOS 27.0, release, under `nice`, load 13–14 with other sessions building.
+The worker's sound is now one capture and one Opus encoder per client, whatever the number of
+streams hearing through it (docs/decisions/audio.md, "One sound per worker on a client, not one
+per stream").
+
+```sh
+cargo nextest run --release -p slopty-worker --lib --run-ignored only --no-capture \
+  -E 'test(=screen::synthetic::tests::one_sound_costs_the_same_for_any_number_of_streams)'
+cargo nextest run -p slopty-worker --lib --no-capture \
+  -E 'test(=screen::synthetic::tests::a_display_and_two_windows_of_one_app_are_one_sound_on_the_wire)'
+cargo nextest run --release -p slopty-client --features headless --lib --run-ignored only --no-capture \
+  -E 'test(=screen::worker_tests::clock_path_cost)'
+```
+
+**What the sound costs the worker** (`one_sound_costs_the_same_for_any_number_of_streams`: one
+`Sound` on the canvas, its 440 Hz tone captured in 10 ms chunks, Opus-encoded and sent into a
+transport that only counts, with N streams listening, a display among them and windows of two
+apps; the process's CPU over 4 s after a second to settle):
+
+| streams | CPU cores | packets a second | captures |
+| --- | --- | --- | --- |
+| 1 | 0.0193 | 99.9 | 1 |
+| 2 | 0.0197 | 100.0 | 1 |
+| 4 | 0.0209 | 100.2 | 1 |
+| 8 | 0.0241 | 100.2 | 1 |
+
+Before, each stream had its own capture tap and its own encoder: about 0.012 of a core a stream
+for the encode alone (118 µs a 10 ms packet, "streams from one worker: what they could share"),
+0.095 at eight, and the client decoded and played each stream's copy (37 µs a packet and a
+CoreAudio player each). Now eight streams cost the worker 0.024 of a core in all, the tone's
+drawing included, and the client one decoder and one player. Nothing a packet goes through
+depends on how many streams listen, and the packet rate and the capture count do not move. The
+0.005 between one stream and eight was not traced on this loaded machine.
+
+**One sound with tiles of one app** (`a_display_and_two_windows_of_one_app_are_one_sound_on_the_wire`:
+the drawn display and both drawn windows, owned by the test's own process, each a real stream
+that joins the sound through `Pipeline::listen`): 122 packets in 1.2 s, 100.4 a second, one
+sequence, all on the sound's media stream and none on the streams'. One capture heard every app
+throughout. The windows' two streams then closed, and the longest wait between packets after
+that was 14.5 ms against 10 ms packets. The worker unit test
+`a_display_and_a_window_are_one_sound_with_no_gap_when_one_goes` holds the same change under
+60 ms, with the capture's filter narrowed in place when the display goes.
+
+**Each frame carries the bound of the estimate that timed it** (`FrameStamp::captured` is now a
+`Captured`: the moment and how far off it may be, the estimate's bound as it stood plus the
+drift from its anchor). `the_clock_probes_time_captures_as_the_shared_clock_does` held every
+frame to the bound read at the end of the run. On loopback that run's last bound was 1.040 ms,
+but the widest a frame had been placed within was 1.251 ms, and 6.243 ms against 8.021 ms
+behind 5 ms each way. Early frames were timed by looser estimates than the last, so the old
+check could fail a frame that was inside its own bound. Each frame is now judged by its own:
+off the shared clock p50 0.038 / max 0.038 ms on loopback, and p50 0.319 / max 0.539 ms behind
+5 ms each way. Placing a capture with its bound costs the decoder's callback 8.2–11.0 ns a
+picture against 8.0–9.4 ns for the anchor alone, in the same run (`clock_path_cost`, 2 000 000
+each, three rounds).

@@ -251,8 +251,9 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   fixture. The client's screen-worker test had covered cursor, reassembly, NACKs, the worker
   stopping with its connection, and audio, all in one. Every failure on record was its wait
   for the player: the Opus encoder took about 40 s in a loaded gate, and the player had not
-  opened 45 s later. The audio half is now `audio_waits_for_the_player_without_holding_video_and_counts_gaps`,
-  alone in the `coreaudio` group, and the video half no longer waits on audio. The waits on
+  opened 45 s later. The audio half is now `audio_waits_for_the_player_and_counts_gaps` (on the worker's one
+  sound since 2026-10-01), alone in the `coreaudio` group, and the video half no longer waits on
+  audio. The waits on
   VideoToolbox and on CoreAudio are bounded at 100 s (`FOR_THE_MACHINE`). None of them
   measures the framework, so the bound only makes a stuck framework fail with the stats. The
   waits on the worker's own logic stay at 3 s.

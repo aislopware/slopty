@@ -1242,25 +1242,17 @@ mod tests {
         assert_eq!(h.rx.ingest(&s0.datagrams[0], h.now), Ingest::Ignored(Ignored::Stale));
     }
 
-    /// The report counts the audio packets that arrived and the ones their sequence skipped; a
-    /// late one counts neither way, a malformed one is refused, and a report sent back is
-    /// counted again.
+    /// An audio datagram comes out as its packet, in any order, and a malformed one is refused.
     #[test]
-    fn audio_is_counted_for_the_report() {
+    fn audio_is_parsed_and_a_malformed_one_refused() {
         let mut h = Harness::new();
         for seq in [5, 6, 9, 8] {
             let audio = slopty_media::audio_datagram(STREAM, seq, 0, &[7; 64], &[]).unwrap();
-            assert!(matches!(h.rx.ingest(&audio, h.now), Ingest::Audio { .. }));
+            assert!(matches!(h.rx.ingest(&audio, h.now), Ingest::Audio { seq: s, .. } if s == seq));
         }
         let mut bad = slopty_media::audio_datagram(STREAM, 10, 0, &[7; 64], &[]).unwrap().to_vec();
         bad[std::mem::offset_of!(MediaHeader, data_count)] = 9;
         assert_eq!(h.rx.ingest(&Bytes::from(bad), h.now), Ingest::Ignored(Ignored::Malformed));
-        let report = h.rx.take_report(h.now, 0);
-        assert_eq!((report.audio_received, report.audio_lost), (3, 2), "5, 6, 9; 8 came late");
-        h.rx.take_back(&report);
-        let again = h.rx.take_report(h.now, 0);
-        assert_eq!((again.audio_received, again.audio_lost), (3, 2), "carried to the next");
-        assert_eq!(h.rx.take_report(h.now, 0).audio_received, 0);
     }
 
     #[test]

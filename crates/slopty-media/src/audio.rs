@@ -16,7 +16,7 @@ use bytes::{BufMut as _, Bytes, BytesMut};
 use slopty_core::StreamId;
 use slopty_proto::datagram::Channel;
 use slopty_proto::media::{HEADER_BYTES, Kind, MAX_PAYLOAD, MediaHeader};
-use slopty_proto::screen::ReceiverReport;
+use slopty_proto::screen::SoundReport;
 use zerocopy::IntoBytes as _;
 use zerocopy::little_endian::{U16, U32};
 
@@ -112,6 +112,39 @@ pub fn parse_audio(data_count: u16, payload: &Bytes) -> Option<AudioPackets> {
     Some(AudioPackets { packet: payload.slice(at..), earlier })
 }
 
+/// The audio packets a receiver heard since its last [`SoundReport`], and the ones missing from
+/// their sequence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SoundCount {
+    window: SoundReport,
+    /// The newest packet's sequence.
+    last: Option<u32>,
+}
+
+impl SoundCount {
+    /// Packet `seq` arrived: counted, with the ones its sequence skipped since the last. A late
+    /// or repeated one counts neither way: its place was counted lost.
+    pub fn arrived(&mut self, seq: u32) {
+        if let Some(last) = self.last {
+            let gap = seq.wrapping_sub(last);
+            if gap == 0 || gap > u32::MAX / 2 {
+                return;
+            }
+            let skipped = u16::try_from(gap.saturating_sub(1)).unwrap_or(u16::MAX);
+            self.window.lost = self.window.lost.saturating_add(skipped);
+        }
+        self.last = Some(seq);
+        self.window.received = self.window.received.saturating_add(1);
+    }
+
+    /// The window's report, and a new window.
+    pub const fn take(&mut self) -> SoundReport {
+        let report = self.window;
+        self.window = SoundReport { received: 0, lost: 0 };
+        report
+    }
+}
+
 /// How many earlier packets each audio datagram carries, from the audio loss the client reports.
 ///
 /// It rises on the report that shows the loss and falls a copy at a time after
@@ -148,12 +181,12 @@ impl AudioCopies {
     }
 
     /// Take a report the client sent at `now_us`; the copies in force after it.
-    pub fn on_report(&mut self, report: &ReceiverReport, now_us: u64) -> usize {
+    pub fn on_report(&mut self, report: SoundReport, now_us: u64) -> usize {
         let elapsed = now_us.saturating_sub(self.at_us);
         self.at_us = now_us;
         #[expect(clippy::cast_precision_loss, reason = "microseconds of a session, well in range")]
         let halves = elapsed as f64 / Self::HALF_LIFE_US as f64;
-        let lost = report.audio_lost;
+        let lost = report.lost;
         self.recent = self.recent.mul_add(0.5_f64.powf(halves), f64::from(lost));
         let wanted: u8 = if lost >= 2 || self.recent >= Self::TWO {
             2
@@ -240,8 +273,24 @@ mod tests {
         assert_eq!((ok.packet, ok.earlier[0].clone()), (payload(&[9]), Some(payload(&[5]))));
     }
 
-    fn lost(audio_lost: u16) -> ReceiverReport {
-        ReceiverReport { audio_received: 5, audio_lost, ..ReceiverReport::default() }
+    fn lost(lost: u16) -> SoundReport {
+        SoundReport { received: 5, lost }
+    }
+
+    /// Gaps in the sequence count as lost, once; a late or repeated packet counts neither way;
+    /// a report starts the next window empty.
+    #[test]
+    fn the_count_reads_the_sequence() {
+        let mut count = SoundCount::default();
+        for seq in [7, 8, 11, 10, 11, 12] {
+            count.arrived(seq);
+        }
+        assert_eq!(count.take(), SoundReport { received: 4, lost: 2 });
+        assert_eq!(count.take(), SoundReport::default());
+        let mut count = SoundCount::default();
+        count.arrived(u32::MAX);
+        count.arrived(1);
+        assert_eq!(count.take(), SoundReport { received: 2, lost: 1 }, "across the wrap");
     }
 
     const REPORT_US: u64 = 50_000;
@@ -254,7 +303,7 @@ mod tests {
         let mut now = 1_000_000;
         let mut report = |copies: &mut AudioCopies, n| {
             now += REPORT_US;
-            copies.on_report(&lost(n), now)
+            copies.on_report(lost(n), now)
         };
         assert_eq!(report(&mut copies, 0), 0, "a clean link carries none");
         assert_eq!(report(&mut copies, 1), 0, "a lone loss is concealed");
@@ -283,7 +332,7 @@ mod tests {
         let mut now = 0;
         for k in 0..2_000_u32 {
             now += REPORT_US;
-            copies.on_report(&lost(u16::from(k % 4 == 0)), now);
+            copies.on_report(lost(u16::from(k % 4 == 0)), now);
             if k > 10 {
                 assert!(copies.copies() >= 1, "report {k}: 5 % loss lost its copies");
             }

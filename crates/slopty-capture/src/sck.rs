@@ -2,12 +2,14 @@
 //! windows are, the accessibility API for resizing and hearing them go, and `NSCursor` for the
 //! pointer's picture. Each function is the free function of the same job in this crate.
 
+use std::sync::Arc;
+
 use slopty_core::WindowId;
 use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, WindowInfo};
 
 use crate::source::{
     AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
-    Rect, TargetWindow, Went, WindowState,
+    Heard, Rect, TargetWindow, Went, WindowState,
 };
 use crate::{Capture, HideWatch, Shareable, Target, geometry};
 
@@ -19,6 +21,7 @@ impl CaptureSource for ScreenCaptureKit {
     type Content = Shareable;
     type HideWatch = HideWatch;
     type Image = slopty_codec::PixelBuffer;
+    type Sound = Arc<Capture>;
     type Stream = Capture;
     type Target = Target;
 
@@ -62,11 +65,57 @@ impl CaptureSource for ScreenCaptureKit {
         target: &Target,
         config: &CaptureConfig,
         sink: impl Fn(CapturedFrame) + Send + Sync + 'static,
-        audio: Option<AudioSink>,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<Capture, CaptureError> {
-        Capture::start(target, config, sink, audio, on_stop, done)
+        Capture::start(target, config, sink, on_stop, done)
+    }
+
+    fn start_sound(
+        heard: &Heard,
+        sink: AudioSink,
+        on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+        done: impl FnOnce(Result<Arc<Capture>, CaptureError>) + Send + 'static,
+    ) {
+        let heard = heard.clone();
+        crate::enumerate(move |content| {
+            let target = match content.and_then(|content| Target::sound(&content, &heard)) {
+                Ok(target) => target,
+                Err(e) => return done(Err(e)),
+            };
+            // The start's answer can come before the capture is back from the call that
+            // starts it, or after: whichever is second hands the capture on.
+            let meeting = Arc::new(parking_lot::Mutex::new(Meeting::Waiting(Box::new(done))));
+            let answered = Arc::clone(&meeting);
+            let started = Capture::start_sound(&target, sink, on_stop, move |live| {
+                answered.lock().answer(live);
+            });
+            match started {
+                Ok(capture) => meeting.lock().started(capture),
+                Err(e) => meeting.lock().answer(Err(e)),
+            }
+        });
+    }
+
+    fn hear(
+        sound: &Arc<Capture>,
+        heard: &Heard,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) {
+        let (sound, heard) = (Arc::clone(sound), heard.clone());
+        crate::enumerate(move |content| {
+            match content.and_then(|content| Target::sound(&content, &heard)) {
+                Ok(target) => sound.retarget(&target, done),
+                Err(e) => done(Err(e)),
+            }
+        });
+    }
+
+    fn stop_sound(
+        sound: &Arc<Capture>,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) {
+        sound.stop(done);
     }
 
     fn update(
@@ -172,5 +221,42 @@ impl CaptureSource for ScreenCaptureKit {
 
     fn cursor_shape() -> Option<CursorShape> {
         crate::read_cursor()
+    }
+}
+
+/// What a sound capture's start is waiting on: the capture back from the call that started it,
+/// and ScreenCaptureKit's answer that it is live.
+enum Meeting {
+    /// Neither yet.
+    Waiting(Box<dyn FnOnce(Result<Arc<Capture>, CaptureError>) + Send>),
+    /// The capture, the answer not yet.
+    Started(Capture, Box<dyn FnOnce(Result<Arc<Capture>, CaptureError>) + Send>),
+    /// The answer, the capture not yet.
+    Answered(Result<(), CaptureError>, Box<dyn FnOnce(Result<Arc<Capture>, CaptureError>) + Send>),
+    /// Told.
+    Done,
+}
+
+impl Meeting {
+    fn started(&mut self, capture: Capture) {
+        *self = match std::mem::replace(self, Self::Done) {
+            Self::Waiting(done) => Self::Started(capture, done),
+            Self::Answered(live, done) => {
+                done(live.map(|()| Arc::new(capture)));
+                Self::Done
+            }
+            told @ (Self::Started(..) | Self::Done) => told,
+        };
+    }
+
+    fn answer(&mut self, live: Result<(), CaptureError>) {
+        *self = match std::mem::replace(self, Self::Done) {
+            Self::Waiting(done) => Self::Answered(live, done),
+            Self::Started(capture, done) => {
+                done(live.map(|()| Arc::new(capture)));
+                Self::Done
+            }
+            told @ (Self::Answered(..) | Self::Done) => told,
+        };
     }
 }

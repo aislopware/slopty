@@ -6,6 +6,7 @@
 //! ([`crate::datagram`]). Everything after the header is opaque to this module.
 
 use bytes::{BufMut as _, Bytes, BytesMut};
+use slopty_core::StreamId;
 use zerocopy::little_endian::{I32, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -21,6 +22,15 @@ pub const HEADER_BYTES: usize = 17;
 /// Bytes available for payload after the header, rounded down to even: parity shards are cut
 /// to an even size, and every fragment of a frame carries as many bytes as its shards.
 pub const MAX_PAYLOAD: usize = (MAX_DATAGRAM - HEADER_BYTES) & !1;
+
+/// The media stream a worker's sound comes on to a client.
+///
+/// Every [`Kind::Audio`] datagram carries it in [`MediaHeader::stream`]. One sound for every stream
+/// a client has open from a worker, since ScreenCaptureKit filters sound by application and two
+/// tiles of one app would otherwise play it twice (`docs/decisions/audio.md`, "One sound per worker
+/// on a client, not one per stream"). A worker numbers its streams from 1, so no stream is this
+/// one.
+pub const SOUND: StreamId = StreamId(0);
 
 /// Datagram kinds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

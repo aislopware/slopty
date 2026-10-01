@@ -482,9 +482,6 @@ struct Window {
     stalled: Duration,
     /// Stalls that released in this window.
     stalls: u16,
-    /// Audio packets that arrived, and the ones missing from their sequence.
-    audio_received: u16,
-    audio_lost: u16,
 }
 
 /// Reassembles one stream's video datagrams and drives its loss policy.
@@ -495,8 +492,6 @@ pub struct Reassembler {
     frames: BTreeMap<u32, Slot>,
     need: Need,
     last_good: Option<u32>,
-    /// The newest audio packet's sequence ([`Self::count_audio`]).
-    last_audio_seq: Option<u32>,
     /// The frames given up on lately, at most [`Config::max_pending`]. Their fragments still in
     /// flight are stale whatever the receiver waits for: while it waits for a keyframe or a
     /// refresh nothing else marks them so, and each one opened its frame again, to be lost again
@@ -578,7 +573,6 @@ impl Reassembler {
             frames: BTreeMap::new(),
             need: Need::Keyframe,
             last_good: None,
-            last_audio_seq: None,
             given_up: VecDeque::new(),
             ready: VecDeque::new(),
             decoder: None,
@@ -715,8 +709,6 @@ impl Reassembler {
         window.stalled =
             window.stalled.saturating_add(Duration::from_millis(u64::from(report.stalled_ms)));
         window.stalls = window.stalls.saturating_add(report.stalls);
-        window.audio_received = window.audio_received.saturating_add(report.audio_received);
-        window.audio_lost = window.audio_lost.saturating_add(report.audio_lost);
     }
 
     /// Feed one datagram.
@@ -781,7 +773,6 @@ impl Reassembler {
                 let seq = header.frame.get();
                 match crate::parse_audio(header.data_count.get(), &payload) {
                     Some(packets) => {
-                        self.count_audio(seq);
                         Ingest::Audio { seq, payload: packets.packet, earlier: packets.earlier }
                     }
                     None => Ingest::Ignored(Ignored::Malformed),
@@ -1469,24 +1460,7 @@ impl Reassembler {
             acked_ltr_len,
             stalled_ms: u16::try_from(window.stalled.as_millis()).unwrap_or(u16::MAX),
             stalls: window.stalls,
-            audio_received: window.audio_received,
-            audio_lost: window.audio_lost,
         }
-    }
-
-    /// Audio packet `seq` arrived: counted for the report, with the ones its sequence skipped
-    /// since the last. A late or repeated one counts neither way: its place was counted lost.
-    fn count_audio(&mut self, seq: u32) {
-        if let Some(last) = self.last_audio_seq {
-            let gap = seq.wrapping_sub(last);
-            if gap == 0 || gap > u32::MAX / 2 {
-                return;
-            }
-            let skipped = u16::try_from(gap.saturating_sub(1)).unwrap_or(u16::MAX);
-            self.window.audio_lost = self.window.audio_lost.saturating_add(skipped);
-        }
-        self.last_audio_seq = Some(seq);
-        self.window.audio_received = self.window.audio_received.saturating_add(1);
     }
 }
 

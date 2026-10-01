@@ -129,7 +129,6 @@ mod tests {
                 });
                 let _gone = tx.send((frame.latency_us, offset, slopty_capture::host_now_us()));
             },
-            None,
             |e| panic!("capture stopped: {e}"),
             move |r| {
                 let _gone = started_tx.send(r);
@@ -186,7 +185,6 @@ mod tests {
             fps: 60,
             format: PixelFormat::Nv12Full,
             queue_depth: depth,
-            audio: false,
             crop,
         }
     }
@@ -245,7 +243,6 @@ mod tests {
             move |frame| {
                 let _gone = tx.send(frame);
             },
-            None,
             |e| panic!("capture stopped: {e}"),
             move |r| {
                 let _gone = started_tx.send(r);
@@ -408,7 +405,6 @@ mod tests {
             move |_frame| {
                 let _gone = tx.send(slopty_capture::host_now_us());
             },
-            None,
             |e| panic!("capture stopped: {e}"),
             move |r| {
                 let _gone = started_tx.send(r);

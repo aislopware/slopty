@@ -148,8 +148,6 @@ pub struct CaptureConfig {
     /// Surfaces in ScreenCaptureKit's pool: the ones the stream and the encoder hold plus one to
     /// render the next capture into (the worker asks for 3).
     pub queue_depth: u8,
-    /// Also capture the target's audio (48 kHz stereo, this process excluded).
-    pub audio: bool,
     /// Sample only this part of the target (a window's frame on a display target); the
     /// whole target when `None`.
     pub crop: Option<Crop>,
@@ -186,8 +184,35 @@ pub struct CapturedAudio {
     pub samples: Vec<f32>,
 }
 
-/// Where audio goes; `None` leaves audio off.
+/// Where a sound capture's audio goes.
 pub type AudioSink = Box<dyn Fn(CapturedAudio) + Send + Sync>;
+
+/// Whose sound a worker's one sound for a client is ([`CaptureSource::start_sound`]).
+///
+/// ScreenCaptureKit filters sound by application, not by window: a window's stream carries all
+/// of its application's sound, and a display's every application's. So a client's streams from
+/// one worker together hear the union of what each would.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Heard {
+    /// Every application: a display is among the streams.
+    Every,
+    /// These processes' applications.
+    Apps(std::collections::BTreeSet<i32>),
+}
+
+impl Heard {
+    /// What `self` and `other` hear together.
+    #[must_use]
+    pub fn with(self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::Every, _) | (_, Self::Every) => Self::Every,
+            (Self::Apps(mut ours), Self::Apps(theirs)) => {
+                ours.extend(theirs);
+                Self::Apps(ours)
+            }
+        }
+    }
+}
 
 /// What a macOS frame carries: an `IOSurface`-backed pixel buffer.
 #[cfg(target_os = "macos")]
@@ -312,6 +337,8 @@ pub trait CaptureSource: 'static {
     type Target: Send + 'static;
     /// A running capture.
     type Stream: Send + Sync + 'static;
+    /// A running capture of sound alone ([`Self::start_sound`]).
+    type Sound: Send + Sync + 'static;
     /// A watch on a window's application that hears one of its windows go.
     type HideWatch: Send + 'static;
 
@@ -347,9 +374,10 @@ pub trait CaptureSource: 'static {
     /// The target's pixels per point.
     fn point_scale(target: &Self::Target) -> f32;
 
-    /// Start capturing `target`. Frames go to `sink` and audio to `audio` from the platform's
-    /// own threads; `on_stop` hears the stream end by itself; `done` runs once it is live or
-    /// has failed.
+    /// Start capturing `target`'s pictures, which go to `sink` from the platform's own threads;
+    /// `on_stop` hears the stream end by itself; `done` runs once it is live or has failed. A
+    /// picture's stream carries no sound: a client hears a worker's through one
+    /// [`Self::start_sound`].
     ///
     /// # Errors
     ///
@@ -358,10 +386,29 @@ pub trait CaptureSource: 'static {
         target: &Self::Target,
         config: &CaptureConfig,
         sink: impl Fn(CapturedFrame<Self::Image>) + Send + Sync + 'static,
-        audio: Option<AudioSink>,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<Self::Stream, CaptureError>;
+    /// Start capturing the sound of `heard` (48 kHz stereo, this process's own left out), which
+    /// goes to `sink` from the platform's threads; `on_stop` hears it end by itself; `done`
+    /// gets the running capture, or why there is none.
+    fn start_sound(
+        heard: &Heard,
+        sink: AudioSink,
+        on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+        done: impl FnOnce(Result<Self::Sound, CaptureError>) + Send + 'static,
+    );
+    /// Hear `heard` on a running sound capture from now on, without stopping it.
+    fn hear(
+        sound: &Self::Sound,
+        heard: &Heard,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    );
+    /// Stop a sound capture; `done` runs once it is torn down.
+    fn stop_sound(
+        sound: &Self::Sound,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    );
     /// Change size, rate, format or crop on a live stream.
     fn update(
         stream: &Self::Stream,
@@ -451,6 +498,16 @@ mod tests {
     /// the screens, whatever the lock says; otherwise the lock decides, and a flag the
     /// dictionary leaves out (the lock, whenever the screens are unlocked) reads as nothing to
     /// remark on.
+    /// Every application outhears any set; two sets hear both.
+    #[test]
+    fn what_streams_hear_together() {
+        let apps = |pids: &[i32]| Heard::Apps(pids.iter().copied().collect());
+        assert_eq!(apps(&[1]).with(&apps(&[2, 1])), apps(&[1, 2]));
+        assert_eq!(apps(&[1]).with(&Heard::Every), Heard::Every);
+        assert_eq!(Heard::Every.with(&apps(&[3])), Heard::Every);
+        assert_eq!(apps(&[]).with(&apps(&[])), apps(&[]));
+    }
+
     #[test]
     fn the_session_flags_say_what_the_screens_show() {
         assert_eq!(Console::of(Some(true), Some(true), None), Console::Shown);

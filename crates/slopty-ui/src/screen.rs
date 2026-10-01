@@ -917,7 +917,7 @@ impl ScreenView {
             cx.set_cursor_image(view.system_pointer.0, None);
         })
         .detach();
-        handle.set_muted(theme.behaviour.stream.muted);
+        handle.mute_by_default(theme.behaviour.stream.muted);
         let glass = glass::Glass::new();
         let presenter = Arc::clone(&glass);
         handle.set_present(Some(Arc::new(move |frame| {
@@ -1500,7 +1500,7 @@ impl ScreenView {
         }
     }
 
-    /// Whether the worker has sent any audio for this stream (the mute control is pointless
+    /// Whether the worker has sent any sound to this client (the mute control is pointless
     /// before that).
     #[must_use]
     pub fn has_audio(&self) -> bool {
@@ -1513,8 +1513,8 @@ impl ScreenView {
         self.handle.muted()
     }
 
-    /// Silence or resume this stream's audio on this client only.
-    /// The pill lives in the tile's header, so the caller notifies its own entity.
+    /// Silence or resume the worker's sound on this client only: every tile of the worker hears
+    /// it, so the caller redraws them all.
     pub fn toggle_mute(&self) {
         self.handle.set_muted(!self.handle.muted());
     }

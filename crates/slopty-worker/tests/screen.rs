@@ -370,7 +370,6 @@ mod encoder_rate_control {
             fps: 60,
             format: PixelFormat::Nv12Full,
             queue_depth: 2,
-            audio: false,
             crop: None,
         };
         let capture = Capture::start(
@@ -388,7 +387,6 @@ mod encoder_rate_control {
                 let _encoded =
                     sink_encoder.encode(frame.image.as_cv(), frame.capture_ts_us, &options);
             },
-            None,
             |e| panic!("capture stopped: {e}"),
             move |r| {
                 let _gone = started_tx.send(r);

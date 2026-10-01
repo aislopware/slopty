@@ -58,20 +58,19 @@ use parking_lot::Mutex;
 #[cfg(all(test, target_vendor = "apple"))]
 use slopty_capture::host_now_us;
 use slopty_capture::{
-    AxError, CaptureConfig, CaptureError, CaptureSource, CapturedAudio, CapturedFrame, Console,
-    Crop, PixelFormat, Rect, TargetWindow, Went, WindowState, crop_for,
+    AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop, Heard,
+    PixelFormat, Rect, TargetWindow, Went, WindowState, crop_for,
 };
 use slopty_codec::{
-    AudioEncoder as _, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _,
-    conformance,
+    CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _, conformance,
 };
 use slopty_core::{DisplayId, StreamId};
 use slopty_input::{InputError, InputSink as _, Pointer, PointerChanges, PointerWatch};
 pub use slopty_media::PathSample;
 use slopty_media::{
-    AudioCopies, Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, Fed, HEARTBEAT_AFTER,
-    LayerGate, MAX_AUDIO_COPIES, MediaError, Pace, Packetizer, RateController, Redundancy, Refine,
-    audio_datagram, cursor_datagram, heartbeat_datagram, slower_rung,
+    Cadence, ChromaGate, Decision, EncodedFrame, EncoderWatch, Fed, HEARTBEAT_AFTER, LayerGate,
+    MediaError, Pace, Packetizer, RateController, Redundancy, Refine, cursor_datagram,
+    heartbeat_datagram, slower_rung,
 };
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::{ClockEcho, MAX_DATAGRAM};
@@ -87,6 +86,7 @@ use crate::platform::{Native, Platform};
 pub mod drag;
 mod engines;
 pub mod sized;
+pub mod sound;
 mod stripes;
 #[cfg(target_os = "macos")]
 pub mod synthetic;
@@ -1108,7 +1108,6 @@ impl Join {
 }
 
 struct Counters {
-    audio_packets: AtomicU64,
     captured: AtomicU64,
     /// Captures a newer one replaced in the mailbox before the encode thread took them.
     superseded: AtomicU64,
@@ -1157,7 +1156,6 @@ const IN_FLIGHT_MAX: usize = 16;
 impl Counters {
     fn new() -> Self {
         Self {
-            audio_packets: AtomicU64::new(0),
             captured: AtomicU64::new(0),
             superseded: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
@@ -1222,7 +1220,7 @@ impl Counters {
             refreshes: self.refreshes.load(Ordering::Relaxed),
             latency_max_us: self.latency_max_us.load(Ordering::Relaxed),
             latency_sum_us: self.latency_sum_us.load(Ordering::Relaxed),
-            audio_packets: self.audio_packets.load(Ordering::Relaxed),
+            audio_packets: 0,
             bitrate_bps: self.bitrate_bps.load(Ordering::Relaxed),
             capture: self.capture.lock().quantiles(),
             encode: self.encode.lock().quantiles(),
@@ -1381,19 +1379,6 @@ impl StreamControl {
     }
 }
 
-/// Audio gate: after this long without a sample above [`AUDIO_FLOOR`] the stream stops
-/// sending packets (silent apps cost nothing on the wire; the client pads silence).
-const AUDIO_HOLD_US: u64 = 300_000;
-/// Anything quieter than this is silence (-80 dBFS).
-const AUDIO_FLOOR: f32 = 1e-4;
-
-/// The encoder and the silence gate.
-struct AudioState<A> {
-    encoder: Option<A>,
-    seq: u32,
-    last_loud_us: u64,
-}
-
 struct Shared<P: Platform = Native> {
     id: StreamId,
     /// The sessions in force and what they were last told. Only an encode takes it, across
@@ -1411,11 +1396,6 @@ struct Shared<P: Platform = Native> {
     /// The newest capture, left by ScreenCaptureKit's queue for the encode thread
     /// ([`start_encode_thread`]).
     mailbox: Mailbox<Frame<P>>,
-    audio: Mutex<AudioState<P::Audio>>,
-    /// How many earlier Opus packets each audio datagram carries, from the audio loss the client
-    /// reports ([`AudioCopies`]), and the packets sent last, nearest first.
-    audio_copies: Mutex<AudioCopies>,
-    audio_sent: Mutex<[Bytes; MAX_AUDIO_COPIES]>,
     rate: Mutex<RateController>,
     /// Whether the encoder should write temporal layers, from the link's loss and the frames
     /// a layered session drops ([`LayerGate`]); the next encode tells the session.
@@ -1481,8 +1461,9 @@ struct Shared<P: Platform = Native> {
     lane: Mutex<Lane>,
     /// Wakes [`lane_loop`]: video is waiting in the lane.
     lane_wake: tokio::sync::Notify,
-    /// `host_now_us()` of the last audio packet sent; the lane is used only while audio flows.
-    last_audio_us: AtomicU64,
+    /// When the client's sound last went out ([`sound::Sound`]): the lane is used only while
+    /// it flows. Unset for a stream no sound listens through.
+    sound: std::sync::OnceLock<Arc<sound::SoundClock>>,
     /// Stream pixels per native pixel of the target (the `scale` of the quality in force), as
     /// `f64` bits: what the cursor loop multiplies a position by, kept current across a rebuild.
     zoom: AtomicU64,
@@ -1554,9 +1535,6 @@ impl<P: Platform> Shared<P> {
             lower: Coder::new(Stripe::media_of(id, 1)),
             join: Mutex::new(Join::default()),
             mailbox: Mailbox::default(),
-            audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
-            audio_copies: Mutex::new(AudioCopies::default()),
-            audio_sent: Mutex::new(Default::default()),
             rate: Mutex::new(RateController::new(max_bps)),
             layers: Mutex::new(LayerGate::default()),
             layers_wanted: AtomicBool::new(false),
@@ -1582,7 +1560,7 @@ impl<P: Platform> Shared<P> {
             repair: tokio::sync::Notify::new(),
             lane: Mutex::new(Lane::default()),
             lane_wake: tokio::sync::Notify::new(),
-            last_audio_us: AtomicU64::new(0),
+            sound: std::sync::OnceLock::new(),
             zoom: AtomicU64::new(1.0_f64.to_bits()),
             cropped: AtomicBool::new(cropped),
             target_hidden: AtomicBool::new(false),
@@ -1610,6 +1588,7 @@ impl<P: Platform> Shared<P> {
         let age = self.top.ltr.lock().usable_age(now::<P>());
         ScreenStats {
             on_crop: self.cropped.load(Ordering::Relaxed),
+            audio_packets: self.sound.get().map_or(0, |sound| sound.packets()),
             ltr: LtrStats {
                 usable: age.is_some(),
                 usable_age_us: age.unwrap_or(0),
@@ -2411,25 +2390,12 @@ impl<P: Platform> Shared<P> {
         self.try_encode(&mut held, false, now)
     }
 
-    /// ScreenCaptureKit delivered PCM: encode and send unless the source has gone quiet.
-    ///
-    /// Audio goes to QUIC at once, ahead of any video waiting in the lane.
-    fn on_audio(&self, chunk: &CapturedAudio) {
-        let now = now::<P>();
-        let Some(packets) = self.encode_audio(&chunk.samples, now) else { return };
-        let datagrams = self.audio_datagrams(&packets, now);
-        self.last_audio_us.store(now, Ordering::Relaxed);
-        let taken = self.send(&datagrams);
-        self.counters.audio_packets.fetch_add(taken.datagrams, Ordering::Relaxed);
-    }
-
     /// Hand a frame's video datagrams on: straight to QUIC while no audio flows, through the
     /// lane while it does, and always behind video already waiting there.
     fn send_video(&self, datagrams: &[Bytes], now: u64) {
         let mut lane = self.lane.lock();
-        let audio = now.saturating_sub(self.last_audio_us.load(Ordering::Relaxed))
-            < LANE_AUDIO_HOLD_US
-            && self.last_audio_us.load(Ordering::Relaxed) != 0;
+        let last_audio = self.sound.get().map_or(0, |sound| sound.last_us());
+        let audio = last_audio != 0 && now.saturating_sub(last_audio) < LANE_AUDIO_HOLD_US;
         if lane.queue.is_empty() && !audio {
             // Nothing to let ahead: a frame costs the lane nothing. The look keeps the drain rate
             // current for when audio starts.
@@ -2459,61 +2425,6 @@ impl<P: Platform> Shared<P> {
         let floor = self.counters.bitrate_bps.load(Ordering::Relaxed) / 8;
         let batch = lane.take(held, lane.budget(floor));
         lane.expected = lane.expected.saturating_add(self.send(&batch).bytes);
-    }
-
-    /// Opus `packets` as datagrams, each carrying again the packets before it the client's
-    /// reported audio loss asks for ([`AudioCopies`]).
-    fn audio_datagrams(&self, packets: &[(u32, Bytes)], now: u64) -> Vec<Bytes> {
-        let copies = self.audio_copies.lock().copies();
-        let mut sent = self.audio_sent.lock();
-        let mut datagrams = Vec::with_capacity(packets.len());
-        for (seq, packet) in packets {
-            let [near, far] = &*sent;
-            let earlier: [&[u8]; MAX_AUDIO_COPIES] = [near, far];
-            let earlier = earlier.get(..copies).unwrap_or_default();
-            datagrams.extend(audio_datagram(self.id, *seq, send_ms_lo(now), packet, earlier));
-            sent.rotate_right(1);
-            if let Some(nearest) = sent.first_mut() {
-                nearest.clone_from(packet);
-            }
-        }
-        datagrams
-    }
-
-    /// Run the silence gate and the encoder under the audio lock; `None` when nothing goes out.
-    fn encode_audio(&self, samples: &[f32], now: u64) -> Option<Vec<(u32, Bytes)>> {
-        let loud = samples.iter().any(|s| s.abs() > AUDIO_FLOOR);
-        let mut audio = self.audio.lock();
-        if loud {
-            audio.last_loud_us = now;
-        } else if now.saturating_sub(audio.last_loud_us) > AUDIO_HOLD_US {
-            return None;
-        }
-        if audio.encoder.is_none() {
-            match P::Audio::new() {
-                Ok(encoder) => audio.encoder = Some(encoder),
-                Err(e) => {
-                    tracing::warn!(stream = %self.id, error = %e, "no Opus encoder; audio off");
-                    // Never retried: keep the gate closed for good.
-                    audio.last_loud_us = 0;
-                    return None;
-                }
-            }
-        }
-        let AudioState { encoder: Some(encoder), seq, .. } = &mut *audio else { return None };
-        let mut packets = Vec::new();
-        let encoded = encoder.push(samples, |packet| {
-            *seq = seq.wrapping_add(1);
-            packets.push((*seq, Bytes::copy_from_slice(packet)));
-        });
-        drop(audio);
-        match encoded {
-            Ok(()) => Some(packets),
-            Err(e) => {
-                tracing::debug!(stream = %self.id, error = %e, "opus encode");
-                None
-            }
-        }
     }
 
     /// A number for an encoder session about to be built, to [`Self::install`] it under.
@@ -2733,13 +2644,6 @@ impl<P: Platform> Shared<P> {
         if index != 0 {
             coder.packetizer.lock().set_parity_permille(permille);
             return None;
-        }
-        let (was, copies) = {
-            let mut control = self.audio_copies.lock();
-            (control.copies(), control.on_report(report, now::<P>()))
-        };
-        if copies != was {
-            tracing::debug!(stream = %self.id, was, copies, lost = report.audio_lost, "audio copies");
         }
         self.follow_layers(permille > Redundancy::MIN);
         let parity_moved = {
@@ -3475,7 +3379,6 @@ fn configs_padded(
         fps: if display.is_some() { 0 } else { fps },
         format,
         queue_depth: QUEUE_DEPTH,
-        audio: true,
         crop: None,
     };
     let (width, height) = capture.surface();
@@ -3602,6 +3505,8 @@ pub struct Pipeline<P: Platform> {
     /// trusted worker; `None` for a display, an untrusted process or an application that would
     /// not be observed. Dropped with the stream.
     hide_watch: Option<<Source<P> as CaptureSource>::HideWatch>,
+    /// The stream's place among those its client's sound is for ([`Self::listen`]).
+    listening: Option<sound::Listening>,
     /// Client input aimed at this stream, in its pixel coordinates.
     injector: P::Input,
     /// The tile sends its trackpad gestures ([`ScreenInput::Gestures`]): told again to the
@@ -3699,7 +3604,6 @@ impl<P: Platform> Pipeline<P> {
             fps: 1,
             format: PixelFormat::Nv12Full,
             queue_depth: 1,
-            audio: true,
             crop: None,
         };
         let (tx, rx) = oneshot::channel();
@@ -3707,7 +3611,6 @@ impl<P: Platform> Pipeline<P> {
             &resolved,
             &config,
             |_frame| {},
-            Some(Box::new(|_chunk| {})),
             |_stopped| {},
             move |result| {
                 let _receiver_gone = tx.send(result);
@@ -3844,12 +3747,11 @@ impl<P: Platform> Pipeline<P> {
 
         let (started_tx, started_rx) = oneshot::channel();
         start_encode_thread(&shared)?;
-        let (sink, audio_sink) = (Arc::clone(&shared), Arc::clone(&shared));
+        let sink = Arc::clone(&shared);
         let capture = Source::<P>::start(
             &resolved,
             &capture_config,
             move |frame| sink.post(frame),
-            Some(Box::new(move |chunk| audio_sink.on_audio(&chunk))),
             {
                 let on_stop = Arc::clone(&on_stop);
                 move |e| on_stop(e)
@@ -3912,6 +3814,7 @@ impl<P: Platform> Pipeline<P> {
             repair,
             lane,
             hide_watch,
+            listening: None,
             injector,
             gestures: false,
             point_scale,
@@ -3933,6 +3836,20 @@ impl<P: Platform> Pipeline<P> {
     #[must_use]
     pub const fn id(&self) -> StreamId {
         self.id
+    }
+
+    /// Hear the target through the client's one sound, `sound`: every application for a
+    /// display, its own for a window. The sound goes ahead of this stream's video while it
+    /// flows. Blocking for a window: one window-server read of its owner.
+    pub fn listen(&mut self, sound: &dyn sound::Listen) {
+        let heard = match self.target {
+            CaptureTarget::Display(_) => Heard::Every,
+            CaptureTarget::Window(id) => {
+                Heard::Apps(Source::<P>::window_owner(id).into_iter().collect())
+            }
+        };
+        let _first = self.shared.sound.set(sound.clock());
+        self.listening = Some(sound.listen(heard));
     }
 
     /// What is being streamed.
@@ -5037,7 +4954,6 @@ mod shape_tests {
 #[cfg(test)]
 #[cfg(target_vendor = "apple")]
 mod tests {
-    use slopty_codec::audio::{CHANNELS, FRAME_SAMPLES};
     use slopty_core::DisplayId;
 
     use super::*;
@@ -5910,31 +5826,6 @@ mod tests {
         assert_eq!(shared.top.sent_at_report.load(Ordering::Relaxed), 0, "nothing sent yet");
     }
 
-    /// Audio goes out while the source is loud and for the hold after it; silence past the
-    /// hold sends nothing, and each packet carries the next sequence number.
-    #[test]
-    fn audio_is_gated_by_silence_and_numbered() -> Result<(), String> {
-        let (shared, _wire) = shared_for_frames();
-        let samples = usize::try_from(FRAME_SAMPLES * CHANNELS).map_err(|e| e.to_string())?;
-        let quiet = vec![0.0_f32; samples];
-        let loud: Vec<f32> = (0..samples).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
-        let start = 1_000_000_u64;
-        assert!(shared.encode_audio(&quiet, start).is_none(), "silence from the start");
-        let first = shared.encode_audio(&loud, start).ok_or("loud: a packet")?;
-        let second = shared.encode_audio(&loud, start + 20_000).ok_or("loud again")?;
-        let seqs: Vec<u32> = first.iter().chain(&second).map(|(seq, _)| *seq).collect();
-        assert_eq!(seqs, vec![1, 2], "one packet per frame, numbered from 1");
-        assert!(
-            shared.encode_audio(&quiet, start + 20_000 + AUDIO_HOLD_US).is_some(),
-            "silence inside the hold still goes out"
-        );
-        assert!(
-            shared.encode_audio(&quiet, start + 20_001 + AUDIO_HOLD_US).is_none(),
-            "and past it, nothing"
-        );
-        Ok(())
-    }
-
     #[test]
     fn the_clock_byte_and_the_crop_knob_are_plain_values() {
         assert_eq!(send_ms_lo(0), 0);
@@ -6558,7 +6449,9 @@ mod tests {
         let shared = Shared::<Native>::new(StreamId(1), sink, 30_000_000, 60, false);
         shared.counters.bitrate_bps.store(target_bps, Ordering::Relaxed);
         let base = 1_000_000_u64;
-        shared.last_audio_us.store(if lane { base } else { 0 }, Ordering::Relaxed);
+        let clock = Arc::new(sound::SoundClock::default());
+        let _first = shared.sound.set(Arc::clone(&clock));
+        clock.sent_at(if lane { base } else { 0 });
         let keyframe: Vec<Bytes> =
             std::iter::repeat_n(Bytes::from(vec![1_u8; 1_150]), 113).collect();
         shared.send_video(&keyframe, base);
@@ -6575,7 +6468,7 @@ mod tests {
                 }
             }
             if ms == 5 {
-                shared.last_audio_us.store(if lane { now } else { 0 }, Ordering::Relaxed);
+                clock.sent_at(if lane { now } else { 0 });
                 shared.send(std::slice::from_ref(&audio));
                 audio_sent_at = Some(ms);
             }

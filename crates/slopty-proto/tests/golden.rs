@@ -1198,10 +1198,15 @@ mod golden {
                     acked_ltr_len: 1,
                     stalled_ms: 180,
                     stalls: 1,
-                    audio_received: 98,
-                    audio_lost: 2,
                 },
             }),
+        );
+        snap(
+            "client_screen_sound_report",
+            &ClientMsg::Screen(ScreenRequest::SoundReport(slopty_proto::screen::SoundReport {
+                received: 98,
+                lost: 2,
+            })),
         );
         snap(
             "worker_screen_source",
@@ -1268,6 +1273,27 @@ mod golden {
             send_ms_lo: 0xab,
         };
         insta::assert_snapshot!("media_heartbeat", hex(header.as_bytes()));
+    }
+
+    /// An audio datagram's header on the worker's sound lane: packet 0x01020304 carrying one
+    /// copy of the packet before it.
+    #[test]
+    fn media_sound_header() {
+        use slopty_proto::media::{Kind, MediaHeader, SOUND};
+        use zerocopy::IntoBytes as _;
+        use zerocopy::little_endian::{U16, U32};
+        let header = MediaHeader {
+            channel: slopty_proto::datagram::Channel::Media as u8,
+            stream: U32::new(SOUND.0),
+            frame: U32::new(0x0102_0304),
+            index: U16::new(0),
+            data_count: U16::new(2),
+            parity_count: 0,
+            kind: Kind::Audio as u8,
+            flags: 0,
+            send_ms_lo: 0xab,
+        };
+        insta::assert_snapshot!("media_sound", hex(header.as_bytes()));
     }
 
     /// A clock probe's echo: the header, then the probe's own stamp and the worker's two

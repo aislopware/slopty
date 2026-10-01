@@ -32,8 +32,10 @@ fn connect_as(
     let (tx, rx) = mpsc::channel(256);
     let me = ClientId::new();
     let key = WorkerKey::new(seed);
+    // One router for the link, as a connection has: its streams share the worker's sound.
+    let router = slopty_client::screen::ScreenRouter::default();
     let factory: ScreenFactory =
-        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+        Arc::new(move |stream, _codec| slopty_client::ScreenHandle::detached_on(&router, stream));
     view.update_in(cx, |v, _window, cx| {
         v.add_worker(key, name.to_owned(), cx);
         let ack = HelloAck { home: home.to_owned(), caps, ..hello(name, Vec::new()) };
@@ -346,4 +348,55 @@ fn overview_labels_say_state_place_and_worker(cx: &mut TestAppContext) {
     assert_eq!(lines.as_deref(), Some("oss/slopty"));
     let ix = view.read_with(cx, |v, _| v.layout.active_workspace());
     assert!(cx.debug_bounds(leak(format!("overview-rollup-{ix}"))).is_some(), "its rollup");
+}
+
+/// A worker has one sound, so its tiles have one mute. Silenced from one window (⌘⇧M), every
+/// tile of the worker says so at once, its pill naming whose sound it is; resumed from the other
+/// window's pill, neither does.
+#[gpui::test]
+fn a_workers_tiles_share_its_one_sound_and_say_its_mute_together(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect_as(&view, cx, 1, "studio", "/Users/me", healthy());
+    let windows = [slopty_core::WindowId(7), slopty_core::WindowId(8)];
+    let tiles = [
+        arrives(&view, cx, &fake, ItemKind::Window { window: windows[0] }, 1),
+        arrives(&view, cx, &fake, ItemKind::Window { window: windows[1] }, 2),
+    ];
+    let key = fake.key;
+    for (stream, window) in (1..).zip(windows) {
+        view.update_in(cx, |v, _w, cx| {
+            let event = ScreenEvent::Opened {
+                stream: StreamId(stream),
+                target: CaptureTarget::Window(window),
+                codec: slopty_proto::screen::VideoCodec::Hevc,
+                width: 640,
+                height: 400,
+                scale: 2.0,
+                stripes: Vec::new(),
+            };
+            v.screen_event(key, event, cx);
+        });
+    }
+    cx.run_until_parked();
+    let muted = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| tiles.map(|t| v.stream(t.item).is_some_and(|s| s.muted)))
+    };
+    let pills = |cx: &mut VisualTestContext| {
+        tiles.map(|t| cx.debug_bounds(leak(format!("mute-{}", t.item.as_uuid()))).is_some())
+    };
+    assert_eq!(muted(&view, cx), [false, false]);
+    assert_eq!(pills(cx), [false, false], "no pill before the worker has sent any sound");
+
+    view.update_in(cx, |v, w, cx| {
+        v.focus_tile(tiles[0], cx);
+        v.toggle_mute(&ToggleMute, w, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(muted(&view, cx), [true, true], "silenced from one tile, said by both");
+    assert_eq!(pills(cx), [true, true], "a silenced tile says so, whichever was pressed");
+    assert_eq!(tile::mute_label("studio"), "Mute studio's sound");
+
+    click(cx, leak(format!("mute-{}", tiles[1].item.as_uuid())));
+    assert_eq!(muted(&view, cx), [false, false], "resumed from the other tile's pill");
+    assert_eq!(pills(cx), [false, false]);
 }

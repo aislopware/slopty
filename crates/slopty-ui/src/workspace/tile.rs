@@ -111,8 +111,19 @@ pub const TAKE_OVER: &str = "Take over";
 pub const HOOKS: &str = "Install hooks";
 /// The pill that takes a PTY's size from the client driving it.
 pub const TAKE: &str = "Take";
-/// A remote window's audio toggle: one name, pressed while this client has silenced it.
+/// A remote window's audio toggle: one name, pressed while this client has silenced it. Its
+/// accessible name and its hint say whose sound it is ([`mute_label`]).
 pub const MUTE: &str = "Mute";
+
+/// What the audio toggle silences: the sound of `worker`, which every one of its tiles plays.
+#[must_use]
+pub(super) fn mute_label(worker: &str) -> String {
+    if worker.is_empty() {
+        format!("{MUTE} the worker's sound")
+    } else {
+        format!("{MUTE} {worker}'s sound")
+    }
+}
 /// A shell's body while its view attaches.
 pub const ATTACHING: &str = "Attaching…";
 /// A window or display asleep in the registry.
@@ -1000,6 +1011,7 @@ impl WorkspaceView {
         let branch =
             agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
         let actions = self.header_actions(tile, item, chrome, cx);
+        let silenced = self.silenced(tile, item, chrome, cx);
         let face = agent
             .map(|(session, _)| self.face_toggles(tile, session, chrome, cx))
             .unwrap_or_default();
@@ -1159,6 +1171,7 @@ impl WorkspaceView {
                 .when_some(upload, gpui::ParentElement::child)
                 .when_some(hooks, gpui::ParentElement::child)
                 .child(actions)
+                .when_some(silenced, gpui::ParentElement::child)
                 .child(strip);
             header.bg(hsla(s.panel)).border_b_0().child(tabs).child(rest)
         } else {
@@ -1202,6 +1215,7 @@ impl WorkspaceView {
                 .when_some(upload, gpui::ParentElement::child)
                 .when_some(hooks, gpui::ParentElement::child)
                 .child(actions)
+                .when_some(silenced, gpui::ParentElement::child)
                 .child(strip)
         };
         header.when_some(progress, gpui::ParentElement::child).into_any_element()
@@ -1673,6 +1687,65 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// A worker's sound was silenced or resumed: every remote tile copies its stream again, so
+    /// each of that worker's says so at once.
+    pub(super) fn sound_changed(&mut self, cx: &mut Context<Self>) {
+        let screens: Vec<ItemId> = self.screens.keys().copied().collect();
+        for id in screens {
+            self.stream_changed(id, cx);
+        }
+    }
+
+    /// A remote tile's toggle for its worker's sound, which every one of the worker's tiles
+    /// silences and says; `None` for a tile with no stream.
+    fn mute_toggle(
+        &self,
+        tile: TileRef,
+        id: ItemId,
+        muted: bool,
+        chrome: Chrome,
+        cx: &Draw<'_, Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !self.screens.contains_key(&id) {
+            return None;
+        }
+        let theme = &self.theme;
+        let icon = if muted { IconName::VolumeX } else { IconName::Volume2 };
+        let label = SharedString::from(mute_label(&self.worker_name(tile.worker)));
+        let hint_theme = std::rc::Rc::new(theme.clone());
+        let hint = label.clone();
+        let toggle =
+            kit::icon_toggle(theme, format!("mute-{}", id.as_uuid()), icon, MUTE, muted, chrome.k)
+                .aria_label(label)
+                .tooltip(move |_window, cx| {
+                    let theme = std::rc::Rc::clone(&hint_theme);
+                    cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
+                });
+        let toggle = toggle.on_click(cx.listener(move |this, _ev, _w, cx| {
+            if let Some(view) = this.screens.get(&id) {
+                view.read(cx).toggle_mute();
+                this.sound_changed(cx);
+            }
+        }));
+        Some(toggle.into_any_element())
+    }
+
+    /// The toggle of a silenced worker's sound, which every tile of it shows whether or not it
+    /// is hovered or focused: a silenced tile must not pass for a quiet one.
+    fn silenced(
+        &self,
+        tile: TileRef,
+        item: &Item,
+        chrome: Chrome,
+        cx: &Draw<'_, Self>,
+    ) -> Option<gpui::AnyElement> {
+        let muted = self.stream(item.id).is_some_and(|stream| stream.muted);
+        if !muted {
+            return None;
+        }
+        self.mute_toggle(tile, item.id, true, chrome, cx)
+    }
+
     /// What a tile's kind offers in its header: take the PTY's size, mute, a page's back and
     /// reload.
     fn header_actions(
@@ -1684,7 +1757,6 @@ impl WorkspaceView {
     ) -> Vec<gpui::AnyElement> {
         let theme = &self.theme;
         let id = item.id;
-        // A muted window always says so: a silenced tile must not pass for a quiet one.
         let stream = self.stream(id).copied().unwrap_or_default();
         let muted = stream.muted;
         let mut actions: Vec<gpui::AnyElement> = Vec::new();
@@ -1746,26 +1818,9 @@ impl WorkspaceView {
                             .into_any_element(),
                     );
                 }
-                if self.screens.contains_key(&id) && (muted || stream.has_audio) {
-                    let icon = if muted { IconName::VolumeX } else { IconName::Volume2 };
-                    let toggle = kit::icon_toggle(
-                        theme,
-                        format!("mute-{}", id.as_uuid()),
-                        icon,
-                        MUTE,
-                        muted,
-                        chrome.k,
-                    );
-                    actions.push(
-                        toggle
-                            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                                if let Some(view) = this.screens.get(&id) {
-                                    view.read(cx).toggle_mute();
-                                    this.stream_changed(id, cx);
-                                }
-                            }))
-                            .into_any_element(),
-                    );
+                // Silenced, the toggle is out of the hover's reach ([`Self::silenced`]).
+                if !muted && stream.has_audio {
+                    actions.extend(self.mute_toggle(tile, id, false, chrome, cx));
                 }
             }
             // A page's way back and its reload are the header's bare icon buttons, as

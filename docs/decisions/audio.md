@@ -14,14 +14,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   then returns a private status (`'SLOP'`) with zero packets, which `FillComplexBuffer`
   surfaces and the caller treats as "done".
 
-- ✅ Capture rides the video `SCStream` (`capturesAudio`, `sampleRate 48000`, `channelCount 2`,
-  `excludesCurrentProcessAudio`) with a second stream output of type `Audio` on the same
+- ✅ Capture rides the video `SCStream` (superseded 2026-10-01: the sound is an audio-only
+  capture of its own, once per client; see "One sound per worker on a client, not one per
+  stream". The settings and the buffer handling below are its own.) (`capturesAudio`,
+  `sampleRate 48000`, `channelCount 2`, `excludesCurrentProcessAudio`) with a second stream
+  output of type `Audio` on the same
   serial queue. `CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer` returns
   `kCMSampleBufferError_ArrayTooSmall` (-12737) unless the list is sized by a first call with
   a null list, so the code asks for the size, allocates 8-byte-aligned words, then fetches;
   ScreenCaptureKit delivers float32 non-interleaved, which `interleave` folds to L/R.
 
-- ✅ **Mute is client-side, decode-but-don't-play** (2026-09-05). `ScreenHandle::set_muted`
+- ✅ **Mute is client-side, decode-but-don't-play** (2026-09-05; since 2026-10-01 the mute is
+  the worker's sound, one switch for all of its tiles, "One sound per worker on a client"). `ScreenHandle::set_muted`
   flips an `AtomicBool` the worker reads per packet; the Opus decoder keeps running so its
   state stays continuous and unmuting resumes on the next 20 ms packet. Nothing goes to the
   host: a host-side stop would need a protocol change and would also silence the other
@@ -806,8 +810,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     goes to the player as a stand-in does: it keeps the gap's time and says nothing of the
     depth, because it arrived with the packet after it, not late.
   - The client's report says how many audio packets arrived in the window and how many the
-    sequence skipped (`audio_received`, `audio_lost`), counted where the datagrams are
-    reassembled. A skipped packet counts as lost even when a copy brought it back, because
+    sequence skipped (since 2026-10-01 `ScreenRequest::SoundReport`, counted by the client's one
+    sound; before, `audio_received` and `audio_lost` in `ReceiverReport`). A skipped packet counts as lost even when a copy brought it back, because
     that is the loss the copies are sized by. Counting only what stayed lost would turn them off
     as soon as they worked.
   - `AudioCopies` on the worker turns those counts into none, one or two copies. A lone packet
@@ -821,9 +825,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `the_copies_come_back_nearest_first`, `the_layout_is_fixed`,
     `copies_that_do_not_fit_are_left_off`, `a_malformed_audio_payload_is_refused`,
     `the_copies_follow_the_reported_loss`, `steady_loss_keeps_the_copies` (`slopty-media`),
-    `audio_is_counted_for_the_report` (pipeline), the client's
-    `audio_waits_for_the_player_without_holding_video_and_counts_gaps`, which ends on a gap the
-    copies fill, and the `client_screen_report` golden. The fuzz targets `reassemble` and
+    `the_count_reads_the_sequence` (`slopty-media`), the client's
+    `audio_waits_for_the_player_and_counts_gaps`, which ends on a gap the copies fill, and the
+    `client_screen_sound_report` golden. The fuzz targets `reassemble` and
     `feedback` carry copies and drive `AudioCopies`.
 
 - ⏸ **Drag and drop lands at the point, both ways: a real drag session on the worker, fed by the
@@ -1369,18 +1373,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     relies on either. A target that checks the file while hovering finds nothing at its path
     until the upload is whole, and may refuse; P5's placeholders end that.
 
-- ⏸ **One sound per worker on a client, not one per stream** (2026-09-30, ruling only; nothing
-  built yet. Measured in MEASUREMENTS, "streams from one worker: what they could share").
-  - *What each stream owns today.* Every stream's capture sets `capturesAudio` (`audio: true` in
-    `crates/slopty-worker/src/screen.rs`), so each holds its own ScreenCaptureKit audio tap, and
-    each stream opens its own Opus encoder. The client opens an Opus decoder and a CoreAudio
-    `Player` per stream, and mutes per stream. ScreenCaptureKit filters audio by application, not
-    by window: a single-window filter captures all of the owning app's audio, even from windows
-    not in the picture (Apple, WWDC22 session 10155, "Take ScreenCaptureKit to the next level"),
-    and a display filter every app's. So two tiles of one app, or a desktop tile and any window
-    tile, carry the same sound, and the client plays it once per tile through players whose
-    buffers drift apart: the same sound doubled and out of phase.
-  - *What it costs.* A stream's sound is about 0.016 of a core and 0.041 W of CPU across the
+- ✅ **One sound per worker on a client, not one per stream** (2026-09-30, ruling; 2026-10-01,
+  built. Measured in MEASUREMENTS, "streams from one worker: what they could share" and "one
+  sound per worker on a client").
+  - *What each stream owned.* Every stream's capture set `capturesAudio`, so each held its own
+    ScreenCaptureKit audio tap, and each opened its own Opus encoder. The client opened an Opus
+    decoder and a CoreAudio `Player` per stream, and muted per stream. ScreenCaptureKit filters
+    audio by application, not by window: a single-window filter captures all of the owning app's
+    audio, even from windows not in the picture (Apple, WWDC22 session 10155, "Take
+    ScreenCaptureKit to the next level"), and a display filter every app's. So two tiles of one
+    app, or a desktop tile and any window tile, carried the same sound, and the client played it
+    once per tile through players whose buffers drift apart: the same sound doubled and out of
+    phase.
+  - *What it cost.* A stream's sound was about 0.016 of a core and 0.041 W of CPU across the
     worker's encode and the client's decode (118 µs and 37 µs a 10 ms packet), 0.126 cores and
     0.33 W at eight streams, before the player and the tap. That is more than the stream's video
     decode (0.007 of a core). Nothing else the streams own is worth sharing: the client's decoders
@@ -1393,25 +1398,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     client's streams (every app when one of them is a display), changed with
     `updateContentFilter:` as streams open and close. The video captures stop capturing audio.
     One Opus encoder per client, one decoder and one player per worker on the client, and the mute
-    is the worker's sound, not a tile's. Streams of different apps still sound together, as they
-    do now; what goes is the duplicate.
-  - *Wire.* The sound gets a lane of its own on the worker connection instead of riding a
-    stream's datagrams: open and close with the first and last stream that has sound, its packets
-    tagged by that lane. (Riding the oldest open stream as a carrier would need no wire change but
-    a hand-over, with a gap and a new decoder, whenever that tile closes, and pre-release a format
-    is replaced cleanly, not worked around.) Goldens for the lane's open, close and packet.
-  - *Owners, in order.* `slopty-proto` (the lane, goldens); then `slopty-capture` (an audio-only
-    capture with an application set it can change), `slopty-worker`'s `screen.rs` (video
-    captures without audio, one audio capture and encoder per client, the set kept current), and
-    `slopty-client` with `slopty-ui` (one player per worker, the mute on the worker's sound) side
-    by side.
-  - *Tests.* Worker units on a fake capture: two window streams of one app open one audio capture
-    and one encoder; a display and a window stream, one capture over every app; windows of two
-    apps, one capture over both, which drops an app when its last window closes. Client: one
-    player for a worker's three tiles, and the mute silences all three. Live, in the macOS guest
-    (`cargo xtask vm live`): two window streams of the test's own app playing a tone arrive as one
-    sound, counted in packets per second at the client. Measurement: `concurrent_audio` at N
-    streams against one lane.
+    is the worker's sound, not a tile's. Streams of different apps still sound together; what
+    goes is the duplicate.
+  - *The capture* (`slopty-capture`). `Heard` is what a stream hears: `Every` application, for a
+    display, or `Apps`, the pids behind its windows; `Heard::with` is the union. A
+    `CaptureSource` starts a sound (`start_sound`), changes what it hears (`hear`) and stops it
+    (`stop_sound`), each answering through a callback. ScreenCaptureKit's is an audio-only
+    `SCStream` of the main display: a 2 × 2 picture at 1 fps, `capturesAudio`, the display filter
+    for `Every` and `initWithDisplay:includingApplications:exceptingWindows:` for `Apps`, the
+    applications picked by `SCRunningApplication.processID` (the objc2 `libc` feature). Its
+    start completion may come before or after `start` returns, so a small state machine hands the
+    capture on whichever comes second, and nothing blocks a ScreenCaptureKit queue. The canvas's
+    is a 440 Hz tone in 10 ms chunks that records what it was told to hear.
+  - *The worker* (`slopty_worker::screen::sound`). The connection makes its `Sound` with its
+    first stream and keeps it for its life. Each `Pipeline::listen` joins it with what its target
+    hears and holds a `Listening`, whose drop leaves. One task follows the members: it starts the
+    capture with the first, changes it in place as they come and go, stops it with the last, and
+    retries a failed start or change every 2 s. One `Voice` holds the silence gate, the Opus
+    encoder and the copies. The streams' lanes read its clock, so video goes through the lane
+    only while sound flows, and their stats count its packets.
+  - *Wire.* The sound has a media stream of its own, 0 (`slopty_proto::media::SOUND`), which no
+    stream takes since a worker numbers them from 1. It needs no open or close: the lane carries
+    packets only while a capture runs, and the client attaches it with the first stream it opens.
+    The client reports it on the control stream (`ScreenRequest::SoundReport`: packets received
+    and the ones the sequence skipped, every 50 ms while any arrive), and `ReceiverReport` lost
+    its audio fields. Goldens `client_screen_report`, `client_screen_sound_report` and
+    `media_sound`. (Riding the oldest open stream as a carrier would have needed no wire change
+    but a hand-over, with a gap and a new decoder, whenever that tile closed.)
+  - *The client* (`slopty_client::screen::sound`). The router holds the connection's sound
+    weakly: the first `spawn_screen` starts it, every handle holds it, and the last one dropped
+    ends its task and lets go of the lane, under the lock a new sound is made under, so one a new
+    stream started meanwhile keeps it. One player, opened on the first packet off the task as
+    before. Its counters lie over every one of the worker's streams' `audio_` stats. The mute is
+    the router's, for the connection's life: a tile opened after the last one closed is still
+    silenced. A new tile brings the settings' preference only until a choice is made
+    (`ScreenHandle::mute_by_default`), so a second window of a worker silenced by hand stays
+    silent.
+  - *The UI.* The pill silences the worker's sound; its accessible name and its hint say whose
+    ("Mute studio's sound"). Pressed in one tile, or by ⌘⇧M, every remote tile copies its stream
+    again, so all of that worker's say it at once. A silenced tile shows its pill whether or not
+    it is hovered or focused: before, the hover-only header actions hid it on every other tile.
+  - *Numbers.* The worker's one sound costs 0.019, 0.020, 0.021 and 0.024 of a core for 1, 2, 4
+    and 8 streams, at 100 packets a second and one capture throughout. The per-stream sound it
+    replaced cost about 0.012 of a core a stream in the worker's encoder alone. A display and two
+    windows of one app put 100.4 packets a second in one sequence on the sound's stream, none on
+    the streams' own, and the longest wait after both windows closed was 14.5 ms against 10 ms
+    packets.
+  - *Tests.* Worker, on the canvas: `two_windows_of_one_app_are_one_sound` (one capture, one
+    encoder, one sequence on `SOUND`), `a_display_and_a_window_are_one_sound_with_no_gap_when_one_goes`
+    (every app, then the window's app alone, changed in place, no gap of 60 ms),
+    `windows_of_two_apps_hear_both_until_one_goes`, `audio_is_gated_by_silence_and_numbered`, and
+    end to end through each stream's `listen`,
+    `a_display_and_two_windows_of_one_app_are_one_sound_on_the_wire`. Capture:
+    `what_streams_hear_together`. Media: `the_count_reads_the_sequence`. Client:
+    `a_workers_streams_share_one_sound_and_its_mute` (three streams, one sound, one mute that
+    outlives it, the lane let go), `the_preference_holds_only_until_a_choice`, and
+    `audio_waits_for_the_player_and_counts_gaps`, which also checks the reports. UI:
+    `a_workers_tiles_share_its_one_sound_and_say_its_mute_together`. Measurement:
+    `one_sound_costs_the_same_for_any_number_of_streams`. Live in the macOS guest, two window
+    streams of the test's own app playing a tone, is not built.
 
 - ✅ **A copy the worker reads half written is announced again whole** (2026-10-01).
   - `NSPasteboard` promises nothing about when a write is whole. Its `changeCount` moves with

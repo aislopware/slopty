@@ -60,8 +60,8 @@ pub use session::console;
 pub use snapshot::{Picture, PixelOrder};
 pub use source::{
     AUDIO_CHANNELS, AUDIO_RATE, AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource,
-    CapturedAudio, CapturedFrame, Console, Crop, DefaultImage, PixelFormat, Rect, TargetWindow,
-    Went, WindowState, crop_for,
+    CapturedAudio, CapturedFrame, Console, Crop, DefaultImage, Heard, PixelFormat, Rect,
+    TargetWindow, Went, WindowState, crop_for,
 };
 #[cfg(target_os = "macos")]
 pub use stream::{Capture, SckDefaults, Target, host_now_us, sck_defaults};

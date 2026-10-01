@@ -37,8 +37,9 @@ use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, WindowInfo};
 
 use crate::geometry;
 use crate::source::{
-    AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
-    PixelFormat, Rect, TargetWindow, Went, WindowState,
+    AUDIO_CHANNELS, AUDIO_RATE, AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource,
+    CapturedAudio, CapturedFrame, Console, Crop, Heard, PixelFormat, Rect, TargetWindow, Went,
+    WindowState,
 };
 use crate::stream::host_now_us;
 
@@ -574,6 +575,92 @@ impl Beat {
     }
 }
 
+/// A tone where a capture would hear the applications' sound: [`TONE_HZ`] in both channels,
+/// in [`TONE_CHUNK_US`] chunks on their own beat, for as long as it runs.
+pub struct Tone {
+    beat: Arc<ToneBeat>,
+    queue: DispatchRetained<DispatchQueue>,
+}
+
+impl std::fmt::Debug for Tone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tone").field("heard", &*self.beat.heard.lock()).finish_non_exhaustive()
+    }
+}
+
+impl Tone {
+    /// Whose sound it stands for now.
+    #[must_use]
+    pub fn heard(&self) -> Heard {
+        self.beat.heard.lock().clone()
+    }
+
+    fn start(heard: Heard, sink: AudioSink) -> Self {
+        let beat = Arc::new(ToneBeat {
+            stopped: AtomicBool::new(false),
+            heard: Mutex::new(heard),
+            sink,
+            phase: AtomicU64::new(0),
+        });
+        let interactive = DispatchQueueAttr::with_qos_class(
+            DispatchQueueAttr::SERIAL,
+            DispatchQoS::UserInteractive,
+            0,
+        );
+        let queue = DispatchQueue::new("io.slopty.canvas.tone", Some(&interactive));
+        let first = Arc::clone(&beat);
+        let again = queue.clone();
+        queue.exec_async(move || first.chunk(&again, host_now_us()));
+        Self { beat, queue }
+    }
+}
+
+/// The tone a [`Tone`] plays, in hertz.
+pub const TONE_HZ: f64 = 440.0;
+
+/// How much sound each chunk of a [`Tone`] carries, and how often one comes: what
+/// ScreenCaptureKit hands over at a time is about this.
+pub const TONE_CHUNK_US: u64 = 10_000;
+
+/// Stereo frames in a chunk of a [`Tone`].
+const TONE_FRAMES: u64 = AUDIO_RATE as u64 * TONE_CHUNK_US / 1_000_000;
+
+struct ToneBeat {
+    stopped: AtomicBool,
+    heard: Mutex<Heard>,
+    sink: AudioSink,
+    /// Frames played so far: where the next chunk's sine starts.
+    phase: AtomicU64,
+}
+
+impl ToneBeat {
+    /// Hand over the chunk due at `due_us`, and ask for the next.
+    fn chunk(self: Arc<Self>, queue: &DispatchRetained<DispatchQueue>, due_us: u64) {
+        if self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        let frames = TONE_FRAMES;
+        let start = self.phase.fetch_add(frames, Ordering::Relaxed);
+        let channels = usize::try_from(AUDIO_CHANNELS).unwrap_or(2);
+        let mut samples =
+            Vec::with_capacity(usize::try_from(frames).unwrap_or(0).saturating_mul(channels));
+        for frame in start..start.saturating_add(frames) {
+            #[expect(clippy::cast_precision_loss, reason = "a sine's phase, wrapped well in range")]
+            let t = frame.checked_rem(u64::from(AUDIO_RATE)).unwrap_or(0) as f64
+                / f64::from(AUDIO_RATE);
+            #[expect(clippy::cast_possible_truncation, reason = "a sample in [-0.25, 0.25]")]
+            let v = (0.25 * (std::f64::consts::TAU * TONE_HZ * t).sin()) as f32;
+            samples.extend(std::iter::repeat_n(v, channels));
+        }
+        (self.sink)(CapturedAudio { pts_us: due_us, samples });
+        let next = due_us.saturating_add(TONE_CHUNK_US);
+        let wait_ns = next.saturating_sub(host_now_us()).saturating_mul(1_000);
+        let when = DispatchTime::NOW.time(i64::try_from(wait_ns).unwrap_or(i64::MAX));
+        let again = queue.clone();
+        let _scheduled = queue.after(when, move || self.chunk(&again, next));
+    }
+}
+
 /// The first beat of a canvas started at `now_us`: the next multiple of the period on the host
 /// clock. Every canvas at one rate then beats on the same instants, as the windows of one
 /// display are captured on its one refresh, whenever each was started.
@@ -588,11 +675,36 @@ impl CaptureSource for Canvas {
     type Content = Vec<DisplayInfo>;
     type HideWatch = ();
     type Image = PixelBuffer;
+    type Sound = Tone;
     type Stream = CanvasStream;
     type Target = CanvasTarget;
 
     fn can_capture() -> bool {
         true
+    }
+
+    fn start_sound(
+        heard: &Heard,
+        sink: AudioSink,
+        _on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+        done: impl FnOnce(Result<Tone, CaptureError>) + Send + 'static,
+    ) {
+        done(Ok(Tone::start(heard.clone(), sink)));
+    }
+
+    fn hear(
+        sound: &Tone,
+        heard: &Heard,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) {
+        *sound.beat.heard.lock() = heard.clone();
+        done(Ok(()));
+    }
+
+    fn stop_sound(sound: &Tone, done: impl FnOnce(Result<(), CaptureError>) + Send + 'static) {
+        sound.beat.stopped.store(true, Ordering::Release);
+        // Behind any chunk already running, so none follows the answer.
+        sound.queue.exec_async(move || done(Ok(())));
     }
 
     fn enumerate(done: impl FnOnce(Result<Vec<DisplayInfo>, CaptureError>) + Send + 'static) {
@@ -657,7 +769,6 @@ impl CaptureSource for Canvas {
         target: &CanvasTarget,
         config: &CaptureConfig,
         sink: impl Fn(CapturedFrame) + Send + Sync + 'static,
-        _audio: Option<AudioSink>,
         _on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<CanvasStream, CaptureError> {
@@ -816,16 +927,7 @@ mod tests {
     use super::*;
 
     fn config(width: u32, height: u32, format: PixelFormat) -> CaptureConfig {
-        CaptureConfig {
-            width,
-            height,
-            align: 16,
-            fps: 60,
-            format,
-            queue_depth: 3,
-            audio: false,
-            crop: None,
-        }
+        CaptureConfig { width, height, align: 16, fps: 60, format, queue_depth: 3, crop: None }
     }
 
     /// A picture spells the input count in its strip, and the reader gets it back, in either
@@ -948,7 +1050,6 @@ mod tests {
                 move |frame| {
                     let _gone = tx.send((stream, frame.capture_ts_us));
                 },
-                None,
                 |_error| {},
                 |_started| {},
             )

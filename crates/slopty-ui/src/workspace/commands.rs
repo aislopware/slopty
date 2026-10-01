@@ -426,11 +426,12 @@ impl WorkspaceView {
         }
     }
 
-    /// ⌘⇧M: silence or resume the focused remote window's audio (this client only).
+    /// ⌘⇧M: silence or resume the sound of the focused remote window's worker (this client
+    /// only).
     pub fn toggle_mute(&mut self, _: &ToggleMute, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(view) = self.active_screen() {
             view.read(cx).toggle_mute();
-            cx.notify();
+            self.sound_changed(cx);
         }
     }
 

@@ -542,8 +542,7 @@ is on screen, sits entirely on one display and no window counts as covering it
 (`crop_allowed`; other processes at levels 0–8 and sibling windows of the same app count,
 the window's own menus and sheets, the Dock's full-screen hit region, the menu bar and
 status items do not: `counts_as_occluder`), the stream is the *display* filter restricted
-to the window's application (`display:includingApplications:`, so the audio is that app's
-only) with `sourceRect` at the window's frame (`Target::resolve_crop`,
+to the window's application (`display:includingApplications:`) with `sourceRect` at the window's frame (`Target::resolve_crop`,
 `WindowPath::DisplayCrop`), which ScreenCaptureKit serves from the frame it already
 composited; otherwise it is the independent-window filter (`WindowPath::Filter`), which
 composites the window on its own and costs a few milliseconds more per frame
@@ -625,23 +624,33 @@ and its jitter — read by the overlay (`hud_lines`) and the app self-test's `du
 test platform's native hosts. An e2e render cannot see the layer, so for that frame each stream
 draws its picture with GPUI too, over its hole (`screen::capture_pictures`).
 
-**Audio** rides the same stream: ScreenCaptureKit captures the target's audio (48 kHz stereo,
-this process excluded) → `AudioConverter` Opus (Apple's, in the OS; 10 ms packets, 96 kb/s) →
-one `Audio` datagram per packet, never NACKed (a lost 10 ms is cheaper than a late one). While
-the client's reports show audio loss, each datagram also carries the one or two packets before
+**Audio** is one sound per worker on a client, not one per stream (`slopty_worker::screen::sound`,
+`slopty_client::screen::sound`). ScreenCaptureKit filters audio by application, so the worker
+captures it once for a connection: an audio-only capture (a 2 × 2 picture at 1 fps) of the main
+display filtered to the union of the applications behind the client's streams, every app when one
+of them is a display, changed in place with `updateContentFilter` as streams come and go
+(`Heard`, `CaptureSource::start_sound` / `hear` / `stop_sound`). The video captures capture none.
+That sound (48 kHz stereo, this process excluded) → one `AudioConverter` Opus encoder (Apple's,
+in the OS; 10 ms packets, 96 kb/s) → one `Audio` datagram per packet on media stream 0
+(`slopty_proto::media::SOUND`; a worker numbers its streams from 1), never NACKed (a lost 10 ms
+is cheaper than a late one). While
+the client's sound reports (`ScreenRequest::SoundReport`, every 50 ms while packets arrive) show
+audio loss, each datagram also carries the one or two packets before
 it (`slopty_media::AudioCopies`, `audio_datagram`), and the client decodes those copies into a
 gap. What no copy covers is concealed by repeating the last pitch period of what played
 (`slopty_codec::audio::Conceal`, up to 60 ms).
 The worker stops sending 300 ms after the last non-silent sample, so silent apps cost nothing.
-The client decodes with `AudioConverter` and plays through an output audio unit whose render
+The client's router starts one sound for the connection with its first stream and ends it with
+the last; it decodes with `AudioConverter` and plays through an output audio unit whose render
 callback fills each device I/O buffer straight from a jitter buffer (`slopty-codec::audio`:
 `Jitter` sets the target, `Ring` plays) that aims for the lateness it measures (p95 over 5 s plus a device buffer, 20–120 ms),
 prefills after a start, a mute or a dry run, and converges by dropping or repeating one 5 ms
 slice with a crossfade, which also absorbs clock drift;
 iOS puts the app in the `Playback` session category so it plays past the ring switch.
-Mute is per item and per client (the "mute" pill, ⌘⇧M, View ▸ Mute Window): packets still
-arrive and decode, only playback stops, so unmuting is instant and other clients hear nothing
-different.
+Mute is the worker's sound on this client (the pill, ⌘⇧M, View ▸ Mute Window), so every tile
+of the worker says it at once: packets still arrive and decode, only playback stops, so unmuting
+is instant and other clients hear nothing different. A new tile brings the settings' preference
+only until a choice is made on the connection.
 
 **Clipboard, files and ports** ride beside the control stream (`slopty-proto::transfer`,
 `slopty-net::streams`). Control messages (`ClipMsg`, `XferMsg`, `WorkerMsg::Ports`) go on the

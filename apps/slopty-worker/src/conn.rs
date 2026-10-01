@@ -324,6 +324,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         reports,
         attached: HashMap::new(),
         screens: HashMap::new(),
+        sound: None,
         streams: JoinSet::new(),
         next_stream: 1,
         tasks,
@@ -868,6 +869,8 @@ struct Peer<'d> {
     /// weak, so the pump ends once the session's actor lets go of its end, whoever closed it.
     attached: HashMap<SessionId, (JoinHandle<()>, WeakClientSink)>,
     screens: HashMap<StreamId, Screen>,
+    /// The client's one sound from this worker, made with its first stream.
+    sound: Option<Arc<dyn slopty_worker::screen::sound::Listen>>,
     /// The screen streams' own tasks, awaited when the connection ends.
     streams: JoinSet<()>,
     next_stream: u32,
@@ -1369,12 +1372,14 @@ impl Peer<'_> {
         self.next_stream = self.next_stream.wrapping_add(1).max(1);
         let (commands, rx) = mpsc::unbounded_channel();
         self.screens.insert(id, Screen { commands, control: None });
+        let sound = self.sound.get_or_insert_with(|| crate::screens::sound(&self.conn));
         let link = crate::screens::Link {
             daemon: self.daemon.clone(),
             client: self.client,
             conn: self.conn.clone(),
             out: self.out.clone(),
             told: self.told.clone(),
+            sound: Arc::clone(sound),
         };
         (id, link, rx)
     }
@@ -1413,6 +1418,11 @@ impl Peer<'_> {
                     self.screen_order.stream(stream, true);
                 }
                 self.command(stream, Command::SetQuality(quality));
+            }
+            ScreenRequest::SoundReport(report) => {
+                if let Some(sound) = &self.sound {
+                    sound.report(report);
+                }
             }
             ScreenRequest::Report { stream, report } => {
                 if let Some(control) = self.media_control(stream) {

@@ -38,7 +38,7 @@ use slopty_proto::screen::CaptureTarget;
 use crate::Shareable;
 use crate::source::{
     AUDIO_CHANNELS, AUDIO_RATE, AudioSink, CaptureConfig, CaptureError, CapturedAudio,
-    CapturedFrame, Crop, PixelFormat, Rect,
+    CapturedFrame, Crop, Heard, PixelFormat, Rect,
 };
 
 impl PixelFormat {
@@ -147,7 +147,7 @@ impl Target {
         let Some(app) = (unsafe { window.owningApplication() }) else {
             return Ok(None);
         };
-        let mut target = Self::display_of_app(kind, &display, &app);
+        let mut target = Self::display_of_apps(kind, &display, &[app]);
         let display_rect = crate::geometry::display_bounds(display_id);
         let Some((crop, pixel_size)) =
             crate::source::crop_for(&bounds, &display_rect, f64::from(target.point_scale))
@@ -158,6 +158,20 @@ impl Target {
         target.display = Some(display_rect);
         target.pixel_size = pixel_size;
         Ok(Some(target))
+    }
+
+    /// The filter a sound capture of `heard` reads through: the main display with every
+    /// application, or with only `heard`'s. Sound is filtered by application whatever display
+    /// the filter names.
+    pub fn sound(content: &Shareable, heard: &Heard) -> Result<Self, CaptureError> {
+        crate::ensure_core_graphics();
+        let main = objc2_core_graphics::CGMainDisplayID();
+        let kind = CaptureTarget::Display(slopty_core::DisplayId(main));
+        let display = content.display(main).ok_or(CaptureError::NotFound(kind))?;
+        Ok(match heard {
+            Heard::Every => Self::display(kind, &display),
+            Heard::Apps(pids) => Self::display_of_apps(kind, &display, &content.applications(pids)),
+        })
     }
 
     fn window(kind: CaptureTarget, window: &SCWindow) -> Self {
@@ -183,13 +197,14 @@ impl Target {
         Self { kind, filter, pixel_size, point_scale, crop: None, display: None }
     }
 
-    /// The display filter restricted to one application: its windows, its audio.
-    fn display_of_app(
+    /// The display filter restricted to `apps`: their windows, their audio.
+    fn display_of_apps(
         kind: CaptureTarget,
         display: &SCDisplay,
-        app: &SCRunningApplication,
+        apps: &[Retained<SCRunningApplication>],
     ) -> Self {
-        let apps: Retained<NSArray<SCRunningApplication>> = NSArray::from_slice(&[app]);
+        let apps: Vec<&SCRunningApplication> = apps.iter().map(|app| &**app).collect();
+        let apps: Retained<NSArray<SCRunningApplication>> = NSArray::from_slice(&apps);
         let none: Retained<NSArray<SCWindow>> = NSArray::from_slice(&[]);
         // SAFETY: as above.
         let filter = unsafe {
@@ -554,19 +569,51 @@ impl std::fmt::Debug for Capture {
 }
 
 impl Capture {
-    /// Build a stream and start it. `done` runs on a ScreenCaptureKit queue once the stream is
-    /// live (or failed); frames follow on `sink`, and `on_stop` fires if the stream dies.
+    /// Build a stream of pictures and start it. `done` runs on a ScreenCaptureKit queue once the
+    /// stream is live (or failed); frames follow on `sink`, and `on_stop` fires if the stream
+    /// dies.
     pub fn start(
         target: &Target,
         config: &CaptureConfig,
         sink: impl Fn(CapturedFrame) + Send + Sync + 'static,
-        audio: Option<AudioSink>,
         on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) -> Result<Self, CaptureError> {
-        let configuration = stream_configuration(config);
-        let wants_audio = config.audio && audio.is_some();
-        let output = Output::new(Box::new(sink), audio, Box::new(on_stop));
+        Self::start_with(target, config, Box::new(sink), None, Box::new(on_stop), done)
+    }
+
+    /// Build a stream of `target`'s sound and start it: its audio goes to `audio`, and the
+    /// pictures ScreenCaptureKit makes beside it, 2 × 2 pixels once a second, go nowhere.
+    pub fn start_sound(
+        target: &Target,
+        audio: AudioSink,
+        on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) -> Result<Self, CaptureError> {
+        let config = CaptureConfig {
+            width: SOUND_PICTURE,
+            height: SOUND_PICTURE,
+            align: 1,
+            fps: 1,
+            format: PixelFormat::Nv12Full,
+            queue_depth: 3,
+            crop: None,
+        };
+        let pictures = Box::new(|_frame: CapturedFrame| {});
+        Self::start_with(target, &config, pictures, Some(audio), Box::new(on_stop), done)
+    }
+
+    fn start_with(
+        target: &Target,
+        config: &CaptureConfig,
+        sink: FrameSink,
+        audio: Option<AudioSink>,
+        on_stop: StopSink,
+        done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+    ) -> Result<Self, CaptureError> {
+        let wants_audio = audio.is_some();
+        let configuration = stream_configuration(config, wants_audio);
+        let output = Output::new(sink, audio, on_stop);
         let delegate: &ProtocolObject<dyn SCStreamDelegate> = ProtocolObject::from_ref(&*output);
         // SAFETY: filter, configuration and delegate are valid; the delegate is retained by the
         // stream (it is also kept alive by `Capture`).
@@ -632,7 +679,7 @@ impl Capture {
         config: &CaptureConfig,
         done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
     ) {
-        let configuration = stream_configuration(config);
+        let configuration = stream_configuration(config, false);
         let block = completion(done);
         // SAFETY: valid stream and configuration; the block is copied by the framework.
         unsafe { self.stream.updateConfiguration_completionHandler(&configuration, Some(&block)) }
@@ -673,7 +720,11 @@ fn completion(
     })
 }
 
-fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguration> {
+/// The side of the pictures a sound capture makes beside its sound: ScreenCaptureKit makes
+/// pictures for every stream, and one of sound alone wants as few as it will take.
+pub(crate) const SOUND_PICTURE: u32 = 2;
+
+fn stream_configuration(config: &CaptureConfig, audio: bool) -> Retained<SCStreamConfiguration> {
     // SAFETY: plain constructor.
     let c = unsafe { SCStreamConfiguration::new() };
     let interval = if config.fps == 0 {
@@ -759,7 +810,7 @@ fn stream_configuration(config: &CaptureConfig) -> Retained<SCStreamConfiguratio
     }
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
-        c.setCapturesAudio(config.audio);
+        c.setCapturesAudio(audio);
     }
     // SAFETY: plain property write on the fresh configuration object.
     unsafe {
@@ -811,10 +862,9 @@ mod tests {
                 fps: 60,
                 format: asked,
                 queue_depth: 2,
-                audio: false,
                 crop: None,
             };
-            let c = stream_configuration(&config);
+            let c = stream_configuration(&config, false);
             // SAFETY: plain getter on a valid configuration object.
             let format = unsafe { c.pixelFormat() };
             // SAFETY: as above.
@@ -840,10 +890,9 @@ mod tests {
                 fps: 0,
                 format: PixelFormat::Nv12Full,
                 queue_depth: 3,
-                audio: false,
                 crop: None,
             };
-            let c = stream_configuration(&config);
+            let c = stream_configuration(&config, false);
             // SAFETY: plain getter on a valid configuration object.
             let w = unsafe { c.width() };
             // SAFETY: as above.

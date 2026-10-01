@@ -16,6 +16,7 @@ use slopty_proto::drag::{DragEvent, DragInput};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
 use slopty_worker::platform::{Native, Platform};
 use slopty_worker::screen::drag::Heard;
+use slopty_worker::screen::sound::{Listen, Sound};
 #[cfg(target_os = "macos")]
 use slopty_worker::screen::synthetic::Synthetic;
 use slopty_worker::screen::{
@@ -114,6 +115,19 @@ pub struct Link {
     pub conn: Connection,
     pub out: mpsc::Sender<WorkerMsg>,
     pub told: mpsc::UnboundedSender<Told>,
+    /// The client's one sound from this worker, which the stream listens through.
+    pub sound: Arc<dyn Listen>,
+}
+
+/// The client's one sound from this worker, sent on `conn`, on the platform its streams are
+/// drawn or captured on ([`slopty_worker::screen::sound`]).
+pub fn sound(conn: &Connection) -> Arc<dyn Listen> {
+    let sink = Arc::new(QuicSink(conn.clone()));
+    #[cfg(target_os = "macos")]
+    if slopty_worker::screen::synthetic_screen() {
+        return Arc::new(Sound::<Synthetic>::new(sink));
+    }
+    Arc::new(Sound::<Native>::new(sink))
 }
 
 /// Open the stream, then serve its commands and its geometry until it is closed or the
@@ -194,9 +208,10 @@ async fn serve_opened<P: Platform>(
     opened: Opened<P>,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
-    let Link { daemon, client, conn, out, told } = link;
+    let Link { daemon, client, conn, out, told, sound } = link;
     let (mut stream, mut sized) = match opened {
-        Ok((stream, events, sized)) => {
+        Ok((mut stream, events, sized)) => {
+            stream.listen(&*sound);
             let target = stream.target();
             tracing::info!(%client, %id, ?target, made = sized.is_some(), "screen opened");
             daemon.screens.insert(&client, target, stream.stats_handle());
@@ -833,8 +848,8 @@ pub mod fake {
 
     use parking_lot::Mutex;
     use slopty_capture::{
-        AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Rect,
-        TargetWindow, Went, WindowState,
+        AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Crop, Heard,
+        Rect, TargetWindow, Went, WindowState,
     };
     use slopty_codec::{
         CodecError, EncodedPacket, EncoderConfig, FrameOptions, PixelBuffer, VideoEncoder,
@@ -894,6 +909,7 @@ pub mod fake {
         type Content = ();
         type HideWatch = ();
         type Image = PixelBuffer;
+        type Sound = ();
         type Stream = ();
         type Target = ();
 
@@ -947,12 +963,32 @@ pub mod fake {
             (): &(),
             _config: &CaptureConfig,
             _sink: impl Fn(CapturedFrame<PixelBuffer>) + Send + Sync + 'static,
-            _audio: Option<AudioSink>,
             _on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
             done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
         ) -> Result<(), CaptureError> {
             done(Ok(()));
             Ok(())
+        }
+
+        fn start_sound(
+            _heard: &Heard,
+            _sink: AudioSink,
+            _on_stop: impl Fn(CaptureError) + Send + Sync + 'static,
+            done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+        ) {
+            done(Ok(()));
+        }
+
+        fn hear(
+            (): &(),
+            _heard: &Heard,
+            done: impl FnOnce(Result<(), CaptureError>) + Send + 'static,
+        ) {
+            done(Ok(()));
+        }
+
+        fn stop_sound((): &(), done: impl FnOnce(Result<(), CaptureError>) + Send + 'static) {
+            done(Ok(()));
         }
 
         fn update(

@@ -71,7 +71,33 @@ pub struct FrameStamp {
     /// When the worker captured it, on this process's clock, as the link's
     /// `slopty_media::ClockSync` placed the capture timestamp; `None` until a clock probe has
     /// come back.
-    pub captured: Option<Instant>,
+    pub captured: Option<Captured>,
+}
+
+/// When the worker captured a frame, on this process's clock, and how far off that may be.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Captured {
+    /// The moment.
+    pub at: Instant,
+    /// The most [`Self::at`] may be off, either way: the bound of the estimate that placed it,
+    /// as it stood then, and the clocks' drift between the estimate's anchor and the capture.
+    /// A later estimate's bound says nothing of a frame this one timed.
+    pub within: Duration,
+}
+
+impl Captured {
+    /// Where `estimate` places a capture stamped `pts_us`.
+    #[must_use]
+    pub fn by(estimate: &ClockEstimate, pts_us: u64) -> Option<Self> {
+        let at = estimate.anchor.captured(pts_us)?;
+        // How far the capture is from the anchor on the worker's clock, as `captured` reads the
+        // wire's low 32 bits: microseconds times parts per million is nanoseconds over 1000.
+        #[expect(clippy::cast_possible_truncation, reason = "the wire's low 32 bits by design")]
+        let apart_us = (pts_us as u32).wrapping_sub(estimate.anchor.host_us as u32);
+        let apart_us = u64::from(apart_us.cast_signed().unsigned_abs());
+        let drift_ns = apart_us.saturating_mul(u64::from(estimate.drift_ppm.unsigned_abs())) / 1000;
+        Some(Self { at, within: estimate.bound.saturating_add(Duration::from_nanos(drift_ns)) })
+    }
 }
 
 /// Widens the wire's 32-bit capture timestamp into a monotonic one.
@@ -358,7 +384,8 @@ impl<C: Clock> Pacer<C> {
         self.ring.push_back(sample);
         self.shown_at = Some(at);
         self.stats.presented = self.stats.presented.saturating_add(1);
-        let captured = self.anchor.map_or(stamp.captured, |a| a.captured(stamp.pts_us));
+        let captured =
+            self.anchor.map_or_else(|| stamp.captured.map(|c| c.at), |a| a.captured(stamp.pts_us));
         if let Some(captured) = captured {
             push_ring(&mut self.captures, at.saturating_duration_since(captured));
         }
@@ -805,6 +832,28 @@ mod tests {
 
     /// With the clocks shared, a frame is timed from its capture too: captured 5 ms before it
     /// arrived and shown a refresh after that, it took 5 ms and a refresh from capture to glass.
+    /// A capture placed by an estimate says how far off it may be: the estimate's bound as it
+    /// stood, widened by the clocks' drift over the way from the anchor, either side of it.
+    #[test]
+    fn a_placed_capture_carries_its_estimates_bound_and_the_drift_since() {
+        let clock = FakeClock::new();
+        let estimate = ClockEstimate {
+            anchor: ClockAnchor { at: clock.at(Duration::from_secs(10)), host_us: 50_000_000 },
+            bound: 300 * Duration::from_micros(1),
+            rtt: MS,
+            drift_ppm: -40,
+        };
+        let at_anchor = Captured::by(&estimate, 50_000_000).unwrap();
+        assert_eq!(at_anchor, Captured { at: estimate.anchor.at, within: estimate.bound });
+        // 2 s on at 40 ppm is 80 µs more, after the anchor or before it.
+        let later = Captured::by(&estimate, 52_000_000).unwrap();
+        assert_eq!(later.at, clock.at(Duration::from_secs(12)));
+        assert_eq!(later.within, Duration::from_micros(380));
+        let earlier = Captured::by(&estimate, 48_000_000).unwrap();
+        assert_eq!(earlier.at, clock.at(Duration::from_secs(8)));
+        assert_eq!(earlier.within, Duration::from_micros(380));
+    }
+
     /// Without an anchor it is timed from the capture its stamp's estimate places, and without
     /// either there is no capture timing at all, never a guess. The shared clock wins over an
     /// estimate, since it is exact.
@@ -830,14 +879,15 @@ mod tests {
         let mut shared = Pacer::new(&clock);
         shared.share_clock(anchor);
         // An estimate 2 ms off, which the exact anchor overrides.
-        shared.offer(FrameStamp { captured: Some(clock.at(17 * MS)), ..s });
+        let estimated_at = Some(Captured { at: clock.at(17 * MS), within: MS });
+        shared.offer(FrameStamp { captured: estimated_at, ..s });
         present(&mut shared, &clock);
         let glass = shared.glass();
         assert_eq!(glass.capture.count, 1);
         assert_eq!(glass.capture.max, 5 * MS + FRAME);
 
         let mut estimated = Pacer::new(&clock);
-        estimated.offer(FrameStamp { captured: Some(clock.at(17 * MS)), ..s });
+        estimated.offer(FrameStamp { captured: estimated_at, ..s });
         present(&mut estimated, &clock);
         assert_eq!(estimated.glass().capture.max, 3 * MS + FRAME, "from the estimate");
     }
