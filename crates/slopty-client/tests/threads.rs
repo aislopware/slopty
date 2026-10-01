@@ -197,8 +197,10 @@ mod threads {
         }
 
         /// The next event into the core; a control message it does not take is handed back.
-        async fn step(&mut self) -> Option<WorkerMsg> {
-            let event = tokio::time::timeout(STEP, self.events.recv()).await.unwrap().unwrap();
+        /// `None` once `deadline` passed with nothing.
+        async fn step(&mut self, deadline: tokio::time::Instant) -> Option<Option<WorkerMsg>> {
+            let event = tokio::time::timeout_at(deadline, self.events.recv()).await.ok()?;
+            let event = event.unwrap_or_else(|| panic!("the link's events ended"));
             match event {
                 LinkEvent::Thread { thread, frame } => {
                     self.came.push(match &frame {
@@ -214,22 +216,34 @@ mod threads {
                 LinkEvent::Control(WorkerMsg::IntentDone(done)) => {
                     assert!(self.threads.done(&done), "every answer is for an intent sent here");
                 }
-                LinkEvent::Control(msg) => return Some(msg),
+                LinkEvent::Control(msg) => return Some(Some(msg)),
                 LinkEvent::Disconnected(why) => panic!("disconnected: {why}"),
                 _ => {}
             }
-            None
+            Some(None)
         }
 
-        async fn until(&mut self, done: impl Fn(&Threads) -> bool) {
+        /// Feed the core until `done` holds; a failure naming `what` once [`STEP`] passes
+        /// without it, however busy the link is meanwhile.
+        async fn until(&mut self, what: &str, done: impl Fn(&Threads) -> bool) {
+            let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
             while !done(&self.threads) {
-                let _control = self.step().await;
+                assert!(self.step(deadline).await.is_some(), "never {what} in {STEP:?}");
             }
         }
 
-        async fn heard<T>(&mut self, mut pick: impl FnMut(WorkerMsg) -> Option<T>) -> T {
+        /// The first control message `pick` takes; a failure naming `what` once [`STEP`]
+        /// passes without one.
+        async fn heard<T>(
+            &mut self,
+            what: &str,
+            mut pick: impl FnMut(WorkerMsg) -> Option<T>,
+        ) -> T {
+            let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
             loop {
-                if let Some(found) = self.step().await.and_then(&mut pick) {
+                let step = self.step(deadline).await;
+                let msg = step.unwrap_or_else(|| panic!("never {what} in {STEP:?}"));
+                if let Some(found) = msg.and_then(&mut pick) {
                     return found;
                 }
             }
@@ -270,7 +284,7 @@ mod threads {
         };
         a.link.send(ClientMsg::OpenSession { request: 1, spec }).await.unwrap();
         let session = a
-            .heard(|msg| match msg {
+            .heard("the session opened", |msg| match msg {
                 WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
                 _ => None,
             })
@@ -303,12 +317,12 @@ mod threads {
 
         // The thread shows in the table and is opened; a prompt is held for this follower.
         let thread = slopty_agent::observed::thread_of("s1");
-        a.until(|t| t.rows().rows.contains_key(&thread)).await;
+        a.until("the thread in the table", |t| t.rows().rows.contains_key(&thread)).await;
         let follow = a.threads.open_thread(thread, None);
         a.send_all(follow).await;
-        a.until(|t| state(t, thread).is_some()).await;
+        a.until("the thread's snapshot", |t| state(t, thread).is_some()).await;
         let held = relay(dir.path(), session, &prompts.next().unwrap());
-        a.until(|t| open_ask(t, thread, None).is_some()).await;
+        a.until("the first prompt", |t| open_ask(t, thread, None).is_some()).await;
         let ask = open_ask(&a.threads, thread, None).unwrap();
 
         // Answered through the outbox: drawn as answered before the worker hears of it.
@@ -321,19 +335,29 @@ mod threads {
         assert!(a.threads.answering(thread, &ask).is_some(), "flipped in the same frame");
         a.send_all(msg).await;
         assert_eq!(printed(held).await["hookSpecificOutput"]["decision"]["behavior"], "allow");
-        a.until(|t| answered(t, thread, &ask) && t.outbox().all().is_empty()).await;
+        a.until("the first answer settled", |t| {
+            answered(t, thread, &ask) && t.outbox().all().is_empty()
+        })
+        .await;
 
         // A second device follows throughout, so the next prompt is held while this one is
         // away, as a phone keeps it held.
         let mut witness = Client::connect(&daemons, ClientId::new(), Threads::default()).await;
         let follow = witness.threads.open_thread(thread, None);
         witness.send_all(follow).await;
-        let at = a.threads.mirror(thread).and_then(Mirror::cursor);
-        witness.until(|t| t.mirror(thread).and_then(Mirror::cursor) == at).await;
+        // At or past where this one stands: the log may have grown since this one last heard.
+        let at = a.threads.mirror(thread).and_then(Mirror::cursor).unwrap();
+        witness
+            .until("the witness caught up", |t| {
+                t.mirror(thread)
+                    .and_then(Mirror::cursor)
+                    .is_some_and(|c| c.epoch == at.epoch && c.seq >= at.seq)
+            })
+            .await;
 
         // A second prompt; the link drops before its answer can go, and the agent goes on.
         let second = relay(dir.path(), session, &prompts.next().unwrap());
-        a.until(|t| open_ask(t, thread, Some(&ask)).is_some()).await;
+        a.until("the second prompt", |t| open_ask(t, thread, Some(&ask)).is_some()).await;
         let next = open_ask(&a.threads, thread, Some(&ask)).unwrap();
         a.link.close();
         a.threads.disconnected();
@@ -356,7 +380,10 @@ mod threads {
         // Linked again: only what was missed comes, and the answer goes under its first id.
         let mut b = Client::connect(&daemons, me, threads).await;
         assert_eq!(printed(second).await["hookSpecificOutput"]["decision"]["behavior"], "allow");
-        b.until(|t| answered(t, thread, &next) && t.outbox().all().is_empty()).await;
+        b.until("the second answer settled", |t| {
+            answered(t, thread, &next) && t.outbox().all().is_empty()
+        })
+        .await;
         let cursor: Cursor = kept.cursor;
         assert_eq!(
             b.came.first(),
@@ -366,7 +393,10 @@ mod threads {
         );
         assert!(!b.came.contains(&Came::Snapshot), "{:?}", b.came);
         let grown = kept.state.items.len();
-        b.until(|t| state(t, thread).is_some_and(|s| s.items.len() > grown)).await;
+        b.until("the rest of the transcript", |t| {
+            state(t, thread).is_some_and(|s| s.items.len() > grown)
+        })
+        .await;
 
         b.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         drop(file);
