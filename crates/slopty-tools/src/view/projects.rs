@@ -263,6 +263,8 @@ pub struct TaskView<'a> {
     pr: Option<PrView<'a>>,
     verified: Option<VerifiedView<'a>>,
     reviewed: Option<ReviewedView<'a>>,
+    /// Its start is proposed and waits for the person, who starts it from the board.
+    proposed: bool,
     created_ms: WallMs,
     updated_ms: WallMs,
 }
@@ -286,6 +288,8 @@ pub struct CardView<'a> {
     pr: Option<PrView<'a>>,
     verified: Option<VerifiedView<'a>>,
     reviewed: Option<ReviewedView<'a>>,
+    /// Its start is proposed and waits for the person.
+    proposed: bool,
     natives: NativeCounts,
     created_ms: WallMs,
     updated_ms: WallMs,
@@ -311,6 +315,7 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         pr: t.pr.as_ref().map(pr),
         verified: t.verified.as_ref().map(verified),
         reviewed: t.reviewed.as_ref().map(reviewed),
+        proposed: t.proposed.is_some(),
         natives: t.natives,
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
@@ -356,6 +361,7 @@ pub fn task(t: &Task) -> TaskView<'_> {
         pr: t.pr.as_ref().map(pr),
         verified: t.verified.as_ref().map(verified),
         reviewed: t.reviewed.as_ref().map(reviewed),
+        proposed: t.proposal.is_some(),
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
     }
@@ -411,6 +417,7 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
         Moment::Claimed { paths } => ("claimed", format!("owns {}", paths_text(paths))),
         Moment::Assigned { spawned: true, .. } => ("assigned", "started for it".to_owned()),
         Moment::Assigned { spawned: false, .. } => ("assigned", "terminal put on it".to_owned()),
+        Moment::Proposed { .. } => ("proposed", "start proposed, waits for the person".to_owned()),
         Moment::State { from, to } => {
             ("state", format!("{} (was {})", state_word(*to), state_word(*from)))
         }

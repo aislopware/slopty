@@ -588,6 +588,7 @@ impl TaskUpdateArgs {
             note: self.note.clone(),
             depends_on,
             placement: None,
+            run_on: None,
             verifier: self.verifier.clone(),
             metadata: metadata_text(self.metadata.clone())?,
         })
@@ -1377,7 +1378,9 @@ pub fn list() -> Vec<Tool> {
              the task in its environment. A task whose `depends_on` are not done waits, unless \
              you say `ignore_dependencies`. Every start counts against the project's limits \
              and the person's bounds. Refused with each worker's reason when none fits. \
-             Returns the task with its terminal's `term`.",
+             Returns the task with its terminal's `term`. When the person asks to start each \
+             task themselves, it is `proposed` instead: it starts once they say so, and you \
+             hear of it as for any start.",
             Kind::Write,
         ),
         tool::<PlacementSuggestArgs>(
@@ -1551,6 +1554,7 @@ async fn run<D: Dispatch>(
                 verifier: a.verifier,
                 review: None,
                 push: false,
+                ask_to_start: false,
                 orchestrator: a.orchestrator,
                 limits: a.limits.into(),
                 metadata: metadata_text(a.metadata)?,
@@ -1565,6 +1569,7 @@ async fn run<D: Dispatch>(
                 verifier: a.verifier,
                 review: None,
                 push: None,
+                ask_to_start: None,
                 limits: a.limits.into(),
                 metadata: metadata_text(a.metadata)?,
             };
@@ -1923,6 +1928,7 @@ mod tests {
                 since_ms: WallMs::ZERO,
                 ended_ms: None,
                 conversation: None,
+                placed: None,
             }),
             branch: None,
             worktree: None,
@@ -1934,6 +1940,7 @@ mod tests {
             created_ms: WallMs::ZERO,
             updated_ms: WallMs::ZERO,
             step: None,
+            proposal: None,
         }
     }
 
@@ -1949,6 +1956,7 @@ mod tests {
                 review: None,
                 verifier: None,
                 push: false,
+                ask_to_start: false,
                 orchestrator: None,
                 limits: Limits::default(),
                 metadata: None,

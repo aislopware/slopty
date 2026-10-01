@@ -59,6 +59,7 @@ async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsCha
             review: None,
             verifier: None,
             push: false,
+            ask_to_start: false,
             orchestrator,
             limits,
             metadata: None,
@@ -232,6 +233,106 @@ async fn a_pinned_start_goes_where_it_is_pinned_over_every_rule() {
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 }
 
+/// The person's "Run on" pins a task to a worker over its rules, and "Anywhere" lets them
+/// choose again; the card says where it is pinned. A started task keeps why it went where it
+/// did: the pin, or the rules that held.
+#[tokio::test]
+async fn a_task_runs_where_the_person_says_and_keeps_why_it_went_there() {
+    use slopty_proto::project::RunOn;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    create(&hub, None).await;
+    let run_on = |task, run_on| Verb::TaskUpdate {
+        project: project(),
+        task,
+        change: Box::new(TaskChange { run_on: Some(run_on), ..TaskChange::default() }),
+    };
+
+    let pinned = new_task(&hub, linux_only()).await;
+    assert!(matches!(hub.dispatch(run_on(pinned, RunOn::Worker(mac))).await, Outcome::Task(_)));
+    assert_eq!(task_now(&hub, pinned).await.pin, Some(mac), "the card says where it is pinned");
+    let asked =
+        spawn(&hub, Verb::TaskSpawn { project: project(), task: pinned, launch: claude(&[]) });
+    let start = request(&mut mac_rx).await;
+    opened(&mac_lease, &start);
+    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
+    let placed = started.assignment.and_then(|a| a.placed).expect("why it went there");
+    assert!(placed.pinned && placed.why.starts_with("pinned"), "{placed:?}");
+    linux_rx.try_recv().unwrap_err();
+
+    let free = new_task(&hub, linux_only()).await;
+    hub.dispatch(run_on(free, RunOn::Worker(mac))).await;
+    hub.dispatch(run_on(free, RunOn::Anywhere)).await;
+    assert_eq!(task_now(&hub, free).await.pin, None, "anywhere takes the pin off");
+    let asked =
+        spawn(&hub, Verb::TaskSpawn { project: project(), task: free, launch: claude(&[]) });
+    let start = request(&mut linux_rx).await;
+    assert_eq!(chosen(&start.1).0, linux, "its rules choose again");
+    opened(&linux_lease, &start);
+    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
+    let card = task_now(&hub, started.id).await;
+    let placed = card.assignment.and_then(|a| a.placed).expect("on the card too");
+    assert!(!placed.pinned, "{placed:?}");
+    assert_eq!(placed.why, r#"os == "linux""#, "the rule that held");
+}
+
+/// When the person asks to start each task, an agent's `task_spawn` only proposes it: the task
+/// keeps the start with where it would go and why, the timeline says so, and no worker is
+/// asked. Only the person starts it, on the worker they choose, as the agent asked; then the
+/// proposal is spent. An agent may not set the setting, nor start what it proposed.
+#[tokio::test]
+async fn an_agent_s_start_waits_for_the_person_when_they_ask_to_start_tasks() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (linux, _linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    let orchestrator = SessionId::new();
+    announce(&mac_lease, orchestrator, true);
+    create(&hub, Some(TermRef { worker: mac, session: orchestrator })).await;
+    let agent = Speaker::Proven(orchestrator);
+    let ask = |on: bool| Verb::ProjectSet {
+        project: project(),
+        orchestrator: None,
+        verifier: None,
+        review: None,
+        push: None,
+        ask_to_start: Some(on),
+        limits: LimitsChange::default(),
+        metadata: None,
+    };
+    let by_agent = spawn_as(&hub, agent, ask(false)).await.unwrap();
+    refused(&by_agent, ErrorCode::Forbidden);
+    assert!(matches!(hub.dispatch(ask(true)).await, Outcome::Project(_)));
+    let task = new_task(&hub, linux_only()).await;
+
+    let launch = TaskLaunch { env: Vec::new(), ..claude(&[]) };
+    let propose = Verb::TaskSpawn { project: project(), task, launch };
+    let answer = spawn_as(&hub, agent, propose).await.unwrap();
+    let Outcome::Task(proposed) = answer else { panic!("not a task: {answer:?}") };
+    let held = proposed.proposal.expect("the start is held").proposed;
+    assert_eq!((held.runs.as_str(), held.on), ("claude", Some(linux)), "{held:?}");
+    assert_eq!(held.why, r#"os == "linux""#);
+    assert!(mac_rx.try_recv().is_err() && linux_rx.try_recv().is_err(), "no worker was asked");
+    let card = task_now(&hub, task).await;
+    assert_eq!(card.state, TaskState::Planned);
+    assert_eq!(card.proposed.map(|p| p.on), Some(Some(linux)), "the card shows it");
+    let timeline = status(&hub).await.timeline;
+    assert!(timeline.iter().any(|e| matches!(e.what, Moment::Proposed { .. })), "{timeline:?}");
+
+    let start = |pin| Verb::TaskStart { project: project(), task, pin };
+    refused(&spawn_as(&hub, agent, start(None)).await.unwrap(), ErrorCode::Forbidden);
+    let asked = spawn(&hub, start(Some(mac)));
+    let begun = request(&mut mac_rx).await;
+    let Verb::SpawnAgent { prompt, .. } = &begun.1 else { panic!("{:?}", begun.1) };
+    assert_eq!(prompt.as_deref(), Some("Read your brief."), "as the agent asked");
+    opened(&mac_lease, &begun);
+    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
+    assert!(started.proposal.is_none(), "the proposal is spent");
+    assert_eq!(started.assignment.map(|a| a.term.worker), Some(mac), "where the person chose");
+    let again = hub.dispatch(start(None)).await;
+    assert!(refused(&again, ErrorCode::Invalid).contains("no start proposed"));
+}
+
 /// A task runs any command, not only Claude Code: a benchmark opens in a terminal of its own,
 /// named for the task, with the project and task in its environment, and is the task's.
 #[tokio::test]
@@ -375,6 +476,7 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
         review: None,
         verifier: None,
         push: None,
+        ask_to_start: None,
         limits: greedy,
         metadata: None,
     };
@@ -822,6 +924,7 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
             review: None,
             verifier: weaker(),
             push: None,
+            ask_to_start: None,
             limits: LimitsChange::default(),
             metadata: None,
         },
@@ -1340,6 +1443,7 @@ async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
         review: None,
         verifier: None,
         push: None,
+        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
     };
@@ -1376,6 +1480,7 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
             review: None,
             verifier: None,
             push: false,
+            ask_to_start: false,
             orchestrator: Some(TermRef { worker: linux, session: theirs }),
             limits: LimitsChange::default(),
             metadata: None,
@@ -1499,6 +1604,7 @@ async fn a_task_s_agent_splits_work_only_under_its_own_task() {
                 review: None,
                 verifier: None,
                 push: false,
+                ask_to_start: false,
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,

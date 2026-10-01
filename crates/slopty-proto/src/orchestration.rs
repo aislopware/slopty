@@ -518,6 +518,9 @@ pub enum Verb {
         /// Push the target to its clone's `origin` after each merge ([`Project::push`]); only
         /// the person turns it on.
         push: bool,
+        /// Hold each task's start for the person ([`Project::ask_to_start`]); only the person
+        /// sets it.
+        ask_to_start: bool,
         /// The orchestrator's terminal.
         orchestrator: Option<TermRef>,
         /// Its limits over [`crate::project::Limits::default`], within the person's
@@ -540,6 +543,9 @@ pub enum Verb {
         /// Whether to push the target after each merge ([`Project::push`]); only the person
         /// sets it.
         push: Option<bool>,
+        /// Whether each task's start waits for the person ([`Project::ask_to_start`]); only the
+        /// person sets it.
+        ask_to_start: Option<bool>,
         /// Its limits, within the person's [`crate::project::Bounds`].
         limits: LimitsChange,
         /// New metadata, in place of the old.
@@ -753,6 +759,17 @@ pub enum Verb {
         /// Push it to `origin` after.
         push: bool,
     },
+    /// Start a task its orchestrator proposed ([`crate::project::Task::proposal`]), the
+    /// person's word: as the orchestrator asked, on `pin` when the person chose a worker.
+    /// Answered as [`Verb::TaskSpawn`] is; an agent is [`ErrorCode::Forbidden`].
+    TaskStart {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// This worker, over the proposal's and the task's placement.
+        pin: Option<WorkerId>,
+    },
     /// Put a task in its project's merge queue, the person's word: its verifier runs on its
     /// branch first when the project or the task names one. How a task with no verifier is
     /// merged, and how one is tried again after it was returned. Answered with
@@ -874,6 +891,7 @@ impl Verb {
             | Self::TaskUpdate { .. }
             | Self::TaskAssign { .. }
             | Self::TaskSpawn { .. }
+            | Self::TaskStart { .. }
             | Self::TaskReport { .. }
             | Self::BundleBranch { .. }
             | Self::FetchBundle { .. }

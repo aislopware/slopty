@@ -37,6 +37,7 @@ fn reviewed(verifier: Option<&str>, review: Option<&str>, log: &mut Vec<Change>)
         review: review.map(str::to_owned),
         verifier: verifier.map(str::to_owned),
         push: false,
+        ask_to_start: false,
         orchestrator: Some(TermRef { worker: WorkerId::new(), session: SessionId::new() }),
         limits: LimitsChange::default(),
         metadata: None,

@@ -27,6 +27,7 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
         review: None,
         verifier: Some("cargo gate".to_owned()),
         push: false,
+        ask_to_start: false,
         orchestrator,
         limits: Limits::default(),
         metadata: None,
@@ -53,6 +54,8 @@ pub(crate) fn card(n: u32, title: &str, state: TaskState, parent: Option<u32>) -
         verified: None,
         merge: None,
         step: None,
+        pin: None,
+        proposed: None,
         natives: NativeCounts::default(),
         created_ms: AT,
         updated_ms: AT,
@@ -66,6 +69,7 @@ pub(crate) fn on(mut card: TaskCard, worker: WorkerId, session: SessionId) -> Ta
         since_ms: AT,
         ended_ms: None,
         conversation: None,
+        placed: None,
     });
     card.branch = Some(format!("slopty/board/{}", card.id));
     card

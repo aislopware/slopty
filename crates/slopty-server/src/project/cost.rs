@@ -59,6 +59,7 @@ fn large() -> Large {
             review: None,
             verifier: Some("cargo gate".to_owned()),
             push: false,
+            ask_to_start: false,
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: Some(r#"{"ticket":"SLOP-1234","owner":"platform"}"#.to_owned()),
@@ -80,7 +81,13 @@ fn large() -> Large {
                 large.terminals.insert(term);
                 large.agents.insert(term);
                 large.busy.push(term);
-                let who = Assignee { term, spawned: true, branch: None, conversation: None };
+                let who = Assignee {
+                    term,
+                    spawned: true,
+                    branch: None,
+                    conversation: None,
+                    placed: None,
+                };
                 large.projects.assign(&id, task.id, who, &HashSet::from([term]), now()).unwrap();
                 for a in 0..SUBAGENTS {
                     for report in native(term, a) {

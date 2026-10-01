@@ -441,6 +441,10 @@ pub struct Project {
     /// Whether the merge queue pushes the target branch to its clone's `origin` after each
     /// merge. Off unless the person turns it on: publishing is theirs to choose.
     pub push: bool,
+    /// Whether a task waits for the person to start it: its orchestrator's start only proposes
+    /// it ([`Task::proposal`]), and the person starts it, or every one proposed, from the board.
+    /// Only the person sets it, since starting is what spends their machines and quota.
+    pub ask_to_start: bool,
     /// The terminal of the agent the person talks to, which splits the goal into tasks.
     pub orchestrator: Option<TermRef>,
     /// Its limits.
@@ -526,6 +530,80 @@ pub struct Suggestion {
     pub reasons: Vec<Reason>,
 }
 
+impl Suggestion {
+    /// The longest [`Self::why`], in bytes.
+    pub const WHY_MAX: usize = STATUS_MAX;
+
+    /// What decides it, in a line. For a worker that fits: its pin, then what scored (the
+    /// most points first), then what it was required to hold. For one that does not: what
+    /// keeps it out.
+    #[must_use]
+    pub fn why(&self) -> String {
+        const BUILT_IN: [&str; 4] = ["pin", "online", "live_per_worker", "fleet live_per_worker"];
+        let built_in = |r: &Reason| BUILT_IN.contains(&r.rule.as_str());
+        let mut parts: Vec<String> = Vec::new();
+        if self.fits {
+            if self.reasons.iter().any(|r| r.rule == "pin" && r.held) {
+                parts.push("pinned".to_owned());
+            }
+            let mut scored: Vec<&Reason> = self.reasons.iter().filter(|r| r.points != 0).collect();
+            scored.sort_by_key(|r| std::cmp::Reverse(r.points));
+            parts.extend(scored.into_iter().map(|r| {
+                let sign = if r.points > 0 { "+" } else { "\u{2212}" };
+                format!("{} {sign}{}", r.rule, r.points.unsigned_abs())
+            }));
+            parts.extend(
+                self.reasons
+                    .iter()
+                    .filter(|r| r.held && r.points == 0 && !built_in(r))
+                    .map(|r| r.rule.clone()),
+            );
+            if parts.is_empty() {
+                parts.push("it has room, and nothing is preferred".to_owned());
+            }
+        } else {
+            parts.extend(self.reasons.iter().filter(|r| !r.held).map(|r| {
+                match (built_in(r), r.detail.is_empty()) {
+                    (true, false) => r.detail.clone(),
+                    (_, true) => format!("{} does not hold", r.rule),
+                    (false, false) => format!("{}: {}", r.rule, r.detail),
+                }
+            }));
+        }
+        parts.truncate(3);
+        let mut why = parts.join(", ");
+        if why.len() > Self::WHY_MAX {
+            let mut cut = Self::WHY_MAX.saturating_sub(3);
+            while !why.is_char_boundary(cut) {
+                cut = cut.saturating_sub(1);
+            }
+            why.truncate(cut);
+            why.push('\u{2026}');
+        }
+        why
+    }
+}
+
+/// Why the server started a task's terminal where it did, as it ranked the workers then.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Placed {
+    /// It was pinned there, by its orchestrator or the person.
+    pub pinned: bool,
+    /// Its score from the preferences.
+    pub score: i64,
+    /// What decided it, in a line ([`Suggestion::why`]).
+    pub why: String,
+}
+
+impl Placed {
+    /// How `suggestion` placed it.
+    #[must_use]
+    pub fn of(suggestion: &Suggestion) -> Self {
+        let pinned = suggestion.reasons.iter().any(|r| r.rule == "pin" && r.held);
+        Self { pinned, score: suggestion.score, why: suggestion.why() }
+    }
+}
+
 /// Where a task stands.
 ///
 /// An agent's own status moves a task among [`Self::Running`], [`Self::Waiting`] and
@@ -606,6 +684,8 @@ pub struct Assignment {
     /// The Claude Code conversation the server started it under (`--session-id`), known
     /// before its first hook; none for a command, or a terminal it was told of.
     pub conversation: Option<String>,
+    /// Why the server put it on its worker; none for a terminal it was told of.
+    pub placed: Option<Placed>,
 }
 
 impl Assignment {
@@ -866,10 +946,35 @@ pub struct Task {
     /// What the server last did for it around its agent: a clone made, its branch brought
     /// home, verified or merged.
     pub step: Option<TaskStep>,
+    /// A start its orchestrator proposed, which waits for the person ([`Project::ask_to_start`]).
+    pub proposal: Option<Proposal>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
+}
+
+/// A start the orchestrator proposed for a task, held until the person starts it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Proposal {
+    /// How to start it, as the orchestrator asked.
+    pub launch: TaskLaunch,
+    /// What the board shows of it.
+    pub proposed: Proposed,
+}
+
+/// A proposed start, as a card shows it: what would run, and where the server would put it
+/// if it started now.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Proposed {
+    /// When it was proposed.
+    pub since_ms: WallMs,
+    /// What would run: `claude`, or the program's name.
+    pub runs: String,
+    /// The worker it would go to now, when one fits.
+    pub on: Option<WorkerId>,
+    /// Why there, or why nowhere, in a line ([`Suggestion::why`]).
+    pub why: String,
 }
 
 /// What the server does for a task around its agent, so no wait is silent.
@@ -1003,6 +1108,8 @@ impl Task {
             reviewed: self.reviewed.clone(),
             merge: self.merge.clone(),
             step: self.step.clone(),
+            proposed: self.proposal.as_ref().map(|p| p.proposed.clone()),
+            pin: self.placement.pin,
             natives: natives.counts(),
             created_ms: self.created_ms,
             updated_ms: self.updated_ms,
@@ -1050,6 +1157,10 @@ pub struct TaskCard {
     pub merge: Option<Merge>,
     /// What the server last did for it around its agent.
     pub step: Option<TaskStep>,
+    /// The worker its placement is pinned to, by its orchestrator or the person's "Run on".
+    pub pin: Option<WorkerId>,
+    /// A start its orchestrator proposed, waiting for the person.
+    pub proposed: Option<Proposed>,
     /// How many natives its node holds.
     pub natives: NativeCounts,
     /// When it was made.
@@ -1068,7 +1179,9 @@ impl TaskCard {
         + 2 * SUMMARY_MAX
         + 8 * REF_MAX
         + ReviewRun::MAX_BYTES
-        + 704;
+        + 2 * Suggestion::WHY_MAX
+        + KIND_MAX
+        + 760;
 }
 
 impl TaskCard {
@@ -1091,11 +1204,19 @@ impl TaskCard {
                     target.len().saturating_add(head.len()).saturating_add(32)
                 }
             }),
-            self.assignment
-                .as_ref()
-                .map_or(0, |a| a.conversation.as_deref().map_or(0, str::len).saturating_add(64)),
+            self.assignment.as_ref().map_or(0, |a| {
+                let placed = a.placed.as_ref().map_or(0, |p| p.why.len().saturating_add(16));
+                a.conversation
+                    .as_deref()
+                    .map_or(0, str::len)
+                    .saturating_add(placed)
+                    .saturating_add(64)
+            }),
             self.depends_on.len().saturating_mul(5),
             self.step.as_ref().map_or(0, TaskStep::approx_bytes),
+            self.proposed
+                .as_ref()
+                .map_or(0, |p| p.why.len().saturating_add(p.runs.len()).saturating_add(48)),
         ]
         .into_iter()
         .fold(128, usize::saturating_add)
@@ -1172,6 +1293,11 @@ pub enum Moment {
         /// The server started it (`task_spawn`), rather than being told of one that ran.
         spawned: bool,
     },
+    /// Its orchestrator proposed its start, which waits for the person.
+    Proposed {
+        /// The worker it would go to then.
+        on: Option<WorkerId>,
+    },
     /// The task moved.
     State {
         /// From.
@@ -1239,6 +1365,7 @@ impl TimelineEntry {
             | Moment::Orchestrator { .. }
             | Moment::Limits { .. }
             | Moment::Assigned { .. }
+            | Moment::Proposed { .. }
             | Moment::State { .. }
             | Moment::AgentGone { .. }
             | Moment::Delivered { .. } => 0,
@@ -1335,10 +1462,21 @@ pub struct TaskChange {
     pub depends_on: Option<Vec<TaskId>>,
     /// A new placement, in place of the old.
     pub placement: Option<Placement>,
+    /// Where it runs, over its placement's pin: what the person's "Run on" sets.
+    pub run_on: Option<RunOn>,
     /// A new verifier of its own.
     pub verifier: Option<String>,
     /// New metadata, in place of the old.
     pub metadata: Option<String>,
+}
+
+/// Where a task runs, as [`TaskChange::run_on`] says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum RunOn {
+    /// On this worker and no other: its placement's pin.
+    Worker(WorkerId),
+    /// Wherever its placement's rules choose: no pin.
+    Anywhere,
 }
 
 /// How to start what runs for a task.
@@ -1503,5 +1641,54 @@ mod tests {
         .count();
         assert_eq!(holding, 6);
         assert!(!TaskState::Merged.holds_paths() && !TaskState::Failed.holds_paths());
+    }
+
+    /// A worker's ranking in a line: its pin, what scored the most first, then what it was
+    /// required to hold; for a worker that does not fit, what keeps it out. A long line is cut
+    /// at a character, never inside one.
+    #[test]
+    fn a_ranking_says_what_decides_it() {
+        let reason = |rule: &str, held: bool, points: i64, detail: &str| Reason {
+            rule: rule.to_owned(),
+            held,
+            points,
+            detail: detail.to_owned(),
+        };
+        let ranked = |fits: bool, reasons: Vec<Reason>| Suggestion {
+            worker: WorkerId::nil(),
+            name: "studio".to_owned(),
+            fits,
+            score: reasons.iter().map(|r| r.points).sum(),
+            reasons,
+        };
+        let fits = ranked(
+            true,
+            vec![
+                reason("online", true, 0, ""),
+                reason("live_per_worker", true, 0, ""),
+                reason(r#"os == "macos""#, true, 0, ""),
+                reason("has(probes.cuda)", true, 10, ""),
+                reason("near #2", true, 100, ""),
+                reason("avoid #3", false, 0, ""),
+            ],
+        );
+        assert_eq!(fits.why(), r#"near #2 +100, has(probes.cuda) +10, os == "macos""#);
+        let pinned =
+            ranked(true, vec![reason("pin", true, 0, ""), reason("avoid #1", false, -100, "")]);
+        assert_eq!(pinned.why(), "pinned, avoid #1 \u{2212}100");
+        assert_eq!(Placed::of(&pinned), Placed { pinned: true, score: -100, why: pinned.why() });
+        let bare = ranked(true, vec![reason("online", true, 0, "")]);
+        assert_eq!(bare.why(), "it has room, and nothing is preferred");
+        let out = ranked(
+            false,
+            vec![
+                reason("online", false, 0, "not online"),
+                reason(r#"os == "linux""#, false, 0, "false here"),
+            ],
+        );
+        assert_eq!(out.why(), r#"not online, os == "linux": false here"#);
+        let long = ranked(true, vec![reason(&"é".repeat(Suggestion::WHY_MAX), true, 0, "")]);
+        let why = long.why();
+        assert!(why.len() <= Suggestion::WHY_MAX && why.ends_with('\u{2026}'), "{}", why.len());
     }
 }

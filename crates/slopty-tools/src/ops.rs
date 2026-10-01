@@ -693,6 +693,8 @@ pub struct ProjectSpec {
     pub review: Option<String>,
     /// Push the target to `origin` after each merge; the person's to turn on.
     pub push: bool,
+    /// Hold each task's start for the person; the person's to set.
+    pub ask_to_start: bool,
     /// The orchestrator's terminal; the caller's own when absent and it runs in one.
     pub orchestrator: Option<String>,
     /// Its limits over the defaults.
@@ -717,6 +719,7 @@ pub async fn project_create<D: Dispatch>(
         verifier: spec.verifier,
         review: spec.review,
         push: spec.push,
+        ask_to_start: spec.ask_to_start,
         orchestrator,
         limits: spec.limits,
         metadata: spec.metadata,
@@ -735,6 +738,8 @@ pub struct ProjectEdit {
     pub review: Option<String>,
     /// Push the target after each merge, or stop.
     pub push: Option<bool>,
+    /// Hold each task's start for the person, or start them as their orchestrator asks.
+    pub ask_to_start: Option<bool>,
     /// New limits.
     pub limits: LimitsChange,
     /// New metadata.
@@ -753,8 +758,17 @@ pub async fn project_set<D: Dispatch>(
         Some(term) => Some(res.term(term).await?),
         None => None,
     };
-    let ProjectEdit { verifier, review, push, limits, metadata, .. } = edit;
-    let verb = Verb::ProjectSet { project, orchestrator, verifier, review, push, limits, metadata };
+    let ProjectEdit { verifier, review, push, ask_to_start, limits, metadata, .. } = edit;
+    let verb = Verb::ProjectSet {
+        project,
+        orchestrator,
+        verifier,
+        review,
+        push,
+        ask_to_start,
+        limits,
+        metadata,
+    };
     project_answer(res.dispatch(), key, verb).await
 }
 
@@ -935,6 +949,25 @@ pub async fn task_report<D: Dispatch>(
 ) -> Result<Task, ToolError> {
     let (project, task) = project_task(dispatch, project, task).await?;
     task_answer(dispatch, key, Verb::TaskReport { project, task, report }).await
+}
+
+/// Start a task its orchestrator proposed, as the person: on `pin` when one is named.
+///
+/// # Errors
+/// As [`task_report`]; an agent is refused.
+pub async fn task_start<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    project: Option<&str>,
+    task: Option<&str>,
+    on: Option<&str>,
+    key: Option<IdempotencyKey>,
+) -> Result<Task, ToolError> {
+    let (project, task) = project_task(res.dispatch(), project, task).await?;
+    let pin = match on {
+        Some(name) => Some(res.worker(Some(name)).await?),
+        None => None,
+    };
+    task_answer(res.dispatch(), key, Verb::TaskStart { project, task, pin }).await
 }
 
 /// Put a task in its project's merge queue, as the person: its verifier runs first when one

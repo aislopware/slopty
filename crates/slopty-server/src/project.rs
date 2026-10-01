@@ -19,9 +19,9 @@ use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live,
     METADATA_MAX, Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives, NodeDetail,
-    NodeNatives, Project, ProjectStatus, ProjectUpdate, REF_MAX, Report, STATUS_MAX, SUMMARY_MAX,
-    StepState, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId,
-    TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    NodeNatives, Placed, Project, ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn,
+    STATUS_MAX, SUMMARY_MAX, StepState, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES,
+    Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
@@ -271,6 +271,8 @@ pub(crate) struct Starting {
     /// The conversation a task's agent was started under, for the task that takes it on once
     /// it shows up after a lost answer.
     pub conversation: Option<String>,
+    /// Why a task's start went to its worker, for the task that takes it on.
+    pub placed: Option<Placed>,
 }
 
 /// A new project's fields.
@@ -283,6 +285,7 @@ pub(crate) struct NewProject {
     pub verifier: Option<String>,
     pub review: Option<String>,
     pub push: bool,
+    pub ask_to_start: bool,
     pub orchestrator: Option<TermRef>,
     pub limits: LimitsChange,
     pub metadata: Option<String>,
@@ -295,6 +298,7 @@ pub(crate) struct ProjectChange {
     pub verifier: Option<String>,
     pub review: Option<String>,
     pub push: Option<bool>,
+    pub ask_to_start: Option<bool>,
     pub limits: LimitsChange,
     pub metadata: Option<String>,
 }
@@ -310,6 +314,8 @@ pub(crate) struct Assignee<'a> {
     pub branch: Option<&'a AgentBranch>,
     /// The Claude Code conversation it was started under, when the server chose it.
     pub conversation: Option<String>,
+    /// Why the server started it on its worker, when it did.
+    pub placed: Option<Placed>,
 }
 
 /// A refused change: its [`Outcome::Error`].
@@ -1000,6 +1006,7 @@ impl Projects {
             review: review_brief(new.review)?,
             verifier: verifier(new.verifier)?,
             push: new.push,
+            ask_to_start: new.ask_to_start,
             orchestrator: new.orchestrator,
             limits,
             metadata: metadata(new.metadata)?,
@@ -1048,6 +1055,10 @@ impl Projects {
         if let Some(push) = change.push {
             quiet |= record.project.push != push;
             record.project.push = push;
+        }
+        if let Some(ask) = change.ask_to_start {
+            quiet |= record.project.ask_to_start != ask;
+            record.project.ask_to_start = ask;
         }
         if limits != record.project.limits {
             record.project.limits = limits;
@@ -1150,6 +1161,7 @@ impl Projects {
             created_ms: now,
             updated_ms: now,
             step: None,
+            proposal: None,
         };
         record.tasks.push(task.clone());
         let entry =
@@ -1296,6 +1308,14 @@ impl Projects {
         if let Some(placement) = change.placement {
             quiet |= t.placement != placement;
             t.placement = placement;
+        }
+        if let Some(run_on) = change.run_on {
+            let pin = match run_on {
+                RunOn::Worker(worker) => Some(worker),
+                RunOn::Anywhere => None,
+            };
+            quiet |= t.placement.pin != pin;
+            t.placement.pin = pin;
         }
         if let Some(verifier) = change.verifier {
             let verifier = words(Some(verifier));
@@ -1531,7 +1551,7 @@ impl Projects {
         terminals: &HashSet<TermRef>,
         now: WallMs,
     ) -> Changed<Task> {
-        let Assignee { term, spawned, branch, conversation } = who;
+        let Assignee { term, spawned, branch, conversation, placed } = who;
         if let Some((other, on)) = self.working_in(term).filter(|(p, t)| (*p, *t) != (id, task)) {
             return Err(refuse(
                 ErrorCode::Conflict,
@@ -1566,7 +1586,10 @@ impl Projects {
         if let Some(gone) = open_term(t) {
             moments.push(Moment::AgentGone { term: gone });
         }
-        t.assignment = Some(Assignment { term, since_ms: now, ended_ms: None, conversation });
+        t.assignment =
+            Some(Assignment { term, since_ms: now, ended_ms: None, conversation, placed });
+        // Whatever starts it, a start proposed for it is spent.
+        t.proposal = None;
         moments.push(Moment::Assigned { term, spawned });
         if !t.state.follows_the_agent() {
             moments.push(Moment::State { from: t.state, to: TaskState::Running });
@@ -1606,6 +1629,38 @@ impl Projects {
             }
         }
         Ok((task_now, updates))
+    }
+
+    /// Keep the start the orchestrator proposed for `task`, which waits for the person: a
+    /// proposal again replaces the last.
+    pub(crate) fn propose(
+        &mut self,
+        id: &ProjectId,
+        task: TaskId,
+        proposal: Proposal,
+        now: WallMs,
+    ) -> Changed<Task> {
+        let record = self.record(id)?;
+        let t = record.task_mut(task)?;
+        if t.state == TaskState::Merged {
+            return Err(invalid(format!("task {task} is merged; make a new task")));
+        }
+        if let Some(term) = open_term(t) {
+            return Err(refuse(
+                ErrorCode::Conflict,
+                format!(
+                    "task {task} has a terminal already, {}/{}; close it first",
+                    term.worker, term.session
+                ),
+            ));
+        }
+        let on = proposal.proposed.on;
+        t.proposal = Some(proposal);
+        t.updated_ms = now;
+        let task_now = t.clone();
+        let entry = record.log(Some(task), Moment::Proposed { on }, now);
+        let update = record.task_update(&task_now, Some(entry));
+        Ok((task_now, vec![update]))
     }
 
     /// The project and task whose open assignment is `term`.

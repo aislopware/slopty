@@ -124,6 +124,7 @@ pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRe
         review: None,
         verifier: Some("cargo gate".to_owned()),
         push: Some(true),
+        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
     };

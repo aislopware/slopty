@@ -1155,6 +1155,64 @@ Tests:
 - The bar's hover says what each segment counts.
 - A finding wraps to two lines, so it is no longer cut to a few characters in a narrow lane.
 
+## Where tasks run, and starts that wait for the person (2026-10-02)
+
+**The board has a machines lens, and every placement keeps its reasons.** ✅ 2026-10-02
+- Before: the server ranked the workers at each spawn (`placement::rank`), then dropped the
+  ranking. The board showed which worker a task was on, but never why it went there, nor which
+  machines had room.
+- Now `assign` records `Assignment.placed` (`Placed { pinned, score, why }`), taken from the
+  chosen worker's `Suggestion`. `Suggestion::why` puts the ranking into words: "pinned" first,
+  then the scored rules by weight (`os == "macos" +10`), then the required rules that held. For
+  a worker that does not fit, it gives the failed rules' details. It keeps at most three parts
+  and `STATUS_MAX` bytes. Rules every worker passes (`online`, the live limits) are left out,
+  since naming them says nothing.
+- The machines lens (key `4`) asks for `WorkerFacts` every 5 s while it is shown, and stops
+  when it is not. It groups the tasks by host: first the workers holding tasks, then the online
+  ones, then the ones away, each by name. A host's heading gives its kind ("macOS, 12 cores,
+  64 GB"), its load and its live agents. Each task's row says why it went there. The tasks that
+  have not started sit under "Not started".
+- **Run on…** (key `o`) opens a picker on a task that has not started. It lists "Anywhere" and
+  the workers in the server's own ranking order (`PlacementSuggest`), each with its `why`. A
+  pick sends `TaskUpdate { run_on }` (`RunOn::Worker` or `RunOn::Anywhere`). This changes only
+  `placement.pin`, so the task's other rules still hold. `TaskCard.pin` shows the pin to the
+  board. The CLI's `slopty task update --run-on <worker|anywhere>` does the same.
+- Tests: `a_ranking_says_what_decides_it` (`slopty-proto`),
+  `a_task_runs_where_the_person_says_and_keeps_why_it_went_there` (`slopty-server`), and
+  `the_machines_lens_shows_where_everything_runs_and_where_a_task_will` (`slopty-ui::workspace`).
+
+**A project can ask before each task starts, and the person starts them.** ✅ 2026-10-02
+- `Project.ask_to_start` is a per-project autonomy setting, and only the person sets it. An
+  agent's `ProjectSet` that names it is refused with `Forbidden`, so an orchestrator cannot
+  grant itself autonomy.
+- Once it is set, an agent's `task_spawn` only proposes. The server checks the launch exactly
+  as it would for a start (the loosening and the placement rules). Then it stores
+  `Task.proposal`: the launch, plus `Proposed { since_ms, runs, on, why }`, giving the worker
+  the ranking would choose now and why, or "no worker fits now: …". It logs
+  `Moment::Proposed { on }`. No worker is asked and nothing is reserved, so a proposal costs
+  nothing until it starts.
+- `Verb::TaskStart { project, task, pin }` runs the stored launch through the same
+  `start_task_once` as a direct spawn, so idempotency and reservation are shared. The person's
+  pin wins over the agent's. `assign` clears the proposal. The verb is the person's alone: an
+  agent is refused, no worker carries it, and no MCP tool offers it. The CLI has
+  `slopty task start` (`--on <worker>` to pin), and `project create --ask-to-start` /
+  `project update --ask-to-start <bool>`.
+- The board draws the proposals as a plan band above the lens. Each row reads "Would start on
+  studio: os == "macos"" and has **Start** (key `s`) and **Run on…**; a pick from the picker
+  starts the task there. **Start all** sends one `TaskStart` per proposal. The orchestrator's
+  row says "Waits on you to start N tasks". The header's hand toggle sets `ask_to_start`.
+- The estimate on the band comes from this project's own timeline. It is the median time from
+  a spawned assignment to Verifying or Done, over finished tasks of the same kind if there are
+  any, otherwise over all of them. It says what it is drawn from ("about 20 min each, from 2
+  finished of the kind"). The server keeps no token count, so the estimate is in time, not in
+  money. Before any task has finished, the band says there is nothing to estimate from yet.
+- "Start a project here" creates the project with `ask_to_start` on. Direct spawns stay the
+  default for the CLI and the MCP `project_create`, where a script expects work to start.
+- Tests: `proposed_start` (goldens `task_proposed`, `task_proposed_card` and `task_start`),
+  `an_agent_s_start_waits_for_the_person_when_they_ask_to_start_tasks` (`slopty-server`),
+  `a_plan_is_estimated_from_the_tasks_that_finished` (`slopty-ui::project`), and
+  `a_plan_waits_for_the_person_who_starts_one_or_all` (`slopty-ui::workspace`).
+
 ## Phases
 
 1. **Wiring and state.** Built 2026-09-30, except the tile.

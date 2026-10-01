@@ -26,6 +26,7 @@ async fn reviewed_fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRef) {
         verifier: None,
         review: Some(BRIEF.to_owned()),
         push: None,
+        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
     };

@@ -721,7 +721,7 @@ fn a_project_starts_in_the_focused_terminal(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     cx.run_until_parked();
 
-    view.update_in(cx, |v, w, cx| v.start_project(&StartProject, w, cx));
+    cx.dispatch_action(StartProject);
     let verbs = sent(&mut queue, cx, done);
     let [Verb::ProjectCreate { project, title, repo, target, orchestrator: Some(term), .. }] =
         verbs.as_slice()
@@ -752,9 +752,190 @@ fn a_project_starts_in_the_focused_terminal(cx: &mut TestAppContext) {
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
     cx.run_until_parked();
-    view.update_in(cx, |v, w, cx| v.start_project(&StartProject, w, cx));
+    cx.dispatch_action(StartProject);
     assert_eq!(sent(&mut queue, cx, done), [], "it already orchestrates one");
     assert!(shown(&view, cx, orchestrator));
+}
+
+/// What the server says of a worker: its name, whether it is reached, and the rest.
+fn facts(worker: WorkerId, name: &str, online: bool) -> slopty_proto::project::WorkerFacts {
+    use slopty_proto::project::Fact;
+    let facts = [
+        ("name", Fact::Text(name.to_owned())),
+        ("online", Fact::Bool(online)),
+        ("os", Fact::Text("macos".to_owned())),
+        ("cpus", Fact::Int(12)),
+        ("memory_mb", Fact::Int(65_536)),
+        ("load", Fact::Float(2.14)),
+        ("live_agents", Fact::Int(3)),
+    ];
+    slopty_proto::project::WorkerFacts {
+        worker,
+        facts: facts.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+    }
+}
+
+/// The machines lens asks the server how the workers are doing and draws each with the
+/// project's agents on it, the workers in use first and one away last, then the tasks still
+/// to start. "Run on…" opens the server's ranking under the task, with why each worker fits or
+/// not; a choice pins the task there and closes the picker.
+#[gpui::test]
+fn the_machines_lens_shows_where_everything_runs_and_where_a_task_will(cx: &mut TestAppContext) {
+    use slopty_proto::project::{Reason, RunOn, Suggestion};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| b.show(Lens::Machines, cx));
+    let away = WorkerId::new();
+    let verbs = sent(&mut queue, cx, |_| {
+        Outcome::Facts(vec![facts(away, "attic", false), facts(worker, "studio", true)])
+    });
+    assert_eq!(verbs, [Verb::WorkerFacts { worker: None }]);
+
+    let y = |cx: &mut VisualTestContext, s: String| {
+        cx.debug_bounds(Box::leak(s.into_boxed_str())).map(|b| b.origin.y)
+    };
+    let studio = y(cx, format!("project-host-{worker}")).expect("the worker in use");
+    let attic = y(cx, format!("project-host-{away}")).expect("the worker away");
+    assert!(studio < attic, "the worker in use first");
+    for node in ["orchestrator", "1", "2"] {
+        let row = y(cx, format!("project-machine-project-node-{node}")).expect(node);
+        assert!(row > studio && row < attic, "{node} under the worker it runs on");
+    }
+    let waiting = y(cx, "project-machines-waiting".to_owned()).expect("what is still to start");
+    assert!(y(cx, "project-machine-project-node-3".to_owned()).is_some_and(|r| r > waiting));
+
+    click(cx, "project-machine-run-on-3");
+    let reason = |rule: &str, held: bool, detail: &str| Reason {
+        rule: rule.to_owned(),
+        held,
+        points: 0,
+        detail: detail.to_owned(),
+    };
+    let ranked = vec![
+        Suggestion {
+            worker,
+            name: "studio".to_owned(),
+            fits: true,
+            score: 0,
+            reasons: vec![reason("online", true, ""), reason(r#"os == "macos""#, true, "")],
+        },
+        Suggestion {
+            worker: away,
+            name: "attic".to_owned(),
+            fits: false,
+            score: 0,
+            reasons: vec![reason("online", false, "not online")],
+        },
+    ];
+    let verbs = sent(&mut queue, cx, |_| Outcome::Suggestions(ranked.clone()));
+    assert_eq!(
+        verbs,
+        [Verb::PlacementSuggest {
+            project: Some(fixtures::id("board")),
+            task: Some(TaskId(3)),
+            placement: None
+        }]
+    );
+    for option in ["anywhere", "0", "1"] {
+        let id = format!("project-machine-picker-3-{option}");
+        assert!(y(cx, id.clone()).is_some(), "{id}");
+    }
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let said: Vec<String> = cx
+        .update(|window, _cx| crate::a11y::tree(window))
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect();
+    assert!(said.iter().any(|l| l == r#"studio, os == "macos""#), "{said:?}");
+    assert!(said.iter().any(|l| l == "attic, not online"), "{said:?}");
+
+    click(cx, "project-machine-picker-3-0");
+    let verbs = sent(&mut queue, cx, |_| Outcome::Done);
+    let [Verb::TaskUpdate { task: TaskId(3), change, .. }] = verbs.as_slice() else {
+        panic!("a pin: {verbs:?}");
+    };
+    assert_eq!(change.run_on, Some(RunOn::Worker(worker)));
+    assert!(y(cx, "project-machine-picker-3".to_owned()).is_none(), "the choice closes it");
+}
+
+/// Before it fans out, the plan waits for the person: the band over the lens holds each
+/// proposed task with where it would start and why and how long tasks take, and the
+/// orchestrator's row says it waits on them. Start starts one, "Start all" every one, a
+/// worker chosen in its picker starts it there, and the header's toggle says whether the
+/// project asks at all.
+#[gpui::test]
+fn a_plan_waits_for_the_person_who_starts_one_or_all(cx: &mut TestAppContext) {
+    use slopty_proto::project::Proposed;
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let proposed = |n, title| {
+        let mut c = card(n, title, TaskState::Planned, None);
+        c.proposed = Some(Proposed {
+            since_ms: fixtures::AT,
+            runs: "claude".to_owned(),
+            on: Some(worker),
+            why: r#"os == "macos""#.to_owned(),
+        });
+        c
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(11, task_changed("board", proposed(4, "Draw the plan"), None), cx);
+        v.project_update(12, task_changed("board", proposed(5, "Start it"), None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    for part in ["project-plan", "project-plan-project-node-4", "project-plan-project-node-5"] {
+        assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
+    }
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let said: Vec<String> = cx
+        .update(|window, _cx| crate::a11y::tree(window))
+        .into_iter()
+        .filter_map(|n| n.label)
+        .collect();
+    let plan_row = r#"Draw the plan, Proposed, Would start on studio: os == "macos""#;
+    assert!(said.iter().any(|l| l == plan_row), "{said:?}");
+    assert!(
+        said.iter().any(|l| l.starts_with("Orchestrator, Waits on you to start 2 tasks")),
+        "{said:?}"
+    );
+    let project = fixtures::id("board");
+    let start = |task, pin| Verb::TaskStart { project: project.clone(), task: TaskId(task), pin };
+
+    click(cx, "project-plan-start-4");
+    assert_eq!(sent(&mut queue, cx, done), [start(4, None)]);
+    click(cx, "project-plan-start-all");
+    assert_eq!(sent(&mut queue, cx, done), [start(4, None), start(5, None)]);
+
+    click(cx, "project-plan-run-on-5");
+    let verbs = sent(&mut queue, cx, |_| Outcome::Suggestions(Vec::new()));
+    assert!(matches!(verbs.as_slice(), [Verb::PlacementSuggest { .. }]), "{verbs:?}");
+    click(cx, "project-plan-picker-5-anywhere");
+    assert_eq!(sent(&mut queue, cx, done), [start(5, None)], "a proposal starts where chosen");
+
+    click(cx, "project-ask");
+    let verbs = sent(&mut queue, cx, done);
+    assert!(
+        matches!(verbs.as_slice(), [Verb::ProjectSet { ask_to_start: Some(true), push: None, .. }]),
+        "{verbs:?}"
+    );
 }
 
 /// The worker the fixtures put the project on: the orchestrator's.

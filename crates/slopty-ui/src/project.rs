@@ -33,6 +33,16 @@ gpui::actions!(
         ShowBoard,
         /// The timeline: what happened, newest first.
         ShowTimeline,
+        /// The machines: each worker, how it is doing, and the project's agents on it.
+        ShowMachines,
+        /// Choose the worker the task the keyboard stands on runs on.
+        RunTaskOn,
+        /// Start the proposed task the keyboard stands on.
+        StartTask,
+        /// Start every task whose start is proposed.
+        StartProposed,
+        /// Hold each task's start for the person, or let the orchestrator start them.
+        ToggleAskToStart,
         /// Ask for the merge of the task the keyboard stands on.
         MergeTask,
         /// Check the task the keyboard stands on again from the start.
@@ -67,6 +77,11 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "retry_task", RetryTask, &["r"], BOARD),
         Command::new(Scope::Project, "approve_task", ApproveTask, &["a"], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
+        Command::new(Scope::Project, "show_machines", ShowMachines, &["4"], BOARD),
+        Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
+        Command::new(Scope::Project, "start_task", StartTask, &["s"], BOARD),
+        Command::new(Scope::Project, "start_proposed", StartProposed, &[], BOARD),
+        Command::new(Scope::Project, "toggle_ask_to_start", ToggleAskToStart, &[], BOARD),
         Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
         Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
         Command::new(Scope::Workspace, "start_project", StartProject, &[], WORKSPACE),
@@ -84,6 +99,11 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Merge the task", IconName::GitBranch, Box::new(MergeTask)),
         line("Retry the task", IconName::RotateCw, Box::new(RetryTask)),
         line("Approve the task's work", IconName::Check, Box::new(ApproveTask)),
+        line("Run the task on\u{2026}", IconName::Server, Box::new(RunTaskOn)),
+        line("Start the task", IconName::CircleDot, Box::new(StartTask)),
+        line("Start every proposed task", IconName::ListChecks, Box::new(StartProposed)),
+        line("Ask before each task starts", IconName::Hand, Box::new(ToggleAskToStart)),
+        line("Show the machines", IconName::Server, Box::new(ShowMachines)),
         line("Push after each merge", IconName::Upload, Box::new(TogglePush)),
         line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
         line("Delete the project", IconName::X, Box::new(DeleteProject)),
@@ -100,6 +120,8 @@ pub enum Lens {
     Board,
     /// What happened, newest first.
     Timeline,
+    /// Where everything runs: each worker and the agents on it.
+    Machines,
 }
 
 impl Lens {
@@ -110,6 +132,7 @@ impl Lens {
             Self::Tree => "Tree",
             Self::Board => "Board",
             Self::Timeline => "Timeline",
+            Self::Machines => "Machines",
         }
     }
 
@@ -120,6 +143,7 @@ impl Lens {
             Self::Tree => IconName::ListTree,
             Self::Board => IconName::Kanban,
             Self::Timeline => IconName::Clock,
+            Self::Machines => IconName::Server,
         }
     }
 
@@ -130,6 +154,7 @@ impl Lens {
             Self::Tree => "project-lens-tree",
             Self::Board => "project-lens-board",
             Self::Timeline => "project-lens-timeline",
+            Self::Machines => "project-lens-machines",
         }
     }
 }

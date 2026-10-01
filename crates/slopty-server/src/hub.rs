@@ -808,6 +808,14 @@ impl Hub {
             Verb::TaskSpawn { project, task, launch } => {
                 self.task_spawn(caller, key, project, task, launch).await
             }
+            Verb::TaskStart { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "a proposed task is the person's to start; task_spawn proposed it, and you hear \
+                 when it starts",
+            ),
+            Verb::TaskStart { project, task, pin } => {
+                self.task_start(key, project, task, pin).await
+            }
             Verb::PlacementSuggest { project, task, placement } => {
                 self.placement_suggest(project.as_ref(), task, placement).await
             }
@@ -1500,6 +1508,7 @@ fn remember(
         | Verb::TaskUpdate { project, .. }
         | Verb::TaskAssign { project, .. }
         | Verb::TaskSpawn { project, .. }
+        | Verb::TaskStart { project, .. }
         | Verb::TaskReport { project, .. }
         | Verb::TaskMerge { project, .. } => Some(project),
         _ => None,
@@ -1630,6 +1639,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskUpdate { .. }
         | Verb::TaskAssign { .. }
         | Verb::TaskSpawn { .. }
+        | Verb::TaskStart { .. }
         | Verb::PlacementSuggest { .. }
         | Verb::WorkerFacts { .. }
         | Verb::TaskGet { .. }

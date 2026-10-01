@@ -15,10 +15,11 @@ mod golden_project {
     };
     use slopty_proto::project::{
         AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Merge, Moment,
-        Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placement,
-        Preference, Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Reason, Report,
-        ReportKind, Runner, StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch,
-        TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
+        Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placed,
+        Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart,
+        Reason, Report, ReportKind, RunOn, Runner, StepKind, StepState, Suggestion, Task,
+        TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
+        WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
@@ -69,6 +70,7 @@ mod golden_project {
             verifier: Some("cargo gate".to_owned()),
             review: Some("A wire change comes with its goldens".to_owned()),
             push: false,
+            ask_to_start: true,
             orchestrator: Some(term()),
             limits: Limits::default(),
             metadata: Some(r#"{"goal":"open"}"#.to_owned()),
@@ -122,6 +124,11 @@ mod golden_project {
                 since_ms: at(),
                 ended_ms: None,
                 conversation: Some("0199a1b1-c3d4-7000-8000-00000000c0de".to_owned()),
+                placed: Some(Placed {
+                    pinned: false,
+                    score: 110,
+                    why: "near #2 +100, os == \"macos\" +10".to_owned(),
+                }),
             }),
             branch: Some("slopty/slopty/3".to_owned()),
             worktree: Some("/w/slopty-3".to_owned()),
@@ -147,6 +154,7 @@ mod golden_project {
                 since_ms: at(),
                 term: Some(term()),
             }),
+            proposal: None,
         }
     }
 
@@ -240,6 +248,7 @@ mod golden_project {
                 verifier: Some("cargo gate".to_owned()),
                 review: Some("A wire change comes with its goldens".to_owned()),
                 push: false,
+                ask_to_start: false,
                 orchestrator: Some(term()),
                 limits,
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
@@ -253,6 +262,7 @@ mod golden_project {
                 verifier: None,
                 review: Some(String::new()),
                 push: Some(true),
+                ask_to_start: None,
                 limits: LimitsChange { depth: Some(3), ..LimitsChange::default() },
                 metadata: None,
             }),
@@ -294,6 +304,7 @@ mod golden_project {
             note: Some("ready".to_owned()),
             depends_on: Some(vec![TaskId(1), TaskId(2)]),
             placement: Some(placement()),
+            run_on: Some(RunOn::Worker(term().worker)),
             verifier: Some(String::new()),
             metadata: Some("{}".to_owned()),
         };
@@ -420,6 +431,46 @@ mod golden_project {
     #[test]
     fn project_delete() {
         snap("project_delete", &request(Verb::ProjectDelete { project: project_id() }));
+    }
+
+    /// A start the orchestrator proposed, as the store keeps it and a card shows it, and the
+    /// person starting it on a worker of their choice.
+    #[test]
+    fn proposed_start() {
+        use slopty_proto::project::{Proposal, Proposed};
+        let launch = TaskLaunch {
+            pin: None,
+            cwd: String::new(),
+            run: Runner::Claude { prompt: Some("Read your brief.".to_owned()), args: Vec::new() },
+            env: Vec::new(),
+            size: None,
+            ignore_dependencies: false,
+        };
+        let proposed = Proposed {
+            since_ms: at(),
+            runs: "claude".to_owned(),
+            on: Some(term().worker),
+            why: r#"os == "macos""#.to_owned(),
+        };
+        let task = Task {
+            state: TaskState::Planned,
+            assignment: None,
+            step: None,
+            merge: None,
+            verified: None,
+            proposal: Some(Proposal { launch, proposed }),
+            ..task()
+        };
+        snap("task_proposed", &task);
+        snap("task_proposed_card", &task.card(&Natives::default()));
+        snap(
+            "task_start",
+            &request(Verb::TaskStart {
+                project: project_id(),
+                task: TaskId(3),
+                pin: Some(term().worker),
+            }),
+        );
     }
 
     /// A task's fresh-context review: the checkout the reviewer reads, its verdict, and the

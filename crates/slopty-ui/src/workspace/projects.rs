@@ -17,14 +17,14 @@ use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, TaskId,
+    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, RunOn, TaskChange, TaskId,
 };
 
 use super::WorkspaceView;
 use super::actions::ToggleProjectBoard;
 use super::agents::agent_ask_line;
 use crate::icons::Status;
-use crate::project::model::{Board, Lane, Projects, TaskAction};
+use crate::project::model::{Board, Lane, Machine, Projects, RunOnPicker, TaskAction};
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject};
 
 /// What the palette and the header call turning a tile to its board.
@@ -57,12 +57,32 @@ pub(super) struct ProjectsState {
     pub caller: Option<ServerCaller>,
     /// A project just started here, whose board shows once the mirror hears of it.
     pub opening: Option<ProjectId>,
+    /// The workers as the server last said they are doing, for the machines lens.
+    pub machines: Vec<Machine>,
+    /// A question about the workers is out: another waits for its answer.
+    pub machines_asked: bool,
+    /// The "Run on" picker open on a task, per project.
+    pub run_on: HashMap<ProjectId, RunOnPicker>,
 }
 
 /// `id` as the workspace keys workers: the one the app gives the server's worker ids.
 #[must_use]
 pub const fn worker_key(id: WorkerId) -> WorkerKey {
     WorkerKey::new(id.as_uuid().as_u128())
+}
+
+/// The person's change to `project`'s pushing or its asking before each start.
+fn set_project(project: &ProjectId, push: Option<bool>, ask_to_start: Option<bool>) -> Verb {
+    Verb::ProjectSet {
+        project: project.clone(),
+        orchestrator: None,
+        verifier: None,
+        review: None,
+        push,
+        ask_to_start,
+        limits: LimitsChange::default(),
+        metadata: None,
+    }
 }
 
 /// The worker id behind `key`: [`worker_key`] the other way. A UUID's simple form is its
@@ -333,7 +353,9 @@ impl WorkspaceView {
         for (project, view) in views {
             let board = self.projects.mirror.get(&project).cloned();
             let agents = board.as_ref().map(|b| self.board_agents(b)).unwrap_or_default();
-            let seen = Seen { board, workers: names.clone(), agents, now };
+            let machines = self.projects.machines.clone();
+            let run_on = self.projects.run_on.get(&project).cloned();
+            let seen = Seen { board, workers: names.clone(), agents, now, machines, run_on };
             view.update(cx, |v, cx| v.set_seen(seen, cx));
         }
         let mut gave = false;
@@ -362,17 +384,12 @@ impl WorkspaceView {
                 }
                 ProjectEvent::Act(task, action) => this.act_on_task(&asked, *task, *action, cx),
                 ProjectEvent::SetPush(push) => {
-                    let verb = Verb::ProjectSet {
-                        project: asked.clone(),
-                        orchestrator: None,
-                        verifier: None,
-                        review: None,
-                        push: Some(*push),
-                        limits: LimitsChange::default(),
-                        metadata: None,
-                    };
-                    this.send_to_server(verb, |_, _| (), cx);
+                    this.send_to_server(set_project(&asked, Some(*push), None), |_, _| (), cx);
                 }
+                ProjectEvent::SetAsk(ask) => {
+                    this.send_to_server(set_project(&asked, None, Some(*ask)), |_, _| (), cx);
+                }
+                ProjectEvent::StartAll => this.start_all(&asked, cx),
                 ProjectEvent::Delete => {
                     this.send_to_server(
                         Verb::ProjectDelete { project: asked.clone() },
@@ -381,6 +398,13 @@ impl WorkspaceView {
                     );
                 }
                 ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
+                ProjectEvent::Machines => this.ask_machines(cx),
+                ProjectEvent::Pin(task, run_on) => this.pin_task(&asked, *task, *run_on, cx),
+                ProjectEvent::CloseRunOn => {
+                    if this.projects.run_on.remove(&asked).is_some() {
+                        this.projects_moved(cx);
+                    }
+                }
             });
         self.projects.subscriptions.insert(project.clone(), subscription);
         self.projects.views.insert(project, view);
@@ -408,8 +432,116 @@ impl WorkspaceView {
                     findings: Vec::new(),
                 },
             },
+            TaskAction::RunOn => return self.open_run_on(&project, task, cx),
+            TaskAction::Start => Verb::TaskStart { project, task, pin: None },
         };
         self.send_to_server(verb, |_, _| (), cx);
+    }
+
+    /// Open the "Run on" picker on `task`, and ask the server to rank the workers for it.
+    fn open_run_on(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
+        let picker = RunOnPicker { task, ranked: None };
+        self.projects.run_on.insert(project.clone(), picker);
+        self.projects_moved(cx);
+        let verb = Verb::PlacementSuggest {
+            project: Some(project.clone()),
+            task: Some(task),
+            placement: None,
+        };
+        let asked = project.clone();
+        self.ask_server(verb, cx, move |this, outcome, cx| {
+            let ranked = match outcome {
+                Outcome::Suggestions(ranked) => ranked,
+                Outcome::Error { message, .. } => {
+                    this.projects.run_on.remove(&asked);
+                    this.show_notice(message, cx);
+                    this.projects_moved(cx);
+                    return;
+                }
+                _ => return,
+            };
+            if let Some(picker) = this.projects.run_on.get_mut(&asked).filter(|p| p.task == task) {
+                picker.ranked = Some(ranked);
+                this.projects_moved(cx);
+            }
+        });
+    }
+
+    /// The "Run on" picker's choice: the task runs there, or wherever its placement chooses.
+    fn pin_task(
+        &mut self,
+        project: &ProjectId,
+        task: TaskId,
+        run_on: RunOn,
+        cx: &mut Context<Self>,
+    ) {
+        self.projects.run_on.remove(project);
+        self.projects_moved(cx);
+        let proposed = self
+            .projects
+            .mirror
+            .get(project)
+            .and_then(|b| b.tasks.get(&task))
+            .is_some_and(|c| c.proposed.is_some());
+        // A proposed task starts where the person chose; any other is pinned there for its
+        // start to come.
+        let verb = if proposed {
+            let pin = match run_on {
+                RunOn::Worker(worker) => Some(worker),
+                RunOn::Anywhere => None,
+            };
+            Verb::TaskStart { project: project.clone(), task, pin }
+        } else {
+            let change = TaskChange { run_on: Some(run_on), ..TaskChange::default() };
+            Verb::TaskUpdate { project: project.clone(), task, change: Box::new(change) }
+        };
+        self.send_to_server(verb, |_, _| (), cx);
+    }
+
+    /// Start every task of `project` whose start is proposed, each where the server places it.
+    fn start_all(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
+        let proposed = self.projects.mirror.get(project).map(|b| b.proposed()).unwrap_or_default();
+        for task in proposed {
+            let verb = Verb::TaskStart { project: project.clone(), task, pin: None };
+            self.send_to_server(verb, |_, _| (), cx);
+        }
+    }
+
+    /// Ask the server how the workers are doing, for the machines lens: one question at a
+    /// time.
+    fn ask_machines(&mut self, cx: &mut Context<Self>) {
+        if self.projects.machines_asked || self.projects.caller.is_none() {
+            return;
+        }
+        self.projects.machines_asked = true;
+        self.ask_server(Verb::WorkerFacts { worker: None }, cx, |this, outcome, cx| {
+            this.projects.machines_asked = false;
+            if let Outcome::Facts(facts) = outcome {
+                let machines: Vec<Machine> = facts.iter().map(Machine::of).collect();
+                if machines != this.projects.machines {
+                    this.projects.machines = machines;
+                    this.projects_moved(cx);
+                }
+            }
+        });
+    }
+
+    /// Send `verb` and hand whatever the server answers to `then`; with no server, say so.
+    fn ask_server(
+        &mut self,
+        verb: Verb,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Outcome, &mut Context<Self>) + 'static,
+    ) {
+        let Some(caller) = self.projects.caller.clone() else {
+            self.show_notice(NO_SERVER.to_owned(), cx);
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let outcome = caller.call(verb).await;
+            this.update(cx, |this, cx| then(this, outcome, cx))
+        })
+        .detach();
     }
 
     /// Send `verb` to the server and hand its answer to `then`; a refusal is said as a
@@ -477,6 +609,9 @@ impl WorkspaceView {
             verifier: None,
             review: None,
             push: false,
+            // The person directs from the board, so a project made there asks before each
+            // task starts.
+            ask_to_start: true,
             orchestrator: Some(TermRef { worker, session }),
             limits: LimitsChange::default(),
             metadata: None,

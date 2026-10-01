@@ -16,9 +16,10 @@ use std::sync::Arc;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Finding, Moment, Native, NativeChange, NativeCounts, Natives, Project, ProjectId,
+    Fact, Finding, Moment, Native, NativeChange, NativeCounts, Natives, Project, ProjectId,
     ProjectStatus, ProjectUpdate, ProjectsPart, ReportKind, ReviewRun, Reviewer, StepKind,
-    StepState, TaskCard, TaskId, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    StepState, Suggestion, TaskCard, TaskId, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    WorkerFacts,
 };
 
 /// How many timeline entries a board keeps: a screenful many times over, and a bound on a
@@ -185,6 +186,10 @@ pub enum TaskAction {
     Retry,
     /// Approve its work over its reviewer.
     Approve,
+    /// Choose the worker it runs on, from the server's ranking of them.
+    RunOn,
+    /// Start it as its orchestrator proposed.
+    Start,
 }
 
 impl TaskAction {
@@ -195,6 +200,8 @@ impl TaskAction {
             Self::Merge => "Merge",
             Self::Retry => "Retry",
             Self::Approve => "Approve",
+            Self::RunOn => "Run on\u{2026}",
+            Self::Start => "Start",
         }
     }
 
@@ -205,9 +212,115 @@ impl TaskAction {
             Self::Merge => "merge",
             Self::Retry => "retry",
             Self::Approve => "approve",
+            Self::RunOn => "run-on",
+            Self::Start => "start",
         };
         format!("{prefix}-{word}-{task}")
     }
+}
+
+/// A node of the tree: a task, or the orchestrator for `None`.
+pub type Node = Option<TaskId>;
+
+/// One worker as the machines lens draws it, from the server's facts about it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Machine {
+    /// Which.
+    pub worker: WorkerId,
+    /// Its name.
+    pub name: String,
+    /// Whether the server reaches it now.
+    pub online: bool,
+    /// Its system, in the facts' word (`macos`, `linux`).
+    pub os: Option<String>,
+    /// How many cores it has.
+    pub cpus: Option<i64>,
+    /// How much memory, in MiB.
+    pub memory_mb: Option<i64>,
+    /// Its load average.
+    pub load: Option<f64>,
+    /// Every agent running on it, whatever project.
+    pub live_agents: Option<i64>,
+}
+
+impl Machine {
+    /// What `facts` say of their worker. A fact it does not report is absent.
+    #[must_use]
+    pub fn of(facts: &WorkerFacts) -> Self {
+        let text = |k: &str| match facts.facts.get(k) {
+            Some(Fact::Text(t)) => Some(t.clone()),
+            _ => None,
+        };
+        let int = |k: &str| match facts.facts.get(k) {
+            Some(Fact::Int(n)) => Some(*n),
+            _ => None,
+        };
+        let load = match facts.facts.get("load") {
+            Some(Fact::Float(f)) => Some(*f),
+            Some(Fact::Int(n)) => Some(f64::from(i32::try_from(*n).unwrap_or(i32::MAX))),
+            _ => None,
+        };
+        Self {
+            worker: facts.worker,
+            name: text("name").unwrap_or_else(|| facts.worker.to_string()),
+            online: matches!(facts.facts.get("online"), Some(Fact::Bool(true))),
+            os: text("os"),
+            cpus: int("cpus"),
+            memory_mb: int("memory_mb"),
+            load,
+            live_agents: int("live_agents"),
+        }
+    }
+
+    /// What it is, in a line: "macos, 12 cores, 64 GB".
+    #[must_use]
+    pub fn kind_line(&self) -> String {
+        let os = self.os.as_deref().map(|os| match os {
+            "macos" => "macOS".to_owned(),
+            "linux" => "Linux".to_owned(),
+            other => other.to_owned(),
+        });
+        let cores =
+            self.cpus.map(|n| if n == 1 { "1 core".to_owned() } else { format!("{n} cores") });
+        let memory = self.memory_mb.map(|mb| format!("{} GB", mb.saturating_add(512) / 1024));
+        [os, cores, memory].into_iter().flatten().collect::<Vec<_>>().join(", ")
+    }
+}
+
+/// How long a task takes, as a project's finished tasks say ([`Board::estimate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Estimate {
+    /// The median time from a task's start to its work being done, in milliseconds.
+    pub each_ms: u64,
+    /// How many finished tasks it is from.
+    pub from: usize,
+    /// They are of the kind asked about, not of every kind.
+    pub same_kind: bool,
+}
+
+impl Estimate {
+    /// It in words: "about 12 min each, from 5 finished".
+    #[must_use]
+    pub fn line(&self) -> String {
+        let mins = self.each_ms.saturating_add(30_000) / 60_000;
+        let each = match mins {
+            0 => "under a minute each".to_owned(),
+            m if m < 120 => format!("about {m} min each"),
+            m => format!("about {} h each", m.saturating_add(30) / 60),
+        };
+        let kind = if self.same_kind { "of the kind" } else { "in this project" };
+        format!("{each}, from {} finished {kind}", self.from)
+    }
+}
+
+/// The "Run on" picker open on a task: the server's ranking of the workers for it, once it
+/// answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunOnPicker {
+    /// The task.
+    pub task: TaskId,
+    /// Every worker, best first, each with its reasons; `None` while the server ranks them.
+    pub ranked: Option<Vec<Suggestion>>,
 }
 
 /// One line of the tree, in the order it is drawn.
@@ -542,7 +655,94 @@ impl Board {
         if passed && (asked || silent) {
             out.push(TaskAction::Approve);
         }
+        if card.proposed.is_some() && self.terminal(Some(card.id)).is_none() {
+            out.push(TaskAction::Start);
+        }
+        if self.not_started(card) {
+            out.push(TaskAction::RunOn);
+        }
         out
+    }
+
+    /// The tasks whose start their orchestrator proposed and the person has not made, by
+    /// number.
+    #[must_use]
+    pub fn proposed(&self) -> Vec<TaskId> {
+        self.tasks
+            .values()
+            .filter(|c| c.proposed.is_some() && self.terminal(Some(c.id)).is_none())
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// How long a task of `kind` takes from its start to its work being done, from this
+    /// project's tasks that got there as far as the timeline still holds: the median of those
+    /// of the kind, else of every kind.
+    #[must_use]
+    pub fn estimate(&self, kind: &str) -> Option<Estimate> {
+        let mut started: BTreeMap<TaskId, WallMs> = BTreeMap::new();
+        let mut took: Vec<(TaskId, u64)> = Vec::new();
+        for entry in &self.timeline {
+            let Some(task) = entry.task else { continue };
+            match &entry.what {
+                Moment::Assigned { spawned: true, .. } => {
+                    started.insert(task, entry.at_ms);
+                }
+                Moment::State { to: TaskState::Verifying | TaskState::Done, .. } => {
+                    if let Some(at) = started.remove(&task) {
+                        let ms = entry.at_ms.as_millis().saturating_sub(at.as_millis());
+                        took.push((task, ms));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let of_kind = |k: &str| -> Vec<u64> {
+            took.iter()
+                .filter(|(t, _)| self.tasks.get(t).is_some_and(|c| c.kind == k))
+                .map(|(_, ms)| *ms)
+                .collect()
+        };
+        let (mut times, same_kind) = match of_kind(kind) {
+            v if !v.is_empty() => (v, true),
+            _ => (took.iter().map(|(_, ms)| *ms).collect::<Vec<_>>(), false),
+        };
+        if times.is_empty() {
+            return None;
+        }
+        times.sort_unstable();
+        let each_ms = times.get(times.len() / 2).copied().unwrap_or_default();
+        Some(Estimate { each_ms, from: times.len(), same_kind })
+    }
+
+    /// Whether `card` waits to be started: planned, with no terminal on it now.
+    fn not_started(&self, card: &TaskCard) -> bool {
+        card.state == TaskState::Planned && self.terminal(Some(card.id)).is_none()
+    }
+
+    /// The nodes whose agents run on `worker` now, the orchestrator first, then by number.
+    #[must_use]
+    pub fn on_worker(&self, worker: WorkerId) -> Vec<Node> {
+        let orchestrator = self.terminal(None).filter(|(w, _)| *w == worker).map(|_| None);
+        let tasks = self
+            .tasks
+            .keys()
+            .copied()
+            .filter(|t| self.terminal(Some(*t)).is_some_and(|(w, _)| w == worker))
+            .map(Some);
+        orchestrator.into_iter().chain(tasks).collect()
+    }
+
+    /// The tasks waiting to be started, by number: where they will run is still to choose.
+    #[must_use]
+    pub fn waiting_to_start(&self) -> Vec<TaskId> {
+        self.tasks.values().filter(|c| self.not_started(c)).map(|c| c.id).collect()
+    }
+
+    /// How many of this project's agents run on `worker` now.
+    #[must_use]
+    pub fn live_on(&self, worker: WorkerId) -> usize {
+        self.on_worker(worker).len()
     }
 
     /// The reviewer's last word on `task` while it still speaks to what the task is now, as
@@ -635,6 +835,10 @@ pub fn moment_line(
         Moment::Assigned { term, spawned: false } => {
             format!("Taken on in a terminal on {}", name(term.worker))
         }
+        Moment::Proposed { on: Some(worker) } => {
+            format!("Proposed to start on {}", name(*worker))
+        }
+        Moment::Proposed { on: None } => "Proposed to start".to_owned(),
         Moment::State { to, .. } => state_word(*to).to_owned(),
         Moment::Branch { branch, pr } => match (branch, pr) {
             (Some(branch), Some(pr)) => format!("On {branch}, pull request #{pr}"),

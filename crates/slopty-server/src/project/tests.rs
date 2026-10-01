@@ -47,6 +47,7 @@ fn new_project(orchestrator: Option<TermRef>, limits: LimitsChange) -> NewProjec
         review: None,
         verifier: Some("cargo gate".to_owned()),
         push: false,
+        ask_to_start: false,
         orchestrator,
         limits,
         metadata: None,
@@ -102,7 +103,7 @@ fn kept(changes: &[Change]) -> Vec<Kept> {
 }
 
 fn who(term: TermRef, spawned: bool, branch: Option<&AgentBranch>) -> Assignee<'_> {
-    Assignee { term, spawned, branch, conversation: None }
+    Assignee { term, spawned, branch, conversation: None, placed: None }
 }
 
 fn assign(p: &mut Projects, task: TaskId, at: TermRef) -> Changed<Task> {
@@ -400,6 +401,7 @@ fn live_agents_are_counted_by_their_terminals_not_their_tasks_states() {
         since: tokio::time::Instant::now(),
         answered: false,
         conversation: None,
+        placed: None,
     });
     assert_eq!(p.live_on(&id(), plain.worker, &fleet.running()), 1, "a start in flight counts");
     let twice = p.may_start(&id(), b, false, &fleet.running()).unwrap_err();

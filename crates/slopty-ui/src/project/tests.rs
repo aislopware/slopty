@@ -1,6 +1,6 @@
 //! The mirror and what the board derives from it, without a window.
 
-use slopty_core::{SessionId, WorkerId};
+use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Moment, Native, NativeAgent, NativeChange, NativeTask, ProjectUpdate, ProjectsPart, StepKind,
@@ -395,7 +395,7 @@ fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
     let mut verifying = card(6, "f", TaskState::Verifying, None);
     let line = StepState::Running { phase: "Compiling".into(), percent: None };
     verifying.step = Some(step(StepKind::Verify, worker, line, None));
-    verifying.updated_ms = slopty_core::WallMs::from_millis(AT.as_millis().saturating_add(50));
+    verifying.updated_ms = WallMs::from_millis(AT.as_millis().saturating_add(50));
     let mut failed = card(7, "g", TaskState::Waiting, None);
     failed.verified = Some(run(false, "7777777abc"));
     let mirror = one(vec![
@@ -551,4 +551,57 @@ fn a_task_offers_what_moves_it_on() {
     assert_eq!(of(10), [TaskAction::Retry]);
     assert_eq!(of(99), [], "no such task");
     assert_eq!(TaskAction::Merge.selector("project-card", TaskId(1)), "project-card-merge-1");
+}
+
+/// A plan's estimate is the median time from a task's start to its work being done, of the
+/// project's tasks of the kind when there are any, else of every kind; with none finished
+/// there is no estimate. A proposed task offers its start, and choosing where it starts.
+#[test]
+fn a_plan_is_estimated_from_the_tasks_that_finished() {
+    use slopty_proto::project::{Proposed, TimelineEntry};
+
+    use super::model::{Estimate, TaskAction};
+    let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+    let at = |min: u64| WallMs::from_millis(AT.as_millis() + min * 60_000);
+    let moment = |seq, task: u32, min, what| TimelineEntry {
+        seq,
+        at_ms: at(min),
+        task: Some(TaskId(task)),
+        what,
+    };
+    let mut review = card(3, "Read it", TaskState::Done, None);
+    review.kind = "review".to_owned();
+    let mut proposed = card(4, "Next", TaskState::Planned, None);
+    proposed.proposed = Some(Proposed {
+        since_ms: AT,
+        runs: "claude".to_owned(),
+        on: Some(term.worker),
+        why: String::new(),
+    });
+    let tasks = vec![
+        card(1, "Build a", TaskState::Done, None),
+        card(2, "Build b", TaskState::Merged, None),
+        review,
+        proposed,
+    ];
+    let timeline = vec![
+        moment(1, 1, 0, Moment::Assigned { term, spawned: true }),
+        moment(2, 1, 10, Moment::State { from: TaskState::Running, to: TaskState::Done }),
+        moment(3, 2, 0, Moment::Assigned { term, spawned: true }),
+        moment(4, 2, 20, Moment::State { from: TaskState::Running, to: TaskState::Verifying }),
+        moment(5, 3, 0, Moment::Assigned { term, spawned: true }),
+        moment(6, 3, 90, Moment::State { from: TaskState::Running, to: TaskState::Done }),
+    ];
+    let mut mirror = Projects::default();
+    mirror.apply_part(snapshot(10, vec![status(project("board", None), tasks, timeline)]));
+    let b = board(&mirror);
+    let build = b.estimate("build").expect("two builds finished");
+    assert_eq!(build, Estimate { each_ms: 20 * 60_000, from: 2, same_kind: true });
+    assert_eq!(build.line(), "about 20 min each, from 2 finished of the kind");
+    let bench = b.estimate("bench").expect("from every kind");
+    assert_eq!((bench.each_ms, bench.from, bench.same_kind), (20 * 60_000, 3, false));
+    assert_eq!(b.proposed(), [TaskId(4)]);
+    assert_eq!(b.actions(TaskId(4)), [TaskAction::Start, TaskAction::RunOn]);
+    let empty = one(Vec::new());
+    assert_eq!(board(&empty).estimate("build"), None);
 }

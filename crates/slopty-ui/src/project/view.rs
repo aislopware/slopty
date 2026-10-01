@@ -21,18 +21,19 @@ use gpui::{
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Merge, Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, StepKind, StepState, TaskCard,
-    TaskId, TaskState, TaskStep, VerifierRun,
+    Merge, Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, RunOn, StepKind, StepState,
+    TaskCard, TaskId, TaskState, TaskStep, VerifierRun,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::model::{
-    Board, Lane, TaskAction, TreeRow, finding_place, queue_words, review_detail, short_commit,
-    state_status, state_word, verdict_detail, verdict_tail,
+    Board, Lane, Machine, RunOnPicker, TaskAction, TreeRow, finding_place, queue_words,
+    review_detail, short_commit, state_status, state_word, verdict_detail, verdict_tail,
 };
 use super::{
-    ApproveTask, DeleteProject, Lens, MergeTask, OpenNode, RetryTask, SelectNext, SelectPrevious,
-    ShowBoard, ShowTerminal, ShowTimeline, ShowTree, TogglePush,
+    ApproveTask, DeleteProject, Lens, MergeTask, OpenNode, RetryTask, RunTaskOn, SelectNext,
+    SelectPrevious, ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed,
+    StartTask, ToggleAskToStart, TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
@@ -55,6 +56,23 @@ pub(crate) const NEEDS_YOU: &str = "Needs you";
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
 /// A timeline entry for a task made under the title it still has.
 pub(crate) const CREATED: &str = "Created";
+/// The machines lens with no worker to draw.
+pub(crate) const NO_MACHINES: &str = "No workers yet";
+/// What the machines lens offers then.
+pub(crate) const NO_MACHINES_HINT: &str =
+    "The workers this server reaches show here, with the agents on each.";
+/// A worker the server cannot reach now.
+pub(crate) const AWAY: &str = "Away";
+/// The machines lens's heading over the tasks still to start.
+pub(crate) const NOT_STARTED: &str = "Not started";
+/// The "Run on" picker's first choice.
+pub(crate) const ANYWHERE: &str = "Anywhere";
+/// What "Anywhere" means.
+pub(crate) const ANYWHERE_LINE: &str = "Wherever its placement chooses";
+/// The "Run on" picker while the server ranks the workers.
+pub(crate) const RANKING: &str = "Ranking the workers\u{2026}";
+/// The "Run on" picker's close button.
+pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 
 /// The least a lane is wide at zoom 1: the tile takes as many across as fit.
 const LANE_W: f32 = 232.0;
@@ -69,8 +87,9 @@ const META_PARTS: usize = 3;
 /// The progress bar's height, at zoom 1.
 const BAR_H: f32 = 3.0;
 
-/// A node of the tree: a task, or the orchestrator for `None`.
-pub type Node = Option<TaskId>;
+pub use super::model::Node;
+/// How often the machines lens asks again how the workers are doing, while it shows.
+const MACHINES_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What a board tells the workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +108,16 @@ pub enum ProjectEvent {
     Delete,
     /// Say this: what was asked of the board cannot be done now.
     Say(String),
+    /// The machines lens shows: ask the server how the workers are doing.
+    Machines,
+    /// Run the task there, or wherever its placement chooses: the "Run on" picker's choice.
+    Pin(TaskId, RunOn),
+    /// Close the "Run on" picker.
+    CloseRunOn,
+    /// Start every task whose start is proposed.
+    StartAll,
+    /// Hold each task's start for the person, or let the orchestrator start them.
+    SetAsk(bool),
 }
 
 /// How long a first "Delete the project" waits for the second that does it.
@@ -162,6 +191,10 @@ pub struct Seen {
     pub agents: HashMap<SessionId, AgentSeen>,
     /// The server's clock now, near enough, for the timeline's ages.
     pub now: WallMs,
+    /// The workers as the server last said they are doing, for the machines lens.
+    pub machines: Vec<Machine>,
+    /// The "Run on" picker, while it is open on one of the project's tasks.
+    pub run_on: Option<RunOnPicker>,
 }
 
 /// A row the keyboard can stand on.
@@ -185,8 +218,9 @@ pub struct ProjectView {
     focus: FocusHandle,
     scroll: ScrollHandle,
     plate: Plate,
-    /// Moves the timeline's ages on once a minute while the timeline shows.
-    tick: Option<Task<()>>,
+    /// Moves the timeline's ages on once a minute while the timeline shows, and asks for the
+    /// workers' news while the machines lens does; for the lens it was started for.
+    tick: Option<(Lens, Task<()>)>,
     /// When "Delete the project" was asked once, waiting for the second ask that does it.
     delete_asked: Option<std::time::Instant>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
@@ -268,8 +302,11 @@ impl ProjectView {
             (Some(was), Some(is)) => Arc::ptr_eq(was, is) || was == is,
             (was, is) => was.is_none() && is.is_none(),
         };
-        let same =
-            same_board && self.seen.workers == seen.workers && self.seen.agents == seen.agents;
+        let same = same_board
+            && self.seen.workers == seen.workers
+            && self.seen.agents == seen.agents
+            && self.seen.machines == seen.machines
+            && self.seen.run_on == seen.run_on;
         if !same {
             self.seen = seen;
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
@@ -302,37 +339,50 @@ impl ProjectView {
         }
     }
 
-    /// Show `lens`.
+    /// Show `lens`. The machines lens asks the server how the workers are doing.
     pub fn show(&mut self, lens: Lens, cx: &mut Context<Self>) {
         if self.lens != lens {
             self.lens = lens;
+            if lens == Lens::Machines {
+                cx.emit(ProjectEvent::Machines);
+            }
             self.picked = self.picked().map(Pick::Node).filter(|p| self.picks().contains(p));
             self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
             cx.notify();
         }
     }
 
-    /// The timeline's ages move on once a minute while it shows, and nothing ticks otherwise.
+    /// The timeline's ages move on once a minute while it shows, the machines lens asks for
+    /// the workers' news every few seconds while it does, and nothing ticks otherwise.
     fn keep_time(&mut self, cx: &Context<Self>) {
-        if self.lens != Lens::Timeline {
-            self.tick = None;
+        let every = match self.lens {
+            Lens::Timeline => AGE_TICK,
+            Lens::Machines => MACHINES_TICK,
+            Lens::Tree | Lens::Board => {
+                self.tick = None;
+                return;
+            }
+        };
+        if self.tick.as_ref().is_some_and(|(lens, _)| *lens == self.lens) {
             return;
         }
-        if self.tick.is_some() {
-            return;
-        }
-        self.tick = Some(cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(AGE_TICK).await;
+                cx.background_executor().timer(every).await;
                 let ticked = this.update(cx, |v, cx| {
-                    v.seen.now = WallMs::now();
-                    cx.notify();
+                    if v.lens == Lens::Machines {
+                        cx.emit(ProjectEvent::Machines);
+                    } else {
+                        v.seen.now = WallMs::now();
+                        cx.notify();
+                    }
                 });
                 if ticked.is_err() {
                     break;
                 }
             }
-        }));
+        });
+        self.tick = Some((self.lens, task));
     }
 
     /// Give the board the keyboard.
@@ -392,6 +442,23 @@ impl ProjectView {
         }
     }
 
+    /// Start every proposed task, or say there is none.
+    pub fn start_all(&self, cx: &mut Context<Self>) {
+        let Some(board) = &self.seen.board else { return };
+        if board.proposed().is_empty() {
+            cx.emit(ProjectEvent::Say(NOTHING_PROPOSED.to_owned()));
+        } else {
+            cx.emit(ProjectEvent::StartAll);
+        }
+    }
+
+    /// Hold each task's start for the person, or stop, as the project does not now.
+    pub fn toggle_ask(&self, cx: &mut Context<Self>) {
+        if let Some(board) = &self.seen.board {
+            cx.emit(ProjectEvent::SetAsk(!board.project.ask_to_start));
+        }
+    }
+
     /// Push the target after each merge, or stop, as the project does not now.
     pub fn toggle_push(&self, cx: &mut Context<Self>) {
         if let Some(board) = &self.seen.board {
@@ -428,7 +495,55 @@ impl ProjectView {
                 .map(|task| Pick::Node(Some(task)))
                 .collect(),
             Lens::Timeline => board.timeline.iter().rev().map(|e| Pick::Entry(e.seq)).collect(),
+            Lens::Machines => self
+                .machine_groups(board)
+                .into_iter()
+                .flat_map(|g| g.nodes)
+                .chain(board.waiting_to_start().into_iter().map(Some))
+                .map(Pick::Node)
+                .collect(),
         }
+    }
+
+    /// The machines lens's groups, in the order it draws them: the workers running this
+    /// project's agents, by name, then the rest online, then those away. A worker the server
+    /// said nothing of yet is drawn from its name alone.
+    fn machine_groups(&self, board: &Board) -> Vec<MachineGroup> {
+        let mut groups: Vec<MachineGroup> = self
+            .seen
+            .machines
+            .iter()
+            .map(|m| MachineGroup {
+                worker: m.worker,
+                name: m.name.clone(),
+                machine: Some(m.clone()),
+                nodes: board.on_worker(m.worker),
+            })
+            .collect();
+        let mut running: Vec<WorkerId> = std::iter::once(None)
+            .chain(board.tasks.keys().copied().map(Some))
+            .filter_map(|node| board.terminal(node).map(|(w, _)| w))
+            .collect();
+        running.sort_unstable();
+        running.dedup();
+        for worker in running {
+            if !groups.iter().any(|g| g.worker == worker) {
+                groups.push(MachineGroup {
+                    worker,
+                    name: self.worker_name(worker),
+                    machine: None,
+                    nodes: board.on_worker(worker),
+                });
+            }
+        }
+        groups.sort_by(|a, b| {
+            let rank = |g: &MachineGroup| {
+                let online = g.machine.as_ref().is_none_or(|m| m.online);
+                (g.nodes.is_empty(), !online)
+            };
+            rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
+        });
+        groups
     }
 
     /// Which child of the scrolled list draws `pick`: a tree row comes after the running
@@ -533,6 +648,18 @@ const fn lane_tone(theme: &Theme, lane: Lane) -> Rgb {
 
 /// The push toggle's one name, said as pressed or not.
 pub(crate) const PUSH: &str = "Push after each merge";
+/// The header's toggle for holding each task's start for the person.
+pub(crate) const ASK_TO_START: &str = "Ask before each task starts";
+/// The plan band's heading.
+pub(crate) const PROPOSED: &str = "Proposed";
+/// The plan band's button.
+pub(crate) const START_ALL: &str = "Start all";
+/// A proposal's word in its row, for a task its orchestrator would start.
+pub(crate) const PROPOSED_WORD: &str = "Proposed";
+/// The plan band with no finished task to estimate from.
+pub(crate) const NO_ESTIMATE: &str = "No finished task to estimate from yet";
+/// "Start all" with nothing proposed.
+pub(crate) const NOTHING_PROPOSED: &str = "No task waits for you to start it";
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
 
@@ -554,6 +681,8 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::Merge => "merge",
         TaskAction::Retry => "retry",
         TaskAction::Approve => "approve",
+        TaskAction::RunOn => "choose where it runs",
+        TaskAction::Start => "start",
     }
 }
 
@@ -627,6 +756,18 @@ impl ProjectView {
             self.zoom,
         )
         .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::Open(None))));
+        let ask = project.ask_to_start;
+        let ask_toggle = crate::kit::icon_toggle(
+            theme,
+            "project-ask",
+            IconName::Hand,
+            ASK_TO_START,
+            ask,
+            self.zoom,
+        )
+        .on_click(cx.listener(move |_this, _ev, _w, cx| {
+            cx.emit(ProjectEvent::SetAsk(!ask));
+        }));
         let title = div()
             .flex()
             .items_center()
@@ -653,6 +794,7 @@ impl ProjectView {
             )
             .child(readout("project-live", live))
             .children(progress.map(|p| readout("project-progress", p)))
+            .child(ask_toggle)
             .child(push_toggle)
             .child(terminal);
         let meta = div()
@@ -686,7 +828,15 @@ impl ProjectView {
         prefix: &str,
         cx: &Context<Self>,
     ) -> Option<Div> {
-        let actions = board.actions(task);
+        // Choosing a worker is the machines lens's: elsewhere it is the palette's, so a tree
+        // of planned tasks is not a column of the same button.
+        let actions: Vec<TaskAction> = board
+            .actions(task)
+            .into_iter()
+            .filter(|a| {
+                *a != TaskAction::RunOn || matches!(prefix, "project-machine" | "project-plan")
+            })
+            .collect();
         if actions.is_empty() {
             return None;
         }
@@ -785,7 +935,7 @@ impl ProjectView {
             let asks = self.agent(board, node).and_then(|a| a.asks.clone());
             let status = node.and_then(|t| board.tasks.get(&t)).and_then(|c| c.status.clone());
             let second = asks.or(status).unwrap_or_else(|| "Waiting on you".to_owned());
-            let line = Line { asking: Some(second), depth: 0, prefix: "project-needs" };
+            let line = Line { asking: Some(second), said: None, depth: 0, prefix: "project-needs" };
             self.node_row(board, node, line, cx)
         });
         Some(
@@ -799,6 +949,99 @@ impl ProjectView {
                 .pb(self.z(theme.spacing.xxs))
                 .bg(hsla(s.raised))
                 .child(self.heading("project-needs-heading", NEEDS_YOU, Some(s.warn)))
+                .children(rows),
+        )
+    }
+
+    /// The plan before it fans out, over the lens: the tasks the orchestrator proposed, each
+    /// with where it would start and why, how long they take as the project's finished tasks
+    /// say, and a button to start them all.
+    fn plan(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        let proposed = board.proposed();
+        if proposed.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let kind = proposed
+            .first()
+            .and_then(|t| board.tasks.get(t))
+            .map_or(String::new(), |c| c.kind.clone());
+        let tasks = if proposed.len() == 1 {
+            "1 task".to_owned()
+        } else {
+            format!("{} tasks", proposed.len())
+        };
+        let estimate = board
+            .estimate(&kind)
+            .map_or_else(|| NO_ESTIMATE.to_owned(), |e| sentence_case(&e.line()));
+        let summary = format!("{tasks}. {estimate}.");
+        let start_all = div()
+            .id("project-plan-start-all")
+            .debug_selector(|| "project-plan-start-all".to_owned())
+            .role(Role::Button)
+            .aria_label(START_ALL)
+            .flex_none()
+            .px(self.z(sp.sm))
+            .rounded(self.z(theme.radii.sm))
+            .border_1()
+            .border_color(hsla(s.border))
+            .text_size(self.z(theme.typography.meta()))
+            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+            .text_color(hsla(s.text))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.overlay)))
+            .child(START_ALL);
+        let start_all = tab_stop(start_all, s.accent)
+            .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::StartAll)));
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(self.z(sp.xs))
+            .pr(self.z(sp.inset()))
+            .child(self.heading("project-plan-heading", PROPOSED, None).flex_none())
+            .child(
+                div()
+                    .id("project-plan-summary")
+                    .debug_selector(|| "project-plan-summary".to_owned())
+                    .flex_1()
+                    .min_w_0()
+                    .pt(self.z(sp.xs))
+                    .pb(self.z(sp.xxs))
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(summary)),
+            )
+            .child(start_all);
+        let rows = proposed.into_iter().map(|task| {
+            let said =
+                board.tasks.get(&task).and_then(|c| c.proposed.as_ref()).map(|p| match p.on {
+                    Some(worker) if p.why.is_empty() => {
+                        format!("Would start on {}", self.worker_name(worker))
+                    }
+                    Some(worker) => {
+                        format!("Would start on {}: {}", self.worker_name(worker), p.why)
+                    }
+                    None => sentence_case(&p.why),
+                });
+            let line = Line { asking: None, said, depth: 0, prefix: "project-plan" };
+            self.node_row(board, Some(task), line, cx)
+        });
+        Some(
+            div()
+                .id("project-plan")
+                .debug_selector(|| "project-plan".to_owned())
+                .role(Role::Group)
+                .aria_label(PROPOSED)
+                .flex_none()
+                .mb(self.z(sp.xs))
+                .pb(self.z(sp.xxs))
+                .bg(hsla(s.raised))
+                .child(head)
                 .children(rows),
         )
     }
@@ -875,14 +1118,15 @@ impl ProjectView {
             .child(tab(Lens::Tree))
             .child(tab(Lens::Board))
             .child(tab(Lens::Timeline))
+            .child(tab(Lens::Machines))
     }
 
     /// One node on two lines: its mark, its number and title with its state at the right, then
     /// where it runs and what it is on. `depth` steps it in under its parent.
     fn node_row(&self, board: &Board, node: Node, line: Line, cx: &Context<Self>) -> AnyElement {
-        let Line { asking, depth, prefix } = line;
+        let Line { asking, said: own_line, depth, prefix } = line;
         let mark = asking.is_some().then_some(Status::NeedsYou);
-        let second = asking;
+        let second = asking.or(own_line);
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
@@ -890,10 +1134,12 @@ impl ProjectView {
         let status = mark.or_else(|| self.node_status(board, node));
         let title = card.map_or_else(|| ORCHESTRATOR.to_owned(), |c| c.title.clone());
         // A row under "Needs you" says no word its heading says.
-        let word = card
-            .filter(|_| mark.is_none())
-            .map(|c| (state_word(c.state), board_tone(theme, state_status(c.state))));
+        let word = card.filter(|_| mark.is_none()).map(|c| {
+            let word = if c.proposed.is_some() { PROPOSED_WORD } else { state_word(c.state) };
+            (word, board_tone(theme, state_status(c.state)))
+        });
         let actions = node.and_then(|task| self.actions(board, task, prefix, cx));
+        let run_on = node.and_then(|task| self.run_on_block(task, prefix, cx));
         let settled = card.is_some_and(|c| c.state == TaskState::Merged);
         // The tree shows a verifier running or failed under its row; a pass is a word in it.
         let check = card
@@ -902,8 +1148,12 @@ impl ProjectView {
             .filter(|c| !c.cleared());
         let meta = second.unwrap_or_else(|| self.node_meta(board, node, card, check.as_ref()));
         let key = format!("{prefix}-{}", node_key(node));
-        let picked =
-            prefix == "project-row" && self.picked() == Some(node) && self.lens == Lens::Tree;
+        let picked = self.picked() == Some(node)
+            && match self.lens {
+                Lens::Tree => prefix == "project-row",
+                Lens::Machines => prefix == "project-machine",
+                Lens::Board | Lens::Timeline => false,
+            };
         let number = node.map(|t| {
             crate::kit::tabular(div())
                 .flex_none()
@@ -984,7 +1234,8 @@ impl ProjectView {
                     .flex_col()
                     .child(first)
                     .children(second)
-                    .children(check.as_ref().map(|c| self.check_block(&key, c, cx))),
+                    .children(check.as_ref().map(|c| self.check_block(&key, c, cx)))
+                    .children(run_on),
             );
         let arrive = ElementId::Name(format!("{key}-in").into());
         let row = if picked { self.plate.mark(row, key) } else { row };
@@ -1044,6 +1295,12 @@ impl ProjectView {
         check: Option<&Check<'_>>,
     ) -> String {
         let mut parts: Vec<String> = Vec::new();
+        let proposed = board.proposed().len();
+        if node.is_none() && proposed > 0 {
+            let tasks =
+                if proposed == 1 { "1 task".to_owned() } else { format!("{proposed} tasks") };
+            parts.push(format!("Waits on you to start {tasks}"));
+        }
         if let Some(card) = card {
             let waits = board.waiting_on(card.id);
             if !waits.is_empty() && matches!(card.state, TaskState::Planned) {
@@ -1413,7 +1670,7 @@ impl ProjectView {
     fn tree(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
         for row in board.tree() {
-            let line = Line { asking: None, depth: row.depth, prefix: "project-row" };
+            let line = Line { asking: None, said: None, depth: row.depth, prefix: "project-row" };
             out.push(self.node_row(board, row.task, line, cx));
             out.extend(self.native_rows(board, row));
         }
@@ -1547,6 +1804,7 @@ impl ProjectView {
                     .child(dotted(theme, meta))
             }))
             .children(block)
+            .children(self.run_on_block(card.id, "project-card", cx))
             .children(why.map(|why| {
                 div()
                     .text_size(self.z(theme.typography.meta()))
@@ -1685,6 +1943,243 @@ impl ProjectView {
     }
 
     /// A lens with nothing in it: one line, and what will land there.
+    /// The machines lens: each worker with how it is doing and the project's agents on it,
+    /// each with why the server put it there, then the tasks still to start, each with a way
+    /// to choose where it runs.
+    fn machines(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let groups = self.machine_groups(board);
+        let waiting = board.waiting_to_start();
+        if groups.is_empty() && waiting.is_empty() {
+            return vec![self.empty(NO_MACHINES, NO_MACHINES_HINT)];
+        }
+        let per_worker = board.project.limits.live_per_worker;
+        let mut out = Vec::new();
+        for group in groups {
+            let key = format!("project-host-{}", group.worker);
+            let online = group.machine.as_ref().is_none_or(|m| m.online);
+            let live = format!("{} of {per_worker} live", board.live_on(group.worker));
+            let load = group.machine.as_ref().and_then(|m| m.load).map(|l| format!("load {l:.1}"));
+            let kind = group.machine.as_ref().map(Machine::kind_line).filter(|k| !k.is_empty());
+            let away = (!online).then_some(AWAY);
+            let readout = |text: String| {
+                crate::kit::tabular(div())
+                    .flex_none()
+                    .text_size(self.z(theme.typography.meta()))
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(text))
+            };
+            let label = said(&[
+                &group.name,
+                away.unwrap_or(""),
+                kind.as_deref().unwrap_or(""),
+                load.as_deref().unwrap_or(""),
+                &live,
+            ]);
+            let selector = key.clone();
+            let head = div()
+                .id(SharedString::from(key.clone()))
+                .debug_selector(move || selector)
+                .role(Role::Heading)
+                .aria_label(label)
+                .flex()
+                .items_center()
+                .gap(self.z(sp.xs))
+                .px(self.z(sp.inset()))
+                .pt(self.z(sp.sm))
+                .pb(self.z(sp.xxs))
+                .when(!online, |el| el.opacity(alpha::STRONG))
+                .child(
+                    icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_secondary))
+                        .size(self.z(theme.typography.icon())),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                        .text_color(hsla(s.text))
+                        .child(SharedString::from(group.name.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(self.z(theme.typography.meta()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(
+                            [away.map(str::to_owned), kind]
+                                .into_iter()
+                                .flatten()
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        )),
+                )
+                .children(load.map(readout))
+                .child(readout(live));
+            out.push(head.into_any_element());
+            for node in group.nodes {
+                let said = node
+                    .and_then(|t| board.tasks.get(&t))
+                    .and_then(|c| c.assignment.as_ref()?.placed.as_ref())
+                    .map(|p| p.why.clone());
+                let line = Line { asking: None, said, depth: 1, prefix: "project-machine" };
+                out.push(self.node_row(board, node, line, cx));
+            }
+        }
+        if !waiting.is_empty() {
+            out.push(
+                self.heading("project-machines-waiting", NOT_STARTED, None).into_any_element(),
+            );
+            for task in waiting {
+                let said = board.tasks.get(&task).map(|c| match c.pin {
+                    Some(worker) => format!("To run on {}", self.worker_name(worker)),
+                    None => ANYWHERE_LINE.to_owned(),
+                });
+                let line = Line { asking: None, said, depth: 0, prefix: "project-machine" };
+                out.push(self.node_row(board, Some(task), line, cx));
+            }
+        }
+        out
+    }
+
+    /// The "Run on" picker under `task`'s row or card, while it is open there: "Anywhere",
+    /// then every worker as the server ranks them, each with what decides it, the one the
+    /// task is pinned to marked.
+    fn run_on_block(
+        &self,
+        task: TaskId,
+        prefix: &str,
+        cx: &Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let picker = self.seen.run_on.as_ref().filter(|p| p.task == task)?;
+        let board = self.seen.board.as_ref()?;
+        let pin = board.tasks.get(&task).and_then(|c| c.pin);
+        let proposing = board.tasks.get(&task).is_some_and(|c| c.proposed.is_some());
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let key = format!("{prefix}-picker-{task}");
+        let option =
+            |id: String, name: String, why: String, on: bool, fits: bool, choice: RunOn| {
+                let selector = id.clone();
+                let el = div()
+                    .id(SharedString::from(id))
+                    .debug_selector(move || selector)
+                    .role(Role::RadioButton)
+                    .aria_label(said(&[&name, &why]))
+                    .aria_toggled(if on {
+                        gpui::accesskit::Toggled::True
+                    } else {
+                        gpui::accesskit::Toggled::False
+                    })
+                    .flex()
+                    .items_baseline()
+                    .gap(self.z(sp.xs))
+                    .min_w_0()
+                    .px(self.z(sp.xs))
+                    .py(self.z(sp.xxs))
+                    .rounded(self.z(theme.radii.sm))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.overlay)))
+                    .child(div().flex_none().size(self.z(theme.typography.icon())).children(
+                        on.then(|| {
+                            icon(theme, IconName::Check, IconSize::Inline, hsla(s.text))
+                                .size(self.z(theme.typography.icon()))
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(hsla(if fits { s.text } else { s.text_muted }))
+                            .child(SharedString::from(name)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(why)),
+                    );
+                tab_stop(el, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    cx.emit(ProjectEvent::Pin(task, choice));
+                }))
+            };
+        let close_id = format!("{key}-close");
+        let close =
+            crate::kit::icon_button_at(theme, close_id, IconName::X, CLOSE_RUN_ON, self.zoom)
+                .on_click(cx.listener(|_this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    cx.emit(ProjectEvent::CloseRunOn);
+                }));
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(self.z(sp.xs))
+            .child(div().flex_1().text_color(hsla(s.text_secondary)).child(SharedString::from(
+                if proposing { format!("Start #{task} on") } else { format!("Run #{task} on") },
+            )))
+            .child(close);
+        let mut options = vec![option(
+            format!("{key}-anywhere"),
+            ANYWHERE.to_owned(),
+            ANYWHERE_LINE.to_owned(),
+            pin.is_none(),
+            true,
+            RunOn::Anywhere,
+        )];
+        let ranking = match &picker.ranked {
+            None => Some(
+                div()
+                    .px(self.z(sp.xs))
+                    .text_color(hsla(s.text_muted))
+                    .child(RANKING)
+                    .into_any_element(),
+            ),
+            Some(ranked) => {
+                options.extend(ranked.iter().enumerate().map(|(i, r)| {
+                    option(
+                        format!("{key}-{i}"),
+                        r.name.clone(),
+                        r.why(),
+                        pin == Some(r.worker),
+                        r.fits,
+                        RunOn::Worker(r.worker),
+                    )
+                }));
+                None
+            }
+        };
+        let selector = key.clone();
+        Some(
+            div()
+                .id(SharedString::from(key))
+                .debug_selector(move || selector)
+                .role(Role::RadioGroup)
+                .aria_label(SharedString::from(format!("Run #{task} on")))
+                .flex()
+                .flex_col()
+                .gap(self.z(sp.xxs))
+                .mt(self.z(sp.xs))
+                .px(self.z(sp.sm))
+                .py(self.z(sp.xs))
+                .rounded(self.z(theme.radii.sm))
+                .bg(hsla(s.panel))
+                .text_size(self.z(theme.typography.meta()))
+                .child(head)
+                .children(options)
+                .children(ranking),
+        )
+    }
+
     fn empty(&self, line: &'static str, hint: &'static str) -> AnyElement {
         let theme = &self.theme;
         div()
@@ -1708,11 +2203,22 @@ impl ProjectView {
     }
 }
 
+/// One worker in the machines lens, and the project's nodes running on it.
+struct MachineGroup {
+    worker: WorkerId,
+    name: String,
+    /// What the server last said of it.
+    machine: Option<Machine>,
+    nodes: Vec<Node>,
+}
+
 /// How a node's row is drawn: in the tree at its depth, or in what needs the person with what
 /// its agent asks.
 struct Line {
     /// What the agent asks, for a row of what needs the person.
     asking: Option<String>,
+    /// A second line of its own, over the node's facts: why it runs where it does.
+    said: Option<String>,
     /// How far in the tree it steps.
     depth: usize,
     /// Its element name's start.
@@ -1751,6 +2257,7 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         Moment::Limits { .. } => (IconName::ListFilter, s.text_muted),
         Moment::Claimed { .. } => (IconName::Lock, s.text_muted),
         Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),
+        Moment::Proposed { .. } => (IconName::Hand, s.text_secondary),
         Moment::State { to, .. } => {
             let status = state_status(*to);
             (status.icon(), board_tone(theme, status))
@@ -1805,6 +2312,15 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &ShowTree, _w, cx| this.show(Lens::Tree, cx)))
             .on_action(cx.listener(|this, _: &ShowBoard, _w, cx| this.show(Lens::Board, cx)))
             .on_action(cx.listener(|this, _: &ShowTimeline, _w, cx| this.show(Lens::Timeline, cx)))
+            .on_action(cx.listener(|this, _: &ShowMachines, _w, cx| this.show(Lens::Machines, cx)))
+            .on_action(cx.listener(|this, _: &RunTaskOn, _w, cx| {
+                this.act_on_picked(TaskAction::RunOn, cx);
+            }))
+            .on_action(cx.listener(|this, _: &StartTask, _w, cx| {
+                this.act_on_picked(TaskAction::Start, cx);
+            }))
+            .on_action(cx.listener(|this, _: &StartProposed, _w, cx| this.start_all(cx)))
+            .on_action(cx.listener(|this, _: &ToggleAskToStart, _w, cx| this.toggle_ask(cx)))
             .on_action(cx.listener(|this, _: &MergeTask, _w, cx| {
                 this.act_on_picked(TaskAction::Merge, cx);
             }))
@@ -1834,9 +2350,11 @@ impl Render for ProjectView {
             Lens::Tree => self.tree(&board, cx),
             Lens::Board => self.board(&board, cx),
             Lens::Timeline => self.timeline(&board, cx),
+            Lens::Machines => self.machines(&board, cx),
         };
         root.child(self.header(&board, cx))
             .children(self.needs_you(&board, cx))
+            .children(self.plan(&board, cx))
             .child(self.lenses(cx))
             .child(
                 div()

@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use slopty_proto::orchestration::IdempotencyKey;
 use slopty_proto::project::{
-    LimitsChange, Preference, ProjectStatus, Report, ReportKind, Runner, Task, TaskChange,
+    LimitsChange, Preference, ProjectStatus, Report, ReportKind, RunOn, Runner, Task, TaskChange,
     TaskState, VerifierRun,
 };
 use slopty_tools::ops::{self, LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec};
@@ -72,6 +72,9 @@ pub enum ProjectCmd {
         /// Push the target branch to the orchestrator's clone's `origin` after each merge.
         #[arg(long)]
         push: bool,
+        /// Hold each task's start until you start it: the orchestrator's starts only propose.
+        #[arg(long)]
+        ask_to_start: bool,
         /// The orchestrator's terminal; this one when run inside a Slopty terminal.
         #[arg(long)]
         orchestrator: Option<String>,
@@ -97,6 +100,10 @@ pub enum ProjectCmd {
         /// Push the target after each merge (`true`), or stop (`false`).
         #[arg(long)]
         push: Option<bool>,
+        /// Hold each task's start until you start it (`true`), or let the orchestrator start
+        /// them (`false`).
+        #[arg(long)]
+        ask_to_start: Option<bool>,
         #[command(flatten)]
         limits: LimitArgs,
         /// New metadata, a JSON object.
@@ -276,6 +283,9 @@ pub enum TaskCmd {
         /// A placement in place of the old, when any of its flags is given.
         #[command(flatten)]
         placement: PlacementArgs,
+        /// Run it on this worker over its placement's rules, or `anywhere` to let them choose.
+        #[arg(long, value_name = "WORKER")]
+        run_on: Option<String>,
         /// Its own verifier; empty for the project's.
         #[arg(long)]
         verifier: Option<String>,
@@ -352,6 +362,15 @@ pub enum TaskCmd {
     Merge {
         #[command(flatten)]
         which: TaskRef,
+    },
+    /// Start a task its orchestrator proposed, as the person: where the server places it, or on
+    /// the worker named.
+    Start {
+        #[command(flatten)]
+        which: TaskRef,
+        /// This worker, over the proposal's and the task's placement.
+        #[arg(long, value_name = "WORKER")]
+        on: Option<String>,
     },
     /// Say whether a task's work may merge, as the person, over its reviewer's word or in its
     /// place: `--approve` puts verified work in the merge queue, `--changes` gives it back to
@@ -430,6 +449,7 @@ pub async fn project(
             verifier,
             review,
             push,
+            ask_to_start,
             orchestrator,
             limits,
             metadata,
@@ -442,6 +462,7 @@ pub async fn project(
                 verifier,
                 review,
                 push,
+                ask_to_start,
                 orchestrator,
                 limits: limits.change(),
                 metadata,
@@ -449,9 +470,26 @@ pub async fn project(
             let status = ops::project_create(&mut res, spec, key).await?;
             print_status(&mut res, &status, json).await
         }
-        ProjectCmd::Update { project, orchestrator, verifier, review, push, limits, metadata } => {
+        ProjectCmd::Update {
+            project,
+            orchestrator,
+            verifier,
+            review,
+            push,
+            ask_to_start,
+            limits,
+            metadata,
+        } => {
             let limits = limits.change();
-            let edit = ProjectEdit { orchestrator, verifier, review, push, limits, metadata };
+            let edit = ProjectEdit {
+                orchestrator,
+                verifier,
+                review,
+                push,
+                ask_to_start,
+                limits,
+                metadata,
+            };
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
         }
@@ -542,6 +580,7 @@ pub async fn task(
             depends_on,
             no_dependencies,
             placement,
+            run_on,
             verifier,
             metadata,
         } => {
@@ -572,6 +611,11 @@ pub async fn task(
                 note,
                 depends_on,
                 placement: None,
+                run_on: match run_on.as_deref() {
+                    None => None,
+                    Some("anywhere") => Some(RunOn::Anywhere),
+                    Some(name) => Some(RunOn::Worker(res.worker(Some(name)).await?)),
+                },
                 verifier,
                 metadata,
             };
@@ -618,6 +662,10 @@ pub async fn task(
         TaskCmd::Merge { which } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_merge(link, project, task, key).await?
+        }
+        TaskCmd::Start { which, on } => {
+            let (project, task) = (which.project.as_deref(), which.task.as_deref());
+            ops::task_start(&mut res, project, task, on.as_deref(), key).await?
         }
         TaskCmd::Review { which, approve, summary, findings, .. } => {
             let findings = findings.iter().map(|f| finding(f)).collect();
