@@ -45,6 +45,7 @@ mod miniature;
 mod navigator;
 mod overlays;
 mod popout;
+pub mod presence;
 mod project_search;
 mod projects;
 pub mod remote;

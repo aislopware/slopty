@@ -1515,6 +1515,7 @@ mod page_chrome;
 mod page_host;
 mod palette;
 mod popout;
+mod presence;
 mod projects;
 mod relaunch;
 mod remote;
