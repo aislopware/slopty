@@ -9,29 +9,17 @@
 
 use gpui::{App, Window};
 
-/// What the window last painted, one line per quad, glyph, icon, image and underline.
+/// What the window last painted, one line per primitive, sorted.
 ///
-/// Each line holds its bounds, clip and colour, and the lines are sorted: two frames that paint
-/// the same things in the same places give the same lines whatever order they were drawn in.
+/// A scroll layer the frame composited counts as the content its tiles were rasterized from,
+/// moved to where the tiles show it and clipped to its viewport: a frame drawn from scratch may
+/// paint that content directly, and the two show the same pixels. Each line holds a primitive's
+/// bounds, clip and colour, and its depth: one more than the deepest primitive painted before it
+/// that it overlaps. Two frames that paint the same things in the same places, each above what
+/// it was above, give the same lines however they numbered or ordered their draws.
 #[must_use]
 pub fn painted(window: &Window) -> Vec<String> {
-    let mut lines: Vec<String> = window
-        .painted_quads()
-        .iter()
-        .map(|q| {
-            format!(
-                "quad {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
-                q.bounds,
-                q.content_mask,
-                q.background,
-                q.border_color,
-                q.corner_radii,
-                q.border_widths,
-                q.border_style
-            )
-        })
-        .chain(window.painted_sprites())
-        .collect();
+    let mut lines = window.painted_primitives();
     lines.sort_unstable();
     lines
 }
@@ -213,6 +201,64 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div().size_full().flex().child(self.0.clone()).child(self.1.clone())
         }
+    }
+
+    /// A list of 200 rows 20 px tall, each a coloured bar with its number.
+    struct Rows;
+
+    impl Render for Rows {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().bg(gpui::white()).child(
+                gpui::uniform_list(
+                    "rows",
+                    200,
+                    cx.processor(|_, range: std::ops::Range<usize>, _, _| {
+                        range
+                            .map(|row| {
+                                div()
+                                    .h(px(20.0))
+                                    .w(px(160.0))
+                                    .bg(gpui::rgb(
+                                        u32::try_from(row).unwrap_or(0).wrapping_mul(0x0001_0101),
+                                    ))
+                                    .child(format!("row {row}"))
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .w(px(160.0))
+                .h(px(200.0)),
+            )
+        }
+    }
+
+    /// A frame that composites a list's scroll layer from its tiles agrees with the same state
+    /// drawn from scratch, which may paint the rows directly: what a tile holds is what is
+    /// compared, not the tile.
+    #[gpui::test]
+    fn a_frame_composited_from_a_layer_agrees_with_one_from_scratch(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, TouchPhase, point};
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (_rows, cx) = cx.add_window_view(|_, _| Rows);
+        cx.run_until_parked();
+        let wheel = |cx: &mut gpui::VisualTestContext| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: point(px(40.0), px(40.0)),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(-15.0))),
+                modifiers: Modifiers::default(),
+                touch_phase: TouchPhase::Moved,
+                momentum_phase: None,
+            });
+            cx.run_until_parked();
+        };
+        for _ in 0..4 {
+            wheel(cx);
+        }
+        cx.update(|window, _| window.reset_layout_stats());
+        wheel(cx);
+        let composited = cx.update(|window, _| window.layout_stats().layer_frames_composited);
+        assert_eq!(composited, 1, "the frame shown composites the list's layer");
+        assert_eq!(cx.update(|window, cx| stale(window, cx, 8)), None);
     }
 
     fn lines(text: &[&str]) -> Vec<String> {
