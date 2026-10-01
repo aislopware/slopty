@@ -684,3 +684,32 @@ fn a_timeline_is_kept_and_paged_within_its_bytes() {
         "more to page"
     );
 }
+
+/// A step's start and end go on the timeline and its progress between on the card alone, its
+/// start time kept; and a server that stopped mid-step says, as it loads, that the step ended.
+#[test]
+fn a_step_is_shown_as_it_goes_and_ends_with_the_server() {
+    use slopty_proto::project::{StepKind, StepState, TaskStep};
+    let mut p = project(None);
+    let a = task(&mut p, "A", &[]);
+    let (worker, since) = (WorkerId::new(), now());
+    let step = |state, since_ms| TaskStep { kind: StepKind::Clone, worker, state, since_ms };
+    let running = |percent| StepState::Running { phase: "Receiving objects".to_owned(), percent };
+    let steps_logged = |p: &Projects| {
+        status(p).timeline.iter().filter(|e| matches!(e.what, Moment::Step(_))).count()
+    };
+    let began = p.set_step(&id(), a, step(running(None), since), now()).unwrap();
+    assert!(began.iter().all(|c| c.durable), "a start is kept");
+    let later = WallMs::from_millis(since.as_millis().saturating_add(5_000));
+    let moved = p.set_step(&id(), a, step(running(Some(40)), later), later).unwrap();
+    assert!(moved.iter().all(|c| !c.durable), "progress is not kept");
+    assert_eq!(get(&p, a).step.map(|s| (s.state, s.since_ms)), Some((running(Some(40)), since)));
+    assert_eq!(steps_logged(&p), 1);
+
+    let mut p = Projects::restore(p.file(Vec::new(), 0));
+    let why = "the server stopped while it ran".to_owned();
+    assert_eq!(get(&p, a).step.map(|s| s.state), Some(StepState::Failed { why }));
+    let done = StepState::Done { detail: "/home/c/slopty/clones/example.com/o/demo".to_owned() };
+    p.set_step(&id(), a, step(done, later), later).unwrap();
+    assert_eq!(steps_logged(&p), 2, "an end is logged");
+}

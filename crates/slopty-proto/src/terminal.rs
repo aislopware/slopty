@@ -162,6 +162,10 @@ pub struct RepoId {
     /// Its first commit (the oldest root reachable from `HEAD`), in full hex. `None` before the
     /// worker has read it, or in a repository with no commit yet.
     pub root: Option<String>,
+    /// The address to clone it from, as its config spells [`Self::origin`], with any
+    /// credentials in it left out: a worker with no clone makes one from it with its own git
+    /// credentials. Not part of its identity.
+    pub url: Option<String>,
 }
 
 impl RepoId {

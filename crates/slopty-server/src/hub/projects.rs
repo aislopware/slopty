@@ -443,7 +443,7 @@ const fn os_word(os: Os) -> &'static str {
 }
 
 /// A worker's facts: its own, with what the server knows of it over them.
-fn facts_of(entry: &Entry, agents_here: u16) -> Facts {
+fn facts_of(entry: &Entry, agents_here: u16, made: &[(String, RepoId)]) -> Facts {
     let (info, caps) = (&entry.info, &entry.info.caps);
     let mut facts = entry.facts.clone();
     let text = |t: &str| Fact::Text(t.to_owned());
@@ -471,7 +471,7 @@ fn facts_of(entry: &Entry, agents_here: u16) -> Facts {
         ("load", Fact::Float(f64::from(info.load))),
         ("online", Fact::Bool(info.liveness == Liveness::Online)),
         ("live_agents", Fact::Int(i64::from(agents_here))),
-        ("repos", repos_of(&entry.sessions)),
+        ("repos", repos_of(&entry.sessions, made)),
     ];
     // What the server knows of a worker is its word over the worker's own.
     for (name, fact) in known {
@@ -499,7 +499,8 @@ fn clones_of(state: &State, project: &Project) -> Clones {
         .workers
         .values()
         .filter_map(|e| {
-            let Fact::Map(repos) = repos_of(&e.sessions) else { return None };
+            let made = made_on(state, e.info.worker);
+            let Fact::Map(repos) = repos_of(&e.sessions, made) else { return None };
             let path = id.keys().find_map(|k| match repos.get(k) {
                 Some(Fact::Text(path)) => Some(path.clone()),
                 _ => None,
@@ -511,16 +512,21 @@ fn clones_of(state: &State, project: &Project) -> Clones {
     Clones { key: Some(key), on }
 }
 
-/// The repositories a worker has a shell in, by each key of their identity
-/// ([`RepoId`]: the
-/// normalized origin, the first commit), to where the clone is. One repository cloned on two
-/// workers has the same keys on both, so `"github.com/o/r" in repos` places a task beside
-/// a clone of it and `repos["github.com/o/r"]` says where; with several clones on one worker
-/// the first path in order is named.
-fn repos_of(sessions: &[SessionSummary]) -> Fact {
+/// The clones the server had made on `worker` ([`super::steps::Steps::made_on`]).
+fn made_on(state: &State, worker: WorkerId) -> &[(String, RepoId)] {
+    state.steps.made_on(worker)
+}
+
+/// The repositories a worker has a shell in or the server had cloned there (`made`), by each
+/// key of their identity ([`RepoId`]: the normalized origin, the first commit), to where the
+/// clone is. One repository cloned on two workers has the same keys on both, so
+/// `"github.com/o/r" in repos` places a task beside a clone of it and `repos["github.com/o/r"]`
+/// says where; with several clones on one worker the first path in order is named.
+fn repos_of(sessions: &[SessionSummary], made: &[(String, RepoId)]) -> Fact {
     let mut repos: BTreeMap<String, &str> = BTreeMap::new();
-    for session in sessions {
-        let (Some(id), Some(path)) = (&session.repo_id, &session.repo) else { continue };
+    let shells = sessions.iter().filter_map(|s| Some((s.repo.as_ref()?, s.repo_id.as_ref()?)));
+    let cloned = made.iter().map(|(path, id)| (path, id));
+    for (path, id) in shells.chain(cloned) {
         for key in id.keys() {
             let at = repos.entry(key.to_owned()).or_insert(path);
             if path.as_str() < *at {
@@ -568,9 +574,10 @@ fn beside_a_clone(id: &RepoId) -> Option<String> {
 }
 
 /// Where `worker` has a clone of `project`'s repository.
-fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Option<String> {
+pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Option<String> {
     let id = project.repo_id.as_ref()?;
-    let Fact::Map(repos) = repos_of(&state.workers.get(&worker)?.sessions) else { return None };
+    let sessions = &state.workers.get(&worker)?.sessions;
+    let Fact::Map(repos) = repos_of(sessions, made_on(state, worker)) else { return None };
     id.keys().find_map(|key| match repos.get(key) {
         Some(Fact::Text(path)) => Some(path.clone()),
         _ => None,
@@ -666,11 +673,22 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
         } else {
             format!("clones of it are on {}", on.join(", "))
         };
+        let cloned = if project.repo_id.as_ref().is_some_and(|id| id.url.is_some()) {
+            " A worker your placement picks that has none gets one cloned first, which the \
+             task's step shows."
+        } else {
+            ""
+        };
         lines.push(format!(
             "- Its repository is {key} on every worker; {on}. A task started with no cwd goes \
-             beside a clone, in a git worktree of its own when its agent writes. For a \
+             beside a clone, in a git worktree of its own when its agent writes.{cloned} For a \
              placement of your own, `\"{key}\" in repos` holds on a worker with a clone and \
              `repos[\"{key}\"]` is its path there."
+        ));
+        lines.push(format!(
+            "- When a task done on another machine reports its branch, the server fetches it \
+             into your clone as slopty/{}/<task>, and the task's step says when it is there.",
+            project.id
         ));
     }
     lines.extend(rules(project, "orchestrator_rules"));
@@ -924,6 +942,9 @@ impl Hub {
             }
             Verb::TaskReport { project, task: id, report } => {
                 let reported = state.projects.report_task(&project, id, &report, now);
+                if reported.is_ok() && report.kind == ReportKind::Done {
+                    self.bring_home_soon(state, (project.clone(), id), report.branch.clone());
+                }
                 reported.map(|((t, parent), u)| {
                     let at = tokio::time::Instant::now();
                     state.deliveries.add((project, parent), Some(id), report, at);
@@ -1014,7 +1035,7 @@ impl Hub {
             .filter(|e| only.is_none_or(|w| w == e.info.worker))
             .map(|e| {
                 let here = state.projects.live_on_worker(e.info.worker, &running);
-                let facts = facts_of(e, here);
+                let facts = facts_of(e, here, made_on(state, e.info.worker));
                 (e.info.name.clone(), WorkerFacts { worker: e.info.worker, facts })
             })
             .collect();
@@ -1040,7 +1061,7 @@ impl Hub {
                     worker,
                     name: e.info.name.clone(),
                     online: e.info.liveness == Liveness::Online && e.link.is_some(),
-                    facts: facts_of(e, fleet_live),
+                    facts: facts_of(e, fleet_live, made_on(state, worker)),
                     live: project.map_or(0, |p| state.projects.live_on(p, worker, &running)),
                     fleet_live,
                 }
@@ -1447,6 +1468,60 @@ impl Hub {
         Ok(task)
     }
 
+    /// Where a task with no directory goes when no worker with a clone of its repository fits:
+    /// the worker its rules would choose but for the clone, when there is an address to clone
+    /// from.
+    async fn placed_for_a_clone(
+        &self,
+        project: &ProjectId,
+        launch: &TaskLaunch,
+        placement: &Placement,
+    ) -> Option<WorkerId> {
+        if !launch.cwd.trim().is_empty() {
+            return None;
+        }
+        let (bare, gathered) = self.without_the_clone_rule(project, placement)?;
+        let ranked = self.rank(bare.clone(), gathered).await.ok()?;
+        placement::choose(&bare, &ranked).ok()
+    }
+
+    /// `placement` without the rule a task with no directory gets, and the workers to rank it
+    /// over; `None` when there is no address to clone the project's repository from.
+    fn without_the_clone_rule(
+        &self,
+        project: &ProjectId,
+        placement: &Placement,
+    ) -> Option<(Placement, Gathered)> {
+        let mut state = self.inner.state.lock();
+        let id = state.projects.project(project).ok()?.repo_id.clone()?;
+        id.url.as_ref()?;
+        let rule = beside_a_clone(&id)?;
+        let mut bare = placement.clone();
+        bare.require.retain(|r| *r != rule);
+        let gathered = Self::candidates(&mut state, Some(project));
+        drop(state);
+        Some((bare, gathered))
+    }
+
+    /// The address to clone the project's repository from onto `worker`, when a task with no
+    /// directory goes there and it has no clone.
+    fn clone_needed(
+        &self,
+        project: &ProjectId,
+        launch: &TaskLaunch,
+        worker: WorkerId,
+    ) -> Option<String> {
+        if !launch.cwd.trim().is_empty() {
+            return None;
+        }
+        let state = self.inner.state.lock();
+        let record = state.projects.project(project).ok()?;
+        let url = record.repo_id.as_ref()?.url.clone()?;
+        let has = clone_on(&state, record, worker).is_some();
+        drop(state);
+        (!has).then_some(url)
+    }
+
     async fn start_task_once(
         &self,
         key: Option<IdempotencyKey>,
@@ -1467,7 +1542,11 @@ impl Hub {
             Ok(ranked) => ranked,
             Err(refused) => return refused,
         };
-        let worker = match placement::choose(&placement, &ranked) {
+        let chosen = match placement::choose(&placement, &ranked) {
+            Ok(worker) => Ok(worker),
+            Err(why) => self.placed_for_a_clone(project, &launch, &placement).await.ok_or(why),
+        };
+        let worker = match chosen {
             Ok(worker) => worker,
             Err(why) => {
                 let message = format!("no worker can take task {task} now: {why}");
@@ -1477,14 +1556,21 @@ impl Hub {
                 });
                 let message = match repo.filter(|_| launch.cwd.trim().is_empty()) {
                     Some((key, rule)) => format!(
-                        "{message}. With no cwd it must go beside a clone of {key} ({rule}): \
-                         clone it on a worker that fits, or name a cwd"
+                        "{message}. With no cwd it must go beside a clone of {key} ({rule}), and \
+                         no address to clone it from is known: clone it on a worker that fits, \
+                         or name a cwd"
                     ),
                     None => message,
                 };
                 return error(ErrorCode::Unplaced, &message);
             }
         };
+        // A task with no directory on a worker with no clone of its repository gets one there.
+        if let Some(url) = self.clone_needed(project, &launch, worker)
+            && let Err(why) = self.clone_for((project, task), worker, url).await
+        {
+            return error(ErrorCode::Failed, &format!("task {task} needed a clone: {why}"));
+        }
         let reserved = {
             let mut state = self.inner.state.lock();
             Self::reserve(&mut state, (project, task), &launch, worker).and_then(|placed| {
@@ -1736,6 +1822,7 @@ mod tests {
             repo_id: Some(RepoId {
                 origin: origin.map(str::to_owned),
                 root: root.map(str::to_owned),
+                url: None,
             }),
             changes: None,
             started_ms: WallMs::ZERO,
@@ -1762,7 +1849,7 @@ mod tests {
             shell_in("/w/notes", None, None),
         ];
         let linux = [shell_in("/home/c/slopty", None, Some(root))];
-        let Fact::Map(on_studio) = repos_of(&studio) else { panic!("a map") };
+        let Fact::Map(on_studio) = repos_of(&studio, &[]) else { panic!("a map") };
         assert_eq!(
             on_studio.get(origin),
             Some(&Fact::Text("/w/slopty".to_owned())),
@@ -1775,7 +1862,7 @@ mod tests {
             worker: WorkerId::new(),
             name: name.to_owned(),
             online: true,
-            facts: Facts::from([("repos".to_owned(), repos_of(sessions))]),
+            facts: Facts::from([("repos".to_owned(), repos_of(sessions, &[]))]),
             live: 0,
             fleet_live: 0,
         };

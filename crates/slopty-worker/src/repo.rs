@@ -10,6 +10,9 @@
 //! ([`Identities`]): the origin is the config file read, the first commit one `git rev-list` in
 //! the background.
 
+pub mod bundle;
+pub mod cloning;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -91,10 +94,40 @@ fn common_dir(root: &Path) -> Option<PathBuf> {
 /// `origin` remote's, else the first remote's the config names. A config file read, no git.
 #[must_use]
 pub fn origin_of(root: &Path) -> Option<String> {
+    normalize_origin(&origin_url(root)?)
+}
+
+/// The fetch URL of the repository rooted at `root` as its config spells it: its `origin`
+/// remote's, else the first remote's.
+fn origin_url(root: &Path) -> Option<String> {
     let config = std::fs::read_to_string(common_dir(root)?.join("config")).ok()?;
-    let urls = remote_urls(&config);
-    let url = urls.iter().find(|(name, _)| name == "origin").or_else(|| urls.first())?;
-    normalize_origin(&url.1)
+    let mut urls = remote_urls(&config);
+    let origin = urls.iter().position(|(name, _)| name == "origin").unwrap_or(0);
+    (origin < urls.len()).then(|| urls.swap_remove(origin).1)
+}
+
+/// `url` to clone from, with what could be a secret left out.
+///
+/// That is an HTTP address's user and password (a token often stands in either), and another
+/// scheme's password. An SSH user (`git@`) stays, since it names the account the worker's key
+/// logs in as. `None` for a path on this machine's own disk ([`normalize_origin`]), which is
+/// never cloned onto another.
+#[must_use]
+pub fn clone_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    normalize_origin(url)?;
+    let Some((scheme, rest)) = url.split_once("://") else { return Some(url.to_owned()) };
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let web = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+    let host = match authority.rsplit_once('@') {
+        None => authority.to_owned(),
+        Some((_, host)) if web => host.to_owned(),
+        Some((user, host)) => {
+            let user = user.split_once(':').map_or(user, |(name, _)| name);
+            format!("{user}@{host}")
+        }
+    };
+    Some(format!("{scheme}://{host}/{path}"))
 }
 
 /// Each `[remote "name"]` section's `url`, in the order the config gives them.
@@ -160,11 +193,12 @@ fn is_shallow(root: &Path) -> bool {
 pub async fn identify(root: PathBuf) -> RepoId {
     let local = {
         let root = root.clone();
-        tokio::task::spawn_blocking(move || (origin_of(&root), is_shallow(&root)))
+        tokio::task::spawn_blocking(move || (origin_url(&root), is_shallow(&root)))
     };
-    let (origin, shallow) = local.await.unwrap_or((None, true));
+    let (url, shallow) = local.await.unwrap_or((None, true));
     let first = if shallow { None } else { first_commit(&root).await };
-    RepoId { origin, root: first }
+    let origin = url.as_deref().and_then(normalize_origin);
+    RepoId { origin, root: first, url: url.as_deref().and_then(clone_url) }
 }
 
 async fn first_commit(root: &Path) -> Option<String> {
@@ -504,6 +538,25 @@ mod tests {
         );
     }
 
+    /// The address another worker clones from keeps no secret: an HTTP address loses its user
+    /// and password, which a token often stands in, and any other scheme its password; an SSH
+    /// account stays, and a local path is no address at all.
+    #[test]
+    fn an_address_to_clone_from_keeps_no_secret() {
+        let url = |u: &str| clone_url(u);
+        let plain = Some("https://github.com/o/r.git".to_owned());
+        assert_eq!(url("https://ghp_token@github.com/o/r.git"), plain);
+        assert_eq!(url("https://me:ghp_token@github.com/o/r.git"), plain);
+        assert_eq!(url("  https://github.com/o/r.git "), plain);
+        assert_eq!(
+            url("ssh://git:secret@host.xz:2222/o/r"),
+            Some("ssh://git@host.xz:2222/o/r".into())
+        );
+        assert_eq!(url("git@github.com:o/r.git"), Some("git@github.com:o/r.git".into()));
+        assert_eq!(url("/w/slopty"), None);
+        assert_eq!(url("file:///w/slopty"), None);
+    }
+
     /// Every spelling of one remote is one string; a clone of a local path is none.
     #[test]
     fn an_origin_is_the_same_however_it_was_spelled() {
@@ -633,7 +686,7 @@ mod tests {
                 let mut gate = gate_rx.clone();
                 Box::pin(async move {
                     let _open = gate.wait_for(|open| *open).await;
-                    RepoId { origin: Some("github.com/o/r".to_owned()), root: None }
+                    RepoId { origin: Some("github.com/o/r".to_owned()), root: None, url: None }
                 })
             })
         };

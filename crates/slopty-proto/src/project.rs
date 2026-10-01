@@ -797,10 +797,71 @@ pub struct Task {
     pub pr: Option<PullRequest>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
+    /// What the server last did for it around its agent: a clone made, its branch brought
+    /// home.
+    pub step: Option<TaskStep>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
+}
+
+/// What the server does for a task around its agent, so no wait is silent: a clone made
+/// before it can start, its branch brought to the orchestrator's machine once it is done.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TaskStep {
+    /// Which.
+    pub kind: StepKind,
+    /// The worker it happens on: the one cloning, or the one the branch comes to.
+    pub worker: WorkerId,
+    /// How it goes.
+    pub state: StepState,
+    /// When it began, by the server's clock.
+    pub since_ms: WallMs,
+}
+
+/// Which [`TaskStep`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum StepKind {
+    /// The repository cloned onto the worker the task is placed on, which had none.
+    Clone,
+    /// The task's branch fetched into the orchestrator's clone, from the worker it ran on.
+    Home,
+}
+
+/// How a [`TaskStep`] goes. Its texts are at most [`SUMMARY_MAX`] bytes.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum StepState {
+    /// Under way.
+    Running {
+        /// What it is doing, in a few words.
+        phase: String,
+        /// How far, when known.
+        percent: Option<u8>,
+    },
+    /// Finished.
+    Done {
+        /// What it made: the clone's path, the branch and its commit.
+        detail: String,
+    },
+    /// It failed, and left nothing behind.
+    Failed {
+        /// Why.
+        why: String,
+    },
+}
+
+impl TaskStep {
+    /// About how many bytes it takes on the wire, never less.
+    #[must_use]
+    pub const fn approx_bytes(&self) -> usize {
+        let text = match &self.state {
+            StepState::Running { phase, .. } => phase,
+            StepState::Done { detail } => detail,
+            StepState::Failed { why } => why,
+        };
+        text.len().saturating_add(64)
+    }
 }
 
 impl Task {
@@ -808,6 +869,13 @@ impl Task {
     #[must_use]
     pub fn base_ref(&self, project: &ProjectId) -> String {
         format!("refs/slopty/{project}/{}/base", self.id)
+    }
+
+    /// The branch its work lands as in the orchestrator's clone when it was done on another
+    /// machine: `slopty/<project>/<task>`, a name only the server sets.
+    #[must_use]
+    pub fn home_branch(project: &ProjectId, task: TaskId) -> String {
+        format!("slopty/{project}/{task}")
     }
 
     /// Its line in the tree, with its node's natives counted.
@@ -827,6 +895,7 @@ impl Task {
             worktree: self.worktree.clone(),
             pr: self.pr.clone(),
             verified: self.verified.clone(),
+            step: self.step.clone(),
             natives: natives.counts(),
             created_ms: self.created_ms,
             updated_ms: self.updated_ms,
@@ -868,6 +937,8 @@ pub struct TaskCard {
     pub pr: Option<PullRequest>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
+    /// What the server last did for it around its agent.
+    pub step: Option<TaskStep>,
     /// How many natives its node holds.
     pub natives: NativeCounts,
     /// When it was made.
@@ -883,9 +954,9 @@ impl TaskCard {
         + STATUS_MAX
         + KIND_MAX
         + DEPENDS_MAX * 5
-        + SUMMARY_MAX
+        + 2 * SUMMARY_MAX
         + 6 * REF_MAX
-        + 512;
+        + 576;
 }
 
 impl TaskCard {
@@ -911,6 +982,7 @@ impl TaskCard {
                 .as_ref()
                 .map_or(0, |a| a.conversation.as_deref().map_or(0, str::len).saturating_add(64)),
             self.depends_on.len().saturating_mul(5),
+            self.step.as_ref().map_or(0, TaskStep::approx_bytes),
         ]
         .into_iter()
         .fold(128, usize::saturating_add)
@@ -1030,6 +1102,9 @@ pub enum Moment {
         /// How many.
         reports: u16,
     },
+    /// A step for the task began, finished or failed; its progress between is on its card
+    /// alone.
+    Step(TaskStep),
 }
 
 impl TimelineEntry {
@@ -1048,6 +1123,7 @@ impl TimelineEntry {
             Moment::Reported { report } => text(&report.note)
                 .saturating_add(texts(&report.artifacts))
                 .saturating_add(report.branch.as_deref().map_or(0, text)),
+            Moment::Step(step) => step.approx_bytes(),
             Moment::Created
             | Moment::Orchestrator { .. }
             | Moment::Limits { .. }

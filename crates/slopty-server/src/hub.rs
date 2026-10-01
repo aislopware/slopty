@@ -60,6 +60,7 @@ use crate::deliver::Deliveries;
 use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
 
 mod projects;
+mod steps;
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus
 /// grace; `docs/decisions/topology.md`).
@@ -73,6 +74,10 @@ const WAIT_GRACE: Duration = Duration::from_secs(15);
 /// How long any other forwarded verb may take. Every verb but `WaitFor` is one step on the
 /// worker; this only bounds a worker that stopped answering while its link stays up.
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a clone the server asked for may take: the worker's own limit, and a minute.
+const CLONE_TIMEOUT: Duration = Duration::from_mins(31);
+/// How long making or fetching a bundle may take: the worker's own limit, and a minute.
+const BUNDLE_TIMEOUT: Duration = Duration::from_mins(11);
 /// Directory changes buffered per client link before it lags and gets the whole directory again.
 const EVENT_BUFFER: usize = 1024;
 /// Events the log holds for [`Verb::Events`]; a cursor older than the oldest reads on from it
@@ -191,6 +196,8 @@ struct State {
     watched: HashMap<SessionId, (Watched, tokio::time::Instant)>,
     /// Where every change to the projects goes to be kept ([`crate::store::ProjectStore`]).
     keeper: Option<mpsc::UnboundedSender<Keep>>,
+    /// What the server does for tasks around their agents: clones, branches brought home.
+    steps: steps::Steps,
 }
 
 /// A project change made under a key, so a repeat of the verb answers as the first did.
@@ -593,7 +600,7 @@ impl Hub {
         self.projects_moved(&mut state, ended);
         for summary in opened {
             let term = TermRef { worker, session: summary.id };
-            self.happen(Happening::SessionOpened { worker, summary });
+            self.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
             self.adopt(&mut state, term);
             self.repo_seen(&mut state, term);
         }
@@ -812,6 +819,11 @@ impl Hub {
                           in the agent's terminal and on the person's devices"
                     .to_owned(),
             },
+            Verb::CloneRepo { .. } | Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => error(
+                ErrorCode::Forbidden,
+                "the server clones and carries branches for tasks itself; task_spawn and \
+                     task_report do it",
+            ),
             verb @ (Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
             | Verb::TaskCreate { .. }
@@ -1018,6 +1030,8 @@ impl Hub {
                 *timeout_ms = (*timeout_ms).min(WAIT_CAP_MS);
                 Duration::from_millis(u64::from(*timeout_ms)).saturating_add(WAIT_GRACE)
             }
+            Verb::CloneRepo { .. } => CLONE_TIMEOUT,
+            Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => BUNDLE_TIMEOUT,
             _ => FORWARD_TIMEOUT,
         };
         let Some(worker) = target(&verb) else {
@@ -1321,7 +1335,7 @@ impl Lease {
                 } else {
                     entry.sessions.push(summary.clone());
                     let term = TermRef { worker, session: summary.id };
-                    hub.happen(Happening::SessionOpened { worker, summary });
+                    hub.happen(Happening::SessionOpened { worker, summary: Box::new(summary) });
                     hub.adopt(&mut state, term);
                     hub.unpark_deliveries(&mut state);
                 }
@@ -1354,6 +1368,9 @@ impl Lease {
                 }
             }
             ToServer::Facts(facts) => entry.facts = crate::placement::bounded(facts),
+            ToServer::Cloning { clone, phase, percent } => {
+                hub.clone_moved(&mut state, clone, phase, percent);
+            }
             ToServer::Report(report) => {
                 let term = TermRef { worker, session: report.session() };
                 match &report {
@@ -1603,7 +1620,10 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::ListWindows { worker }
         | Verb::CaptureStill { worker, .. }
         | Verb::Upload { worker, .. }
-        | Verb::WakePeer { worker, .. } => Some(*worker),
+        | Verb::WakePeer { worker, .. }
+        | Verb::CloneRepo { worker, .. }
+        | Verb::BundleBranch { worker, .. }
+        | Verb::FetchBundle { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
             Some(item.worker)
         }

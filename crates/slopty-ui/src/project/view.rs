@@ -18,7 +18,7 @@ use gpui::{
 };
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::project::{
-    Moment, NativeCounts, ProjectId, ReportKind, TaskCard, TaskId, TaskState,
+    Moment, NativeCounts, ProjectId, ReportKind, StepKind, StepState, TaskCard, TaskId, TaskState,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
@@ -810,6 +810,11 @@ impl ProjectView {
             if card.read_only {
                 parts.push("reads only".to_owned());
             }
+            // A step under way or failed says so on the row; one done is the timeline's.
+            let shown = card.step.as_ref().filter(|s| !matches!(s.state, StepState::Done { .. }));
+            if let Some(step) = shown {
+                parts.push(super::model::step_line(step, |w| self.worker_name(w)));
+            }
         }
         let counts = card.map_or(board.orchestrator_natives, |c| c.natives);
         parts.extend(natives_line(counts));
@@ -1210,6 +1215,12 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
             ReportKind::Done => (IconName::CircleCheck, s.success),
         },
         Moment::Delivered { .. } => (IconName::Inbox, s.text_muted),
+        Moment::Step(step) => match (step.kind, &step.state) {
+            (_, StepState::Failed { .. }) => (IconName::CircleX, s.error),
+            (StepKind::Clone, _) => (IconName::FolderGit2, s.text_secondary),
+            (StepKind::Home, StepState::Done { .. }) => (IconName::GitBranch, s.success),
+            (StepKind::Home, _) => (IconName::Download, s.text_secondary),
+        },
     };
     (glyph, hsla(tone))
 }

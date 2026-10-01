@@ -20,8 +20,8 @@ use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live,
     METADATA_MAX, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives, NodeDetail,
     NodeNatives, Project, ProjectStatus, ProjectUpdate, REF_MAX, Report, STATUS_MAX, SUMMARY_MAX,
-    TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId, TaskSpec,
-    TaskState, TimelineEntry, VerifierRun,
+    StepState, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId,
+    TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
@@ -776,6 +776,14 @@ impl Projects {
             .into_iter()
             .map(|mut r| {
                 r.recount();
+                // No step goes on across a restart: one under way when the server stopped
+                // says it ended.
+                for step in r.tasks.iter_mut().filter_map(|t| t.step.as_mut()) {
+                    if matches!(step.state, StepState::Running { .. }) {
+                        let why = "the server stopped while it ran".to_owned();
+                        step.state = StepState::Failed { why };
+                    }
+                }
                 (r.project.id.clone(), r)
             })
             .collect();
@@ -1109,6 +1117,7 @@ impl Projects {
             verified: None,
             created_ms: now,
             updated_ms: now,
+            step: None,
         };
         record.tasks.push(task.clone());
         let entry =
@@ -1597,12 +1606,46 @@ impl Projects {
         updates
     }
 
+    /// What the server does for `task` around its agent moved ([`TaskStep`]): the card shows
+    /// it. A step that began, finished or failed goes on the timeline too, its texts clipped;
+    /// progress between is the card's alone, and not kept.
+    pub(crate) fn set_step(
+        &mut self,
+        id: &ProjectId,
+        task: TaskId,
+        mut step: TaskStep,
+        now: WallMs,
+    ) -> Result<Vec<Change>, Refused> {
+        let text = match &mut step.state {
+            StepState::Running { phase, .. } => phase,
+            StepState::Done { detail } => detail,
+            StepState::Failed { why } => why,
+        };
+        *text = clipped(text, SUMMARY_MAX);
+        let record = self.record(id)?;
+        let t =
+            record.tasks.iter_mut().find(|t| t.id == task).ok_or_else(|| unknown_task(id, task))?;
+        let began = !matches!(&t.step, Some(s) if s.kind == step.kind && matches!(s.state, StepState::Running { .. }));
+        let logged = match step.state {
+            StepState::Running { .. } => began,
+            StepState::Done { .. } | StepState::Failed { .. } => true,
+        };
+        if !began && let Some(was) = &t.step {
+            step.since_ms = was.since_ms;
+        }
+        t.step = Some(step.clone());
+        t.updated_ms = now;
+        let task_now = t.clone();
+        let entry = logged.then(|| record.log(Some(task), Moment::Step(step), now));
+        Ok(vec![Change { durable: logged, ..record.task_update(&task_now, entry) }])
+    }
+
     /// The terminal `term` is in the repository `id`: a project it orchestrates that knows no
     /// repository yet learns it, each key clipped like any other ref. Learned once: the
     /// orchestrator walking into another checkout later does not move where tasks go.
     pub(crate) fn repo_seen(&mut self, term: TermRef, id: &RepoId) -> Vec<Change> {
         let clip = |key: &Option<String>| key.as_deref().map(|k| clipped(k, REF_MAX));
-        let id = RepoId { origin: clip(&id.origin), root: clip(&id.root) };
+        let id = RepoId { origin: clip(&id.origin), root: clip(&id.root), url: clip(&id.url) };
         self.records
             .values_mut()
             .filter(|r| r.project.orchestrator == Some(term) && r.project.repo_id.is_none())

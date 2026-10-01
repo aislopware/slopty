@@ -156,7 +156,7 @@ mod tests {
     const ROOT: &str = "c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e";
 
     fn id(origin: Option<&str>, root: Option<&str>) -> RepoId {
-        RepoId { origin: origin.map(str::to_owned), root: root.map(str::to_owned) }
+        RepoId { origin: origin.map(str::to_owned), root: root.map(str::to_owned), url: None }
     }
 
     fn names(grouped: &Grouped) -> Vec<&str> {

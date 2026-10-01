@@ -17,7 +17,8 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Moment, Native, NativeChange, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
-    ProjectUpdate, ProjectsPart, ReportKind, TaskCard, TaskId, TaskState, TimelineEntry,
+    ProjectUpdate, ProjectsPart, ReportKind, StepKind, StepState, TaskCard, TaskId, TaskState,
+    TaskStep, TimelineEntry,
 };
 
 /// How many timeline entries a board keeps: a screenful many times over, and a bound on a
@@ -526,6 +527,34 @@ pub fn moment_line(
         Moment::Delivered { term, reports: 1 } => format!("A report delivered to {}", agent(*term)),
         Moment::Delivered { term, reports } => {
             format!("{reports} reports delivered to {}", agent(*term))
+        }
+        Moment::Step(step) => step_line(step, &name),
+    }
+}
+
+/// A step the server takes for a task, in words: what, where, and how it went.
+#[must_use]
+pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
+    let at = name(step.worker);
+    let first = |text: &str| crate::kit::first_line(text).to_owned();
+    match (step.kind, &step.state) {
+        (StepKind::Clone, StepState::Running { phase, percent }) => match percent {
+            Some(p) => format!("Cloning on {at}: {} {p}%", first(phase)),
+            None => format!("Cloning on {at}"),
+        },
+        (StepKind::Clone, StepState::Done { .. }) => format!("Cloned on {at}"),
+        (StepKind::Clone, StepState::Failed { why }) => {
+            format!("Clone on {at} failed: {}", first(why))
+        }
+        (StepKind::Home, StepState::Running { percent, .. }) => match percent {
+            Some(p) => format!("Bringing its branch to {at}: {p}%"),
+            None => format!("Bringing its branch to {at}"),
+        },
+        (StepKind::Home, StepState::Done { detail }) => {
+            format!("Branch arrived on {at}: {}", first(detail))
+        }
+        (StepKind::Home, StepState::Failed { why }) => {
+            format!("Branch did not reach {at}: {}", first(why))
         }
     }
 }

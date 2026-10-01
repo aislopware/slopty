@@ -176,6 +176,7 @@ async fn session(
     let Watched { mut caps, mut facts } = watched;
     // Subscribed before the registration is taken: whatever happens after it is sent after it.
     let mut events = daemon.events.subscribe();
+    let mut cloning = orchestrator.clone_progress();
     let mut reports = daemon.reports.subscribe();
     let now = caps.borrow_and_update().clone();
     let registration = Registration {
@@ -297,6 +298,17 @@ async fn session(
                     Ok(_) => continue,
                     // What was missed is in a fresh registration.
                     Err(broadcast::error::RecvError::Lagged(_)) => break "fell behind the daemon's events",
+                    Err(broadcast::error::RecvError::Closed) => break "the daemon is stopping",
+                };
+                if out.send(msg).await.is_err() {
+                    break "the writer stopped";
+                }
+            }
+            step = cloning.recv() => {
+                let msg = match step {
+                    Ok((clone, p)) => ToServer::Cloning { clone, phase: p.phase, percent: p.percent },
+                    // A step of progress missed is overtaken by the next.
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break "the daemon is stopping",
                 };
                 if out.send(msg).await.is_err() {

@@ -168,8 +168,8 @@ impl Command {
     }
 
     /// Whether a key alone is a chord for it: its scope takes them, or every context it binds
-    /// in holds no text to type into ([`TEXTLESS`]), as a PDF's pages in a file tile, whose
-    /// scope also holds the editor's commands.
+    /// in holds no text to type into: a PDF's pages in a file tile (whose scope also holds the
+    /// editor's commands), a folder, a board.
     #[must_use]
     pub fn takes_bare_keys(&self) -> bool {
         self.scope.takes_bare_keys()

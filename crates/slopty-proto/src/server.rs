@@ -236,6 +236,16 @@ pub enum ToServer {
     /// and probes (`docs/decisions/projects.md`). Sent after registering and when they change;
     /// each replaces the last.
     Facts(crate::project::Facts),
+    /// How far a clone the server asked for ([`crate::orchestration::Verb::CloneRepo`]) has
+    /// come, sent as it moves.
+    Cloning {
+        /// The server's number for the clone.
+        clone: u64,
+        /// What git is doing, in its words (`Receiving objects`).
+        phase: String,
+        /// How far that is, when git says.
+        percent: Option<u8>,
+    },
 }
 
 /// Server → dialer.

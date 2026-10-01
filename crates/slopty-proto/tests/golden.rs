@@ -472,6 +472,7 @@ mod golden {
             repo_id: Some(slopty_proto::terminal::RepoId {
                 origin: Some("github.com/aislopware/slopty".to_owned()),
                 root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+                url: Some("git@github.com:aislopware/slopty.git".to_owned()),
             }),
             changes: Some(slopty_proto::terminal::RepoChanges { files: 3, added: 12, removed: 4 }),
             started_ms: WallMs::from_millis(1_790_000_000_000),

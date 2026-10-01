@@ -642,6 +642,69 @@ pub enum Verb {
         /// The terminal, by its session.
         session: SessionId,
     },
+    /// Clone a repository onto a worker from `url`, with the worker's own git credentials,
+    /// into the place it keeps its clones; one there already is answered as it is. How it goes
+    /// comes as [`crate::server::ToServer::Cloning`]. Answered with [`Outcome::Cloned`].
+    CloneRepo {
+        /// Where.
+        worker: WorkerId,
+        /// What to clone: a remote's address, never a path on the worker's own disk.
+        url: String,
+        /// The server's number for it, which its progress names.
+        clone: u64,
+    },
+    /// Put a branch's commits beyond where it left `target` in a git bundle on its worker, for
+    /// another worker to fetch. Answered with [`Outcome::Bundle`].
+    BundleBranch {
+        /// Where.
+        worker: WorkerId,
+        /// The clone or worktree the branch is in.
+        repo: String,
+        /// The branch.
+        branch: String,
+        /// The branch work lands on, whose fork point the bundle starts after; the whole
+        /// branch when `None`.
+        target: Option<String>,
+    },
+    /// Fetch a branch from a bundle put in the worker's bundle place into a repository on it,
+    /// as the branch `into`; the bundle goes after. A repository that lacks the commit the
+    /// bundle starts after fetches its own `origin` once first. Answered with
+    /// [`Outcome::Fetched`].
+    FetchBundle {
+        /// Where.
+        worker: WorkerId,
+        /// The repository to fetch into.
+        repo: String,
+        /// The bundle's name in the worker's bundle place.
+        bundle: String,
+        /// The branch it holds.
+        branch: String,
+        /// The branch it lands as, which is set to it whatever it held.
+        into: String,
+        /// The commit the branch is at, which the bundle must hold.
+        head: String,
+    },
+}
+
+/// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
+/// [`Verb::FetchBundle`]): an upload there is a bundle to fetch. One left an hour is swept.
+pub const BUNDLES: &str = "~/.cache/slopty/bundles";
+
+/// A branch put in a git bundle on its worker ([`Verb::BundleBranch`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BranchBundle {
+    /// Where it is on the worker.
+    pub path: String,
+    /// Its name, for [`Verb::FetchBundle`] once it is in another worker's [`BUNDLES`].
+    pub name: String,
+    /// Its size.
+    pub size: u64,
+    /// Its BLAKE3 digest.
+    pub digest: Hash,
+    /// The commit the branch is at.
+    pub head: String,
+    /// The commit it starts after, when it holds only the branch's own.
+    pub base: Option<String>,
 }
 
 /// One step of a [`Verb::Upload`].
@@ -697,11 +760,15 @@ impl Verb {
             | Self::TaskUpdate { .. }
             | Self::TaskAssign { .. }
             | Self::TaskSpawn { .. }
-            | Self::TaskReport { .. } => true,
+            | Self::TaskReport { .. }
+            | Self::BundleBranch { .. }
+            | Self::FetchBundle { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
-            Self::ListWorkers
+            // A clone there already is answered as it is.
+            Self::CloneRepo { .. }
+            | Self::ListWorkers
             | Self::ListTerminals { .. }
             | Self::ReadScreen { .. }
             | Self::ReadOutput { .. }
@@ -795,8 +862,8 @@ pub enum Happening {
     SessionOpened {
         /// Where.
         worker: WorkerId,
-        /// What.
-        summary: SessionSummary,
+        /// What; boxed, being the largest but for a project's.
+        summary: Box<SessionSummary>,
     },
     /// A terminal ended.
     SessionClosed {
@@ -1094,6 +1161,23 @@ pub enum Outcome {
     /// For [`Verb::WorkingOn`]: the project and the task, none for its orchestrator; none when
     /// the terminal is on nothing.
     WorkingOn(Option<(ProjectId, Option<TaskId>)>),
+    /// For [`Verb::CloneRepo`]: where the clone is, and which repository it is.
+    Cloned {
+        /// Its root on the worker.
+        path: String,
+        /// Its identity, as the worker reads it.
+        repo: crate::terminal::RepoId,
+    },
+    /// For [`Verb::BundleBranch`]: the bundle, to read with [`Verb::ReadFile`]; boxed, being
+    /// rare and the largest.
+    Bundle(Box<BranchBundle>),
+    /// For [`Verb::FetchBundle`]: the branch is in the repository at `head`.
+    Fetched {
+        /// The branch it landed as.
+        branch: String,
+        /// Its commit.
+        head: String,
+    },
 }
 
 /// A page of an agent's conversation: the entries of one thread from `start`, what the face

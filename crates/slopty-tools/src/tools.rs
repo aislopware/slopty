@@ -1854,6 +1854,7 @@ mod tests {
             verified: None,
             created_ms: WallMs::ZERO,
             updated_ms: WallMs::ZERO,
+            step: None,
         }
     }
 

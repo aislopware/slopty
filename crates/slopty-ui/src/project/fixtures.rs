@@ -47,6 +47,7 @@ pub(crate) fn card(n: u32, title: &str, state: TaskState, parent: Option<u32>) -
         worktree: None,
         pr: None,
         verified: None,
+        step: None,
         natives: NativeCounts::default(),
         created_ms: AT,
         updated_ms: AT,

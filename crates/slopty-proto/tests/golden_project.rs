@@ -11,16 +11,17 @@ mod golden_project {
     use slopty_proto::agent::{AgentBranch, PullRequest, Review, Worktree};
     use slopty_proto::codec;
     use slopty_proto::orchestration::{
-        ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
+        BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::project::{
         AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Moment, Native,
         NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placement, Preference,
         Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Reason, Report, ReportKind,
-        Runner, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
-        TimelineEntry, VerifierRun, WorkerFacts,
+        Runner, StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec,
+        TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
+    use slopty_proto::terminal::RepoId;
     use uuid::Uuid;
 
     fn hex(bytes: &[u8]) -> String {
@@ -59,9 +60,10 @@ mod golden_project {
             id: project_id(),
             title: "Projects mode".to_owned(),
             repo: "~/src/slopty".to_owned(),
-            repo_id: Some(slopty_proto::terminal::RepoId {
+            repo_id: Some(RepoId {
                 origin: Some("github.com/aislopware/slopty".to_owned()),
                 root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+                url: Some("https://github.com/aislopware/slopty.git".to_owned()),
             }),
             target: "main".to_owned(),
             verifier: Some("cargo gate".to_owned()),
@@ -131,6 +133,12 @@ mod golden_project {
             verified: Some(run(false, "clippy: 2 errors")),
             created_ms: at(),
             updated_ms: WallMs::from_millis(1_790_000_005_000),
+            step: Some(TaskStep {
+                kind: StepKind::Home,
+                worker: term().worker,
+                state: StepState::Running { phase: "Sending".to_owned(), percent: Some(40) },
+                since_ms: at(),
+            }),
         }
     }
 
@@ -324,6 +332,59 @@ mod golden_project {
         );
     }
 
+    /// What the server asks of workers for a task around its agent: a clone, a branch
+    /// bundled, a bundle fetched; and how they answer.
+    #[test]
+    fn task_steps() {
+        let worker = term().worker;
+        let url = "https://github.com/aislopware/slopty.git".to_owned();
+        snap("clone_repo", &request(Verb::CloneRepo { worker, url, clone: 7 }));
+        let progress = "Receiving objects".to_owned();
+        snap("worker_cloning", &ToServer::Cloning { clone: 7, phase: progress, percent: Some(45) });
+        let repo = RepoId {
+            origin: Some("github.com/aislopware/slopty".to_owned()),
+            root: Some(commit('c')),
+            url: Some("https://github.com/aislopware/slopty.git".to_owned()),
+        };
+        let path = "/home/c/slopty/clones/github.com/aislopware/slopty".to_owned();
+        snap("cloned", &reply(Outcome::Cloned { path: path.clone(), repo }));
+        let branch = "worktree-slopty-slopty-3".to_owned();
+        snap(
+            "bundle_branch",
+            &request(Verb::BundleBranch {
+                worker,
+                repo: path,
+                branch: branch.clone(),
+                target: Some("main".to_owned()),
+            }),
+        );
+        let name = format!("{branch}-4a7aa6d00000.bundle");
+        snap(
+            "bundle",
+            &reply(Outcome::Bundle(Box::new(BranchBundle {
+                path: format!("/home/c/.cache/slopty/bundles/{name}"),
+                name: name.clone(),
+                size: 81_920,
+                digest: [7; 32],
+                head: commit('a'),
+                base: Some(commit('b')),
+            }))),
+        );
+        snap(
+            "fetch_bundle",
+            &request(Verb::FetchBundle {
+                worker,
+                repo: "/w/slopty".to_owned(),
+                bundle: name,
+                branch,
+                into: "slopty/slopty/3".to_owned(),
+                head: commit('a'),
+            }),
+        );
+        let into = "slopty/slopty/3".to_owned();
+        snap("fetched", &reply(Outcome::Fetched { branch: into, head: commit('a') }));
+    }
+
     #[test]
     fn project_answers() {
         let timeline = vec![
@@ -437,10 +498,16 @@ mod golden_project {
             Moment::Reported { report: report() },
             Moment::Delivered { term: term(), reports: 3 },
             Moment::Note { text: "ready".to_owned() },
+            Moment::Step(TaskStep {
+                kind: StepKind::Clone,
+                worker: term().worker,
+                state: StepState::Failed { why: "fatal: Authentication failed".to_owned() },
+                since_ms: at(),
+            }),
         ];
         let timeline: Vec<TimelineEntry> =
             (1..).zip(moments).map(|(seq, what)| entry(seq, what)).collect();
-        let snapshot = status(timeline.clone(), 14);
+        let snapshot = status(timeline.clone(), 15);
         let part = ProjectsPart { seq: 49, first: true, last: true, projects: vec![snapshot] };
         snap("project_snapshot", &FromServer::Projects(Box::new(part)));
         let update = ProjectUpdate {

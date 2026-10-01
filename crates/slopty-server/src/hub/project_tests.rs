@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use slopty_agent::vouch::SessionKey;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason, PullRequest, Worktree};
+use slopty_proto::orchestration::{BranchBundle, UploadPart};
 use slopty_proto::project::{
     Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, Placement, ProjectId, Runner, TASK_ENV,
     TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
@@ -1505,6 +1506,7 @@ async fn the_orchestrator_is_told_where_its_repository_is_cloned() {
         repo_id: Some(slopty_proto::terminal::RepoId {
             origin: origin.map(str::to_owned),
             root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+            url: None,
         }),
         ..summary(session)
     };
@@ -1549,6 +1551,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
         repo_id: Some(slopty_proto::terminal::RepoId {
             origin: origin.map(str::to_owned),
             root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+            url: None,
         }),
         ..summary(session)
     };
@@ -1602,4 +1605,226 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let no = hub.dispatch(Verb::TaskSpawn { project: project(), task: there, launch }).await;
     let said = refused(&no, ErrorCode::Unplaced);
     assert!(said.contains("in repos"), "the clone rule is named: {said}");
+}
+
+/// A shell in the clone at `path` of the repository `origin`, cloned from `url`.
+fn in_repo(session: SessionId, path: &str, url: Option<&str>) -> SessionSummary {
+    SessionSummary {
+        repo: Some(path.to_owned()),
+        repo_id: Some(slopty_proto::terminal::RepoId {
+            origin: Some("example.com/o/demo".to_owned()),
+            root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+            url: url.map(str::to_owned),
+        }),
+        ..summary(session)
+    }
+}
+
+/// The task's step as its card has it now.
+async fn step_of(hub: &Hub, task: TaskId) -> Option<slopty_proto::project::TaskStep> {
+    task_now(hub, task).await.step
+}
+
+/// The worker's answer to `verb` request `id`.
+fn answer(lease: &Lease, id: RequestId, outcome: Outcome) {
+    lease.handle(ToServer::Reply { id, outcome });
+}
+
+/// A task with no directory whose rules want a worker with no clone of the project's
+/// repository gets one there first, from the address the orchestrator's clone names: the card
+/// shows how far it is as git says, the timeline its start and end, and the agent then starts
+/// in it. A clone that fails is the start's refusal, and the card says why.
+#[tokio::test]
+async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
+    use slopty_proto::project::{StepKind, StepState};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let url = "https://example.com/o/demo.git";
+    let studio = vec![in_repo(orchestrator, "/w/demo", Some(url))];
+    let (studio, _studio_lease, _studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let (_linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let anywhere = TaskLaunch { cwd: String::new(), ..claude(&[]) };
+
+    let task = new_task(&hub, linux_only()).await;
+    let verb = Verb::TaskSpawn { project: project(), task, launch: anywhere.clone() };
+    let asked = spawn(&hub, verb);
+    let (id, verb) = request(&mut linux_rx).await;
+    let Verb::CloneRepo { url: asked_url, clone, .. } = verb else { panic!("{verb:?}") };
+    assert_eq!(asked_url, url);
+    let running = |s: Option<slopty_proto::project::TaskStep>| match s.map(|s| (s.kind, s.state)) {
+        Some((StepKind::Clone, StepState::Running { phase, percent })) => Some((phase, percent)),
+        _ => None,
+    };
+    assert!(running(step_of(&hub, task).await).is_some(), "the card says it clones");
+    let phase = "Receiving objects".to_owned();
+    linux_lease.handle(ToServer::Cloning { clone, phase: phase.clone(), percent: Some(42) });
+    assert_eq!(running(step_of(&hub, task).await), Some((phase.clone(), Some(42))));
+    linux_lease.handle(ToServer::Cloning { clone, phase: phase.clone(), percent: Some(43) });
+    assert_eq!(running(step_of(&hub, task).await), Some((phase, Some(42))), "in steps of five");
+
+    let path = "/home/c/slopty/clones/example.com/o/demo".to_owned();
+    let repo = in_repo(SessionId::new(), &path, Some(url)).repo_id.unwrap();
+    answer(&linux_lease, id, Outcome::Cloned { path: path.clone(), repo });
+    let start = request(&mut linux_rx).await;
+    let Verb::SpawnAgent { cwd, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
+    assert_eq!(cwd, path, "the agent starts in the clone made");
+    assert!(args.iter().any(|a| a == "--worktree"), "{args:?}");
+    opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let done = step_of(&hub, task).await.map(|s| s.state);
+    assert_eq!(done, Some(StepState::Done { detail: path.clone() }));
+    let steps: Vec<_> = status(&hub)
+        .await
+        .timeline
+        .into_iter()
+        .filter_map(|e| match e.what {
+            Moment::Step(s) => Some(s.state),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(steps.as_slice(), [StepState::Running { .. }, StepState::Done { .. }]),
+        "{steps:?}"
+    );
+
+    // The next task there finds the clone: no second one.
+    let next = new_task(&hub, linux_only()).await;
+    let verb = Verb::TaskSpawn { project: project(), task: next, launch: anywhere.clone() };
+    let asked = spawn(&hub, verb);
+    let start = request(&mut linux_rx).await;
+    assert!(matches!(&start.1, Verb::SpawnAgent { cwd, .. } if *cwd == path), "{:?}", start.1);
+    opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    // A clone that fails: the start is refused saying why, and so is the card.
+    let (_other, other_lease, mut other_rx) = worker_on(&hub, "other", Os::Linux, Vec::new());
+    let only_other =
+        Placement { require: vec![r#"name == "other""#.to_owned()], ..Placement::default() };
+    let failing = new_task(&hub, only_other).await;
+    let verb = Verb::TaskSpawn { project: project(), task: failing, launch: anywhere };
+    let asked = spawn(&hub, verb);
+    let (id, verb) = request(&mut other_rx).await;
+    assert!(matches!(verb, Verb::CloneRepo { .. }), "{verb:?}");
+    let denied = "fatal: Authentication failed for 'https://example.com/o/demo.git/'".to_owned();
+    answer(&other_lease, id, Outcome::Error { code: ErrorCode::Failed, message: denied.clone() });
+    let said = refused(&asked.await.unwrap(), ErrorCode::Failed).to_owned();
+    assert!(said.contains("Authentication failed"), "{said}");
+    let failed = step_of(&hub, failing).await.map(|s| (s.kind, s.state));
+    assert_eq!(failed, Some((StepKind::Clone, StepState::Failed { why: denied })));
+}
+
+/// A task's agent reports done on a worker other than its orchestrator's: its branch comes
+/// home as a bundle of its own commits, read in parts there and uploaded here, then fetched
+/// into the orchestrator's clone as `slopty/<project>/<task>`, and the timeline says it arrived.
+/// A clone that lacks the fork point gets the whole branch instead, and a done reported again
+/// mid-trip sends the branch once more after it.
+#[tokio::test]
+async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
+    use slopty_proto::project::{Report, ReportKind, StepKind, StepState, TaskStep};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let studio = vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
+    let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let linux = vec![in_repo(SessionId::new(), "/home/c/demo", None)];
+    let (_linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let task = new_task(&hub, linux_only()).await;
+    let launch = TaskLaunch { cwd: String::new(), ..claude(&[]) };
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
+    let start = request(&mut linux_rx).await;
+    let term = opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    let branch = format!("worktree-slopty-slopty-{task}");
+    let report = Report {
+        kind: ReportKind::Done,
+        note: "Built it.".to_owned(),
+        artifacts: Vec::new(),
+        branch: Some(branch.clone()),
+        pr: None,
+    };
+    let verb = Verb::TaskReport { project: project(), task, report };
+    let done = async || hub.dispatch_as(Speaker::Proven(term.session), None, verb.clone()).await;
+    assert!(matches!(done().await, Outcome::Task(_)));
+
+    let bundle = |target: Option<String>, size: u64| {
+        let name = format!("{branch}-4a7aa6d00000.bundle");
+        let (path, head) = (
+            format!("/home/c/.cache/slopty/bundles/{name}"),
+            format!("{}4a7aa", "4a7aa6d".repeat(5)),
+        );
+        let made = BranchBundle { path, name, size, digest: [3; 32], head, base: None };
+        (target, Outcome::Bundle(Box::new(made)))
+    };
+    // The fork point first; the clone here lacks it; then the whole branch.
+    for (want_target, lacking) in [(Some("main".to_owned()), true), (None, false)] {
+        let (id, verb) = request(&mut linux_rx).await;
+        let Verb::BundleBranch { repo, branch: b, target, .. } = verb else { panic!("{verb:?}") };
+        assert_eq!(
+            (repo.as_str(), b.as_str(), &target),
+            ("/home/c/demo", branch.as_str(), &want_target)
+        );
+        if lacking {
+            // Done again mid-trip: the trip goes once more when this one ends.
+            assert!(matches!(done().await, Outcome::Task(_)));
+        }
+        answer(&linux_lease, id, bundle(target, 6).1);
+        let (id, verb) = request(&mut linux_rx).await;
+        assert!(matches!(verb, Verb::ReadFile { offset: 0, .. }), "{verb:?}");
+        answer(&linux_lease, id, Outcome::File { bytes: b"bundle".to_vec(), offset: 0, size: 6 });
+        let (id, verb) = request(&mut studio_rx).await;
+        let Verb::Upload { path, part: UploadPart::Bytes { offset: 0, .. }, .. } = verb else {
+            panic!("{verb:?}")
+        };
+        assert!(path.starts_with("~/.cache/slopty/bundles/"), "{path}");
+        answer(&studio_lease, id, Outcome::Done);
+        let (id, verb) = request(&mut studio_rx).await;
+        assert!(
+            matches!(verb, Verb::Upload { part: UploadPart::Finish { size: 6, .. }, .. }),
+            "{verb:?}"
+        );
+        answer(&studio_lease, id, Outcome::Done);
+        let (id, verb) = request(&mut studio_rx).await;
+        let Verb::FetchBundle { repo, into, head, .. } = verb else { panic!("{verb:?}") };
+        assert_eq!(repo, "/w/demo", "into the orchestrator's clone");
+        assert_eq!(into, format!("slopty/slopty/{task}"), "as a branch only the server names");
+        let outcome = if lacking {
+            let message = "error: Repository lacks these prerequisite commits".to_owned();
+            Outcome::Error { code: ErrorCode::Conflict, message }
+        } else {
+            Outcome::Fetched { branch: into, head }
+        };
+        answer(&studio_lease, id, outcome);
+    }
+    let (id, verb) = request(&mut linux_rx).await;
+    assert!(matches!(verb, Verb::BundleBranch { .. }), "the second trip: {verb:?}");
+    let arrived: Vec<_> = status(&hub)
+        .await
+        .timeline
+        .into_iter()
+        .filter_map(|e| match e.what {
+            Moment::Step(TaskStep { kind, worker, state: StepState::Done { detail }, .. }) => {
+                Some((kind, worker, detail))
+            }
+            _ => None,
+        })
+        .collect();
+    let detail = format!("{branch} as slopty/slopty/{task} at 4a7aa6d in /w/demo");
+    assert_eq!(arrived, [(StepKind::Home, studio, detail)], "the branch arrived");
+    let nothing = format!("{branch} has no commit beyond main");
+    answer(&linux_lease, id, Outcome::Error { code: ErrorCode::Failed, message: nothing.clone() });
+    let failed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(TaskStep { state: StepState::Failed { why }, .. }) =
+                step_of(&hub, task).await
+            {
+                return why;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the second trip ends");
+    assert_eq!(failed, nothing);
 }

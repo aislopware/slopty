@@ -12,8 +12,8 @@ use slopty_proto::agent::{PullRequest, Review};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Bounds, Fact, Facts, Limits, Live, Moment, NativeCounts, Natives, NodeDetail, Peer, Placement,
-    Project, ProjectStatus, Report, ReportKind, Suggestion, Task, TaskCard, TaskState,
-    TimelineEntry, VerifierRun,
+    Project, ProjectStatus, Report, ReportKind, StepKind, StepState, Suggestion, Task, TaskCard,
+    TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
 
@@ -381,6 +381,21 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
         Moment::Delivered { reports, .. } => {
             ("delivered", format!("{reports} report(s) handed to its agent"))
         }
+        Moment::Step(step) => ("step", step_text(step)),
+    }
+}
+
+/// A step the server took for a task, in a line.
+fn step_text(step: &TaskStep) -> String {
+    let what = match step.kind {
+        StepKind::Clone => format!("clone on worker {}", step.worker),
+        StepKind::Home => format!("branch brought to worker {}", step.worker),
+    };
+    match &step.state {
+        StepState::Running { phase, percent: Some(p) } => format!("{what}: {phase} {p}%"),
+        StepState::Running { phase, percent: None } => format!("{what}: {phase}"),
+        StepState::Done { detail } => format!("{what} done: {detail}"),
+        StepState::Failed { why } => format!("{what} failed: {why}"),
     }
 }
 

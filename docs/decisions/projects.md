@@ -648,11 +648,105 @@ MonoCode)
   waits for the first run's own shell before the test opens anything, so the tiles stand in
   the same order on every run. Three runs rendered byte-identical goldens.
 
+**A task placed where there is no clone gets one, made by that worker's own git.** ✅ 2026-10-01
+- Before, a task with no `cwd` could start only on a worker that already had a clone, so an
+  orchestrator could not send work to a fresh Linux box. Now, when no worker with a clone fits,
+  the task goes where its rules would put it without the clone rule, and that worker clones
+  the repository first. A pin to a worker with no clone does the same.
+- The address comes from the orchestrator's clone: `RepoId::url`, the origin's URL as its
+  config spells it, with an HTTP user and password and any other scheme's password left out
+  (`repo::clone_url`). An SSH user such as `git@` stays, since it names the account the key
+  logs in as. A clone of a local path has no address, and its refusal says so. The URL is not
+  part of the identity: `RepoId::same` and the `repos` keys ignore it.
+- The worker clones with its own git, so its person's credentials, SSH keys, credential
+  helpers and `insteadOf` rules apply, and Slopty carries no token. Git never prompts
+  (`GIT_TERMINAL_PROMPT=0`, no stdin). The clone goes to `~/slopty/clones/<host>/<path>`, built
+  beside that folder and renamed into it once git finishes, so a failed or cut-short clone
+  leaves nothing that looks like a clone. One that is already there and has the same origin
+  is answered as it is. At most two clones run at once on a worker, one at a time per folder,
+  and each has 30 minutes with its wait for a turn counted.
+- Slopty made the clone, so it trusts it for Claude Code (`repo::cloning::trust`, kept only
+  inside `~/slopty/clones`). Otherwise the agent would wait at the folder trust dialog and no
+  hook would run. The worktrees under it share the clone's trust key.
+- It is visible, as everything the server does for a task is: `Task::step` (`TaskStep`, also
+  on the card) says what is being done, where, and how it is going. Git's own progress
+  arrives as `ToServer::Cloning` and is shown in 5% steps. The step's start and its end
+  (`Done` with the path, or `Failed` with git's `fatal:` line) go on the timeline as
+  `Moment::Step`. The progress between them shows on the card only and is not kept. A clone
+  that fails refuses the start with git's words.
+- The server keeps the clones it had made per worker (`Steps::made_on`) and adds them to that
+  worker's `repos` fact, so the next task finds the clone before any shell has opened in it.
+  After a restart that list is empty, and a worker asked again answers from the clone it
+  already has.
+- A step under way when the server stops is marked failed as the store loads, so no card
+  keeps saying it is cloning.
+- Rejected: **cloning through the server** (a bare repository there, as the phase 2 design
+  has it). It needs `git-remote-slopty` and a server-side copy of every repository. A worker
+  can reach the forge the person already uses, with credentials the person already has.
+
+**A finished task's branch comes home as a bundle, under a name only the server gives.**
+✅ 2026-10-01
+- When a task's agent reports `done` with a branch and it ran on a machine other than its
+  orchestrator's, or in another clone, the server brings the branch to the orchestrator's
+  clone, in the background:
+  1. The worker it ran on bundles the branch's commits beyond its fork point from the target,
+     taken from `origin/<target>` or else `<target>` (`Verb::BundleBranch`, `git bundle
+     create`).
+  2. The server reads the bundle in 4 MiB parts and uploads it into the other worker's
+     `~/.cache/slopty/bundles` with the digest checked.
+  3. That worker fetches it (`Verb::FetchBundle`).
+  Neither worker needs a credential for the other, nothing is pushed to the forge, and the
+  bundle is removed once it has been fetched. One left behind is swept after an hour.
+- It lands as `slopty/<project>/<task>` (`Task::home_branch`), force-set. The name the agent
+  reported is only the source. A report naming `main` therefore never moves the person's
+  `main`. Landing under the reported name would also have let the next done report rewrite
+  whatever branch it named.
+- The receiving clone usually lacks the fork point, because a clone made later fetched a newer
+  target. So when `git bundle verify` reports missing prerequisites, the receiver fetches its
+  own `origin` once and verifies again. Only if the commits are still missing (no origin, or
+  the forge unreachable) does the server send the whole branch. `--quiet` is not used on
+  verify, because it hides the list of missing commits that tells the cases apart.
+- The clone it goes to is the orchestrator's current checkout while that is still in the
+  project's repository (`RepoId::same`), and otherwise any clone of it on that worker. The
+  source is the task's worktree as its status line reports it, else the repository its
+  terminal is in, else a clone on that worker.
+- It shows as a `Home` step: bundling, sending with a percent, and then done (`<branch> as
+  slopty/<project>/<task> at <short> in <clone>`) or failed with the reason. The step names the
+  worker the branch goes to. A branch already in the orchestrator's clone, because the task
+  ran there or in a worktree under it, has no step.
+- One trip per task runs at a time. A second done report during a trip sends it again
+  afterwards, for the newer commits.
+- The orchestrator's role tells it where such branches arrive. Merging stays with the
+  orchestrator and the merge queue (phase 3).
+
+**`--worktree` works as the earlier ruling assumed, with one consequence for bases.** ✅
+2026-10-01 (read from Claude Code 2.1.281's bundle)
+- `--worktree <name>` makes `<repo>/.claude/worktrees/<name>` on branch `worktree-<name>`, with
+  any `/` in the name as `+`. It runs `git worktree add --no-track -B worktree-<name> <path>
+  <base>`. When the folder is already there, the worktree is reopened, not made again. The
+  role's `worktree-slopty-<project>-<task>` names the branch it makes.
+- The base is `origin/<default branch>`. Origin is fetched first when `FETCH_HEAD` is stale,
+  and local `HEAD` is used when there is no origin. The person's `worktree.baseRef: "head"`
+  uses local `HEAD` instead. So a task forks from the forge's default branch. It does not fork
+  from the project's `target` when that is another branch, and it does not include the
+  orchestrator's unpushed commits. That is why the bundle's fork point is taken from
+  `origin/<target>` and the receiver fetches its origin.
+- Known: `-B` resets the branch. A task started again after someone removed its worktree folder
+  starts its branch over from the base. The commits are still in the reflog, and a branch
+  already brought home is still kept as `slopty/<project>/<task>`.
+- Tests: `a_task_on_a_worker_with_no_clone_gets_one_made_and_shown` and
+  `a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone` (hub),
+  `a_step_is_shown_as_it_goes_and_ends_with_the_server` (store),
+  `a_clone_is_made_once_and_found_again`, `a_clone_without_an_origin_or_that_fails_leaves_nothing`
+  and `a_branch_reaches_another_clone_through_a_bundle_of_its_own_commits` (real git), and
+  `a_task_s_clone_is_made_where_it_runs_and_its_branch_comes_home` in
+  `apps/slopty-cli/tests/projects.rs`. That one runs two real workers whose git reaches a
+  local forge through each person's own `insteadOf`. It checks the clone made where the task
+  runs, the trust kept for it, the agent started in it, and the branch arriving in the
+  orchestrator's clone at the agent's commit, with origin fetched for the fork point.
+
 Not built in Phase 1:
-- clones made on demand: a task with no `cwd` waits for a worker that already has a clone,
-  and nothing clones the repository onto one that has none;
-- merging a worktree's branch from another machine back to the target;
-- the verifier run and the merge queue;
+- merging a task's branch to the target (the verifier run and the merge queue);
 - the known gaps under "An agent never has more than the person gave it".
 
 ## Phases

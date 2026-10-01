@@ -45,8 +45,8 @@ use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::orchestration::{
-    Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef, Line, Outcome, Screen,
-    Size, TermRef, Verb, WaitUntil,
+    BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
+    Line, Outcome, Screen, Size, TermRef, Verb, WaitUntil,
 };
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
@@ -62,6 +62,8 @@ const ORCHESTRATOR: ClientId = ClientId::nil();
 
 /// Who a [`Verb::PointAt`] says pointed, as a client's toast names it.
 const POINTER_NAME: &str = "Orchestration";
+/// How many clone progress steps wait for the server's link before the oldest are dropped.
+const CLONE_PROGRESS: usize = 64;
 
 /// Lines one `ReadOutput` returns at most, whatever it asks: a reply is one control-stream
 /// frame, and a caller pages on with `next`.
@@ -153,6 +155,15 @@ impl From<WorkerError> for Failure {
     }
 }
 
+/// A bundle that could not be made or fetched, as the server is told: a receiver that lacks
+/// the fork point is a conflict, which a whole-branch bundle resolves.
+fn bundle_failure(failed: crate::repo::bundle::Failed) -> Failure {
+    match failed {
+        crate::repo::bundle::Failed::Prerequisites(why) => Failure::new(ErrorCode::Conflict, why),
+        crate::repo::bundle::Failed::Other(why) => Failure::new(ErrorCode::Failed, why),
+    }
+}
+
 /// Answers the verbs the server forwards to this worker. Cheap to clone.
 #[derive(Clone)]
 pub struct Orchestrator {
@@ -173,6 +184,10 @@ struct Inner {
     /// Held while a start under a chosen id looks for it and opens it, so two starts under one
     /// id open one terminal.
     choosing: tokio::sync::Mutex<()>,
+    /// The clones the server asked for, at most a few at a time.
+    cloner: crate::repo::cloning::Cloner,
+    /// How they go ([`Orchestrator::clone_progress`]).
+    clone_progress: broadcast::Sender<(u64, crate::repo::cloning::Progress)>,
 }
 
 /// What an agent the orchestrator starts is given.
@@ -215,6 +230,8 @@ impl Orchestrator {
             once: idempotency::Ledger::default(),
             agent_terms: parking_lot::Mutex::default(),
             choosing: tokio::sync::Mutex::default(),
+            cloner: crate::repo::cloning::Cloner::default(),
+            clone_progress: broadcast::channel(CLONE_PROGRESS).0,
         };
         Self { inner: Arc::new(inner) }
     }
@@ -344,6 +361,9 @@ impl Orchestrator {
                 let (bytes, size) = blocking(move || read_file(&path, offset, length)).await?;
                 Ok(Outcome::File { bytes, offset, size })
             }
+            verb @ (Verb::CloneRepo { .. }
+            | Verb::BundleBranch { .. }
+            | Verb::FetchBundle { .. }) => Box::pin(self.repository(verb)).await,
             Verb::WriteFile { worker, path, bytes } => {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
@@ -461,7 +481,18 @@ impl Orchestrator {
             Verb::Upload { worker, path, upload, part } => {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
-                blocking(move || upload::apply(&path, upload, part)).await.map(|()| Outcome::Done)
+                // The bundle place is the server's to fill, and is made the first time it does.
+                let bundles = crate::file::expand_home(Path::new(BUNDLES));
+                let into_bundles = path.parent() == Some(bundles.as_path());
+                blocking(move || {
+                    if into_bundles {
+                        std::fs::create_dir_all(&bundles)
+                            .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))?;
+                    }
+                    upload::apply(&path, upload, part)
+                })
+                .await
+                .map(|()| Outcome::Done)
             }
             Verb::WakePeer { worker, peer } => {
                 self.mine(worker)?;
@@ -617,6 +648,88 @@ impl Orchestrator {
             tokio::spawn(type_when_ready(handle, prompt, AgentFeed { events, agents }));
         }
         Ok(Outcome::Opened(TermRef { worker: self.inner.id, session }))
+    }
+
+    /// The verbs on a repository the server asks for around a task: a clone, a branch
+    /// bundled, a bundle fetched. Apart, and boxed, since their futures are large and rare.
+    async fn repository(&self, verb: Verb) -> Result<Outcome, Failure> {
+        match verb {
+            Verb::CloneRepo { worker, url, clone } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let progress = self.inner.clone_progress.clone();
+                let told = move |p: crate::repo::cloning::Progress| {
+                    let _no_link = progress.send((clone, p));
+                };
+                let home = slopty_platform::dirs::home();
+                let (path, repo) = self
+                    .inner
+                    .cloner
+                    .clone_repo(git, &url, &home, told)
+                    .await
+                    .map_err(|why| Failure::new(ErrorCode::Failed, why))?;
+                let at = path.clone();
+                blocking(move || {
+                    crate::repo::cloning::trust(&home, &at);
+                    Ok(())
+                })
+                .await?;
+                Ok(Outcome::Cloned { path: path.to_string_lossy().into_owned(), repo })
+            }
+            Verb::BundleBranch { worker, repo, branch, target } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let dir = crate::file::expand_home(Path::new(BUNDLES));
+                let made = crate::repo::bundle::bundle_branch(
+                    git,
+                    &repo,
+                    &branch,
+                    target.as_deref(),
+                    &dir,
+                )
+                .await
+                .map_err(bundle_failure)?;
+                Ok(Outcome::Bundle(Box::new(BranchBundle {
+                    path: made.path.to_string_lossy().into_owned(),
+                    name: made.name,
+                    size: made.size,
+                    digest: made.digest,
+                    head: made.head,
+                    base: made.base,
+                })))
+            }
+            Verb::FetchBundle { worker, repo, bundle, branch, into, head } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let dir = crate::file::expand_home(Path::new(BUNDLES));
+                let want = crate::repo::bundle::Fetch {
+                    name: &bundle,
+                    branch: &branch,
+                    into: &into,
+                    head: &head,
+                };
+                let head = crate::repo::bundle::fetch_bundle(git, &repo, &dir, want)
+                    .await
+                    .map_err(bundle_failure)?;
+                Ok(Outcome::Fetched { branch: into, head })
+            }
+            _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
+        }
+    }
+
+    /// How the clones the server asked for go, as they move: the server's number for each,
+    /// and its progress.
+    #[must_use]
+    pub fn clone_progress(&self) -> broadcast::Receiver<(u64, crate::repo::cloning::Progress)> {
+        self.inner.clone_progress.subscribe()
     }
 
     /// `worker` is this one.

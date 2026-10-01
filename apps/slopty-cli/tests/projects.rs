@@ -41,6 +41,17 @@ mod tests {
     /// ptyd and a worker registered with the server at `server`, finding `claude` in
     /// `programs` first, with `settings` as its `settings.toml`; killed with the test.
     async fn worker(dir: &Path, server: SocketAddr, programs: &Path, settings: &str) -> Vec<Child> {
+        worker_named(dir, server, programs, settings, "projects-test").await
+    }
+
+    /// [`worker`] under `name`.
+    async fn worker_named(
+        dir: &Path,
+        server: SocketAddr,
+        programs: &Path,
+        settings: &str,
+        name: &str,
+    ) -> Vec<Child> {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::write(dir.join("data").join("settings.toml"), settings).unwrap();
         let path = slopty_testkit::env::path_with(programs);
@@ -63,7 +74,7 @@ mod tests {
         tokio::time::timeout(STEP, ready).await.expect("ptyd socket");
         let mut worker = scrubbed(bin("slopty-worker"), &dir.join("home"))
             .env("PATH", &path)
-            .env("SLOPTY_WORKER_NAME", "projects-test")
+            .env("SLOPTY_WORKER_NAME", name)
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
@@ -608,6 +619,214 @@ mod tests {
             seen["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
         assert!(argv.windows(2).any(|w| w == ["--worktree", "slopty-demo-1"]), "{argv:?}");
 
+        server.shutdown().await;
+    }
+
+    /// `git -C dir args…` with nobody's config: what it printed.
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let ran = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+        String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+    }
+
+    /// Two real workers, the orchestrator's with a clone of the project's repository and
+    /// another with none. A task the rules put on the other gets a clone there first, made by
+    /// that worker's own git from the address the orchestrator's clone names (its person's
+    /// `insteadOf` reaching the forge), shown as a step. Once its agent reports done, the
+    /// branch it committed comes home: bundled there, carried by the server, fetched into the
+    /// orchestrator's clone at the same commit, and the card says it arrived.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_task_s_clone_is_made_where_it_runs_and_its_branch_comes_home() {
+        use slopty_proto::project::{Placement, StepKind, StepState};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        // The forge: a bare repository that both workers' git reaches as an https address.
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git_out(&seed, &["init", "-q", "-b", "main"]);
+        git_out(&seed, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git_out(&seed, &["commit", "-q", "--allow-empty", "-m", "second"]);
+        git_out(&root, &["clone", "-q", "--bare", "seed", "forge.git"]);
+        let url = "https://example.com/o/demo.git";
+        let reach = format!("url.file://{}.insteadOf={url}", root.join("forge.git").display());
+        git_out(&root, &["-c", &reach, "clone", "-q", url, "demo"]);
+        let studio_clone = root.join("demo");
+        // The target moves on after the orchestrator's clone was made, so the clone made later
+        // forks from a commit this one has yet to fetch.
+        git_out(&seed, &["commit", "-q", "--allow-empty", "-m", "third"]);
+        let forge = root.join("forge.git");
+        git_out(&seed, &["push", "-q", &forge.to_string_lossy(), "main"]);
+        let forge_main = git_out(&forge, &["rev-parse", "main"]);
+
+        // Each worker's person reaches the forge through their own git config.
+        let config = format!("[url \"file://{}\"]\n\tinsteadOf = {url}\n", forge.display());
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::write(root.join("home/.gitconfig"), &config).unwrap();
+        let (server, _daemons, studio) = fleet(&root, "").await;
+        let hub = server.hub().clone();
+        let linux_dir = root.join("linux");
+        let linux_home = linux_dir.join("home");
+        std::fs::create_dir_all(&linux_home).unwrap();
+        std::fs::write(linux_home.join(".gitconfig"), config).unwrap();
+        // Claude Code has run for this person, so a clone made for an agent is trusted.
+        std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
+        let programs = root.join("programs");
+        let _linux_daemons =
+            worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
+        until("the second worker registers", async || {
+            (hub.directory().iter().filter(|w| w.liveness == Liveness::Online).count() == 2)
+                .then_some(())
+        })
+        .await;
+
+        let shell = Verb::OpenTerminal {
+            worker: studio,
+            cwd: Some(studio_clone.to_string_lossy().into_owned()),
+            command: Vec::new(),
+            env: Vec::new(),
+            name: None,
+            size: None,
+            session: None,
+        };
+        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
+        let project = ProjectId::new("demo").unwrap();
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Demo".to_owned(),
+                repo: "demo".to_owned(),
+                target: "main".to_owned(),
+                verifier: None,
+                orchestrator: Some(orchestrator),
+                limits: LimitsChange::default(),
+                metadata: None,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        let id = until("the project learns its repository", async || {
+            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
+        })
+        .await;
+        assert_eq!(id.url.as_deref(), Some(url), "the address to clone from, as its config has it");
+
+        let on_linux = Placement {
+            require: vec![r#"name == "linux-box""#.to_owned()],
+            ..Placement::default()
+        };
+        let spec =
+            TaskSpec { title: "Write it".to_owned(), placement: on_linux, ..TaskSpec::default() };
+        let task =
+            hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
+        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
+        let (record, gate) = (root.join("record.json"), root.join("go"));
+        let branch = "worktree-slopty-demo-1";
+        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": branch } }]);
+        let launch = TaskLaunch {
+            pin: None,
+            cwd: String::new(),
+            run: Runner::Claude { prompt: None, args: Vec::new() },
+            env: vec![
+                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
+                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+                ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+            ],
+            size: None,
+            ignore_dependencies: false,
+        };
+        let spawned = hub
+            .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
+            .await;
+        let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
+        let cloned = linux_home.join("slopty/clones/example.com/o/demo");
+        let step = spawned.step.map(|s| (s.kind, s.state));
+        let detail = cloned.to_string_lossy().into_owned();
+        assert_eq!(step, Some((StepKind::Clone, StepState::Done { detail })), "shown as a step");
+        let config: Value =
+            serde_json::from_slice(&std::fs::read(linux_home.join(".claude.json")).unwrap())
+                .unwrap();
+        let key = std::fs::canonicalize(&cloned).unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            config["projects"][&key]["hasTrustDialogAccepted"],
+            Value::Bool(true),
+            "the clone is trusted for its agent: {config}"
+        );
+        let seen: Value = until("the agent starts in the clone", async || {
+            std::fs::read(&record).ok().and_then(|b| serde_json::from_slice(&b).ok())
+        })
+        .await;
+        assert_eq!(seen["cwd"].as_str().map(PathBuf::from), Some(cloned.clone()));
+
+        // The agent's work: a commit on its branch in a worktree of the clone, as Claude Code's
+        // `--worktree` makes it.
+        let tree = cloned.join(".claude/worktrees/slopty-demo-1");
+        let tree_text = tree.to_string_lossy().into_owned();
+        git_out(&cloned, &["worktree", "add", "-q", "-b", branch, &tree_text, "origin/main"]);
+        std::fs::write(tree.join("work.txt"), "done\n").unwrap();
+        git_out(&tree, &["add", "."]);
+        git_out(&tree, &["commit", "-q", "-m", "the work"]);
+        let head = git_out(&tree, &["rev-parse", "HEAD"]);
+        std::fs::write(&gate, "").unwrap();
+
+        let started = std::time::Instant::now();
+        let arrived = until("the branch arrives home", async || {
+            let card = status(&hub, &project).await.tasks.into_iter().next()?;
+            match card.step.map(|s| (s.kind, s.state)) {
+                Some((StepKind::Home, StepState::Done { detail })) => Some(detail),
+                Some((StepKind::Home, StepState::Failed { why })) => panic!("not home: {why}"),
+                _ => None,
+            }
+        })
+        .await;
+        eprintln!("brought home in {:?} after the report was allowed", started.elapsed());
+        let home_branch = "slopty/demo/1";
+        assert!(
+            arrived
+                .starts_with(&format!("{branch} as {home_branch} at {}", head.get(..7).unwrap())),
+            "{arrived}"
+        );
+        assert_eq!(
+            git_out(&studio_clone, &["rev-parse", home_branch]),
+            head,
+            "in the orchestrator's clone"
+        );
+        assert_eq!(
+            git_out(&studio_clone, &["rev-parse", "origin/main"]),
+            forge_main,
+            "which fetched its origin for the fork point, rather than take the whole history"
+        );
+        let bundles = linux_home.join(".cache/slopty/bundles");
+        let studio_bundles = root.join("home/.cache/slopty/bundles");
+        let left = std::fs::read_dir(&studio_bundles).map_or(0, Iterator::count);
+        assert_eq!(left, 0, "the bundle fetched is gone");
+        assert!(bundles.exists(), "made where the branch was");
+
+        let moments: Vec<(StepKind, bool)> = status(&hub, &project)
+            .await
+            .timeline
+            .into_iter()
+            .filter_map(|e| match e.what {
+                Moment::Step(s) => Some((s.kind, matches!(s.state, StepState::Done { .. }))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            moments,
+            [
+                (StepKind::Clone, false),
+                (StepKind::Clone, true),
+                (StepKind::Home, false),
+                (StepKind::Home, true)
+            ],
+            "each step's start and end on the timeline"
+        );
         server.shutdown().await;
     }
 }

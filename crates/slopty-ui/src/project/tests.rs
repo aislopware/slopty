@@ -3,8 +3,8 @@
 use slopty_core::{SessionId, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Moment, Native, NativeAgent, NativeChange, NativeTask, ProjectUpdate, ProjectsPart, TaskId,
-    TaskState,
+    Moment, Native, NativeAgent, NativeChange, NativeTask, ProjectUpdate, ProjectsPart, StepKind,
+    StepState, TaskId, TaskState,
 };
 
 use super::fixtures::{self, AT, card, entry, on, project, snapshot, status, task_changed};
@@ -273,6 +273,28 @@ fn every_moment_reads_as_a_sentence() {
     assert_eq!(
         say(Moment::Claimed { paths: vec!["crates/a".into(), "crates/b".into(), "docs".into()] }),
         "Owns crates/a and 2 more"
+    );
+    let step = |kind, state| {
+        Moment::Step(slopty_proto::project::TaskStep { kind, worker, state, since_ms: AT })
+    };
+    let running = |phase: &str, percent| StepState::Running { phase: phase.into(), percent };
+    assert_eq!(say(step(StepKind::Clone, running("Starting", None))), "Cloning on studio");
+    assert_eq!(
+        say(step(StepKind::Clone, running("Receiving objects", Some(45)))),
+        "Cloning on studio: Receiving objects 45%"
+    );
+    assert_eq!(
+        say(step(StepKind::Clone, StepState::Failed { why: "fatal: denied\nmore".into() })),
+        "Clone on studio failed: fatal: denied"
+    );
+    assert_eq!(
+        say(step(StepKind::Home, running("Sending", Some(40)))),
+        "Bringing its branch to studio: 40%"
+    );
+    let detail = "worktree-slopty-board-1 as slopty/board/1 at 4a7aa6d in /w/board".to_owned();
+    assert_eq!(
+        say(step(StepKind::Home, StepState::Done { detail })),
+        "Branch arrived on studio: worktree-slopty-board-1 as slopty/board/1 at 4a7aa6d in /w/board"
     );
     let words = [
         TaskState::Planned,
