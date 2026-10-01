@@ -1877,6 +1877,30 @@ impl TerminalView {
         self.clip_hook = Some(hook);
     }
 
+    /// The session's worker is back on a new link, whose sender is `out` and whose clipboard
+    /// is asked through `clip`: the view goes on showing what it showed until the stream it
+    /// attaches there, at the size it is laid out at, replaces that. What waited for
+    /// room in the old link's queue, and the guesses made over it, are let go: they were typed
+    /// at a worker that never heard them.
+    pub fn relink(
+        &mut self,
+        out: mpsc::Sender<ClientMsg>,
+        clip: Option<ClipHook>,
+        cx: &mut Context<Self>,
+    ) {
+        self.out = out;
+        self.clip_hook = clip;
+        self.state.relinked();
+        self.predictor.flush();
+        self.unsent.clear();
+        self.unsent_task = None;
+        self.unsent_reached = None;
+        self.reached_task = None;
+        self.pending_size = None;
+        self.post(TermRequest::Attach { size: self.state.size() }, cx);
+        cx.notify();
+    }
+
     /// What the clipboard holds, as the workspace reads it; text when nobody asks.
     fn clip_paste(&self) -> ClipPaste {
         self.clip_hook.as_ref().map_or(ClipPaste::Text, |hook| hook())

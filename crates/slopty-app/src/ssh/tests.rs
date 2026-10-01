@@ -277,6 +277,24 @@ fn the_sheet_installs_step_by_step_then_adds_the_worker(cx: &mut TestAppContext)
     assert_eq!(kept.and_then(|t| t.user).as_deref(), Some("me"), "how it was reached, kept");
 }
 
+/// A machine named already (an address that answered as another build) opens the sheet with
+/// its host filled in, and Install brings it to this build.
+#[gpui::test]
+fn the_sheet_opens_on_a_named_host(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    cx.simulate_resize(size(px(900.0), px(800.0)));
+    let deployer = StandIn::new("mini");
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
+    cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_ssh_at("me@mini", window, cx)));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("ssh-form").is_some(), "the form");
+    click(cx, "ssh-install");
+    assert_eq!(deployer.asked(), ["deploy mini Some(\"me\") None server=None"]);
+}
+
 /// Cancel stops the run (its deploy is dropped, which kills `ssh`) and brings the form back;
 /// a failure shows where it stopped, what to do and the machine's last lines, with the form
 /// there to fix and "Try again".

@@ -139,6 +139,10 @@ pub struct TermState {
     /// was asked in: a range in flight is not asked again, and an answer for a numbering that
     /// has gone is dropped.
     in_flight: VecDeque<Fetch>,
+    /// The session's stream starts again on a new link ([`Self::relinked`]): its first frame
+    /// may number the lines afresh under the same epoch (a restarted worker replays its
+    /// checkpoint into a new engine), so the lines held are not trusted to match it.
+    relinked: bool,
 }
 
 /// One `FetchLines` in flight.
@@ -237,6 +241,7 @@ impl TermState {
             parked: None,
             superseded: 0,
             in_flight: VecDeque::new(),
+            relinked: false,
         }
     }
 
@@ -419,6 +424,18 @@ impl TermState {
         self.first_visible.0.saturating_sub(self.scrollback.oldest().0)
     }
 
+    /// The link this state's stream came over is gone and a new one attaches: what is held is
+    /// shown until the new stream's first frame replaces it. That frame starts the sequence
+    /// over, and the lines held are put aside then, since a restarted worker may number them
+    /// differently under the same epoch. The ranges asked of the old link get no answer.
+    pub fn relinked(&mut self) {
+        self.last_seq = None;
+        self.resync_pending = false;
+        self.in_flight.clear();
+        self.parked = None;
+        self.relinked = true;
+    }
+
     /// Apply one event.
     pub fn apply(&mut self, event: TermEvent) -> Vec<Effect> {
         match event {
@@ -506,7 +523,8 @@ impl TermState {
         self.frames = self.frames.saturating_add(1);
         let (epoch_before, top) =
             (self.epoch, (self.view_offset != 0).then(|| self.index_at_row(0)));
-        let held = self.epoch == Some(frame.epoch) || self.change_numbering(&frame);
+        let trusted = !std::mem::take(&mut self.relinked);
+        let held = (trusted && self.epoch == Some(frame.epoch)) || self.change_numbering(&frame);
         let gap = match self.last_seq {
             Some(prev) => frame.seq != prev.wrapping_add(1),
             None => false,
@@ -560,7 +578,7 @@ impl TermState {
         // Scrolled up, the lines on screen hold still as output arrives below them: the offset
         // counts from the bottom, so it grows by what arrived. In another numbering the old top
         // names nothing, and the offset is only kept within the history.
-        match top.filter(|_| self.epoch == epoch_before) {
+        match top.filter(|_| trusted && self.epoch == epoch_before) {
             Some(top) => effects.extend(self.scroll_to_line(top)),
             None => self.view_offset = self.view_offset.min(self.history_len()),
         }
@@ -1937,6 +1955,33 @@ mod tests {
         assert_eq!(s.screen().line(0).map(Line::text).as_deref(), Some("joined"));
         assert!(s.apply(TermEvent::Frame(frame(6, false, 0, 0, 3, &[(1, "x")]))).is_empty());
         assert_eq!((s.frames(), s.superseded()), (4, 2));
+    }
+
+    /// A new link's stream starts its numbers over and may number the lines afresh: its first
+    /// frame is taken though its sequence number is lower, the held lines are put aside rather
+    /// than shown under the new numbering, and what was asked of the old link is asked again.
+    #[test]
+    fn a_relinked_stream_starts_over_and_trusts_no_held_line() {
+        let mut s = TermState::new(size());
+        s.apply(TermEvent::Frame(frame(40, true, 0, 2, 5, &[(0, "c"), (1, "d"), (2, "e")])));
+        assert!(!s.scroll(2).is_empty(), "the history asked of the old link");
+        let lines = ["a", "b"].map(|t| Line::from_text(t, 10, Style::DEFAULT)).to_vec();
+        s.apply(TermEvent::Lines { start: LineIndex(0), lines });
+        assert!(s.line(LineIndex(0)).is_some(), "held from the old link");
+        s.relinked();
+        assert_eq!(s.epoch(), Some(0), "the old numbering stands until the new frame");
+        assert_eq!(s.screen().line(0).map(Line::text).as_deref(), Some("c"), "still shown");
+
+        let effects = s.apply(TermEvent::Frame(frame(1, true, 0, 2, 5, &[(0, "x"), (1, "y")])));
+        assert!(effects.is_empty(), "no resync asked: {effects:?}");
+        assert_eq!(s.superseded(), 0, "taken, not dropped as older");
+        assert_eq!(s.screen().line(0).map(Line::text).as_deref(), Some("x"));
+        assert!(s.line(LineIndex(0)).is_none(), "the old link's line is not shown as the new's");
+        assert_eq!(s.view_offset(), 0, "a scroll place in the old numbering names nothing");
+        let fetch = s.scroll(2);
+        assert_eq!(fetch.len(), 1, "asked again on the new link: {fetch:?}");
+        assert!(s.apply(TermEvent::Frame(frame(2, false, 0, 2, 5, &[(2, "z")]))).is_empty());
+        assert_eq!(s.line(LineIndex(4)).map(Line::text).as_deref(), Some("z"));
     }
 
     /// A program on the alternate screen and back: the primary's lines are put aside and

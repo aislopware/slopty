@@ -564,4 +564,38 @@ fn a_face_stays_through_a_dropped_link_with_its_draft(cx: &mut TestAppContext) {
         cx.debug_bounds(selector("state", tile.item)).is_none(),
         "the composer says it; no pill says it again"
     );
+
+    // The worker is back with the agent still at work: the same face follows again on the new
+    // link, its draft kept, over the same shell.
+    let shell = view.read_with(cx, |v, _| v.terminal(session).map(Entity::entity_id));
+    let (tx, rx) = mpsc::channel(256);
+    let factory: ScreenFactory =
+        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+    let me = ClientId::new();
+    let working = SessionAgent {
+        kind: AgentKind::ClaudeCode,
+        status: AgentStatus::Working,
+        source: AgentSource::Hook,
+        since_ms: WallMs::ZERO,
+        mode: None,
+    };
+    let sessions = vec![SessionSummary { agent: Some(working), ..summary(session, None) }];
+    view.update_in(cx, |v, _w, cx| {
+        let link = WorkerLink { me, out: tx, open_screen: factory, remote: None };
+        v.connect_worker(key, link, hello("studio", sessions), cx);
+    });
+    studio.rx = rx;
+    cx.run_until_parked();
+    assert!(face_shown(&view, cx, session), "still the face");
+    let again = view.read_with(cx, |v, _| v.conversation(session).map(Entity::entity_id));
+    assert_eq!(again, Some(face.entity_id()), "the same face");
+    assert_eq!(view.read_with(cx, |v, _| v.terminal(session).map(Entity::entity_id)), shell);
+    assert_eq!(face.read_with(cx, ConversationView::draft), "half a thought");
+    assert_eq!(face.read_with(cx, |f, _| f.away().map(str::to_owned)), None, "no longer away");
+    assert!(
+        requests(&mut studio)
+            .iter()
+            .any(|r| matches!(r, ConversationRequest::Follow { session: s } if *s == session)),
+        "followed again on the new link"
+    );
 }

@@ -111,8 +111,9 @@ fn a_shell_closed_while_its_worker_is_away_is_closed_when_it_is_back(cx: &mut Te
     cx.run_until_parked();
     goes_away(&view, cx, &studio);
     studio.drain();
-    let held = cx.update(|window, cx| view.read(cx).focus.contains_focused(window, cx));
-    assert!(held, "the workspace keeps the keyboard when the focused shell's view goes");
+    let shell = view.read_with(cx, |v, _| v.terminal(s2).cloned()).expect("kept through the drop");
+    let held = cx.update(|window, cx| shell.read(cx).focus_handle(cx).is_focused(window));
+    assert!(held, "the shell keeps its view, and the keyboard with it");
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.layout().contains(second)), "off the strip");
@@ -292,4 +293,161 @@ fn a_link_in_doubt_sets_its_tiles_back_until_it_is_live(cx: &mut TestAppContext)
     assert!(cx.debug_bounds(pill).is_none(), "and no frame said the worker was away");
     assert_eq!(view.read_with(cx, |v, _| v.links(key)), 2, "on its second link");
     fresh(cx, "relinked");
+}
+
+/// The rows `session`'s view shows, trimmed.
+fn rows(view: &Entity<WorkspaceView>, cx: &VisualTestContext, session: SessionId) -> Vec<String> {
+    view.read_with(cx, |v, cx| {
+        let shell = v.terminal(session).expect("a view").read(cx);
+        shell.state().screen().lines().iter().map(|l| l.text().trim_end().to_owned()).collect()
+    })
+}
+
+/// Every way a link drops (a silence, the worker restarting, the server saying it went away)
+/// keeps a shell's view with its last rows, set back under a pill saying so. The next link
+/// takes the same view up: it attaches at the size it is laid out at, with this client's
+/// colours, and the restarted worker's first frame replaces the rows though its numbers start
+/// over. A session the worker no longer runs lets go of its view with its tile.
+#[gpui::test]
+fn a_dropped_link_keeps_each_shell_and_the_next_one_takes_it_up_in_place(cx: &mut TestAppContext) {
+    let statuses = [
+        WorkerStatus::Reconnecting("disconnected: worker silent".into()),
+        WorkerStatus::Reconnecting("disconnected: closed by peer".into()),
+        WorkerStatus::Unreachable,
+        WorkerStatus::Gone,
+    ];
+    for status in statuses {
+        let (view, cx) = workspace(cx);
+        let mut studio = connect(&view, cx, 1, "studio");
+        let [(s1, first), (s2, second), _] = three_shells(&view, cx, &studio);
+        view.update_in(cx, |v, _w, cx| {
+            v.term_event(s1, frame(&["$ make", "built"]), cx);
+            v.focus_tile(first, cx);
+        });
+        cx.run_until_parked();
+        let shell = view.read_with(cx, |v, _| v.terminal(s1).cloned()).expect("attached");
+        let key = studio.key;
+        view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, status.clone(), cx));
+        cx.run_until_parked();
+        let kept = view.read_with(cx, |v, _| v.terminal(s1).cloned()).expect("kept");
+        assert_eq!(kept.entity_id(), shell.entity_id(), "{status:?}: the same view");
+        assert_eq!(rows(&view, cx, s1)[..2], ["$ make", "built"], "{status:?}: its last rows");
+        assert!(cx.debug_bounds(selector("in-doubt", first.item)).is_some(), "{status:?}");
+        assert!(cx.debug_bounds(selector("state", first.item)).is_some(), "{status:?}: a pill");
+        // Another worker's sync reconciles every view: the away worker's stay.
+        let laptop = connect(&view, cx, 2, "laptop");
+        opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
+        assert!(view.read_with(cx, |v, _| v.terminal(s2).is_some()), "{status:?}");
+
+        relink(&view, cx, &mut studio, vec![summary(s1, None)]);
+        let sent = studio.drain();
+        let attached = sent.iter().position(|m| {
+            matches!(m, ClientMsg::Term { session, req: TermRequest::Attach { size } }
+                if *session == s1 && size.cols > 0)
+        });
+        let colours = sent.iter().position(|m| {
+            matches!(m, ClientMsg::Term { session, req: TermRequest::Colors(_) } if *session == s1)
+        });
+        assert!(attached.zip(colours).is_some_and(|(a, c)| a < c), "{status:?}: {sent:?}");
+        let relinked = view.read_with(cx, |v, _| v.terminal(s1).cloned()).expect("still there");
+        assert_eq!(relinked.entity_id(), shell.entity_id(), "{status:?}: taken up in place");
+        assert_eq!(rows(&view, cx, s1)[..2], ["$ make", "built"], "{status:?}: until a frame");
+        assert!(cx.debug_bounds(selector("in-doubt", first.item)).is_none(), "{status:?}");
+        assert!(cx.debug_bounds(selector("state", first.item)).is_none(), "{status:?}");
+
+        let restarted = match frame(&["$ make", "built", "$ "]) {
+            TermEvent::Frame(f) => TermEvent::Frame(Frame { seq: 0, ..f }),
+            other => other,
+        };
+        view.update_in(cx, |v, _w, cx| v.term_event(s1, restarted, cx));
+        cx.run_until_parked();
+        assert_eq!(rows(&view, cx, s1)[..3], ["$ make", "built", "$"], "{status:?}");
+
+        let items: Vec<Item> =
+            view.read_with(cx, |v, _| v.item(first).cloned().into_iter().collect());
+        view.update_in(cx, |v, _w, cx| {
+            v.apply_sync(key, ItemSync::Snapshot { version: 9, items }, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |v, _| {
+            assert!(v.terminal(s2).is_none(), "{status:?}: the ended session's view went");
+            assert!(!v.layout().contains(second), "{status:?}: with its tile");
+        });
+    }
+}
+
+/// A remote window whose link drops keeps its last picture, set back. The next link opens its
+/// stream again behind that picture: the old view stays on the tile, and hears nothing of the
+/// new link's streams (whose numbers start over), until the new stream has a picture of its
+/// own, which takes its place in one step.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_dropped_window_keeps_its_picture_until_the_new_stream_has_one(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let window = slopty_core::WindowId(7);
+    let tile = arrives(&view, cx, &studio, ItemKind::Window { window }, 1);
+    let opened = || ScreenEvent::Opened {
+        stream: StreamId(1),
+        target: CaptureTarget::Window(window),
+        codec: slopty_proto::screen::VideoCodec::Hevc,
+        width: 1280,
+        height: 800,
+        scale: 2.0,
+        stripes: Vec::new(),
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, opened(), cx));
+    cx.run_until_parked();
+    let picture = || {
+        core_video::pixel_buffer::CVPixelBuffer::new(
+            core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            64,
+            40,
+            None,
+        )
+        .expect("pixel buffer")
+    };
+    let old = view.read_with(cx, |v, _| v.screen(tile.item).cloned()).expect("streaming");
+    old.update(cx, |v, cx| v.show_picture(picture(), cx));
+    cx.run_until_parked();
+
+    goes_away(&view, cx, &studio);
+    let kept = view.read_with(cx, |v, _| v.screen(tile.item).cloned()).expect("kept");
+    assert_eq!(kept.entity_id(), old.entity_id(), "the last picture stays");
+    assert!(cx.debug_bounds(selector("in-doubt", tile.item)).is_some(), "set back");
+
+    relink(&view, cx, &mut studio, Vec::new());
+    let items: Vec<Item> = view.read_with(cx, |v, _| v.item(tile).cloned().into_iter().collect());
+    view.update_in(cx, |v, _w, cx| {
+        v.apply_sync(key, ItemSync::Snapshot { version: 9, items }, cx);
+    });
+    cx.run_until_parked();
+    let sent = studio.drain();
+    assert!(
+        sent.iter().any(|m| matches!(m, ClientMsg::Screen(ScreenRequest::Open { .. }))),
+        "the new link opens the stream again: {sent:?}"
+    );
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, opened(), cx));
+    cx.run_until_parked();
+    let fresh = view
+        .read_with(cx, |v, _| v.workers.get(&key)?.fresh_screens.get(&tile.item).cloned())
+        .expect("opened behind the old picture");
+    let shown = view.read_with(cx, |v, _| v.screen(tile.item).map(Entity::entity_id));
+    assert_eq!(shown, Some(old.entity_id()), "the old picture until the new one shows");
+    assert!(cx.debug_bounds(selector("in-doubt", tile.item)).is_some(), "still set back");
+    let geometry =
+        ScreenEvent::Geometry { stream: StreamId(1), width: 640, height: 400, stripes: Vec::new() };
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, geometry, cx));
+    cx.run_until_parked();
+    assert_eq!(fresh.read_with(cx, |v, _| v.native()), (640.0, 400.0), "the new link's word");
+    assert_ne!(old.read_with(cx, |v, _| v.native()), (640.0, 400.0), "never the old view's");
+
+    fresh.update(cx, |v, cx| v.show_picture(picture(), cx));
+    cx.run_until_parked();
+    let shown = view.read_with(cx, |v, _| v.screen(tile.item).map(Entity::entity_id));
+    assert_eq!(shown, Some(fresh.entity_id()), "the new stream took the tile");
+    assert!(cx.debug_bounds(selector("in-doubt", tile.item)).is_none(), "live again");
+    let waiting = view.read_with(cx, |v, _| v.workers.get(&key).map(|w| w.fresh_screens.len()));
+    assert_eq!(waiting, Some(0));
 }

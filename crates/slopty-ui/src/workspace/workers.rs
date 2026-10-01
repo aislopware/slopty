@@ -77,6 +77,7 @@ impl WorkspaceView {
         self.items_dirty = true;
         self.reset_remote(key, &known, cx);
         self.seed_agents(&agents, cx);
+        self.relink_terminals(key, &known, cx);
         // The disk may have moved on while the worker was away: every file tile of it reads
         // again, and one holding an edit weighs it against what is there now.
         let files: Vec<ItemId> = self
@@ -90,9 +91,13 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The link to `key` dropped (or never came up): its tiles stay where they are and say
-    /// the worker is away; the views that spoke to the old link go, and come back with the
-    /// next one. Notes and file tiles keep what they show.
+    /// The link to `key` dropped or never came up, whatever dropped it: a silence, the worker
+    /// restarting, a probe unanswered after a resume, the server saying the worker went away.
+    /// Its tiles stay where they are and keep what they showed, set back under a pill saying
+    /// the worker is away: a shell its last rows, a remote window its last picture, a face its
+    /// draft, a note or a file its text. The next link takes them up in place
+    /// ([`Self::connect_worker`]): the shells attach again from the worker's checkpoint, the
+    /// faces follow again, and the streams open again behind their last pictures.
     pub fn disconnect_worker(
         &mut self,
         key: WorkerKey,
@@ -106,25 +111,28 @@ impl WorkspaceView {
         w.relay.reset();
         w.relay_due = None;
         w.pending_opens.clear();
+        // A stream opened on the link that dropped has nothing more coming.
+        w.fresh_screens.clear();
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
         }
         w.picker_wanted = false;
-        self.probes.retain(|(k, ..)| *k != key);
         w.display_wanted = false;
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
         let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
+        let screens = &self.screens;
+        w.stale_screens.extend(items.iter().copied().filter(|id| screens.contains_key(id)));
+        self.probes.retain(|(k, ..)| *k != key);
         self.reset_remote(key, &sessions, cx);
         for session in &sessions {
             if self.face_shown(*session) && self.faces.views.contains_key(session) {
                 self.faces.held.insert(*session);
             }
-            self.terminals.remove(session);
+            // The worker's own word on its agent went with the link; the server's stands in.
             self.agents.remove(session);
             self.handoff.forget_session(*session);
         }
         for item in &items {
-            self.screens.remove(item);
             // A save sent on the link that dropped has no answer coming.
             if let Some(view) = self.files.get(item) {
                 view.update(cx, FileView::link_lost);
@@ -144,21 +152,55 @@ impl WorkspaceView {
             self.picker = None;
             self.pending_focus_self = true;
         }
-        // The focused shell's or window's view went with the link: the workspace takes the
-        // keyboard, so ⌘W, ⌘T and the rest still answer while the worker is away. A note or a
-        // file tile keeps its view, and the keyboard with it.
-        let viewless = self.focused().filter(|t| t.worker == key).and_then(|t| self.item(t));
-        if viewless.is_some_and(|i| {
-            matches!(
-                i.kind,
-                ItemKind::Terminal { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
-            )
-        }) {
-            self.pending_focus_self = true;
-        }
         self.update_awake(cx);
         self.agents_moved(cx);
         cx.notify();
+    }
+
+    /// The shells of `key` kept through its last link's drop, among `known`, whose sessions
+    /// the new link still runs: each attaches again from where it stands, showing what it
+    /// showed until the worker's first frame replaces it, with the new link's clipboard and
+    /// the agent the worker says runs there now.
+    fn relink_terminals(&self, key: WorkerKey, known: &[SessionId], cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get(&key) else { return };
+        let Some(link) = w.link.clone() else { return };
+        let kept: Vec<(SessionId, Entity<TerminalView>)> = known
+            .iter()
+            .filter(|s| w.sessions.contains_key(s))
+            .filter_map(|s| Some((*s, self.terminals.get(s)?.clone())))
+            .collect();
+        let colors = self.theme.terminal.wire();
+        for (session, view) in kept {
+            let clip = self.clip_hook(key);
+            view.update(cx, |v, cx| v.relink(link.out.clone(), clip, cx));
+            let req = TermRequest::Colors(colors);
+            if let Some(w) = self.workers.get(&key) {
+                w.send(ClientMsg::Term { session, req });
+            }
+            let agent = self.agents.get(&session).cloned();
+            let status = agent.as_ref().map(|a| a.status.clone());
+            view.update(cx, |v, cx| v.set_agent_status(status, cx));
+            if let Some(face) = self.faces.views.get(&session) {
+                face.update(cx, |v, cx| v.set_agent(agent, cx));
+            }
+        }
+    }
+
+    /// Whether `tile`'s body may show what is no longer so, and is drawn set back: its worker
+    /// is away or its link in doubt ([`WorkerStatus::in_doubt`]), or its picture came over a
+    /// link that has gone. A face held through the drop says so in its own composer instead.
+    pub(super) fn set_back(&self, tile: TileRef) -> bool {
+        let Some(w) = self.workers.get(&tile.worker) else { return false };
+        if w.stale_screens.contains(&tile.item) {
+            return true;
+        }
+        if !w.status.in_doubt() && w.link.is_some() {
+            return false;
+        }
+        !matches!(
+            w.doc.get(tile.item).map(|i| &i.kind),
+            Some(ItemKind::Terminal { session }) if self.faces.held.contains(session)
+        )
     }
 
     /// A worker's link state changed without a link coming or going (a failed attempt).
@@ -200,10 +242,14 @@ impl WorkspaceView {
             self.drop_item_views(item.id, cx);
             if let ItemKind::Terminal { session } = item.kind {
                 self.finished.remove(&session);
+                self.terminals.remove(&session);
+                self.faces.held.remove(&session);
             }
         }
         for session in w.sessions.keys() {
             self.finished.remove(session);
+            self.terminals.remove(session);
+            self.faces.held.remove(session);
         }
         let (gone, closed): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.closed).into_iter().partition(|c| c.tile.worker == key);
@@ -607,10 +653,32 @@ impl WorkspaceView {
             }
             self.attach_terminal(key, session, cx);
         }
+        // A worker away keeps its shells' views, showing their last rows, for its next link to
+        // attach again; one closed or put to sleep meanwhile lets go of its view.
+        let away: std::collections::HashSet<SessionId> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| w.link.is_none())
+            .flat_map(|(key, w)| {
+                w.doc
+                    .items()
+                    .filter_map(|i| match i.kind {
+                        ItemKind::Terminal { session } if !i.sleeping => Some(session),
+                        _ => None,
+                    })
+                    .chain(
+                        self.closed
+                            .iter()
+                            .filter(move |c| c.tile.worker == *key)
+                            .filter_map(|c| c.session),
+                    )
+                    .filter(|s| w.sessions.contains_key(s))
+            })
+            .collect();
         let gone: Vec<SessionId> = self
             .terminals
             .keys()
-            .filter(|s| !wanted.iter().any(|(_, w)| w == *s))
+            .filter(|s| !away.contains(s) && !wanted.iter().any(|(_, w)| w == *s))
             .copied()
             .collect();
         for session in gone {
@@ -728,6 +796,9 @@ impl WorkspaceView {
         let mut keep: Vec<ItemId> = Vec::new();
         for w in self.workers.values_mut() {
             if w.link.is_none() {
+                // Away, its tiles keep their last pictures for the next link to replace.
+                let screens = &self.screens;
+                keep.extend(w.doc.items().map(|i| i.id).filter(|id| screens.contains_key(id)));
                 continue;
             }
             // A display tile streamed from a display made for this device opens its own way;
@@ -743,9 +814,13 @@ impl WorkspaceView {
                     }
                 } else {
                     keep.push(id);
-                    let open = w.sized.as_mut().zip(key).and_then(|(s, key)| {
-                        (!self.screens.contains_key(&id)).then(|| s.open(key, quality)).flatten()
-                    });
+                    let streaming = (self.screens.contains_key(&id)
+                        && !w.stale_screens.contains(&id))
+                        || w.fresh_screens.contains_key(&id);
+                    let open =
+                        w.sized.as_mut().zip(key).and_then(|(s, key)| {
+                            (!streaming).then(|| s.open(key, quality)).flatten()
+                        });
                     if let Some(open) = open {
                         w.send(open);
                     }
@@ -775,7 +850,9 @@ impl WorkspaceView {
                 .collect();
             for &(id, target) in &wanted {
                 keep.push(id);
-                if self.screens.contains_key(&id) || w.pending_opens.values().any(|&p| p == id) {
+                let streaming = (self.screens.contains_key(&id) && !w.stale_screens.contains(&id))
+                    || w.fresh_screens.contains_key(&id);
+                if streaming || w.pending_opens.values().any(|&p| p == id) {
                     continue;
                 }
                 if w.pending_opens.contains_key(&target) {
@@ -788,6 +865,10 @@ impl WorkspaceView {
         }
         // Dropping a view sends `Close` for its stream.
         self.screens.retain(|id, _| keep.contains(id));
+        for w in self.workers.values_mut() {
+            w.stale_screens.retain(|id| keep.contains(id));
+            w.fresh_screens.retain(|id, _| keep.contains(id));
+        }
     }
 
     /// A remote-window event from `key`.
@@ -846,10 +927,15 @@ impl WorkspaceView {
                     }
                 });
                 let tile = TileRef { worker: key, item: id };
+                let behind_stale = self.screens.contains_key(&id)
+                    && self.workers.get(&key).is_some_and(|w| w.stale_screens.contains(&id));
                 cx.subscribe(&view, move |this, view, event, cx| match event {
                     crate::screen::ScreenViewEvent::Pressed => this.focus_tile(tile, cx),
-                    crate::screen::ScreenViewEvent::Ready
-                    | crate::screen::ScreenViewEvent::Health => cx.notify(),
+                    crate::screen::ScreenViewEvent::Ready => {
+                        this.fresh_stream_shows(key, id, &view, cx);
+                        cx.notify();
+                    }
+                    crate::screen::ScreenViewEvent::Health => cx.notify(),
                     crate::screen::ScreenViewEvent::PasteFiles(files) => {
                         let view = view.downgrade();
                         this.paste_files_in_window(tile, &view, files.clone(), cx);
@@ -869,8 +955,14 @@ impl WorkspaceView {
                 .detach();
                 // Its facts, copied whenever it changes: its first frame, its sound.
                 cx.observe(&view, move |this, _view, cx| this.stream_changed(id, cx)).detach();
-                self.screens.insert(id, view);
-                self.stream_changed(id, cx);
+                if behind_stale {
+                    if let Some(w) = self.workers.get_mut(&key) {
+                        w.fresh_screens.insert(id, view);
+                    }
+                } else {
+                    self.screens.insert(id, view);
+                    self.stream_changed(id, cx);
+                }
             }
             ScreenEvent::Closed { stream, reason } => {
                 // A display made for this device that ends goes back to the physical one,
@@ -880,52 +972,48 @@ impl WorkspaceView {
                 {
                     w.sized = None;
                 }
-                let gone: Vec<ItemId> = self.streams_of(key, stream, cx);
-                for id in gone {
+                for (id, _) in self.stream_views(key, stream, cx) {
                     tracing::info!(%stream, %reason, "screen closed by worker");
+                    // Its last picture goes with it: what it showed has ended.
                     self.screens.remove(&id);
+                    if let Some(w) = self.workers.get_mut(&key) {
+                        w.fresh_screens.remove(&id);
+                        w.stale_screens.remove(&id);
+                    }
                 }
             }
             ScreenEvent::Geometry { stream, width, height, .. } => {
                 if width > 0 && height > 0 {
-                    for id in self.streams_of(key, stream, cx) {
-                        if let Some(view) = self.screens.get(&id) {
-                            view.update(cx, |v, cx| v.set_geometry(width, height, cx));
-                        }
+                    for (_, view) in self.stream_views(key, stream, cx) {
+                        view.update(cx, |v, cx| v.set_geometry(width, height, cx));
                     }
                 }
             }
             ScreenEvent::Rate { stream, target_bps, verdict, capped } => {
-                for id in self.streams_of(key, stream, cx) {
-                    if let Some(view) = self.screens.get(&id) {
-                        view.update(cx, |v, cx| v.set_rate(target_bps, verdict, capped, cx));
-                    }
+                for (_, view) in self.stream_views(key, stream, cx) {
+                    view.update(cx, |v, cx| v.set_rate(target_bps, verdict, capped, cx));
                 }
             }
             ScreenEvent::Source { stream, state } => {
-                for id in self.streams_of(key, stream, cx) {
-                    if let Some(view) = self.screens.get(&id) {
-                        view.update(cx, |v, cx| v.set_source_state(state, cx));
-                    }
+                for (id, view) in self.stream_views(key, stream, cx) {
+                    view.update(cx, |v, cx| v.set_source_state(state, cx));
+                    // The worker has said how its target stands: the new stream knows more
+                    // than the last picture, even before (or without) a picture of its own.
+                    self.fresh_stream_shows(key, id, &view, cx);
                 }
             }
             ScreenEvent::KeyboardSource { stream, source, applied } => {
-                for id in self.streams_of(key, stream, cx) {
-                    if let Some(view) = self.screens.get(&id) {
-                        view.update(cx, |v, _| v.set_keyboard_source(&source, applied));
-                    }
+                for (_, view) in self.stream_views(key, stream, cx) {
+                    view.update(cx, |v, _| v.set_keyboard_source(&source, applied));
                 }
             }
             ScreenEvent::Cursor { stream, shape } => {
-                for id in self.streams_of(key, stream, cx) {
-                    if let Some(view) = self.screens.get(&id) {
-                        view.update(cx, |v, cx| v.set_cursor_shape(shape.clone(), cx));
-                    }
+                for (_, view) in self.stream_views(key, stream, cx) {
+                    view.update(cx, |v, cx| v.set_cursor_shape(shape.clone(), cx));
                 }
             }
             ScreenEvent::Drag { stream, event } => {
-                for id in self.streams_of(key, stream, cx) {
-                    let Some(view) = self.screens.get(&id).cloned() else { continue };
+                for (id, view) in self.stream_views(key, stream, cx) {
                     if let Some((drag, outcome)) = view.update(cx, |v, cx| v.drag_heard(&event, cx))
                     {
                         self.drag_ended(TileRef { worker: key, item: id }, drag, outcome, cx);
@@ -936,14 +1024,45 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The items of `key` whose view shows `stream` (stream ids are per worker).
-    fn streams_of(&self, key: WorkerKey, stream: StreamId, cx: &Context<Self>) -> Vec<ItemId> {
+    /// The views of `key`'s items that show `stream` on its current link, each with its item:
+    /// one opened behind a stale picture, or the tile's own. Stream ids are per link, so a
+    /// picture kept from a link that has gone never hears the new one's.
+    fn stream_views(
+        &self,
+        key: WorkerKey,
+        stream: StreamId,
+        cx: &Context<Self>,
+    ) -> Vec<(ItemId, Entity<ScreenView>)> {
         let Some(w) = self.workers.get(&key) else { return Vec::new() };
         w.doc
             .items()
-            .filter(|i| self.screens.get(&i.id).is_some_and(|v| v.read(cx).stream() == stream))
-            .map(|i| i.id)
+            .filter_map(|i| {
+                let view = w.fresh_screens.get(&i.id).or_else(|| {
+                    self.screens.get(&i.id).filter(|_| !w.stale_screens.contains(&i.id))
+                })?;
+                (view.read(cx).stream() == stream).then(|| (i.id, view.clone()))
+            })
             .collect()
+    }
+
+    /// `view`, opened on the new link behind item `id`'s last picture, has something to show:
+    /// it takes the tile's place, and the stale picture goes.
+    fn fresh_stream_shows(
+        &mut self,
+        key: WorkerKey,
+        id: ItemId,
+        view: &Entity<ScreenView>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        if w.fresh_screens.get(&id).is_none_or(|fresh| fresh != view) {
+            return;
+        }
+        w.fresh_screens.remove(&id);
+        w.stale_screens.remove(&id);
+        self.screens.insert(id, view.clone());
+        self.stream_changed(id, cx);
+        cx.notify();
     }
 
     /// Window items restored from the registry have no title until a `Listing` names them.

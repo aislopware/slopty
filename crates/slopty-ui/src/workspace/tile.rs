@@ -2341,13 +2341,12 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// A body whose worker's link is in doubt after a resume ([`WorkerStatus::in_doubt`]),
-    /// set back: what it shows may be stale, and it says so in the frame the doubt starts, with
-    /// no word or spinner over it. It comes back the frame the probe answers or the new link
-    /// lands.
+    /// A body that may show what is no longer so ([`Self::set_back`]), set back: its worker
+    /// away, its link in doubt after a resume, its picture from a link that has gone. It says
+    /// so in the frame the doubt starts, and comes back the frame the probe answers or the new
+    /// link's stream shows.
     fn set_back_in_doubt(&self, tile: TileRef, content: gpui::AnyElement) -> gpui::AnyElement {
-        let doubt = self.workers.get(&tile.worker).is_some_and(|w| w.status.in_doubt());
-        if !doubt {
+        if !self.set_back(tile) {
             return content;
         }
         div()

@@ -145,11 +145,27 @@ pub struct Added {
     pub name: String,
 }
 
+/// The worker at an address being added runs another build: nothing is remembered, and the
+/// way on is to install this build on its host ([`UpdateNotice::host`]).
+///
+/// [`UpdateNotice::host`]: slopty_client::update::UpdateNotice::host
+#[derive(Debug, Clone)]
+pub struct OtherBuild(pub slopty_client::update::UpdateNotice);
+
+impl std::fmt::Display for OtherBuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}. {}", self.0.title(), self.0.detail())
+    }
+}
+
+impl std::error::Error for OtherBuild {}
+
 /// Connect to `address` (`host[:port]`) and remember the worker under the id it answers with.
 ///
 /// # Errors
 ///
-/// When the address does not parse, nothing answers there, or the worker turns it away.
+/// When the address does not parse, nothing answers there, or the worker turns it away; a
+/// worker on another build is an [`OtherBuild`].
 pub async fn add_worker(address: &str) -> Result<Added> {
     let address: HostAddr = address.trim().parse()?;
     let mut me = known()?;
@@ -157,6 +173,10 @@ pub async fn add_worker(address: &str) -> Result<Added> {
     let conn = connect(&endpoint, &address, hello(me.client())).await.map_err(|e| {
         if matches!(e, slopty_net::NetError::NotGranted) {
             anyhow!(Refusal::NotGranted.text())
+        } else if let Some(notice) =
+            slopty_client::update::UpdateNotice::for_worker_dial(address.host(), &e)
+        {
+            anyhow::Error::new(OtherBuild(notice))
         } else {
             anyhow::Error::new(e).context(format!("connect to {address}"))
         }

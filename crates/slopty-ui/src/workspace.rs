@@ -384,6 +384,12 @@ struct Worker {
     display_wanted: bool,
     /// Streams requested but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
+    /// Remote tiles whose view came over a link that has gone: it shows its last picture, set
+    /// back, until a stream opened on the next link has one of its own.
+    stale_screens: std::collections::HashSet<ItemId>,
+    /// Streams opened on this link for a stale tile, waiting for their first picture to take
+    /// its place, so the tile never shows an empty frame between the two.
+    fresh_screens: HashMap<ItemId, Entity<ScreenView>>,
     /// The display tile streamed from a display this worker made for this device.
     sized: Option<desktop::Sized>,
     /// The first snapshot since the link came up has not been applied yet.
@@ -422,6 +428,8 @@ impl Worker {
             picker_wanted: false,
             display_wanted: false,
             pending_opens: HashMap::new(),
+            stale_screens: std::collections::HashSet::new(),
+            fresh_screens: HashMap::new(),
             sized: None,
             awaiting_snapshot: false,
             queued: Vec::new(),

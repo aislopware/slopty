@@ -369,7 +369,7 @@ impl Search {
                 Some("Start the Slopty server on a machine there.")
             }
             (Self::Answered { .. }, Panel::Worker) => {
-                Some("Start the Slopty worker on a Mac there.")
+                Some("Start the Slopty worker on a Mac or Linux machine there.")
             }
         }
     }
@@ -1483,8 +1483,27 @@ impl Workspace {
                     ws.add_worker(id, name, true, cx);
                     cx.notify();
                 }
-                Ok(Err(e)) => ws.panel_failed(format!("{e:#}"), cx),
+                Ok(Err(e)) => match e.downcast_ref::<net::OtherBuild>() {
+                    // Not a dead end: the way on is installing this build there.
+                    Some(other) => ws.install_this_build_at(other.0.host.clone(), cx),
+                    None => ws.panel_failed(format!("{e:#}"), cx),
+                },
                 Err(_dropped) => ws.panel_failed("connection task died".to_owned(), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// The panel's worker answered on another build: the SSH sheet opens with its host filled
+    /// in, to install this build over it.
+    fn install_this_build_at(&mut self, host: String, cx: &Context<Self>) {
+        if let Some(adding) = &mut self.adding {
+            adding.busy = false;
+        }
+        let Some(window) = self.window else { return };
+        cx.spawn(async move |this, cx| {
+            let _opened = cx.update_window(window, |_root, window, cx| {
+                this.update(cx, |ws, cx| ws.open_ssh_at(&host, window, cx))
             });
         })
         .detach();
@@ -1774,7 +1793,7 @@ impl Workspace {
             ),
             Panel::Worker => (
                 "Add a worker",
-                "A Mac running the Slopty worker, on your tailnet or VPN.",
+                "A Mac or Linux worker on your tailnet or VPN.",
                 "Add",
                 "Connect to a server instead",
                 Panel::Server,
@@ -3525,6 +3544,68 @@ mod tests {
         });
         cx.run_until_parked();
         (ws, cx)
+    }
+
+    /// A deployer for a test that only opens the SSH sheet: nothing is ever deployed.
+    #[derive(Debug)]
+    struct NoDeploys;
+
+    impl ssh::Deployer for NoDeploys {
+        fn deploy(
+            &self,
+            _to: &ssh::Target,
+            _server: Option<slopty_deploy::Server>,
+            _events: tokio::sync::mpsc::UnboundedSender<slopty_deploy::Event>,
+        ) -> this_mac::Pending<Result<slopty_deploy::Deployed, slopty_deploy::Failure>> {
+            panic!("this test deploys nothing")
+        }
+
+        fn add(&self, _address: &str) -> this_mac::Pending<Result<net::Added, String>> {
+            panic!("this test adds nothing")
+        }
+
+        fn remember(&self, _worker: WorkerId, _to: &ssh::Target) {}
+
+        fn target_of(&self, _worker: WorkerId) -> Option<ssh::Target> {
+            None
+        }
+    }
+
+    /// An address that answers as another build is no dead end in the panel: the add says so
+    /// as an [`net::OtherBuild`], which opens the SSH sheet on that host to install this build
+    /// there, the panel no longer busy (`ssh::tests` checks the sheet's host field).
+    #[gpui::test]
+    fn a_worker_on_another_build_opens_the_install_on_its_host(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        let window = cx.update(|window, _cx| window.window_handle());
+        ws.update(cx, |ws, _cx| {
+            ws.window = Some(window);
+            ws.deployer = Some(Rc::new(NoDeploys));
+        });
+        let notice = slopty_client::update::UpdateNotice {
+            of: slopty_client::update::Of::Worker,
+            host: "mini.local".to_owned(),
+            peer: "0.0.1".to_owned(),
+        };
+        let failed = anyhow::Error::new(net::OtherBuild(notice));
+        let other = failed.downcast_ref::<net::OtherBuild>().expect("typed through anyhow");
+        assert!(failed.to_string().contains(&other.0.detail()), "{failed}");
+        let host = other.0.host.clone();
+        ws.update(cx, |ws, cx| {
+            if let Some(adding) = &mut ws.adding {
+                adding.busy = true;
+            }
+            ws.install_this_build_at(host, cx);
+        });
+        cx.run_until_parked();
+        let (busy, sheet) = ws.read_with(cx, |ws, _cx| {
+            let adding = ws.adding.as_ref().expect("the panel is up");
+            (adding.busy, adding.ssh.is_some())
+        });
+        assert!(!busy, "no longer waiting on the add");
+        assert!(sheet && cx.debug_bounds("ssh-form").is_some(), "the sheet, drawn");
     }
 
     /// The shell with no window, no worker and no panel.

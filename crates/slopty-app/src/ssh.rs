@@ -368,6 +368,17 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The sheet with `host` in its host field, for a machine the person already named: a
+    /// worker there that runs another build is brought to this one by installing over it.
+    pub fn open_ssh_at(&mut self, host: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_ssh(window, cx);
+        let Some(sheet) = self.adding.as_ref().and_then(|a| a.ssh.as_ref()) else { return };
+        let field = sheet.host.clone();
+        let host = host.to_owned();
+        field.update(cx, |input, cx| input.set_value(host, window, cx));
+        cx.notify();
+    }
+
     /// Back from the sheet to the panel; a run under way stops.
     pub(crate) fn leave_ssh(&mut self, cx: &mut Context<Self>) {
         if let Some(adding) = &mut self.adding {

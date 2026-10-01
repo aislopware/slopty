@@ -1526,8 +1526,10 @@ its command, every other key still goes to the program.
 **Workers.** The app holds every added worker at once: one `WorkerLink` (on the process's one
 client endpoint, with its own reconnect loop and silence check) per worker
 (`slopty_app::workers`), all feeding the one `WorkspaceView` under the worker's `WorkerKey`
-(its `WorkerId`'s 128 bits). A dropped link keeps the worker's tiles ("reconnecting"); the
-next connection's snapshot reconciles them. The system says when a link may have died under
+(its `WorkerId`'s 128 bits). A dropped link, whatever dropped it, keeps the worker's tiles
+and what they show, set back under "reconnecting": a shell its rows, a window its last picture,
+a face its draft. The next link takes the same views up in place (a shell attaches again, a
+window's stream opens again behind its picture), and its snapshot reconciles the tiles. The system says when a link may have died under
 it (`slopty_platform::resume`: the Mac woke, its screens woke, the session came back or was
 unlocked, the app came to the front, and Network.framework's path monitor on a path change;
 UIKit's scene and protected-data notifications on iOS). Each live link is probed at once (a

@@ -1853,6 +1853,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - *What no test here reaches.* The system posting its notifications, because no test sleeps
     the Mac or moves its network, and the two lost-resume races, which need a resume to land
     within one tick of a link ending.
+- ✅ **A dropped link keeps every tile and takes it up in place** (2026-10-01, readiness audit
+  A1). Only the resume path kept its tiles: a link given up after its silence, a worker that
+  restarted, or one the server said went away dropped every shell, window and agent view of
+  that worker, so its tiles went blank under "Reconnecting" until the next link replayed.
+  Every cause now goes through the same keep (`WorkspaceView::disconnect_worker`).
+  - **Shells keep their view.** The tile shows its last rows, set back under the away pill. The
+    next link hands the same view its sender and clipboard (`TerminalView::relink`), and the view
+    attaches again at the size it is laid out at. A restarted worker starts its frame numbers
+    over and may number the lines afresh under the same epoch, since it replays its checkpoint
+    into a new engine. So the new stream's first frame is taken whatever its number, and the
+    lines held are put aside then, never shown under the new numbering
+    (`TermState::relinked`). What waited for room on the old link and the local-echo guesses
+    made over it are dropped: no worker heard them. Scroll place does not survive a relink.
+  - **Windows keep their last picture**, set back. The next link opens the stream again behind
+    it. The stale view hears none of the new link's streams, whose ids start over, and gives
+    the tile up in one step once the new stream has a picture, or once the worker says how its
+    target stands (`Worker::fresh_screens`, `stale_screens`). No frame shows the tile empty.
+  - **Faces stay** as before, draft and all, and follow again on the new link. The worker's own
+    word on an agent still goes with the link, so the server's stands in while it is away.
+  - Tests: `a_dropped_link_keeps_each_shell_and_the_next_one_takes_it_up_in_place`,
+    `a_dropped_window_keeps_its_picture_until_the_new_stream_has_one`,
+    `a_face_stays_through_a_dropped_link_with_its_draft` (`slopty-ui`), and
+    `a_relinked_stream_starts_over_and_trusts_no_held_line` (`slopty-client`).
 - ✅ **A resent Initial is not a stateless reset** (2026-10-01, MEASUREMENTS "the fill's dials
   after the port fix, and a reset by peer"). The fill's dials that got no answer stayed fixed
   ("A dual-stack port no IPv4 socket holds"): four soaks, about 47 000 CLI calls, none failed to
