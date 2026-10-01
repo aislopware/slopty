@@ -201,7 +201,7 @@ fn a_click_opens_a_nodes_agent_or_says_why_not(cx: &mut TestAppContext) {
 /// each is what the same state drawn from scratch shows.
 #[gpui::test]
 fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
     let (_, agent) = setup.agent;
@@ -947,4 +947,118 @@ fn fixtures_worker(
     view.read_with(cx, |v, _| {
         v.projects().of_orchestrator(orchestrator).and_then(|b| b.worker(None)).expect("a worker")
     })
+}
+
+/// The labels the board says to assistive technology now.
+fn labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    cx.update(|window, _cx| crate::a11y::tree(window)).into_iter().filter_map(|n| n.label).collect()
+}
+
+/// A board opens onto what changed since this client last looked. The first look has nothing
+/// to compare with; hiding the board reads its timeline to the end; opening it again tells what
+/// came after, what needs the person first, until they close it. Where the board holds less
+/// than that, the recap reads the rest back from the server first. How far each project was
+/// read is what the layout keeps across launches.
+#[gpui::test]
+fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext) {
+    use crate::project::fixtures::run;
+    use crate::project::recap::Looked;
+
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let show = |cx: &mut VisualTestContext, on: bool| {
+        view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, on, cx));
+        cx.run_until_parked();
+    };
+    show(cx, true);
+    assert!(cx.debug_bounds("project-recap").is_none(), "a first look has no recap");
+    show(cx, false);
+    let id = fixtures::id("board");
+    let looked = view.read_with(cx, |v, _| v.projects_looked());
+    assert_eq!(
+        looked.iter().map(|(p, l)| (p.clone(), l.seq)).collect::<Vec<_>>(),
+        [(id.clone(), 3)]
+    );
+
+    let merged = card(1, "Wire the board", TaskState::Merged, None);
+    let to_merged = Moment::State { from: TaskState::Done, to: TaskState::Merged };
+    let failed = card(3, "Golden files", TaskState::Waiting, Some(1));
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(11, task_changed("board", merged, Some(entry(4, Some(1), to_merged))), cx);
+        let verified = Moment::Verified(run(false, "9c1e2f3"));
+        v.project_update(12, task_changed("board", failed, Some(entry(5, Some(3), verified))), cx);
+    });
+    show(cx, true);
+    for part in [
+        "project-recap",
+        "project-recap-heading",
+        "project-recap-verify-failed",
+        "project-recap-merged",
+        "project-recap-close",
+    ] {
+        assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
+    }
+    let y =
+        |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).expect("drawn").origin.y;
+    assert!(
+        y(cx, "project-recap-verify-failed") < y(cx, "project-recap-merged"),
+        "what needs the person comes first"
+    );
+    let said = labels(&view, cx);
+    for line in
+        ["Since you last looked", "Verifier failed on #3 Golden files", "Merged #1 Wire the board"]
+    {
+        assert!(said.iter().any(|l| l == line), "{line} in {said:?}");
+    }
+    click(cx, "project-recap-close");
+    assert!(cx.debug_bounds("project-recap").is_none(), "closed");
+    show(cx, false);
+    show(cx, true);
+    assert!(cx.debug_bounds("project-recap").is_none(), "nothing new since");
+    show(cx, false);
+
+    // A launch later: the board holds only the newest entries, so the recap reads the rest.
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let term = TermRef { worker, session: orchestrator };
+    let newest = vec![entry(50, Some(2), Moment::Note { text: "later".into() })];
+    let tasks = vec![card(2, "Read the store", TaskState::Merged, None)];
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        let record = project("board", Some(term));
+        v.projects_part(snapshot(20, vec![status(record, tasks.clone(), newest)]), cx);
+        v.restore_projects_looked([(id.clone(), Looked { seq: 40, at_ms: fixtures::AT })]);
+    });
+    show(cx, true);
+    let missed =
+        vec![entry(41, Some(2), Moment::State { from: TaskState::Done, to: TaskState::Merged })];
+    let mut answer = status(project("board", Some(term)), tasks, missed);
+    answer.next = 51;
+    let verbs = sent(&mut queue, cx, |_| Outcome::Project(Box::new(answer.clone())));
+    assert_eq!(
+        verbs,
+        [Verb::ProjectStatus { project: id.clone(), since: Some(41), timeout_ms: 0 }],
+        "read from past the last look"
+    );
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "Merged #2 Read the store"), "{said:?}");
+    assert!(
+        said.iter().any(|l| l.starts_with("Since you looked, ") && l.ends_with(" ago")),
+        "{said:?}"
+    );
+    assert!(cx.debug_bounds("project-recap-partial").is_none(), "it read all of it");
+
+    // Further back than the server keeps: the recap says it could not read all of it.
+    show(cx, false);
+    view.update_in(cx, |v, _w, _cx| {
+        v.restore_projects_looked([(id.clone(), Looked { seq: 30, at_ms: fixtures::AT })]);
+    });
+    show(cx, true);
+    let verbs = sent(&mut queue, cx, |_| Outcome::Project(Box::new(answer.clone())));
+    assert_eq!(verbs.len(), 1, "{verbs:?}");
+    assert!(cx.debug_bounds("project-recap-partial").is_some(), "entries 31 to 40 are gone");
 }

@@ -30,6 +30,7 @@ use super::model::{
     Board, Lane, Machine, RunOnPicker, TaskAction, TreeRow, finding_place, queue_words,
     review_detail, short_commit, state_status, state_word, verdict_detail, verdict_tail,
 };
+use super::recap::{Recap, RecapKind};
 use super::{
     ApproveTask, DeleteProject, Lens, MergeTask, OpenNode, RetryTask, RunTaskOn, SelectNext,
     SelectPrevious, ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed,
@@ -118,6 +119,8 @@ pub enum ProjectEvent {
     StartAll,
     /// Hold each task's start for the person, or let the orchestrator start them.
     SetAsk(bool),
+    /// The person read the recap: close it.
+    CloseRecap,
 }
 
 /// How long a first "Delete the project" waits for the second that does it.
@@ -195,6 +198,9 @@ pub struct Seen {
     pub machines: Vec<Machine>,
     /// The "Run on" picker, while it is open on one of the project's tasks.
     pub run_on: Option<RunOnPicker>,
+    /// What changed since this client last looked, from the moment the board opened until the
+    /// person closes it or the board hides.
+    pub recap: Option<Recap>,
 }
 
 /// A row the keyboard can stand on.
@@ -306,7 +312,8 @@ impl ProjectView {
             && self.seen.workers == seen.workers
             && self.seen.agents == seen.agents
             && self.seen.machines == seen.machines
-            && self.seen.run_on == seen.run_on;
+            && self.seen.run_on == seen.run_on
+            && self.seen.recap == seen.recap;
         if !same {
             self.seen = seen;
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
@@ -660,6 +667,12 @@ pub(crate) const PROPOSED_WORD: &str = "Proposed";
 pub(crate) const NO_ESTIMATE: &str = "No finished task to estimate from yet";
 /// "Start all" with nothing proposed.
 pub(crate) const NOTHING_PROPOSED: &str = "No task waits for you to start it";
+/// The recap's heading when the person looked a moment ago.
+pub(crate) const RECAP: &str = "Since you last looked";
+/// The recap's button that closes it.
+pub(crate) const CLOSE_RECAP: &str = "Close the recap";
+/// The recap's last line when it could not read back as far as the person's last look.
+pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
 
@@ -951,6 +964,111 @@ impl ProjectView {
                 .child(self.heading("project-needs-heading", NEEDS_YOU, Some(s.warn)))
                 .children(rows),
         )
+    }
+
+    /// What changed since this client last looked, over what needs the person: a line per
+    /// kind of change, what needs them first, and a button that closes it.
+    fn recap(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        let recap = self.seen.recap.as_ref()?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let away = std::time::Duration::from_millis(
+            self.seen.now.as_millis().saturating_sub(recap.since.at_ms.as_millis()),
+        );
+        let heading = match age_label(away).as_str() {
+            "now" => RECAP.to_owned(),
+            age => format!("Since you looked, {age} ago"),
+        };
+        let close = crate::kit::icon_button_at(
+            theme,
+            "project-recap-close",
+            IconName::X,
+            CLOSE_RECAP,
+            self.zoom,
+        )
+        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::CloseRecap)));
+        let head = div()
+            .flex()
+            .items_center()
+            .pr(self.z(sp.xs))
+            .child(
+                div()
+                    .id("project-recap-heading")
+                    .debug_selector(|| "project-recap-heading".to_owned())
+                    .role(Role::Heading)
+                    .aria_label(SharedString::from(heading.clone()))
+                    .flex_1()
+                    .min_w_0()
+                    .px(self.z(sp.inset()))
+                    .pt(self.z(sp.xs))
+                    .pb(self.z(sp.xxs))
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(heading)),
+            )
+            .child(close);
+        let partial = recap
+            .partial
+            .then(|| self.recap_line("project-recap-partial", None, RECAP_PARTIAL.to_owned()));
+        let lines = recap.lines.iter().map(|line| {
+            let id = format!("project-recap-{}", recap_word(line.kind));
+            self.recap_line(&id, Some(line.kind), line.text(board))
+        });
+        Some(
+            div()
+                .id("project-recap")
+                .debug_selector(|| "project-recap".to_owned())
+                .role(Role::Group)
+                .aria_label(RECAP)
+                .flex_none()
+                .mb(self.z(sp.xs))
+                .pb(self.z(sp.xs))
+                .bg(hsla(s.raised))
+                .child(head)
+                .children(lines)
+                .children(partial),
+        )
+    }
+
+    /// One line of the recap: its kind's mark, in the warning tone when it needs the person,
+    /// and its words.
+    fn recap_line(&self, id: &str, kind: Option<RecapKind>, text: String) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let (glyph, tone) = match kind {
+            Some(kind) if kind.needs_you() => (recap_icon(kind), s.warn),
+            Some(kind) => (recap_icon(kind), s.text_muted),
+            None => (IconName::Clock, s.text_muted),
+        };
+        let key = id.to_owned();
+        div()
+            .id(SharedString::from(id.to_owned()))
+            .debug_selector(move || key)
+            .role(Role::ListItem)
+            .aria_label(SharedString::from(text.clone()))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.inset()))
+            .py(self.z(theme.spacing.xxs))
+            .min_w_0()
+            .child(
+                icon(theme, glyph, IconSize::Inline, hsla(tone))
+                    .flex_none()
+                    .size(self.z(theme.typography.icon())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(text)),
+            )
     }
 
     /// The plan before it fans out, over the lens: the tasks the orchestrator proposed, each
@@ -2249,6 +2367,37 @@ fn natives_line(counts: NativeCounts) -> Option<String> {
 }
 
 /// A timeline entry's icon and tone.
+/// The word a recap line's selector ends in.
+const fn recap_word(kind: RecapKind) -> &'static str {
+    match kind {
+        RecapKind::ChangesAsked => "changes",
+        RecapKind::VerifyFailed => "verify-failed",
+        RecapKind::StepFailed => "step-failed",
+        RecapKind::Stuck => "stuck",
+        RecapKind::AgentEnded => "ended",
+        RecapKind::Proposed => "proposed",
+        RecapKind::Merged => "merged",
+        RecapKind::Verified => "verified",
+        RecapKind::Started => "started",
+        RecapKind::Created => "created",
+    }
+}
+
+/// A recap line's mark: the one its timeline entries draw.
+const fn recap_icon(kind: RecapKind) -> IconName {
+    match kind {
+        RecapKind::ChangesAsked => IconName::MessageSquareWarning,
+        RecapKind::VerifyFailed | RecapKind::StepFailed => IconName::CircleX,
+        RecapKind::Stuck => IconName::CircleAlert,
+        RecapKind::AgentEnded => IconName::Power,
+        RecapKind::Proposed => IconName::Hand,
+        RecapKind::Merged => IconName::GitMerge,
+        RecapKind::Verified => IconName::CircleCheck,
+        RecapKind::Started => IconName::SquareTerminal,
+        RecapKind::Created => IconName::Plus,
+    }
+}
+
 fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
     let s = &theme.surfaces;
     let (glyph, tone) = match what {
@@ -2353,6 +2502,7 @@ impl Render for ProjectView {
             Lens::Machines => self.machines(&board, cx),
         };
         root.child(self.header(&board, cx))
+            .children(self.recap(&board, cx))
             .children(self.needs_you(&board, cx))
             .children(self.plan(&board, cx))
             .child(self.lenses(cx))

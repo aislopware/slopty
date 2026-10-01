@@ -6,12 +6,14 @@
 //! orchestrator, and every agent the tree names is a tile of its own that the board opens.
 //!
 //! * [`model`] — the server's projects mirrored, and what the board derives from one.
+//! * [`recap`] — what changed since this client last looked.
 //! * `view` — the board itself: the header and its bar, what needs the person, and the tree, board
 //!   and timeline lenses.
 
 #![expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 
 pub mod model;
+pub mod recap;
 mod view;
 
 pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen};

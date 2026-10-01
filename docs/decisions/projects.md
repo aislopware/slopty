@@ -1213,6 +1213,37 @@ Tests:
   `a_plan_is_estimated_from_the_tasks_that_finished` (`slopty-ui::project`), and
   `a_plan_waits_for_the_person_who_starts_one_or_all` (`slopty-ui::workspace`).
 
+## What changed while you were away, and what it cost (2026-10-02)
+
+**A board opens onto what changed since this client last looked.** ✅ 2026-10-02
+- Before: coming back to a project meant reading the timeline from the top and guessing where
+  the last look ended.
+- The cursor is this client's: the `seq` of the last timeline entry its board showed, and
+  when it hid (`project::recap::Looked`). A board on show reads everything as it arrives, so
+  the cursor moves only as the board hides, and at quit for a board still on show.
+  `layout.json` keeps it per project beside the faces and pop-outs, so the recap spans
+  launches. It is per device, as the plan asks: a look on the iPad does not empty the Mac's
+  recap.
+- Opening the board compares the cursor with the timeline. `Recap::of` keeps the kinds that
+  move the person: changes asked, a verifier or a step that failed, a stuck report, an agent
+  that ended before its work was done, a proposed start, and then merged, verified, started
+  and created. Each kind is one line naming its tasks in the order they last moved
+  ("Verifier failed on #5 and #6", "Merged #4 Write the decision"), and a line counts past
+  three. What needs the person comes first, marked in the warning tone. Project-wide entries
+  and notes are left to the timeline.
+- The snapshot carries only the latest 64 entries, so a long absence falls before what the
+  board holds. The recap then reads the gap back with `ProjectStatus { since }`, a page at a
+  time and at most 8 pages. If the server no longer keeps the entries back to the cursor, the
+  recap says so on its last line rather than passing for complete.
+- The first look on a device has no recap: there is nothing to compare with, and the tree
+  already shows everything. A cursor past the end belongs to an earlier project of the same
+  name, so it is dropped.
+- The band sits over "Needs you" until the person closes it or the board hides. Nothing on
+  the server changes: it is the client's own reading.
+- Tests: `a_recap_tells_what_needs_you_first_and_names_its_tasks` (`slopty-ui::project`) and
+  `a_board_opens_onto_what_changed_since_you_last_looked` (`slopty-ui::workspace`, over
+  `ServerCaller::queued`).
+
 ## Phases
 
 1. **Wiring and state.** Built 2026-09-30, except the tile.

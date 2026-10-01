@@ -25,6 +25,7 @@ use super::actions::ToggleProjectBoard;
 use super::agents::agent_ask_line;
 use crate::icons::Status;
 use crate::project::model::{Board, Lane, Machine, Projects, RunOnPicker, TaskAction};
+use crate::project::recap::{Looked, Recap};
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject};
 
 /// What the palette and the header call turning a tile to its board.
@@ -35,6 +36,9 @@ pub(crate) const NO_PROJECT: &str = "No project runs in this terminal";
 pub(crate) const NO_SERVER: &str = "No server to send it to";
 /// What "Start a project here" says away from a terminal.
 pub(crate) const NO_TERMINAL: &str = "Stand in a terminal to start a project there";
+/// How many pages of the timeline a recap reads back from the server, past what the board
+/// holds: far enough for a night away from a busy project.
+const RECAP_PAGES: usize = 8;
 /// What the person says approving a task's work from the board.
 pub(crate) const APPROVED_HERE: &str = "Approved by the person";
 
@@ -63,6 +67,17 @@ pub(super) struct ProjectsState {
     pub machines_asked: bool,
     /// The "Run on" picker open on a task, per project.
     pub run_on: HashMap<ProjectId, RunOnPicker>,
+    /// How far this client read each project's timeline, as its board last hid.
+    pub looked: HashMap<ProjectId, Looked>,
+    /// The boards on show at the last hand-over: one not among them opened since.
+    pub open: HashSet<ProjectId>,
+    /// What changed since the last look, for each board that opened onto news.
+    pub recaps: HashMap<ProjectId, Recap>,
+}
+
+/// The last entry of `board`'s timeline, 0 for an empty one.
+fn last_seq(board: &Board) -> u64 {
+    board.timeline.back().map_or(0, |e| e.seq)
 }
 
 /// `id` as the workspace keys workers: the one the app gives the server's worker ids.
@@ -307,6 +322,7 @@ impl WorkspaceView {
         let live = &self.projects.mirror;
         self.projects.views.retain(|p, _| live.get(p).is_some());
         self.projects.subscriptions.retain(|p, _| live.get(p).is_some());
+        self.look_at_boards(cx);
         if self.projects.shown.is_empty() {
             self.projects.focus.clear();
             return false;
@@ -355,7 +371,8 @@ impl WorkspaceView {
             let agents = board.as_ref().map(|b| self.board_agents(b)).unwrap_or_default();
             let machines = self.projects.machines.clone();
             let run_on = self.projects.run_on.get(&project).cloned();
-            let seen = Seen { board, workers: names.clone(), agents, now, machines, run_on };
+            let recap = self.projects.recaps.get(&project).cloned();
+            let seen = Seen { board, workers: names.clone(), agents, now, machines, run_on, recap };
             view.update(cx, |v, cx| v.set_seen(seen, cx));
         }
         let mut gave = false;
@@ -366,6 +383,127 @@ impl WorkspaceView {
             }
         }
         gave
+    }
+
+    /// The boards on show now against those at the last hand-over: a board that hid read its
+    /// timeline to the end, and one that opened is handed what changed since this client last
+    /// looked. A first look has nothing to compare with, and no recap.
+    fn look_at_boards(&mut self, cx: &Context<Self>) {
+        let mirror = &self.projects.mirror;
+        let now: HashSet<ProjectId> = self
+            .projects
+            .shown
+            .iter()
+            .filter_map(|s| Some(mirror.of_orchestrator(*s)?.project.id.clone()))
+            .collect();
+        let at_ms = WallMs::now();
+        let hid: Vec<ProjectId> = self.projects.open.difference(&now).cloned().collect();
+        if !hid.is_empty() {
+            self.layout_touched(cx);
+        }
+        for project in hid {
+            self.projects.recaps.remove(&project);
+            if let Some(board) = self.projects.mirror.get(&project) {
+                self.projects.looked.insert(project, Looked { seq: last_seq(board), at_ms });
+            }
+        }
+        let opened: Vec<ProjectId> = now.difference(&self.projects.open).cloned().collect();
+        self.projects.open = now;
+        for project in opened {
+            self.recap(project, cx);
+        }
+    }
+
+    /// What changed in `project` since this client last looked, from what its board holds,
+    /// or read back from the server first when the board holds less than that.
+    fn recap(&mut self, project: ProjectId, cx: &Context<Self>) {
+        let Some(board) = self.projects.mirror.get(&project).cloned() else { return };
+        let Some(since) = self.projects.looked.get(&project).copied() else { return };
+        // A cursor past the end is another project's of the same name, made since.
+        if since.seq > last_seq(&board) {
+            self.projects.looked.remove(&project);
+            return;
+        }
+        let held_from = board.timeline.front().map_or(u64::MAX, |e| e.seq);
+        let caller = self.projects.caller.clone();
+        let Some(caller) = caller.filter(|_| held_from > since.seq.saturating_add(1)) else {
+            let partial = held_from > since.seq.saturating_add(1);
+            if let Some(recap) = Recap::of(&board, since, &board.timeline, partial) {
+                self.projects.recaps.insert(project, recap);
+            }
+            return;
+        };
+        Self::spawn_recap(caller, project, (since, held_from), cx);
+    }
+
+    /// Read `project`'s timeline from past `since` up to the entries its board holds, a page
+    /// at a time and no more than [`RECAP_PAGES`], then recap it with what the board holds.
+    fn spawn_recap(
+        caller: ServerCaller,
+        project: ProjectId,
+        (since, held_from): (Looked, u64),
+        cx: &Context<Self>,
+    ) {
+        let asked = project.clone();
+        let read = async move {
+            let mut read = Vec::new();
+            let mut from = since.seq.saturating_add(1);
+            for _ in 0..RECAP_PAGES {
+                let verb = Verb::ProjectStatus {
+                    project: asked.clone(),
+                    since: Some(from),
+                    timeout_ms: 0,
+                };
+                let Outcome::Project(status) = caller.call(verb).await else { break };
+                read.extend(status.timeline.into_iter().filter(|e| e.seq < held_from));
+                if status.next <= from || status.next >= held_from {
+                    return (read, false);
+                }
+                from = status.next;
+            }
+            (read, true)
+        };
+        cx.spawn(async move |this, cx| {
+            let (read, partial) = read.await;
+            this.update(cx, |this, cx| {
+                if !this.projects.open.contains(&project) {
+                    return;
+                }
+                let Some(board) = this.projects.mirror.get(&project).cloned() else { return };
+                let gap = read.first().is_none_or(|e| e.seq > since.seq.saturating_add(1));
+                let entries = read.iter().chain(board.timeline.iter());
+                if let Some(recap) = Recap::of(&board, since, entries, partial || gap) {
+                    this.projects.recaps.insert(project, recap);
+                    this.projects_moved(cx);
+                }
+            })
+        })
+        .detach();
+    }
+
+    /// How far this client has read each project's timeline, to keep across launches: what
+    /// each board read as it last hid, and for a board on show now, all of it.
+    #[must_use]
+    pub fn projects_looked(&self) -> Vec<(ProjectId, Looked)> {
+        let at_ms = WallMs::now();
+        let mut looked = self.projects.looked.clone();
+        for project in &self.projects.open {
+            if let Some(board) = self.projects.mirror.get(project) {
+                looked.insert(project.clone(), Looked { seq: last_seq(board), at_ms });
+            }
+        }
+        let mut looked: Vec<(ProjectId, Looked)> = looked.into_iter().collect();
+        looked.sort_by(|a, b| a.0.cmp(&b.0));
+        looked
+    }
+
+    /// How far the last launch read each project's timeline: the recaps of this one start
+    /// there.
+    pub fn restore_projects_looked(
+        &mut self,
+        looked: impl IntoIterator<Item = (ProjectId, Looked)>,
+    ) {
+        self.projects.looked.extend(looked);
     }
 
     fn make_board(&mut self, project: ProjectId, cx: &mut Context<Self>) {
@@ -400,6 +538,11 @@ impl WorkspaceView {
                 ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
                 ProjectEvent::Machines => this.ask_machines(cx),
                 ProjectEvent::Pin(task, run_on) => this.pin_task(&asked, *task, *run_on, cx),
+                ProjectEvent::CloseRecap => {
+                    if this.projects.recaps.remove(&asked).is_some() {
+                        this.projects_moved(cx);
+                    }
+                }
                 ProjectEvent::CloseRunOn => {
                     if this.projects.run_on.remove(&asked).is_some() {
                         this.projects_moved(cx);

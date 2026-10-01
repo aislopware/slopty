@@ -605,3 +605,62 @@ fn a_plan_is_estimated_from_the_tasks_that_finished() {
     let empty = one(Vec::new());
     assert_eq!(board(&empty).estimate("build"), None);
 }
+
+/// A recap reads only what came after the last look, tells each kind once with its tasks in
+/// the order they last moved, puts what needs the person first, and leaves out an agent that
+/// ended once its work merged. A line names up to three tasks and counts the rest.
+#[test]
+fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
+    use super::fixtures::run;
+    use super::recap::{Looked, Recap, RecapKind};
+
+    let mut merged = card(4, "Write the decision", TaskState::Merged, None);
+    merged.assignment = None;
+    let mirror = one(vec![
+        merged,
+        card(5, "Check the goldens", TaskState::Waiting, None),
+        card(6, "Draw the lanes", TaskState::Waiting, None),
+    ]);
+    let board = board(&mirror);
+    let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+    let to = |to| Moment::State { from: TaskState::Running, to };
+    let timeline = [
+        entry(1, Some(5), Moment::Verified(run(false, "1111111"))),
+        entry(2, Some(4), to(TaskState::Merged)),
+        entry(3, Some(4), Moment::AgentGone { term }),
+        entry(4, Some(6), Moment::AgentGone { term }),
+        entry(5, Some(5), Moment::Verified(run(false, "2222222"))),
+        entry(6, Some(6), Moment::Verified(run(false, "3333333"))),
+        entry(7, None, Moment::Note { text: "the project's own".into() }),
+    ];
+    let since = Looked { seq: 1, at_ms: AT };
+    let recap = Recap::of(board, since, &timeline, false).expect("news");
+    let kinds: Vec<(RecapKind, Vec<u32>)> =
+        recap.lines.iter().map(|l| (l.kind, l.tasks.iter().map(|t| t.0).collect())).collect();
+    assert_eq!(
+        kinds,
+        [
+            (RecapKind::VerifyFailed, vec![5, 6]),
+            (RecapKind::AgentEnded, vec![6]),
+            (RecapKind::Merged, vec![4]),
+        ],
+        "the failure before the look is not told again; #4's agent ended as it should"
+    );
+    let texts: Vec<String> = recap.lines.iter().map(|l| l.text(board)).collect();
+    assert_eq!(
+        texts,
+        [
+            "Verifier failed on #5 and #6",
+            "Agent ended on #6 Draw the lanes",
+            "Merged #4 Write the decision"
+        ]
+    );
+    assert!(RecapKind::VerifyFailed.needs_you() && !RecapKind::Merged.needs_you());
+
+    let created: Vec<_> = (10..15)
+        .map(|n| entry(u64::from(n), Some(n), Moment::TaskCreated { title: format!("t{n}") }))
+        .collect();
+    let recap = Recap::of(board, since, &created, false).expect("news");
+    assert_eq!(recap.lines[0].text(board), "Created #10, #11, #12 and 2 more");
+    assert_eq!(Recap::of(board, Looked { seq: 7, at_ms: AT }, &timeline, false), None);
+}

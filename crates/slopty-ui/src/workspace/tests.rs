@@ -45,6 +45,14 @@ impl Fake {
 }
 
 /// A focused workspace, drawn once so the strip's size is known.
+/// A workspace whose frames hold still: GPUI's fades and slides run on the wall clock, so a
+/// test that judges a frame against one drawn from scratch ([`crate::retained::stale`]) runs
+/// under Reduce Motion, where a slow machine cannot catch one half way.
+fn still_workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    workspace(cx)
+}
+
 fn workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
     cx.update(|cx| {
         gpui_kit::init(cx);
