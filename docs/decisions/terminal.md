@@ -3112,7 +3112,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   clipboard it already mirrors: on a Mac, its pasteboard sync; on Linux, the clipboard it holds.
   When sharing is off, the read is denied, which OSC 52 answers with an empty value. Before this,
   libghostty ignored a read, so a program that asked waited out its own timeout.
-  - **What is shared** (`Clipboard::shared_text`). A client's copy, mirrored onto the worker, is
+  - **What is shared** (`Clipboard::shared_text_within`). A client's copy, mirrored onto the worker, is
     readable only while that client watches the worker's clipboard. The worker's own copy is
     readable while any client watches. A client's toggle tells the worker at once that it stopped
     watching, so the next read is denied. A secret (concealed or transient) is never readable, on
@@ -3125,13 +3125,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `PROVIDE_WAIT` (5 s). A copy made on the worker is readable once the poller sees it, within
     50 ms while watched.
   - **Wiring.** The engine answers reads from a source the session sets
-    (`GhosttyEngine::share_clipboard`). The worker hands every session, current and later, a reader
-    over its clipboard (`Worker::share_clipboard`, `Clipboard::reader`). The same callback answers
+    (`GhosttyEngine::share_clipboard`). The worker hands every session, current and later, its
+    clipboard as the sessions see it (`Worker::share_clipboard`, `clip::ForSessions`). The same
+    callback answers
     a Kitty clipboard read (OSC 5522) of `text/plain`, and a read of any other type is refused.
-  - **Kitty paste events.** Installing libghostty's read callback also turns on Kitty paste
-    events (mode 5522), which only `Terminal::paste` sends. The engine pastes through
-    `paste::encode`, so a program that sets the mode still gets an ordinary bracketed paste.
-    Kitty MIME paste, which comes next, takes this up.
+  - **Kitty paste events.** Installing libghostty's read callback is what lets a program turn on
+    Kitty paste events (mode 5522). A paste to such a program is the next entry.
   - Tests: engine `a_read_with_nothing_shared_is_answered_empty`,
     `a_read_is_answered_from_the_source_each_time`,
     `only_the_standard_clipboard_within_bounds_is_read`, `a_kitty_read_gets_text_and_nothing_else`;
@@ -3140,3 +3139,40 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_programs_clipboard_read_gets_the_text_only_while_it_is_shared`. That last one runs a real
     bash whose reads come before sharing, while shared, after sharing is turned off, and of
     promised text, under a 60 s promise wait.
+
+- ✅ **A paste to a program that asks for paste events carries the paster's copy** (2026-10-02).
+  A program can turn on Kitty paste events (mode 5522). It is then told of a paste as the list of
+  the paste's MIME types and a one-time password, never its text, and reads the types it wants
+  with that password. Text that would be unsafe on the input line needs no asking about, since
+  none of it reaches the input until the program reads it. The session answers that read from the
+  paste itself.
+  - **What a paste carries.** Always the pasted text, as `text/plain`. Beside it, the paster's
+    copy as `text/html`, `text/rtf`, `image/png` and `image/tiff`, on the same gate as a read: only
+    while that client shares its clipboard with the worker, and never a secret. The copy goes only
+    when the pasted text is that copy's text, matched by its digest or bytes, or when the paste is
+    empty (a picture's paste chord). A paste of a selection or a snippet is just its text.
+  - **File lists stay behind.** A client's `text/uri-list` names files on the client, which a
+    program on the worker cannot open. The pasteboard sync keeps them off the worker's
+    pasteboard for the same reason (`clip::writable`). Files travel as a transfer.
+  - **Here before the event.** The program reads at once, and the read is answered on the spot,
+    so every type the event lists is on the worker before the event goes. What the client's
+    offer holds only as a promise is fetched first (`ForSessions::paste_fetch`, urgent, each
+    representation once). The session waits up to `PASTE_WAIT` (3 s, the connection's wait for a
+    picture's paste) and then lists what is here. Meanwhile the viewers' input waits behind the
+    paste in order, as input waits behind a picture's paste. The session hears the bytes arrive
+    through a counter the clipboard moves whenever a client's bytes arrive, are refused or its
+    offer goes (`ForSessions::arrivals`), so nothing on the session thread blocks.
+  - **Bounded.** The copy carries at most `PASTE_CARRY_BYTES` (8 MiB) beside the text. The
+    program's read is answered on its input, base64 and all, and this keeps that answer well
+    inside the 16 MiB input queue. A representation listed larger is left out, and the fetch
+    asks for no more.
+  - **Once.** The password grants one read. The engine forgets the paste after it, and every
+    later read goes by the sharing rule above.
+  - Tests: engine `a_paste_to_a_program_that_asked_is_an_event_it_reads_once`,
+    `an_empty_paste_event_tells_nothing`; worker
+    `a_paste_carries_the_shared_copy_and_asks_for_the_rest_once`,
+    `a_paste_carries_no_secret_and_nothing_past_its_budget`, and
+    `a_paste_to_a_program_asking_for_events_carries_the_pasters_copy`. That last one runs a real
+    bash that turns the mode on, is pasted to while the picture is still on the client, and gets
+    the event once the picture arrives, with a key typed after the paste arriving after it. It
+    then reads the rich text and the picture with the password.

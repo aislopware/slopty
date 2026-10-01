@@ -22,6 +22,7 @@ use slopty_pty::protocol::OutputFrame;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::WorkerError;
+use crate::clip::ForSessions;
 use crate::compress::{Compressor, Turn};
 use crate::restore::Place;
 
@@ -162,7 +163,7 @@ enum Cmd {
     ResizeUnviewed { size: TermSize, reply: oneshot::Sender<u16> },
     Probe { reply: oneshot::Sender<Probe> },
     Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
-    ShareClipboard { reader: crate::clip::Reader },
+    ShareClipboard { clip: Arc<dyn ForSessions> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
     Launch { line: String },
@@ -439,9 +440,10 @@ impl SessionHandle {
         rx.await.map_err(|_gone| WorkerError::SessionClosed)?
     }
 
-    /// Answer the program's clipboard reads (OSC 52) from `reader` from now on.
-    pub fn share_clipboard(&self, reader: crate::clip::Reader) -> Result<(), WorkerError> {
-        self.send(Cmd::ShareClipboard { reader })
+    /// Answer the program's clipboard reads (OSC 52) from `clip` from now on, and carry the
+    /// paster's copy with a paste to a program told of pastes as events.
+    pub fn share_clipboard(&self, clip: Arc<dyn ForSessions>) -> Result<(), WorkerError> {
+        self.send(Cmd::ShareClipboard { clip })
     }
 
     /// Read the terminal as text, on the actor's thread.
@@ -900,6 +902,13 @@ struct Actor {
     compressing: Option<Turn>,
     /// Compressing frees no memory on this platform.
     compress_unsupported: bool,
+    /// The clipboard the program reads and pastes carry ([`SessionHandle::share_clipboard`]).
+    clip: Option<Arc<dyn ForSessions>>,
+    /// Moves as the clients' clipboard bytes arrive, for a paste waiting on them.
+    arrivals: Option<watch::Receiver<u64>>,
+    /// A paste event waiting for the paster's copy, and the viewers' input behind it.
+    pasting: Option<paste::Pasting>,
+    held: VecDeque<(ClientId, TermRequest, tokio::time::Instant)>,
 }
 
 /// A session's output is looked at for a local server's address at most this often once it
@@ -1061,6 +1070,10 @@ impl Actor {
             compress_turn: None,
             compressing: None,
             compress_unsupported: false,
+            clip: None,
+            arrivals: None,
+            pasting: None,
+            held: VecDeque::new(),
         })
     }
 
@@ -1125,6 +1138,12 @@ impl Actor {
                     self.progress_told_now(tokio::time::Instant::now());
                 }
                 () = sleep_until_due(self.compress_due) => self.compress_step(),
+                () = paste::arrived(&mut self.arrivals), if self.pasting.is_some() => {
+                    self.paste_progress(false);
+                }
+                () = sleep_until_due(self.pasting.as_ref().map(paste::Pasting::until)) => {
+                    self.paste_progress(true);
+                }
                 turn = turn_of(&mut self.compress_turn) => {
                     self.compress_turn = None;
                     if let Some(turn) = turn {
@@ -2054,6 +2073,10 @@ impl Actor {
                     self.send_to(old, &TermEvent::Driver { you: false });
                 }
             }
+            // Input waits, in order, behind a paste waiting for the paster's copy.
+            Cmd::Request { client, req, at } if self.pasting.is_some() && req.is_input() => {
+                self.held.push_back((client, req, at));
+            }
             Cmd::Request { client, req, at } => self.request(client, req, at),
             Cmd::Snapshot { reply } => {
                 let _ignored = reply.send(Snapshot {
@@ -2078,8 +2101,11 @@ impl Actor {
             Cmd::Memory { reply } => {
                 let _ignored = reply.send(self.engine.memory().map_err(WorkerError::from));
             }
-            Cmd::ShareClipboard { reader } => {
-                self.engine.share_clipboard(Some(Box::new(move || reader())));
+            Cmd::ShareClipboard { clip } => {
+                let reads = Arc::clone(&clip);
+                self.engine.share_clipboard(Some(Box::new(move || reads.shared_text())));
+                self.arrivals = Some(clip.arrivals());
+                self.clip = Some(clip);
             }
             Cmd::Probe { reply } => {
                 // A child that already exited has no foreground process; asking would only
@@ -2211,6 +2237,10 @@ impl Actor {
                 self.engine.encode_key(&event, &mut bytes)
             }
             TermRequest::Mouse(m) => self.engine.encode_mouse(&m, &mut bytes),
+            // An event puts nothing on the program's input, so it needs no asking about.
+            TermRequest::Paste { text, .. } if self.engine.paste_events().unwrap_or(false) => {
+                return self.paste_event(client, text);
+            }
             // Judged against the program's mode as it is now, not the one the client last saw
             // in a frame: a paste that would run something goes back to be asked about.
             TermRequest::Paste { text, confirmed } => match self.engine.paste_is_safe(&text) {
@@ -2336,6 +2366,8 @@ fn premultiplied_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
     }
     pixels
 }
+
+mod paste;
 
 #[cfg(test)]
 mod tests {

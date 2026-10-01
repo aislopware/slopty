@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub use clipboard::ClipboardSource;
+pub use clipboard::{ClipboardSource, PasteRep, TEXT_MIME};
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIteration, RowIterator};
@@ -439,7 +439,7 @@ impl GhosttyEngine {
         install_render_hold(&mut term, &render, &hold)?;
         let marks = Rc::new(RefCell::new(Vec::new()));
         install_marks(&mut term, &marks)?;
-        let clipboard = Rc::new(RefCell::new(None));
+        let clipboard = Rc::new(RefCell::new(clipboard::Reads::default()));
         clipboard::install(&mut term, &clipboard)?;
 
         let mut engine = Self {

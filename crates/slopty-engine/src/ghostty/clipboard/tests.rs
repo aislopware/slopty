@@ -81,3 +81,54 @@ fn a_kitty_read_gets_text_and_nothing_else() {
     let got = answer(&mut e, b"\x1b]5522;type=read:id=r2;aW1hZ2UvcG5n\x1b\\");
     assert!(got.contains("status=EPERM:id=r2"), "{got:?}");
 }
+
+/// The one-time password of the paste event in `told`.
+fn password(told: &str) -> String {
+    let start = told.find(":pw=").unwrap().saturating_add(4);
+    let rest = told.get(start..).unwrap();
+    rest.get(..rest.find(['\x1b', ';', ':']).unwrap()).unwrap().to_owned()
+}
+
+/// A program that turned paste events on is told of a paste as its types, text first, and
+/// reads what it wants with the password, once. Whatever it reads after is the shared
+/// clipboard's, which is nothing here.
+#[test]
+fn a_paste_to_a_program_that_asked_is_an_event_it_reads_once() {
+    let mut e = engine();
+    assert!(!e.paste_events().unwrap());
+    assert_eq!(answer(&mut e, b"\x1b[?5522h"), "");
+    assert!(e.paste_events().unwrap());
+    let html = PasteRep { mime: "text/html", data: b"<b>hi</b>".to_vec() };
+    assert!(e.paste_event("hi", vec![html]).unwrap());
+    let told: String = e
+        .drain_events()
+        .into_iter()
+        .filter_map(|ev| match ev {
+            EngineEvent::PtyWrite(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+            _ => None,
+        })
+        .collect();
+    let pw = password(&told);
+    // "text/plain text/html\n"
+    assert!(
+        told.contains("mime=Lg==") && told.contains("dGV4dC9wbGFpbiB0ZXh0L2h0bWwK"),
+        "{told:?}"
+    );
+    // "text/html", read by a program named "app" with the paste's password.
+    let read = format!("\x1b]5522;type=read:id=r1:name=YXBw:pw={pw};dGV4dC9odG1s\x1b\\");
+    let got = answer(&mut e, read.as_bytes());
+    // "<b>hi</b>"
+    assert!(got.contains("mime=dGV4dC9odG1s;PGI+aGk8L2I+"), "{got:?}");
+    assert!(!got.contains("aGk="), "the text was not asked for: {got:?}");
+    let again = answer(&mut e, read.as_bytes());
+    assert!(again.contains("status=EPERM"), "{again:?}");
+}
+
+/// Nothing to paste tells the program nothing.
+#[test]
+fn an_empty_paste_event_tells_nothing() {
+    let mut e = engine();
+    let _on = answer(&mut e, b"\x1b[?5522h");
+    assert!(!e.paste_event("", Vec::new()).unwrap());
+    assert!(e.drain_events().is_empty());
+}

@@ -1,15 +1,21 @@
-//! A program's clipboard reads (OSC 52 `?`, OSC 5522 `type=read`), answered from the text the
-//! session is given to share: whatever the worker mirrors while clipboard sharing is on, and
-//! nothing otherwise. The answer is decided in the callback, on the spot: a read the program
-//! waits on never waits on anything itself.
+//! A program's clipboard reads (OSC 52 `?`, OSC 5522 `type=read`), and pastes as Kitty paste
+//! events.
+//!
+//! A read is answered from the text the session is given to share: whatever the worker mirrors
+//! while clipboard sharing is on, and nothing otherwise. A program that turned on paste events
+//! (mode 5522) is told of a paste as the list of its MIME types instead of its text, and reads
+//! the ones it wants with the paste's one-time password; that read is answered from the paste.
+//! Every answer is decided in the callback, on the spot: a read the program waits on never
+//! waits on anything itself.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use libghostty_vt::Terminal;
 use libghostty_vt::terminal::{
     ClipboardLocation, ClipboardMime, ClipboardRead, ClipboardReadError, ClipboardReplyContent,
+    Mode,
 };
+use libghostty_vt::{Terminal, paste};
 use slopty_proto::terminal::MAX_OSC52_BYTES;
 
 use super::GhosttyEngine;
@@ -21,33 +27,90 @@ use crate::EngineError;
 /// [`GhosttyEngine::write`], so it must return at once.
 pub type ClipboardSource = Box<dyn Fn() -> Option<String>>;
 
-/// The source shared with the read callback.
-pub(super) type Shared = Rc<RefCell<Option<ClipboardSource>>>;
+/// One representation of a paste: its MIME type and its bytes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PasteRep {
+    /// The MIME type the program asks for it by, such as `text/html`.
+    pub mime: &'static str,
+    /// Its bytes.
+    pub data: Vec<u8>,
+}
 
-const TEXT: &str = "text/plain";
+/// What the read callback answers from, shared with it.
+#[derive(Default)]
+pub(super) struct Reads {
+    source: Option<ClipboardSource>,
+    /// The last paste event's representations, until the program reads them with its password.
+    pasted: Vec<PasteRep>,
+}
+
+pub(super) type Shared = Rc<RefCell<Reads>>;
+
+/// The MIME type of text, as Kitty names it.
+pub const TEXT_MIME: &str = "text/plain";
 
 impl GhosttyEngine {
     /// Answer the program's clipboard reads from `source`; `None` denies them all, as a new
     /// engine does.
     pub fn share_clipboard(&self, source: Option<ClipboardSource>) {
-        *self.clipboard.borrow_mut() = source;
+        self.clipboard.borrow_mut().source = source;
+    }
+
+    /// Whether the program asked to be told of pastes as Kitty paste events (mode 5522), so a
+    /// paste goes to [`Self::paste_event`] rather than [`Self::encode_paste`].
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn paste_events(&self) -> Result<bool, EngineError> {
+        Ok(self.term.mode(Mode::PASTE_EVENTS)?)
+    }
+
+    /// Tell the program of a paste of `text`, with `more` of the same copy beside it, as a
+    /// Kitty paste event: the MIME types, text first, and a one-time password. Nothing of the
+    /// paste reaches the program until it reads what it wants with that password, which is
+    /// answered from this paste. A paste with no representation tells nothing (`false`).
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing, or no entropy for the password.
+    pub fn paste_event(&mut self, text: &str, more: Vec<PasteRep>) -> Result<bool, EngineError> {
+        let mut reps = Vec::with_capacity(more.len().saturating_add(1));
+        if !text.is_empty() {
+            reps.push(PasteRep { mime: TEXT_MIME, data: text.as_bytes().to_vec() });
+        }
+        reps.extend(more.into_iter().filter(|rep| rep.mime != TEXT_MIME));
+        if reps.is_empty() {
+            return Ok(false);
+        }
+        let mimes: Vec<ClipboardMime<'_>> =
+            reps.iter().map(|rep| ClipboardMime::new(rep.mime)).collect();
+        let told = self.term.paste(paste::Options::new(), &mimes, |_, _| Ok(()))?;
+        drop(mimes);
+        if told {
+            self.clipboard.borrow_mut().pasted = reps;
+        }
+        Ok(told)
     }
 }
 
-/// Answer reads of the standard clipboard's text from `source`, up to the [`MAX_OSC52_BYTES`] a
-/// program's own copy may be; every other read is refused.
-///
-/// Installing the callback also turns on Kitty paste events (mode 5522) in libghostty, which
-/// only [`Terminal::paste`] sends; the engine's pastes go through [`libghostty_vt::paste::encode`]
-/// and stay plain (bracketed) pastes.
+/// Answer a read with a paste event's password from that paste, and any other read of the
+/// standard clipboard's text from the shared source, up to the [`MAX_OSC52_BYTES`] a program's
+/// own copy may be; every other read is refused. Installing the callback is what lets a
+/// program turn on paste events (mode 5522).
 pub(super) fn install(
     term: &mut Terminal<'static, 'static>,
-    source: &Shared,
+    reads: &Shared,
 ) -> Result<(), EngineError> {
-    let source = Rc::clone(source);
+    let reads = Rc::clone(reads);
     term.on_clipboard_read(move |_, read| {
+        if read.granted() {
+            // The paste event's password: the paste is this read's, once.
+            let pasted = std::mem::take(&mut reads.borrow_mut().pasted);
+            return reply_paste(read, &pasted);
+        }
         let text = answerable(&read)
-            .then(|| source.borrow().as_ref().and_then(|f| f()))
+            .then(|| reads.borrow().source.as_ref().and_then(|f| f()))
             .flatten()
             .filter(|text| text.len() <= MAX_OSC52_BYTES);
         // The reply writes to the pty through the pty-write callback: no borrow is held over it.
@@ -60,19 +123,35 @@ pub(super) fn install(
 /// text or as the list of what it holds.
 fn answerable(read: &ClipboardRead<'_>) -> bool {
     read.location() == ClipboardLocation::Standard
-        && (read.list() || read.mimes().any(|m| m == TEXT.as_bytes()))
+        && (read.list() || read.mimes().any(|m| m == TEXT_MIME.as_bytes()))
 }
 
 fn reply(read: ClipboardRead<'_>, text: Option<&str>) {
     match text {
         Some(text) => {
-            let wanted = read.mimes().any(|m| m == TEXT.as_bytes());
-            let content = [ClipboardReplyContent::new(TEXT, text.as_bytes())];
+            let wanted = read.mimes().any(|m| m == TEXT_MIME.as_bytes());
+            let content = [ClipboardReplyContent::new(TEXT_MIME, text.as_bytes())];
             let contents: &[ClipboardReplyContent<'_>] = if wanted { &content } else { &[] };
-            read.reply(Ok(contents), &[ClipboardMime::new(TEXT)], false);
+            read.reply(Ok(contents), &[ClipboardMime::new(TEXT_MIME)], false);
         }
         None => read.reply(Err(ClipboardReadError::Denied), &[], false),
     }
+}
+
+/// Answer a read with a paste event's password from the paste: each type it asks for that the
+/// paste has.
+fn reply_paste(read: ClipboardRead<'_>, pasted: &[PasteRep]) {
+    if pasted.is_empty() {
+        return read.reply(Err(ClipboardReadError::Denied), &[], false);
+    }
+    let contents: Vec<ClipboardReplyContent<'_>> = pasted
+        .iter()
+        .filter(|rep| read.mimes().any(|m| m == rep.mime.as_bytes()))
+        .map(|rep| ClipboardReplyContent::new(rep.mime, &rep.data))
+        .collect();
+    let available: Vec<ClipboardMime<'_>> =
+        pasted.iter().map(|rep| ClipboardMime::new(rep.mime)).collect();
+    read.reply(Ok(&contents), &available, false);
 }
 
 #[cfg(test)]

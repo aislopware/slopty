@@ -126,7 +126,7 @@ struct Inner {
     /// [`Worker::restore`] reopens them.
     lost: Mutex<HashMap<SessionId, Recipe>>,
     /// What the sessions' programs read of the clipboard ([`Worker::share_clipboard`]).
-    clipboard: Mutex<Option<crate::clip::Reader>>,
+    clipboard: Mutex<Option<Arc<dyn crate::clip::ForSessions>>>,
 }
 
 /// A session being opened, from before ptyd starts it until it is in the table or the open
@@ -573,20 +573,21 @@ impl Worker {
             .insert(id, Entry { handle: handle.clone(), command, exited, started_ms });
         // Read after the insert: a reader shared meanwhile reaches the session one way or the
         // other.
-        let reader = self.inner.clipboard.lock().clone();
-        if let Some(reader) = reader {
-            let _closed = handle.share_clipboard(reader);
+        let clip = self.inner.clipboard.lock().clone();
+        if let Some(clip) = clip {
+            let _closed = handle.share_clipboard(clip);
         }
         Ok(handle)
     }
 
-    /// Answer every session's clipboard reads (OSC 52) from `reader`, those opened later too.
-    pub fn share_clipboard(&self, reader: &crate::clip::Reader) {
-        *self.inner.clipboard.lock() = Some(Arc::clone(reader));
+    /// Give every session, those opened later too, the clipboard its program reads (OSC 52)
+    /// and its pastes carry.
+    pub fn share_clipboard(&self, clip: &Arc<dyn crate::clip::ForSessions>) {
+        *self.inner.clipboard.lock() = Some(Arc::clone(clip));
         let handles: Vec<SessionHandle> =
             self.inner.sessions.lock().values().map(|e| e.handle.clone()).collect();
         for handle in handles {
-            let _closed = handle.share_clipboard(Arc::clone(reader));
+            let _closed = handle.share_clipboard(Arc::clone(clip));
         }
     }
 

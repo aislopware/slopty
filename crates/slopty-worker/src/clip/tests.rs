@@ -933,19 +933,19 @@ fn a_program_reads_the_shared_text_only_while_it_is_shared() {
     let copy = client_offer(1, 0, vec![vec![inline(ClipFormat::Text, b"client copy")]]);
     assert!(c.offered(a, copy, Instant::now()));
     assert!(c.mirror(a));
-    assert_eq!(c.shared_text(1024), None, "nobody shares");
+    assert_eq!(c.shared_text_within(1024), None, "nobody shares");
     c.watch(b, true);
-    assert_eq!(c.shared_text(1024), None, "the copy is a's, and a does not share");
+    assert_eq!(c.shared_text_within(1024), None, "the copy is a's, and a does not share");
     c.watch(a, true);
-    assert_eq!(c.shared_text(1024).as_deref(), Some("client copy"));
-    assert_eq!(c.shared_text(4), None, "past the bound");
+    assert_eq!(c.shared_text_within(1024).as_deref(), Some("client copy"));
+    assert_eq!(c.shared_text_within(4), None, "past the bound");
 
     c.board().copy(&[(&text(), b"worker copy")]);
     assert!(c.poll(Instant::now()).is_some());
     c.watch(a, false);
-    assert_eq!(c.shared_text(1024).as_deref(), Some("worker copy"), "b still shares");
+    assert_eq!(c.shared_text_within(1024).as_deref(), Some("worker copy"), "b still shares");
     c.watch(b, false);
-    assert_eq!(c.shared_text(1024), None);
+    assert_eq!(c.shared_text_within(1024), None);
 
     c.watch(a, true);
     let mut secret = client_offer(2, 0, vec![vec![inline(ClipFormat::Text, b"hunter2")]]);
@@ -953,7 +953,7 @@ fn a_program_reads_the_shared_text_only_while_it_is_shared() {
     let _mirrored = c.offered(a, secret, Instant::now());
     assert_eq!(c.paste(a, PasteKind::Window), Paste::Ready);
     assert_eq!(c.board().data(0, &text()).unwrap(), b"hunter2");
-    assert_eq!(c.shared_text(1024), None, "a secret is pasted, never read");
+    assert_eq!(c.shared_text_within(1024), None, "a secret is pasted, never read");
 }
 
 /// Text the pasteboard only promises is not fetched for a read: the read answers nothing at
@@ -970,7 +970,7 @@ fn a_read_of_promised_text_never_waits_or_fetches() {
     assert!(c.offered(a, offer, Instant::now()));
     assert!(c.mirror(a));
     let asked = Instant::now();
-    assert_eq!(c.shared_text(1024), None);
+    assert_eq!(c.shared_text_within(1024), None);
     assert!(asked.elapsed() < Duration::from_secs(1));
     assert!(sent.lock().is_empty(), "{:?}", sent.lock());
 }

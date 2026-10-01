@@ -2301,7 +2301,7 @@ exec sleep 60"#;
         clip.attach(link, Arc::new(move |_| *counted.lock() += 1));
         assert!(clip.offered(link, offer(1, b"client copy", true), Instant::now()));
         assert!(clip.mirror(link));
-        session.share_clipboard(clip.reader()).unwrap();
+        session.share_clipboard(Arc::<Clipboard<Held>>::clone(&clip)).unwrap();
         // Handled in order: the reader is in place once the session answers this.
         let _memory = session.memory().await.unwrap();
         let (tx, mut rx) = viewer(256);
@@ -2332,6 +2332,122 @@ exec sleep 60"#;
         assert!(screen.contains("got4[]"), "only promised: {screen}");
         assert!(waited < Duration::from_secs(5), "the promised read waited {waited:?}");
         assert_eq!(*fetches.lock(), 0, "a read never asks the client");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A paste to a program that turned on Kitty paste events (mode 5522) is an event listing
+    /// the paster's copy: its text, its rich text, and its picture once fetched from the
+    /// client, with input typed after the paste waiting behind it. The program reads the types
+    /// it wants with the event's password and gets their bytes.
+    #[tokio::test]
+    async fn a_paste_to_a_program_asking_for_events_carries_the_pasters_copy() {
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        use slopty_core::WorkerId;
+        use slopty_input::pasteboard::Held;
+        use slopty_proto::transfer::{ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Rep};
+        use slopty_worker::clip::{Clipboard, digest};
+
+        fn rep(format: ClipFormat, bytes: &[u8], inline: bool) -> Rep {
+            Rep {
+                kind: ClipType::Format(format),
+                size: Some(bytes.len() as u64),
+                hash: Some(digest(bytes)),
+                inline: inline.then(|| bytes.to_vec()),
+            }
+        }
+
+        // The event's three parts, then the next byte typed, then the program's read of
+        // "text/html image/png" with the password and every part of its answer.
+        let script = r#"stty -echo -icanon
+printf '\033[?5522hready\n'
+for i in 1 2 3; do IFS= read -r -d '\' x; printf '%s\n' "$x" >> "$0/event"; done
+IFS= read -r -n 1 z; printf '%s' "$z" > "$0/typed"
+pw=$(tr -d '\033' < "$0/event" | sed -n 's/.*:pw=\([^:;]*\).*/\1/p' | head -n 1)
+printf '\033]5522;type=read:id=r1:name=YXBw:pw=%s;dGV4dC9odG1sIGltYWdlL3BuZw==\033\\' "$pw"
+while IFS= read -r -d '\' x; do
+  printf '%s\n' "$x" >> "$0/reply"
+  case $x in *status=DONE*) break;; esac
+done
+: > "$0/done"
+exec sleep 60"#;
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name);
+        let (session, mut child) =
+            start(&["/bin/bash", "-c", script, dir.path().to_str().unwrap()]);
+        let until = |name: &str| {
+            let path = at(name);
+            async move {
+                let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+                while !path.exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "never wrote {}: {:?}",
+                        path.display(),
+                        ["event", "typed", "reply"]
+                            .map(|f| std::fs::read_to_string(path.with_file_name(f)).ok())
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+
+        let clip = Arc::new(Clipboard::new(Held::default(), Peer::Worker(WorkerId::new())));
+        let fetches = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let asked = Arc::clone(&fetches);
+        let link = 7;
+        clip.attach(link, Arc::new(move |msg| asked.lock().push(msg)));
+        clip.watch(link, true);
+        let client = ClientId::new();
+        let png = b"\x89PNG not really".to_vec();
+        let offer = Offer {
+            origin: Peer::Client(client),
+            generation: 1,
+            age_ms: 0,
+            concealed: false,
+            items: vec![ClipEntry {
+                reps: vec![
+                    rep(ClipFormat::Text, b"hello", true),
+                    rep(ClipFormat::Html, b"<b>hello</b>", true),
+                    rep(ClipFormat::Png, &png, false),
+                ],
+            }],
+        };
+        let _mirrored = clip.offered(link, offer, Instant::now());
+        session.share_clipboard(Arc::<Clipboard<Held>>::clone(&clip)).unwrap();
+        // The mode is the engine's once the output after it is on the screen.
+        let (tx, mut rx) = viewer(256);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        session
+            .request(client, TermRequest::Paste { text: "hello".to_owned(), confirmed: false })
+            .unwrap();
+        session.request(client, TermRequest::Raw(b"Z".to_vec())).unwrap();
+
+        let deadline = Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        let rep = loop {
+            let first = fetches.lock().first().cloned();
+            if let Some(ClipMsg::Fetch { rep, .. }) = first {
+                break rep;
+            }
+            assert!(Instant::now() < deadline, "the picture was never asked for");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert!(!at("event").exists(), "the event waits for the picture");
+        let _whole = clip.supply(link, &rep, png.clone());
+        until("done").await;
+
+        let event = std::fs::read_to_string(at("event")).unwrap();
+        // "text/plain text/html image/png\n"
+        assert!(event.contains("dGV4dC9wbGFpbiB0ZXh0L2h0bWwgaW1hZ2UvcG5nCg=="), "{event:?}");
+        assert!(event.starts_with("\x1b]5522;type=read:status=OK"), "{event:?}");
+        assert_eq!(std::fs::read_to_string(at("typed")).unwrap(), "Z", "typed after the paste");
+        let reply = std::fs::read_to_string(at("reply")).unwrap();
+        // "text/html" and "<b>hello</b>"; "image/png" and the picture.
+        assert!(reply.contains("mime=dGV4dC9odG1s;PGI+aGVsbG88L2I+"), "{reply:?}");
+        assert!(reply.contains("mime=aW1hZ2UvcG5n;iVBORyBub3QgcmVhbGx5"), "{reply:?}");
         session.close();
         let _killed = child.kill().await;
     }

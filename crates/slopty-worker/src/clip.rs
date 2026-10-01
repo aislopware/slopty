@@ -47,7 +47,6 @@ use slopty_input::pasteboard::{
     clip_type, format_of, serve_main_run_loop, type_on_board,
 };
 use slopty_platform::pasteboard_access::Access as ReadAccess;
-use slopty_proto::terminal::MAX_OSC52_BYTES;
 use slopty_proto::transfer::{
     ClipEntry, ClipFormat, ClipMsg, ClipType, Hash, INLINE_CLIP_BYTES, MAX_CLIP_ITEMS, Offer, Peer,
     Rep, RepRef, Source, origin_bytes, parse_origin,
@@ -205,11 +204,18 @@ struct Shared {
     arrived: Condvar,
     /// How long a promise waits for bytes to start or go on arriving ([`PROVIDE_WAIT`]).
     wait: Duration,
+    /// Moved with every ring of [`Shared::arrived`], for the sessions, which cannot wait on it.
+    arrivals: watch::Sender<u64>,
 }
 
-/// What a session's program reads of the clipboard ([`Clipboard::reader`]): the shared text
-/// now, or `None`. Never blocks.
-pub type Reader = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+impl Shared {
+    /// A client's bytes arrived or will not, or its offer went: whoever waits on them looks
+    /// again.
+    fn ring(&self) {
+        self.arrived.notify_all();
+        self.arrivals.send_modify(|n| *n = n.wrapping_add(1));
+    }
+}
 
 /// A representation's key within one offer.
 type Key = (u16, ClipType);
@@ -495,7 +501,12 @@ impl<B: Board + Access> Clipboard<B> {
     /// Sync over `board` on behalf of `me`, a promise waiting `wait` for bytes to start or go on.
     pub fn waiting(board: B, me: Peer, wait: Duration) -> Self {
         let state = State { generation: first_generation(), ..State::default() };
-        let shared = Arc::new(Shared { state: Mutex::new(state), arrived: Condvar::new(), wait });
+        let shared = Arc::new(Shared {
+            state: Mutex::new(state),
+            arrived: Condvar::new(),
+            wait,
+            arrivals: watch::Sender::new(0),
+        });
         let born = Instant::now();
         Self { board, me, shared, interest: watch::Sender::new(Interest::Idle), born }
     }
@@ -552,7 +563,7 @@ impl<B: Board + Access> Clipboard<B> {
             }
             matches!(state.holds, Holds::Secret { link, .. } if link == client)
         };
-        self.shared.arrived.notify_all();
+        self.shared.ring();
         if secret {
             self.clear();
         }
@@ -569,7 +580,7 @@ impl<B: Board + Access> Clipboard<B> {
     /// promised is `None` until its bytes are here, and a copy made on the worker is known
     /// from the poller's next look.
     #[must_use]
-    pub fn shared_text(&self, max: usize) -> Option<String> {
+    pub fn shared_text_within(&self, max: usize) -> Option<String> {
         let state = self.shared.state.lock();
         let bytes = match state.holds {
             Holds::Mirror { link, source } if state.watchers.contains(&link) => {
@@ -597,17 +608,6 @@ impl<B: Board + Access> Clipboard<B> {
         let text = text.to_owned();
         drop(state);
         Some(text)
-    }
-
-    /// [`Clipboard::shared_text`] for the sessions' programs, up to what one may copy
-    /// ([`MAX_OSC52_BYTES`]).
-    #[must_use]
-    pub fn reader(self: &Arc<Self>) -> Reader
-    where
-        B: Send + Sync + 'static,
-    {
-        let clip = Arc::downgrade(self);
-        Arc::new(move || clip.upgrade()?.shared_text(MAX_OSC52_BYTES))
     }
 
     /// How reading the pasteboard goes now, for the doctor.
@@ -823,7 +823,7 @@ impl<B: Board + Access> Clipboard<B> {
         let mirror = !concealed && !same && newer(copied, state.copied);
         state.incoming.insert(client, Incoming::new(offer, copied));
         drop(state);
-        self.shared.arrived.notify_all();
+        self.shared.ring();
         if secret && !same {
             self.clear();
         }
@@ -882,7 +882,7 @@ impl<B: Board + Access> Clipboard<B> {
         }
         let whole = !inc.waiting.is_empty() && inc.whole();
         drop(state);
-        self.shared.arrived.notify_all();
+        self.shared.ring();
         whole
     }
 
@@ -897,7 +897,7 @@ impl<B: Board + Access> Clipboard<B> {
         inc.refused.insert((rep.item, rep.kind.clone()));
         let whole = !inc.waiting.is_empty() && inc.whole();
         drop(state);
-        self.shared.arrived.notify_all();
+        self.shared.ring();
         whole
     }
 
@@ -910,7 +910,7 @@ impl<B: Board + Access> Clipboard<B> {
             inc.heard = Some(now);
         }
         drop(state);
-        self.shared.arrived.notify_all();
+        self.shared.ring();
     }
 
     /// The client's offer `source` is gone: nothing more of it is coming.
@@ -920,7 +920,7 @@ impl<B: Board + Access> Clipboard<B> {
             inc.gone = true;
         }
         drop(state);
-        self.shared.arrived.notify_all();
+        self.shared.ring();
     }
 
     /// Put `client`'s offer on the pasteboard with what of it is here, promising the rest unless
@@ -1095,6 +1095,10 @@ fn writable(kind: &ClipType, bytes: Option<&[u8]>) -> bool {
         format_of(&board_type).is_some() || carried(&board_type)
     }
 }
+
+mod paste;
+
+pub use paste::{ForSessions, PastePlan};
 
 #[cfg(test)]
 mod tests;
