@@ -23,7 +23,7 @@ pub const MOD_PROTOCOL: u32 = 1;
 /// `crates/slopty-agent/tests/fixtures/mod` with the official build. A version joins this list
 /// only with a new recording, because the plugin API is early access and changes between
 /// releases.
-pub const MOD_CLAUDE_VERSIONS: &[&str] = &["2.1.283"];
+pub const MOD_CLAUDE_VERSIONS: &[&str] = &["2.1.286"];
 
 /// Where the mod posts its events: the worker's mod socket.
 pub const SOCKET_ENV: &str = "SLOPTY_MOD_SOCKET";

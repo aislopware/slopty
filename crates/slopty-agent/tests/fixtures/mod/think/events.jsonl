@@ -1,4 +1,4 @@
-{"events":[{"claude":"2.1.283","cwd":"/work","interactive":false,"kind":"hello","protocol":1,"sessionId":"00000000-0000-4000-8000-000000000001"}],"session":"00000000-0000-4000-8000-000000000016"}
+{"events":[{"claude":"2.1.286","cwd":"/work","interactive":false,"kind":"hello","protocol":1,"sessionId":"00000000-0000-4000-8000-000000000001"}],"session":"00000000-0000-4000-8000-000000000016"}
 {"events":[{"kind":"turn.start","text":"scenario:think say hello","turnId":"00000000-0000-4000-8000-000000000017"}],"session":"00000000-0000-4000-8000-000000000016"}
 {"events":[{"kind":"step.start","model":"claude-haiku-4-5-20251001","step":0,"turnId":"00000000-0000-4000-8000-000000000017"}],"session":"00000000-0000-4000-8000-000000000016"}
 {"events":[{"block":0,"kind":"thinking","model":"claude-haiku-4-5-20251001","step":0,"text":"The person ","turnId":"00000000-0000-4000-8000-000000000017"}],"session":"00000000-0000-4000-8000-000000000016"}
@@ -6,6 +6,6 @@
 {"events":[{"block":1,"kind":"text","model":"claude-haiku-4-5-20251001","step":0,"text":"Hello","turnId":"00000000-0000-4000-8000-000000000017"}],"session":"00000000-0000-4000-8000-000000000016"}
 {"events":[{"block":1,"kind":"text","model":"claude-haiku-4-5-20251001","step":0,"text":" there.","turnId":"00000000-0000-4000-8000-000000000017"}],"session":"00000000-0000-4000-8000-000000000016"}
 {"events":[{"kind":"stop","model":"claude-haiku-4-5-20251001","step":0,"stopReason":"end_turn","turnId":"00000000-0000-4000-8000-000000000017","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":12,"model":"claude-haiku-4-5-20251001","output_tokens":20}}],"session":"00000000-0000-4000-8000-000000000016"}
-{"events":[{"durationMs":393,"kind":"turn.complete","reason":"answer","turnId":"00000000-0000-4000-8000-000000000017","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":12,"model":"claude-haiku-4-5-20251001","output_tokens":20}}],"session":"00000000-0000-4000-8000-000000000016"}
+{"events":[{"durationMs":53,"kind":"turn.complete","reason":"answer","turnId":"00000000-0000-4000-8000-000000000017","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":12,"model":"claude-haiku-4-5-20251001","output_tokens":20}}],"session":"00000000-0000-4000-8000-000000000016"}
 {"events":[{"context":{"percent":0,"tokens":12,"window":200000},"cost":{"usd":0.000112},"kind":"measure","rateLimits":[]}],"session":"00000000-0000-4000-8000-000000000016"}
 {"events":[{"kind":"bye"}],"session":"00000000-0000-4000-8000-000000000016"}

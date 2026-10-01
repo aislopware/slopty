@@ -72,7 +72,7 @@ fn the_recorded_events_decode() {
     }
     let events = events("bash");
     let Some((_, ModEvent::Hello(hello))) = events.first() else { panic!("{events:?}") };
-    assert_eq!((hello.protocol, hello.claude.as_str()), (MOD_PROTOCOL, "2.1.283"));
+    assert_eq!((hello.protocol, hello.claude.as_str()), (MOD_PROTOCOL, MOD_CLAUDE_VERSIONS[0]));
 }
 
 /// The fixtures are the mod as it is embedded, recorded on a Claude Code the gate trusts: a

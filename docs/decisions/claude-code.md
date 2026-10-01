@@ -1221,7 +1221,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The mod's first event is a `hello` naming its protocol (`MOD_PROTOCOL`) and Claude Code's
       version. Nothing else is heard until a hello passes `slopty_agent::live::gate`: this
       protocol, and a version in `MOD_CLAUDE_VERSIONS`, which holds exactly the versions
-      recorded (today `["2.1.283"]`).
+      recorded (today `["2.1.286"]`, re-recorded 2026-10-01 with the mod unchanged: 2.1.286 batches
+      and interleaves a subagent's events differently, and the recordings still decode and settle).
     - The person follows upstream version by version, so a new Claude Code is not trusted until
       it is recorded. A refused hello is logged once per session (warn), and that session is
       followed from the transcript alone.
