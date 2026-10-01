@@ -770,6 +770,19 @@ pub enum Verb {
         /// This worker, over the proposal's and the task's placement.
         pin: Option<WorkerId>,
     },
+    /// Tell a task's agent something, as the person: their own words, which reach the agent
+    /// through its hooks as reports do, never typed into its terminal. The board's next steps
+    /// (fix CI, address the review's comments, resolve conflicts) are said this way. Answered
+    /// with [`Outcome::Done`]; a task with no agent running is [`ErrorCode::Invalid`], and an
+    /// agent is [`ErrorCode::Forbidden`].
+    TaskTell {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// What the person says, at most [`crate::project::NOTE_MAX`] bytes.
+        text: String,
+    },
     /// Put a task in its project's merge queue, the person's word: its verifier runs on its
     /// branch first when the project or the task names one. How a task with no verifier is
     /// merged, and how one is tried again after it was returned. Answered with
@@ -814,6 +827,20 @@ pub enum Verb {
     ProjectDelete {
         /// Which.
         project: ProjectId,
+    },
+    /// Read a pull request's own checks from its forge, with the forge's own command line
+    /// (`gh`, `glab`) in a checkout of its repository, as the worker's user is signed in to it:
+    /// nothing of the sign-in is read. The server's own, for a task's card. Answered with
+    /// [`Outcome::Checks`]; [`ErrorCode::Unsupported`] when the worker has no such command.
+    PullChecks {
+        /// Where.
+        worker: WorkerId,
+        /// A checkout of the repository the pull request is in.
+        cwd: String,
+        /// Its number.
+        number: u32,
+        /// A GitLab merge request rather than a GitHub pull request.
+        merge_request: bool,
     },
 }
 
@@ -892,6 +919,7 @@ impl Verb {
             | Self::TaskAssign { .. }
             | Self::TaskSpawn { .. }
             | Self::TaskStart { .. }
+            | Self::TaskTell { .. }
             | Self::TaskReport { .. }
             | Self::BundleBranch { .. }
             | Self::FetchBundle { .. }
@@ -907,6 +935,7 @@ impl Verb {
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
             // A clone there already is answered as it is.
             Self::CloneRepo { .. }
+            | Self::PullChecks { .. }
             | Self::ListWorkers
             | Self::ListTerminals { .. }
             | Self::ReadScreen { .. }
@@ -1354,6 +1383,8 @@ pub enum Outcome {
         /// Where it left the target branch, in hex.
         base: String,
     },
+    /// For [`Verb::PullChecks`]: what the pull request's checks say.
+    Checks(crate::project::Checks),
 }
 
 /// A page of an agent's conversation: the entries of one thread from `start`, what the face

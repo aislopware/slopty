@@ -332,7 +332,11 @@ fn a_task_follows_its_agent_until_someone_else_moves_it() {
     };
     let (_, updates) = p.update_task(&id(), t, verifying, Caller::Person, now()).unwrap();
     assert_eq!(updates.len(), 2, "moved, verified");
-    assert!(p.agent_status(at, &AgentStatus::Working, now()).is_empty());
+    let working = p.agent_status(at, &AgentStatus::Working, now());
+    assert!(
+        matches!(working.as_slice(), [Change { durable: false, kept: Kept { entry: None, .. } }]),
+        "its time is counted, quietly: {working:?}"
+    );
     assert_eq!(get(&p, t).state, TaskState::Verifying);
 
     let gone = p.session_ended(at, now());
@@ -341,6 +345,44 @@ fn a_task_follows_its_agent_until_someone_else_moves_it() {
         [Kept { entry: Some(TimelineEntry { what: Moment::AgentGone { .. }, .. }), .. }]
     ));
     assert!(get(&p, t).assignment.is_some_and(|a| a.ended_ms == Some(now())));
+}
+
+/// Time at work is counted per task and, apart, for the orchestrator: a stretch runs from
+/// working to idle or blocked, the wait between is left out, and an ended stretch is written
+/// while a begun one is only pushed. A closed terminal ends the stretch it was in.
+#[test]
+fn time_at_work_is_counted_per_task_and_apart_for_the_orchestrator() {
+    let orchestrator = term();
+    let mut p = project(Some(orchestrator));
+    let t = task(&mut p, "Work", &[]);
+    let at = term();
+    assign(&mut p, t, at).unwrap();
+    let ms = |s: u64| WallMs::from_millis(now().as_millis() + s * 1_000);
+    let durable = |changes: &[Change]| changes.iter().map(|c| c.durable).collect::<Vec<_>>();
+
+    assert_eq!(durable(&p.agent_status(at, &AgentStatus::Working, ms(0))), [false]);
+    let tool = AgentStatus::Tool { tool: "Bash".to_owned() };
+    assert!(p.agent_status(at, &tool, ms(10)).is_empty(), "the same stretch");
+    assert_eq!(durable(&p.agent_status(orchestrator, &AgentStatus::Working, ms(20))), [false]);
+    assert_eq!(durable(&p.agent_status(at, &AgentStatus::Idle, ms(60))), [true], "kept");
+    let blocked = AgentStatus::Blocked(BlockReason::Question);
+    assert_eq!(durable(&p.agent_status(orchestrator, &blocked, ms(50))), [true]);
+    assert_eq!(get(&p, t).spent, Spent { active_ms: 60_000, since_ms: None });
+    let record = &status(&p).project;
+    assert_eq!(record.orchestrator_spent, Spent { active_ms: 30_000, since_ms: None });
+
+    p.agent_status(at, &AgentStatus::Working, ms(600));
+    let card = status(&p).tasks.into_iter().find(|c| c.id == t).unwrap();
+    assert_eq!(card.spent.since_ms, Some(ms(600)), "the card carries the stretch under way");
+    assert_eq!(card.spent.at(ms(605)), 65_000);
+    let back = Projects::restore(p.file(Vec::new(), 0));
+    assert_eq!(
+        get(&back, t).spent,
+        Spent { active_ms: 60_000, since_ms: None },
+        "a restart ends it"
+    );
+    p.session_ended(at, ms(630));
+    assert_eq!(get(&p, t).spent, Spent { active_ms: 90_000, since_ms: None }, "it ended there");
 }
 
 /// One terminal per task and one task per terminal: a second live terminal for a task, or a

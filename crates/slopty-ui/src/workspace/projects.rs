@@ -26,6 +26,7 @@ use super::agents::agent_ask_line;
 use crate::icons::Status;
 use crate::project::model::{Board, Lane, Machine, Projects, RunOnPicker, TaskAction};
 use crate::project::recap::{Looked, Recap};
+use crate::project::spend::MetersBySession;
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject};
 
 /// What the palette and the header call turning a tile to its board.
@@ -73,6 +74,8 @@ pub(super) struct ProjectsState {
     pub open: HashSet<ProjectId>,
     /// What changed since the last look, for each board that opened onto news.
     pub recaps: HashMap<ProjectId, Recap>,
+    /// The agents' threads' meters as last heard, by the session their TUI runs in.
+    pub meters: MetersBySession,
 }
 
 /// The last entry of `board`'s timeline, 0 for an empty one.
@@ -372,7 +375,17 @@ impl WorkspaceView {
             let machines = self.projects.machines.clone();
             let run_on = self.projects.run_on.get(&project).cloned();
             let recap = self.projects.recaps.get(&project).cloned();
-            let seen = Seen { board, workers: names.clone(), agents, now, machines, run_on, recap };
+            let meters = board.as_ref().map(|b| self.board_meters(b)).unwrap_or_default();
+            let seen = Seen {
+                board,
+                workers: names.clone(),
+                agents,
+                now,
+                machines,
+                run_on,
+                recap,
+                meters,
+            };
             view.update(cx, |v, cx| v.set_seen(seen, cx));
         }
         let mut gave = false;
@@ -555,7 +568,7 @@ impl WorkspaceView {
 
     /// A board's action on a task, as the person's word to the server: a merge and a retry
     /// both put the task in the merge queue, which checks it afresh; an approval stands over
-    /// the reviewer's.
+    /// the reviewer's; a next step is said to the task's agent, as the person.
     fn act_on_task(
         &mut self,
         project: &ProjectId,
@@ -577,6 +590,18 @@ impl WorkspaceView {
             },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
             TaskAction::Start => Verb::TaskStart { project, task, pin: None },
+            TaskAction::FixCi | TaskAction::AddressComments | TaskAction::ResolveConflicts => {
+                let board = self.projects.mirror.get(&project);
+                let Some(text) = board.and_then(|b| b.told(task, action)) else { return };
+                let asked = match action {
+                    TaskAction::FixCi => "fix CI",
+                    TaskAction::AddressComments => "address the comments",
+                    _ => "resolve the conflicts",
+                };
+                let said = format!("Asked #{task}'s agent to {asked}");
+                let verb = Verb::TaskTell { project, task, text };
+                return self.send_to_server(verb, move |this, cx| this.show_notice(said, cx), cx);
+            }
         };
         self.send_to_server(verb, |_, _| (), cx);
     }
@@ -774,6 +799,36 @@ impl WorkspaceView {
     }
 
     /// How each agent of `board` is doing, as this client sees it.
+    /// What the thread of the agent in `session` says it spent, its context and the plan's
+    /// rate windows, as the thread's mirror hears it; `None` once the thread is gone. The
+    /// boards whose nodes it runs show it in the next frame.
+    pub fn thread_meters(
+        &mut self,
+        session: SessionId,
+        meters: Option<slopty_proto::thread::Meters>,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match meters {
+            Some(meters) => self.projects.meters.insert(session, meters.clone()) != Some(meters),
+            None => self.projects.meters.remove(&session).is_some(),
+        };
+        if changed {
+            self.projects_moved(cx);
+        }
+    }
+
+    /// The meters of `board`'s agents: its orchestrator's and every task's last agent's.
+    fn board_meters(&self, board: &Board) -> MetersBySession {
+        let orchestrator = board.project.orchestrator.map(|t| t.session);
+        let tasks =
+            board.tasks.values().filter_map(|c| c.assignment.as_ref().map(|a| a.term.session));
+        orchestrator
+            .into_iter()
+            .chain(tasks)
+            .filter_map(|s| Some((s, self.projects.meters.get(&s)?.clone())))
+            .collect()
+    }
+
     fn board_agents(&self, board: &Board) -> HashMap<SessionId, AgentSeen> {
         let sessions = std::iter::once(None)
             .chain(board.tasks.keys().copied().map(Some))

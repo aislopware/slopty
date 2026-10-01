@@ -1244,6 +1244,132 @@ Tests:
   `a_board_opens_onto_what_changed_since_you_last_looked` (`slopty-ui::workspace`, over
   `ServerCaller::queued`).
 
+**Time at work per node and subtree, the orchestrator's share apart.** ✅ 2026-10-02
+- Before: the board had no notion of what a task cost. Wall time from the timeline counted
+  every wait at the prompt or on the person as work.
+- The server already follows every agent's status for its task. It now also keeps `Spent {
+  active_ms, since_ms }` on each task, and `Project.orchestrator_spent` for the orchestrator.
+  A stretch begins when the agent starts working and ends when it stops (`Spent::follow`).
+  Working, running a tool, and waiting on background work it started count as work
+  (`Spent::works`). Idle at the prompt, done, blocked on the person, or holding only scheduled
+  prompts does not.
+- The stretch under way travels as `since_ms` and is counted by the reader (`Spent::at`), so a
+  running clock costs no message per second. The board ticks once a minute while any of its
+  agents works.
+- An ended stretch is written to the store and a begun one is only pushed, so the time
+  survives a restart for at most one extra write per turn. A restart drops a stretch that was
+  under way, since the server cannot know the gap was work. A closed terminal ends its
+  stretch.
+- `TaskCard.spent` carries it to the board. A row shows its time beside its state, from a
+  minute, its subtree's when it split work off ("worked 42m, 12m itself"). The header shows
+  the project's total, with the tasks' and the orchestrator's shares on hover.
+- The plan band's estimate now uses the finished tasks' time at work instead of the
+  timeline's wall time, so it no longer depends on what the timeline still holds: "about 20
+  min of work each".
+- **Cost, context and quota are the agents' threads' word.** `slopty_proto::thread::Meters`
+  carries a session's cost, its context and the plan's rate windows from the agent's own
+  status line, so no credential is read. The workspace takes them per session
+  (`WorkspaceView::thread_meters`), and the board rolls them up the same way:
+  - cost per node and subtree, and the orchestrator's apart;
+  - the context as a figure beside the time, hidden under 20 % and warning from 80 %;
+  - each rate window in the header at the fullest any agent reports, warning from 80 %.
+- A node whose thread this client has not heard shows its time alone. Tokens beyond the
+  context are not summed, since the meters carry the context's size, not a running count.
+- Tests: `spent_counts_the_stretches_at_work` (`slopty-proto`),
+  `time_at_work_is_counted_per_task_and_apart_for_the_orchestrator` (`slopty-server`),
+  `time_and_cost_roll_up_the_tree_with_the_orchestrator_apart` (`slopty-ui::project`) and
+  `the_board_says_what_its_agents_spent` (`slopty-ui::workspace`). The goldens
+  `project_snapshot`, `project_reply_status`, `task_merged_card` and others carry the new
+  fields.
+
+**The board's next steps are the person's words to the task's agent.** ✅ 2026-10-02
+- Before: when a task's verifier failed, its review asked for changes or its rebase
+  conflicted, the server told its agent once. If the agent stopped short, the person had to
+  open its TUI and type. Retry checked the same work again, which fails the same way.
+- `Verb::TaskTell { project, task, text }` carries the person's own words to a task's agent,
+  through the same delivery the reports take: the worker hands them over through the agent's
+  hooks, and nothing is typed into its terminal. `Deliveries` now tells who wrote an item:
+  - an agent's report, paced as before;
+  - the server's notice;
+  - the person's words, which go at once, unpaced. A second message replaces the person's
+    first while it is unread, and it never replaces the server's notice beside it.
+  The agent reads them under "The person says:", with the reports' tag spelled apart. The
+  timeline keeps `Moment::Told`.
+- `TaskTell` is the person's alone, since an agent reports upward with `task_report`.
+  It needs an agent running on the task, so a word is never parked for an agent that may
+  never come. The CLI has `slopty task tell <words>`. No MCP tool offers it.
+- While a task's agent runs, `Board::actions` puts its next step first on its row and card,
+  and the palette offers each one for the task the board stands on:
+  - **Fix CI** while its verifier's failure still speaks;
+  - **Address comments** while its review, or its pull request's review, asks for changes;
+  - **Resolve conflicts** after a rebase onto the target conflicted.
+  `Board::told` writes the words from what the board knows: the verifier's command, commit
+  and first line; the review's summary and up to five findings with their places; the pull
+  request; and git's word on the conflict. Each ends with what to do next. Retry for a failed
+  verifier or rebase waits until no agent runs, since checking unchanged work fails the same
+  way.
+- A conflict is now its own step, `StepKind::Rebase`, failed. Before, it was a failed merge
+  that told the board nothing about which next step fits. The recap tells it as "Conflicts
+  on #n".
+- Fix CI reads the project's verifier as its CI, and a pull request's own checks too (below).
+- Tests: `told_and_conflicted` (goldens `task_tell`, `moment_told`, `step_rebase_failed`),
+  `the_person_s_words_go_at_once_beside_the_server_s` (`slopty-server::deliver`),
+  `the_person_s_words_reach_the_task_s_agent` (`slopty-server`, through a worker's link),
+  `a_running_agent_is_told_its_next_step_in_the_person_s_words` (`slopty-ui::project`) and
+  `a_next_step_is_said_to_the_task_s_agent` (`slopty-ui::workspace`).
+
+## A pull request's own checks, and the pipeline row (2026-10-02)
+
+- **Who reads them.** The server watches every task that has a pull request and is not merged
+  or failed (`Hub::watch_checks`). It asks the worker its agent ran on, in that task's
+  worktree, with `Verb::PullChecks`. The worker runs the person's own forge command:
+  `gh pr checks N --json name,bucket`, or `glab mr view N --output json` for a GitLab merge
+  request, whose `head_pipeline.status` counts as one check (`slopty-worker::repo::checks`).
+  - It runs as the worker's user, with prompts and update notices off. Nothing of the sign-in
+    is read or passed. A command that is not signed in says so, and the card keeps its last
+    word.
+  - A worker without the command answers Unsupported. The command is looked for on `PATH`,
+    then where Homebrew puts it, since a daemon started by launchd has little on its `PATH`.
+  - `gh` ends 8 while checks run and 1 once one fails, with the same JSON either way, so the
+    JSON is read whatever the exit code. "no checks reported" means no checks.
+- **How often.** The watcher wakes every 10 s and reads only what is due. Checks still
+  running are read again after 30 s, settled ones after 2 min (a push starts them again), and
+  after 5 min when the forge could not be asked. The server does the polling, not each
+  client, so a hundred boards cost one read.
+- **What is kept.** `Checks` holds the state (none, pending, passing, failing), the counts and
+  up to five failing names, each at most 128 bytes, on `Task` and `TaskCard`. A read that says
+  the same as the last one changes nothing. The timeline logs `Moment::Checks` only when the
+  state changes, so a poll never floods it. The recap tells a failure as "Checks failed on
+  #n".
+- **Fix CI** is offered when the checks fail and an agent is live. Its words name the failing
+  checks and the command that shows them.
+- **The pipeline row.** Once a task's work is on its way (verifying, done, judged, queued or
+  with a pull request), its board card draws one row of quiet chips:
+  - its branch;
+  - what the verifier and the reviewer said;
+  - its place in the queue;
+  - "PR #n" with its checks in words ("1 of 6 checks fail", "2 of 6 checks running", "checks
+    pass") and "changes requested";
+  - the to-dos still open.
+
+  The chips use neutral text. A stage that holds the merge back is drawn in the stronger ink,
+  never in red, because a red mark belongs to a run that failed and none of these is an alarm
+  until someone has to act. The stage that the card's own check block already says, with its
+  detail, is left off the row, and the card's meta line drops what the row says. A tree row
+  says the pull request with its checks in its meta line.
+- **To-dos block merge.** Claude Code's own task list is the agent's word for what is left.
+  The merge queue gives back work whose list still has items open, naming up to five of them,
+  before it rebases anything. The board hides Merge while they are open and shows "N to-dos
+  open" on the row.
+- Tests:
+  - `pull_request_checks` (goldens `pull_checks`, `outcome_checks`, `moment_checks`);
+  - `the_forge_s_command_is_run_in_the_checkout` and the JSON readers
+    (`slopty-worker::repo::checks`, with `#!/bin/sh` stand-ins for `gh` and `glab`);
+  - `a_pull_request_s_checks_are_read_where_its_work_is` and
+    `open_to_dos_keep_work_from_merging` (`slopty-server`, through a worker's link);
+  - `a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge` (`slopty-ui::project`);
+  - `a_card_draws_its_pipeline_once_its_work_is_on_its_way` (`slopty-ui::workspace`).
+
 ## Phases
 
 1. **Wiring and state.** Built 2026-09-30, except the tile.

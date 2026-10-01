@@ -821,6 +821,10 @@ impl Hub {
             Verb::TaskStart { project, task, pin } => {
                 self.task_start(key, project, task, pin).await
             }
+            Verb::TaskTell { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "telling a task's agent is the person's; an agent reports with task_report",
+            ),
             Verb::PlacementSuggest { project, task, placement } => {
                 self.placement_suggest(project.as_ref(), task, placement).await
             }
@@ -852,6 +856,11 @@ impl Hub {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
             Verb::ProjectDelete { project } => self.project_delete(&project),
+            Verb::PullChecks { .. } => error(
+                ErrorCode::Forbidden,
+                "the server reads each task's pull request checks itself, onto its card; \
+                 task_get shows them",
+            ),
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
@@ -867,6 +876,7 @@ impl Hub {
             | Verb::TaskUpdate { .. }
             | Verb::TaskAssign { .. }
             | Verb::TaskReport { .. }
+            | Verb::TaskTell { .. }
             | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
             other => self.forward(key, other).await,
         }
@@ -1515,6 +1525,7 @@ fn remember(
         | Verb::TaskAssign { project, .. }
         | Verb::TaskSpawn { project, .. }
         | Verb::TaskStart { project, .. }
+        | Verb::TaskTell { project, .. }
         | Verb::TaskReport { project, .. }
         | Verb::TaskMerge { project, .. } => Some(project),
         _ => None,
@@ -1646,6 +1657,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskAssign { .. }
         | Verb::TaskSpawn { .. }
         | Verb::TaskStart { .. }
+        | Verb::TaskTell { .. }
         | Verb::PlacementSuggest { .. }
         | Verb::WorkerFacts { .. }
         | Verb::TaskGet { .. }
@@ -1671,6 +1683,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::CloneRepo { worker, .. }
         | Verb::BundleBranch { worker, .. }
         | Verb::FetchBundle { worker, .. }
+        | Verb::PullChecks { worker, .. }
         | Verb::Verify { worker, .. }
         | Verb::ReviewCheckout { worker, .. }
         | Verb::Rebase { worker, .. }

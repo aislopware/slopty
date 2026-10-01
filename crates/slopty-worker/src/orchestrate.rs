@@ -280,6 +280,7 @@ impl Orchestrator {
             | Verb::TaskReview { .. }
             | Verb::ProjectDelete { .. }
             | Verb::TaskStart { .. }
+            | Verb::TaskTell { .. }
             | Verb::ProjectList
             | Verb::ProjectStatus { .. }
             | Verb::TaskCreate { .. }
@@ -384,7 +385,8 @@ impl Orchestrator {
             | Verb::Verify { .. }
             | Verb::ReviewCheckout { .. }
             | Verb::Rebase { .. }
-            | Verb::FastForward { .. }) => Box::pin(self.repository(verb)).await,
+            | Verb::FastForward { .. }
+            | Verb::PullChecks { .. }) => Box::pin(self.repository(verb)).await,
             Verb::WriteFile { worker, path, bytes } => {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
@@ -811,6 +813,22 @@ impl Orchestrator {
                         .map_err(|f| verify_failure(&f))?;
                 let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
                 Ok(Outcome::FastForwarded { head, pushed, push_failed })
+            }
+            Verb::PullChecks { worker, cwd, number, merge_request } => {
+                self.mine(worker)?;
+                let cwd = crate::file::expand_home(Path::new(&cwd));
+                crate::repo::checks::read(&cwd, number, merge_request)
+                    .await
+                    .map(Outcome::Checks)
+                    .map_err(|failed| match failed {
+                        crate::repo::checks::Failed::Missing(program) => Failure::new(
+                            ErrorCode::Unsupported,
+                            format!("this worker has no {program}"),
+                        ),
+                        crate::repo::checks::Failed::Said(why) => {
+                            Failure::new(ErrorCode::Failed, why)
+                        }
+                    })
             }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }

@@ -553,23 +553,20 @@ fn a_task_offers_what_moves_it_on() {
     assert_eq!(TaskAction::Merge.selector("project-card", TaskId(1)), "project-card-merge-1");
 }
 
-/// A plan's estimate is the median time from a task's start to its work being done, of the
-/// project's tasks of the kind when there are any, else of every kind; with none finished
-/// there is no estimate. A proposed task offers its start, and choosing where it starts.
+/// A plan's estimate is the median time at work of the project's finished tasks of the kind
+/// when there are any, else of every kind; with none finished there is no estimate. A proposed task
+/// offers its start, and choosing where it starts.
 #[test]
 fn a_plan_is_estimated_from_the_tasks_that_finished() {
-    use slopty_proto::project::{Proposed, TimelineEntry};
+    use slopty_proto::project::{Proposed, Spent};
 
     use super::model::{Estimate, TaskAction};
     let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
-    let at = |min: u64| WallMs::from_millis(AT.as_millis() + min * 60_000);
-    let moment = |seq, task: u32, min, what| TimelineEntry {
-        seq,
-        at_ms: at(min),
-        task: Some(TaskId(task)),
-        what,
+    let worked = |mut c: slopty_proto::project::TaskCard, min: u64| {
+        c.spent = Spent { active_ms: min * 60_000, since_ms: None };
+        c
     };
-    let mut review = card(3, "Read it", TaskState::Done, None);
+    let mut review = worked(card(3, "Read it", TaskState::Done, None), 90);
     review.kind = "review".to_owned();
     let mut proposed = card(4, "Next", TaskState::Planned, None);
     proposed.proposed = Some(Proposed {
@@ -579,25 +576,18 @@ fn a_plan_is_estimated_from_the_tasks_that_finished() {
         why: String::new(),
     });
     let tasks = vec![
-        card(1, "Build a", TaskState::Done, None),
-        card(2, "Build b", TaskState::Merged, None),
+        worked(card(1, "Build a", TaskState::Done, None), 10),
+        worked(card(2, "Build b", TaskState::Merged, None), 20),
         review,
         proposed,
-    ];
-    let timeline = vec![
-        moment(1, 1, 0, Moment::Assigned { term, spawned: true }),
-        moment(2, 1, 10, Moment::State { from: TaskState::Running, to: TaskState::Done }),
-        moment(3, 2, 0, Moment::Assigned { term, spawned: true }),
-        moment(4, 2, 20, Moment::State { from: TaskState::Running, to: TaskState::Verifying }),
-        moment(5, 3, 0, Moment::Assigned { term, spawned: true }),
-        moment(6, 3, 90, Moment::State { from: TaskState::Running, to: TaskState::Done }),
+        worked(card(5, "Still going", TaskState::Running, None), 500),
     ];
     let mut mirror = Projects::default();
-    mirror.apply_part(snapshot(10, vec![status(project("board", None), tasks, timeline)]));
+    mirror.apply_part(snapshot(10, vec![status(project("board", None), tasks, Vec::new())]));
     let b = board(&mirror);
     let build = b.estimate("build").expect("two builds finished");
     assert_eq!(build, Estimate { each_ms: 20 * 60_000, from: 2, same_kind: true });
-    assert_eq!(build.line(), "about 20 min each, from 2 finished of the kind");
+    assert_eq!(build.line(), "about 20 min of work each, from 2 finished of the kind");
     let bench = b.estimate("bench").expect("from every kind");
     assert_eq!((bench.each_ms, bench.from, bench.same_kind), (20 * 60_000, 3, false));
     assert_eq!(b.proposed(), [TaskId(4)]);
@@ -663,4 +653,209 @@ fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
     let recap = Recap::of(board, since, &created, false).expect("news");
     assert_eq!(recap.lines[0].text(board), "Created #10, #11, #12 and 2 more");
     assert_eq!(Recap::of(board, Looked { seq: 7, at_ms: AT }, &timeline, false), None);
+}
+
+/// A node's time at work counts its subtree's with its own, the orchestrator's share stays
+/// apart, and a stretch under way counts to the moment the board reads it. What the agents'
+/// threads say adds cost, context and the plan's rate windows, the fullest of each; a node
+/// whose thread is not heard shows its time alone.
+#[test]
+fn time_and_cost_roll_up_the_tree_with_the_orchestrator_apart() {
+    use slopty_proto::project::Spent;
+    use slopty_proto::thread::{Limit, Meters};
+
+    use super::spend::{MetersBySession, dollars, limit_line, worked};
+    let min = |m: u64| m * 60_000;
+    let at = |m: u64| WallMs::from_millis(AT.as_millis() + min(m));
+    let worker = WorkerId::new();
+    let (orchestrator, parent, child, leaf) =
+        (SessionId::new(), SessionId::new(), SessionId::new(), SessionId::new());
+    let spent = |c: slopty_proto::project::TaskCard, done: u64, since: Option<u64>| {
+        let mut c = c;
+        c.spent = Spent { active_ms: min(done), since_ms: since.map(at) };
+        c
+    };
+    let mut record = project("board", Some(TermRef { worker, session: orchestrator }));
+    record.orchestrator_spent = Spent { active_ms: min(8), since_ms: None };
+    let tasks = vec![
+        spent(on(card(1, "Parent", TaskState::Running, None), worker, parent), 12, None),
+        spent(on(card(2, "Child", TaskState::Running, Some(1)), worker, child), 20, Some(0)),
+        spent(on(card(3, "Grandchild", TaskState::Done, Some(2)), worker, leaf), 5, None),
+        spent(card(4, "Apart", TaskState::Planned, None), 0, None),
+    ];
+    let mut mirror = Projects::default();
+    mirror.apply_part(snapshot(10, vec![status(record, tasks, Vec::new())]));
+    let b = board(&mirror);
+    assert!(b.at_work(), "#2's clock runs");
+    let none = MetersBySession::new();
+    let now = at(10);
+    let first = b.spend(Some(TaskId(1)), now, &none);
+    assert_eq!((first.own_ms, first.subtree_ms), (min(12), min(12 + 30 + 5)));
+    assert!(first.has_subtree() && first.own_cost.is_none() && first.subtree_cost.is_none());
+    let lone = b.spend(Some(TaskId(3)), now, &none);
+    assert!(!lone.has_subtree());
+    let mine = b.spend(None, now, &none);
+    assert_eq!((mine.own_ms, mine.subtree_ms), (min(8), min(8)), "its own share alone");
+    let all = b.project_spend(now, &none);
+    assert_eq!((all.orchestrator_ms, all.tasks_ms, all.total_ms()), (min(8), min(47), min(55)));
+
+    let meters = |cost, used, limits: Vec<Limit>| Meters {
+        cost_micro_usd: Some(cost),
+        context_tokens: Some(used),
+        context_window: Some(200_000),
+        limits,
+        ..Meters::default()
+    };
+    let limit = |name: &str, used_bp| Limit { name: name.to_owned(), used_bp, resets_ms: None };
+    let heard: MetersBySession = [
+        (orchestrator, meters(400_000, 40_000, vec![limit("five-hour", 4_200)])),
+        (
+            child,
+            meters(1_250_000, 170_000, vec![limit("five-hour", 4_400), limit("seven-day", 1_800)]),
+        ),
+        (leaf, meters(50_000, 10_000, Vec::new())),
+    ]
+    .into_iter()
+    .collect();
+    let first = b.spend(Some(TaskId(1)), now, &heard);
+    assert_eq!((first.own_cost, first.subtree_cost), (None, Some(1_300_000)));
+    let second = b.spend(Some(TaskId(2)), now, &heard);
+    assert_eq!(second.context_shown(), Some((8_500, true)), "85% warns");
+    assert_eq!(b.spend(Some(TaskId(3)), now, &heard).context_shown(), None, "5% is not shown");
+    assert_eq!(b.spend(None, now, &heard).context_shown(), Some((2_000, false)));
+    let all = b.project_spend(now, &heard);
+    assert_eq!((all.orchestrator_cost, all.tasks_cost), (Some(400_000), Some(1_300_000)));
+    assert_eq!(all.limits.iter().map(limit_line).collect::<Vec<_>>(), ["5-hour 44%", "weekly 18%"]);
+    assert_eq!(
+        [worked(0), worked(min(12)), worked(min(64)), dollars(1_700_000), dollars(4_999)],
+        ["under 1m", "12m", "1h 4m", "$1.70", "$0.00"]
+    );
+}
+
+/// While a task's agent runs, its next step is the person's word to it, first on its row: fix
+/// CI for a failed verifier, address the comments a review or its pull request asked for,
+/// resolve the conflicts its rebase met. Checking it again unchanged would fail the same way,
+/// so Retry waits for an agent that is gone. What is said names what failed and what to do.
+#[test]
+fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
+    use slopty_proto::agent::{PullRequest, Review};
+    use slopty_proto::project::Finding;
+
+    use super::fixtures::{review, run, step};
+    use super::model::TaskAction;
+
+    let worker = WorkerId::new();
+    let live = |n, title, state| on(card(n, title, state, None), worker, SessionId::new());
+    let mut ci = live(1, "Its verifier failed", TaskState::Waiting);
+    ci.verified = Some(run(false, "9c1e2f3"));
+    ci.step =
+        Some(step(StepKind::Verify, worker, StepState::Failed { why: "2 errors".into() }, None));
+    let mut asked = live(2, "Changes asked", TaskState::Waiting);
+    asked.verified = Some(run(true, "4444444"));
+    let mut said = review(false, "4444444", None);
+    said.verdict.findings = vec![Finding {
+        path: Some("crates/a.rs".into()),
+        line: Some(12),
+        severity: "high".into(),
+        blocking: true,
+        body: "This unwraps a None.".into(),
+    }];
+    asked.reviewed = Some(said);
+    let mut pr = live(3, "Its pull request", TaskState::Waiting);
+    pr.pr = Some(PullRequest {
+        number: 9,
+        url: "https://github.com/o/r/pull/9".into(),
+        review: Some(Review::ChangesRequested),
+        merge_request: false,
+    });
+    let mut conflict = live(4, "Does not rebase", TaskState::Waiting);
+    let why = StepState::Failed { why: "conflicts in a.txt".into() };
+    conflict.step = Some(step(StepKind::Rebase, worker, why.clone(), None));
+    let mut gone = card(5, "Does not rebase, nobody on it", TaskState::Planned, None);
+    gone.step = Some(step(StepKind::Rebase, worker, why, None));
+    let mirror = one(vec![ci, asked, pr, conflict, gone]);
+    let b = board(&mirror);
+    let of = |n| b.actions(TaskId(n));
+    assert_eq!(of(1), [TaskAction::FixCi], "no Retry while an agent can fix it");
+    assert_eq!(of(2), [TaskAction::AddressComments, TaskAction::Approve]);
+    assert_eq!(of(3), [TaskAction::AddressComments]);
+    assert_eq!(of(4), [TaskAction::ResolveConflicts]);
+    assert_eq!(of(5), [TaskAction::Retry, TaskAction::RunOn], "nobody to tell");
+    assert!(TaskAction::FixCi.tells() && !TaskAction::Retry.tells());
+
+    let told = |n, action| b.told(TaskId(n), action).expect("words");
+    let fix = told(1, TaskAction::FixCi);
+    assert!(fix.starts_with("Fix CI. `cargo gate` failed on your work at 9c1e2f3"), "{fix}");
+    assert!(fix.ends_with("report done again with task_report."), "{fix}");
+    let address = told(2, TaskAction::AddressComments);
+    assert!(address.contains("- blocking, crates/a.rs:12: This unwraps a None."), "{address}");
+    let pull = told(3, TaskAction::AddressComments);
+    assert!(pull.contains("Pull request #9 has changes requested"), "{pull}");
+    let resolve = told(4, TaskAction::ResolveConflicts);
+    assert!(resolve.contains("does not rebase onto main: conflicts in a.txt"), "{resolve}");
+    assert_eq!(b.told(TaskId(4), TaskAction::FixCi), None, "nothing failed to fix");
+    assert_eq!(b.told(TaskId(1), TaskAction::Merge), None);
+}
+
+/// Once a task's work is on its way, one row says each stage of it: its branch, what its
+/// verifier and reviewer said, its place in the queue, its pull request with its own checks,
+/// and the to-dos still open, which hold the merge back. Failing checks are CI to fix.
+#[test]
+fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
+    use slopty_proto::agent::PullRequest;
+    use slopty_proto::project::{Checks, ChecksState, NativeCounts};
+
+    use super::fixtures::{queued, review};
+    use super::model::{StageKind, TaskAction};
+
+    let worker = WorkerId::new();
+    let mut ahead = queued(card(1, "Ahead", TaskState::Done, None), 10, "1111111");
+    ahead.branch = Some("worktree-ahead".into());
+    let mut piped = queued(card(2, "Its pull request", TaskState::Done, None), 20, "2222222");
+    piped.reviewed = Some(review(true, "2222222", None));
+    piped.pr = Some(PullRequest {
+        number: 42,
+        url: "https://github.com/o/r/pull/42".into(),
+        review: None,
+        merge_request: false,
+    });
+    piped.checks = Some(Checks {
+        state: ChecksState::Failing,
+        passed: 5,
+        failed: 1,
+        pending: 0,
+        skipped: 0,
+        failing: vec!["clippy (macos)".into()],
+        at_ms: AT,
+    });
+    let piped = on(piped, worker, SessionId::new());
+    let mut todos =
+        on(card(3, "Still has to-dos", TaskState::Done, None), worker, SessionId::new());
+    todos.natives = NativeCounts { agents: 0, running: 0, todos: 3, done: 1 };
+    let working = card(4, "Still at work", TaskState::Running, None);
+    let mirror = one(vec![ahead, piped, todos, working]);
+    let b = board(&mirror);
+
+    let said = |n| {
+        b.pipeline(TaskId(n)).into_iter().map(|s| (s.kind, s.words, s.holds)).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        said(2),
+        [
+            (StageKind::Branch, "slopty/board/2".to_owned(), false),
+            (StageKind::Verifier, "Verified".to_owned(), false),
+            (StageKind::Reviewer, "Approved".to_owned(), false),
+            (StageKind::Queue, "2nd to merge".to_owned(), false),
+            (StageKind::Pull, "PR #42, 1 of 6 checks fail".to_owned(), true),
+        ]
+    );
+    let todo = (StageKind::ToDos, "2 to-dos open".to_owned(), true);
+    assert_eq!(said(3), [(StageKind::Branch, "slopty/board/3".to_owned(), false), todo]);
+    assert!(said(4).is_empty(), "nothing to say while it is worked on");
+
+    assert_eq!(b.actions(TaskId(2)), [TaskAction::FixCi], "failing checks are CI to fix");
+    let fix = b.told(TaskId(2), TaskAction::FixCi).expect("words");
+    assert!(fix.contains("Pull request #42's checks failed: clippy (macos)."), "{fix}");
+    assert!(!b.actions(TaskId(3)).contains(&TaskAction::Merge), "{:?}", b.actions(TaskId(3)));
+    assert_eq!(b.open_todos(TaskId(3)), 2);
 }

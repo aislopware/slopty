@@ -985,6 +985,25 @@ pub async fn task_merge<D: Dispatch>(
     task_answer(dispatch, key, Verb::TaskMerge { project, task }).await
 }
 
+/// Tell a task's agent something, as the person: their words reach it through its hooks as a
+/// report does, never typed into its terminal.
+///
+/// # Errors
+/// As [`task_report`]; a task with no agent running, and an agent asking, are refused.
+pub async fn task_tell<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    task: Option<&str>,
+    text: String,
+    key: Option<IdempotencyKey>,
+) -> Result<(), ToolError> {
+    let (project, task) = project_task(dispatch, project, task).await?;
+    match dispatch.send(key, Verb::TaskTell { project, task, text }).await {
+        Outcome::Done => Ok(()),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
 /// Say whether a task's work may merge, as the reviewer the server started for it or as the
 /// person: an approval queues it, changes asked give it back to its agent with the findings.
 ///

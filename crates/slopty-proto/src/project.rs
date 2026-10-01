@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
 
-use crate::agent::{AgentBranch, PullRequest};
+use crate::agent::{AgentBranch, AgentStatus, PullRequest};
 use crate::orchestration::{Size, TermRef};
 use crate::terminal::RepoId;
 
@@ -141,6 +141,10 @@ pub const TIMELINE_PAGE_BYTES: usize = 1 << 20;
 pub const TIMELINE_BYTES_KEPT: usize = 8 << 20;
 /// The longest report note, in bytes.
 pub const NOTE_MAX: usize = SUMMARY_MAX;
+/// How many failing checks of a pull request a card names ([`Checks::failing`]).
+pub const CHECKS_NAMED: usize = 5;
+/// The longest name of a check a card keeps.
+pub const CHECK_NAME_MAX: usize = 128;
 /// The most artifacts one [`Report`] names.
 pub const ARTIFACTS_MAX: usize = 32;
 
@@ -447,6 +451,9 @@ pub struct Project {
     pub ask_to_start: bool,
     /// The terminal of the agent the person talks to, which splits the goal into tasks.
     pub orchestrator: Option<TermRef>,
+    /// How long the orchestrator worked, idle waits left out: its share, apart from its
+    /// tasks'.
+    pub orchestrator_spent: Spent,
     /// Its limits.
     pub limits: Limits,
     /// Anything its agents keep with it: the text of a JSON object.
@@ -948,10 +955,130 @@ pub struct Task {
     pub step: Option<TaskStep>,
     /// A start its orchestrator proposed, which waits for the person ([`Project::ask_to_start`]).
     pub proposal: Option<Proposal>,
+    /// How long its agents worked on it, idle waits left out.
+    pub spent: Spent,
+    /// What its pull request's own checks last said, while it has one.
+    pub checks: Option<Checks>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
+}
+
+/// How long an agent worked: the stretches it was at work, the waits between left out.
+///
+/// The server follows the agent's status ([`Spent::works`]): a stretch begins when it starts
+/// working and ends when it stops, so a wait at the prompt or on the person is not counted.
+/// The stretch under way is counted by whoever reads it ([`Spent::at`]), so a running clock
+/// needs no message per second.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Spent {
+    /// The stretches that ended, in milliseconds.
+    pub active_ms: u64,
+    /// When the stretch under way began, while the agent works.
+    pub since_ms: Option<WallMs>,
+}
+
+/// What a pull request's own checks say, as its forge reports them (`gh pr checks`, a merge
+/// request's pipeline).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Checks {
+    /// Where they stand together.
+    pub state: ChecksState,
+    /// How many passed.
+    pub passed: u16,
+    /// How many failed or were cancelled.
+    pub failed: u16,
+    /// How many still run or wait to.
+    pub pending: u16,
+    /// How many were skipped.
+    pub skipped: u16,
+    /// The names of those that failed, at most [`CHECKS_NAMED`], each at most
+    /// [`CHECK_NAME_MAX`] bytes.
+    pub failing: Vec<String>,
+    /// When the forge said so, by the server's clock.
+    pub at_ms: WallMs,
+}
+
+impl Checks {
+    /// The most it takes on the wire.
+    pub const MAX_BYTES: usize = CHECKS_NAMED * (CHECK_NAME_MAX + 2) + 40;
+
+    /// About how many bytes it takes on the wire, never less.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        self.failing.iter().map(|n| n.len().saturating_add(10)).fold(40, usize::saturating_add)
+    }
+
+    /// Whether it says the same as `other`, whenever each was read.
+    #[must_use]
+    pub fn says_as(&self, other: &Self) -> bool {
+        Self { at_ms: other.at_ms, ..self.clone() } == *other
+    }
+}
+
+/// Where a pull request's checks stand together.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ChecksState {
+    /// It has none.
+    None,
+    /// Some still run, and none has failed.
+    Pending,
+    /// Every one passed or was skipped.
+    Passing,
+    /// At least one failed.
+    Failing,
+}
+
+/// What following an agent's status did to its [`Spent`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stretch {
+    /// It started working.
+    Began,
+    /// It stopped, and the stretch is counted.
+    Ended,
+}
+
+impl Spent {
+    /// Whether an agent with `status` is at work: thinking, running a tool, or waiting on
+    /// background work it started. Idle at its prompt, done, blocked on the person, or holding
+    /// only scheduled prompts, it is not.
+    #[must_use]
+    pub const fn works(status: &AgentStatus) -> bool {
+        match status {
+            AgentStatus::Working | AgentStatus::Tool { .. } => true,
+            AgentStatus::Waiting { tasks, .. } => *tasks > 0,
+            AgentStatus::None | AgentStatus::Idle | AgentStatus::Blocked(_) | AgentStatus::Done => {
+                false
+            }
+        }
+    }
+
+    /// Its agent is at work now or not: a stretch begins, or the one under way ends.
+    pub const fn follow(&mut self, works: bool, now: WallMs) -> Option<Stretch> {
+        match (self.since_ms, works) {
+            (None, true) => {
+                self.since_ms = Some(now);
+                Some(Stretch::Began)
+            }
+            (Some(since), false) => {
+                self.active_ms = self.at_from(since, now);
+                self.since_ms = None;
+                Some(Stretch::Ended)
+            }
+            _ => None,
+        }
+    }
+
+    /// How long it worked as of `now`, the stretch under way included.
+    #[must_use]
+    pub fn at(&self, now: WallMs) -> u64 {
+        self.since_ms.map_or(self.active_ms, |since| self.at_from(since, now))
+    }
+
+    const fn at_from(&self, since: WallMs, now: WallMs) -> u64 {
+        self.active_ms.saturating_add(now.as_millis().saturating_sub(since.as_millis()))
+    }
 }
 
 /// A start the orchestrator proposed for a task, held until the person starts it.
@@ -1011,6 +1138,9 @@ pub enum StepKind {
     Merge,
     /// A reviewer with fresh context reading the task's work, in a session of its own.
     Review,
+    /// The merge queue's rebase of the task's work onto the target. It is a step of its own
+    /// only when it fails, and then it conflicts: the work goes back to its agent to resolve.
+    Rebase,
 }
 
 /// How a [`TaskStep`] goes. Its texts are at most [`SUMMARY_MAX`] bytes.
@@ -1110,6 +1240,8 @@ impl Task {
             step: self.step.clone(),
             proposed: self.proposal.as_ref().map(|p| p.proposed.clone()),
             pin: self.placement.pin,
+            spent: self.spent,
+            checks: self.checks.clone(),
             natives: natives.counts(),
             created_ms: self.created_ms,
             updated_ms: self.updated_ms,
@@ -1161,6 +1293,10 @@ pub struct TaskCard {
     pub pin: Option<WorkerId>,
     /// A start its orchestrator proposed, waiting for the person.
     pub proposed: Option<Proposed>,
+    /// How long its agents worked on it, idle waits left out.
+    pub spent: Spent,
+    /// What its pull request's own checks last said, while it has one.
+    pub checks: Option<Checks>,
     /// How many natives its node holds.
     pub natives: NativeCounts,
     /// When it was made.
@@ -1181,7 +1317,8 @@ impl TaskCard {
         + ReviewRun::MAX_BYTES
         + 2 * Suggestion::WHY_MAX
         + KIND_MAX
-        + 760;
+        + Checks::MAX_BYTES
+        + 800;
 }
 
 impl TaskCard {
@@ -1198,6 +1335,7 @@ impl TaskCard {
             self.pr.as_ref().map_or(0, |pr| pr.url.len().saturating_add(32)),
             self.verified.as_ref().map_or(0, VerifierRun::approx_bytes),
             self.reviewed.as_ref().map_or(0, ReviewRun::approx_bytes),
+            self.checks.as_ref().map_or(0, Checks::approx_bytes),
             self.merge.as_ref().map_or(0, |m| match m {
                 Merge::Queued { .. } => 16,
                 Merge::Merged { target, head, .. } => {
@@ -1314,12 +1452,19 @@ pub enum Moment {
     },
     /// Its verifier ran, or the person recorded what it said.
     Verified(VerifierRun),
+    /// Its pull request's checks came to stand otherwise: started, passed or failed.
+    Checks(Checks),
     /// A reviewer, or the person, said whether the work may merge.
     Reviewed(ReviewRun),
     /// The terminal on it closed.
     AgentGone {
         /// The terminal.
         term: TermRef,
+    },
+    /// The person told the task's agent something ([`crate::orchestration::Verb::TaskTell`]).
+    Told {
+        /// What they said.
+        text: String,
     },
     /// Words from the orchestrator or the person.
     Note {
@@ -1355,8 +1500,9 @@ impl TimelineEntry {
             Moment::Claimed { paths } => texts(paths),
             Moment::Branch { branch, .. } => branch.as_deref().map_or(0, text),
             Moment::Verified(run) => run.approx_bytes(),
+            Moment::Checks(checks) => checks.approx_bytes(),
             Moment::Reviewed(run) => run.approx_bytes(),
-            Moment::Note { text: words } => text(words),
+            Moment::Note { text: words } | Moment::Told { text: words } => text(words),
             Moment::Reported { report } => text(&report.note)
                 .saturating_add(texts(&report.artifacts))
                 .saturating_add(report.branch.as_deref().map_or(0, text)),
@@ -1641,6 +1787,42 @@ mod tests {
         .count();
         assert_eq!(holding, 6);
         assert!(!TaskState::Merged.holds_paths() && !TaskState::Failed.holds_paths());
+    }
+
+    /// Time spent counts the stretches an agent was at work and leaves out its waits: idle at
+    /// its prompt, blocked on the person, or holding only a scheduled prompt. A stretch under
+    /// way counts up to the moment it is read, and a status that does not change the stretch
+    /// changes nothing.
+    #[test]
+    fn spent_counts_the_stretches_at_work() {
+        use crate::agent::BlockReason;
+        let at = |s: u64| WallMs::from_millis(1_000_000 + s * 1_000);
+        let tool = AgentStatus::Tool { tool: "Bash".to_owned() };
+        let background = AgentStatus::Waiting { tasks: 1, crons: 0 };
+        let scheduled = AgentStatus::Waiting { tasks: 0, crons: 1 };
+        let blocked = AgentStatus::Blocked(BlockReason::Question);
+        for (status, works) in [
+            (&AgentStatus::Working, true),
+            (&tool, true),
+            (&background, true),
+            (&scheduled, false),
+            (&blocked, false),
+            (&AgentStatus::Idle, false),
+            (&AgentStatus::Done, false),
+            (&AgentStatus::None, false),
+        ] {
+            assert_eq!(Spent::works(status), works, "{status:?}");
+        }
+        let mut spent = Spent::default();
+        assert_eq!(spent.follow(true, at(0)), Some(Stretch::Began));
+        assert_eq!(spent.follow(true, at(5)), None, "still the same stretch");
+        assert_eq!(spent.at(at(30)), 30_000, "the stretch under way counts as it is read");
+        assert_eq!(spent.follow(false, at(40)), Some(Stretch::Ended));
+        assert_eq!(spent.follow(false, at(100)), None);
+        assert_eq!(spent.at(at(500)), 40_000, "a wait is not counted");
+        spent.follow(true, at(600));
+        spent.follow(false, at(620));
+        assert_eq!(spent, Spent { active_ms: 60_000, since_ms: None });
     }
 
     /// A worker's ranking in a line: its pin, what scored the most first, then what it was

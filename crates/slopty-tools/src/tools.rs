@@ -1910,6 +1910,8 @@ mod tests {
     /// Task `id` as the fake's server makes it, its agent in the fake's shell once started.
     fn made_task(id: u32, parent: Option<TaskId>, title: &str, started: bool) -> Task {
         Task {
+            checks: None,
+            spent: slopty_proto::project::Spent::default(),
             id: TaskId(id),
             parent,
             depends_on: Vec::new(),
@@ -1948,6 +1950,7 @@ mod tests {
     fn project_status(id: ProjectId) -> ProjectStatus {
         ProjectStatus {
             project: Project {
+                orchestrator_spent: slopty_proto::project::Spent::default(),
                 id,
                 title: "Slopty".to_owned(),
                 repo: "~/slopty".to_owned(),

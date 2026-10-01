@@ -3,12 +3,13 @@
 //! person's checkout in the way each end as they should. The git behind each verb is proved in
 //! `slopty-worker`'s `repo::verify` and end to end in `apps/slopty-cli/tests/projects.rs`.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use slopty_proto::orchestration::{Line, Screen};
 use slopty_proto::project::{
-    LimitsChange, Merge, Moment, Placement, Report, ReportKind, StepKind, StepState, TaskId,
-    TaskState,
+    Checks, ChecksState, LimitsChange, Merge, Moment, NativeTask, Placement, Report, ReportKind,
+    StepKind, StepState, TaskId, TaskState,
 };
 use slopty_proto::server::Os;
 
@@ -399,8 +400,142 @@ async fn a_conflict_goes_back_to_the_agent_with_its_paths() {
     let step = card.step.unwrap();
     assert_eq!(
         (step.kind, step.state),
-        (StepKind::Merge, StepState::Failed { why: "conflicts in a.txt, src/lib.rs".to_owned() })
+        (StepKind::Rebase, StepState::Failed { why: "conflicts in a.txt, src/lib.rs".to_owned() })
     );
     let told = studio.told(agent.session, "does not rebase onto main").await;
     assert!(told.contains("conflicts in a.txt, src/lib.rs"), "{told}");
+}
+
+/// The person's next step reaches the task's own agent through its hooks, at once and in
+/// their words, and the timeline keeps it. An agent may not speak as the person, and a task
+/// with no agent running has nobody to tell.
+#[tokio::test]
+async fn the_person_s_words_reach_the_task_s_agent() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, orchestrator, task, agent) = fleet(&hub).await;
+    let refused = |o: &Outcome, want: ErrorCode| {
+        assert!(matches!(o, Outcome::Error { code, .. } if *code == want), "{o:?}");
+    };
+    let tell = |text: &str| Verb::TaskTell { project: project(), task, text: text.to_owned() };
+    let words = "Resolve the conflicts with main, then report done again.";
+    assert_eq!(hub.dispatch(tell(words)).await, Outcome::Done);
+    let told = studio.told(agent.session, "The person says:").await;
+    assert!(told.contains(words), "{told}");
+    let s = status(&hub).await;
+    assert!(
+        s.timeline.iter().any(|e| e.what == Moment::Told { text: words.to_owned() }),
+        "{:?}",
+        s.timeline
+    );
+
+    let as_agent = hub.dispatch_as(Speaker::Proven(orchestrator.session), None, tell("Go")).await;
+    refused(&as_agent, ErrorCode::Forbidden);
+    refused(&hub.dispatch(tell("  ")).await, ErrorCode::Invalid);
+    studio.lease.handle(ToServer::SessionClosed {
+        session: agent.session,
+        reason: slopty_proto::terminal::CloseReason::Exited,
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while task_now(&hub, task).await.assignment.is_some_and(|a| a.open()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("its terminal closes");
+    refused(&hub.dispatch(tell("Fix CI")).await, ErrorCode::Invalid);
+}
+
+/// Work whose agent still has to-dos open on its own list is not merged: the queue gives it
+/// back to its agent naming them, before it rebases anything.
+#[tokio::test]
+async fn open_to_dos_keep_work_from_merging() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    let todo = |id: &str, subject: &str, done| NativeTask {
+        id: id.to_owned(),
+        subject: subject.to_owned(),
+        done,
+    };
+    for item in [todo("1", "Write the tests", false), todo("2", "Build it", true)] {
+        let report = AgentReport::NativeTask { session: agent.session, task: item };
+        studio.lease.handle(ToServer::Report(report));
+    }
+    done(&hub, task, agent).await;
+    let asked = studio.request().await;
+    studio.ran(&asked, 0, ('a', 'b'));
+    let (id, _close) = studio.past_screens(&["ok"]).await;
+    answer(&studio.lease, id, Outcome::Done);
+    until_state(&hub, task, TaskState::Waiting).await;
+    let card = task_now(&hub, task).await;
+    let step = card.step.unwrap();
+    assert_eq!(
+        (step.kind, step.state),
+        (
+            StepKind::Merge,
+            StepState::Failed { why: "1 to-do still open on its task list".to_owned() }
+        )
+    );
+    let told = studio.told(agent.session, "your task list still has 1 to-do open").await;
+    assert!(told.contains("(Write the tests)"), "{told}");
+    assert!(!told.contains("Build it"), "{told}");
+    let rebased = tokio::time::timeout(Duration::from_millis(300), studio.request()).await;
+    assert!(rebased.is_err(), "nothing is rebased: {rebased:?}");
+}
+
+/// A task's pull request's own checks are read on the worker its agent ran on, in its
+/// worktree, and put on its card; the timeline says where they stand when that moves, and a
+/// read that says the same again is no change.
+#[tokio::test]
+async fn a_pull_request_s_checks_are_read_where_its_work_is() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    let worktree = slopty_proto::agent::Worktree {
+        name: "slopty-slopty-1".to_owned(),
+        path: TREE.to_owned(),
+        branch: Some(BRANCH.to_owned()),
+        original_cwd: "/w/demo".to_owned(),
+        original_branch: Some("main".to_owned()),
+    };
+    let pr = slopty_proto::agent::PullRequest {
+        number: 7,
+        url: "https://example.com/o/demo/pull/7".to_owned(),
+        review: None,
+        merge_request: false,
+    };
+    let branch = AgentBranch { session: agent.session, pr: Some(pr), worktree: Some(worktree) };
+    studio.lease.handle(ToServer::Report(AgentReport::Branch(branch)));
+    let card = task_now(&hub, task).await;
+    assert_eq!((card.pr.map(|p| p.number), card.worktree.as_deref()), (Some(7), Some(TREE)));
+
+    let failing = Checks {
+        state: ChecksState::Failing,
+        passed: 3,
+        failed: 1,
+        pending: 0,
+        skipped: 1,
+        failing: vec!["lint".to_owned()],
+        at_ms: WallMs::now(),
+    };
+    for round in 0..2 {
+        let watcher = hub.clone();
+        let read = tokio::spawn(async move {
+            let mut due = HashMap::new();
+            watcher.read_due_checks(&mut due).await;
+            due.len()
+        });
+        let (id, verb) = studio.request().await;
+        let Verb::PullChecks { worker, cwd, number, merge_request } = verb else {
+            panic!("round {round}: {verb:?}")
+        };
+        assert_eq!((worker, cwd.as_str(), number, merge_request), (agent.worker, TREE, 7, false));
+        let again = Checks { at_ms: WallMs::now(), ..failing.clone() };
+        answer(&studio.lease, id, Outcome::Checks(again));
+        assert_eq!(read.await.unwrap(), 1, "due again later");
+    }
+    let card = task_now(&hub, task).await;
+    let kept = card.checks.expect("its checks");
+    assert_eq!((kept.state, kept.failing), (ChecksState::Failing, vec!["lint".to_owned()]));
+    let s = status(&hub).await;
+    let said: Vec<_> = s.timeline.iter().filter(|e| matches!(e.what, Moment::Checks(_))).collect();
+    assert_eq!(said.len(), 1, "{said:?}");
 }

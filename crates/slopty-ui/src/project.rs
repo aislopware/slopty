@@ -7,6 +7,7 @@
 //!
 //! * [`model`] — the server's projects mirrored, and what the board derives from one.
 //! * [`recap`] — what changed since this client last looked.
+//! * [`spend`] — time at work per node and subtree, and what the agents' threads say they cost.
 //! * `view` — the board itself: the header and its bar, what needs the person, and the tree, board
 //!   and timeline lenses.
 
@@ -14,6 +15,7 @@
 
 pub mod model;
 pub mod recap;
+pub mod spend;
 mod view;
 
 pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen};
@@ -51,6 +53,12 @@ gpui::actions!(
         RetryTask,
         /// Approve the work of the task the keyboard stands on over its reviewer.
         ApproveTask,
+        /// Tell the agent of the task the keyboard stands on to make its verifier pass.
+        FixCi,
+        /// Tell the agent of the task the keyboard stands on to address its review.
+        AddressComments,
+        /// Tell the agent of the task the keyboard stands on to resolve its conflicts.
+        ResolveConflicts,
         /// Push the target after each merge, or stop.
         TogglePush,
         /// Turn the orchestrator's tile back to its terminal.
@@ -78,6 +86,9 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "merge_task", MergeTask, &["m"], BOARD),
         Command::new(Scope::Project, "retry_task", RetryTask, &["r"], BOARD),
         Command::new(Scope::Project, "approve_task", ApproveTask, &["a"], BOARD),
+        Command::new(Scope::Project, "fix_ci", FixCi, &[], BOARD),
+        Command::new(Scope::Project, "address_comments", AddressComments, &[], BOARD),
+        Command::new(Scope::Project, "resolve_conflicts", ResolveConflicts, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
         Command::new(Scope::Project, "show_machines", ShowMachines, &["4"], BOARD),
         Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
@@ -101,6 +112,17 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Merge the task", IconName::GitBranch, Box::new(MergeTask)),
         line("Retry the task", IconName::RotateCw, Box::new(RetryTask)),
         line("Approve the task's work", IconName::Check, Box::new(ApproveTask)),
+        line("Tell the task's agent to fix CI", IconName::Wrench, Box::new(FixCi)),
+        line(
+            "Tell the task's agent to address the comments",
+            IconName::MessageSquare,
+            Box::new(AddressComments),
+        ),
+        line(
+            "Tell the task's agent to resolve the conflicts",
+            IconName::GitBranch,
+            Box::new(ResolveConflicts),
+        ),
         line("Run the task on\u{2026}", IconName::Server, Box::new(RunTaskOn)),
         line("Start the task", IconName::CircleDot, Box::new(StartTask)),
         line("Start every proposed task", IconName::ListChecks, Box::new(StartProposed)),

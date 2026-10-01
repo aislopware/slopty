@@ -372,6 +372,16 @@ pub enum TaskCmd {
         #[arg(long, value_name = "WORKER")]
         on: Option<String>,
     },
+    /// Tell a task's agent something, as the person: the words reach it through its hooks as a
+    /// report does, never typed into its terminal (fix CI, address the comments, resolve the
+    /// conflicts).
+    Tell {
+        #[command(flatten)]
+        which: TaskRef,
+        /// What to say.
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
+    },
     /// Say whether a task's work may merge, as the person, over its reviewer's word or in its
     /// place: `--approve` puts verified work in the merge queue, `--changes` gives it back to
     /// its agent with the summary and findings.
@@ -666,6 +676,12 @@ pub async fn task(
         TaskCmd::Start { which, on } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_start(&mut res, project, task, on.as_deref(), key).await?
+        }
+        TaskCmd::Tell { which, words } => {
+            let (project, task) = (which.project.as_deref(), which.task.as_deref());
+            ops::task_tell(link, project, task, words.join(" "), key).await?;
+            println!("Told its agent");
+            return Ok(());
         }
         TaskCmd::Review { which, approve, summary, findings, .. } => {
             let findings = findings.iter().map(|f| finding(f)).collect();

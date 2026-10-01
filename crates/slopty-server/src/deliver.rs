@@ -45,20 +45,34 @@ pub(crate) const CONTEXT_MAX: usize = 9_000;
 /// A node of a project's tree: a task, or the orchestrator's when the task is absent.
 pub(crate) type Node = (ProjectId, Option<TaskId>);
 
-/// What waits for a node: a task's report, or the server's own words: standing instructions
-/// when the task is absent, or a notice about the task (its verifier failed, it merged).
+/// Who wrote what waits for a node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum By {
+    /// A task's agent: its report.
+    Agent,
+    /// The server: standing instructions when the task is absent, or a notice about the task
+    /// (its verifier failed, it merged), read as they are.
+    Server,
+    /// The person, to the task's own agent: their words, which go at once.
+    Person,
+}
+
+/// What waits for a node: a task's report, the server's own words, or the person's.
 #[derive(Clone, Debug)]
 struct Item {
     task: Option<TaskId>,
     report: Report,
     at: Instant,
-    /// The server wrote it, about `task`: its words are read as they are.
-    notice: bool,
+    by: By,
 }
 
 impl Item {
-    /// The pacing it goes under: its task's needs, or its task's blocks.
+    /// The pacing it goes under: its task's needs, or its task's blocks. The person's words
+    /// are not paced.
     fn paced(&self) -> Option<(TaskId, bool)> {
+        if self.by == By::Person {
+            return None;
+        }
         let stuck = match self.report.kind {
             ReportKind::NeedsInput => false,
             ReportKind::Stuck => true,
@@ -69,6 +83,9 @@ impl Item {
 
     /// When it falls due, given when its task's last report of its kind went.
     fn due(&self, last: Option<Instant>) -> Instant {
+        if self.by == By::Person {
+            return self.at;
+        }
         let after = |wait: Duration| self.at.checked_add(wait).unwrap_or(self.at);
         let paced = |every: Duration| {
             let next = last.and_then(|last| last.checked_add(every));
@@ -146,7 +163,7 @@ impl Deliveries {
     /// A report of `task` for `node`: it replaces the task's checkpoint and finish still
     /// waiting, and its need or block when it is one; it waits with the task's others.
     pub(crate) fn add(&mut self, node: Node, task: Option<TaskId>, report: Report, at: Instant) {
-        self.push(node, Item { task, report, at, notice: false });
+        self.push(node, Item { task, report, at, by: By::Agent });
     }
 
     /// The server's own `note` about `task`, for `node`, paced as a report of `kind`: it
@@ -164,7 +181,21 @@ impl Deliveries {
         // closing its block as an agent's words are.
         let note = plain(note);
         let report = Report { kind, note, artifacts: Vec::new(), branch: None, pr: None };
-        self.push(node, Item { task: Some(task), report, at, notice: true });
+        self.push(node, Item { task: Some(task), report, at, by: By::Server });
+    }
+
+    /// The person's `words` to the agent of `task` itself: they go at once, replace what the
+    /// person said before that has not been read, and stand beside the server's notices.
+    pub(crate) fn person(&mut self, project: ProjectId, task: TaskId, words: &str, at: Instant) {
+        let note = plain(words);
+        let report = Report {
+            kind: ReportKind::NeedsInput,
+            note,
+            artifacts: Vec::new(),
+            branch: None,
+            pr: None,
+        };
+        self.push((project, Some(task)), Item { task: Some(task), report, at, by: By::Person });
     }
 
     fn push(&mut self, node: Node, item: Item) {
@@ -172,10 +203,11 @@ impl Deliveries {
         let (task, kind) = (item.task, item.report.kind);
         queue.waiting.retain(|i| {
             let settles = matches!(i.report.kind, ReportKind::Checkpoint | ReportKind::Done);
-            let replaced = if item.notice {
-                i.notice
-            } else {
-                !i.notice && (settles || (task.is_some() && i.report.kind == kind))
+            let replaced = match item.by {
+                By::Server | By::Person => i.by == item.by,
+                By::Agent => {
+                    i.by == By::Agent && (settles || (task.is_some() && i.report.kind == kind))
+                }
             };
             i.task != task || !replaced
         });
@@ -361,7 +393,14 @@ fn cut(text: &str, max: usize) -> String {
 /// an agent's, so they never close the block they sit in ([`plain`]).
 fn block(item: &Item) -> String {
     let r = &item.report;
-    let Some(task) = item.task.filter(|_| !item.notice) else { return r.note.trim().to_owned() };
+    if item.by == By::Person {
+        let mut lines = vec!["The person says:".to_owned()];
+        lines.extend(r.note.trim().lines().map(|line| format!("  {line}")));
+        return lines.join("\n");
+    }
+    let Some(task) = item.task.filter(|_| item.by == By::Agent) else {
+        return r.note.trim().to_owned();
+    };
     let mut lines = vec![format!("task {task}: {}", kind_word(r.kind))];
     lines.extend(r.note.trim().lines().map(|line| format!("  {}", plain(line))));
     lines.extend(r.branch.iter().map(|branch| format!("  branch: {}", plain(branch))));

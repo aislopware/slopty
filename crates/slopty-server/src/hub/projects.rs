@@ -8,7 +8,7 @@
 //! opening another. So a start whose answer was lost still counts, and its terminal is put on
 //! its task when the worker announces it. A caller never chooses the id.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,8 +26,8 @@ use slopty_proto::server::{FromServer, Liveness, Os};
 use slopty_proto::terminal::{RepoId, SessionSummary};
 
 use super::{
-    Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, digest, error, keep_start, keyed, known_term,
-    remember, start_again, start_answered, term_of,
+    Again, Entry, Hub, State, WAIT_CAP_MS, WeakHub, branch_of, digest, error, keep_start, keyed,
+    known_term, remember, start_again, start_answered, term_of,
 };
 use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Ranking};
@@ -935,6 +935,7 @@ impl Hub {
         let status = |s: ProjectStatus| Outcome::Project(Box::new(s));
         let mut named = None;
         let mut kick = None;
+        let mut told = None;
         let answered = match verb.clone() {
             Verb::ProjectCreate {
                 project,
@@ -997,6 +998,12 @@ impl Hub {
             }
             Verb::TaskClaim { project, task: id, paths } => {
                 state.projects.claim(&project, id, &paths, now).map(|(t, u)| (task(t), u))
+            }
+            Verb::TaskTell { project, task: id, text } => {
+                state.projects.tell(&project, id, &text, now).map(|(words, u)| {
+                    told = Some((project, id, words));
+                    (Outcome::Done, u)
+                })
             }
             Verb::TaskUpdate { project, task: id, change } => state
                 .projects
@@ -1079,6 +1086,10 @@ impl Hub {
         };
         if let Some(project) = kick {
             self.kick(state, &project);
+        }
+        if let Some((project, task, words)) = told {
+            state.deliveries.person(project, task, &words, tokio::time::Instant::now());
+            self.inner.deliver.notify_one();
         }
         if let Some(term) =
             named.as_ref().and_then(|p| state.projects.project(p).ok()?.orchestrator)
@@ -2048,6 +2059,75 @@ pub(super) struct Gathered {
     candidates: Vec<Candidate>,
     peers: BTreeMap<TaskId, WorkerId>,
     ranking: Ranking,
+}
+
+/// How often the watcher looks for checks falling due.
+const CHECKS_TICK: Duration = Duration::from_secs(10);
+/// How soon a pull request's checks are read again while some still run.
+const CHECKS_RUNNING: Duration = Duration::from_secs(30);
+/// How soon once they have settled: a push starts them again, and the next read sees it.
+const CHECKS_SETTLED: Duration = Duration::from_secs(120);
+/// How soon after the forge could not be asked: a worker away, a command not signed in.
+const CHECKS_FAILED: Duration = Duration::from_secs(300);
+
+impl Hub {
+    /// Read every open task's pull request's own checks from its forge, on the worker its
+    /// agent ran on and in the worktree it worked in, until the hub is gone: often while they
+    /// run, seldom once they settle, and only when one falls due. The card shows them.
+    pub async fn watch_checks(hub: WeakHub) {
+        let mut due: HashMap<(ProjectId, TaskId), tokio::time::Instant> = HashMap::new();
+        loop {
+            tokio::time::sleep(CHECKS_TICK).await;
+            let Some(hub) = hub.upgrade() else { return };
+            hub.read_due_checks(&mut due).await;
+        }
+    }
+
+    /// One round of [`Hub::watch_checks`]: read the checks that fall due by `due`, and say
+    /// when each is due again.
+    pub(crate) async fn read_due_checks(
+        &self,
+        due: &mut HashMap<(ProjectId, TaskId), tokio::time::Instant>,
+    ) {
+        let watched = self.inner.state.lock().projects.pull_requests();
+        due.retain(|at, _| watched.iter().any(|w| (&w.project, w.task) == (&at.0, at.1)));
+        let now = tokio::time::Instant::now();
+        for watch in watched {
+            let at = (watch.project.clone(), watch.task);
+            if due.get(&at).is_some_and(|when| *when > now) {
+                continue;
+            }
+            let next = self.read_checks(watch).await;
+            due.insert(at, now.checked_add(next).unwrap_or(now));
+        }
+    }
+
+    /// Ask `watch`'s worker for its pull request's checks and put them on its card; how soon
+    /// to ask again.
+    async fn read_checks(&self, watch: crate::project::PrWatch) -> Duration {
+        let verb = Verb::PullChecks {
+            worker: watch.worker,
+            cwd: watch.cwd,
+            number: watch.number,
+            merge_request: watch.merge_request,
+        };
+        let checks = match self.forward(None, verb).await {
+            Outcome::Checks(checks) => checks,
+            other => {
+                tracing::debug!(project = %watch.project, task = %watch.task, ?other, "no checks");
+                return CHECKS_FAILED;
+            }
+        };
+        let running = checks.state == slopty_proto::project::ChecksState::Pending;
+        let mut state = self.inner.state.lock();
+        let set = state.projects.set_checks(&watch.project, watch.task, checks, WallMs::now());
+        match set {
+            Ok(changes) => self.projects_moved(&mut state, changes),
+            Err(refused) => tracing::debug!(?refused, "checks not kept"),
+        }
+        drop(state);
+        if running { CHECKS_RUNNING } else { CHECKS_SETTLED }
+    }
 }
 
 #[cfg(test)]

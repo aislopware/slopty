@@ -7,7 +7,7 @@
 
 use slopty_core::WallMs;
 use slopty_proto::project::{
-    Moment, ReportKind, StepKind, StepState, TaskId, TaskState, TimelineEntry,
+    ChecksState, Moment, ReportKind, StepKind, StepState, TaskId, TaskState, TimelineEntry,
 };
 
 use super::model::Board;
@@ -31,6 +31,10 @@ pub enum RecapKind {
     ChangesAsked,
     /// Its verifier failed.
     VerifyFailed,
+    /// Its work does not rebase onto the target.
+    Conflicts,
+    /// Its pull request's own checks failed.
+    ChecksFailed,
     /// A step the server takes failed: a clone, bringing the branch home, a merge.
     StepFailed,
     /// Its agent reported it is stuck, or needs an answer.
@@ -55,6 +59,8 @@ impl RecapKind {
         match self {
             Self::ChangesAsked => "Changes asked on",
             Self::VerifyFailed => "Verifier failed on",
+            Self::Conflicts => "Conflicts on",
+            Self::ChecksFailed => "Checks failed on",
             Self::StepFailed => "A step failed on",
             Self::Stuck => "Stuck:",
             Self::AgentEnded => "Agent ended on",
@@ -73,6 +79,8 @@ impl RecapKind {
             self,
             Self::ChangesAsked
                 | Self::VerifyFailed
+                | Self::Conflicts
+                | Self::ChecksFailed
                 | Self::StepFailed
                 | Self::Stuck
                 | Self::AgentEnded
@@ -86,8 +94,12 @@ impl RecapKind {
             Moment::Reviewed(run) if !run.verdict.approved => Some(Self::ChangesAsked),
             Moment::Verified(run) if !run.passed => Some(Self::VerifyFailed),
             Moment::Verified(_) => Some(Self::Verified),
+            Moment::Checks(checks) if checks.state == ChecksState::Failing => {
+                Some(Self::ChecksFailed)
+            }
             Moment::Step(step) => match (step.kind, &step.state) {
                 (StepKind::Verify, StepState::Failed { .. }) => Some(Self::VerifyFailed),
+                (StepKind::Rebase, StepState::Failed { .. }) => Some(Self::Conflicts),
                 (_, StepState::Failed { .. }) => Some(Self::StepFailed),
                 _ => None,
             },

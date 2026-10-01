@@ -428,14 +428,33 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
             ("branch", text)
         }
         Moment::Verified(run) => ("verified", verified_text(run)),
+        Moment::Checks(checks) => ("checks", checks_text(checks)),
         Moment::Reviewed(run) => ("reviewed", reviewed_text(run)),
         Moment::AgentGone { .. } => ("agent_gone", "its terminal closed".to_owned()),
         Moment::Note { text } => ("note", text.clone()),
+        Moment::Told { text } => ("told", format!("the person told its agent: {text}")),
         Moment::Reported { report } => ("reported", report_text(report)),
         Moment::Delivered { reports, .. } => {
             ("delivered", format!("{reports} report(s) handed to its agent"))
         }
         Moment::Step(step) => ("step", step_text(step)),
+    }
+}
+
+/// A pull request's checks, in a line.
+fn checks_text(checks: &slopty_proto::project::Checks) -> String {
+    use slopty_proto::project::ChecksState;
+    let counts = format!(
+        "{} passed, {} failed, {} pending, {} skipped",
+        checks.passed, checks.failed, checks.pending, checks.skipped
+    );
+    match checks.state {
+        ChecksState::None => "its pull request has no checks".to_owned(),
+        ChecksState::Pending => format!("its pull request's checks run: {counts}"),
+        ChecksState::Passing => format!("its pull request's checks pass: {counts}"),
+        ChecksState::Failing => {
+            format!("its pull request's checks fail ({}): {counts}", checks.failing.join(", "))
+        }
     }
 }
 
@@ -447,6 +466,7 @@ fn step_text(step: &TaskStep) -> String {
         StepKind::Verify => format!("verifier on worker {}", step.worker),
         StepKind::Merge => format!("merge on worker {}", step.worker),
         StepKind::Review => format!("review on worker {}", step.worker),
+        StepKind::Rebase => format!("rebase onto the target on worker {}", step.worker),
     };
     match &step.state {
         StepState::Running { phase, percent: Some(p) } => format!("{what}: {phase} {p}%"),

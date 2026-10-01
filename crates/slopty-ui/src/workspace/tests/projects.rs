@@ -1062,3 +1062,161 @@ fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext
     assert_eq!(verbs.len(), 1, "{verbs:?}");
     assert!(cx.debug_bounds("project-recap-partial").is_some(), "entries 31 to 40 are gone");
 }
+
+/// The board says what the project spent: its time at work in the header with the
+/// orchestrator's share apart on hover, each row's time with its subtree's, and, once the
+/// agents' threads hand their meters over, the cost, a context nearly full, and the plan's
+/// rate windows. A thread that goes takes its meters with it.
+#[gpui::test]
+fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
+    use slopty_proto::project::Spent;
+    use slopty_proto::thread::{Limit, Meters};
+
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (_, agent) = setup.agent;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let minutes = |m: u64| Spent { active_ms: m.saturating_mul(60_000), since_ms: None };
+    let mut first = on(card(1, "Wire the board", TaskState::Running, None), worker, agent);
+    first.spent = minutes(12);
+    let mut after = card(3, "Golden files", TaskState::Planned, Some(1));
+    after.spent = minutes(30);
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(11, task_changed("board", first, None), cx);
+        v.project_update(12, task_changed("board", after, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    for part in
+        ["project-spent", "project-row-project-node-1-spent", "project-row-project-node-3-spent"]
+    {
+        assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
+    }
+    for unheard in ["project-cost", "project-limit-0", "project-row-project-node-1-context"] {
+        assert!(cx.debug_bounds(unheard).is_none(), "{unheard} waits for the threads");
+    }
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "42m of work: tasks 42m, orchestrator under 1m"), "{said:?}");
+    assert!(said.iter().any(|l| l.ends_with("worked 42m, 12m itself")), "{said:?}");
+
+    let meters = Meters {
+        cost_micro_usd: Some(1_250_000),
+        context_tokens: Some(170_000),
+        context_window: Some(200_000),
+        limits: vec![Limit { name: "five-hour".to_owned(), used_bp: 8_100, resets_ms: None }],
+        ..Meters::default()
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_meters(agent, Some(meters), cx));
+    cx.run_until_parked();
+    for part in ["project-cost", "project-limit-0", "project-row-project-node-1-context"] {
+        assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
+    }
+    let said = labels(&view, cx);
+    assert!(
+        said.iter().any(|l| l == "$1.25 spent: tasks $1.25, orchestrator not heard"),
+        "{said:?}"
+    );
+    assert!(said.iter().any(|l| l == "5-hour 81%"), "{said:?}");
+    assert!(
+        said.iter().any(|l| l.ends_with("worked 42m, 12m itself, $1.25, context 85%")),
+        "{said:?}"
+    );
+
+    view.update_in(cx, |v, _w, cx| v.thread_meters(agent, None, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-cost").is_none(), "gone with its thread");
+}
+
+/// A next step on a task's row is the person's word to its agent: "Fix CI" sends `TaskTell`
+/// with what failed and what to do, never a key into its terminal, and the board says it
+/// went. From the palette's line it does the same to the task the board stands on.
+#[gpui::test]
+fn a_next_step_is_said_to_the_task_s_agent(cx: &mut TestAppContext) {
+    use crate::project::FixCi;
+    use crate::project::fixtures::run;
+
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (_, agent) = setup.agent;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let mut failed = on(card(1, "Wire the board", TaskState::Waiting, None), worker, agent);
+    failed.verified = Some(run(false, "9c1e2f3"));
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(11, task_changed("board", failed, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    click(cx, "project-row-fix-ci-1");
+    let verbs = sent(&mut queue, cx, done);
+    let [Verb::TaskTell { project, task, text }] = verbs.as_slice() else { panic!("{verbs:?}") };
+    assert_eq!((project, *task), (&fixtures::id("board"), TaskId(1)));
+    assert!(text.starts_with("Fix CI. `cargo gate` failed on your work at 9c1e2f3"), "{text}");
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice.as_deref(), Some("Asked #1's agent to fix CI"));
+
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| {
+        b.select_by(1, cx);
+        b.select_by(1, cx);
+    });
+    assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(1))));
+    cx.dispatch_action(FixCi);
+    let verbs = sent(&mut queue, cx, done);
+    assert!(matches!(verbs.as_slice(), [Verb::TaskTell { task: TaskId(1), .. }]), "{verbs:?}");
+}
+
+/// A card whose work is on its way draws its pipeline under it, one chip a stage, and says
+/// them to a screen reader: its pull request with its own checks and its open to-dos among
+/// them. A card still at work draws none.
+#[gpui::test]
+fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext) {
+    use slopty_proto::agent::PullRequest;
+    use slopty_proto::project::{Checks, ChecksState, NativeCounts};
+
+    use crate::project::fixtures::queued;
+
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (_, agent) = setup.agent;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let mut done =
+        on(queued(card(1, "Wire the board", TaskState::Done, None), 10, "1111111"), worker, agent);
+    done.pr = Some(PullRequest {
+        number: 42,
+        url: "https://github.com/o/r/pull/42".into(),
+        review: None,
+        merge_request: false,
+    });
+    done.checks = Some(Checks {
+        state: ChecksState::Pending,
+        passed: 4,
+        failed: 0,
+        pending: 2,
+        skipped: 0,
+        failing: Vec::new(),
+        at_ms: fixtures::AT,
+    });
+    done.natives = NativeCounts { agents: 0, running: 0, todos: 1, done: 0 };
+    let working = card(2, "Golden files", TaskState::Running, None);
+    view.update_in(cx, |v, _w, cx| {
+        v.project_update(11, task_changed("board", done, None), cx);
+        v.project_update(12, task_changed("board", working, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| b.show(Lens::Board, cx));
+    cx.run_until_parked();
+    for part in ["project-card-1-branch", "project-card-1-pull", "project-card-1-todos"] {
+        assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
+    }
+    assert!(cx.debug_bounds("project-card-2-branch").is_none(), "nothing on its way yet");
+    let said = labels(&view, cx);
+    assert!(said.iter().any(|l| l == "PR #42, 2 of 6 checks running"), "{said:?}");
+    assert!(said.iter().any(|l| l == "1 to-do open"), "{said:?}");
+}

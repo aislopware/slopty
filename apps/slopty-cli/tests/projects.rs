@@ -1159,7 +1159,7 @@ mod tests {
 
         let card = card_when(&hub, project, "the queue gives it back", |card| {
             card.step.as_ref().is_some_and(|s| {
-                s.kind == StepKind::Merge && matches!(s.state, StepState::Failed { .. })
+                s.kind == StepKind::Rebase && matches!(s.state, StepState::Failed { .. })
             })
         })
         .await;
@@ -1231,7 +1231,7 @@ mod tests {
                 "Verify began",
                 "verified true",
                 "Merge began",
-                "Merge failed",
+                "Rebase failed",
                 "Home began",
                 "Home done",
                 "Verify began",
@@ -1386,7 +1386,7 @@ mod tests {
 
         let card = card_when(&hub, &project, "the queue gives it back", |card| {
             card.step.as_ref().is_some_and(|s| {
-                s.kind == StepKind::Merge && matches!(s.state, StepState::Failed { .. })
+                s.kind == StepKind::Rebase && matches!(s.state, StepState::Failed { .. })
             })
         })
         .await;
@@ -1412,7 +1412,7 @@ mod tests {
                 "Verify began",
                 "verified true",
                 "Merge began",
-                "Merge failed"
+                "Rebase failed"
             ]
         );
         server.shutdown().await;

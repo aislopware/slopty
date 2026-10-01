@@ -475,6 +475,13 @@ impl Hub {
                 return Went::Next;
             }
         };
+        let open = self.inner.state.lock().projects.open_todos(project, task);
+        if !open.is_empty() {
+            let (why, words) = todo_words(&open);
+            let told = Told { run: None, review: None, words };
+            self.give_back(at, StepKind::Merge, Some(place.worker), &why, Some(told));
+            return Went::Next;
+        }
         let verified = {
             let state = self.inner.state.lock();
             state.projects.task(project, task).ok().and_then(|t| t.verified.clone())
@@ -523,7 +530,8 @@ impl Hub {
                         place.target,
                     );
                     let told = Told { run: None, review: None, words: told };
-                    self.give_back(at, StepKind::Merge, Some(place.worker), &message, Some(told));
+                    // Its own step, so the board offers the person "Resolve conflicts".
+                    self.give_back(at, StepKind::Rebase, Some(place.worker), &message, Some(told));
                     return Went::Next;
                 }
                 other => {
@@ -589,6 +597,26 @@ impl Hub {
         self.held(at, StepKind::Merge, place.worker, why);
         Went::Hold
     }
+}
+
+/// How many to-dos to name to a task's agent; the rest it has on its own list.
+const TODOS_NAMED: usize = 5;
+
+/// Why work with `open` to-dos on its agent's list does not merge, and the words its agent
+/// reads: the list is the agent's own word for what is left.
+fn todo_words(open: &[String]) -> (String, String) {
+    let count =
+        if open.len() == 1 { "1 to-do".to_owned() } else { format!("{} to-dos", open.len()) };
+    let named: Vec<&str> = open.iter().take(TODOS_NAMED).map(String::as_str).collect();
+    let more = open.len().saturating_sub(TODOS_NAMED);
+    let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+    let why = format!("{count} still open on its task list");
+    let words = format!(
+        "Your work is not merged: your task list still has {count} open ({}{more}). Finish \
+         them, or mark them done if they are, and report done again with task_report.",
+        named.join("; ")
+    );
+    (why, words)
 }
 
 /// What a task given back carries beyond its reason: the verifier's run and the terminal it

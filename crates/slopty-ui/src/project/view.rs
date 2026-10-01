@@ -27,14 +27,16 @@ use slopty_proto::project::{
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::model::{
-    Board, Lane, Machine, RunOnPicker, TaskAction, TreeRow, finding_place, queue_words,
-    review_detail, short_commit, state_status, state_word, verdict_detail, verdict_tail,
+    Board, Lane, Machine, RunOnPicker, Stage, StageKind, TaskAction, TreeRow, finding_place,
+    pull_words, queue_words, review_detail, short_commit, state_status, state_word, verdict_detail,
+    verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
+use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
 use super::{
-    ApproveTask, DeleteProject, Lens, MergeTask, OpenNode, RetryTask, RunTaskOn, SelectNext,
-    SelectPrevious, ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed,
-    StartTask, ToggleAskToStart, TogglePush,
+    AddressComments, ApproveTask, DeleteProject, FixCi, Lens, MergeTask, OpenNode,
+    ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard, ShowMachines,
+    ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask, ToggleAskToStart, TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
@@ -201,6 +203,8 @@ pub struct Seen {
     /// What changed since this client last looked, from the moment the board opened until the
     /// person closes it or the board hides.
     pub recap: Option<Recap>,
+    /// The meters of the project's agents' threads, as this client heard them, by session.
+    pub meters: MetersBySession,
 }
 
 /// A row the keyboard can stand on.
@@ -313,7 +317,8 @@ impl ProjectView {
             && self.seen.agents == seen.agents
             && self.seen.machines == seen.machines
             && self.seen.run_on == seen.run_on
-            && self.seen.recap == seen.recap;
+            && self.seen.recap == seen.recap
+            && self.seen.meters == seen.meters;
         if !same {
             self.seen = seen;
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
@@ -360,11 +365,14 @@ impl ProjectView {
     }
 
     /// The timeline's ages move on once a minute while it shows, the machines lens asks for
-    /// the workers' news every few seconds while it does, and nothing ticks otherwise.
+    /// the workers' news every few seconds while it does, the clocks of agents at work move on
+    /// once a minute, and nothing ticks otherwise.
     fn keep_time(&mut self, cx: &Context<Self>) {
+        let at_work = self.seen.board.as_ref().is_some_and(|b| b.at_work());
         let every = match self.lens {
             Lens::Timeline => AGE_TICK,
             Lens::Machines => MACHINES_TICK,
+            Lens::Tree | Lens::Board if at_work => AGE_TICK,
             Lens::Tree | Lens::Board => {
                 self.tick = None;
                 return;
@@ -379,6 +387,10 @@ impl ProjectView {
                 let ticked = this.update(cx, |v, cx| {
                     if v.lens == Lens::Machines {
                         cx.emit(ProjectEvent::Machines);
+                        if v.seen.board.as_ref().is_some_and(|b| b.at_work()) {
+                            v.seen.now = WallMs::now();
+                            cx.notify();
+                        }
                     } else {
                         v.seen.now = WallMs::now();
                         cx.notify();
@@ -696,6 +708,9 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::Approve => "approve",
         TaskAction::RunOn => "choose where it runs",
         TaskAction::Start => "start",
+        TaskAction::FixCi => "fix",
+        TaskAction::AddressComments => "address",
+        TaskAction::ResolveConflicts => "resolve",
     }
 }
 
@@ -807,6 +822,7 @@ impl ProjectView {
             )
             .child(readout("project-live", live))
             .children(progress.map(|p| readout("project-progress", p)))
+            .children(self.spent_readouts(board))
             .child(ask_toggle)
             .child(push_toggle)
             .child(terminal);
@@ -831,6 +847,65 @@ impl ProjectView {
             .child(title)
             .child(meta)
             .child(self.bar(board))
+    }
+
+    /// What the project spent, in the header: its time at work, then its cost and the plan's
+    /// rate windows once the agents' threads say them. Each says on hover how the
+    /// orchestrator's share and its tasks' make it up.
+    fn spent_readouts(&self, board: &Board) -> Vec<Stateful<Div>> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spend = board.project_spend(self.seen.now, &self.seen.meters);
+        let readout = |id: &'static str, text: String, hint: Option<String>, tone: Rgb| {
+            let hint_theme = Rc::clone(&self.hint_theme);
+            let label = hint.clone().unwrap_or_else(|| text.clone());
+            crate::kit::tabular(div())
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(Role::Label)
+                .aria_label(SharedString::from(label))
+                .flex_none()
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(tone))
+                .child(SharedString::from(text))
+                .when_some(hint, |el, hint| {
+                    el.tooltip(move |_window, cx| {
+                        let theme = Rc::clone(&hint_theme);
+                        cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
+                    })
+                })
+        };
+        let mut out = Vec::new();
+        if spend.total_ms() >= SHOWN_FROM_MS {
+            let hint = format!(
+                "{} of work: tasks {}, orchestrator {}",
+                worked(spend.total_ms()),
+                worked(spend.tasks_ms),
+                worked(spend.orchestrator_ms)
+            );
+            out.push(readout(
+                "project-spent",
+                worked(spend.total_ms()),
+                Some(hint),
+                s.text_secondary,
+            ));
+        }
+        if let Some(cost) = spend.total_cost() {
+            let part = |c: Option<u64>| c.map_or_else(|| "not heard".to_owned(), dollars);
+            let hint = format!(
+                "{} spent: tasks {}, orchestrator {}",
+                dollars(cost),
+                part(spend.tasks_cost),
+                part(spend.orchestrator_cost)
+            );
+            out.push(readout("project-cost", dollars(cost), Some(hint), s.text_secondary));
+        }
+        let ids = ["project-limit-0", "project-limit-1", "project-limit-2"];
+        for (limit, id) in spend.limits.iter().zip(ids) {
+            let tone = if limit.used_bp >= CONTEXT_WARN_BP { s.warn } else { s.text_secondary };
+            out.push(readout(id, limit_line(limit), None, tone));
+        }
+        out
     }
 
     /// A task's actions, as buttons on its row or card: what needs the person to move on.
@@ -1258,14 +1333,18 @@ impl ProjectView {
         });
         let actions = node.and_then(|task| self.actions(board, task, prefix, cx));
         let run_on = node.and_then(|task| self.run_on_block(task, prefix, cx));
+        let spend = board.spend(node, self.seen.now, &self.seen.meters);
+        let spent_words = spent_words(&spend);
         let settled = card.is_some_and(|c| c.state == TaskState::Merged);
         // The tree shows a verifier running or failed under its row; a pass is a word in it.
         let check = card
             .filter(|_| prefix == "project-row")
             .and_then(|c| Self::check(board, c))
             .filter(|c| !c.cleared());
-        let meta = second.unwrap_or_else(|| self.node_meta(board, node, card, check.as_ref()));
+        let meta =
+            second.unwrap_or_else(|| self.node_meta(board, node, card, check.as_ref(), false));
         let key = format!("{prefix}-{}", node_key(node));
+        let spent = self.spent_readout(&key, &spend);
         let picked = self.picked() == Some(node)
             && match self.lens {
                 Lens::Tree => prefix == "project-row",
@@ -1298,6 +1377,7 @@ impl ProjectView {
                     })
                     .child(SharedString::from(title.clone())),
             )
+            .children(spent)
             .children(word.map(|(word, tone)| {
                 div()
                     .flex_none()
@@ -1316,7 +1396,7 @@ impl ProjectView {
                 .text_color(hsla(s.text_muted))
                 .child(dotted(theme, meta.clone()))
         });
-        let label = said(&[&title, word.map_or("", |(word, _)| word), &meta]);
+        let label = said(&[&title, word.map_or("", |(word, _)| word), &meta, &spent_words]);
         let selector = key.clone();
         let row = div()
             .id(SharedString::from(key.clone()))
@@ -1365,6 +1445,43 @@ impl ProjectView {
         crate::kit::slide_fade(row, arrive, ARRIVE, crate::kit::Pace::Fade, cx)
     }
 
+    /// A node's time at work beside its state, with its subtree's when it split work off, and
+    /// its context once full enough to matter.
+    fn spent_readout(&self, key: &str, spend: &NodeSpend) -> Option<Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let ms = if spend.has_subtree() { spend.subtree_ms } else { spend.own_ms };
+        let ms = Some(ms).filter(|ms| *ms >= SHOWN_FROM_MS);
+        let context = spend.context_shown();
+        if ms.is_none() && context.is_none() {
+            return None;
+        }
+        let time = ms.map(|ms| {
+            let id = format!("{key}-spent");
+            crate::kit::tabular(div())
+                .debug_selector(move || id)
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(worked(ms)))
+        });
+        let context = context.map(|(bp, warns)| {
+            let id = format!("{key}-context");
+            crate::kit::tabular(div())
+                .debug_selector(move || id)
+                .text_color(hsla(if warns { s.warn } else { s.text_muted }))
+                .child(SharedString::from(format!("{}%", bp / 100)))
+        });
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xs))
+                .text_size(self.z(theme.typography.meta()))
+                .children(context)
+                .children(time),
+        )
+    }
+
     /// The hairlines that tie a row to its parent's column: one per level above it.
     fn guides(&self, depth: usize) -> Div {
         let theme = &self.theme;
@@ -1404,13 +1521,15 @@ impl ProjectView {
     /// waits on, the step it is at, its place in the queue, its last pass, where it merged),
     /// what its agent says it is doing, where it runs, its branch and pull request, that it
     /// only reads, and what runs inside it. Two separators at the most: the rest is on its
-    /// card's other lines, the timeline, and its agent's tile.
+    /// card's other lines, the timeline, and its agent's tile. `piped` leaves out what a
+    /// pipeline row under it says already.
     fn node_meta(
         &self,
         board: &Board,
         node: Node,
         card: Option<&TaskCard>,
         check: Option<&Check<'_>>,
+        piped: bool,
     ) -> String {
         let mut parts: Vec<String> = Vec::new();
         let proposed = board.proposed().len();
@@ -1431,16 +1550,17 @@ impl ProjectView {
                 .step
                 .as_ref()
                 .filter(|s| !matches!(s.state, StepState::Done { .. }))
-                .filter(|s| !check.is_some_and(|c| c.speaks_for(s)));
+                .filter(|s| !check.is_some_and(|c| c.speaks_for(s)))
+                .filter(|s| !(piped && s.running() && s.kind == StepKind::Merge));
             if let Some(step) = shown {
                 parts.push(super::model::step_line(step, |w| self.worker_name(w)));
             }
             let merging =
                 card.step.as_ref().is_some_and(|s| s.kind == StepKind::Merge && s.running());
-            if let Some((place, _)) = board.queue_place(card.id).filter(|_| !merging) {
+            if let Some((place, _)) = board.queue_place(card.id).filter(|_| !merging && !piped) {
                 parts.push(queue_words(place));
             }
-            if check.is_none() {
+            if check.is_none() && !piped {
                 if let Some(run) = board.review(card.id).filter(|r| r.verdict.approved) {
                     parts.push(format!("Approved at {}", short_commit(&run.head)));
                 } else if let Some(run) = board.verdict(card.id).filter(|r| r.passed) {
@@ -1459,11 +1579,11 @@ impl ProjectView {
             parts.push(self.worker_name(worker));
         }
         if let Some(card) = card {
-            if let Some(branch) = &card.branch {
+            if let Some(branch) = card.branch.as_ref().filter(|_| !piped) {
                 parts.push(branch.clone());
             }
-            if let Some(pr) = &card.pr {
-                parts.push(format!("PR #{}", pr.number));
+            if let Some((words, _)) = pull_words(card).filter(|_| !piped) {
+                parts.push(words);
             }
             if card.read_only {
                 parts.push("reads only".to_owned());
@@ -1863,15 +1983,23 @@ impl ProjectView {
         let own = Lane::of(card.state);
         let status = self.node_status(board, node);
         let check = Self::check(board, card);
-        let meta = self.node_meta(board, node, Some(card), check.as_ref());
-        let block =
-            check.as_ref().map(|c| self.check_block(&format!("project-card-{}", card.id), c, cx));
+        let key = format!("project-card-{}", card.id);
+        // The check's own block says its stage, with its detail.
+        let mut stages = board.pipeline(card.id);
+        if let Some(check) = &check {
+            let spoken = if check.is_review() { StageKind::Reviewer } else { StageKind::Verifier };
+            stages.retain(|stage| stage.kind != spoken);
+        }
+        let piped = !stages.is_empty();
+        let meta = self.node_meta(board, node, Some(card), check.as_ref(), piped);
+        let pipeline = self.pipeline_row(&key, &stages);
+        let block = check.as_ref().map(|c| self.check_block(&key, c, cx));
         // A parent standing in a lane for a descendant says whose it is.
         let why = (own != lane).then(|| format!("{} in a subtask", lane.title()));
-        let key = format!("project-card-{}", card.id);
         let arrive = ElementId::Name(format!("{key}-in").into());
         let selector = key.clone();
-        let label = said(&[&card.title, state_word(card.state), &meta]);
+        let along: Vec<&str> = stages.iter().map(|stage| stage.words.as_str()).collect();
+        let label = said(&[&card.title, state_word(card.state), &meta, &along.join(", ")]);
         let el = div()
             .id(SharedString::from(key))
             .debug_selector(move || selector)
@@ -1921,6 +2049,7 @@ impl ProjectView {
                     .text_color(hsla(s.text_muted))
                     .child(dotted(theme, meta))
             }))
+            .children(pipeline)
             .children(block)
             .children(self.run_on_block(card.id, "project-card", cx))
             .children(why.map(|why| {
@@ -1935,6 +2064,39 @@ impl ProjectView {
             cx.notify();
         }));
         crate::kit::slide_fade(el, arrive, ARRIVE, crate::kit::Pace::Fade, cx)
+    }
+
+    /// A task's way to its target on one row of quiet chips, a stage holding the merge back in
+    /// a stronger ink: no colour, since none of it is an alarm until someone has to act.
+    fn pipeline_row(&self, key: &str, stages: &[Stage]) -> Option<Div> {
+        if stages.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let chips = stages.iter().map(|stage| {
+            let id = format!("{key}-{}", stage.kind.word());
+            let selector = id.clone();
+            div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::Label)
+                .aria_label(SharedString::from(stage.words.clone()))
+                .flex_none()
+                .max_w_full()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .px(self.z(sp.xs))
+                .rounded(self.z(theme.radii.sm))
+                .border_1()
+                .border_color(hsla(s.border_subtle))
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(if stage.holds { s.text } else { s.text_muted }))
+                .child(SharedString::from(stage.words.clone()))
+        });
+        Some(div().flex().flex_wrap().gap(self.z(sp.xxs)).pt(self.z(sp.xxs)).children(chips))
     }
 
     /// The timeline, newest first: when, which task, and what happened.
@@ -2367,11 +2529,35 @@ fn natives_line(counts: NativeCounts) -> Option<String> {
 }
 
 /// A timeline entry's icon and tone.
+/// Time at work is shown from a minute: less than that on every row of a board just started
+/// would be noise.
+const SHOWN_FROM_MS: u64 = 60_000;
+
+/// What a node spent, as its row says it to assistive technology: "worked 40m, 12m itself,
+/// $1.20, context 82%".
+fn spent_words(spend: &NodeSpend) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if spend.has_subtree() && spend.subtree_ms >= SHOWN_FROM_MS {
+        parts.push(format!("worked {}", worked(spend.subtree_ms)));
+        parts.push(format!("{} itself", worked(spend.own_ms)));
+    } else if spend.own_ms >= SHOWN_FROM_MS {
+        parts.push(format!("worked {}", worked(spend.own_ms)));
+    }
+    let cost = if spend.has_subtree() { spend.subtree_cost } else { spend.own_cost };
+    parts.extend(cost.map(dollars));
+    if let Some((bp, _)) = spend.context_shown() {
+        parts.push(format!("context {}%", bp / 100));
+    }
+    parts.join(", ")
+}
+
 /// The word a recap line's selector ends in.
 const fn recap_word(kind: RecapKind) -> &'static str {
     match kind {
         RecapKind::ChangesAsked => "changes",
         RecapKind::VerifyFailed => "verify-failed",
+        RecapKind::Conflicts => "conflicts",
+        RecapKind::ChecksFailed => "checks-failed",
         RecapKind::StepFailed => "step-failed",
         RecapKind::Stuck => "stuck",
         RecapKind::AgentEnded => "ended",
@@ -2388,6 +2574,8 @@ const fn recap_icon(kind: RecapKind) -> IconName {
     match kind {
         RecapKind::ChangesAsked => IconName::MessageSquareWarning,
         RecapKind::VerifyFailed | RecapKind::StepFailed => IconName::CircleX,
+        RecapKind::Conflicts => IconName::GitBranch,
+        RecapKind::ChecksFailed => IconName::GitPullRequest,
         RecapKind::Stuck => IconName::CircleAlert,
         RecapKind::AgentEnded => IconName::Power,
         RecapKind::Proposed => IconName::Hand,
@@ -2415,10 +2603,17 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         Moment::Branch { .. } => (IconName::GitBranch, s.text_secondary),
         Moment::Verified(run) if run.passed => (IconName::CircleCheck, s.text_secondary),
         Moment::Verified(_) => (IconName::CircleX, s.error),
+        Moment::Checks(checks) => match checks.state {
+            slopty_proto::project::ChecksState::Failing => (IconName::CircleX, s.error),
+            slopty_proto::project::ChecksState::Passing => {
+                (IconName::CircleCheck, s.text_secondary)
+            }
+            _ => (IconName::GitPullRequest, s.text_secondary),
+        },
         Moment::Reviewed(run) if run.verdict.approved => (IconName::CircleCheck, s.text_secondary),
         Moment::Reviewed(_) => (IconName::MessageSquareWarning, s.text_secondary),
         Moment::AgentGone { .. } => (IconName::Power, s.text_muted),
-        Moment::Note { .. } => (IconName::MessageSquare, s.text_secondary),
+        Moment::Note { .. } | Moment::Told { .. } => (IconName::MessageSquare, s.text_secondary),
         Moment::Reported { report } => match report.kind {
             ReportKind::Checkpoint => (IconName::Flag, s.text_secondary),
             ReportKind::NeedsInput => (IconName::MessageSquareWarning, s.warn),
@@ -2429,7 +2624,9 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         Moment::Step(step) => match (step.kind, &step.state) {
             (_, StepState::Failed { .. }) => (IconName::CircleX, s.error),
             (StepKind::Clone, _) => (IconName::FolderGit2, s.text_secondary),
-            (StepKind::Home, StepState::Done { .. }) => (IconName::GitBranch, s.text_secondary),
+            (StepKind::Home, StepState::Done { .. }) | (StepKind::Rebase, _) => {
+                (IconName::GitBranch, s.text_secondary)
+            }
             (StepKind::Home, _) => (IconName::Download, s.text_secondary),
             (StepKind::Verify, _) => (IconName::ListChecks, s.text_secondary),
             (StepKind::Merge, _) => (IconName::GitMerge, s.text_secondary),
@@ -2478,6 +2675,15 @@ impl Render for ProjectView {
             }))
             .on_action(cx.listener(|this, _: &ApproveTask, _w, cx| {
                 this.act_on_picked(TaskAction::Approve, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FixCi, _w, cx| {
+                this.act_on_picked(TaskAction::FixCi, cx);
+            }))
+            .on_action(cx.listener(|this, _: &AddressComments, _w, cx| {
+                this.act_on_picked(TaskAction::AddressComments, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ResolveConflicts, _w, cx| {
+                this.act_on_picked(TaskAction::ResolveConflicts, cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePush, _w, cx| this.toggle_push(cx)))
             .on_action(cx.listener(|_this, _: &ShowTerminal, _w, cx| {

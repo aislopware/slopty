@@ -19,6 +19,7 @@ pub(crate) fn id(name: &str) -> ProjectId {
 /// A project whose orchestrator runs in `orchestrator`, when it has one.
 pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
     Project {
+        orchestrator_spent: slopty_proto::project::Spent::default(),
         id: id(name),
         title: "Ship the project board".to_owned(),
         repo: "slopty".to_owned(),
@@ -38,6 +39,8 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
 /// Task `n`, titled, in `state`, split from `parent`.
 pub(crate) fn card(n: u32, title: &str, state: TaskState, parent: Option<u32>) -> TaskCard {
     TaskCard {
+        checks: None,
+        spent: slopty_proto::project::Spent::default(),
         id: TaskId(n),
         parent: parent.map(TaskId),
         depends_on: Vec::new(),

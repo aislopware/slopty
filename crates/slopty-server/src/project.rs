@@ -17,11 +17,12 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
-    ARTIFACTS_MAX, AgentReport, Assignment, DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live,
-    METADATA_MAX, Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives, NodeDetail,
-    NodeNatives, Placed, Project, ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn,
-    STATUS_MAX, SUMMARY_MAX, StepState, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES,
-    Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    ARTIFACTS_MAX, AgentReport, Assignment, CHECK_NAME_MAX, CHECKS_NAMED, Checks, DEPENDS_MAX,
+    KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Merge, Moment, NOTE_MAX, Native,
+    NativeAgent, NativeChange, Natives, NodeDetail, NodeNatives, Placed, Project, ProjectStatus,
+    ProjectUpdate, Proposal, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState,
+    Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId,
+    TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
@@ -37,6 +38,23 @@ pub const NATIVES_KEPT: usize = 256;
 const UNCLAIMED_KEPT: usize = 256;
 /// The fewest timeline entries a project may keep.
 const TIMELINE_LEAST: u32 = 16;
+
+/// A task's pull request, for its checks to be read where its agent worked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PrWatch {
+    /// Its project.
+    pub project: ProjectId,
+    /// The task.
+    pub task: TaskId,
+    /// The worker its agent ran on.
+    pub worker: WorkerId,
+    /// The worktree it worked in there.
+    pub cwd: String,
+    /// The pull request's number.
+    pub number: u32,
+    /// A GitLab merge request.
+    pub merge_request: bool,
+}
 
 /// Who asks for a change. The person may do anything a verb allows; an agent may not answer
 /// a permission, merge a task or record what its verifier said, which are the person's or the
@@ -803,6 +821,12 @@ impl Projects {
                         step.state = StepState::Failed { why };
                     }
                 }
+                // Nor a stretch of work: how long the server was away is not known to be
+                // work, and the agent's status after its worker registers starts the next.
+                r.project.orchestrator_spent.since_ms = None;
+                for t in &mut r.tasks {
+                    t.spent.since_ms = None;
+                }
                 (r.project.id.clone(), r)
             })
             .collect();
@@ -998,6 +1022,7 @@ impl Projects {
         within("a repository", Some(&new.repo), REF_MAX)?;
         within("a target branch", Some(&new.target), REF_MAX)?;
         let project = Project {
+            orchestrator_spent: Spent::default(),
             id: new.id.clone(),
             title,
             repo: new.repo.trim().to_owned(),
@@ -1137,6 +1162,8 @@ impl Projects {
         }
         let number = u32::try_from(record.tasks.len()).unwrap_or(u32::MAX).saturating_add(1);
         let task = Task {
+            spent: Spent::default(),
+            checks: None,
             id: TaskId(number),
             parent: spec.parent,
             depends_on,
@@ -1663,6 +1690,93 @@ impl Projects {
         Ok((task_now, vec![update]))
     }
 
+    /// The items still open on `task`'s agent's own task list, by their titles: they keep its
+    /// work from merging.
+    pub(crate) fn open_todos(&self, id: &ProjectId, task: TaskId) -> Vec<String> {
+        let Some(record) = self.records.get(id) else { return Vec::new() };
+        let natives = record.natives_of(Some(task));
+        natives.tasks.iter().filter(|t| !t.done).map(|t| t.subject.clone()).collect()
+    }
+
+    /// Every task whose pull request's checks are worth reading: one with a pull request
+    /// still open to merge, and a worktree on the worker its agent ran on to read them in.
+    pub(crate) fn pull_requests(&self) -> Vec<PrWatch> {
+        self.records
+            .iter()
+            .flat_map(|(id, r)| {
+                r.tasks.iter().filter_map(move |t| {
+                    if matches!(t.state, TaskState::Merged | TaskState::Failed) {
+                        return None;
+                    }
+                    let pr = t.pr.as_ref()?;
+                    Some(PrWatch {
+                        project: id.clone(),
+                        task: t.id,
+                        worker: t.assignment.as_ref()?.term.worker,
+                        cwd: t.worktree.clone()?,
+                        number: pr.number,
+                        merge_request: pr.merge_request,
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// What `task`'s pull request's checks say now. Only a change is worth a word: it goes to
+    /// the card, and to the timeline when where they stand together moved.
+    pub(crate) fn set_checks(
+        &mut self,
+        id: &ProjectId,
+        task: TaskId,
+        mut checks: Checks,
+        now: WallMs,
+    ) -> Result<Vec<Change>, Refused> {
+        checks.at_ms = now;
+        checks.failing.truncate(CHECKS_NAMED);
+        for name in &mut checks.failing {
+            *name = clipped(name, CHECK_NAME_MAX);
+        }
+        let record = self.record(id)?;
+        let t = record.task_mut(task)?;
+        let was = t.checks.as_ref().map(|c| c.state);
+        if t.checks.as_ref().is_some_and(|c| c.says_as(&checks)) {
+            t.checks = Some(checks);
+            return Ok(Vec::new());
+        }
+        let moved = was != Some(checks.state);
+        t.checks = Some(checks.clone());
+        t.updated_ms = now;
+        let task_now = t.clone();
+        let entry = moved.then(|| record.log(Some(task), Moment::Checks(checks), now));
+        Ok(vec![record.task_update(&task_now, entry)])
+    }
+
+    /// The person tells `task`'s agent `text`: kept on the timeline, and handed back trimmed for
+    /// the hub to deliver. A task with no agent running has nobody to hear it.
+    pub(crate) fn tell(
+        &mut self,
+        id: &ProjectId,
+        task: TaskId,
+        text: &str,
+        now: WallMs,
+    ) -> Result<(String, Vec<Change>), Refused> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(invalid("say something to the task's agent"));
+        }
+        within("what the person says", Some(text), NOTE_MAX)?;
+        let record = self.record(id)?;
+        let t = record.task_mut(task)?;
+        if open_term(t).is_none() {
+            return Err(invalid(format!(
+                "task {task} has no agent running to hear it; start one for it first"
+            )));
+        }
+        let entry = record.log(Some(task), Moment::Told { text: text.to_owned() }, now);
+        let kept = Kept { entry: Some(entry), ..record.kept() };
+        Ok((text.to_owned(), vec![Change { kept, durable: true }]))
+    }
+
     /// The project and task whose open assignment is `term`.
     fn working_in(&self, term: TermRef) -> Option<(&ProjectId, TaskId)> {
         self.records.iter().find_map(|(id, r)| {
@@ -1670,29 +1784,44 @@ impl Projects {
         })
     }
 
-    /// An agent's status changed: the task it works on follows it while it runs. Only a block
-    /// is worth the timeline; working and waiting flip at every turn.
+    /// An agent's status changed: the task it works on follows it while it runs, and the time
+    /// it spends at work is counted on its task, or on its project for an orchestrator. Only a
+    /// block is worth the timeline, since working and waiting flip at every turn. A stretch of
+    /// work that ended is written, so the time survives a restart; the flips between are only
+    /// pushed.
     pub(crate) fn agent_status(
         &mut self,
         term: TermRef,
         status: &AgentStatus,
         now: WallMs,
     ) -> Vec<Change> {
-        let Some(to) = follows(status) else { return Vec::new() };
+        let to = follows(status);
+        let works = Spent::works(status);
         let mut updates = Vec::new();
         for record in self.records.values_mut() {
-            let Some(t) = record.tasks.iter_mut().find(|t| {
-                t.state.follows_the_agent() && t.state != to && open_term(t) == Some(term)
-            }) else {
+            if record.project.orchestrator == Some(term)
+                && let Some(stretch) = record.project.orchestrator_spent.follow(works, now)
+            {
+                let durable = stretch == Stretch::Ended;
+                updates.push(Change { durable, ..record.record_update(None) });
+            }
+            let Some(t) = record.tasks.iter_mut().find(|t| open_term(t) == Some(term)) else {
                 continue;
             };
+            let stretch = t.spent.follow(works, now);
+            let moved = to.filter(|to| t.state.follows_the_agent() && t.state != *to);
+            if stretch.is_none() && moved.is_none() {
+                continue;
+            }
             let from = t.state;
-            t.state = to;
-            t.updated_ms = now;
+            if let Some(to) = moved {
+                t.state = to;
+                t.updated_ms = now;
+            }
             let (task, id) = (t.clone(), t.id);
-            let entry = (to == TaskState::Blocked)
-                .then(|| record.log(Some(id), Moment::State { from, to }, now));
-            let durable = entry.is_some();
+            let entry = (moved == Some(TaskState::Blocked))
+                .then(|| record.log(Some(id), Moment::State { from, to: TaskState::Blocked }, now));
+            let durable = entry.is_some() || stretch == Some(Stretch::Ended);
             updates.push(Change { durable, ..record.task_update(&task, entry) });
         }
         updates
@@ -1763,6 +1892,7 @@ impl Projects {
                     }
                     a.ended_ms = Some(now);
                     t.updated_ms = now;
+                    t.spent.follow(false, now);
                     Some(t.clone())
                 })
                 .collect();
@@ -1771,6 +1901,7 @@ impl Projects {
                 updates.push(record.task_update(&task, Some(entry)));
             }
             if record.project.orchestrator == Some(term) {
+                record.project.orchestrator_spent.follow(false, now);
                 let entry = record.log(None, Moment::AgentGone { term }, now);
                 updates.push(record.record_update(Some(entry)));
             }

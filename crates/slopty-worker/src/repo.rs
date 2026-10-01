@@ -11,6 +11,7 @@
 //! the background.
 
 pub mod bundle;
+pub mod checks;
 pub mod cloning;
 pub mod review;
 pub mod snapshot;

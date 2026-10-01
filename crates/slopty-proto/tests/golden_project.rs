@@ -17,7 +17,7 @@ mod golden_project {
         AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Merge, Moment,
         Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placed,
         Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart,
-        Reason, Report, ReportKind, RunOn, Runner, StepKind, StepState, Suggestion, Task,
+        Reason, Report, ReportKind, RunOn, Runner, Spent, StepKind, StepState, Suggestion, Task,
         TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
         WorkerFacts,
     };
@@ -58,6 +58,7 @@ mod golden_project {
 
     fn project() -> Project {
         Project {
+            orchestrator_spent: Spent { active_ms: 480_000, since_ms: None },
             id: project_id(),
             title: "Projects mode".to_owned(),
             repo: "~/src/slopty".to_owned(),
@@ -106,6 +107,11 @@ mod golden_project {
     fn task() -> Task {
         let s = spec();
         Task {
+            checks: None,
+            spent: Spent {
+                active_ms: 754_000,
+                since_ms: Some(WallMs::from_millis(1_790_000_004_500)),
+            },
             id: TaskId(3),
             parent: s.parent,
             depends_on: s.depends_on,
@@ -471,6 +477,68 @@ mod golden_project {
                 pin: Some(term().worker),
             }),
         );
+    }
+
+    /// The person's next step for a task's agent, as they said it, on the timeline; and a
+    /// rebase that conflicts, the step that gives the work back to be resolved.
+    #[test]
+    fn told_and_conflicted() {
+        snap(
+            "task_tell",
+            &request(Verb::TaskTell {
+                project: project_id(),
+                task: TaskId(3),
+                text: "Resolve the conflicts with main, then report done again.".to_owned(),
+            }),
+        );
+        let told = TimelineEntry {
+            seq: 12,
+            at_ms: at(),
+            task: Some(TaskId(3)),
+            what: Moment::Told { text: "Fix CI: cargo gate failed at 9c1e2f3.".to_owned() },
+        };
+        snap("moment_told", &told);
+        let step = TaskStep {
+            kind: StepKind::Rebase,
+            worker: term().worker,
+            state: StepState::Failed { why: "CONFLICT (content): crates/a.rs".to_owned() },
+            since_ms: at(),
+            term: None,
+        };
+        snap("step_rebase_failed", &step);
+    }
+
+    /// A task's pull request's own checks: the read the server asks of the worker its agent
+    /// ran on, what the forge said, and the timeline's word when where they stand moved.
+    #[test]
+    fn pull_request_checks() {
+        use slopty_proto::project::{Checks, ChecksState};
+        snap(
+            "pull_checks",
+            &request(Verb::PullChecks {
+                worker: term().worker,
+                cwd: "/w/slopty/.claude/worktrees/slopty-slopty-3".to_owned(),
+                number: 42,
+                merge_request: false,
+            }),
+        );
+        let checks = Checks {
+            state: ChecksState::Failing,
+            passed: 6,
+            failed: 1,
+            pending: 0,
+            skipped: 2,
+            failing: vec!["clippy (macos)".to_owned()],
+            at_ms: at(),
+        };
+        snap("outcome_checks", &reply(Outcome::Checks(checks.clone())));
+        let entry = TimelineEntry {
+            seq: 13,
+            at_ms: at(),
+            task: Some(TaskId(3)),
+            what: Moment::Checks(checks),
+        };
+        snap("moment_checks", &entry);
     }
 
     /// A task's fresh-context review: the checkout the reviewer reads, its verdict, and the

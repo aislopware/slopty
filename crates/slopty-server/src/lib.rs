@@ -130,6 +130,7 @@ impl Server {
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
             tokio::spawn(mcp::serve(mcp_listener, config.admission, hub.clone())),
+            tokio::spawn(Hub::watch_checks(hub.downgrade())),
         ];
         tracing::info!(name = %hub.name(), %quic, %mcp, state = %store.path().display(), "serving");
         Ok(Self { hub, listener, quic, mcp, store, tasks, keeper })

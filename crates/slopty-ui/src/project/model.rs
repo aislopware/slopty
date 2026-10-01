@@ -14,13 +14,49 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_proto::agent::Review;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Fact, Finding, Moment, Native, NativeChange, NativeCounts, Natives, Project, ProjectId,
-    ProjectStatus, ProjectUpdate, ProjectsPart, ReportKind, ReviewRun, Reviewer, StepKind,
-    StepState, Suggestion, TaskCard, TaskId, TaskState, TaskStep, TimelineEntry, VerifierRun,
-    WorkerFacts,
+    Checks, ChecksState, Fact, Finding, Moment, Native, NativeChange, NativeCounts, Natives,
+    Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, ReportKind, ReviewRun,
+    Reviewer, StepKind, StepState, Suggestion, TaskCard, TaskId, TaskState, TaskStep,
+    TimelineEntry, VerifierRun, WorkerFacts,
 };
+
+/// `card`'s pull request as a row says it, with its own checks and its review, and whether
+/// either holds the merge back.
+#[must_use]
+pub fn pull_words(card: &TaskCard) -> Option<(String, bool)> {
+    let pr = card.pr.as_ref()?;
+    let asked = pr.review == Some(Review::ChangesRequested);
+    let (checks, failing) = card.checks.as_ref().map_or((None, false), checks_words);
+    let mut words = format!("PR #{}", pr.number);
+    if let Some(checks) = checks {
+        words.push_str(", ");
+        words.push_str(&checks);
+    }
+    if asked {
+        words.push_str(", changes requested");
+    }
+    Some((words, failing || asked))
+}
+
+/// A pull request's checks as its row says them, in neutral words, and whether one failed.
+fn checks_words(checks: &Checks) -> (Option<String>, bool) {
+    let all = checks.passed.saturating_add(checks.failed).saturating_add(checks.pending);
+    match checks.state {
+        ChecksState::None => (None, false),
+        ChecksState::Pending => {
+            (Some(format!("{} of {all} checks running", checks.pending)), false)
+        }
+        ChecksState::Passing => (Some("checks pass".to_owned()), false),
+        ChecksState::Failing => (Some(format!("{} of {all} checks fail", checks.failed)), true),
+    }
+}
+
+/// How many of a review's findings the person's "Address comments" names; the agent reads
+/// the rest in the review it was given.
+const TOLD_FINDINGS: usize = 5;
 
 /// How many timeline entries a board keeps: a screenful many times over, and a bound on a
 /// project the client watches for days.
@@ -190,6 +226,12 @@ pub enum TaskAction {
     RunOn,
     /// Start it as its orchestrator proposed.
     Start,
+    /// Tell its agent, as the person, to make its failed verifier pass.
+    FixCi,
+    /// Tell its agent, as the person, to address what its review asked for.
+    AddressComments,
+    /// Tell its agent, as the person, to resolve the conflicts its rebase met.
+    ResolveConflicts,
 }
 
 impl TaskAction {
@@ -202,7 +244,16 @@ impl TaskAction {
             Self::Approve => "Approve",
             Self::RunOn => "Run on\u{2026}",
             Self::Start => "Start",
+            Self::FixCi => "Fix CI",
+            Self::AddressComments => "Address comments",
+            Self::ResolveConflicts => "Resolve conflicts",
         }
+    }
+
+    /// Whether it is the person's words to the task's agent, rather than a word to the server.
+    #[must_use]
+    pub const fn tells(self) -> bool {
+        matches!(self, Self::FixCi | Self::AddressComments | Self::ResolveConflicts)
     }
 
     /// Its button's element name, for `task` on the row or card named by `prefix`.
@@ -214,8 +265,54 @@ impl TaskAction {
             Self::Approve => "approve",
             Self::RunOn => "run-on",
             Self::Start => "start",
+            Self::FixCi => "fix-ci",
+            Self::AddressComments => "address-comments",
+            Self::ResolveConflicts => "resolve-conflicts",
         };
         format!("{prefix}-{word}-{task}")
+    }
+}
+
+/// One stage of a task's way to the target, as its pipeline row says it ([`Board::pipeline`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stage {
+    /// Which.
+    pub kind: StageKind,
+    /// What it says.
+    pub words: String,
+    /// It holds the merge back until someone acts.
+    pub holds: bool,
+}
+
+/// The stages a pipeline row names, in their order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StageKind {
+    /// The branch the work is on.
+    Branch,
+    /// The project's verifier.
+    Verifier,
+    /// The fresh reviewer, or the person.
+    Reviewer,
+    /// The merge queue.
+    Queue,
+    /// The pull request and its own checks.
+    Pull,
+    /// The agent's own task list.
+    ToDos,
+}
+
+impl StageKind {
+    /// The word its element name ends in.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Branch => "branch",
+            Self::Verifier => "verifier",
+            Self::Reviewer => "reviewer",
+            Self::Queue => "queue",
+            Self::Pull => "pull",
+            Self::ToDos => "todos",
+        }
     }
 }
 
@@ -290,7 +387,7 @@ impl Machine {
 /// How long a task takes, as a project's finished tasks say ([`Board::estimate`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Estimate {
-    /// The median time from a task's start to its work being done, in milliseconds.
+    /// The median time a task worked before it was done, in milliseconds.
     pub each_ms: u64,
     /// How many finished tasks it is from.
     pub from: usize,
@@ -299,14 +396,14 @@ pub struct Estimate {
 }
 
 impl Estimate {
-    /// It in words: "about 12 min each, from 5 finished".
+    /// It in words: "about 12 min of work each, from 5 finished of the kind".
     #[must_use]
     pub fn line(&self) -> String {
         let mins = self.each_ms.saturating_add(30_000) / 60_000;
         let each = match mins {
-            0 => "under a minute each".to_owned(),
-            m if m < 120 => format!("about {m} min each"),
-            m => format!("about {} h each", m.saturating_add(30) / 60),
+            0 => "under a minute of work each".to_owned(),
+            m if m < 120 => format!("about {m} min of work each"),
+            m => format!("about {} h of work each", m.saturating_add(30) / 60),
         };
         let kind = if self.same_kind { "of the kind" } else { "in this project" };
         format!("{each}, from {} finished {kind}", self.from)
@@ -629,7 +726,14 @@ impl Board {
     /// - approve its work over a reviewer that asked for changes or ended with nothing said, once
     ///   its verifier passed.
     ///
-    /// A task that only reads, or is merged, has nothing to merge.
+    /// While its agent runs, the next step is the person's word to it, which comes first:
+    /// - fix CI when its verifier's failure still speaks;
+    /// - address the comments when its review, or its pull request's, asked for changes;
+    /// - resolve the conflicts its rebase onto the target met.
+    ///
+    /// Checking a failure again unchanged would fail the same way, so a failed verifier or
+    /// rebase offers Retry only when no agent runs to fix it. A task that only reads, or is
+    /// merged, has nothing to merge.
     #[must_use]
     pub fn actions(&self, task: TaskId) -> Vec<TaskAction> {
         let Some(card) = self.tasks.get(&task) else { return Vec::new() };
@@ -637,14 +741,31 @@ impl Board {
             return Vec::new();
         }
         let failed = card.step.as_ref().filter(|s| matches!(s.state, StepState::Failed { .. }));
+        let live = self.terminal(Some(task)).is_some();
         let mut out = Vec::new();
-        if card.state == TaskState::Done && card.merge.is_none() {
+        let checks_fail = card.checks.as_ref().is_some_and(|c| c.state == ChecksState::Failing);
+        let fix_ci = live && (self.verdict(task).is_some_and(|r| !r.passed) || checks_fail);
+        if fix_ci {
+            out.push(TaskAction::FixCi);
+        }
+        let review_asked = self.review(task).is_some_and(|r| !r.verdict.approved)
+            || card.pr.as_ref().is_some_and(|pr| pr.review == Some(Review::ChangesRequested));
+        if live && review_asked {
+            out.push(TaskAction::AddressComments);
+        }
+        let conflicted = failed.is_some_and(|s| s.kind == StepKind::Rebase);
+        if live && conflicted {
+            out.push(TaskAction::ResolveConflicts);
+        }
+        if card.state == TaskState::Done && card.merge.is_none() && self.open_todos(task) == 0 {
             out.push(TaskAction::Merge);
         }
-        let retried = |kind: StepKind| {
-            matches!(kind, StepKind::Home | StepKind::Verify | StepKind::Review | StepKind::Merge)
+        let retried = |kind: StepKind| match kind {
+            StepKind::Home | StepKind::Review | StepKind::Merge => true,
+            StepKind::Verify | StepKind::Rebase => !live,
+            StepKind::Clone => false,
         };
-        if failed.is_some_and(|s| retried(s.kind)) {
+        if failed.is_some_and(|s| retried(s.kind)) && !fix_ci {
             out.push(TaskAction::Retry);
         }
         let passed =
@@ -664,6 +785,145 @@ impl Board {
         out
     }
 
+    /// What the person says to `task`'s agent for a next step, in their words: what failed or
+    /// what was asked, from what the board knows, and what to do about it.
+    #[must_use]
+    pub fn told(&self, task: TaskId, action: TaskAction) -> Option<String> {
+        let card = self.tasks.get(&task)?;
+        let target = &self.project.target;
+        let then = "commit, and report done again with task_report.";
+        match action {
+            TaskAction::FixCi => {
+                let mut failed = Vec::new();
+                if let Some(run) = self.verdict(task).filter(|r| !r.passed) {
+                    let command = self.project.verifier.as_deref().unwrap_or("The verifier");
+                    let summary = crate::kit::first_line(&run.summary);
+                    let what =
+                        if summary.is_empty() { String::new() } else { format!(": {summary}") };
+                    failed.push(format!(
+                        "`{command}` failed on your work at {}{what}.",
+                        short_commit(&run.head)
+                    ));
+                }
+                let checks = card.checks.as_ref().filter(|c| c.state == ChecksState::Failing);
+                if let (Some(checks), Some(pr)) = (checks, card.pr.as_ref()) {
+                    let names = checks.failing.join(", ");
+                    failed.push(format!(
+                        "Pull request #{}'s checks failed: {names}. `gh pr checks {}` shows them.",
+                        pr.number, pr.number
+                    ));
+                }
+                if failed.is_empty() {
+                    return None;
+                }
+                Some(format!("Fix CI. {} Make it pass, then {then}", failed.join(" ")))
+            }
+            TaskAction::AddressComments => {
+                let mut lines = vec!["Address the review's comments.".to_owned()];
+                if let Some(run) = self.review(task).filter(|r| !r.verdict.approved) {
+                    let summary = crate::kit::first_line(&run.verdict.summary);
+                    if !summary.is_empty() {
+                        lines.push(summary.to_owned());
+                    }
+                    for finding in run.verdict.findings.iter().take(TOLD_FINDINGS) {
+                        let place = finding_place(finding);
+                        let body = crate::kit::first_line(&finding.body);
+                        let blocking = if finding.blocking { "blocking" } else { "note" };
+                        lines.push(match place {
+                            Some(place) => format!("- {blocking}, {place}: {body}"),
+                            None => format!("- {blocking}: {body}"),
+                        });
+                    }
+                }
+                if let Some(pr) =
+                    card.pr.as_ref().filter(|pr| pr.review == Some(Review::ChangesRequested))
+                {
+                    lines.push(format!(
+                        "Pull request #{} has changes requested: {}",
+                        pr.number, pr.url
+                    ));
+                }
+                lines.push(format!("Then {then}"));
+                Some(lines.join("\n"))
+            }
+            TaskAction::ResolveConflicts => {
+                let step = card.step.as_ref().filter(|s| s.kind == StepKind::Rebase)?;
+                let StepState::Failed { why } = &step.state else { return None };
+                Some(format!(
+                    "Resolve the conflicts. Your work does not rebase onto {target}: {}. Rebase \
+                     onto {target}, resolve them, then {then}",
+                    crate::kit::first_line(why)
+                ))
+            }
+            TaskAction::Merge
+            | TaskAction::Retry
+            | TaskAction::Approve
+            | TaskAction::RunOn
+            | TaskAction::Start => None,
+        }
+    }
+
+    /// The to-dos still open on `task`'s agent's own list, while its work waits to be checked
+    /// or merged: they keep it from merging, as the merge queue gives back a task that has
+    /// them.
+    #[must_use]
+    pub fn open_todos(&self, task: TaskId) -> u16 {
+        let Some(card) = self.tasks.get(&task) else { return 0 };
+        let waiting = matches!(card.state, TaskState::Verifying | TaskState::Done);
+        if waiting { card.natives.todos.saturating_sub(card.natives.done) } else { 0 }
+    }
+
+    /// `task`'s way to the target in one row, once its work is on it: its branch, what its
+    /// verifier and its reviewer said, its place in the queue, its pull request with its own
+    /// checks, and the to-dos still open. Empty while it is still being worked on, and once it
+    /// has merged.
+    #[must_use]
+    pub fn pipeline(&self, task: TaskId) -> Vec<Stage> {
+        let Some(card) = self.tasks.get(&task) else { return Vec::new() };
+        let on_its_way = card.verified.is_some()
+            || card.reviewed.is_some()
+            || card.merge.is_some()
+            || card.pr.is_some()
+            || matches!(card.state, TaskState::Verifying | TaskState::Done);
+        if !on_its_way || card.read_only || card.state == TaskState::Merged {
+            return Vec::new();
+        }
+        let stage = |kind, words: String, holds| Stage { kind, words, holds };
+        let running =
+            |kind: StepKind| card.step.as_ref().is_some_and(|s| s.kind == kind && s.running());
+        let mut out = Vec::new();
+        if let Some(branch) = &card.branch {
+            out.push(stage(StageKind::Branch, branch.clone(), false));
+        }
+        if running(StepKind::Verify) {
+            out.push(stage(StageKind::Verifier, "Verifying".to_owned(), false));
+        } else if let Some(run) = self.verdict(task) {
+            let words = if run.passed { "Verified" } else { "Verifier failed" };
+            out.push(stage(StageKind::Verifier, words.to_owned(), !run.passed));
+        }
+        if running(StepKind::Review) {
+            out.push(stage(StageKind::Reviewer, "Reviewing".to_owned(), false));
+        } else if let Some(run) = self.review(task) {
+            let approved = run.verdict.approved;
+            let words = if approved { "Approved" } else { "Changes asked" };
+            out.push(stage(StageKind::Reviewer, words.to_owned(), !approved));
+        }
+        if running(StepKind::Merge) {
+            out.push(stage(StageKind::Queue, "Merging".to_owned(), false));
+        } else if let Some((place, _)) = self.queue_place(task) {
+            out.push(stage(StageKind::Queue, queue_words(place), false));
+        }
+        if let Some((words, holds)) = pull_words(card) {
+            out.push(stage(StageKind::Pull, words, holds));
+        }
+        match self.open_todos(task) {
+            0 => {}
+            1 => out.push(stage(StageKind::ToDos, "1 to-do open".to_owned(), true)),
+            n => out.push(stage(StageKind::ToDos, format!("{n} to-dos open"), true)),
+        }
+        out
+    }
+
     /// The tasks whose start their orchestrator proposed and the person has not made, by
     /// number.
     #[must_use]
@@ -675,37 +935,25 @@ impl Board {
             .collect()
     }
 
-    /// How long a task of `kind` takes from its start to its work being done, from this
-    /// project's tasks that got there as far as the timeline still holds: the median of those
-    /// of the kind, else of every kind.
+    /// How long a task of `kind` works before it is done, from this project's tasks whose
+    /// work is done: the median of their time at work (idle waits left out), of those of the
+    /// kind, else of every kind.
     #[must_use]
     pub fn estimate(&self, kind: &str) -> Option<Estimate> {
-        let mut started: BTreeMap<TaskId, WallMs> = BTreeMap::new();
-        let mut took: Vec<(TaskId, u64)> = Vec::new();
-        for entry in &self.timeline {
-            let Some(task) = entry.task else { continue };
-            match &entry.what {
-                Moment::Assigned { spawned: true, .. } => {
-                    started.insert(task, entry.at_ms);
-                }
-                Moment::State { to: TaskState::Verifying | TaskState::Done, .. } => {
-                    if let Some(at) = started.remove(&task) {
-                        let ms = entry.at_ms.as_millis().saturating_sub(at.as_millis());
-                        took.push((task, ms));
-                    }
-                }
-                _ => {}
-            }
-        }
-        let of_kind = |k: &str| -> Vec<u64> {
-            took.iter()
-                .filter(|(t, _)| self.tasks.get(t).is_some_and(|c| c.kind == k))
-                .map(|(_, ms)| *ms)
-                .collect()
-        };
-        let (mut times, same_kind) = match of_kind(kind) {
-            v if !v.is_empty() => (v, true),
-            _ => (took.iter().map(|(_, ms)| *ms).collect::<Vec<_>>(), false),
+        let finished: Vec<&TaskCard> = self
+            .tasks
+            .values()
+            .filter(|c| {
+                matches!(c.state, TaskState::Verifying | TaskState::Done | TaskState::Merged)
+            })
+            .filter(|c| c.spent.active_ms > 0)
+            .collect();
+        let of_kind: Vec<u64> =
+            finished.iter().filter(|c| c.kind == kind).map(|c| c.spent.active_ms).collect();
+        let (mut times, same_kind) = if of_kind.is_empty() {
+            (finished.iter().map(|c| c.spent.active_ms).collect::<Vec<_>>(), false)
+        } else {
+            (of_kind, true)
         };
         if times.is_empty() {
             return None;
@@ -847,9 +1095,21 @@ pub fn moment_line(
             (None, None) => "Left its branch".to_owned(),
         },
         Moment::Verified(run) => verdict_line(run),
+        Moment::Checks(checks) => match checks.state {
+            ChecksState::None => "The pull request has no checks".to_owned(),
+            ChecksState::Pending => "The pull request's checks run".to_owned(),
+            ChecksState::Passing => "The pull request's checks pass".to_owned(),
+            ChecksState::Failing if checks.failing.is_empty() => {
+                "The pull request's checks fail".to_owned()
+            }
+            ChecksState::Failing => {
+                format!("The pull request's checks fail: {}", checks.failing.join(", "))
+            }
+        },
         Moment::Reviewed(run) => review_line(run),
         Moment::AgentGone { .. } => "Agent ended".to_owned(),
         Moment::Note { text } => crate::kit::first_line(text).to_owned(),
+        Moment::Told { text } => format!("You told its agent: {}", crate::kit::first_line(text)),
         Moment::Reported { report } => {
             let kind = match report.kind {
                 ReportKind::Checkpoint => "Checkpoint",
@@ -913,6 +1173,9 @@ pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
         },
         (StepKind::Review, StepState::Done { detail }) => format!("Reviewed: {}", first(detail)),
         (StepKind::Review, StepState::Failed { why }) => format!("Review: {}", first(why)),
+        (StepKind::Rebase, StepState::Running { .. }) => format!("Rebasing on {at}"),
+        (StepKind::Rebase, StepState::Done { .. }) => format!("Rebased on {at}"),
+        (StepKind::Rebase, StepState::Failed { why }) => format!("Conflicts: {}", first(why)),
     }
 }
 
