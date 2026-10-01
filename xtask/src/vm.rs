@@ -678,23 +678,13 @@ fn provision(home: &Utf8Path, macos: Macos, base: &str) -> Result<()> {
     Ok(())
 }
 
-/// The directory cargo builds into, wherever `CARGO_TARGET_DIR` or the config put it.
-fn target_dir(sh: &Shell) -> Result<Utf8PathBuf> {
-    #[derive(serde::Deserialize)]
-    struct Metadata {
-        target_directory: Utf8PathBuf,
-    }
-    let json = cmd!(sh, "cargo metadata --format-version 1 --no-deps").quiet().read()?;
-    Ok(serde_json::from_str::<Metadata>(&json)?.target_directory)
-}
-
 /// Build the worker's binaries for this Mac (and so for the guest); the directory they are in.
 fn build_worker(sh: &Shell) -> Result<Utf8PathBuf> {
     step(
         "build slopty-ptyd, slopty-worker and slopty",
         &cmd!(sh, "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-cli --bins"),
     )?;
-    Ok(target_dir(sh)?.join("debug"))
+    Ok(crate::tools::target_dir(sh)?.join("debug"))
 }
 
 /// Put the worker built into `bins` on `name` with `slopty worker deploy`, admitting this Mac's

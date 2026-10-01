@@ -480,6 +480,26 @@ const SPAWNED_BINS: [&str; 10] = [
     "slopty-stub-claude",
 ];
 
+/// `slopty_testkit::bins::BUILT`: where nextest's setup script built them.
+pub const BINS_BUILT: &str = "SLOPTY_BINS_BUILT";
+
+/// `cargo xtask spawned-bins`, nextest's setup script (`.config/nextest.toml`): build every binary
+/// a test spawns before the first test starts, as the test lane does, so a bare
+/// `cargo nextest run` never builds them inside one test's timeout. The tests learn the directory
+/// through `$NEXTEST_ENV`. Under `cargo xtask` they are built already, and this returns at once.
+pub fn spawned_bins(sh: &Shell) -> Result<()> {
+    if std::env::var_os(BINS_FRESH).is_some() {
+        return Ok(());
+    }
+    let env =
+        std::env::var_os("NEXTEST_ENV").context("nextest runs this and names $NEXTEST_ENV")?;
+    cmd!(sh, "cargo build --workspace --tests {SPAWNED_BINS...}").run()?;
+    let built = crate::tools::target_dir(sh)?.join("debug");
+    std::fs::write(&env, format!("{BINS_BUILT}={built}\n"))
+        .with_context(|| format!("write {}", std::path::Path::new(&env).display()))?;
+    Ok(())
+}
+
 /// The gate's tests: build every test binary, then run nextest's `profile` (on `only`'s
 /// packages when given) and the doctests side by side. Cargo holds the target dir's lock only
 /// while it builds, and the build is done, so neither waits for the other. Meanwhile
@@ -916,13 +936,16 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BINS_FRESH, SPAWNED_BINS, failed_tests, next_step, one_gpui, summary_of};
+    use super::{
+        BINS_BUILT, BINS_FRESH, SPAWNED_BINS, failed_tests, next_step, one_gpui, summary_of,
+    };
 
-    /// The gate builds what the tests look for, under the variable they read.
+    /// The gate builds what the tests look for, under the variables they read.
     #[test]
     fn the_spawned_binaries_match_the_testkit() {
         let testkit = include_str!("../../crates/slopty-testkit/src/bins.rs");
         assert!(testkit.contains(&format!("pub const FRESH: &str = \"{BINS_FRESH}\";")));
+        assert!(testkit.contains(&format!("pub const BUILT: &str = \"{BINS_BUILT}\";")));
         let names: Vec<&str> = SPAWNED_BINS.iter().copied().filter(|a| *a != "--bin").collect();
         let count = format!("NAMES: [&str; {}]", names.len());
         assert!(testkit.contains(&count), "bins::NAMES is not {} long", names.len());

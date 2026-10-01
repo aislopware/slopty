@@ -114,6 +114,8 @@ enum Cmd {
     /// After a commit on main: push it to the `gate` branch, where CI runs every gate lane and
     /// fast-forwards main to it once all pass.
     Land(land::LandOpts),
+    /// nextest's setup script: build every binary a test spawns before the first test starts.
+    SpawnedBins,
     /// Delete the build units and incremental caches nothing has used for a while, in every
     /// target dir under `target/`, then the least recently used until `target/` is within its
     /// budget and its volume above the free-space floor (also run, skipping busy dirs, after
@@ -315,6 +317,7 @@ fn main() -> Result<()> {
             gated
         }
         Cmd::Land(opts) => land::run(&sh, &opts),
+        Cmd::SpawnedBins => gate::spawned_bins(&sh),
         Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run, no_wait } => {
             let mut limits = prune::Limits::from_env()?;
             if let Some(gb) = budget_gb {

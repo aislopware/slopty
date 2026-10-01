@@ -186,6 +186,16 @@ pub fn workspace_packages() -> Result<Vec<Package>> {
     Ok(packages)
 }
 
+/// The directory cargo builds into, wherever `CARGO_TARGET_DIR` or the config put it.
+pub fn target_dir(sh: &Shell) -> Result<Utf8PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct Metadata {
+        target_directory: Utf8PathBuf,
+    }
+    let json = cmd!(sh, "cargo metadata --format-version 1 --no-deps").quiet().read()?;
+    Ok(serde_json::from_str::<Metadata>(&json)?.target_directory)
+}
+
 /// The repository root: the directory containing the workspace `Cargo.toml`.
 pub fn repo_root() -> Result<Utf8PathBuf> {
     let manifest_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));

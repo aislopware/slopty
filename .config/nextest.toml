@@ -1,3 +1,12 @@
+# Before the first test of a bare `cargo nextest run`, every binary a test spawns is built
+# (`cargo xtask spawned-bins`), so no test builds them inside its own timeout. Under `cargo xtask`
+# they are built already and the script returns at once; xtask builds into its own target dir, so
+# the script never waits on the workspace's lock.
+experimental = [ "setup-scripts" ]
+
+[scripts.setup.spawned-bins]
+command = "cargo xtask spawned-bins"
+
 [profile.default]
 retries = 0
 # A test that leaves a child (ptyd, a worker, a shell) holding its output fails.
@@ -6,6 +15,11 @@ slow-timeout = { period = "30s", terminate-after = 4, grace-period = "5s" }
 fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
+
+# Only the packages whose tests can spawn a daemon (`slopty_testkit::bins`).
+[[profile.default.scripts]]
+filter = "rdeps(=slopty-testkit)"
+setup = "spawned-bins"
 
 [profile.default.junit]
 path = "junit.xml"

@@ -4,8 +4,10 @@
 //! `claude` finds each beside its own binary. Under `cargo xtask` (the gate's tests, the e2e
 //! suites) they are built before any test starts, which sets [`FRESH`], so no test shells out to
 //! cargo: one that did would wait on cargo's locks for as long as any other build on the machine
-//! held them. A bare `cargo nextest run` builds them once per test process instead, fresh, since
-//! one left from an older build would test the old code.
+//! held them, inside its own timeout. A bare `cargo nextest run` builds them in its setup script
+//! (`cargo xtask spawned-bins`), which names the directory in [`BUILT`]. Any other run, or a test
+//! of another profile, builds them once per test process instead, fresh, since one left from an
+//! older build would test the old code.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -13,6 +15,10 @@ use std::sync::OnceLock;
 /// Set by `cargo xtask` once every binary in [`NAMES`] is built into the profile directory the
 /// tests run from.
 pub const FRESH: &str = "SLOPTY_BINS_FRESH";
+
+/// Set by nextest's setup script to the profile directory it built every binary in [`NAMES`]
+/// into, which is fresh for the tests built there too.
+pub const BUILT: &str = "SLOPTY_BINS_BUILT";
 
 /// The binaries a test may spawn. `cargo xtask` builds the same list (`--bin`).
 pub const NAMES: [&str; 5] =
@@ -23,24 +29,30 @@ pub const NAMES: [&str; 5] =
 ///
 /// # Panics
 ///
-/// When [`FRESH`] is unset and the build of [`NAMES`] fails.
+/// When neither [`FRESH`] nor [`BUILT`] vouches for `anchor`'s directory and the build of
+/// [`NAMES`] fails.
 #[must_use]
 pub fn bin(anchor: &str, name: &str) -> PathBuf {
     let anchor = Path::new(anchor);
-    if std::env::var_os(FRESH).is_none() {
-        static BUILT: OnceLock<()> = OnceLock::new();
-        BUILT.get_or_init(|| build(anchor));
+    if !fresh(anchor) {
+        static ONCE: OnceLock<()> = OnceLock::new();
+        ONCE.get_or_init(|| build(anchor));
     }
     anchor.with_file_name(name)
+}
+
+fn fresh(anchor: &Path) -> bool {
+    std::env::var_os(FRESH).is_some()
+        || std::env::var_os(BUILT).is_some_and(|dir| anchor.parent() == Some(Path::new(&dir)))
 }
 
 fn build(anchor: &Path) {
     let release = anchor.parent().is_some_and(|dir| dir.ends_with("release"));
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut build = std::process::Command::new(cargo);
-    // The whole workspace, so features resolve across every member (`workspace-hack` among
-    // them) and not only the calling test's package, where cargo would otherwise start.
-    build.args(["build", "--workspace"]);
+    // The whole workspace with its tests, as the gate and the setup script build them, so features
+    // resolve across every member's dev-dependencies too and each crate is the unit already built.
+    build.args(["build", "--workspace", "--tests"]);
     for name in NAMES {
         build.args(["--bin", name]);
     }
