@@ -14,12 +14,13 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        Expanded, Intent, IntentDone, Outcome, Page, Start, TableFrame, ThreadFrame, ThreadRequest,
+        Expanded, FileDiff, Intent, IntentDone, Outcome, Page, Pick, Review, ReviewScope, Start,
+        TableFrame, ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
         Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Fork, Image, IntentId, Item,
-        ItemBody, ItemId, Limit, Link, Liveness, Meters, Notice, PartKey, Patch, Pending,
+        ItemBody, ItemId, Limit, Link, Liveness, Meters, Model, Notice, PartKey, Patch, Pending,
         PendingState, Phase, Plan, Request, RequestState, Status, Step, ThreadId, ThreadMeta,
         ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId, TurnState, Usage,
         UserMessage, Wait, kind,
@@ -76,6 +77,7 @@ mod golden_thread {
             }),
             drive: Drive::named(Drive::OBSERVED),
             caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
+            models: vec![Model { id: "opus".to_owned(), label: "Opus".to_owned() }],
             facts: BTreeMap::from([("branch".to_owned(), "main".to_owned())]),
             created_ms: ms(1_000),
         }
@@ -612,6 +614,62 @@ mod golden_thread {
             })
             .collect();
         snap("frame_tool_details", &ThreadFrame::Page(Page { turns: vec![], items, older: false }));
+    }
+
+    /// A review asked for, sent, and a change kept and put back.
+    #[test]
+    fn review() {
+        snap(
+            "review_request",
+            &ThreadRequest::Review { thread: thread(), scope: ReviewScope::Turn(TurnId(2)) },
+        );
+        snap("review_since", &ReviewScope::Since(TurnId(1)));
+        snap("review_kept", &ReviewScope::Kept);
+        let hunk = Hunk {
+            old_start: 3,
+            old_lines: 1,
+            new_start: 3,
+            new_lines: 2,
+            lines: vec!["-a".to_owned(), "+b".to_owned(), "+c".to_owned()],
+        };
+        let patch = Patch { hunks: vec![hunk], added: 2, removed: 1, clipped_lines: 0, full: None };
+        let review = Review {
+            scope: ReviewScope::Kept,
+            from: Some(TreeRef("4b825dc6".to_owned())),
+            to: Some(TreeRef("9d1e0f3a".to_owned())),
+            files: vec![
+                FileDiff {
+                    path: "src/lib.rs".to_owned(),
+                    from: Some("aa11".to_owned()),
+                    to: Some("bb22".to_owned()),
+                    binary: false,
+                    patch,
+                },
+                FileDiff {
+                    path: "logo.png".to_owned(),
+                    from: None,
+                    to: Some("cc33".to_owned()),
+                    binary: true,
+                    patch: Patch {
+                        hunks: vec![],
+                        added: 0,
+                        removed: 0,
+                        clipped_lines: 0,
+                        full: None,
+                    },
+                },
+            ],
+            absent: None,
+        };
+        snap("review_frame", &ThreadFrame::Review(Box::new(review)));
+        let pick = Pick {
+            path: "src/lib.rs".to_owned(),
+            from: Some("aa11".to_owned()),
+            stamp: Some("bb22".to_owned()),
+            hunks: vec![0],
+        };
+        snap("review_keep", &Intent::Keep(pick.clone()));
+        snap("review_revert", &Intent::Revert(Pick { hunks: vec![], ..pick }));
     }
 
     /// The thread messages as they ride the control stream and open a stream of their own.

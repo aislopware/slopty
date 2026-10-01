@@ -11,15 +11,19 @@ use std::sync::Arc;
 use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Outcome, TableFrame, ThreadFrame, ThreadRequest,
+    Expanded, Intent, IntentDone, Outcome, ReviewScope, TableFrame, ThreadFrame, ThreadRequest,
 };
 use slopty_proto::thread::{
-    AgentId, AskId, Cap, ContentRef, Cursor, IntentId, ThreadId, ThreadState, TurnId,
+    Action, AgentId, AskId, Cap, ContentRef, Cursor, IntentId, ThreadId, ThreadState, TurnId,
 };
 use slopty_worker::conversation::Seen;
-use slopty_worker::orchestrate::{self, Conversations as _};
+use slopty_worker::manager::Worker;
+use slopty_worker::orchestrate::{self, Agents, Conversations as _};
+use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::claude::{self, Asks, Driver, Sources};
-use slopty_worker::thread::{Follower, Host};
+use slopty_worker::thread::compose::Terminals;
+use slopty_worker::thread::review::Snapshots;
+use slopty_worker::thread::{Composer, Follower, Host};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
@@ -39,20 +43,63 @@ impl Sources for Observed {
     }
 }
 
-/// The daemon's threads, and the adapter that answers for them. Cheap to clone.
+/// The daemon's terminals and agents, as the composer types into them.
+struct Typing {
+    worker: Worker,
+    agents: crate::server::DaemonAgents,
+}
+
+impl Agents for Typing {
+    fn status(&self, session: SessionId) -> Option<slopty_proto::agent::SessionAgent> {
+        self.agents.status(session)
+    }
+
+    fn forget(&self, session: SessionId) {
+        self.agents.forget(session);
+    }
+
+    fn ended(&self, session: SessionId) -> bool {
+        self.agents.ended(session)
+    }
+}
+
+impl Terminals for Typing {
+    fn terminal(&self, session: SessionId) -> Option<SessionHandle> {
+        self.worker.get(session).ok()
+    }
+}
+
+/// The daemon's threads and what serves them.
+///
+/// The adapter answers for them, the composer types what is sent to them, and their turns
+/// are snapshotted. Cheap to clone.
 #[derive(Clone, Debug)]
 pub struct Threads {
     host: Host,
     claude: Driver,
+    composer: Composer,
+    snapshots: Snapshots,
 }
 
-/// Open the threads kept under `dir`, and what [`start`] needs to observe into them. A host
-/// that cannot open is warned of, and the daemon goes on without threads.
-pub fn open(dir: &Path) -> Option<(Threads, Asks)> {
+/// Open the threads kept under `dir`, and what [`start`] needs to observe into them.
+///
+/// They are typed into through `worker`'s terminals as `agents` says of them, and their
+/// snapshots' indexes are kept under `snapshots`. A host that cannot open is warned of, and
+/// the daemon goes on without threads.
+pub fn open(
+    dir: &Path,
+    snapshots: &Path,
+    worker: Worker,
+    agents: Arc<parking_lot::Mutex<slopty_agent::AgentTable>>,
+) -> Option<(Threads, Asks)> {
     match Host::open(dir, slopty_worker::thread::log::Limits::default()) {
         Ok(host) => {
             let (claude, asks) = Driver::channel();
-            Some((Threads { host, claude }, asks))
+            let typing = Typing { worker, agents: crate::server::DaemonAgents(agents) };
+            let composer = Composer::new(host.clone(), Arc::new(typing));
+            let git = slopty_worker::changes::git().map(Path::to_path_buf);
+            let snapshots = Snapshots::new(host.clone(), snapshots, git);
+            Some((Threads { host, claude, composer, snapshots }, asks))
         }
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "the thread host did not open: {e}");
@@ -61,9 +108,10 @@ pub fn open(dir: &Path) -> Option<(Threads, Asks)> {
     }
 }
 
-/// Observe every Claude Code session into the daemon's threads.
+/// Observe every Claude Code session into the daemon's threads, and snapshot each turn.
 pub fn start(daemon: &Daemon, asks: Asks) {
     let Some(threads) = &daemon.threads else { return };
+    drop(threads.snapshots.spawn());
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
     drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks));
 }
@@ -119,6 +167,7 @@ impl Drop for Following {
 enum Command {
     Page { before: TurnId, turns: u32 },
     Expand { content: ContentRef },
+    Review { scope: ReviewScope },
 }
 
 impl Following {
@@ -190,8 +239,25 @@ impl Following {
             ThreadRequest::Expand { thread, content } => {
                 self.command(at, thread, Command::Expand { content });
             }
+            ThreadRequest::Review { thread, scope } => {
+                self.command(at, thread, Command::Review { scope });
+            }
+            // Git takes its time: a keep or a revert is answered from a task of its own.
+            ThreadRequest::Intent {
+                id,
+                thread,
+                intent: intent @ (Intent::Keep(_) | Intent::Revert(_)),
+            } => {
+                let (snapshots, out) = (threads.snapshots, at.out.clone());
+                at.tasks.spawn(async move {
+                    if let Some(outcome) = snapshots.pick(thread, id, &intent).await {
+                        let _gone =
+                            out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                    }
+                });
+            }
             ThreadRequest::Intent { id, thread, intent } => {
-                let outcome = act(at, &threads.host, thread, id, intent);
+                let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
             ThreadRequest::Start { id, start } => {
@@ -224,41 +290,63 @@ const fn refused(reason: String) -> Outcome {
 
 /// Act on intent `id` for `thread` once ([`Host::intent`]): a repeat, after a reconnect or
 /// from another client, gets the first outcome back and acts on nothing.
-fn act(at: &Origin<'_>, host: &Host, thread: ThreadId, id: IntentId, intent: Intent) -> Outcome {
-    let decided = host.intent(thread, id, |state| (decide(at, state, intent), Vec::new()));
+fn act(
+    at: &Origin<'_>,
+    threads: &Threads,
+    thread: ThreadId,
+    id: IntentId,
+    intent: &Intent,
+) -> Outcome {
+    let decided = threads.host.intent(thread, id, |state| decide(at, threads, state, id, intent));
     decided.unwrap_or_else(|| refused("no such thread".to_owned()))
 }
 
 /// What comes of `intent` on `state`'s thread, done as it is decided.
-fn decide(at: &Origin<'_>, state: &ThreadState, intent: Intent) -> Outcome {
+fn decide(
+    at: &Origin<'_>,
+    threads: &Threads,
+    state: &ThreadState,
+    id: IntentId,
+    intent: &Intent,
+) -> (Outcome, Vec<Action>) {
     let needs = intent.needs();
     if !state.meta.can(needs) {
-        return Outcome::Unsupported { cap: Cap::named(needs) };
+        return (Outcome::Unsupported { cap: Cap::named(needs) }, Vec::new());
     }
     let Some(session) = state.meta.terminal else {
-        return refused("the thread's agent runs in no terminal here".to_owned());
+        let reason = "the thread's agent runs in no terminal here".to_owned();
+        return (refused(reason), Vec::new());
     };
-    match intent {
+    if let Some(decided) = threads.composer.decide(state, id, intent) {
+        return decided;
+    }
+    let outcome = match intent {
         Intent::Answer { ask, choice, message } => {
-            let Some(held) = held(&ask) else { return refused(format!("no request {}", ask.0)) };
-            let Some(verdict) = slopty_agent::observed::verdict(&choice, message.as_deref()) else {
-                return refused(format!("no choice {choice}"));
-            };
-            if crate::follow::answer(at.daemon, at.link, at.client, session, held, verdict) {
-                Outcome::Done
-            } else {
-                refused("the request is no longer open to this client".to_owned())
+            let verdict = slopty_agent::observed::verdict(choice, message.as_deref());
+            match (held(ask), verdict) {
+                (None, _) => refused(format!("no request {}", ask.0)),
+                (_, None) => refused(format!("no choice {choice}")),
+                (Some(held), Some(verdict)) => answered(crate::follow::answer(
+                    at.daemon, at.link, at.client, session, held, verdict,
+                )),
             }
         }
-        Intent::Release { ask } => {
-            let Some(held) = held(&ask) else { return refused(format!("no request {}", ask.0)) };
-            if crate::follow::hand_back(at.daemon, at.link, at.client, session, held) {
-                Outcome::Done
-            } else {
-                refused("the request is no longer open to this client".to_owned())
+        Intent::Release { ask } => match held(ask) {
+            None => refused(format!("no request {}", ask.0)),
+            Some(held) => {
+                answered(crate::follow::hand_back(at.daemon, at.link, at.client, session, held))
             }
-        }
+        },
         _ => Outcome::Unsupported { cap: Cap::named(needs) },
+    };
+    (outcome, Vec::new())
+}
+
+fn answered(taken: bool) -> Outcome {
+    if taken {
+        Outcome::Done
+    } else {
+        refused("the request is no longer open to this client".to_owned())
     }
 }
 
@@ -300,6 +388,7 @@ async fn stream(
             return;
         }
     };
+    let (reviewed_tx, mut reviewed) = mpsc::unbounded_channel();
     let why = loop {
         let frame = tokio::select! {
             frame = follower.next() => match frame {
@@ -318,7 +407,17 @@ async fn stream(
                     let body = threads.expand(thread, content.clone()).await;
                     ThreadFrame::Expanded { content, body }
                 }
+                // A review runs git for a while: on a task of its own, so the thread's frames
+                // go on meanwhile.
+                Some(Command::Review { scope }) => {
+                    let (snapshots, reviewed) = (threads.snapshots.clone(), reviewed_tx.clone());
+                    tokio::spawn(async move {
+                        let _gone = reviewed.send(snapshots.review(thread, scope).await);
+                    });
+                    continue;
+                }
             },
+            Some(review) = reviewed.recv() => ThreadFrame::Review(Box::new(review)),
         };
         if let Err(e) = out.send(&frame).await {
             tracing::debug!(%thread, error = %e, "thread stream ended");

@@ -18,7 +18,7 @@ use slopty_core::{SessionId, WallMs};
 
 use super::{
     Action, AgentId, AskId, Cap, Changed, Choice, ContentRef, Cursor, Delivery, Drive, IntentId,
-    Item, ItemId, Link, Status, ThreadId, ThreadState, Turn, TurnId,
+    Item, ItemId, Link, Patch, Status, ThreadId, ThreadState, TreeRef, Turn, TurnId,
 };
 
 /// What a client asks of a worker's threads.
@@ -82,6 +82,14 @@ pub enum ThreadRequest {
     Approvals {
         /// On or off.
         on: bool,
+    },
+    /// What changed in the working tree of a followed thread over `scope`, sent on its
+    /// stream as a [`ThreadFrame::Review`].
+    Review {
+        /// The thread.
+        thread: ThreadId,
+        /// Over what.
+        scope: ReviewScope,
     },
 }
 
@@ -157,6 +165,27 @@ pub enum Intent {
         /// The task.
         task: String,
     },
+    /// Take a change into what the person has kept ([`ReviewScope::Kept`]): the whole file,
+    /// or the hunks named. Refused when the file or what was kept no longer is what the
+    /// review showed.
+    Keep(Pick),
+    /// Put a change back in the working tree as it was: the whole file, or the hunks named.
+    /// Refused when the file no longer is what the review showed.
+    Revert(Pick),
+}
+
+/// A file's change as a review showed it, or some of its hunks.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Pick {
+    /// The file, from the repository's root.
+    pub path: String,
+    /// Its blob on the review's old side ([`FileDiff::from`]).
+    pub from: Option<String>,
+    /// Its blob on the new side, as the review showed it ([`FileDiff::to`]): the stamp the
+    /// worker checks the file against.
+    pub stamp: Option<String>,
+    /// The hunks, by their place in [`FileDiff::patch`]; empty for the whole file.
+    pub hunks: Vec<u32>,
 }
 
 impl Intent {
@@ -174,6 +203,7 @@ impl Intent {
             Self::SetMode { .. } => Cap::SET_MODE,
             Self::Compact => Cap::COMPACT,
             Self::StopTask { .. } => Cap::STOP_TASK,
+            Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
         }
     }
 }
@@ -244,6 +274,50 @@ pub enum ThreadFrame {
         /// It.
         body: Expanded,
     },
+    /// What changed over a scope, asked for by [`ThreadRequest::Review`].
+    Review(Box<Review>),
+}
+
+/// The span of a thread's work a review covers, each a diff between two snapshots of the
+/// working tree ([`Action::Snapshot`]); "now" is a snapshot taken for the review.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ReviewScope {
+    /// One turn: from its start to its end, or to now while it runs.
+    Turn(TurnId),
+    /// From a turn's start to now.
+    Since(TurnId),
+    /// From what the person has kept ([`Intent::Keep`]) to now; what is left to review.
+    Kept,
+}
+
+/// A review: each file that differs between two trees.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Review {
+    /// What was asked for.
+    pub scope: ReviewScope,
+    /// The old side.
+    pub from: Option<TreeRef>,
+    /// The new side.
+    pub to: Option<TreeRef>,
+    /// The files, by path.
+    pub files: Vec<FileDiff>,
+    /// Why there is nothing to compare, when there is not: no git repository, no snapshot.
+    pub absent: Option<String>,
+}
+
+/// One file of a review.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FileDiff {
+    /// The file, from the repository's root.
+    pub path: String,
+    /// Its blob on the old side; `None` when it was added.
+    pub from: Option<String>,
+    /// Its blob on the new side; `None` when it was removed.
+    pub to: Option<String>,
+    /// Its bytes are not text, so it has no hunks.
+    pub binary: bool,
+    /// Its hunks, the ones [`Pick::hunks`] count.
+    pub patch: Patch,
 }
 
 /// Older turns of a thread.

@@ -30,6 +30,7 @@ mod threads {
             forked_from: None,
             drive: Drive::named(Drive::OBSERVED),
             caps: vec![Cap::named(Cap::QUEUE)],
+            models: Vec::new(),
             facts: BTreeMap::new(),
             created_ms: WallMs::from_millis(1),
         }

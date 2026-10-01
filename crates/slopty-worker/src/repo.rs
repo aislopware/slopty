@@ -13,6 +13,7 @@
 pub mod bundle;
 pub mod cloning;
 pub mod review;
+pub mod snapshot;
 pub mod verify;
 
 use std::collections::{HashMap, HashSet};

@@ -12996,3 +12996,28 @@ cargo nextest run -p slopty-pty --test ptmx_churn --no-run   # then copy the bin
 cargo xtask vm ssh -- '/tmp/ptmx_churn --ignored --nocapture'
 cargo xtask vm stop
 ```
+
+## 2026-10-02 — a turn snapshot of this repository
+
+What a turn's snapshot costs the worker (`repo::snapshot::Repo::take`: `git add -A` and
+`git write-tree` through the thread's own index), on a local clone of this repository (1 683
+tracked files) in the temporary directory. M1 Max, git 2.56.0, three runs while other lanes
+built under `nice`:
+
+```
+cargo test -p slopty-worker --test review -- --ignored --nocapture snapshot_cost
+```
+
+| snapshot | run 1 | run 2 | run 3 |
+| --- | --- | --- | --- |
+| first (from `HEAD`, every file hashed) | 216 ms | 322 ms | 245 ms |
+| nothing changed | 27 ms | 108 ms | 99 ms |
+| nothing changed | 25 ms | 96 ms | 102 ms |
+| one file changed | 30 ms | 96 ms | 90 ms |
+| nothing changed | 30 ms | 95 ms | 101 ms |
+
+Keeping the index between snapshots is what makes the later ones cheap: git's stat cache
+skips every file not touched since, where a fresh `read-tree HEAD` each time would hash the
+whole tree again, as the first one does. The spread between runs is the machine's load: both
+are two git processes. None of it is on the turn's path: the edge goes out at once and the
+snapshot follows as its own action.

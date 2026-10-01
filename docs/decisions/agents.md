@@ -218,9 +218,77 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Intents act under the host's lock, once per id.** `Answer` and `Release` go through the
     held prompts the conversation path answers. A repeat, after a reconnect or from another
     client, gets the first outcome back and touches nothing. An intent the thread's caps lack
-    is `Unsupported`. Those the worker cannot act on yet (send, interrupt, model and the rest)
-    are `Unsupported` too, until the composer moves to the worker. `Start` is refused and not
-    recorded.
+    is `Unsupported`, and so is any no adapter acts on yet (mode, compact, stopping a task).
+    Messages, interrupts and models go to the composer (next entry). `Start` is refused and
+    not recorded.
   - **Expansion asks the adapter.** The Claude driver answers an `Expand` from the session's
     own transcripts, on the blocking pool: a text cut at `EXPANDED_CHARS`, a picture's bytes,
     or `Gone`.
+
+- ✅ **The worker types what is sent to an observed agent, under the draft guard**
+  (2026-10-02, `crates/slopty-worker/src/thread/compose.rs`; tests in
+  `crates/slopty-worker/tests/compose.rs` over a real terminal whose program records every
+  byte, and `apps/slopty-worker/tests/threads.rs` over the link).
+  - **The same keystrokes the face typed from the client.** A message is a paste (bracketed
+    where the TUI asked), 200 ms, then Enter. A model is `/model <id>` typed, the pause, then
+    Enter. An interrupt is Esc. All of it goes through orchestration's guard (`may_type`) at
+    the moment it is written. Nothing is typed while the agent asks a person, before its hooks
+    have spoken, once it has exited, or over a person's unsent line. Nothing it types clears
+    that line.
+  - **A message waits in the thread's pending list until it goes**, where a client shows it,
+    edits it or withdraws it. Its entry leaves once the Enter is written; the transcript's
+    prompt is what the client confirms its own bubble by.
+    - A steer goes as soon as the guard lets it, into the turn under way.
+    - A queued message waits until the agent is at rest by its hooks, and then goes, one per
+      turn. The next waits until the agent has taken the last one: it was seen working since,
+      or the turn it started has ended. A queued message is never folded into the turn under
+      way.
+    - One the guard holds is `Held` with why, "Your draft in the terminal is in the way" for a
+      person's line, and goes once the way is clear (tried again every 250 ms, since a draft
+      says nothing when it is sent).
+    - When a person starts a line between the paste and the Enter, the Enter is not sent and
+      the message stays, saying it was typed and not sent. It is never typed again, and it
+      cannot be edited, since its text is already in the terminal.
+  - **An interrupt and a model are checked before they are taken.** Esc is refused over a
+    draft, while a person is asked, and when the agent is not working. A model must be in the
+    thread's catalogue (`ThreadMeta::models`). For Claude Code the catalogue is the aliases
+    `/model` takes (`observed::MODELS`), so no client keeps a list of its own. `/model` waits
+    for the agent to be at rest. Mode stays read-only.
+  - **Each thread with something to send has one task**, which sends one thing at a time, so
+    two messages never interleave in the terminal. It wakes on the thread's batches, on a new
+    intent, and every 250 ms while something waits on the guard or the agent.
+
+- ✅ **Every turn is snapshotted into private refs, and a review is a diff between two
+  snapshots** (2026-10-02, `crates/slopty-worker/src/repo/snapshot.rs`,
+  `crates/slopty-worker/src/thread/review.rs`; tests in `crates/slopty-worker/tests/review.rs`
+  on a real repository, cost in `docs/MEASUREMENTS.md`, "a turn snapshot of this
+  repository").
+  - **A snapshot is the working tree as `git add -A` sees it**, written as a tree through an
+    index of the thread's own, so the person's index, `HEAD` and stash are never touched.
+    Untracked files are in and ignored ones out, so a Bash edit is caught as well as a tool's.
+    The index is kept between snapshots, so each hashes only what changed since the last, and
+    only the first starts from `HEAD`. A commit for each tree keeps it alive under
+    `refs/slopty/threads/<thread>/<turn>-{before,after}`. The refs of a turn 256 turns back go.
+  - **Taken at the edges, off the edge's path.** The host tells of a turn beginning or ending
+    as the thread's last turn: a log read again from the start tells of old turns, and the tree
+    is long past them. A turn's start is snapshotted at the earliest word of it, the agent
+    starting to work, since the observed Claude path sees the turn itself only once the
+    transcript has it. The snapshot follows as `Action::Snapshot`, one thread at a time and in
+    order. A thread outside git takes none, and its review says why.
+  - **A review compares two snapshots, "now" being one taken for it**: a turn (start to end,
+    or to now while it runs), since a turn's start, or what is left after what the person kept.
+    It is asked with `ThreadRequest::Review` and answered on the thread's stream as
+    `ThreadFrame::Review`, from a task of its own so the thread's frames go on meanwhile. Each
+    file carries its blob ids on both sides. Hunks are cut on the worker with three lines of
+    context, the same way every time, so a hunk named by its place is the one the review
+    showed. A review carries at most 20 000 diff lines, and files past that come without hunks.
+  - **Keep and revert act once per id, checked against what the review showed.** A revert
+    writes the file's old side back, whole or by hunk, only while the file is still the blob
+    the review showed. Keeping moves the file, whole or by hunk, into a kept tree
+    (`refs/slopty/threads/<thread>/kept`), only while what is kept of it is still the review's
+    old side. "What is left to review" is the kept tree against now, starting from the
+    thread's first snapshot. Both run git, so they are answered from a task of their own, and a
+    repeat that comes while one is under way gets nothing until it is done.
+  - **Every variant is appended last** (`ThreadRequest::Review`, `ThreadFrame::Review`,
+    `Intent::Keep`, `Intent::Revert`), so no existing golden changed for them. The model
+    catalogue (`ThreadMeta::models`, the composer's entry) did change the snapshot goldens.

@@ -167,6 +167,7 @@ mod threads {
         Snapshot(Cursor),
         Page { turns: usize, older: bool },
         Expanded(Expanded),
+        Review(Box<slopty_proto::thread::wire::Review>),
         Actions { epoch: u64, first: u64, next: u64 },
     }
 
@@ -259,6 +260,7 @@ mod threads {
                     self.got.push(Got::Page { turns: page.turns.len(), older: page.older });
                 }
                 ThreadFrame::Expanded { body, .. } => self.got.push(Got::Expanded(body)),
+                ThreadFrame::Review(review) => self.got.push(Got::Review(review)),
             }
         }
 
@@ -296,10 +298,15 @@ mod threads {
 
     /// Open `/bin/sh` in `cwd`, not attached.
     async fn open_shell(client: &mut Client, cwd: &Path) -> SessionId {
+        open(client, cwd, vec!["/bin/sh".to_owned()]).await
+    }
+
+    /// Open `command` in `cwd`, not attached.
+    async fn open(client: &mut Client, cwd: &Path, command: Vec<String>) -> SessionId {
         let spec = OpenSession {
             size: TermSize { cols: 80, rows: 24, ..TermSize::default() },
             cwd: Some(cwd.to_string_lossy().into_owned()),
-            command: vec!["/bin/sh".to_owned()],
+            command,
             env: vec![("PS1".to_owned(), "$ ".to_owned())],
             title: None,
             attach: false,
@@ -427,5 +434,73 @@ mod threads {
 
         b.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         drop(file);
+    }
+
+    /// A message sent to a thread is typed by the worker into its agent's terminal, as a paste
+    /// and an Enter, and its pending entry goes once it has. The terminal's program records
+    /// every byte it is given (`cat`, in raw mode); the agent's hooks are `slopty hook` run as
+    /// Claude Code runs it.
+    #[tokio::test]
+    async fn a_message_sent_to_a_thread_is_typed_into_its_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let record = dir.path().join("record");
+        let script = r#"stty raw -echo; printf ready >"$0"; exec cat >>"$0""#;
+        let command = ["/bin/sh", "-c", script, &record.to_string_lossy()].map(str::to_owned);
+        let session = open(&mut a, dir.path(), command.to_vec()).await;
+        let read = || std::fs::read_to_string(&record).unwrap_or_default();
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        let recorded = async |want: &str| {
+            while read() != want {
+                assert!(tokio::time::Instant::now() < deadline, "{:?}", read());
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        recorded("ready").await;
+        std::fs::write(&record, "").unwrap();
+
+        let main = dir.path().join("s2.jsonl");
+        std::fs::write(&main, "").unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s2",
+            "transcript_path": main, "cwd": dir.path(),
+        });
+        assert_eq!(printed(relay(dir.path(), session, &start)).await, "");
+        let thread = slopty_agent::observed::thread_of("s2");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.contains_key(&thread)).await;
+        a.follow(thread).await;
+        a.until(|c| c.thread.is_some()).await;
+
+        let id = IntentId::new();
+        let send = Intent::Send {
+            text: "hello from the face".to_owned(),
+            delivery: slopty_proto::thread::Delivery::Steer,
+        };
+        assert_eq!(a.intent(id, thread, send).await, Outcome::Accepted);
+        recorded("hello from the face\r").await;
+        a.until(|c| c.state().pending.is_empty()).await;
+
+        // A review comes on the thread's stream; this folder is not in git, so it says so,
+        // and nothing can be kept.
+        let scope = slopty_proto::thread::wire::ReviewScope::Kept;
+        a.send(ThreadRequest::Review { thread, scope }).await;
+        a.until(|c| c.got.iter().any(|g| matches!(g, Got::Review(_)))).await;
+        let absent = a.got.iter().find_map(|g| match g {
+            Got::Review(review) => review.absent.as_deref(),
+            _ => None,
+        });
+        assert_eq!(absent, Some(slopty_worker::thread::review::NOT_IN_GIT));
+        let pick = slopty_proto::thread::wire::Pick {
+            path: "a.txt".to_owned(),
+            from: None,
+            stamp: None,
+            hunks: Vec::new(),
+        };
+        let kept = a.intent(IntentId::new(), thread, Intent::Keep(pick)).await;
+        assert!(matches!(kept, Outcome::Refused { .. }), "{kept:?}");
+
+        a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 }

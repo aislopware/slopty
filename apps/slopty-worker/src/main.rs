@@ -548,7 +548,13 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     let transfers = Arc::new(slopty_worker::xfer::Transfers::new(
         args.drop_dir.clone().unwrap_or_else(slopty_worker::xfer::Transfers::default_drop_root),
     ));
-    let (threads, observing) = threads::open(&data_dir.join("threads")).unzip();
+    let (threads, observing) = threads::open(
+        &data_dir.join("threads"),
+        &data_dir.join("snapshots"),
+        worker.clone(),
+        Arc::clone(&agents),
+    )
+    .unzip();
     let daemon = Daemon {
         worker,
         listener,

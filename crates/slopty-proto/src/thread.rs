@@ -260,6 +260,9 @@ pub struct ThreadMeta {
     pub drive: Drive,
     /// What it can do through Slopty, sorted.
     pub caps: Vec<Cap>,
+    /// The models it can be switched to ([`wire::Intent::SetModel`]), from its adapter's
+    /// catalogue; empty where it cannot be.
+    pub models: Vec<Model>,
     /// Open facts about it: its project, task, branch, pull request, model.
     pub facts: BTreeMap<String, String>,
     /// When it began.
@@ -283,6 +286,15 @@ impl ThreadMeta {
     pub fn can(&self, cap: &str) -> bool {
         self.caps.iter().any(|c| c.0 == cap)
     }
+}
+
+/// A model a thread's agent can be switched to.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Model {
+    /// The agent's own name for it, as its switch takes it (`opus`, a full model id).
+    pub id: String,
+    /// Its name for people.
+    pub label: String,
 }
 
 /// Where a subagent's thread hangs: the thread and the call that started it.

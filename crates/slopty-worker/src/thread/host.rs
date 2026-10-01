@@ -13,7 +13,9 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
-use slopty_proto::thread::{Action, Cursor, IntentId, ThreadId, ThreadMeta, ThreadState, TurnId};
+use slopty_proto::thread::{
+    Action, Cursor, IntentId, Phase, ThreadId, ThreadMeta, ThreadState, TurnId,
+};
 use tokio::sync::{broadcast, watch};
 
 use super::intents::Intents;
@@ -22,6 +24,30 @@ use super::table::Table;
 
 /// Batches a slow follower may fall behind by before it catches up from the log instead.
 const FEED_BATCHES: usize = 1024;
+
+/// Turn edges a slow listener may fall behind by; one that lags misses those snapshots.
+const EDGES: usize = 256;
+
+/// A moment of a thread's work a snapshot is taken at ([`Host::edges`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnEdge {
+    /// The thread.
+    pub thread: ThreadId,
+    /// What happened.
+    pub moment: Moment,
+}
+
+/// What a [`TurnEdge`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moment {
+    /// The agent started working: the earliest word of a turn, which some adapters have
+    /// before the turn itself shows.
+    Busy,
+    /// A turn began, as the thread's last.
+    Began(TurnId),
+    /// A turn ended, as the thread's last.
+    Ended(TurnId),
+}
 
 /// Actions applied together, as every follower of the thread hears them.
 #[derive(Debug)]
@@ -58,6 +84,7 @@ struct Inner {
     table: Table,
     /// Intents that start a thread, which have no thread of their own to be kept with yet.
     starts: Intents,
+    edges: broadcast::Sender<TurnEdge>,
 }
 
 #[derive(Debug)]
@@ -117,6 +144,7 @@ impl Host {
                 threads,
                 table,
                 starts,
+                edges: broadcast::Sender::new(EDGES),
             })),
         })
     }
@@ -151,7 +179,24 @@ impl Host {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let hosted = inner.threads.get_mut(&thread)?;
-        Some(apply(hosted, &mut inner.table, actions))
+        Some(apply(hosted, &mut inner.table, &inner.edges, actions))
+    }
+
+    /// Apply what `change` makes of `thread` as it stands, in one step: nothing else changes
+    /// it between the look and the actions. `None` for a thread not held, else what `change`
+    /// returned beside its actions.
+    pub fn update<F, T>(&self, thread: ThreadId, change: F) -> Option<T>
+    where
+        F: FnOnce(&ThreadState) -> (Vec<Action>, T),
+    {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let hosted = inner.threads.get_mut(&thread)?;
+        let (actions, out) = change(hosted.log.state());
+        if !actions.is_empty() {
+            apply(hosted, &mut inner.table, &inner.edges, actions);
+        }
+        Some(out)
     }
 
     /// Start `thread`'s log over from `state`, under a new epoch: every follower gets a
@@ -184,6 +229,24 @@ impl Host {
             Some(hosted) => hosted.log.delete(),
             None => Ok(()),
         }
+    }
+
+    /// Every turn edge any thread reaches from now on.
+    #[must_use]
+    pub fn edges(&self) -> broadcast::Receiver<TurnEdge> {
+        self.inner.lock().edges.subscribe()
+    }
+
+    /// The outcome intent `id` for `thread` had, if it was acted on.
+    #[must_use]
+    pub fn outcome(&self, thread: ThreadId, id: IntentId) -> Option<Outcome> {
+        self.inner.lock().threads.get(&thread)?.intents.outcome(&id).cloned()
+    }
+
+    /// Every batch `thread` applies from now on; `None` for a thread not held.
+    #[must_use]
+    pub fn watch(&self, thread: ThreadId) -> Option<broadcast::Receiver<Arc<Batch>>> {
+        self.inner.lock().threads.get(&thread).map(|h| h.feed.subscribe())
     }
 
     /// Follow `thread` from `have`: what was missed, and every batch after it. `None` for a
@@ -234,7 +297,7 @@ impl Host {
         }
         let (outcome, actions) = act(hosted.log.state());
         if !actions.is_empty() {
-            apply(hosted, &mut inner.table, actions);
+            apply(hosted, &mut inner.table, &inner.edges, actions);
         }
         if let Err(e) = hosted.intents.record(id, outcome.clone()) {
             tracing::warn!(%thread, "an intent could not be recorded: {e}");
@@ -281,12 +344,39 @@ fn create(inner: &mut Inner, meta: ThreadMeta) -> io::Result<Cursor> {
     Ok(cursor)
 }
 
-fn apply(hosted: &mut Hosted, table: &mut Table, actions: Vec<Action>) -> Cursor {
+fn apply(
+    hosted: &mut Hosted,
+    table: &mut Table,
+    edges: &broadcast::Sender<TurnEdge>,
+    actions: Vec<Action>,
+) -> Cursor {
     let first = hosted.log.cursor();
+    let was_working = hosted.log.state().status.phase == Phase::Working;
     if let Err(e) = hosted.log.append(&actions) {
         tracing::warn!(thread = %hosted.log.id(), "a thread's log could not be written: {e}");
     }
     table.put(hosted.log.state().row(WallMs::now()));
+    let thread = hosted.log.id();
+    let state = hosted.log.state();
+    if !was_working && state.status.phase == Phase::Working {
+        let _nobody = edges.send(TurnEdge { thread, moment: Moment::Busy });
+    }
+    // Only the last turn's edges are the agent's now: a log read again from the start (a
+    // restart) tells every old turn too, and the tree is long past those.
+    let last = state.last_turn().map(|t| t.id);
+    for action in &actions {
+        let moment = match action {
+            Action::TurnStarted(turn) => Some(Moment::Began(turn.id)),
+            Action::TurnEnded { turn, .. } => Some(Moment::Ended(*turn)),
+            _ => None,
+        };
+        let live = |turn: TurnId| Some(turn) == last;
+        if let Some(moment) =
+            moment.filter(|m| matches!(m, Moment::Began(t) | Moment::Ended(t) if live(*t)))
+        {
+            let _nobody = edges.send(TurnEdge { thread, moment });
+        }
+    }
     let _no_follower =
         hosted.feed.send(Arc::new(Batch { epoch: first.epoch, seq: first.seq, actions }));
     hosted.log.cursor()

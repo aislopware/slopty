@@ -1129,8 +1129,15 @@ carries the requests and the control stream carries the table (`WorkerMsg::Threa
 intent's outcome (`WorkerMsg::IntentDone`). A followed thread streams on a unidirectional
 stream of its own (`UniHead::Thread`), one task per thread on the worker
 (`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. Following a
-thread holds its terminal's permission prompts, as following its conversation does. The model
-lands beside today's Claude path, described below, which it replaces once the clients switch
+thread holds its terminal's permission prompts, as following its conversation does. What is
+sent to an observed agent (a message, steered or queued, an interrupt, a model) is typed into
+its terminal by the worker's composer (`slopty_worker::thread::compose`), under the draft
+guard orchestration's input uses, with each waiting message on the thread's pending list. Each
+turn's edges are snapshotted (`git add -A` through an index of the thread's own, into
+`refs/slopty/threads/<thread>/<turn>-{before,after}`, `slopty_worker::thread::review`), off
+the turn's path. A review is a diff between two snapshots, cut into hunks on the worker, and
+keep and revert act per file or hunk against the blobs the review showed. The model lands
+beside today's Claude path, described below, which it replaces once the clients switch
 over.
 
 Claude Code only, for now, and always through its own TUI, which stays the source of truth.

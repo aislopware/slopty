@@ -7911,6 +7911,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "similar 3.2.0",
  "slopty-agent",
  "slopty-capture",
  "slopty-client",

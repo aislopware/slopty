@@ -18,6 +18,7 @@ fn meta() -> ThreadMeta {
         forked_from: None,
         drive: Drive::named(Drive::OBSERVED),
         caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
+        models: Vec::new(),
         facts: BTreeMap::new(),
         created_ms: WallMs::from_millis(1),
     }

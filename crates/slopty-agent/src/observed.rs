@@ -33,9 +33,9 @@ use slopty_proto::conversation::{
 };
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, ContentRef,
-    Drive, Effect, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Notice, PartKey, Phase,
-    Plan, Request, RequestState, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolState, Turn,
-    TurnId, TurnState, Usage, UserMessage, Wait, detail, kind,
+    Drive, Effect, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Model, Notice, PartKey,
+    Phase, Plan, Request, RequestState, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolState,
+    Turn, TurnId, TurnState, Usage, UserMessage, Wait, detail, kind,
 };
 
 use crate::live;
@@ -51,7 +51,21 @@ pub enum Out {
 }
 
 /// The capabilities an observed Claude Code has through Slopty.
-pub const CAPS: [&str; 5] = [Cap::APPROVALS, Cap::LIVE_TEXT, Cap::LIVE_TUI, Cap::QUEUE, Cap::STEER];
+pub const CAPS: [&str; 8] = [
+    Cap::APPROVALS,
+    Cap::INTERRUPT,
+    Cap::LIVE_TEXT,
+    Cap::LIVE_TUI,
+    Cap::QUEUE,
+    Cap::SET_MODEL,
+    Cap::SNAPSHOTS,
+    Cap::STEER,
+];
+
+/// The models `/model` takes, by the aliases Claude Code resolves to its current ones: its
+/// catalogue as the thread offers it.
+pub const MODELS: [(&str, &str); 4] =
+    [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("default", "Default")];
 
 /// The thread of Claude Code session `native`.
 #[must_use]
@@ -209,6 +223,10 @@ impl Observed {
             forked_from: None,
             drive: Drive::named(Drive::OBSERVED),
             caps,
+            models: MODELS
+                .iter()
+                .map(|(id, label)| Model { id: (*id).to_owned(), label: (*label).to_owned() })
+                .collect(),
             facts: BTreeMap::new(),
             created_ms: now,
         };
@@ -437,6 +455,7 @@ impl Observed {
             parent,
             origin: ThreadMeta::SUBAGENT.to_owned(),
             caps: Vec::new(),
+            models: Vec::new(),
             ..self.meta.clone()
         }
     }
