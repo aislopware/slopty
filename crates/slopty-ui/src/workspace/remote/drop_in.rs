@@ -13,12 +13,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::{AnyWindowHandle, AsyncApp, Context, Pixels, Point, WeakEntity, point, px};
+#[cfg(target_os = "macos")]
 use slopty_client::clip::Fetched;
 use slopty_client::dnd::{self, Outcome};
 use slopty_client::layout::TileRef;
 use slopty_platform::file_drop::{DropSink, Dropped};
 use slopty_proto::drag::{DragId, Promised};
+#[cfg(target_os = "macos")]
 use slopty_proto::items::ItemKind;
+#[cfg(target_os = "macos")]
 use slopty_proto::transfer::{RepRef, Source};
 
 use super::{Upload, WorkspaceView};

@@ -72,6 +72,9 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId]) -> Result<()> {
         step("brew install xcodegen", &cmd!(sh, "brew install xcodegen"))?;
     }
     step("git submodules", &cmd!(sh, "git submodule update --init --recursive --depth 1"))?;
+    if lanes.contains(&LaneId::Tests) && std::env::var_os("GITHUB_ACTIONS").is_some() {
+        raise_pseudo_terminals(sh)?;
+    }
     if lanes.is_empty() {
         // What only the user can fix; a probe that cannot run is not a failed setup.
         if let Err(error) = crate::doctor::run(sh) {
@@ -79,6 +82,26 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The pseudo-terminals the tests lane needs open at once: what a Mac allows by default, where
+/// every local gate runs (`kern.tty.ptmx_max`).
+const PSEUDO_TERMINALS: u32 = 511;
+
+/// Let a hosted runner open as many pseudo-terminals as a Mac does. Its guest allows fewer, and
+/// the suite's shells, spawned side by side across test binaries, ran out of them (run
+/// 36817494749: `open /dev/ptmx` refused in two spawn tests).
+fn raise_pseudo_terminals(sh: &Shell) -> Result<()> {
+    let now: u32 = cmd!(sh, "sysctl -n kern.tty.ptmx_max").read()?.trim().parse()?;
+    println!("  pseudo-terminals: {now} allowed");
+    if now >= PSEUDO_TERMINALS {
+        return Ok(());
+    }
+    let setting = format!("kern.tty.ptmx_max={PSEUDO_TERMINALS}");
+    step(
+        &format!("pseudo-terminals {now} → {PSEUDO_TERMINALS}"),
+        &cmd!(sh, "sudo -n sysctl -w {setting}"),
+    )
 }
 
 #[cfg(test)]

@@ -935,6 +935,7 @@ fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
 }
 
 /// A worker's window tile streaming at `stream`, drawn.
+#[cfg(target_os = "macos")]
 fn streaming(
     view: &Entity<WorkspaceView>,
     cx: &mut VisualTestContext,
@@ -962,6 +963,7 @@ fn streaming(
 }
 
 /// The drag steps sent to a worker.
+#[cfg(target_os = "macos")]
 fn drag_steps(sent: Vec<ClientMsg>) -> Vec<slopty_proto::drag::DragInput> {
     sent.into_iter()
         .filter_map(|m| match m {
