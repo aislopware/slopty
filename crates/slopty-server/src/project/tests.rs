@@ -44,6 +44,7 @@ fn new_project(orchestrator: Option<TermRef>, limits: LimitsChange) -> NewProjec
         title: "Projects".to_owned(),
         repo: "~/src/slopty".to_owned(),
         target: "main".to_owned(),
+        review: None,
         verifier: Some("cargo gate".to_owned()),
         push: false,
         orchestrator,

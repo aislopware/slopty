@@ -56,6 +56,7 @@ async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsCha
             title: "Projects".to_owned(),
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
+            review: None,
             verifier: None,
             push: false,
             orchestrator,
@@ -371,6 +372,7 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
     let set = Verb::ProjectSet {
         project: project(),
         orchestrator: None,
+        review: None,
         verifier: None,
         push: None,
         limits: greedy,
@@ -817,6 +819,7 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
         Verb::ProjectSet {
             project: project(),
             orchestrator: None,
+            review: None,
             verifier: weaker(),
             push: None,
             limits: LimitsChange::default(),
@@ -1334,6 +1337,7 @@ async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
     let named = Verb::ProjectSet {
         project: project(),
         orchestrator: Some(persons),
+        review: None,
         verifier: None,
         push: None,
         limits: LimitsChange::default(),
@@ -1369,6 +1373,7 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
             title: "Elsewhere".to_owned(),
             repo: "~/src/elsewhere".to_owned(),
             target: "main".to_owned(),
+            review: None,
             verifier: None,
             push: false,
             orchestrator: Some(TermRef { worker: linux, session: theirs }),
@@ -1491,6 +1496,7 @@ async fn a_task_s_agent_splits_work_only_under_its_own_task() {
                 title: "Mine".to_owned(),
                 repo: "~/src/mine".to_owned(),
                 target: "main".to_owned(),
+                review: None,
                 verifier: None,
                 push: false,
                 orchestrator: None,

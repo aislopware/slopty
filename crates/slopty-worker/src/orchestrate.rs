@@ -277,6 +277,7 @@ impl Orchestrator {
             | Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
             | Verb::TaskMerge { .. }
+            | Verb::TaskReview { .. }
             | Verb::ProjectList
             | Verb::ProjectStatus { .. }
             | Verb::TaskCreate { .. }
@@ -379,6 +380,7 @@ impl Orchestrator {
             | Verb::BundleBranch { .. }
             | Verb::FetchBundle { .. }
             | Verb::Verify { .. }
+            | Verb::ReviewCheckout { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }) => Box::pin(self.repository(verb)).await,
             Verb::WriteFile { worker, path, bytes } => {
@@ -765,6 +767,21 @@ impl Orchestrator {
                 let handle = self.open_as(Some(session), &req, ORCHESTRATOR).await?;
                 let term = TermRef { worker: self.inner.id, session: handle.id() };
                 Ok(Outcome::Verifying { term, head: made.head, base: made.base })
+            }
+            Verb::ReviewCheckout { worker, repo, worktree, head, target } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
+                let place = crate::repo::verify::place(&places, &worktree)
+                    .map_err(|f| verify_failure(&f))?;
+                let made = crate::repo::review::checkout(git, &repo, &place, &head, &target)
+                    .await
+                    .map_err(|f| verify_failure(&f))?;
+                let path = made.path.to_string_lossy().into_owned();
+                Ok(Outcome::CheckedOut { path, head: made.head, base: made.base })
             }
             Verb::Rebase { worker, repo, worktree, head, onto } => {
                 self.mine(worker)?;

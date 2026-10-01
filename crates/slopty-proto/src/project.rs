@@ -26,6 +26,12 @@ use crate::agent::{AgentBranch, PullRequest};
 use crate::orchestration::{Size, TermRef};
 use crate::terminal::RepoId;
 
+mod review;
+pub use review::{
+    FINDING_MAX, FINDING_PATH_MAX, FINDINGS_MAX, Finding, REVIEW_DIFF, REVIEW_SUMMARY_MAX,
+    ReviewRun, ReviewVerdict, Reviewer,
+};
+
 /// The variable naming the server, `host[:port]`, in every session a worker runs: `slopty mcp`
 /// and the CLI inside it find the server with no flag.
 pub const SERVER_ENV: &str = "SLOPTY_SERVER";
@@ -429,6 +435,9 @@ pub struct Project {
     pub target: String,
     /// The command that says a task's work is right (`cargo gate`), when there is one.
     pub verifier: Option<String>,
+    /// What the person asks a fresh-context reviewer to look for in each task's work once its
+    /// verifier passes, when a reviewer reads it before it merges ([`ReviewRun`]).
+    pub review: Option<String>,
     /// Whether the merge queue pushes the target branch to its clone's `origin` after each
     /// merge. Off unless the person turns it on: publishing is theirs to choose.
     pub push: bool,
@@ -850,6 +859,8 @@ pub struct Task {
     pub pr: Option<PullRequest>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
+    /// What its reviewer last said.
+    pub reviewed: Option<ReviewRun>,
     /// Its place in the merge queue, or the merge that put its work on the target.
     pub merge: Option<Merge>,
     /// What the server last did for it around its agent: a clone made, its branch brought
@@ -893,6 +904,8 @@ pub enum StepKind {
     /// The merge queue rebasing the task's work onto the target, verifying it again and
     /// fast-forwarding the target to it.
     Merge,
+    /// A reviewer with fresh context reading the task's work, in a session of its own.
+    Review,
 }
 
 /// How a [`TaskStep`] goes. Its texts are at most [`SUMMARY_MAX`] bytes.
@@ -987,6 +1000,7 @@ impl Task {
             worktree: self.worktree.clone(),
             pr: self.pr.clone(),
             verified: self.verified.clone(),
+            reviewed: self.reviewed.clone(),
             merge: self.merge.clone(),
             step: self.step.clone(),
             natives: natives.counts(),
@@ -1030,6 +1044,8 @@ pub struct TaskCard {
     pub pr: Option<PullRequest>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
+    /// What its reviewer last said.
+    pub reviewed: Option<ReviewRun>,
     /// Its place in the merge queue, or its merge.
     pub merge: Option<Merge>,
     /// What the server last did for it around its agent.
@@ -1051,6 +1067,7 @@ impl TaskCard {
         + DEPENDS_MAX * 5
         + 2 * SUMMARY_MAX
         + 8 * REF_MAX
+        + ReviewRun::MAX_BYTES
         + 704;
 }
 
@@ -1067,6 +1084,7 @@ impl TaskCard {
             text(self.worktree.as_deref()),
             self.pr.as_ref().map_or(0, |pr| pr.url.len().saturating_add(32)),
             self.verified.as_ref().map_or(0, VerifierRun::approx_bytes),
+            self.reviewed.as_ref().map_or(0, ReviewRun::approx_bytes),
             self.merge.as_ref().map_or(0, |m| match m {
                 Merge::Queued { .. } => 16,
                 Merge::Merged { target, head, .. } => {
@@ -1170,6 +1188,8 @@ pub enum Moment {
     },
     /// Its verifier ran, or the person recorded what it said.
     Verified(VerifierRun),
+    /// A reviewer, or the person, said whether the work may merge.
+    Reviewed(ReviewRun),
     /// The terminal on it closed.
     AgentGone {
         /// The terminal.
@@ -1209,6 +1229,7 @@ impl TimelineEntry {
             Moment::Claimed { paths } => texts(paths),
             Moment::Branch { branch, .. } => branch.as_deref().map_or(0, text),
             Moment::Verified(run) => run.approx_bytes(),
+            Moment::Reviewed(run) => run.approx_bytes(),
             Moment::Note { text: words } => text(words),
             Moment::Reported { report } => text(&report.note)
                 .saturating_add(texts(&report.artifacts))

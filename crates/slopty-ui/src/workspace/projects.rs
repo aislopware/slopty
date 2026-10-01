@@ -154,10 +154,11 @@ impl WorkspaceView {
         self.show_board(session, true, cx);
     }
 
-    /// A board asked for a verifier's terminal: its tile, focused, or why there is none.
-    fn open_output(&mut self, session: SessionId, cx: &mut Context<Self>) {
+    /// A board asked for a terminal the server runs for a task, a verifier's or a reviewer's:
+    /// its tile, focused, or `gone` when there is none.
+    fn open_output(&mut self, session: SessionId, gone: &str, cx: &mut Context<Self>) {
         if self.tile_of_session(session).is_none() {
-            self.show_notice("The verifier's terminal has closed".to_owned(), cx);
+            self.show_notice(gone.to_owned(), cx);
             return;
         }
         self.reveal_session(session, cx);
@@ -300,7 +301,12 @@ impl WorkspaceView {
         let subscription =
             cx.subscribe(&view, move |this, _view, event: &ProjectEvent, cx| match *event {
                 ProjectEvent::Open(node) => this.open_node(&asked, node, cx),
-                ProjectEvent::Output(term) => this.open_output(term.session, cx),
+                ProjectEvent::Output(term) => {
+                    this.open_output(term.session, "The verifier's terminal has closed", cx);
+                }
+                ProjectEvent::Reviewer(term) => {
+                    this.open_output(term.session, "The reviewer's session has closed", cx);
+                }
             });
         self.projects.subscriptions.insert(project.clone(), subscription);
         self.projects.views.insert(project, view);

@@ -16,9 +16,9 @@ use std::sync::Arc;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Moment, Native, NativeChange, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
-    ProjectUpdate, ProjectsPart, ReportKind, StepKind, StepState, TaskCard, TaskId, TaskState,
-    TaskStep, TimelineEntry, VerifierRun,
+    Finding, Moment, Native, NativeChange, NativeCounts, Natives, Project, ProjectId,
+    ProjectStatus, ProjectUpdate, ProjectsPart, ReportKind, ReviewRun, Reviewer, StepKind,
+    StepState, TaskCard, TaskId, TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 
 /// How many timeline entries a board keeps: a screenful many times over, and a bound on a
@@ -475,6 +475,21 @@ impl Board {
         speaks.then_some(run)
     }
 
+    /// The reviewer's last word on `task` while it still speaks to what the task is now, as
+    /// [`Self::verdict`]: an approval while the task waits to merge, changes asked until the
+    /// work is checked again or merged.
+    #[must_use]
+    pub fn review(&self, task: TaskId) -> Option<&ReviewRun> {
+        let card = self.tasks.get(&task)?;
+        let run = card.reviewed.as_ref()?;
+        let speaks = if run.verdict.approved {
+            card.state == TaskState::Done
+        } else {
+            !matches!(card.state, TaskState::Merged | TaskState::Verifying)
+        };
+        speaks.then_some(run)
+    }
+
     /// The tasks whose agent waits on the person, by number.
     #[must_use]
     pub fn needs_you(&self) -> Vec<TaskId> {
@@ -558,6 +573,7 @@ pub fn moment_line(
             (None, None) => "Left its branch".to_owned(),
         },
         Moment::Verified(run) => verdict_line(run),
+        Moment::Reviewed(run) => review_line(run),
         Moment::AgentGone { .. } => "Agent ended".to_owned(),
         Moment::Note { text } => crate::kit::first_line(text).to_owned(),
         Moment::Reported { report } => {
@@ -617,6 +633,12 @@ pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
         }
         (StepKind::Merge, StepState::Done { detail }) => format!("Merged: {}", first(detail)),
         (StepKind::Merge, StepState::Failed { why }) => format!("Not merged: {}", first(why)),
+        (StepKind::Review, StepState::Running { phase, .. }) => match first(phase).as_str() {
+            "" => format!("Reviewing on {at}"),
+            line => format!("Reviewing on {at}: {line}"),
+        },
+        (StepKind::Review, StepState::Done { detail }) => format!("Reviewed: {}", first(detail)),
+        (StepKind::Review, StepState::Failed { why }) => format!("Review: {}", first(why)),
     }
 }
 
@@ -678,6 +700,59 @@ pub fn queue_words(place: usize) -> String {
         _ => "th",
     };
     if place == 1 { "Next to merge".to_owned() } else { format!("{place}{suffix} to merge") }
+}
+
+/// What a reviewer judged and how, after its verdict's word: the commits it read, the person
+/// when it was their word, what it found and how long it read.
+#[must_use]
+pub fn review_detail(run: &ReviewRun) -> String {
+    let mut parts = vec![match (run.head.as_str(), run.base.as_str()) {
+        ("", _) => String::new(),
+        (head, "") => short_commit(head).to_owned(),
+        (head, base) => format!("{} over {}", short_commit(head), short_commit(base)),
+    }];
+    parts.retain(|p| !p.is_empty());
+    if run.by == Reviewer::Person {
+        parts.push("by you".to_owned());
+    }
+    let found = run.verdict.findings.len().saturating_add(usize::from(run.more));
+    let blocking = run.blocking().count();
+    match (found, blocking) {
+        (0, _) => {}
+        (1, 0) => parts.push("1 note".to_owned()),
+        (n, 0) => parts.push(format!("{n} notes")),
+        (n, b) if n == b => parts.push(format!("{b} blocking")),
+        (n, b) => parts.push(format!("{b} blocking of {n}")),
+    }
+    if run.took_ms > 0 {
+        parts.push(crate::kit::duration(std::time::Duration::from_millis(run.took_ms)));
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// Where a finding points, as an editor and a compiler say it: `path:line`, or the path alone.
+#[must_use]
+pub fn finding_place(f: &Finding) -> Option<String> {
+    let path = f.path.as_deref().filter(|p| !p.is_empty())?;
+    Some(f.line.map_or_else(|| path.to_owned(), |line| format!("{path}:{line}")))
+}
+
+/// What a review said, in a line: who, at which commit, and for changes asked the first
+/// finding that blocks.
+#[must_use]
+pub fn review_line(run: &ReviewRun) -> String {
+    let at = short_commit(&run.head);
+    let by = match run.by {
+        Reviewer::Agent(_) => "Reviewer",
+        Reviewer::Person => "You",
+    };
+    if run.verdict.approved {
+        return format!("{by} approved {at}");
+    }
+    match run.blocking().next() {
+        Some(f) => format!("{by} asked for changes at {at}: {}", crate::kit::first_line(&f.body)),
+        None => format!("{by} asked for changes at {at}"),
+    }
 }
 
 /// A commit as people read it: its first seven hex digits.

@@ -512,6 +512,9 @@ pub enum Verb {
         target: String,
         /// The command that says a task's work is right.
         verifier: Option<String>,
+        /// What a fresh-context reviewer looks for in each task's work before it merges
+        /// ([`crate::project::Project::review`]); only the person asks for one.
+        review: Option<String>,
         /// Push the target to its clone's `origin` after each merge ([`Project::push`]); only
         /// the person turns it on.
         push: bool,
@@ -532,6 +535,8 @@ pub enum Verb {
         orchestrator: Option<TermRef>,
         /// The verifier command; empty for none.
         verifier: Option<String>,
+        /// The reviewer's brief ([`crate::project::Project::review`]); empty for no reviewer.
+        review: Option<String>,
         /// Whether to push the target after each merge ([`Project::push`]); only the person
         /// sets it.
         push: Option<bool>,
@@ -758,6 +763,35 @@ pub enum Verb {
         /// Which.
         task: TaskId,
     },
+    /// Say whether a task's work may merge, as its reviewer or the person: an approval puts it
+    /// in the merge queue, a block gives it back to its agent with the findings. Only the
+    /// reviewer session the server started for the task, or the person, may; the person's word
+    /// stands over the reviewer's. Answered with [`Outcome::Task`].
+    TaskReview {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+        /// What it says.
+        verdict: crate::project::ReviewVerdict,
+    },
+    /// Check out `head` in the checkout named `worktree` under
+    /// [`crate::project::VERIFY_PLACES`] of the clone at `repo`, with the diff from its fork
+    /// point off the branch `target` written beside it as [`crate::project::REVIEW_DIFF`], for
+    /// a reviewer to read. The server's own, for a task's review; answered with
+    /// [`Outcome::CheckedOut`].
+    ReviewCheckout {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The checkout's name.
+        worktree: String,
+        /// The commit or branch to check out.
+        head: String,
+        /// The branch work lands on.
+        target: String,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -838,6 +872,8 @@ impl Verb {
             | Self::BundleBranch { .. }
             | Self::FetchBundle { .. }
             | Self::TaskMerge { .. }
+            | Self::TaskReview { .. }
+            | Self::ReviewCheckout { .. }
             | Self::Verify { .. }
             | Self::Rebase { .. }
             | Self::FastForward { .. } => true,
@@ -1283,6 +1319,15 @@ pub enum Outcome {
         pushed: bool,
         /// Why a push asked for did not happen; the branch moved all the same.
         push_failed: Option<String>,
+    },
+    /// For [`Verb::ReviewCheckout`]: the work is checked out at `path`.
+    CheckedOut {
+        /// Where, on the worker.
+        path: String,
+        /// The commit checked out, in hex.
+        head: String,
+        /// Where it left the target branch, in hex.
+        base: String,
     },
 }
 

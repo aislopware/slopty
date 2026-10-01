@@ -59,6 +59,8 @@ async fn a_project_board_follows_its_orchestration() {
             "slopty",
             "--verifier",
             "cargo gate",
+            "--review",
+            "A wire change comes with its goldens",
             "--orchestrator",
             &orchestrator,
         ])
@@ -83,6 +85,7 @@ async fn a_project_board_follows_its_orchestration() {
         &["--title", "Write the decision", "--owns", "docs/decisions/ui.md"],
         &["--title", "Check the wire goldens", "--owns", "crates/slopty-proto/tests"],
         &["--title", "Mirror the merge queue", "--owns", "crates/slopty-ui/src/project/tests.rs"],
+        &["--title", "Name the reviewer", "--owns", "crates/slopty-proto/src/project.rs"],
     ] {
         let mut create = vec!["task", "create", "--project", PROJECT];
         create.extend_from_slice(args);
@@ -106,6 +109,31 @@ async fn a_project_board_follows_its_orchestration() {
         .slopty(&update("2", &["--state", "blocked", "--status", "Which lanes come first?"]))
         .await
         .unwrap();
+    // A reviewer that asked for changes stays on its task with what it found, what blocks first.
+    // It lands before task 4 merges, so the board that shows the merge shows it too.
+    stack
+        .slopty(&update("7", &["--passed", "--head", "3b8d2a1", "--base", "c08d4c1"]))
+        .await
+        .unwrap();
+    stack
+        .slopty(&[
+            "task",
+            "review",
+            "--project",
+            PROJECT,
+            "--task",
+            "7",
+            "--changes",
+            "--summary",
+            "One blocker",
+            "--finding",
+            "crates/slopty-proto/src/project.rs:431: Project.review has no golden, so a wire change would pass unseen.",
+            "--finding",
+            "crates/slopty-proto/tests/golden_project.rs: The review fixture names no finding with a line.",
+        ])
+        .await
+        .unwrap();
+
     stack
         .slopty(&update(
             "4",
@@ -157,7 +185,7 @@ async fn a_project_board_follows_its_orchestration() {
             let agent =
                 d.items.iter().any(|i| i.session.as_deref() == Some(agent_session.as_str()));
             project(d)
-                .is_some_and(|p| p.tasks.len() == 6 && p.lanes.iter().any(|(l, _)| l == "merged"))
+                .is_some_and(|p| p.tasks.len() == 7 && p.lanes.iter().any(|(l, _)| l == "merged"))
                 && agent
         })
         .await

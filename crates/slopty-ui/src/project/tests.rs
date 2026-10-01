@@ -451,3 +451,55 @@ fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
     );
     assert!(board(&again).verdict(TaskId(1)).is_none(), "a pass for work since moved on");
 }
+
+/// A reviewer's word speaks as a verifier's does: an approval while its task waits to merge,
+/// changes asked until the work is checked again or merged. Each says the commits it read,
+/// who spoke when it was the person, what it found and how long it read; a finding points at
+/// its path and line as a compiler does.
+#[test]
+fn a_review_speaks_while_it_holds_and_says_what_it_found() {
+    use super::fixtures::{queued, review};
+    use super::model::{finding_place, review_detail, review_line};
+    let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+    let approved = {
+        let mut c = queued(card(1, "a", TaskState::Done, None), 5, "1111111");
+        c.reviewed = Some(review(true, "1111111", Some(term)));
+        c
+    };
+    let asked = {
+        let mut c = card(2, "b", TaskState::Waiting, None);
+        c.reviewed = Some(review(false, "2222222", Some(term)));
+        c
+    };
+    let again = {
+        let mut c = card(3, "c", TaskState::Verifying, None);
+        c.reviewed = Some(review(false, "3333333", Some(term)));
+        c
+    };
+    let mirror = one(vec![approved, asked, again]);
+    let b = board(&mirror);
+    assert!(b.review(TaskId(1)).is_some_and(|r| r.verdict.approved), "while it waits to merge");
+    assert!(b.review(TaskId(2)).is_some_and(|r| !r.verdict.approved), "until it is read again");
+    assert!(b.review(TaskId(3)).is_none(), "checked again, the old word is gone");
+
+    let asked = review(false, "4a7aa6d0", Some(term));
+    assert_eq!(review_detail(&asked), "4a7aa6d over c08d4c1 \u{b7} 1 blocking of 2 \u{b7} 1m 35s");
+    let mut yours = review(true, "4a7aa6d0", None);
+    yours.verdict.findings.clear();
+    yours.took_ms = 0;
+    assert_eq!(review_detail(&yours), "4a7aa6d over c08d4c1 \u{b7} by you");
+    assert_eq!(
+        review_line(&asked),
+        "Reviewer asked for changes at 4a7aa6d: Project.review has no golden, so a wire change \
+         would pass unseen."
+    );
+    assert_eq!(review_line(&yours), "You approved 4a7aa6d");
+    let places: Vec<Option<String>> = asked.verdict.findings.iter().map(finding_place).collect();
+    assert_eq!(
+        places,
+        [
+            Some("crates/slopty-proto/src/project.rs:431".to_owned()),
+            Some("docs/decisions/projects.md".to_owned())
+        ]
+    );
+}

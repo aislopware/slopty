@@ -689,6 +689,8 @@ pub struct ProjectSpec {
     pub target: Option<String>,
     /// The verifier command.
     pub verifier: Option<String>,
+    /// What a fresh-context reviewer looks for before each merge; the person's to ask for.
+    pub review: Option<String>,
     /// Push the target to `origin` after each merge; the person's to turn on.
     pub push: bool,
     /// The orchestrator's terminal; the caller's own when absent and it runs in one.
@@ -713,6 +715,7 @@ pub async fn project_create<D: Dispatch>(
         repo: spec.repo,
         target: spec.target.unwrap_or_else(|| "main".to_owned()),
         verifier: spec.verifier,
+        review: spec.review,
         push: spec.push,
         orchestrator,
         limits: spec.limits,
@@ -728,6 +731,8 @@ pub struct ProjectEdit {
     pub orchestrator: Option<String>,
     /// A new verifier; empty for none.
     pub verifier: Option<String>,
+    /// A new reviewer's brief; empty for no reviewer.
+    pub review: Option<String>,
     /// Push the target after each merge, or stop.
     pub push: Option<bool>,
     /// New limits.
@@ -748,8 +753,8 @@ pub async fn project_set<D: Dispatch>(
         Some(term) => Some(res.term(term).await?),
         None => None,
     };
-    let ProjectEdit { verifier, push, limits, metadata, .. } = edit;
-    let verb = Verb::ProjectSet { project, orchestrator, verifier, push, limits, metadata };
+    let ProjectEdit { verifier, review, push, limits, metadata, .. } = edit;
+    let verb = Verb::ProjectSet { project, orchestrator, verifier, review, push, limits, metadata };
     project_answer(res.dispatch(), key, verb).await
 }
 
@@ -929,6 +934,22 @@ pub async fn task_merge<D: Dispatch>(
 ) -> Result<Task, ToolError> {
     let (project, task) = project_task(dispatch, project, task).await?;
     task_answer(dispatch, key, Verb::TaskMerge { project, task }).await
+}
+
+/// Say whether a task's work may merge, as the reviewer the server started for it or as the
+/// person: an approval queues it, changes asked give it back to its agent with the findings.
+///
+/// # Errors
+/// As [`task_report`]; any other agent is refused.
+pub async fn task_review<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    task: Option<&str>,
+    verdict: slopty_proto::project::ReviewVerdict,
+    key: Option<IdempotencyKey>,
+) -> Result<Task, ToolError> {
+    let (project, task) = project_task(dispatch, project, task).await?;
+    task_answer(dispatch, key, Verb::TaskReview { project, task, verdict }).await
 }
 
 /// One node of a project's tree in full: the task named (the caller's own when none is), or

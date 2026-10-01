@@ -427,6 +427,82 @@ fn a_verifier_shows_on_its_task_and_opens_its_terminal(cx: &mut TestAppContext) 
     );
 }
 
+/// A reviewer shows where its task does, as a verifier does. At work, it stands under its
+/// row with "Reviewer" to open its session. Its changes asked stand under the row with what it
+/// found, what blocks first, and the session it is kept in opens without opening the agent.
+/// An approval is a word in the row, and on the board a card says it with its note. A session
+/// that has closed says so.
+#[gpui::test]
+fn a_reviewer_shows_on_its_task_and_opens_its_session(cx: &mut TestAppContext) {
+    use slopty_proto::project::{StepKind, StepState};
+
+    use crate::project::fixtures::{queued, review, run, step};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (orchestrator_tile, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let kept = SessionId::new();
+    let kept_tile = opens(&view, cx, &setup.fake, kept, setup.fake.me, 3);
+    let closed = SessionId::new();
+    let reviewer = TermRef { worker, session: kept };
+
+    let mut asked = card(4, "Read the snapshot", TaskState::Waiting, None);
+    asked.verified = Some(run(true, "4a7aa6d0"));
+    asked.reviewed = Some(review(false, "4a7aa6d0", Some(reviewer)));
+    let why = StepState::Failed { why: "Project.review has no golden".into() };
+    asked.step = Some(step(StepKind::Review, worker, why, Some(reviewer)));
+    let mut reading = card(5, "Draw the lanes", TaskState::Verifying, None);
+    let line = StepState::Running { phase: "Reading 5555555 over c08d4c1".into(), percent: None };
+    reading.step =
+        Some(step(StepKind::Review, worker, line, Some(TermRef { worker, session: closed })));
+    let mut approved = queued(card(6, "Hold it to goldens", TaskState::Done, None), 20, "6666666");
+    approved.reviewed = Some(review(true, "6666666", Some(reviewer)));
+    view.update_in(cx, |v, _w, cx| {
+        for (seq, c) in [(11, asked), (12, reading), (13, approved)] {
+            v.project_update(seq, task_changed("board", c, None), cx);
+        }
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let drawn = |cx: &mut VisualTestContext, s: &str| {
+        cx.debug_bounds(Box::leak(s.to_owned().into_boxed_str())).is_some()
+    };
+    for part in [
+        "project-row-project-node-4-check",
+        "project-row-project-node-4-findings",
+        "project-row-project-node-4-output",
+        "project-row-project-node-5-check",
+        "project-row-project-node-5-output",
+    ] {
+        assert!(drawn(cx, part), "{part} is drawn");
+    }
+    assert!(!drawn(cx, "project-row-project-node-6-check"), "an approval is a word in its row");
+    assert!(!drawn(cx, "project-row-project-node-5-findings"), "nothing found while it reads");
+
+    let link = cx.debug_bounds("project-row-project-node-4-output").expect("drawn").center();
+    cx.simulate_click(link, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(kept_tile), "the reviewer's session, not the agent's");
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "the row's own click held back");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
+    cx.run_until_parked();
+    let link = cx.debug_bounds("project-row-project-node-5-output").expect("drawn").center();
+    cx.simulate_click(link, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("The reviewer's session has closed")
+    );
+
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| b.show(Lens::Board, cx));
+    cx.run_until_parked();
+    for part in ["project-card-4-findings", "project-card-6-check", "project-card-6-findings"] {
+        assert!(drawn(cx, part), "{part} is drawn");
+    }
+}
+
 /// Letting the server go takes its projects, their boards and everything kept for them.
 #[gpui::test]
 fn forgetting_the_server_keeps_nothing_of_its_projects(cx: &mut TestAppContext) {

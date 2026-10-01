@@ -19,20 +19,20 @@ use gpui::{
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Merge, Moment, NativeCounts, ProjectId, ReportKind, StepKind, StepState, TaskCard, TaskId,
-    TaskState, VerifierRun,
+    Merge, Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, StepKind, StepState, TaskCard,
+    TaskId, TaskState, TaskStep, VerifierRun,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::model::{
-    Board, Lane, TreeRow, queue_words, short_commit, state_status, state_word, verdict_detail,
-    verdict_tail,
+    Board, Lane, TreeRow, finding_place, queue_words, review_detail, short_commit, state_status,
+    state_word, verdict_detail, verdict_tail,
 };
 use super::{Lens, OpenNode, SelectNext, SelectPrevious, ShowBoard, ShowTimeline, ShowTree};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
-use crate::palette::{Plate, age_label, dotted};
+use crate::palette::{Plate, age_label, dotted, sentence_case};
 
 /// The key context of a board; its keys are bound in it.
 pub const CTX: &str = "ProjectBoard";
@@ -72,21 +72,51 @@ pub enum ProjectEvent {
     Open(Node),
     /// Show a terminal the server runs for a task, its verifier's, in its tile.
     Output(TermRef),
+    /// Open the Claude Code session a task's reviewer reads its work in.
+    Reviewer(TermRef),
 }
 
-/// What a task's verifier shows on its card and its row: a run under way, or its verdict.
+/// What a task's checks show on its card and its row: its verifier or its reviewer at work,
+/// or the last word that still speaks.
 #[derive(Clone, Debug, PartialEq)]
 enum Check<'a> {
-    /// It runs now, with its last line.
-    Running { line: String, term: Option<TermRef> },
-    /// What it said, and the terminal a failed run is kept in.
+    /// A verifier or a reviewer at work, with its last line.
+    Running { line: String, term: Option<TermRef>, review: bool },
+    /// What the verifier said, and the terminal a failed run is kept in.
     Verdict { run: &'a VerifierRun, term: Option<TermRef> },
+    /// What the reviewer said, and its session, kept when it asked for changes.
+    Review { run: &'a ReviewRun, term: Option<TermRef> },
 }
 
 impl Check<'_> {
     const fn term(&self) -> Option<TermRef> {
         match self {
-            Self::Running { term, .. } | Self::Verdict { term, .. } => *term,
+            Self::Running { term, .. } | Self::Verdict { term, .. } | Self::Review { term, .. } => {
+                *term
+            }
+        }
+    }
+
+    /// A reviewer's, whose terminal is a Claude Code session to open rather than output.
+    const fn is_review(&self) -> bool {
+        matches!(self, Self::Review { .. } | Self::Running { review: true, .. })
+    }
+
+    /// Whether this block says what `step` would: the check it is, at work or with its word.
+    fn speaks_for(&self, step: &TaskStep) -> bool {
+        match self {
+            Self::Running { .. } => true,
+            Self::Verdict { .. } => step.kind == StepKind::Verify,
+            Self::Review { .. } => step.kind == StepKind::Review,
+        }
+    }
+
+    /// A word that lets the work go on: a pass, an approval.
+    const fn cleared(&self) -> bool {
+        match self {
+            Self::Verdict { run, .. } => run.passed,
+            Self::Review { run, .. } => run.verdict.approved,
+            Self::Running { .. } => false,
         }
     }
 }
@@ -468,6 +498,9 @@ impl ProjectView {
         if let Some(verifier) = &project.verifier {
             place.push(format!("verified by {verifier}"));
         }
+        if project.review.is_some() {
+            place.push("reviewed before it merges".to_owned());
+        }
         place.push(format!("{live} of {limit} agents live"));
         let title = div()
             .flex()
@@ -695,7 +728,7 @@ impl ProjectView {
         let check = card
             .filter(|_| prefix == "project-row")
             .and_then(|c| Self::check(board, c))
-            .filter(|c| !matches!(c, Check::Verdict { run, .. } if run.passed));
+            .filter(|c| !c.cleared());
         let meta = second.unwrap_or_else(|| self.node_meta(board, node, card, check.as_ref()));
         let key = format!("{prefix}-{}", node_key(node));
         let picked =
@@ -858,12 +891,12 @@ impl ProjectView {
                 parts.push("reads only".to_owned());
             }
             // A step under way or failed says so on the row; one done is the timeline's, and a
-            // verifier running says it in its own block.
+            // check running, or a word with its own block, says it there.
             let shown = card
                 .step
                 .as_ref()
                 .filter(|s| !matches!(s.state, StepState::Done { .. }))
-                .filter(|_| !matches!(check, Some(Check::Running { .. })));
+                .filter(|s| !check.is_some_and(|c| c.speaks_for(s)));
             if let Some(step) = shown {
                 parts.push(super::model::step_line(step, |w| self.worker_name(w)));
             }
@@ -872,10 +905,12 @@ impl ProjectView {
             if let Some((place, _)) = board.queue_place(card.id).filter(|_| !merging) {
                 parts.push(queue_words(place));
             }
-            if check.is_none()
-                && let Some(run) = board.verdict(card.id).filter(|r| r.passed)
-            {
-                parts.push(format!("Passed at {}", short_commit(&run.head)));
+            if check.is_none() {
+                if let Some(run) = board.review(card.id).filter(|r| r.verdict.approved) {
+                    parts.push(format!("Approved at {}", short_commit(&run.head)));
+                } else if let Some(run) = board.verdict(card.id).filter(|r| r.passed) {
+                    parts.push(format!("Passed at {}", short_commit(&run.head)));
+                }
             }
             if let Some(Merge::Merged { target, head, pushed, .. }) = &card.merge {
                 let pushed = if *pushed { ", pushed" } else { "" };
@@ -890,22 +925,30 @@ impl ProjectView {
         parts.join(" \u{b7} ")
     }
 
-    /// What `card`'s verifier shows: a run under way, else its verdict while that still
-    /// speaks to the task as it is now ([`Board::verdict`]).
+    /// What `card`'s checks show: a verifier or a reviewer at work, else the reviewer's word
+    /// and then the verifier's while it still speaks to the task as it is now
+    /// ([`Board::review`], [`Board::verdict`]). An approval stands for the pass it followed.
     fn check<'a>(board: &'a Board, card: &'a TaskCard) -> Option<Check<'a>> {
-        let running = card
-            .step
-            .as_ref()
-            .filter(|s| s.running() && (s.kind == StepKind::Verify || s.term.is_some()));
+        let checks = |s: &TaskStep| matches!(s.kind, StepKind::Verify | StepKind::Review);
+        let running = card.step.as_ref().filter(|s| s.running() && (checks(s) || s.term.is_some()));
         if let Some(step) = running
             && let StepState::Running { phase, .. } = &step.state
         {
             let line = crate::kit::first_line(phase).to_owned();
-            return Some(Check::Running { line, term: step.term });
+            let review = step.kind == StepKind::Review;
+            return Some(Check::Running { line, term: step.term, review });
+        }
+        let kept = |kind: StepKind| {
+            card.step
+                .as_ref()
+                .filter(|s| s.kind == kind && matches!(s.state, StepState::Failed { .. }))
+                .and_then(|s| s.term)
+        };
+        if let Some(run) = board.review(card.id) {
+            return Some(Check::Review { run, term: kept(StepKind::Review) });
         }
         let run = board.verdict(card.id)?;
-        let kept = card.step.as_ref().filter(|s| matches!(s.state, StepState::Failed { .. }));
-        Some(Check::Verdict { run, term: kept.and_then(|s| s.term) })
+        Some(Check::Verdict { run, term: kept(StepKind::Verify) })
     }
 
     /// A verifier's run or verdict under a task: its mark and word, the commits it judged and
@@ -915,13 +958,30 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let (status, word, detail, tail) = match check {
-            Check::Running { line, .. } => (Status::Working, "Verifying", line.clone(), Vec::new()),
+            Check::Running { line, review: false, .. } => {
+                (Status::Working, "Verifying", line.clone(), Vec::new())
+            }
+            Check::Running { line, review: true, .. } => {
+                (Status::Working, "Reviewing", line.clone(), Vec::new())
+            }
             Check::Verdict { run, .. } if run.passed => {
                 (Status::Done, "Passed", verdict_detail(run), Vec::new())
             }
             Check::Verdict { run, .. } => {
                 (Status::Failed, "Failed", verdict_detail(run), verdict_tail(run, TAIL_LINES))
             }
+            Check::Review { run, .. } if run.verdict.approved => {
+                (Status::Done, "Approved", review_detail(run), Vec::new())
+            }
+            Check::Review { run, .. } => {
+                (Status::Failed, "Changes asked", review_detail(run), Vec::new())
+            }
+        };
+        let review = check.is_review();
+        let (link_word, link_label) = if review {
+            ("Reviewer", "Open the reviewer's session")
+        } else {
+            ("Output", "Show the verifier's output")
         };
         let tone = status.tone(theme);
         let output = check.term().map(|term| {
@@ -931,7 +991,7 @@ impl ProjectView {
                 .id(SharedString::from(id))
                 .debug_selector(move || selector)
                 .role(Role::Link)
-                .aria_label("Show the verifier's output")
+                .aria_label(link_label)
                 .flex_none()
                 .flex()
                 .items_center()
@@ -945,10 +1005,14 @@ impl ProjectView {
                     icon(theme, IconName::SquareTerminal, IconSize::Inline, hsla(s.text_muted))
                         .size(self.z(theme.typography.icon())),
                 )
-                .child("Output");
+                .child(link_word);
             tab_stop(link, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
-                cx.emit(ProjectEvent::Output(term));
+                cx.emit(if review {
+                    ProjectEvent::Reviewer(term)
+                } else {
+                    ProjectEvent::Output(term)
+                });
             }))
         });
         let head = div()
@@ -996,6 +1060,10 @@ impl ProjectView {
                         .child(SharedString::from(line.to_owned()))
                 }))
         });
+        let findings = match check {
+            Check::Review { run, .. } => self.findings(key, run),
+            _ => None,
+        };
         let selector = format!("{key}-check");
         div()
             .debug_selector(move || selector)
@@ -1007,6 +1075,82 @@ impl ProjectView {
             .text_size(self.z(theme.typography.meta()))
             .child(head)
             .children(tail)
+            .children(findings)
+    }
+
+    /// What a reviewer found, a line each, what blocks first as the server keeps them: its
+    /// severity, where it points in the face a path is read in, and what it says from its
+    /// first line, with a count of the rest. The session holds the review whole.
+    fn findings(&self, key: &str, run: &ReviewRun) -> Option<Stateful<Div>> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        if run.verdict.findings.is_empty() {
+            return None;
+        }
+        let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
+        let shown = run.verdict.findings.iter().take(TAIL_LINES);
+        let rest = run
+            .verdict
+            .findings
+            .len()
+            .saturating_sub(TAIL_LINES)
+            .saturating_add(usize::from(run.more));
+        let rows = shown.map(|f| {
+            let tone = if f.blocking { s.error } else { s.text_muted };
+            div()
+                .flex()
+                .items_baseline()
+                .gap(self.z(sp.xs))
+                .min_w_0()
+                .child(div().flex_none().text_color(hsla(tone)).child(sentence_case(&f.severity)))
+                .children(finding_place(f).map(|place| {
+                    // The file's own name and line, as narrow as a card is: the path is in the
+                    // session and in what the agent was told.
+                    let short = place.rsplit('/').next().unwrap_or(&place).to_owned();
+                    div()
+                        .flex_none()
+                        .max_w(relative(0.4))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .font_family(mono.clone())
+                        .text_size(self.z(theme.typography.caption()))
+                        .text_color(hsla(s.text_muted))
+                        .child(short)
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(hsla(s.text_secondary))
+                        .child(crate::kit::first_line(&f.body).to_owned()),
+                )
+        });
+        let more = (rest > 0).then(|| {
+            let word = if rest == 1 { "finding" } else { "findings" };
+            div().text_color(hsla(s.text_muted)).child(format!("{rest} more {word}"))
+        });
+        let id = format!("{key}-findings");
+        let selector = id.clone();
+        Some(
+            div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::List)
+                .flex()
+                .flex_col()
+                .gap(self.z(sp.xxs))
+                .px(self.z(sp.sm))
+                .py(self.z(sp.xs))
+                .rounded(self.z(theme.radii.sm))
+                .bg(hsla(s.panel))
+                .children(rows)
+                .children(more),
+        )
     }
 
     /// Claude Code's own subagents running under `node`, as leaves of the tree.
@@ -1401,6 +1545,8 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         Moment::Branch { .. } => (IconName::GitBranch, s.text_secondary),
         Moment::Verified(run) if run.passed => (IconName::CircleCheck, s.success),
         Moment::Verified(_) => (IconName::CircleX, s.error),
+        Moment::Reviewed(run) if run.verdict.approved => (IconName::CircleCheck, s.success),
+        Moment::Reviewed(_) => (IconName::MessageSquareWarning, s.error),
         Moment::AgentGone { .. } => (IconName::Power, s.text_muted),
         Moment::Note { .. } => (IconName::MessageSquare, s.text_secondary),
         Moment::Reported { report } => match report.kind {
@@ -1418,6 +1564,7 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
             (StepKind::Verify, _) => (IconName::ListChecks, s.text_secondary),
             (StepKind::Merge, StepState::Done { .. }) => (IconName::GitMerge, s.success),
             (StepKind::Merge, _) => (IconName::GitMerge, s.text_secondary),
+            (StepKind::Review, _) => (IconName::Eye, s.text_secondary),
         },
     };
     (glyph, hsla(tone))

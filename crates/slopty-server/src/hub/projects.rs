@@ -55,7 +55,7 @@ const PICKS_CONVERSATION: [&str; 6] =
 /// The terminals and the agents live now, with the starts that count no more pruned: those
 /// answered whose grace ended, a plain agent's once its agent shows, a task's once its task
 /// holds its terminal.
-fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
+pub(super) fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
     let mut terminals = HashSet::new();
     let mut agents = HashSet::new();
     for entry in state.workers.values() {
@@ -387,7 +387,7 @@ fn loosened(flag: &str, project: Option<&ProjectId>) -> Outcome {
 /// written starts it in a looser mode; and, for a task, a conversation id chosen now
 /// (`--session-id`), so the task knows it before the first hook, and the role it plays
 /// (`--append-system-prompt`). The id, when chosen, comes back too.
-fn started_args(
+pub(super) fn started_args(
     mut args: Vec<String>,
     permission_flags: bool,
     role: Option<String>,
@@ -411,7 +411,7 @@ fn started_args(
 
 /// Refused when the fleet runs as many agents as the person allows, or `worker` as many as
 /// one worker may.
-fn fleet_room(
+pub(super) fn fleet_room(
     state: &State,
     running: &Running<'_>,
     bounds: Bounds,
@@ -885,6 +885,7 @@ impl Hub {
                 repo,
                 target,
                 verifier,
+                review,
                 push,
                 orchestrator,
                 limits,
@@ -896,6 +897,7 @@ impl Hub {
                     repo,
                     target,
                     verifier,
+                    review,
                     push,
                     orchestrator,
                     limits,
@@ -904,18 +906,25 @@ impl Hub {
                 named = orchestrator.map(|_| new.id.clone());
                 state.projects.create(new, &running, now).map(|(s, u)| (status(s), u))
             }),
-            Verb::ProjectSet { project, orchestrator, verifier, push, limits, metadata } => {
-                known_term(state, orchestrator).and_then(|()| {
-                    let before = state.projects.status(&project, None, &running).ok();
-                    let change = ProjectChange { orchestrator, verifier, push, limits, metadata };
-                    let set = state.projects.set(&project, change, &running, now)?;
-                    let was = before.and_then(|b| b.project.orchestrator);
-                    if orchestrator.is_some() && set.0.project.orchestrator != was {
-                        named = Some(project);
-                    }
-                    Ok((status(set.0), set.1))
-                })
-            }
+            Verb::ProjectSet {
+                project,
+                orchestrator,
+                verifier,
+                review,
+                push,
+                limits,
+                metadata,
+            } => known_term(state, orchestrator).and_then(|()| {
+                let before = state.projects.status(&project, None, &running).ok();
+                let change =
+                    ProjectChange { orchestrator, verifier, review, push, limits, metadata };
+                let set = state.projects.set(&project, change, &running, now)?;
+                let was = before.and_then(|b| b.project.orchestrator);
+                if orchestrator.is_some() && set.0.project.orchestrator != was {
+                    named = Some(project);
+                }
+                Ok((status(set.0), set.1))
+            }),
             Verb::TaskCreate { project, spec } => {
                 state.projects.create_task(&project, *spec, now).map(|(t, u)| (task(t), u))
             }
@@ -981,6 +990,9 @@ impl Hub {
                 if checked.is_ok() && self.merge_when_home(state, (&project, id)) {
                     state.projects.task(&project, id).map(|t| (task(t.clone()), Vec::new()))
                 } else {
+                    if checked.is_ok() {
+                        self.let_go(state, (&project, id));
+                    }
                     let asked = checked.and_then(|()| state.projects.ask_merge(&project, id, now));
                     if asked.is_ok() {
                         kick = Some(project);
@@ -2015,6 +2027,7 @@ mod tests {
             title: "Big".to_owned(),
             repo: "~/src/big".to_owned(),
             target: "main".to_owned(),
+            review: None,
             verifier: None,
             push: false,
             orchestrator: None,

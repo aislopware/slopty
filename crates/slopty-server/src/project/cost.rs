@@ -56,6 +56,7 @@ fn large() -> Large {
             title: format!("Project {p}"),
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
+            review: None,
             verifier: Some("cargo gate".to_owned()),
             push: false,
             orchestrator: None,

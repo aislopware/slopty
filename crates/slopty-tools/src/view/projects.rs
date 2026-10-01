@@ -11,9 +11,9 @@ use slopty_core::{WallMs, WorkerId};
 use slopty_proto::agent::{PullRequest, Review};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Bounds, Fact, Facts, Limits, Live, Moment, NativeCounts, Natives, NodeDetail, Peer, Placement,
-    Project, ProjectStatus, Report, ReportKind, StepKind, StepState, Suggestion, Task, TaskCard,
-    TaskState, TaskStep, TimelineEntry, VerifierRun,
+    Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, NodeDetail, Peer,
+    Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer, StepKind,
+    StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
 
@@ -189,6 +189,53 @@ fn verified(v: &VerifierRun) -> VerifiedView<'_> {
     VerifiedView { passed: v.passed, summary: &v.summary, head: &v.head, base: &v.base }
 }
 
+/// One thing a reviewer found, for JSON.
+#[derive(Debug, Serialize)]
+pub struct FindingView<'a> {
+    path: Option<&'a str>,
+    line: Option<u32>,
+    severity: &'a str,
+    blocking: bool,
+    body: &'a str,
+}
+
+/// A reviewer's word, for JSON: `more` counts the findings past those kept.
+#[derive(Debug, Serialize)]
+pub struct ReviewedView<'a> {
+    approved: bool,
+    by: String,
+    summary: &'a str,
+    findings: Vec<FindingView<'a>>,
+    more: u16,
+    head: &'a str,
+    base: &'a str,
+}
+
+fn finding(f: &Finding) -> FindingView<'_> {
+    FindingView {
+        path: f.path.as_deref(),
+        line: f.line,
+        severity: &f.severity,
+        blocking: f.blocking,
+        body: &f.body,
+    }
+}
+
+fn reviewed(r: &ReviewRun) -> ReviewedView<'_> {
+    ReviewedView {
+        approved: r.verdict.approved,
+        by: match r.by {
+            Reviewer::Agent(term) => term_string(term),
+            Reviewer::Person => "person".to_owned(),
+        },
+        summary: &r.verdict.summary,
+        findings: r.verdict.findings.iter().map(finding).collect(),
+        more: r.more,
+        head: &r.head,
+        base: &r.base,
+    }
+}
+
 /// A task, for JSON.
 #[derive(Debug, Serialize)]
 pub struct TaskView<'a> {
@@ -215,6 +262,7 @@ pub struct TaskView<'a> {
     base: Option<&'a str>,
     pr: Option<PrView<'a>>,
     verified: Option<VerifiedView<'a>>,
+    reviewed: Option<ReviewedView<'a>>,
     created_ms: WallMs,
     updated_ms: WallMs,
 }
@@ -237,6 +285,7 @@ pub struct CardView<'a> {
     worktree: Option<&'a str>,
     pr: Option<PrView<'a>>,
     verified: Option<VerifiedView<'a>>,
+    reviewed: Option<ReviewedView<'a>>,
     natives: NativeCounts,
     created_ms: WallMs,
     updated_ms: WallMs,
@@ -261,6 +310,7 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         worktree: t.worktree.as_deref(),
         pr: t.pr.as_ref().map(pr),
         verified: t.verified.as_ref().map(verified),
+        reviewed: t.reviewed.as_ref().map(reviewed),
         natives: t.natives,
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
@@ -305,6 +355,7 @@ pub fn task(t: &Task) -> TaskView<'_> {
         base: t.base.as_deref(),
         pr: t.pr.as_ref().map(pr),
         verified: t.verified.as_ref().map(verified),
+        reviewed: t.reviewed.as_ref().map(reviewed),
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
     }
@@ -370,6 +421,7 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
             ("branch", text)
         }
         Moment::Verified(run) => ("verified", verified_text(run)),
+        Moment::Reviewed(run) => ("reviewed", reviewed_text(run)),
         Moment::AgentGone { .. } => ("agent_gone", "its terminal closed".to_owned()),
         Moment::Note { text } => ("note", text.clone()),
         Moment::Reported { report } => ("reported", report_text(report)),
@@ -387,6 +439,7 @@ fn step_text(step: &TaskStep) -> String {
         StepKind::Home => format!("branch brought to worker {}", step.worker),
         StepKind::Verify => format!("verifier on worker {}", step.worker),
         StepKind::Merge => format!("merge on worker {}", step.worker),
+        StepKind::Review => format!("review on worker {}", step.worker),
     };
     match &step.state {
         StepState::Running { phase, percent: Some(p) } => format!("{what}: {phase} {p}%"),
@@ -394,6 +447,23 @@ fn step_text(step: &TaskStep) -> String {
         StepState::Done { detail } => format!("{what} done: {detail}"),
         StepState::Failed { why } => format!("{what} failed: {why}"),
     }
+}
+
+/// What a review said, by whom and at which commits.
+fn reviewed_text(run: &ReviewRun) -> String {
+    let word = if run.verdict.approved { "approved" } else { "changes asked" };
+    let by = match run.by {
+        Reviewer::Agent(_) => "the reviewer",
+        Reviewer::Person => "the person",
+    };
+    let short = |c: &str| c.get(..7).unwrap_or(c).to_owned();
+    let blocking = run.blocking().count();
+    let found = run.verdict.findings.len().saturating_add(usize::from(run.more));
+    format!(
+        "{word} by {by} at {} over {}: {found} finding(s), {blocking} blocking",
+        short(&run.head),
+        short(&run.base)
+    )
 }
 
 /// What a verifier said, at which commits.
@@ -628,6 +698,16 @@ pub fn status_text<S: std::hash::BuildHasher>(
             let word = if v.passed { "passed" } else { "failed" };
             let head = v.head.get(..8).unwrap_or(&v.head);
             let _infallible = writeln!(out, "{indent}   verifier {word} at {head}: {}", v.summary);
+        }
+        if let Some(r) = &t.reviewed {
+            let _infallible = writeln!(out, "{indent}   {}", reviewed_text(r));
+            for f in r.blocking() {
+                let at = f.path.as_deref().map_or_else(String::new, |p| match f.line {
+                    Some(line) => format!("{p}:{line}: "),
+                    None => format!("{p}: "),
+                });
+                let _infallible = writeln!(out, "{indent}     blocks: {at}{}", f.body);
+            }
         }
         counts_text(&mut out, t.natives, depth.saturating_add(2));
         let kids = children.get(&Some(t.id.0)).into_iter().flatten().rev();

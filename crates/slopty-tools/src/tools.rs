@@ -418,6 +418,62 @@ struct TaskReportArgs {
     idempotency_key: Option<String>,
 }
 
+/// `review_report`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReviewReportArgs {
+    /// The project; the one you were started for when omitted.
+    project: Option<String>,
+    /// The task whose work you read; the one you were started for when omitted.
+    task: Option<TaskArg>,
+    /// Whether the work may merge: true unless a finding blocks.
+    approved: bool,
+    /// The review in a few lines.
+    summary: String,
+    /// What you found that matters, the most important first; at most 8 are kept.
+    #[serde(default)]
+    findings: Vec<FindingArg>,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
+}
+
+/// One finding of a review.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FindingArg {
+    /// The file, relative to the repository's root.
+    path: Option<String>,
+    /// The line in the work's version of the file.
+    line: Option<u32>,
+    /// `blocker`, `should` or `nit`, or a word of your own.
+    severity: String,
+    /// Whether it keeps the work from merging: only a blocker does.
+    #[serde(default)]
+    blocking: bool,
+    /// What is wrong and what to do, in a few sentences.
+    body: String,
+}
+
+impl ReviewReportArgs {
+    fn verdict(self) -> slopty_proto::project::ReviewVerdict {
+        slopty_proto::project::ReviewVerdict {
+            approved: self.approved,
+            summary: self.summary,
+            findings: self
+                .findings
+                .into_iter()
+                .map(|f| slopty_proto::project::Finding {
+                    path: f.path,
+                    line: f.line,
+                    severity: f.severity,
+                    blocking: f.blocking,
+                    body: f.body,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The kinds of report.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1300,6 +1356,14 @@ pub fn list() -> Vec<Tool> {
              timeline.",
             Kind::Write,
         ),
+        tool::<ReviewReportArgs>(
+            "review_report",
+            "As the reviewer the server started for a task, say whether its work may merge: \
+             `approved`, a `summary`, and the `findings` that matter (path, line, severity, \
+             whether each blocks). An approval puts it in the merge queue; changes asked go \
+             back to its agent with the findings. Only that reviewer, or the person, may.",
+            Kind::Write,
+        ),
         tool::<TaskAssignArgs>(
             "task_assign",
             "Put the terminal named (yours when omitted) on a task, for one the server did not \
@@ -1485,6 +1549,7 @@ async fn run<D: Dispatch>(
                 repo: a.repo,
                 target: a.target,
                 verifier: a.verifier,
+                review: None,
                 push: false,
                 orchestrator: a.orchestrator,
                 limits: a.limits.into(),
@@ -1498,6 +1563,7 @@ async fn run<D: Dispatch>(
             let edit = ProjectEdit {
                 orchestrator: a.orchestrator,
                 verifier: a.verifier,
+                review: None,
                 push: None,
                 limits: a.limits.into(),
                 metadata: metadata_text(a.metadata)?,
@@ -1566,6 +1632,15 @@ async fn run<D: Dispatch>(
             let reported =
                 ops::task_report(dispatch, a.project.as_deref(), task.as_deref(), a.report(), key);
             json(&view::projects::task(&reported.await?))
+        }
+        "review_report" => {
+            let a: ReviewReportArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key.clone())?;
+            let task = task_text(a.task.as_ref());
+            let project = a.project.clone();
+            let reviewed =
+                ops::task_review(dispatch, project.as_deref(), task.as_deref(), a.verdict(), key);
+            json(&view::projects::task(&reviewed.await?))
         }
         "task_assign" => {
             let a: TaskAssignArgs = args(arguments)?;
@@ -1853,6 +1928,7 @@ mod tests {
             worktree: None,
             base: None,
             pr: None,
+            reviewed: None,
             verified: None,
             merge: None,
             created_ms: WallMs::ZERO,
@@ -1870,6 +1946,7 @@ mod tests {
                 repo: "~/slopty".to_owned(),
                 repo_id: None,
                 target: "main".to_owned(),
+                review: None,
                 verifier: None,
                 push: false,
                 orchestrator: None,
@@ -2182,6 +2259,7 @@ mod tests {
                 "task_claim",
                 "task_update",
                 "task_report",
+                "review_report",
                 "task_assign",
                 "task_spawn",
                 "placement_suggest",

@@ -935,8 +935,106 @@ Not built in Phase 1:
   5. The branch comes home again and is verified, and `main` fast-forwards to the resolved
      work with nothing pushed.
 
+**A reviewer reads the work with fresh eyes before it merges.** ✅ 2026-10-01
+- Research, read 2026-10-01:
+  - Claude Code's `/review` (now an alias of `/code-review`) and `/security-review`. The
+    security review reads the diff against the merge base with read-only tools and drops
+    findings under 8 of 10 confidence. Anthropic's code-review plugin runs parallel finder
+    agents, then a validating subagent per finding, and keeps those scored 80 or more.
+  - Anthropic's managed Code Review never blocks: it is always a neutral check, with findings
+    ranked Important, Nit and Pre-existing. Anthropic reports that pull requests with
+    substantive comments rose from 16% to 54%, and that under 1% of findings were marked
+    incorrect. claude-code-action cannot approve a pull request.
+  - A Claude Code subagent that is not a fork starts with a fresh context. The docs' reviewer
+    example has only `Read, Glob, Grep`.
+  - CodeRabbit blocks only when `request_changes_workflow` is turned on, which it is not by
+    default. The person can overrule it (`@coderabbitai resolve`, `approve`). Graphite's
+    reviewer comments on a stack and never merges.
+  - Cognition reports that Devin Review catches about 2 bugs per pull request, about 58% of
+    them severe, and finds that a reviewer works best with none of the author's context.
+  - Claude Code features that fit: `--session-id`, `--permission-mode`,
+    `--append-system-prompt` and `--disallowedTools` work in an interactive session.
+    `--json-schema` works only in print mode (`-p`).
+- What they agree on, and what Slopty does:
+  - The reviewer reads the diff against the base, with read-only tools, and has none of the
+    author's context.
+  - Each finding is structured (path, line, severity, blocking) and states what to do.
+  - Only the top severity blocks, and the person can overrule it, with the overruling
+    recorded.
+- The person turns it on per project with a brief: `slopty project create --review <brief>`, or
+  `project update --review` (an empty brief turns it off). Only the person sets it, as with the
+  verifier.
+- Once the verifier passes (at once with no verifier), the task stays Verifying and the lane's
+  next job is `Job::Review`:
+  1. `Verb::ReviewCheckout` makes a detached checkout of the verified commit of its own
+     (`~/slopty/verify/<project>-review-<task>`). Beside it is `.slopty-review.diff`, the
+     output of `git diff base..head`.
+  2. The server starts `claude` in it on the orchestrator's worker with `Verb::SpawnAgent`,
+     with `--disallowedTools Edit,Write,NotebookEdit`, its own `--session-id`, a role through
+     `--append-system-prompt` (the person's brief, the diff's path, how to answer), and
+     `SLOPTY_PROJECT` and `SLOPTY_TASK`.
+  3. The task's step is Review, running, naming the reviewer's terminal.
+- The reviewer is a real Claude Code session in a terminal, and the person can open it from
+  the board. The lane does not wait on it: the next task is verified alongside it.
+- It answers with the `review_report` tool (`Verb::TaskReview`). Only that session, proven by
+  its link, or the person may give the verdict; the task's own agent cannot. The run keeps at
+  most 8 findings, the blocking ones first, and counts the rest (`ReviewRun::more`).
+  - **Approved:** the task is Done and queued, and the reviewer's session closes.
+  - **Changes asked:** the task is given back as a failed verifier is. Its agent's next prompt
+    hook carries the findings, what blocks first ("What blocks the merge:", "Also noted:"). The
+    reviewer's session is kept to be read.
+  - **The person** (`slopty task review --approve | --changes --finding <path:line: words>`)
+    may answer at any time, over the reviewer or after it. An approval needs a verifier that
+    passed. It closes whichever reviewer session is open or kept.
+- A reviewer that ends with no verdict leaves the step failed, "The reviewer ended without a
+  verdict". The task waits for the person and is not read again on its own. `task merge`
+  starts the checks afresh. So does a server restart that finds a review under way.
+- A new head clears the old word. Each report of done, `task merge` and the person's ask for a
+  merge drop the last verifier run, the last review and the step, and close a reviewer still
+  reading.
+- On the board, the review shows the way the verifier's run does (`Board::review`,
+  `ProjectView::check_block`):
+  - "Reviewing" while it reads;
+  - "Approved" or "Changes asked", the commits read, "by you" when it was the person, the
+    count of blocking findings, and how long it read;
+  - for each finding, its severity, its file and line in the mono face, and its first line.
+  - "Reviewer" opens the session (`ProjectEvent::Reviewer`).
+  - The project's line says "reviewed before it merges".
+  - An approval speaks while the task waits to merge. Changes asked speak until the work is
+    checked again or merged.
+- Rejected:
+  - `claude -p --json-schema` as a hidden process. It would give a typed verdict for free,
+    but the person could not watch the review or ask the reviewer anything. A session hidden
+    behind the TUI breaks the rule that the TUI stays the source of truth.
+  - Plan mode for the reviewer. `--disallowedTools` keeps the tools it may read with (Bash
+    for `git log`, the tests) and removes those that write. Plan mode would also stop it at
+    a plan prompt.
+  - Blocking by default, and no reviewer by default. A project opts in with a brief. Once on,
+    a blocker blocks, since that is what the person asked for, and the person can always
+    overrule it.
+  - Parallel finders with validators, as the code-review plugin has. They cost several
+    sessions of the plan per task. One reviewer with a brief, told to report only what it
+    would defend, is the measured start. Finders can come later, once misses show they are
+    needed.
+  - A reviewer subagent inside the task's own session. It would share the author's context,
+    which is what review exists to avoid, and its verdict could not be proven to be anyone's
+    but the author's.
+- Measured, with the stub claude on one worker: 0.47 to 0.88 s from the agent's spawn to the
+  reviewer's word (`docs/MEASUREMENTS.md`). That is the server's path and not the review itself.
+- Tests:
+  - `a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own` (store): the job
+    order, a reviewer holding only its own task, a restart, and the bound on findings.
+  - `a_reviewer_reads_the_verified_work_and_its_verdict_decides_the_merge` and
+    `a_reviewer_that_ends_without_a_verdict_leaves_it_to_the_person` (hub, scripted worker).
+  - `a_reviewer_reads_the_task_s_own_diff_in_a_checkout_of_its_own` (worker, real git).
+  - `a_reviewer_s_block_goes_back_to_the_agent_and_the_person_s_word_merges_it` (CLI): real
+    workers, git and the stub claude as the reviewer.
+  - `a_review_speaks_while_it_holds_and_says_what_it_found` (model) and
+    `a_reviewer_shows_on_its_task_and_opens_its_session` (workspace).
+  - The `project-*` goldens, which hold a task with changes asked.
+
 Known gaps:
-- The fresh-context reviewer before a merge is not built.
+- The review's cost per task is not on the board yet. It comes with the tokens per agent.
 
 Tests:
 - `slopty-server::project::merge::tests`: the queue's order and its reload from the store's file
@@ -972,7 +1070,7 @@ Tests:
    - Mirror presence as a placement fact (placement itself was built in Phase 1).
    - A worktree setup file (A3).
    - Linux worker hardening: systemd, x86_64 and a real network e2e.
-3. **Verify and merge.** The verifier and the merge queue built 2026-10-01.
+3. **Verify and merge.** The verifier, the merge queue and the reviewer built 2026-10-01.
    - The verifier runs per task, and the merge queue on the server.
    - The fresh-context reviewer.
    - The timeline, and tokens per agent.

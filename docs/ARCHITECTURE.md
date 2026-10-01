@@ -452,7 +452,14 @@ the store is the queue and a restart takes it up where it stood:
   detached checkout the project keeps in that clone (`~/slopty/verify/<project>`,
   `slopty-worker::repo::verify`). The step carries that terminal, and the last line shows as
   progress. The exit comes from the session's own exit state.
-- A pass queues the task (`Merge::Queued`). The head of the queue is rebased onto the target in
+- With a reviewer asked for (`Project::review`), a pass starts one before the task is queued
+  (`hub::review`). It is a Claude Code session the server starts on the orchestrator's worker,
+  read-only (`--disallowedTools Edit,Write,NotebookEdit`), in a checkout of the verified
+  commit with the task's diff beside it (`Verb::ReviewCheckout`, `slopty-worker::repo::review`).
+  The step names its terminal, so the person can open it. The lane goes on beside it. Its
+  `review_report` (`Verb::TaskReview`), or the person's, queues the task or gives it back with
+  the findings.
+- A pass (or an approval) queues the task (`Merge::Queued`). The head of the queue is rebased onto the target in
   the same checkout (`Verb::Rebase`), verified again unless the rebase left the commit that
   passed, and the target is fast-forwarded (`Verb::FastForward`). That is a compare and swap
   on the commit it was rebased onto, made with `merge --ff-only` in a worktree that has the

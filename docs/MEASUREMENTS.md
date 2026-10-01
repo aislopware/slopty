@@ -12781,6 +12781,32 @@ because the exit wakes the lane. Nothing on this path is a hot path for input or
 optimisation follows. A real verifier (`cargo gate`, about a minute warm) dwarfs it.
 
 
+## 2026-10-01 — a finished task to a reviewer's word
+
+Mac Studio M1 Max, macOS 27.0, debug build, under `nice`, other sessions building.
+
+```sh
+cargo test -p slopty-cli --test projects -- a_reviewer_s_block --nocapture 2>&1 | grep MEASURE
+```
+
+`a_reviewer_s_block_goes_back_to_the_agent_and_the_person_s_word_merges_it` uses one real
+worker and the stub claude as both the task's agent and its reviewer. The clock starts when the
+agent is spawned and stops when the task's card carries the reviewer's verdict. In between:
+- the agent's `task_report`;
+- the verifier as a terminal;
+- the review checkout with `git worktree add` and the diff written beside it;
+- the reviewer's spawn through ptyd;
+- its MCP `review_report`.
+
+| run | spawn to the reviewer's word |
+| --- | --- |
+| 1 | 883 ms |
+| 2 | 466 ms |
+| 3 | 573 ms |
+
+This is the server's own path. A real reviewer reads for minutes, and nothing here is on an
+input or frame path, so no optimisation follows.
+
 ## 2026-10-01 — a reload's diff
 
 A file tile tints the lines a reload changed. The diff ran under an 8 ms wall-clock timeout and

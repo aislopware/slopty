@@ -61,6 +61,7 @@ use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starti
 
 mod projects;
 mod queue;
+mod review;
 mod steps;
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus
@@ -201,6 +202,8 @@ struct State {
     steps: steps::Steps,
     /// The projects' lanes running: their verifiers and merge queues.
     lanes: queue::Lanes,
+    /// The reviewers at work, by the task they read.
+    reviews: review::Reviews,
 }
 
 /// A project change made under a key, so a repeat of the verb answers as the first did.
@@ -829,7 +832,13 @@ impl Hub {
                 "the server clones and carries branches for tasks itself; task_spawn and \
                      task_report do it",
             ),
-            Verb::Verify { .. } | Verb::Rebase { .. } | Verb::FastForward { .. } => error(
+            Verb::TaskReview { project, task, verdict } => {
+                self.task_review(caller, from, (&project, task), verdict)
+            }
+            Verb::Verify { .. }
+            | Verb::Rebase { .. }
+            | Verb::FastForward { .. }
+            | Verb::ReviewCheckout { .. } => error(
                 ErrorCode::Forbidden,
                 "the server verifies and merges tasks itself, one at a time; a task's done \
                  report starts it, and the person's task_merge asks for it",
@@ -1132,6 +1141,9 @@ impl Hub {
         projects::unwatch(state, term.session);
         let updates = state.projects.session_ended(term, WallMs::now());
         self.projects_moved(state, updates);
+        self.reviewer_closed(state, term);
+        // An agent ending makes room: a reviewer waiting for it may start.
+        self.kick_all(state);
     }
 
     /// Log and push each project change, and send the store what it keeps. Called under the
@@ -1619,7 +1631,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskGet { .. }
         | Verb::WorkingOn { .. }
         | Verb::TaskReport { .. }
-        | Verb::TaskMerge { .. } => None,
+        | Verb::TaskMerge { .. }
+        | Verb::TaskReview { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
@@ -1638,6 +1651,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::BundleBranch { worker, .. }
         | Verb::FetchBundle { worker, .. }
         | Verb::Verify { worker, .. }
+        | Verb::ReviewCheckout { worker, .. }
         | Verb::Rebase { worker, .. }
         | Verb::FastForward { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {

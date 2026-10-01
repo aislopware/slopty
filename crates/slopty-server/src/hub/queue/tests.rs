@@ -20,23 +20,23 @@ use super::super::*;
 
 const URL: &str = "https://example.com/o/demo.git";
 const TREE: &str = "/w/demo/.claude/worktrees/slopty-slopty-1";
-const BRANCH: &str = "worktree-slopty-slopty-1";
+pub(in crate::hub) const BRANCH: &str = "worktree-slopty-slopty-1";
 
-fn commit(c: char) -> String {
+pub(in crate::hub) fn commit(c: char) -> String {
     std::iter::repeat_n(c, 40).collect()
 }
 
 /// The orchestrator's worker as the lane sees it: its requests, and what it delivered to its
 /// agents' hooks on the way.
-struct Studio {
-    lease: Lease,
-    rx: mpsc::Receiver<FromServer>,
-    delivered: Vec<(SessionId, String)>,
+pub(in crate::hub) struct Studio {
+    pub lease: Lease,
+    pub rx: mpsc::Receiver<FromServer>,
+    pub delivered: Vec<(SessionId, String)>,
 }
 
 impl Studio {
     /// The next request, keeping any delivery that comes first.
-    async fn request(&mut self) -> (RequestId, Verb) {
+    pub(in crate::hub) async fn request(&mut self) -> (RequestId, Verb) {
         loop {
             match tokio::time::timeout(Duration::from_secs(10), self.rx.recv()).await {
                 Ok(Some(FromServer::Request { id, verb, .. })) => return (id, verb),
@@ -50,7 +50,7 @@ impl Studio {
     }
 
     /// The next request but a read of a verifier's screen, each answered with `lines`.
-    async fn past_screens(&mut self, lines: &[&str]) -> (RequestId, Verb) {
+    pub(in crate::hub) async fn past_screens(&mut self, lines: &[&str]) -> (RequestId, Verb) {
         loop {
             let (id, verb) = self.request().await;
             if !matches!(verb, Verb::ReadScreen { .. }) {
@@ -61,7 +61,7 @@ impl Studio {
     }
 
     /// Deliveries until one to `session` holds `words`.
-    async fn told(&mut self, session: SessionId, words: &str) -> String {
+    pub(in crate::hub) async fn told(&mut self, session: SessionId, words: &str) -> String {
         let found = |d: &[(SessionId, String)]| {
             d.iter().find(|(s, c)| *s == session && c.contains(words)).map(|(_, c)| c.clone())
         };
@@ -81,7 +81,12 @@ impl Studio {
 
     /// The verifier the lane asked for runs in its terminal, and has exited with `status`
     /// before the worker answers: what it judged.
-    fn ran(&self, (id, verb): &(RequestId, Verb), status: i32, judged: (char, char)) -> TermRef {
+    pub(in crate::hub) fn ran(
+        &self,
+        (id, verb): &(RequestId, Verb),
+        status: i32,
+        judged: (char, char),
+    ) -> TermRef {
         let Verb::Verify { worker, session, .. } = verb else { panic!("{verb:?}") };
         let exited = SessionSummary { state: SessionState::Exited { status }, ..summary(*session) };
         self.lease.handle(ToServer::SessionChanged(exited));
@@ -92,7 +97,7 @@ impl Studio {
     }
 }
 
-fn screen(lines: &[&str]) -> Outcome {
+pub(in crate::hub) fn screen(lines: &[&str]) -> Outcome {
     let lines =
         (0..).zip(lines).map(|(index, text)| Line { index, text: (*text).to_owned() }).collect();
     Outcome::Screen(Screen {
@@ -106,7 +111,7 @@ fn screen(lines: &[&str]) -> Outcome {
 
 /// A studio with the orchestrator in its clone and a task's agent in a worktree of it, the
 /// project's verifier named, the task on that agent; its id and the agent's terminal.
-async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRef) {
+pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRef) {
     let (orchestrator, agent) = (SessionId::new(), SessionId::new());
     let sessions =
         vec![in_repo(orchestrator, "/w/demo", Some(URL)), in_repo(agent, TREE, Some(URL))];
@@ -116,6 +121,7 @@ async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRef) {
     let set = Verb::ProjectSet {
         project: project(),
         orchestrator: None,
+        review: None,
         verifier: Some("cargo gate".to_owned()),
         push: Some(true),
         limits: LimitsChange::default(),
@@ -131,7 +137,7 @@ async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRef) {
 }
 
 /// The agent says it is done, with its branch.
-async fn done(hub: &Hub, task: TaskId, agent: TermRef) {
+pub(in crate::hub) async fn done(hub: &Hub, task: TaskId, agent: TermRef) {
     let report = Report {
         kind: ReportKind::Done,
         note: "Built it.".to_owned(),
@@ -144,7 +150,7 @@ async fn done(hub: &Hub, task: TaskId, agent: TermRef) {
     assert!(matches!(reported, Outcome::Task(_)), "{reported:?}");
 }
 
-async fn until_state(hub: &Hub, task: TaskId, want: TaskState) {
+pub(in crate::hub) async fn until_state(hub: &Hub, task: TaskId, want: TaskState) {
     let reached = tokio::time::timeout(Duration::from_secs(10), async {
         while task_now(hub, task).await.state != want {
             tokio::time::sleep(Duration::from_millis(10)).await;

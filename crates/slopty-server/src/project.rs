@@ -278,6 +278,7 @@ pub(crate) struct NewProject {
     pub repo: String,
     pub target: String,
     pub verifier: Option<String>,
+    pub review: Option<String>,
     pub push: bool,
     pub orchestrator: Option<TermRef>,
     pub limits: LimitsChange,
@@ -289,6 +290,7 @@ pub(crate) struct NewProject {
 pub(crate) struct ProjectChange {
     pub orchestrator: Option<TermRef>,
     pub verifier: Option<String>,
+    pub review: Option<String>,
     pub push: Option<bool>,
     pub limits: LimitsChange,
     pub metadata: Option<String>,
@@ -716,6 +718,12 @@ fn verifier(text: Option<String>) -> Result<Option<String>, Refused> {
     Ok(words(text))
 }
 
+/// A reviewer's brief, trimmed: `None` for empty, which asks for no reviewer.
+fn review_brief(text: Option<String>) -> Result<Option<String>, Refused> {
+    within("a reviewer's brief", text.as_deref(), SUMMARY_MAX)?;
+    Ok(words(text))
+}
+
 /// A refusal for passing one of the person's bounds.
 fn over_bound(name: &str, have: usize, most: u64) -> Refused {
     refuse(
@@ -980,6 +988,7 @@ impl Projects {
             repo: new.repo.trim().to_owned(),
             repo_id: None,
             target: new.target.trim().to_owned(),
+            review: review_brief(new.review)?,
             verifier: verifier(new.verifier)?,
             push: new.push,
             orchestrator: new.orchestrator,
@@ -1012,11 +1021,16 @@ impl Projects {
         let limits = limited(record.project.limits, change.limits, bounds)?;
         let metadata = change.metadata.map(|m| metadata(Some(m))).transpose()?;
         let new_verifier = change.verifier.map(|v| verifier(Some(v))).transpose()?;
+        let new_review = change.review.map(|r| review_brief(Some(r))).transpose()?;
         let mut updates = Vec::new();
         let mut quiet = false;
         if let Some(verifier) = new_verifier {
             quiet |= record.project.verifier != verifier;
             record.project.verifier = verifier;
+        }
+        if let Some(review) = new_review {
+            quiet |= record.project.review != review;
+            record.project.review = review;
         }
         if let Some(metadata) = metadata {
             quiet |= record.project.metadata != metadata;
@@ -1121,6 +1135,7 @@ impl Projects {
             worktree: None,
             base: None,
             pr: None,
+            reviewed: None,
             verified: None,
             merge: None,
             created_ms: now,
@@ -1943,6 +1958,6 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
 #[cfg(test)]
 mod cost;
 mod merge;
-pub(crate) use merge::{Advance, Job, Queue};
+pub(crate) use merge::{Advance, Job, Queue, bounded as bounded_review};
 #[cfg(test)]
 mod tests;

@@ -40,8 +40,16 @@ mod tests {
 
     /// ptyd and a worker registered with the server at `server`, finding `claude` in
     /// `programs` first, with `settings` as its `settings.toml`; killed with the test.
-    async fn worker(dir: &Path, server: SocketAddr, programs: &Path, settings: &str) -> Vec<Child> {
-        worker_named(dir, server, programs, settings, "projects-test").await
+    /// Every terminal ptyd starts has `env` beside its own, as a stub started by the server
+    /// rather than the test gets its script.
+    async fn worker(
+        dir: &Path,
+        server: SocketAddr,
+        programs: &Path,
+        settings: &str,
+        env: &[(String, String)],
+    ) -> Vec<Child> {
+        daemons(dir, server, programs, settings, "projects-test", env).await
     }
 
     /// [`worker`] under `name`.
@@ -52,12 +60,24 @@ mod tests {
         settings: &str,
         name: &str,
     ) -> Vec<Child> {
+        daemons(dir, server, programs, settings, name, &[]).await
+    }
+
+    async fn daemons(
+        dir: &Path,
+        server: SocketAddr,
+        programs: &Path,
+        settings: &str,
+        name: &str,
+        env: &[(String, String)],
+    ) -> Vec<Child> {
         std::fs::create_dir_all(dir.join("data")).unwrap();
         std::fs::write(dir.join("data").join("settings.toml"), settings).unwrap();
         let path = slopty_testkit::env::path_with(programs);
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = scrubbed(bin("slopty-ptyd"), &dir.join("home"))
             .env("PATH", &path)
+            .envs(env.iter().cloned())
             .arg("--socket")
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
@@ -129,6 +149,15 @@ mod tests {
     /// A server on loopback keeping its state under `root`, and a worker registered with it
     /// that has the stub as `claude`, once it is online with Claude Code installed.
     async fn fleet(root: &Path, settings: &str) -> (Server, Vec<Child>, WorkerId) {
+        fleet_with(root, settings, &[]).await
+    }
+
+    /// [`fleet`], with `env` in every terminal its worker starts ([`worker`]).
+    async fn fleet_with(
+        root: &Path,
+        settings: &str,
+        env: &[(String, String)],
+    ) -> (Server, Vec<Child>, WorkerId) {
         let server = Server::start(Config {
             name: "projects-test".to_owned(),
             quic: "127.0.0.1:0".parse().unwrap(),
@@ -142,7 +171,7 @@ mod tests {
         let programs = root.join("programs");
         std::fs::create_dir_all(&programs).unwrap();
         std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
-        let daemons = worker(root, server.quic_addr(), &programs, settings).await;
+        let daemons = worker(root, server.quic_addr(), &programs, settings, env).await;
         let worker = until("the worker registers with Claude Code installed", async || {
             hub.directory().into_iter().find(|w| {
                 w.liveness == Liveness::Online
@@ -200,6 +229,7 @@ mod tests {
                 title: "Demo".to_owned(),
                 repo: root.to_string_lossy().into_owned(),
                 target: "main".to_owned(),
+                review: None,
                 verifier: None,
                 push: false,
                 orchestrator: None,
@@ -467,6 +497,7 @@ mod tests {
                 title: "Demo".to_owned(),
                 repo: root.to_string_lossy().into_owned(),
                 target: "main".to_owned(),
+                review: None,
                 verifier: None,
                 push: false,
                 orchestrator: None,
@@ -579,6 +610,7 @@ mod tests {
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
+                review: None,
                 verifier: None,
                 push: false,
                 orchestrator: Some(orchestrator),
@@ -707,6 +739,7 @@ mod tests {
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
+                review: None,
                 verifier: None,
                 push: false,
                 orchestrator: Some(orchestrator),
@@ -865,6 +898,7 @@ mod tests {
                     Some(format!("{:?} {how}", s.kind))
                 }
                 Moment::Verified(run) => Some(format!("verified {}", run.passed)),
+                Moment::Reviewed(run) => Some(format!("reviewed {}", run.verdict.approved)),
                 _ => None,
             })
             .collect()
@@ -948,6 +982,7 @@ mod tests {
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
+                review: None,
                 verifier: Some(verifier.to_owned()),
                 push: false,
                 orchestrator: Some(orchestrator),
@@ -1250,6 +1285,7 @@ mod tests {
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
+                review: None,
                 verifier: Some(verifier.to_owned()),
                 push: false,
                 orchestrator: Some(orchestrator),
@@ -1371,6 +1407,208 @@ mod tests {
                 "verified true",
                 "Merge began",
                 "Merge failed"
+            ]
+        );
+        server.shutdown().await;
+    }
+
+    /// One worker, with a reviewer asked for. The task's agent reports done, its verifier
+    /// passes, and the server starts a reviewer of its own: a stub `claude` in a checkout of the
+    /// verified commit with the task's diff beside it, read-only, a terminal the person can
+    /// open. Its `review_report` blocks the merge, so the task goes back and its agent's next
+    /// prompt brings the findings through its hooks; the reviewer's terminal stays to be read.
+    /// The person reads the work and approves it with `slopty task review`, the reviewer is
+    /// let go, and the queue fast-forwards `main` to the commit both checked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reviewer_s_block_goes_back_to_the_agent_and_the_person_s_word_merges_it() {
+        use slopty_proto::project::{REVIEW_DIFF, Reviewer, StepKind};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("demo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        git(&repo, &["remote", "add", "origin", "git@github.com:aislopware/demo.git"]);
+        let base = git_out(&repo, &["rev-parse", "main"]);
+        let tree = repo.join(".claude/worktrees/t1");
+        git(&repo, &["worktree", "add", "-q", "-b", "task-1", &tree.to_string_lossy(), "main"]);
+        std::fs::write(tree.join("work.txt"), "done\n").unwrap();
+        git(&tree, &["add", "."]);
+        git(&tree, &["commit", "-q", "-m", "the work"]);
+        let head = git_out(&tree, &["rev-parse", "HEAD"]);
+
+        let reviewer_record = root.join("reviewer.json");
+        let verdict = json!([{ "name": "review_report", "arguments": {
+            "approved": false,
+            "summary": "work.txt says done and nothing reads it.",
+            "findings": [
+                { "path": "work.txt", "line": 1, "severity": "blocker", "blocking": true,
+                  "body": "Nothing reads work.txt; wire it in or drop it." },
+                { "severity": "nit", "body": "The commit message could say why." }
+            ]
+        } }]);
+        let reviewer_env = [
+            ("STUB_RECORD".to_owned(), reviewer_record.to_string_lossy().into_owned()),
+            ("STUB_MCP_CALLS".to_owned(), verdict.to_string()),
+        ];
+        let (server, _daemons, worker) = fleet_with(&root, "", &reviewer_env).await;
+        let hub = server.hub().clone();
+        let shell = Verb::OpenTerminal {
+            worker,
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            command: Vec::new(),
+            env: Vec::new(),
+            name: None,
+            size: None,
+            session: None,
+        };
+        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
+        let project = ProjectId::new("demo").unwrap();
+        let brief = "Nothing is added that nothing reads";
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Demo".to_owned(),
+                repo: "demo".to_owned(),
+                target: "main".to_owned(),
+                review: Some(brief.to_owned()),
+                verifier: Some("test -f work.txt".to_owned()),
+                push: false,
+                orchestrator: Some(orchestrator),
+                limits: LimitsChange::default(),
+                metadata: None,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        until("the project learns its repository", async || {
+            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
+        })
+        .await;
+        let spec = TaskSpec { title: "Write it".to_owned(), ..TaskSpec::default() };
+        let task =
+            hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
+        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
+        let (record, later) = (root.join("agent.json"), root.join("later"));
+        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": "task-1" } }]);
+        let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
+        let launch = TaskLaunch {
+            pin: Some(worker),
+            cwd: tree.to_string_lossy().into_owned(),
+            run: Runner::Claude { prompt: None, args: Vec::new() },
+            env: vec![
+                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
+                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+                ("STUB_LATER".to_owned(), prompt.to_string()),
+                ("STUB_LATER_AFTER".to_owned(), later.to_string_lossy().into_owned()),
+            ],
+            size: None,
+            ignore_dependencies: false,
+        };
+        let spawned = hub
+            .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
+            .await;
+        let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
+        let agent = spawned.assignment.unwrap().term;
+
+        let started = std::time::Instant::now();
+        let card = card_when(&hub, &project, "the reviewer asks for changes", |card| {
+            card.reviewed.is_some() && card.state == TaskState::Waiting
+        })
+        .await;
+        eprintln!("MEASURE spawn to a reviewer's word: {:?}", started.elapsed());
+        let run = card.reviewed.unwrap();
+        let Reviewer::Agent(reviewer) = run.by else { panic!("{run:?}") };
+        assert_eq!((run.head.as_str(), run.base.as_str()), (head.as_str(), base.as_str()));
+        assert!(!run.verdict.approved && run.verdict.findings[0].blocking, "{run:?}");
+        assert!(card.verified.is_some_and(|v| v.passed && v.head == head));
+        let step = card.step.unwrap();
+        assert_eq!((step.kind, step.term), (StepKind::Review, Some(reviewer)), "kept to read");
+        let listed = match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
+            Outcome::Terminals(list) => list,
+            other => panic!("{other:?}"),
+        };
+        assert!(listed.iter().any(|(_, s)| s.id == reviewer.session), "a terminal to open");
+
+        let seen: Value =
+            serde_json::from_slice(&std::fs::read(&reviewer_record).unwrap()).unwrap();
+        let args: Vec<&str> =
+            seen["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        let flag = args.iter().position(|a| *a == "--disallowedTools").expect("read-only");
+        assert_eq!(args[flag + 1], "Edit,Write,NotebookEdit");
+        assert!(args.iter().any(|a| a.contains(brief)), "told the brief: {args:?}");
+        let place = root.join("home/slopty/verify/demo-review-1");
+        assert_eq!(seen["cwd"], json!(place.to_string_lossy()), "in a checkout of its own");
+        assert_eq!(seen["env"]["SLOPTY_TASK"], "1", "{seen}");
+        assert!(seen["mcp"][0]["error"].is_null(), "its verdict taken: {seen}");
+        assert_eq!(git_out(&place, &["rev-parse", "HEAD"]), head, "the verified commit");
+        let diff = std::fs::read_to_string(place.join(REVIEW_DIFF)).unwrap();
+        assert!(diff.contains("+done") && diff.contains("work.txt"), "{diff}");
+
+        let reports = slopty_agent::reports::dir(&root.join("worker.sock"));
+        until("the report waits for the agent's hooks", async || {
+            reports.join(format!("{}.json", agent.session)).exists().then_some(())
+        })
+        .await;
+        std::fs::write(&later, "").unwrap();
+        let seen: Value = until("the agent's next prompt hands it the review", async || {
+            let seen: Value = serde_json::from_slice(&std::fs::read(&record).ok()?).ok()?;
+            (seen["hooks"].as_array()?.len() >= 2).then_some(seen)
+        })
+        .await;
+        let handed = seen["hooks"][1]["outputs"][0]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        for words in ["What blocks the merge", "work.txt:1", "Nothing reads work.txt", "Also noted"]
+        {
+            assert!(handed.contains(words), "{words:?} in {handed}");
+        }
+        assert_eq!(seen["typed"], json!([]), "nothing typed into the agent");
+
+        let said = slopty(
+            &root,
+            server.quic_addr(),
+            &[
+                "task",
+                "review",
+                "--project",
+                "demo",
+                "--task",
+                "1",
+                "--approve",
+                "--summary",
+                "It is read by the next task.",
+            ],
+        )
+        .await;
+        assert!(said.contains("#1"), "{said}");
+        let card = card_when(&hub, &project, "the person's word merges it", |card| {
+            card.state == TaskState::Merged
+        })
+        .await;
+        assert_eq!(card.reviewed.map(|r| r.by), Some(Reviewer::Person));
+        assert_eq!(git_out(&repo, &["rev-parse", "main"]), head, "main fast-forwarded");
+        until("the reviewer the person spoke over is let go", async || {
+            match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
+                Outcome::Terminals(list) => {
+                    list.iter().all(|(_, s)| s.id != reviewer.session).then_some(())
+                }
+                _ => None,
+            }
+        })
+        .await;
+        assert_eq!(
+            moments(&hub, &project).await,
+            [
+                "Verify began",
+                "verified true",
+                "Review began",
+                "reviewed false",
+                "reviewed true",
+                "Merge began",
+                "Merge done"
             ]
         );
         server.shutdown().await;

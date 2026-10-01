@@ -65,6 +65,10 @@ pub enum ProjectCmd {
         /// The command that says a task's work is right (`cargo gate`).
         #[arg(long)]
         verifier: Option<String>,
+        /// Have a fresh-context reviewer read each task's work before it merges, looking for
+        /// this as well as for what would be wrong to merge.
+        #[arg(long)]
+        review: Option<String>,
         /// Push the target branch to the orchestrator's clone's `origin` after each merge.
         #[arg(long)]
         push: bool,
@@ -87,6 +91,9 @@ pub enum ProjectCmd {
         /// A new verifier command; empty for none.
         #[arg(long)]
         verifier: Option<String>,
+        /// A new reviewer's brief; empty for no reviewer.
+        #[arg(long)]
+        review: Option<String>,
         /// Push the target after each merge (`true`), or stop (`false`).
         #[arg(long)]
         push: Option<bool>,
@@ -341,6 +348,26 @@ pub enum TaskCmd {
         #[command(flatten)]
         which: TaskRef,
     },
+    /// Say whether a task's work may merge, as the person, over its reviewer's word or in its
+    /// place: `--approve` puts verified work in the merge queue, `--changes` gives it back to
+    /// its agent with the summary and findings.
+    Review {
+        #[command(flatten)]
+        which: TaskRef,
+        /// The work may merge.
+        #[arg(long, conflicts_with = "changes", required_unless_present = "changes")]
+        approve: bool,
+        /// The work needs changes first.
+        #[arg(long)]
+        changes: bool,
+        /// The review in a few lines.
+        #[arg(long, default_value = "")]
+        summary: String,
+        /// A finding that blocks, as `path:line: words`, `path: words` or just words; again
+        /// for more.
+        #[arg(long = "finding")]
+        findings: Vec<String>,
+    },
     /// One node in full: a task with its brief and Claude Code's own subagents and to-dos, or
     /// with `--task orchestrator` the orchestrator's.
     Get {
@@ -396,6 +423,7 @@ pub async fn project(
             repo,
             target,
             verifier,
+            review,
             push,
             orchestrator,
             limits,
@@ -407,6 +435,7 @@ pub async fn project(
                 repo,
                 target: Some(target),
                 verifier,
+                review,
                 push,
                 orchestrator,
                 limits: limits.change(),
@@ -415,9 +444,9 @@ pub async fn project(
             let status = ops::project_create(&mut res, spec, key).await?;
             print_status(&mut res, &status, json).await
         }
-        ProjectCmd::Update { project, orchestrator, verifier, push, limits, metadata } => {
+        ProjectCmd::Update { project, orchestrator, verifier, review, push, limits, metadata } => {
             let limits = limits.change();
-            let edit = ProjectEdit { orchestrator, verifier, push, limits, metadata };
+            let edit = ProjectEdit { orchestrator, verifier, review, push, limits, metadata };
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
         }
@@ -580,6 +609,13 @@ pub async fn task(
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_merge(link, project, task, key).await?
         }
+        TaskCmd::Review { which, approve, summary, findings, .. } => {
+            let findings = findings.iter().map(|f| finding(f)).collect();
+            let verdict =
+                slopty_proto::project::ReviewVerdict { approved: approve, summary, findings };
+            let (project, task) = (which.project.as_deref(), which.task.as_deref());
+            ops::task_review(link, project, task, verdict, key).await?
+        }
         TaskCmd::Get { which } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             let node = ops::task_get(link, project, task).await?;
@@ -629,4 +665,25 @@ async fn print_status(
         res.workers().await?.iter().map(|w| (w.worker, w.name.clone())).collect();
     print!("{}", view::status_text(status, &names));
     Ok(())
+}
+
+/// A finding the person writes, `path:line: words`, `path: words` or just words, as one that
+/// blocks.
+fn finding(text: &str) -> slopty_proto::project::Finding {
+    let blocker =
+        |path: Option<&str>, line: Option<u32>, body: &str| slopty_proto::project::Finding {
+            path: path.map(str::to_owned),
+            line,
+            severity: "blocker".to_owned(),
+            blocking: true,
+            body: body.trim().to_owned(),
+        };
+    let Some((place, body)) = text.split_once(": ") else { return blocker(None, None, text) };
+    match place.rsplit_once(':') {
+        Some((path, line)) if line.parse::<u32>().is_ok() => {
+            blocker(Some(path), line.parse().ok(), body)
+        }
+        _ if place.contains(char::is_whitespace) => blocker(None, None, text),
+        _ => blocker(Some(place), None, body),
+    }
 }

@@ -8,7 +8,9 @@
 //! which asks the workers, is the hub's.
 
 use slopty_core::WallMs;
-use slopty_proto::project::StepState;
+use slopty_proto::project::{
+    FINDING_MAX, FINDING_PATH_MAX, FINDINGS_MAX, REVIEW_SUMMARY_MAX, ReviewRun, StepKind, StepState,
+};
 
 use super::{
     Change, Changed, Merge, Moment, ProjectId, Projects, Record, Refused, SUMMARY_MAX, Task,
@@ -22,6 +24,8 @@ pub(crate) enum Job {
     Verify(TaskId),
     /// Merge the task at the head of the queue.
     Merge(TaskId),
+    /// Start a fresh-context reviewer on a task's work, verified or with no verifier.
+    Review(TaskId),
 }
 
 /// One move the lane makes to a task; what is absent stays.
@@ -33,6 +37,10 @@ pub(crate) struct Advance {
     pub step: Option<TaskStep>,
     /// What its verifier said.
     pub verified: Option<VerifierRun>,
+    /// What its reviewer said.
+    pub reviewed: Option<ReviewRun>,
+    /// Forget what was judged of earlier work first, its step with it: the work changed.
+    pub fresh: bool,
     /// Its place in the queue, or its merge.
     pub merge: Queue,
     /// The timeline's entry for the move, when it is worth one.
@@ -63,21 +71,43 @@ fn queue_of(record: &Record) -> Vec<TaskId> {
     queued.into_iter().map(|(_, id)| id).collect()
 }
 
+/// What a task being checked waits for next: its verifier, its reviewer, or nothing the lane
+/// does (a reviewer at work, or one that ended without a verdict, which the person settles).
+fn check_of(record: &Record, t: &Task) -> Option<Job> {
+    let review = t.step.as_ref().filter(|s| s.kind == StepKind::Review);
+    let reviewing = review.is_some_and(|s| s.term.is_some() && s.running());
+    let stopped = review.is_some_and(|s| matches!(s.state, StepState::Failed { .. }));
+    if reviewing || (stopped && t.reviewed.is_none()) {
+        return None;
+    }
+    let verifies = t.verifier.is_some() || record.project.verifier.is_some();
+    let verified = t.verified.as_ref().is_some_and(|r| r.passed) || !verifies;
+    if record.project.review.is_some() && verified && t.reviewed.is_none() {
+        Some(Job::Review(t.id))
+    } else {
+        Some(Job::Verify(t.id))
+    }
+}
+
 impl Projects {
-    /// What `id`'s lane does next: the task waiting longest for its verifier, else the head of
-    /// the queue. Verifying comes first, since an agent waits on the answer and every pass
-    /// feeds the queue.
+    /// What `id`'s lane does next: for the task waiting longest to be checked, its verifier or
+    /// its reviewer; else the head of the queue. Checking comes first, since an agent waits on
+    /// the answer and every pass feeds the queue. A reviewer runs beside the lane, so a task
+    /// whose reviewer is at work waits without holding the rest.
     pub(crate) fn next_job(&self, id: &ProjectId) -> Option<Job> {
         let record = self.records.get(id)?;
-        let verifying = record
-            .tasks
-            .iter()
-            .filter(|t| t.state == TaskState::Verifying)
-            .min_by_key(|t| (t.updated_ms, t.id));
-        match verifying {
-            Some(t) => Some(Job::Verify(t.id)),
-            None => queue_of(record).first().copied().map(Job::Merge),
-        }
+        let mut checking: Vec<&Task> =
+            record.tasks.iter().filter(|t| t.state == TaskState::Verifying).collect();
+        checking.sort_by_key(|t| (t.updated_ms, t.id));
+        checking
+            .into_iter()
+            .find_map(|t| check_of(record, t))
+            .or_else(|| queue_of(record).first().copied().map(Job::Merge))
+    }
+
+    /// Whether `id` has a reviewer read each task's work before it merges.
+    pub(crate) fn reviews(&self, id: &ProjectId) -> bool {
+        self.records.get(id).is_some_and(|r| r.project.review.is_some())
     }
 
     /// The projects with work for their lanes.
@@ -106,6 +136,11 @@ impl Projects {
         {
             return Err(invalid(format!("task {task} cannot go from {:?} to {to:?}", t.state)));
         }
+        if advance.fresh {
+            t.verified = None;
+            t.reviewed = None;
+            t.step = None;
+        }
         if let Some(to) = advance.state {
             t.state = to;
         }
@@ -121,6 +156,9 @@ impl Projects {
         if let Some(mut run) = advance.verified {
             run.summary = clipped(&run.summary, SUMMARY_MAX);
             t.verified = Some(run);
+        }
+        if let Some(run) = advance.reviewed {
+            t.reviewed = Some(bounded(run));
         }
         match advance.merge {
             Queue::Keep => {}
@@ -140,10 +178,17 @@ impl Projects {
         self.may_merge(id, task)?;
         let record = self.record(id)?;
         let t = record.task(task)?;
-        let verifies = t.verifier.is_some() || record.project.verifier.is_some();
+        let checks = t.verifier.is_some()
+            || record.project.verifier.is_some()
+            || record.project.review.is_some();
         let from = t.state;
-        let advance = if verifies {
-            Advance { state: Some(TaskState::Verifying), merge: Queue::Leave, ..Advance::default() }
+        let advance = if checks {
+            Advance {
+                state: Some(TaskState::Verifying),
+                merge: Queue::Leave,
+                fresh: true,
+                ..Advance::default()
+            }
         } else {
             Advance {
                 state: Some(TaskState::Done),
@@ -177,6 +222,23 @@ impl Projects {
         }
         Ok(())
     }
+}
+
+/// `run` within the bounds a card carries ([`ReviewRun::MAX_BYTES`]): its texts clipped, and
+/// the findings past [`FINDINGS_MAX`] counted rather than kept, those that block kept first.
+pub(crate) fn bounded(mut run: ReviewRun) -> ReviewRun {
+    let verdict = &mut run.verdict;
+    verdict.summary = clipped(&verdict.summary, REVIEW_SUMMARY_MAX);
+    verdict.findings.sort_by_key(|f| !f.blocking);
+    let past = verdict.findings.len().saturating_sub(FINDINGS_MAX);
+    verdict.findings.truncate(FINDINGS_MAX);
+    for f in &mut verdict.findings {
+        f.path = f.path.as_deref().map(|p| clipped(p, FINDING_PATH_MAX));
+        f.severity = clipped(&f.severity, FINDING_PATH_MAX);
+        f.body = clipped(&f.body, FINDING_MAX);
+    }
+    run.more = run.more.saturating_add(u16::try_from(past).unwrap_or(u16::MAX));
+    run
 }
 
 #[cfg(test)]

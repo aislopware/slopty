@@ -67,6 +67,7 @@ mod golden_project {
             }),
             target: "main".to_owned(),
             verifier: Some("cargo gate".to_owned()),
+            review: Some("A wire change comes with its goldens".to_owned()),
             push: false,
             orchestrator: Some(term()),
             limits: Limits::default(),
@@ -132,6 +133,7 @@ mod golden_project {
                 merge_request: false,
             }),
             verified: Some(run(false, "clippy: 2 errors")),
+            reviewed: None,
             merge: Some(Merge::Queued { since_ms: at() }),
             created_ms: at(),
             updated_ms: WallMs::from_millis(1_790_000_005_000),
@@ -236,6 +238,7 @@ mod golden_project {
                 repo: "~/src/slopty".to_owned(),
                 target: "main".to_owned(),
                 verifier: Some("cargo gate".to_owned()),
+                review: Some("A wire change comes with its goldens".to_owned()),
                 push: false,
                 orchestrator: Some(term()),
                 limits,
@@ -248,6 +251,7 @@ mod golden_project {
                 project: project_id(),
                 orchestrator: None,
                 verifier: None,
+                review: Some(String::new()),
                 push: Some(true),
                 limits: LimitsChange { depth: Some(3), ..LimitsChange::default() },
                 metadata: None,
@@ -410,6 +414,69 @@ mod golden_project {
         };
         let card = Task { merge: Some(merged), state: TaskState::Merged, ..task() };
         snap("task_merged_card", &card.card(&Natives::default()));
+    }
+
+    /// A task's fresh-context review: the checkout the reviewer reads, its verdict, and the
+    /// card that carries it.
+    #[test]
+    fn review() {
+        use slopty_proto::project::{Finding, ReviewRun, ReviewVerdict, Reviewer};
+        snap(
+            "review_checkout",
+            &request(Verb::ReviewCheckout {
+                worker: term().worker,
+                repo: "/w/slopty".to_owned(),
+                worktree: "slopty-review-3".to_owned(),
+                head: "slopty/slopty/3".to_owned(),
+                target: "main".to_owned(),
+            }),
+        );
+        snap(
+            "checked_out",
+            &reply(Outcome::CheckedOut {
+                path: "/home/c/slopty/verify/slopty-review-3".to_owned(),
+                head: commit('a'),
+                base: commit('b'),
+            }),
+        );
+        let verdict = ReviewVerdict {
+            approved: false,
+            summary: "The wire change has no golden.".to_owned(),
+            findings: vec![
+                Finding {
+                    path: Some("crates/slopty-proto/src/project.rs".to_owned()),
+                    line: Some(431),
+                    severity: "blocker".to_owned(),
+                    blocking: true,
+                    body: "A new field on Project with no golden for it.".to_owned(),
+                },
+                Finding {
+                    path: None,
+                    line: None,
+                    severity: "nit".to_owned(),
+                    blocking: false,
+                    body: "The doc says 'verifier' where it means the reviewer.".to_owned(),
+                },
+            ],
+        };
+        snap(
+            "task_review",
+            &request(Verb::TaskReview {
+                project: project_id(),
+                task: TaskId(3),
+                verdict: verdict.clone(),
+            }),
+        );
+        let run = ReviewRun {
+            verdict,
+            more: 1,
+            head: commit('a'),
+            base: commit('b'),
+            by: Reviewer::Agent(term()),
+            took_ms: 95_000,
+        };
+        let card = Task { reviewed: Some(run), state: TaskState::Waiting, ..task() };
+        snap("task_reviewed_card", &card.card(&Natives::default()));
     }
 
     /// What the server asks of workers for a task around its agent: a clone, a branch
