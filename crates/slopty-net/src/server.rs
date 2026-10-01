@@ -133,6 +133,8 @@ pub struct ServerLink {
     pub remote: SocketAddr,
     /// The server's name, from its `Welcome`.
     pub name: String,
+    /// The server's number for this link, from its `Welcome`.
+    pub link: u64,
     /// Dialer → server.
     pub tx: FramedSend<ToServer>,
     /// Server → dialer: for a worker, requests; for a client or agent, the directory first,
@@ -177,7 +179,7 @@ async fn hello(conn: Connection, remote: SocketAddr, role: Role) -> Result<Serve
         .await
         .map_err(|_elapsed| NetError::Protocol("welcome timeout"))??;
     match reply {
-        FromServer::Welcome { name } => Ok(ServerLink { conn, remote, name, tx, rx }),
+        FromServer::Welcome { name, link } => Ok(ServerLink { conn, remote, name, link, tx, rx }),
         FromServer::Refused(why) => {
             conn.close(close_code::NORMAL.into(), b"refused");
             Err(DialError::Refused(why))

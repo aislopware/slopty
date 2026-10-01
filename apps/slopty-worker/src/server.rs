@@ -199,7 +199,7 @@ async fn session(
             }
             Err(DialError::Net(e)) => return Err(e.into()),
         };
-    let ServerLink { conn, remote, name, tx, mut rx } = link;
+    let ServerLink { conn, remote, name, tx, mut rx, .. } = link;
     redial.linked(std::time::Instant::now());
     tracing::info!(server = %name, %remote, "registered with the server");
     let (out, out_rx) = mpsc::channel::<ToServer>(OUT_DEPTH);
@@ -223,6 +223,8 @@ async fn session(
     }
     // A registration outlives a facts task that ended: the facts it sent stand.
     let mut facts_watched = true;
+    // Nor its threads: the whole table goes first on every registration.
+    let mut threads = daemon.threads.as_ref().map(crate::threads::Publish::of);
     let mut requests = JoinSet::new();
     let why = loop {
         tokio::select! {
@@ -349,6 +351,14 @@ async fn session(
                     break "the writer stopped";
                 }
             }
+            frame = next_frame(&mut threads) => match frame {
+                Some(frame) => {
+                    if out.send(ToServer::Threads(frame)).await.is_err() {
+                        break "the writer stopped";
+                    }
+                }
+                None => threads = None,
+            },
             Some(done) = requests.join_next() => {
                 if let Err(e) = done {
                     tracing::warn!(error = %e, "a forwarded verb's task failed");
@@ -366,6 +376,16 @@ async fn session(
     writer.abort();
     conn.close(slopty_net::worker::close_code::NORMAL.into(), b"worker link ended");
     Ok(why)
+}
+
+/// The next frame of the thread table for the server; never, with no threads.
+async fn next_frame(
+    threads: &mut Option<crate::threads::Publish>,
+) -> Option<slopty_proto::thread::wire::TableFrame> {
+    match threads {
+        Some(threads) => threads.next().await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Send what is queued until the link fails. A reply too large for one message goes as an

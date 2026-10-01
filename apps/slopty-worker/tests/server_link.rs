@@ -117,7 +117,7 @@ mod tests {
         async fn welcome(link: AcceptedLink) -> (Self, Registration) {
             let Role::Worker(registration) = link.role else { panic!("{:?}", link.role) };
             let mut tx = link.tx;
-            let welcome = FromServer::Welcome { name: "fake".into() };
+            let welcome = FromServer::Welcome { name: "fake".into(), link: 1 };
             tx.send(&welcome).await.unwrap();
             (Self { conn: link.conn, tx, rx: link.rx, heard: Vec::new(), next: 1 }, *registration)
         }
@@ -262,6 +262,51 @@ mod tests {
         assert!(
             starts.iter().all(|at| (before..=after).contains(at)),
             "{before}..={after}: {starts:?}"
+        );
+    }
+
+    /// Once registered, the worker publishes its thread table to the server, all of it first:
+    /// a Claude Code session that starts in a terminal is a row there, naming that terminal,
+    /// for the server's attention ladder.
+    #[tokio::test]
+    async fn the_server_hears_the_workers_threads() {
+        use slopty_proto::thread::wire::TableFrame;
+
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (mut peer, reg) = Peer::welcome(link).await;
+        peer.heard(|m| matches!(m, ToServer::Threads(TableFrame::Snapshot { .. }))).await;
+
+        let Outcome::Opened(term) = peer.ask(open(reg.worker, dir.path())).await else {
+            panic!("the terminal opens");
+        };
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/slopty-agent/tests/fixtures/conversation/tools/transcript.jsonl");
+        let transcript = dir.path().join("projects").join("s1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::copy(fixture, &transcript).unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": transcript, "cwd": dir.path(),
+        });
+        hook(dir.path(), term.session, start).await;
+        let thread = slopty_agent::observed::thread_of("s1");
+        let has_row = |m: &ToServer| match m {
+            ToServer::Threads(
+                TableFrame::Snapshot { rows, .. } | TableFrame::Delta { rows, .. },
+            ) => rows.iter().any(|r| r.id == thread && r.terminal == Some(term.session)),
+            _ => false,
+        };
+        peer.heard(has_row).await;
+        let first = peer.heard.iter().position(|m| matches!(m, ToServer::Threads(_)));
+        let snapshot = first.and_then(|at| peer.heard.get(at));
+        assert!(
+            matches!(snapshot, Some(ToServer::Threads(TableFrame::Snapshot { .. }))),
+            "the whole table first: {snapshot:?}"
         );
     }
 

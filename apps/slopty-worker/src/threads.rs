@@ -356,6 +356,46 @@ fn held(ask: &AskId) -> Option<u64> {
     ask.0.parse().ok()
 }
 
+/// The thread table as the server is told of it: every row first, then what changed. The
+/// server ranks the rows for the whole fleet (`slopty_server::hub`'s ladder).
+#[derive(Debug)]
+pub struct Publish {
+    host: Host,
+    have: Option<Cursor>,
+    changed: watch::Receiver<Cursor>,
+}
+
+impl Publish {
+    /// The table of `threads`, from the start.
+    #[must_use]
+    pub fn of(threads: &Threads) -> Self {
+        let changed = threads.host.table_watch();
+        Self { host: threads.host.clone(), have: None, changed }
+    }
+
+    /// The next frame to send: the whole table the first time, then each change that moved a
+    /// row. Cancel safe. `None` once the host is gone.
+    pub async fn next(&mut self) -> Option<TableFrame> {
+        loop {
+            if self.have.is_some() {
+                self.changed.changed().await.ok()?;
+            }
+            self.changed.borrow_and_update();
+            let frame = self.host.table(self.have);
+            let (cursor, moved) = match &frame {
+                TableFrame::Snapshot { cursor, .. } => (*cursor, true),
+                TableFrame::Delta { cursor, rows, removed } => {
+                    (*cursor, !rows.is_empty() || !removed.is_empty())
+                }
+            };
+            self.have = Some(cursor);
+            if moved {
+                return Some(frame);
+            }
+        }
+    }
+}
+
 /// Keep the client's table current from `have`: what it lacks now, then each change.
 async fn table(host: Host, mut have: Option<Cursor>, out: mpsc::Sender<WorkerMsg>) {
     let mut changed = host.table_watch();

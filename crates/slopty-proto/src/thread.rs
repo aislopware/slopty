@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WallMs};
 use uuid::Uuid;
 
+pub mod attention;
 pub mod detail;
 mod reduce;
 pub mod wire;
@@ -986,6 +987,10 @@ pub enum Action {
         /// The tree.
         tree: TreeRef,
     },
+    /// Whether the working tree, as last snapshotted, holds changes the person has not kept:
+    /// the worker compares it with what they kept, or the thread's first snapshot when they
+    /// have kept nothing.
+    ToReview(bool),
 }
 
 /// A place in a thread's log, or in a worker's thread table.

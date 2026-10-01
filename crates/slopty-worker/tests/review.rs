@@ -177,7 +177,8 @@ mod review {
 
     /// A hunk put back leaves the other; a revert of a file that changed since is refused,
     /// and the same intent again is its first outcome with nothing done. What is kept leaves
-    /// what is left to review, a hunk or a file at a time.
+    /// what is left to review, a hunk or a file at a time, and the thread is to review until
+    /// everything is kept.
     #[tokio::test]
     async fn changes_are_kept_and_put_back_by_hunk_and_by_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -189,8 +190,10 @@ mod review {
         let changed = A.replace("two\n", "TWO\n").replace("eleven\n", "ELEVEN\nmore\n");
         std::fs::write(repo.join("a.txt"), &changed).unwrap();
         std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        assert!(!rig.host.state(rig.thread).unwrap().0.to_review, "nothing ended yet");
         rig.end(1);
         rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
+        rig.until(|s| s.to_review).await;
         let review = rig.snapshots.review(rig.thread, ReviewScope::Turn(TurnId(1))).await;
 
         let back = IntentId::new();
@@ -215,10 +218,13 @@ mod review {
         assert_eq!(rig.pick(IntentId::new(), &whole).await, Outcome::Done);
         let left = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
         assert!(left.files.is_empty(), "nothing left to review: {left:#?}");
+        let to_review = || rig.host.state(rig.thread).unwrap().0.to_review;
+        assert!(!to_review(), "all of it kept, the thread is no longer to review");
 
         let gone = Intent::Revert(pick(&review, "new.txt", vec![]));
         assert_eq!(rig.pick(IntentId::new(), &gone).await, Outcome::Done);
         assert!(!repo.join("new.txt").exists(), "an added file put back is no file");
+        assert!(to_review(), "what was kept is gone from the tree: a change to review");
     }
 
     /// A thread outside git takes no snapshot and its review says why.

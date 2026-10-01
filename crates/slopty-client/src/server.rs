@@ -12,6 +12,7 @@
 //! ([`crate::directory`]).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use slopty_core::WorkerId;
 use slopty_net::server::{DialError, ServerLink, connect};
@@ -19,7 +20,8 @@ use slopty_net::{HostAddr, NetError};
 use slopty_proto::RequestId;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{FromServer, Refusal, Role, ToServer};
-use tokio::sync::{mpsc, oneshot};
+use slopty_proto::thread::attention::Presence;
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::update::UpdateNotice;
 
@@ -35,6 +37,8 @@ pub enum ServerEvent {
     Linked {
         /// Its name.
         name: String,
+        /// Its number for this link ([`slopty_proto::thread::attention::Present::link`]).
+        link: u64,
     },
     /// A message from it: the directory, a worker's change, an event.
     Message(Box<FromServer>),
@@ -54,13 +58,14 @@ pub enum ServerEvent {
 pub struct ServerTask {
     task: tokio::task::JoinHandle<()>,
     calls: mpsc::Sender<Call>,
+    presence: Arc<watch::Sender<Option<Presence>>>,
 }
 
 impl ServerTask {
     /// A handle that sends verbs up this link, for as long as it runs.
     #[must_use]
     pub fn caller(&self) -> ServerCaller {
-        ServerCaller { calls: self.calls.clone() }
+        ServerCaller { calls: self.calls.clone(), presence: Arc::clone(&self.presence) }
     }
 }
 
@@ -72,6 +77,8 @@ impl ServerTask {
 #[derive(Clone, Debug)]
 pub struct ServerCaller {
     calls: mpsc::Sender<Call>,
+    /// Where the person is, sent on every change and again on every link.
+    presence: Arc<watch::Sender<Option<Presence>>>,
 }
 
 impl ServerCaller {
@@ -90,6 +97,24 @@ impl ServerCaller {
     pub async fn wake(&self, worker: WorkerId) -> Outcome {
         self.call(Verb::Wake { worker }).await
     }
+
+    /// Say where the person is on this client. Nothing goes when it is what was said last;
+    /// a new link is told it at once.
+    pub fn presence(&self, presence: Presence) {
+        self.presence.send_if_modified(|now| {
+            let changed = now.as_ref() != Some(&presence);
+            if changed {
+                *now = Some(presence);
+            }
+            changed
+        });
+    }
+
+    /// Where this client last said the person is.
+    #[must_use]
+    pub fn presence_said(&self) -> Option<Presence> {
+        self.presence.borrow().clone()
+    }
 }
 
 impl ServerCaller {
@@ -98,7 +123,8 @@ impl ServerCaller {
     #[must_use]
     pub fn queued() -> (Self, CallQueue) {
         let (calls, queued) = mpsc::channel(CALL_DEPTH);
-        (Self { calls }, CallQueue { queued })
+        let presence = Arc::new(watch::Sender::new(None));
+        (Self { calls, presence }, CallQueue { queued })
     }
 }
 
@@ -158,8 +184,11 @@ pub fn spawn(
 ) -> (ServerTask, mpsc::Receiver<ServerEvent>) {
     let (tx, rx) = mpsc::channel(EVENT_DEPTH);
     let (calls, queued) = mpsc::channel(CALL_DEPTH);
-    let task = runtime.spawn(run(endpoint, addr, role, first, tx, queued));
-    (ServerTask { task, calls }, rx)
+    let presence = Arc::new(watch::Sender::new(None));
+    let said = presence.subscribe();
+    let up = Up { calls: queued, presence: said };
+    let task = runtime.spawn(run(endpoint, addr, role, first, tx, up));
+    (ServerTask { task, calls, presence }, rx)
 }
 
 async fn run(
@@ -168,7 +197,7 @@ async fn run(
     role: Role,
     mut first: Option<ServerLink>,
     tx: mpsc::Sender<ServerEvent>,
-    mut calls: mpsc::Receiver<Call>,
+    mut up: Up,
 ) {
     let mut redial = slopty_net::redial::Redial::default();
     loop {
@@ -180,7 +209,7 @@ async fn run(
         let event = match dialled {
             Ok(link) => {
                 redial.linked(std::time::Instant::now());
-                let Some(why) = pump(link, &tx, &mut calls).await else { return };
+                let Some(why) = pump(link, &tx, &mut up).await else { return };
                 ServerEvent::Unlinked { why }
             }
             Err(DialError::Refused(why)) => ServerEvent::Refused(why),
@@ -212,26 +241,33 @@ async fn run(
         loop {
             tokio::select! {
                 () = &mut wait => break,
-                Some(call) = calls.recv() => call.answer(unreachable(&why)),
+                Some(call) = up.calls.recv() => call.answer(unreachable(&why)),
             }
         }
     }
 }
 
+/// What goes up the link from this client: verbs, and where the person is.
+#[derive(Debug)]
+struct Up {
+    calls: mpsc::Receiver<Call>,
+    presence: watch::Receiver<Option<Presence>>,
+}
+
 /// Hand on everything the link carries and send up every verb until it ends; the reason, or
 /// `None` once nobody listens.
-async fn pump(
-    link: ServerLink,
-    tx: &mpsc::Sender<ServerEvent>,
-    calls: &mut mpsc::Receiver<Call>,
-) -> Option<String> {
+async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> Option<String> {
+    let Up { calls, presence } = up;
     tracing::debug!(server = %link.remote, name = %link.name, "server linked");
-    let ServerLink { conn, name, tx: mut up, mut rx, .. } = link;
+    let ServerLink { conn, name, link, tx: mut up, mut rx, .. } = link;
     let close = || conn.close(slopty_net::worker::close_code::NORMAL.into(), b"bye");
-    if tx.send(ServerEvent::Linked { name }).await.is_err() {
+    if tx.send(ServerEvent::Linked { name, link }).await.is_err() {
         close();
         return None;
     }
+    // A new link knows nothing of where the person is: it is told at once.
+    presence.mark_changed();
+    let mut said_open = true;
     let mut pending: HashMap<RequestId, Call> = HashMap::new();
     let mut next: RequestId = 0;
     let why = loop {
@@ -250,6 +286,18 @@ async fn pump(
                 }
                 Err(e) => break e.to_string(),
             },
+            changed = presence.changed(), if said_open => {
+                if changed.is_err() {
+                    said_open = false;
+                    continue;
+                }
+                let said = presence.borrow_and_update().clone();
+                if let Some(said) = said
+                    && let Err(e) = up.send(&ToServer::Presence(said)).await
+                {
+                    break e.to_string();
+                }
+            }
             Some(call) = calls.recv() => {
                 next = next.wrapping_add(1);
                 let request = ToServer::Request { id: next, key: None, verb: call.verb.clone() };

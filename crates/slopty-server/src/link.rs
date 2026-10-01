@@ -72,7 +72,7 @@ async fn worker(
     tailscale: Option<&LocalApi>,
 ) {
     let (out, queue) = mpsc::channel(LINK_QUEUE);
-    let welcome = FromServer::Welcome { name: hub.name().to_owned() };
+    let welcome = FromServer::Welcome { name: hub.name().to_owned(), link: hub.number_link() };
     // First in the queue before the worker is reachable, so no request can overtake it.
     if out.try_send(welcome).is_err() {
         return;
@@ -186,15 +186,19 @@ async fn client(hub: Hub, link: AcceptedLink, name: String, speaker: Speaker) {
     tracing::info!(%name, %remote, "client connected");
     // Subscribed before the state is read, so no change falls between the two.
     let mut changes = hub.subscribe();
-    let welcome = FromServer::Welcome { name: hub.name().to_owned() };
+    let (out, mut replies) = mpsc::channel(LINK_QUEUE);
+    let number = hub.number_link();
+    // Only a person's client is where a person is, and gets notices.
+    let seated = (speaker == Speaker::Person).then(|| hub.seat(number, name.clone(), out.clone()));
+    let seat = seated.as_ref().map(crate::hub::Seated::link);
+    let welcome = FromServer::Welcome { name: hub.name().to_owned(), link: number };
     if tx.send(&welcome).await.is_err() {
         return;
     }
     if tell(&mut tx, state(&hub)).await.is_err() {
         return;
     }
-    let (out, mut replies) = mpsc::channel(LINK_QUEUE);
-    let mut reader = tokio::spawn(read_requests(hub.clone(), rx, out, speaker));
+    let mut reader = tokio::spawn(read_requests(hub.clone(), rx, out, speaker, seat));
     loop {
         let msgs = tokio::select! {
             ended = &mut reader => {
@@ -220,6 +224,7 @@ async fn client(hub: Hub, link: AcceptedLink, name: String, speaker: Speaker) {
     // Takes the link's requests with it: a `WaitFor` or `Events` nobody will read the answer to
     // stops here, not at its timeout minutes later.
     reader.abort();
+    drop(seated);
     conn.close(slopty_net::worker::close_code::NORMAL.into(), b"bye");
 }
 
@@ -229,6 +234,7 @@ async fn read_requests(
     mut rx: FramedRecv<ToServer>,
     out: mpsc::Sender<FromServer>,
     speaker: Speaker,
+    seat: Option<u64>,
 ) -> NetError {
     // Dropped (returning or aborted) with the link, which aborts every request still running.
     let mut requests = JoinSet::new();
@@ -241,6 +247,13 @@ async fn read_requests(
                     let outcome = hub.dispatch_as(speaker, key, verb).await;
                     let _gone = out.send(FromServer::Reply { id, outcome }).await;
                 });
+            }
+            Ok(ToServer::Presence(presence)) => {
+                if let Some(link) = seat {
+                    hub.presence(link, presence);
+                } else {
+                    tracing::debug!("ignored where the person is, from no person's client");
+                }
             }
             Ok(_other) => tracing::debug!("ignored a message a client does not send"),
             Err(e) => return e,
@@ -257,13 +270,15 @@ async fn tell(tx: &mut FramedSend<FromServer>, msgs: Vec<FromServer>) -> Result<
 }
 
 /// The fleet's state: the directory, then every terminal and the agent in it, then every
-/// project.
+/// project, the attention ladder, and where the person is.
 fn state(hub: &Hub) -> Vec<FromServer> {
     let mut snapshot = hub.state();
     let parts = Hub::project_parts(&mut snapshot);
     let mut msgs =
         vec![FromServer::Directory(snapshot.directory), FromServer::Terminals(snapshot.terminals)];
     msgs.extend(parts.into_iter().map(|part| FromServer::Projects(Box::new(part))));
+    msgs.push(FromServer::Ladder(Box::new(hub.ladder())));
+    msgs.push(FromServer::Present(hub.present()));
     msgs
 }
 

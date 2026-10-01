@@ -246,6 +246,12 @@ pub enum ToServer {
         /// How far that is, when git says.
         percent: Option<u8>,
     },
+    /// A worker's thread table: a snapshot after registering, then what changed
+    /// ([`crate::thread::wire::TableFrame`]).
+    Threads(crate::thread::wire::TableFrame),
+    /// A client says where the person is on it, on every change
+    /// ([`crate::thread::attention::Presence`]).
+    Presence(crate::thread::attention::Presence),
 }
 
 /// Server → dialer.
@@ -255,6 +261,9 @@ pub enum FromServer {
     Welcome {
         /// The server's name.
         name: String,
+        /// The server's number for this link, the one it lists a person's client under
+        /// ([`crate::thread::attention::Present::link`]).
+        link: u64,
     },
     /// The hello was refused; the connection closes after this.
     Refused(Refusal),
@@ -311,6 +320,14 @@ pub enum FromServer {
         /// The reports, as the agent reads them.
         context: String,
     },
+    /// For a client or agent: the fleet's attention ladder, sent after the projects and again
+    /// whenever a rung moves. Each replaces the last.
+    Ladder(Box<crate::thread::attention::Ladder>),
+    /// For a client: every client where the person is, sent after the ladder and again on
+    /// every change. Each replaces the last.
+    Present(Vec<crate::thread::attention::Present>),
+    /// For a client: a notice the server picked it to show, from where the person is.
+    Notice(Box<crate::thread::attention::Notice>),
 }
 
 /// Why the server refused a hello.

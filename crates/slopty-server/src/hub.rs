@@ -59,10 +59,13 @@ use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 use crate::deliver::Deliveries;
 use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
 
+mod ladder;
 mod projects;
 mod queue;
 mod review;
 mod steps;
+
+pub use ladder::Seated;
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus
 /// grace; `docs/decisions/topology.md`).
@@ -204,6 +207,8 @@ struct State {
     lanes: queue::Lanes,
     /// The reviewers at work, by the task they read.
     reviews: review::Reviews,
+    /// Every worker's thread rows, the ladder made of them, and where the person is.
+    board: ladder::Board,
 }
 
 /// A project change made under a key, so a repeat of the verb answers as the first did.
@@ -1435,7 +1440,8 @@ impl Lease {
                 let moved = state.projects.report(worker, &report, WallMs::now());
                 hub.projects_moved(&mut state, moved);
             }
-            ToServer::Hello { .. } | ToServer::Request { .. } => {
+            ToServer::Threads(frame) => state.board.take(worker, frame),
+            ToServer::Hello { .. } | ToServer::Request { .. } | ToServer::Presence(_) => {
                 tracing::debug!(%worker, "ignored a message a worker does not send");
             }
         }

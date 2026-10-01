@@ -227,9 +227,9 @@ impl Workspace {
     /// One thing the server link said.
     fn server_event(&mut self, event: ServerEvent, cx: &mut Context<Self>) {
         match event {
-            ServerEvent::Linked { name } => {
-                tracing::info!(%name, "server linked");
-                self.directory.set_server(ServerState::Linked { name });
+            ServerEvent::Linked { name, link } => {
+                tracing::info!(%name, link, "server linked");
+                self.directory.set_server(ServerState::Linked { name, link });
                 self.view.update(cx, |v, cx| v.set_server_status(None, cx));
             }
             ServerEvent::Unlinked { why } => self.server_down(why, UNREACHABLE, cx),
@@ -328,6 +328,8 @@ impl Workspace {
                 | Happening::SessionOpened { .. }
                 | Happening::SessionExited { .. } => {}
             },
+            // The workspace's to show; until it does, nothing here takes them.
+            Change::Ladder(_) | Change::Present(_) | Change::Notice(_) => {}
             Change::Terminals(terminals) => {
                 let agents = terminals
                     .into_iter()

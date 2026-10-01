@@ -120,6 +120,8 @@ mod tests {
             panic!("then the projects")
         };
         assert!(part.first && part.last && part.projects.is_empty(), "in one part: {part:?}");
+        assert_eq!(next(&mut client).await, FromServer::Ladder(Box::default()), "then the ladder");
+        assert_eq!(next(&mut client).await, FromServer::Present(Vec::new()), "and the people");
 
         client
             .tx
@@ -236,6 +238,8 @@ mod tests {
         let _directory = next(&mut client).await;
         let _terminals = next(&mut client).await;
         let _projects = next(&mut client).await;
+        let _ladder = next(&mut client).await;
+        let _present = next(&mut client).await;
 
         cut.store(true, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();

@@ -393,6 +393,10 @@ pub struct ThreadRow {
     pub caps: Vec<Cap>,
     /// Its open facts.
     pub facts: BTreeMap<String, String>,
+    /// Whether its tree holds changes the person has not kept ([`super::Action::ToReview`]).
+    pub to_review: bool,
+    /// Its meters: model, mode, context, cost, the plan's rate windows.
+    pub meters: super::Meters,
     /// When it last changed.
     pub updated_ms: WallMs,
 }

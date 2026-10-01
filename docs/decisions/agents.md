@@ -311,6 +311,52 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   `Claude Code` names nothing. The first prompt that is not a command then names it, and
   keeps it.
 
+- ✅ **The server ranks every thread on one ladder, and a notice goes where the person is**
+  (2026-10-02, `crates/slopty-proto/src/thread/attention.rs`,
+  `crates/slopty-server/src/hub/ladder.rs`; the tests in `hub/ladder/tests.rs`,
+  `crates/slopty-server/tests/ladder.rs`, and `the_server_hears_the_workers_threads` in
+  `apps/slopty-worker/tests/server_link.rs`).
+  - **One rank from the row alone.** `Rung::of(&ThreadRow)` gives Needs you (a request open,
+    or the phase says so), Failed, To review, Working, Waiting or Idle. The server and every
+    client rank alike, and the words are the same on every surface.
+  - **To review is the tree, not the agent's word.** After each turn's end snapshot, and after
+    each keep or revert, the worker compares the tree with what the person kept, or with the
+    thread's first snapshot when they kept nothing (`Action::ToReview`). That holds for every
+    agent and every edit, a Bash edit included. Keeping every file clears it, and putting back
+    something kept raises it again.
+  - **The server ranks, because it holds every worker.** Each worker publishes its table
+    (`ToServer::Threads`, the whole table on every registration, then each change). A subagent
+    folds into the thread it hangs from, and never stands or notifies on its own. A subagent
+    that needs the person lifts its parent at once. One that failed reads as working while
+    anyone in its family still works or waits, since the parent may carry on without it, and
+    lifts the parent to failed only once the whole family is at rest. Otherwise the parent
+    stands as high as its highest subagent. The rest roll up per tile, worker,
+    project node (a subtask into its task), project and fleet. Each roll-up counts every rung
+    and names the thread to go to first, on the highest rung and there longest. The server
+    ranks again on every row, terminal or project change, and sends the ladder only when it
+    moved, whole each time, since rungs move far more rarely than rows.
+  - **A workspace is the client's own**, laid out on the device alone, so the client folds the
+    tiles it holds with `Ladder::over`. The fold is the same one the server uses.
+  - **Presence routes the notices.** A person's client (`Role::Client`, never an agent's link)
+    says where they are: `Seat::Desk` or `Seat::Handheld`, whether they are at it now, the
+    workspace in front and the tiles on screen. A thread that hangs from no other and climbs
+    to needing the person, fails, or comes to rest from working is a notice. Notices go:
+    - to no client while its tile is on screen where the person is;
+    - to the desks they are at, and never to a handheld beside them;
+    - to the handhelds they hold when they are at no desk;
+    - to every client when they are at none.
+
+    A thread first seen at a rung (a worker that comes back) is no news. A finished notice
+    carries how long the thread worked, from its first busy rung to its rest, by the worker's
+    clock. The client shows it only when that is over its person's slow-command time. A
+    notice a subagent raised names it (`Notice::via`). Every client hears who is where
+    (`FromServer::Present`), and finds itself there by the number its `Welcome` gave its link.
+    A client says where the person is through `ServerCaller::presence`, which sends nothing
+    for the same again and tells every new link at once.
+  - **The server's notice is the only trigger for an OS notification or an alert.** Once
+    notices flow, a client shows only what it is handed and never decides on its own from the
+    ladder or a status, so two devices never both alert for one thing.
+
 - ✅ **A client mirrors each open thread, holds its intents in an outbox, and keeps both on
   disk** (2026-10-02, `crates/slopty-client/src/threads.rs`; the unit tests beside it and
   `a_thread_and_an_answer_outlive_a_dropped_link_and_a_relaunch` in

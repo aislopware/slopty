@@ -127,6 +127,7 @@ impl Server {
         let tasks = vec![
             tokio::spawn(store.clone().keep(hub.persisted())),
             tokio::spawn(Hub::deliver_reports(hub.downgrade())),
+            tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
             tokio::spawn(mcp::serve(mcp_listener, config.admission, hub.clone())),
         ];

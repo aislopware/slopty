@@ -44,6 +44,8 @@ pub struct ThreadState {
     pub meters: Meters,
     /// The commands the composer offers.
     pub commands: Vec<Command>,
+    /// Whether its tree holds changes the person has not kept ([`Action::ToReview`]).
+    pub to_review: bool,
 }
 
 impl ThreadState {
@@ -62,6 +64,7 @@ impl ThreadState {
             tasks: Vec::new(),
             meters: Meters::default(),
             commands: Vec::new(),
+            to_review: false,
         }
     }
 
@@ -131,6 +134,7 @@ impl ThreadState {
                     }
                 }
             }
+            Action::ToReview(to_review) => self.to_review = *to_review,
         }
     }
 
@@ -238,6 +242,8 @@ impl ThreadState {
             drive: self.meta.drive.clone(),
             caps: self.meta.caps.clone(),
             facts: self.meta.facts.clone(),
+            to_review: self.to_review,
+            meters: self.meters.clone(),
             updated_ms,
         }
     }

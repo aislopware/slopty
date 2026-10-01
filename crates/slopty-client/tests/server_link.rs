@@ -55,7 +55,7 @@ mod tests {
     async fn welcome(listener: &ServerListener, directory: Vec<WorkerInfo>) -> AcceptedLink {
         let mut link = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
         assert!(matches!(link.role, Role::Client { .. }), "{:?}", link.role);
-        link.tx.send(&FromServer::Welcome { name: "hub".to_owned() }).await.unwrap();
+        link.tx.send(&FromServer::Welcome { name: "hub".to_owned(), link: 1 }).await.unwrap();
         link.tx.send(&FromServer::Directory(directory)).await.unwrap();
         link
     }
@@ -73,9 +73,12 @@ mod tests {
         let mut dir = Directory::default();
 
         let mut link = welcome(&listener, vec![worker(id, Liveness::Online)]).await;
-        let ServerEvent::Linked { name } = next(&mut events).await else { panic!("not linked") };
+        let ServerEvent::Linked { name, link: number } = next(&mut events).await else {
+            panic!("not linked")
+        };
+        assert_eq!(number, 1, "the number the server gave the link");
         assert_eq!(name, "hub");
-        dir.set_server(ServerState::Linked { name });
+        dir.set_server(ServerState::Linked { name, link: number });
         let ServerEvent::Message(msg) = next(&mut events).await else { panic!("no directory") };
         assert_eq!(dir.apply(*msg), vec![Change::Listed(id)]);
 
@@ -148,5 +151,51 @@ mod tests {
 
         let _granted = welcome(&listener, Vec::new()).await;
         let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("not let in") };
+    }
+
+    /// The next message a client sent, which must say where the person is.
+    async fn said(
+        rx: &mut slopty_net::framed::FramedRecv<slopty_proto::server::ToServer>,
+    ) -> slopty_proto::thread::attention::Presence {
+        match tokio::time::timeout(WAIT, rx.recv()).await.unwrap().unwrap() {
+            slopty_proto::server::ToServer::Presence(p) => p,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Where the person is goes up on each change, not again for the same, and to a new link
+    /// at once.
+    #[tokio::test]
+    async fn presence_goes_on_each_change_and_to_each_new_link() {
+        use slopty_proto::thread::attention::{Presence, Seat};
+        let listener =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::default()).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = slopty_net::client::bind_client().unwrap();
+        let addr = HostAddr::new("127.0.0.1", port);
+        let (task, mut events) =
+            spawn(&tokio::runtime::Handle::current(), endpoint, addr, role(), None);
+        let caller = task.caller();
+        let at = |active| Presence {
+            seat: Seat::Desk,
+            active,
+            workspace: None,
+            showing: Vec::new(),
+            focus: None,
+        };
+
+        let mut link = welcome(&listener, Vec::new()).await;
+        let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("not linked") };
+        caller.presence(at(true));
+        assert_eq!(said(&mut link.rx).await, at(true));
+        caller.presence(at(true));
+        caller.presence(at(false));
+        assert_eq!(said(&mut link.rx).await, at(false), "the same again sent nothing");
+
+        link.conn.close(0_u32.into(), b"restart");
+        while !matches!(next(&mut events).await, ServerEvent::Unlinked { .. }) {}
+        let mut again = welcome(&listener, Vec::new()).await;
+        assert_eq!(said(&mut again.rx).await, at(false), "a new link is told at once");
+        assert_eq!(caller.presence_said(), Some(at(false)));
     }
 }

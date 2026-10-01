@@ -107,8 +107,32 @@ impl Snapshots {
                 tracing::warn!(%thread, turn = turn.0, "a turn's snapshot was not kept: {e}");
                 continue;
             }
-            self.host.apply(thread, vec![Action::Snapshot { turn, edge, tree }]);
+            self.host.apply(thread, vec![Action::Snapshot { turn, edge, tree: tree.clone() }]);
+            if edge == Edge::After {
+                self.judge(thread, &repo, &tree).await;
+            }
         }
+    }
+
+    /// Mark whether `thread`'s tree `now` holds changes its person has not kept: anything
+    /// apart from what they kept, or from the thread's first snapshot when they kept nothing.
+    async fn judge(&self, thread: ThreadId, repo: &Repo, now: &TreeRef) {
+        let kept = match repo.kept(thread).await {
+            Ok(kept) => kept,
+            Err(e) => {
+                tracing::warn!(%thread, "what was kept could not be read: {e}");
+                return;
+            }
+        };
+        self.host.update(thread, |state| {
+            let to_review = kept.clone().or_else(|| base(state)).is_some_and(|from| from != *now);
+            let actions = if state.to_review == to_review {
+                vec![]
+            } else {
+                vec![Action::ToReview(to_review)]
+            };
+            (actions, ())
+        });
     }
 
     /// A snapshot of `thread`'s tree now, under its lock.
@@ -193,6 +217,12 @@ impl Snapshots {
                     (_, Some(base)) => repo.keep(thread, &base, pick).await.map(|_kept| ()),
                     (_, None) => Err(Failed("No snapshot was taken to keep from".to_owned())),
                 };
+                if done.is_ok() {
+                    match repo.take().await {
+                        Ok(now) => self.judge(thread, &repo, &now).await,
+                        Err(e) => tracing::warn!(%thread, "a snapshot failed: {e}"),
+                    }
+                }
                 done.map_or_else(|e| refused(e.0), |()| Outcome::Done)
             }
         };

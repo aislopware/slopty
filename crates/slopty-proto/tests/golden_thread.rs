@@ -213,6 +213,22 @@ mod golden_thread {
         }
     }
 
+    fn meters() -> Meters {
+        Meters {
+            model: Some("Opus 5.5".to_owned()),
+            model_id: Some("claude-opus-5-5".to_owned()),
+            mode: Some("default".to_owned()),
+            context_tokens: Some(42_000),
+            context_window: Some(200_000),
+            cost_micro_usd: Some(250_000),
+            limits: vec![Limit {
+                name: "five-hour".to_owned(),
+                used_bp: 1_250,
+                resets_ms: Some(ms(99)),
+            }],
+        }
+    }
+
     fn state() -> ThreadState {
         let mut state = ThreadState::new(meta());
         for action in [
@@ -231,6 +247,8 @@ mod golden_thread {
             Action::ItemStarted(item("toolu_2", ItemBody::Tool(Box::new(call(kind::EXEC, None))))),
             Action::RequestOpened(Box::new(request())),
             Action::PendingSet(vec![pending()]),
+            Action::MetersSet(meters()),
+            Action::ToReview(true),
         ] {
             state.apply(&action);
         }
@@ -484,19 +502,7 @@ mod golden_thread {
                 item: Some(ItemId("toolu_3".to_owned())),
                 output: Some(clip("watching")),
             }]),
-            Action::MetersSet(Meters {
-                model: Some("Opus 5.5".to_owned()),
-                model_id: Some("claude-opus-5-5".to_owned()),
-                mode: Some("default".to_owned()),
-                context_tokens: Some(42_000),
-                context_window: Some(200_000),
-                cost_micro_usd: Some(250_000),
-                limits: vec![Limit {
-                    name: "five-hour".to_owned(),
-                    used_bp: 1_250,
-                    resets_ms: Some(ms(99)),
-                }],
-            }),
+            Action::MetersSet(meters()),
             Action::CommandsSet(vec![Command {
                 name: "compact".to_owned(),
                 description: "Compact the context".to_owned(),
@@ -510,6 +516,7 @@ mod golden_thread {
                 edge: Edge::After,
                 tree: TreeRef("9f2e".to_owned()),
             },
+            Action::ToReview(true),
         ];
         snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
     }
@@ -712,6 +719,91 @@ mod golden_thread {
                 rows: vec![row],
                 removed: vec![ThreadId::from_uuid(Uuid::from_u128(9))],
             },
+        );
+    }
+
+    /// The attention ladder and where the person is, on the server's link.
+    #[test]
+    fn attention() {
+        use slopty_core::WorkerId;
+        use slopty_proto::orchestration::TermRef;
+        use slopty_proto::project::{ProjectId, TaskId};
+        use slopty_proto::server::{FromServer, ToServer};
+        use slopty_proto::thread::attention::{
+            Counts, Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat,
+            Standing, ThreadAt, Via,
+        };
+        let worker = WorkerId::from_uuid(Uuid::from_u128(0x3011));
+        let session = SessionId::from_uuid(Uuid::from_u128(0x5e55));
+        let tile = TermRef { worker, session };
+        let at = ThreadAt { worker, thread: thread() };
+        let ranked = Ranked { at, rung: Rung::NeedsYou, since_ms: ms(1_500) };
+        let standing = Standing {
+            rung: Rung::NeedsYou,
+            counts: Counts {
+                needs_you: 1,
+                failed: 2,
+                to_review: 3,
+                working: 4,
+                waiting: 5,
+                idle: 6,
+            },
+            top: Some(at),
+            since_ms: ms(1_500),
+        };
+        let project = ProjectId::new("slopty").expect("a project id");
+        let ladder = Ladder {
+            threads: vec![ranked],
+            tiles: vec![(tile, standing)],
+            workers: vec![(worker, standing)],
+            nodes: vec![
+                (NodeAt { project: project.clone(), task: None }, Standing::default()),
+                (NodeAt { project: project.clone(), task: Some(TaskId(2)) }, standing),
+            ],
+            projects: vec![(project, standing)],
+            fleet: standing,
+        };
+        snap("attention_ladder", &FromServer::Ladder(Box::new(ladder)));
+        let presence = Presence {
+            seat: Seat::Desk,
+            active: true,
+            workspace: Some("slopty".to_owned()),
+            showing: vec![tile],
+            focus: Some(tile),
+        };
+        snap("attention_presence", &ToServer::Presence(presence.clone()));
+        snap("attention_welcome", &FromServer::Welcome { name: "studio".to_owned(), link: 7 });
+        let handheld = Presence { seat: Seat::Handheld, active: false, ..presence.clone() };
+        snap(
+            "attention_present",
+            &FromServer::Present(vec![
+                Present { link: 1, name: "mac-studio".to_owned(), presence },
+                Present { link: 2, name: "iPhone".to_owned(), presence: handheld },
+            ]),
+        );
+        for (name, kind, worked_ms) in [
+            ("attention_notice_needs_you", NoticeKind::NeedsYou, None),
+            ("attention_notice_failed", NoticeKind::Failed, None),
+            ("attention_notice_finished", NoticeKind::Finished, Some(93_000)),
+        ] {
+            let notice = Notice {
+                kind,
+                thread: at,
+                tile: Some(session),
+                title: "Fix the ladder".to_owned(),
+                text: "Wants to run cargo test".to_owned(),
+                worked_ms,
+                via: (kind == NoticeKind::NeedsYou).then(|| Via {
+                    thread: ThreadId::from_uuid(Uuid::from_u128(0x5ab)),
+                    title: "Explore the hub".to_owned(),
+                }),
+            };
+            snap(name, &FromServer::Notice(Box::new(notice)));
+        }
+        let rows = vec![state().row(ms(2_500))];
+        snap(
+            "attention_threads",
+            &ToServer::Threads(TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 3 }, rows }),
         );
     }
 }

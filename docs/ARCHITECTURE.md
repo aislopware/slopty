@@ -1136,9 +1136,17 @@ guard orchestration's input uses, with each waiting message on the thread's pend
 turn's edges are snapshotted (`git add -A` through an index of the thread's own, into
 `refs/slopty/threads/<thread>/<turn>-{before,after}`, `slopty_worker::thread::review`), off
 the turn's path. A review is a diff between two snapshots, cut into hunks on the worker, and
-keep and revert act per file or hunk against the blobs the review showed. The model lands
-beside today's Claude path, described below, which it replaces once the clients switch
-over.
+keep and revert act per file or hunk against the blobs the review showed. A thread whose tree
+differs from what the person kept is to review (`Action::ToReview`). Each worker publishes its
+table to the server too (`ToServer::Threads`), and the server ranks the fleet on one
+attention ladder (`slopty_proto::thread::attention`, `slopty_server::hub`'s `ladder`): Needs
+you, Failed, To review, Working, Waiting, Idle, a subagent folded into its parent, rolled up
+per tile, worker, project node, project and fleet, and sent to every link as
+`FromServer::Ladder` whenever a rung moves. A person's client says where they are
+(`ToServer::Presence`: desk or handheld, active, the tiles on screen). A thread that comes to
+need them, fails or finishes is a `FromServer::Notice` to the clients they are at, none while
+its tile is on screen and no handheld while they are at a desk. The model lands beside today's
+Claude path, described below, which it replaces once the clients switch over.
 
 Claude Code only, for now, and always through its own TUI, which stays the source of truth.
 Slopty reads the agent's state and points the human at the terminal that needs them. It is

@@ -19,6 +19,7 @@ use slopty_net::endpoint::WORKER_PORT;
 use slopty_proto::orchestration::HubEvent;
 use slopty_proto::server::{FromServer, Liveness, WorkerInfo};
 use slopty_proto::terminal::SessionSummary;
+use slopty_proto::thread::attention::{Ladder, Notice, Present};
 
 /// File name of the cached directory inside the client's data directory.
 pub const CACHE_FILE: &str = "directory.json";
@@ -35,6 +36,9 @@ pub enum ServerState {
     Linked {
         /// The server's name.
         name: String,
+        /// The server's number for this client's link, the one [`Change::Present`] lists it
+        /// under.
+        link: u64,
     },
     /// The last attempt failed or the link dropped; redialling, with the reason.
     Unreachable {
@@ -69,6 +73,13 @@ pub enum Change {
     /// Every open terminal, and the agent in each: the whole state, replacing what the events
     /// before it said.
     Terminals(Vec<(WorkerId, SessionSummary)>),
+    /// The fleet's attention ladder, replacing the last.
+    Ladder(Box<Ladder>),
+    /// Where the person is on every client that said, replacing the last.
+    Present(Vec<Present>),
+    /// A notice the server picked this client to show. Once notices flow they are the only
+    /// trigger of an OS notification or an alert, so two devices never both alert.
+    Notice(Box<Notice>),
 }
 
 /// Whether to dial a worker now, and where.
@@ -185,6 +196,9 @@ impl Directory {
             | FromServer::Reply { .. }
             | FromServer::Projects { .. }
             | FromServer::Deliver { .. } => Vec::new(),
+            FromServer::Ladder(ladder) => vec![Change::Ladder(ladder)],
+            FromServer::Present(present) => vec![Change::Present(present)],
+            FromServer::Notice(notice) => vec![Change::Notice(notice)],
         }
     }
 
@@ -340,7 +354,7 @@ mod tests {
 
     fn linked() -> Directory {
         let mut d = Directory::default();
-        d.set_server(ServerState::Linked { name: "server".to_owned() });
+        d.set_server(ServerState::Linked { name: "server".to_owned(), link: 1 });
         d
     }
 
@@ -417,7 +431,7 @@ mod tests {
             Dial::At(HostAddr::new("fd7a:115c:a1e0::2", 45550)),
             "the server's word is stale, so try it"
         );
-        d.set_server(ServerState::Linked { name: "s".to_owned() });
+        d.set_server(ServerState::Linked { name: "s".to_owned(), link: 1 });
         assert_eq!(d.dial(away), Dial::Hold(Liveness::Gone), "once it answers, it holds");
         d.set_server(ServerState::Unreachable { why: "timed out".to_owned() });
         assert!(d.degraded());
