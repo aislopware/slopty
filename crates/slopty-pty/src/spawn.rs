@@ -835,20 +835,33 @@ mod tests {
 
     /// A child that exits after the watch is made but before the looks is found by the look
     /// for an exit.
+    ///
+    /// The hooks run in the parent, so nothing holds the child: one that fails its `chdir`
+    /// before the parent adds the watch is `Gone` instead (a loaded runner did, 2026-10-01).
+    /// Both are right; the spawn is repeated until the look after the watch has been seen.
     #[cfg(target_vendor = "apple")]
     #[test]
     fn a_child_that_exits_while_the_watch_is_made_is_caught_up_with() {
         let missing = std::env::temp_dir().join("slopty-no-such-dir-for-spawn");
         let pty = Pty::open(TermSize::default()).unwrap();
         let launch = Launch::new(Path::new("/bin/sh"), ["sh"], [], &missing).unwrap();
-        hook::set(|moment, pid| {
-            if moment == hook::Moment::Watching {
-                wait_for_exit(pid);
-            }
-        });
-        let error = launch.spawn(pty.slave()).unwrap_err();
-        assert!(error.to_string().starts_with("chdir "), "{error}");
-        assert_eq!(hook::last(), Some(hook::CaughtUp::Exited));
+        let mut seen = Vec::new();
+        while seen.len() < 200 && !seen.contains(&Some(hook::CaughtUp::Exited)) {
+            hook::set(|moment, pid| {
+                if moment == hook::Moment::Watching {
+                    wait_for_exit(pid);
+                }
+            });
+            let error = launch.spawn(pty.slave()).unwrap_err();
+            assert!(error.to_string().starts_with("chdir "), "{error}");
+            seen.push(hook::last());
+        }
+        assert!(
+            seen.iter()
+                .all(|how| matches!(how, Some(hook::CaughtUp::Gone | hook::CaughtUp::Exited))),
+            "{seen:?}"
+        );
+        assert_eq!(seen.last(), Some(&Some(hook::CaughtUp::Exited)), "{seen:?}");
     }
 
     /// A setuid program that has already run by the time the watch is made (`login`, which
