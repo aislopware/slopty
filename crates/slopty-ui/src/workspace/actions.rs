@@ -355,6 +355,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
     ];
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));
     items.extend(crate::file::pages_palette_items(&workspace));
+    items.extend(crate::file::editor_palette_items(&workspace));
     // Only a debug build's page is open to Web Inspector, and only the Mac has one of its own.
     if cfg!(all(debug_assertions, target_os = "macos")) {
         items.push(w("Inspect page", IconName::Wrench, Box::new(InspectPage)));

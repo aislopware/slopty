@@ -939,3 +939,5 @@ fn measure_the_reload_diff_at_its_bound() {
     took.sort();
     eprintln!("exact diff of {half} against {half} lines: p50 {:?}, max {:?}", took[10], took[20]);
 }
+
+mod editing;

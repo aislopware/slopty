@@ -20,7 +20,7 @@ use syntect::highlighting::{
     Color, FontStyle as SyntectStyle, HighlightIterator, HighlightState, Highlighter,
     ScopeSelectors, StyleModifier, Theme as ScopeTheme, ThemeItem,
 };
-use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxReference, SyntaxSet};
 
 use crate::colors::hsla;
 
@@ -175,7 +175,69 @@ impl Syntax {
     pub fn name(self) -> &'static str {
         &self.0.name
     }
+
+    /// How this language writes a comment, asked of the grammar itself: the first common
+    /// token that the grammar parses as opening a comment. A line comment wins over a block
+    /// pair, as editors toggle lines; none for a grammar with neither (JSON).
+    ///
+    /// The bundle's dump carries no `.tmPreferences` (syntect leaves the metadata out of its
+    /// packs), so the grammar's own scopes are the only word on it there is, and they cover
+    /// every grammar in the bundle with no table to keep. A probe parses one short line from
+    /// the start state, microseconds once the grammar's patterns are compiled.
+    #[must_use]
+    pub fn comment(self) -> Option<Comment> {
+        let line = LINE_COMMENTS.into_iter().find(|token| {
+            let probe = format!("{token} x\n");
+            self.comments_at(&probe, token.len().saturating_add(1))
+        });
+        line.map(Comment::Line).or_else(|| {
+            BLOCK_COMMENTS
+                .into_iter()
+                .find(|(open, close)| {
+                    let probe = format!("{open} x {close}\n");
+                    self.comments_at(&probe, open.len().saturating_add(1))
+                })
+                .map(|(open, close)| Comment::Block(open, close))
+        })
+    }
+
+    /// Whether byte `at` of `line`, parsed from the grammar's start, is inside a comment.
+    fn comments_at(self, line: &str, at: usize) -> bool {
+        let Ok(comment) = Scope::new("comment") else { return false };
+        let mut state = ParseState::new(self.0);
+        let Ok(ops) = state.parse_line(line, syntaxes()) else { return false };
+        let mut stack = ScopeStack::new();
+        for (offset, op) in &ops {
+            if *offset > at {
+                break;
+            }
+            if stack.apply(op).is_err() {
+                return false;
+            }
+        }
+        stack.as_slice().iter().any(|scope| comment.is_prefix_of(*scope))
+    }
 }
+
+/// How a language writes a comment ([`Syntax::comment`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Comment {
+    /// From the token to the end of the line (`//`, `#`, `--`).
+    Line(&'static str),
+    /// Between an opening and a closing token (`/*` and `*/`, `<!--` and `-->`).
+    Block(&'static str, &'static str),
+}
+
+/// Line-comment tokens in the order they are tried: C's family first, so a grammar with both
+/// `//` and `#` (PHP) gets the first; SQL's and Haskell's before the scripts' `#`, which the
+/// MySQL dialect also takes; then Lisp and INI's, TeX and Erlang's, Basic's, Fortran's and
+/// Vim's.
+const LINE_COMMENTS: [&str; 8] = ["//", "--", "#", ";", "%", "'", "!", "\""];
+
+/// Block-comment pairs, for a grammar with no line comment: C's (CSS), markup's, Haskell's
+/// and the ML family's.
+const BLOCK_COMMENTS: [(&str, &str); 4] =
+    [("/*", "*/"), ("<!--", "-->"), ("{-", "-}"), ("(*", "*)")];
 
 /// The grammars bat ships, loaded once on first use (a few tens of milliseconds, paid on a
 /// background thread by the first file tile): syntect's own set has no TOML, TypeScript,
@@ -510,6 +572,37 @@ mod tests {
             ("/w/flake.nix", "Nix"),
         ] {
             assert_eq!(Syntax::for_path(path, "").map(Syntax::name), Some(name), "{path}");
+        }
+        Ok(())
+    }
+
+    /// Each grammar says how it comments, with no table: C's family `//`, the scripts `#`,
+    /// SQL and Lua `--`, Lisp `;`, and a block pair where there is no line comment. JSON takes `//`
+    /// as Sublime does (JSONC).
+    #[test]
+    fn a_grammar_says_how_it_writes_a_comment() -> Result<(), String> {
+        for (tag, comment) in [
+            ("rs", Some(Comment::Line("//"))),
+            ("ts", Some(Comment::Line("//"))),
+            ("go", Some(Comment::Line("//"))),
+            ("c", Some(Comment::Line("//"))),
+            ("py", Some(Comment::Line("#"))),
+            ("sh", Some(Comment::Line("#"))),
+            ("toml", Some(Comment::Line("#"))),
+            ("yaml", Some(Comment::Line("#"))),
+            ("Dockerfile", Some(Comment::Line("#"))),
+            ("sql", Some(Comment::Line("--"))),
+            ("lua", Some(Comment::Line("--"))),
+            ("hs", Some(Comment::Line("--"))),
+            ("clj", Some(Comment::Line(";"))),
+            ("tex", Some(Comment::Line("%"))),
+            ("css", Some(Comment::Block("/*", "*/"))),
+            ("html", Some(Comment::Block("<!--", "-->"))),
+            ("md", Some(Comment::Block("<!--", "-->"))),
+            ("json", Some(Comment::Line("//"))),
+            ("diff", None),
+        ] {
+            assert_eq!(grammar(tag)?.comment(), comment, "{tag}");
         }
         Ok(())
     }

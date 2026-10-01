@@ -209,6 +209,10 @@ const FILE_INPUT: Option<&str> = Some("FileEditor > Input");
 const FILE: Option<&str> = Some(crate::file::CTX);
 /// A file tile's find bar: the terminal's find keys, in the bar's own context.
 const FILE_SEARCH: Option<&str> = Some("FileSearch");
+/// A file tile's editor itself, not its fields: deeper than gpui-kit's `Input`, so ours win.
+const FILE_TEXT: Option<&str> = Some("FileText > Input");
+/// A file tile's "go to line" field.
+const FILE_GO_TO: Option<&str> = Some(crate::file::GO_TO_CTX);
 /// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
 const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
 /// Contexts with no text field in them, where a key alone cannot be wanted for typing.
@@ -403,6 +407,15 @@ pub fn defaults() -> Vec<Command> {
         c(File, "close_find", t::CloseFind, &["escape"], &[FILE_SEARCH]),
         c(File, "find_next", t::FindNext, &["cmd-g"], &[FILE_SEARCH]),
         c(File, "find_previous", t::FindPrev, &["cmd-shift-g"], &[FILE_SEARCH]),
+        // The editor's own commands, Zed's and VS Code's keys.
+        c(File, "toggle_comment", crate::file::ToggleComment, &["cmd-/"], &[FILE_TEXT]),
+        c(File, "go_to_line", crate::file::GoToLine, &["ctrl-g"], &[FILE_TEXT]),
+        c(File, "close_go_to_line", crate::file::CloseGoToLine, &["escape"], &[FILE_GO_TO]),
+        c(File, "move_line_up", crate::file::MoveLineUp, &["alt-up"], &[FILE_TEXT]),
+        c(File, "move_line_down", crate::file::MoveLineDown, &["alt-down"], &[FILE_TEXT]),
+        c(File, "duplicate_line", crate::file::DuplicateLine, &["alt-shift-down"], &[FILE_TEXT]),
+        c(File, "jump_to_bracket", crate::file::JumpToBracket, &["cmd-shift-\\"], &[FILE_TEXT]),
+        c(File, "toggle_soft_wrap", crate::file::ToggleSoftWrap, &[], &[FILE]),
         // A PDF's pages, as Preview reads them.
         c(File, "scroll_down", crate::file::ScrollDown, &["down"], &[FILE_PAGES]),
         c(File, "scroll_up", crate::file::ScrollUp, &["up"], &[FILE_PAGES]),

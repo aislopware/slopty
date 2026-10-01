@@ -4314,3 +4314,60 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_key_row_knows_its_overflow_before_layout`,
     `the_overlay_prints_the_pinned_round_trip_and_the_hold_keeps_the_links`,
     `a_long_list_fades_at_its_foot_in_its_first_frame`.
+
+- ✅ **The file editor stays light: its helpers come from the text and the grammar, never a
+  language server** (2026-10-01). The user wants the file tile for quick edits on a remote
+  machine, not an IDE, and ruled a language server out as too heavy. What a light editor is
+  expected to have was read from the primary sources (Zed's and Lapce's default keymaps and
+  settings, Helix's book and source, Sublime Text 4215's shipped package, micro's help pages,
+  Warp's editor actions). All six toggle a line comment (⌘/ in five), go to a line (⌃G in four,
+  `line:col` in most), find and replace with regular expressions, pair brackets and quotes, and
+  indent on ↩. Five of six add the next match to the selection (⌘D) and match brackets; most
+  move and copy lines (⌥↑/⌥↓, ⌥⇧↓), guess the file's indentation, and complete words from the
+  file. Only some have an outline without a server, EditorConfig, trimming on save, or format
+  on save.
+  - **Round one** (this entry): ⌘/ toggles comments in the file's language, ⌃G goes to
+    `line`, `line:col` or `line,col` (the caret follows the typing, ↩ keeps it, Esc puts it
+    back, as Zed's), ⌥↑/⌥↓ move the selected lines, ⌥⇧↓ copies them, the bracket pair at the
+    caret is framed in a muted hairline and ⌘⇧\ jumps between its two ends, Tab follows the
+    file's own indentation, CRLF line ends and a UTF-8 BOM are kept, and Markdown wraps. "Wrap
+    long lines" toggles it per tile. Each is in the palette with its chord (`file::editing`).
+  - **Already in gpui-kit and on:** closing pairs (a quote is not paired after a word
+    character, so "don't" types as written), indentation on ↩ from the brackets, indent guides
+    (now at the file's own width; at gpui-kit's default of 2 a four-space file drew two guides
+    per level), ⌥-click for another caret and ⌥⇧-drag for a block. ⌘⌥↑/↓ stay the workspace's
+    focus keys, so a caret is added with the pointer.
+  - **The comment token is asked of the grammar.** bat's grammars (two-face) carry no
+    `.tmPreferences`: syntect leaves its `metadata` out of a pack (`#[serde(skip)]`), and
+    two-face loads none. So `Syntax::comment` parses `// x`, `-- x`, `# x` and the other
+    common tokens from the grammar's start state and takes the first whose `x` lands in a
+    `comment` scope, else the first block pair (`/* */`, `<!-- -->`) that does. Every grammar
+    in the bundle answers with no table to keep, in microseconds. `--` is tried before `#`,
+    which the MySQL flavour of SQL also takes. JSON answers `//`, as Sublime does (JSONC).
+  - **Indentation is guessed as Helix and Lapce do**: a histogram of the indent *increases*
+    between neighbouring lines over the first 10 000 (`edit::detect_indent`), tabs when tab
+    lines outnumber space lines, the narrower width on a tie, and the ` *` lines of a block
+    comment skipped. A file with no indented line gets four spaces.
+  - **Line ends and the BOM are kept apart from the text** (`edit::Format`). A file whose
+    every line ends `\r\n` is edited as `\n` lines and saved with `\r\n` again, so a new line
+    ends like the others; gpui-kit's ↩ puts in `\n`, which made mixed files before. A file that
+    mixes the two keeps its bytes, so a save changes no line the person did not touch. The
+    worker still sends a file that is not UTF-8 as not text.
+  - **The commands bind in `FileText > Input`**, a key context round the editor alone, so ⌘/
+    and ⌥↑ do nothing in the tile's find and "go to line" fields, and they win over gpui-kit's
+    `Input` bindings in the editor.
+  - **Not built, judged:** a language server (ruled out); format on save. That would take a
+    worker verb with a timeout, a per-project setting and a way to report a formatter's
+    failure, for what the shell beside the tile does with `cargo fmt`, after which the tile
+    reloads by itself. Zed and Lapce ship it off. Folding stays off: without a syntax tree its
+    ranges would be guessed from indentation, which reads worse than none in a small tile.
+  - **Next:** find and replace with regular expressions and `$1` captures (the `regex` crate),
+    ⌘D and ⌘⇧L (gpui-kit has no public way to add a selection, so a fork change), words from
+    the file completed through gpui-kit's completion provider, a symbol list from the
+    grammar's `entity.name.*` scopes (Sublime's `showInSymbolList` set), and trailing
+    whitespace trimmed on the lines an edit touched, with EditorConfig read by the worker.
+  - Numbers in MEASUREMENTS.md, 2026-10-01, "the editor's helpers". Tests: `edit::tests`
+    (indentation, line ends, comments, moved and copied lines, brackets, go to line),
+    `highlight::tests::a_grammar_says_how_it_writes_a_comment`, and `file::tests::editing` with
+    the real editor and the default keys. The goldens `editor`, `editor-dirty` and
+    `editor-conflict` show one indent guide per level.

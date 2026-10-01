@@ -20,11 +20,15 @@
 //! and sends it whole, and the platform decodes it at the size the tile draws it.
 
 pub mod decode;
+pub mod edit;
+mod editing;
 pub mod pdf_text;
 mod preview;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use edit::{Format, Indent};
+pub use editing::{GO_TO_CTX, TEXT_CTX, palette_items as editor_palette_items};
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -62,10 +66,29 @@ mod actions {
             SaveFile,
             /// Answer the program waiting on this file tile: saved, and done with.
             FinishEdit,
+            /// Comment the selected lines, or uncomment them, in the file's language.
+            ToggleComment,
+            /// Open the tile's "go to line" field.
+            GoToLine,
+            /// Close the "go to line" field, the caret back where it was.
+            CloseGoToLine,
+            /// Swap the selected lines with the one above.
+            MoveLineUp,
+            /// Swap the selected lines with the one below.
+            MoveLineDown,
+            /// Write the selected lines again below them.
+            DuplicateLine,
+            /// Put the caret on the bracket that pairs with the one at it.
+            JumpToBracket,
+            /// Wrap long lines at the tile's width, or stop.
+            ToggleSoftWrap,
         ]
     );
 }
-pub use actions::{FinishEdit, SaveFile};
+pub use actions::{
+    CloseGoToLine, DuplicateLine, FinishEdit, GoToLine, JumpToBracket, MoveLineDown, MoveLineUp,
+    SaveFile, ToggleComment, ToggleSoftWrap,
+};
 
 /// The key context of a file tile; ⌘S is bound in it.
 pub const CTX: &str = "FileEditor";
@@ -138,10 +161,13 @@ impl EventEmitter<FileViewEvent> for FileView {}
 /// A version of the file: what the worker sent, or what this tile saved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Version {
-    /// The text as the worker sends it, without the file's final newline.
+    /// The text as the editor holds it: without the file's final newline, its BOM, or the
+    /// `\r` of lines that all end `\r\n`.
     text: String,
     /// Whether the file ends with a newline, which the worker's text leaves off.
     newline: bool,
+    /// How the file ends its lines and whether it has a BOM, put back on save.
+    format: Format,
     /// Its modification time on disk.
     modified_ms: WallMs,
 }
@@ -149,12 +175,13 @@ struct Version {
 impl Version {
     /// The version a text read describes.
     fn of(text: &str, final_newline: bool, modified_ms: WallMs) -> Self {
-        Self { text: text.to_owned(), newline: final_newline, modified_ms }
+        let (text, format) = Format::split(text, final_newline);
+        Self { text: text.into_owned(), newline: final_newline, format, modified_ms }
     }
 
     /// The bytes the file holds for this text.
     fn file_text(&self, text: &str) -> String {
-        if self.newline { format!("{text}\n") } else { text.to_owned() }
+        self.format.join(text, self.newline)
     }
 }
 
@@ -384,6 +411,18 @@ pub struct FileView {
     syntax: Option<Syntax>,
     /// The picture or PDF the file is, while it is one.
     preview: Option<preview::Preview>,
+    /// How the file indents, read from its text at each read; Tab follows it.
+    indent: Indent,
+    /// Long lines wrap at the tile's width (on for prose).
+    wrap: bool,
+    /// Whether the editor wraps now; it is told at the next frame, which has the window.
+    wrapped: bool,
+    /// The bracket pair at the caret, opening first, tinted while the caret is at it.
+    bracket: Option<(usize, usize)>,
+    /// The caret and the edit the pair was found for: it is looked for again when either moves.
+    bracket_at: Option<(usize, u64)>,
+    /// The "go to line" field, while open.
+    goto: Option<editing::GoTo>,
     /// The editor's events, and its every change marking this view dirty: the tile draws
     /// this view from GPUI's view cache, which a change inside the editor would not otherwise
     /// invalidate.
@@ -452,6 +491,12 @@ impl FileView {
             edit: 0,
             syntax: None,
             preview: None,
+            indent: Indent::DEFAULT,
+            wrap: false,
+            wrapped: false,
+            bracket: None,
+            bracket_at: None,
+            goto: None,
             _editor_events: [events, redraw],
         }
     }
@@ -701,6 +746,7 @@ impl FileView {
             _ => Version {
                 text: String::new(),
                 newline: kept.mark.newline,
+                format: Format::default(),
                 modified_ms: WallMs::ZERO,
             },
         };
@@ -799,6 +845,12 @@ impl FileView {
         } else {
             None
         };
+        let (indent, prose) = editing::opening_layout(&incoming.text, self.syntax);
+        self.indent = indent;
+        if !reload {
+            // A reload keeps what the person chose.
+            self.wrap = prose;
+        }
         self.pending_text = Some(incoming.text.clone());
         self.base = Some(incoming);
         self.dirty = false;
@@ -906,8 +958,10 @@ impl FileView {
 
     fn send(&mut self, base_modified_ms: Option<WallMs>, cx: &mut Context<Self>) {
         let text = self.text(cx);
-        let newline = self.base.as_ref().is_some_and(|b| b.newline);
-        let sent = Version { text, newline, modified_ms: base_modified_ms.unwrap_or(WallMs::ZERO) };
+        let (newline, format) =
+            self.base.as_ref().map(|b| (b.newline, b.format)).unwrap_or_default();
+        let modified_ms = base_modified_ms.unwrap_or(WallMs::ZERO);
+        let sent = Version { text, newline, format, modified_ms };
         let file = sent.file_text(&sent.text);
         tracing::debug!(path = %self.path, bytes = file.len(), ?base_modified_ms, "save file");
         self.saving = Some(sent);
@@ -947,6 +1001,8 @@ impl FileView {
 
     /// ⌘F: open the find bar, or put the caret back in it with the text selected.
     pub fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // One field over the corner at a time: the find bar takes the place of "go to line".
+        self.goto = None;
         if self.search.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
             let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
@@ -1077,6 +1133,7 @@ impl FileView {
         let (tint, hit) = (hsla_alpha(s.success, alpha::FAINT), hsla_alpha(s.warn, alpha::FAINT));
         let hits = self.search.as_ref().map(|s| s.hits.clone()).unwrap_or_default();
         let changed = self.changed.clone();
+        let brackets = self.bracket_marks();
         let marks = self.editor.update(cx, |e, _cx| {
             let text = e.text();
             let line = |row: usize, color| {
@@ -1093,6 +1150,7 @@ impl FileView {
             marks.extend(
                 hits.iter().filter(|row| **row < text.lines_len()).map(|row| line(*row, hit)),
             );
+            marks.extend(brackets.into_iter().filter(|m| m.range().end <= text.len()));
             marks
         });
         match &self.marks {
@@ -1136,6 +1194,11 @@ impl FileView {
 
     /// Apply what waited for a window: new text, then the caret's line.
     fn apply_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.wrap != self.wrapped {
+            let wrap = self.wrap;
+            self.wrapped = wrap;
+            self.editor.update(cx, |e, cx| e.set_soft_wrap(wrap, window, cx));
+        }
         if let Some(text) = self.pending_text.take() {
             let caret = self.editor.read(cx).cursor();
             let scroll = self.editor.read(cx).scroll_offset();
@@ -1149,6 +1212,7 @@ impl FileView {
                     e.set_scroll_offset(scroll, cx);
                 }
             });
+            self.apply_indent(cx);
             self.install_highlighter(cx);
             self.remark(cx);
             if self.search.is_some() {
@@ -1561,8 +1625,10 @@ impl Render for FileView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending(window, cx);
         self.settle_focus(window, cx);
+        self.refresh_bracket(cx);
         let id = *self.id.as_uuid();
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
+        let goto = self.goto.as_ref().map(|g| self.render_goto(g, cx));
         let bar = self.render_bar(cx);
         let waiting = self.render_waiting(cx);
         let theme = &self.theme;
@@ -1583,6 +1649,7 @@ impl Render for FileView {
             }
             Some(FileRead::Media { .. }) if self.base.is_none() => self.render_preview(cx),
             Some(_) => div()
+                .key_context(TEXT_CTX)
                 .flex_1()
                 .min_h_0()
                 .w_full()
@@ -1610,6 +1677,7 @@ impl Render for FileView {
                 el.on_action(cx.listener(|this, _: &FinishEdit, _window, cx| this.finish_edit(cx)))
             })
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find(window, cx)))
+            .when(self.shows_text(), |el| Self::editing_keys(el, cx))
             .when(self.shows_pages(), |el| Self::page_keys(el, cx))
             .relative()
             .size_full()
@@ -1622,6 +1690,7 @@ impl Render for FileView {
             .children(waiting)
             .child(body)
             .children(search)
+            .children(goto)
     }
 }
 

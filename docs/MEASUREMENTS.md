@@ -12822,3 +12822,26 @@ common), 21 runs: p50 0.22 ms, max 0.82 ms.
 ```sh
 cargo test -p slopty-ui --release --lib measure_the_reload_diff_at_its_bound -- --ignored --nocapture
 ```
+
+## 2026-10-01 — the editor's helpers
+
+What a file tile's editing helpers cost on the UI thread at their bounds (`file::edit`). The
+bracket pair is looked for again on every caret move and keystroke, so it is on the input path;
+the others run once per read or per command.
+
+Mac Studio M1 Max, release, load average 26 from other sessions' builds, medians of 21 runs:
+
+| What | Median |
+| --- | --- |
+| Bracket at the caret, its pair 64 KiB away (the scan's bound) | 218 µs |
+| Bracket at the caret, unmatched (the whole 64 KiB scanned) | 212 µs |
+| No bracket next to the caret (the usual keystroke) | 0.08 µs |
+| Indentation guess over its 10 000-line sample | 184 µs |
+| Comment toggled over 1 000 lines | 50 µs |
+
+The worst case is under 3 % of a 120 Hz frame and only arises with the caret next to a bracket
+whose pair is hundreds of lines off; `BRACKET_SCAN_BYTES` bounds it by size, never by the clock.
+
+```sh
+cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_editor_helpers --no-capture
+```
