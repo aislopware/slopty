@@ -5,7 +5,7 @@
 //! and takes its catch-up under the same lock, so it misses nothing and is sent nothing twice
 //! ([`Host::follow`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,7 +14,8 @@ use parking_lot::Mutex;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
 use slopty_proto::thread::{
-    Action, Cursor, IntentId, Phase, ThreadId, ThreadMeta, ThreadState, TurnId,
+    Action, Cursor, Edge, IntentId, ItemBody, ItemId, PendingState, Phase, ThreadId, ThreadMeta,
+    ThreadState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -92,15 +93,91 @@ struct Hosted {
     log: Log,
     intents: Intents,
     feed: broadcast::Sender<Arc<Batch>>,
+    own: Own,
 }
 
 impl Hosted {
     fn open(dir: &Path, log: Log) -> io::Result<Self> {
+        let own = Own::of(log.state());
         Ok(Self {
             log,
             intents: Intents::open(&dir.join("intents"))?,
             feed: broadcast::Sender::new(FEED_BATCHES),
+            own,
         })
+    }
+}
+
+/// What the worker adds to a thread that its adapter never tells: which message an intent
+/// sent, and each turn's snapshots. A thread read again from its agent's session
+/// ([`Host::reset`]) gets them back as the adapter tells its items and turns again.
+#[derive(Debug, Default)]
+struct Own {
+    /// Messages typed and not yet seen in the thread: the intent and the words.
+    typed: VecDeque<(IntentId, String)>,
+    /// The intent each of the person's items came from.
+    sent: HashMap<ItemId, IntentId>,
+    /// Each turn's snapshots.
+    trees: HashMap<TurnId, (Option<TreeRef>, Option<TreeRef>)>,
+}
+
+/// Messages typed whose items are waited for; past it the oldest is given up.
+const TYPED: usize = 64;
+
+impl Own {
+    fn of(state: &ThreadState) -> Self {
+        let sent = state
+            .items
+            .iter()
+            .filter_map(|item| match &item.body {
+                ItemBody::User(message) => message.intent.map(|intent| (item.id.clone(), intent)),
+                _ => None,
+            })
+            .collect();
+        let trees = state
+            .turns
+            .iter()
+            .filter(|t| t.before.is_some() || t.after.is_some())
+            .map(|t| (t.id, (t.before.clone(), t.after.clone())))
+            .collect();
+        Self { typed: VecDeque::new(), sent, trees }
+    }
+
+    /// `actions` with what the worker knows put back in: an item's intent, a turn's trees.
+    fn mark(&mut self, actions: &mut [Action]) {
+        for action in actions {
+            match action {
+                Action::ItemStarted(item)
+                | Action::ItemUpdated(item)
+                | Action::ItemCompleted(item) => {
+                    let ItemBody::User(message) = &mut item.body else { continue };
+                    if message.intent.is_some() {
+                        continue;
+                    }
+                    message.intent = self.sent.get(&item.id).copied().or_else(|| {
+                        let words = message.text.text.trim();
+                        let at = self.typed.iter().position(|(_, typed)| typed.trim() == words)?;
+                        let (intent, _) = self.typed.remove(at)?;
+                        self.sent.insert(item.id.clone(), intent);
+                        Some(intent)
+                    });
+                }
+                Action::TurnStarted(turn) => {
+                    if let Some((before, after)) = self.trees.get(&turn.id) {
+                        turn.before = turn.before.take().or_else(|| before.clone());
+                        turn.after = turn.after.take().or_else(|| after.clone());
+                    }
+                }
+                Action::Snapshot { turn, edge, tree } => {
+                    let trees = self.trees.entry(*turn).or_default();
+                    match edge {
+                        Edge::Before => trees.0 = Some(tree.clone()),
+                        Edge::After => trees.1 = Some(tree.clone()),
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -209,6 +286,16 @@ impl Host {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let Some(hosted) = inner.threads.get_mut(&thread) else { return Ok(None) };
+        // What waits to be sent is the worker's own, which no agent's session has: it stays.
+        // One that was being typed may be in the terminal already, so it is not typed again.
+        let mut state = state;
+        state.pending.clone_from(&hosted.log.state().pending);
+        for pending in &mut state.pending {
+            if pending.state == PendingState::Sending {
+                pending.state =
+                    PendingState::Held { reason: super::compose::TYPED_NOT_SENT.to_owned() };
+            }
+        }
         hosted.log.reset(state)?;
         let cursor = hosted.log.cursor();
         inner.table.put(hosted.log.state().row(WallMs::now()));
@@ -229,6 +316,18 @@ impl Host {
             Some(hosted) => hosted.log.delete(),
             None => Ok(()),
         }
+    }
+
+    /// Message `text` was typed for intent `id` into `thread`'s agent: the item the agent
+    /// makes of it is marked with the intent ([`slopty_proto::thread::UserMessage::intent`]).
+    pub fn typed(&self, thread: ThreadId, id: IntentId, text: &str) {
+        let mut inner = self.inner.lock();
+        let Some(hosted) = inner.threads.get_mut(&thread) else { return };
+        let typed = &mut hosted.own.typed;
+        if typed.len() >= TYPED {
+            typed.pop_front();
+        }
+        typed.push_back((id, text.to_owned()));
     }
 
     /// Every turn edge any thread reaches from now on.
@@ -348,8 +447,9 @@ fn apply(
     hosted: &mut Hosted,
     table: &mut Table,
     edges: &broadcast::Sender<TurnEdge>,
-    actions: Vec<Action>,
+    mut actions: Vec<Action>,
 ) -> Cursor {
+    hosted.own.mark(&mut actions);
     let first = hosted.log.cursor();
     let was_working = hosted.log.state().status.phase == Phase::Working;
     if let Err(e) = hosted.log.append(&actions) {

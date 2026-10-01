@@ -236,8 +236,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     have spoken, once it has exited, or over a person's unsent line. Nothing it types clears
     that line.
   - **A message waits in the thread's pending list until it goes**, where a client shows it,
-    edits it or withdraws it. Its entry leaves once the Enter is written; the transcript's
-    prompt is what the client confirms its own bubble by.
+    edits it or withdraws it. Its entry leaves once the Enter is written. The item the agent
+    makes of it carries the intent (`UserMessage::intent`): the host marks the first person's
+    item whose words are the typed ones, so a client confirms its own bubble by id.
     - A steer goes as soon as the guard lets it, into the turn under way.
     - A queued message waits until the agent is at rest by its hooks, and then goes, one per
       turn. The next waits until the agent has taken the last one: it was seen working since,
@@ -292,3 +293,20 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Every variant is appended last** (`ThreadRequest::Review`, `ThreadFrame::Review`,
     `Intent::Keep`, `Intent::Revert`), so no existing golden changed for them. The model
     catalogue (`ThreadMeta::models`, the composer's entry) did change the snapshot goldens.
+
+- ✅ **What the worker adds to a thread outlives the thread being read again** (2026-10-02,
+  `crates/slopty-worker/src/thread/host.rs`; `what_the_worker_owns_outlives_a_read_again` in
+  `crates/slopty-worker/tests/threads.rs`). An observed thread is read again from its
+  transcript after a worker restart, under a new epoch, and the transcript has none of what
+  the worker added. The host keeps it beside the log and puts it back as the adapter tells
+  the thread again: the intent each person's item came from, each turn's snapshots, and the
+  pending messages. A message that was being typed when the worker went down may be in the
+  terminal already, so it comes back held as typed and not sent, and is never typed again.
+  The composer goes on with every thread's waiting messages when the daemon starts.
+
+- ✅ **An observed thread is named by the session until its first prompt names it**
+  (2026-10-02, `crates/slopty-agent/src/observed.rs`, `observed::Observed::title`). Claude
+  Code paints the session's own name in the terminal title (`✳ Fix the flaky test`), so a
+  thread started from a shell is named at once, and renamed as that name changes. The bare
+  `Claude Code` names nothing. The first prompt that is not a command then names it, and
+  keeps it.

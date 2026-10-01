@@ -194,6 +194,8 @@ pub struct Observed {
     status: Option<Status>,
     open: Vec<Request>,
     out: Vec<Out>,
+    /// The title is the session's own name, which its first prompt replaces.
+    named: bool,
 }
 
 impl Observed {
@@ -242,6 +244,7 @@ impl Observed {
             meters: Meters::default(),
             status: None,
             open: Vec::new(),
+            named: false,
         }
     }
 
@@ -346,6 +349,21 @@ impl Observed {
         if mode.is_some() && mode != self.meters.mode {
             self.meters.mode = mode;
             self.push(self.meta.id, Action::MetersSet(self.meters.clone()));
+        }
+        self.drain()
+    }
+
+    /// The terminal's title changed, or was first heard. Claude Code paints the session's own
+    /// name there (`✳ Fix the flaky test`, or the bare `Claude Code` before it has one), which
+    /// names the thread until its first prompt does.
+    pub fn title(&mut self, title: &str) -> Vec<Out> {
+        if let Some(name) = session_name(title)
+            && (self.meta.title.is_empty() || self.named)
+            && self.meta.title != name
+        {
+            self.meta.title = name;
+            self.named = true;
+            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
         }
         self.drain()
     }
@@ -505,11 +523,12 @@ impl Observed {
         let id = self.ensure(thread);
         let body = self.body(thread, entry);
         if id == self.meta.id
-            && self.meta.title.is_empty()
+            && (self.meta.title.is_empty() || self.named)
             && let Body::Prompt(prompt) = &entry.body
             && prompt.command.is_none()
         {
             self.meta.title = title_of(&prompt.text.text);
+            self.named = false;
             self.push(id, Action::Meta(Box::new(self.meta.clone())));
         }
         let Some(mapped) = self.threads.get_mut(thread) else { return };
@@ -978,6 +997,18 @@ fn changed_by(body: &Body) -> Changed {
         _ => return Changed::default(),
     };
     Changed { added: patch.added, removed: patch.removed }
+}
+
+/// The session's own name in a Claude Code terminal title: what follows its glyph, unless
+/// that is only the program's name.
+fn session_name(title: &str) -> Option<String> {
+    let title = title.trim();
+    let glyph = title.chars().next()?;
+    if glyph != crate::title::IDLE && !crate::title::WORKING.contains(&glyph) {
+        return None;
+    }
+    let name = title.get(glyph.len_utf8()..)?.trim();
+    (!name.is_empty() && !name.eq_ignore_ascii_case("claude code")).then(|| title_of(name))
 }
 
 /// A thread's title from its first prompt: the first line, cut at a word.

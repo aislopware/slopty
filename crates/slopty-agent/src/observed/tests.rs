@@ -324,3 +324,30 @@ fn ids_and_references_are_stable() {
     let thread = conv::ThreadId::Agent("a1".to_owned());
     assert_eq!(text_ref(&content_ref(&thread, &at)), Some((thread, at)));
 }
+
+/// Before any prompt the thread is named by the session's own name in the terminal title, at
+/// once and as it changes; the bare program name names nothing; the first prompt then names
+/// it for good.
+#[test]
+fn a_thread_is_named_by_the_session_until_its_first_prompt() {
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    host.take(observed.title("✳ Claude Code"));
+    assert_eq!(host.thread(observed.main()).meta.title, "", "the program's name is no name");
+    host.take(observed.title("✳ Flaky test hunt"));
+    assert_eq!(host.thread(observed.main()).meta.title, "Flaky test hunt");
+    host.take(observed.title("◐ Flaky test hunt, round two"));
+    assert_eq!(host.thread(observed.main()).meta.title, "Flaky test hunt, round two");
+    host.take(observed.title("~/work"));
+    assert_eq!(host.thread(observed.main()).meta.title, "Flaky test hunt, round two");
+
+    let dir = dir("conversation", "edit");
+    let mut transcripts = Transcripts::default();
+    let changes = transcripts.read(&dir.join("transcript.jsonl"), &subagents(&dir));
+    host.take(observed.transcript(&changes, &[]));
+    let titled = host.thread(observed.main()).meta.title.clone();
+    assert_ne!(titled, "Flaky test hunt, round two", "the first prompt names it");
+    host.take(observed.title("✳ Something else"));
+    assert_eq!(host.thread(observed.main()).meta.title, titled, "and keeps it");
+}

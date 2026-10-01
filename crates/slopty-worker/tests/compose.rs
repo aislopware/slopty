@@ -16,8 +16,8 @@ mod compose {
     use slopty_proto::terminal::{TermRequest, TermSize};
     use slopty_proto::thread::wire::{Intent, Outcome};
     use slopty_proto::thread::{
-        Action, Changed, Delivery, IntentId, PendingState, ThreadId, ThreadState, Turn, TurnId,
-        TurnState, Usage,
+        Action, Changed, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, PendingState,
+        ThreadId, ThreadState, Turn, TurnId, TurnState, Usage, UserMessage,
     };
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::Agents;
@@ -197,6 +197,22 @@ mod compose {
         let first = rig.send("hello there", Delivery::Steer);
         rig.recorded("hello there\r").await;
         rig.until(|s| s.pending.is_empty()).await;
+        // The agent's own record of the prompt is the intent's item.
+        let prompt = Item {
+            id: ItemId("p1".to_owned()),
+            turn: TurnId(1),
+            at_ms: WallMs::ZERO,
+            body: ItemBody::User(UserMessage {
+                text: Clipped::whole("hello there"),
+                images: Vec::new(),
+                command: None,
+                intent: None,
+            }),
+        };
+        rig.host.apply(rig.thread, vec![Action::ItemStarted(prompt)]);
+        let item = rig.state().items.into_iter().find(|i| i.id.0 == "p1").unwrap();
+        let ItemBody::User(message) = item.body else { panic!() };
+        assert_eq!(message.intent, Some(first), "the client's bubble finds its item by id");
 
         rig.person(b"half");
         rig.send("second", Delivery::Steer);

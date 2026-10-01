@@ -52,6 +52,8 @@ enum Input {
     Permission(PermissionEvent),
     /// The terminal's working directory, as its shell last said.
     Cwd(String),
+    /// The terminal's title, where Claude Code names the session.
+    Title(String),
     /// The whole of a clipped text or picture, asked through a [`Driver`].
     Expand(ContentRef, oneshot::Sender<Expanded>),
 }
@@ -95,6 +97,7 @@ pub fn spawn(
     tokio::spawn(async move {
         let mut sessions: HashMap<SessionId, mpsc::UnboundedSender<Input>> = HashMap::new();
         let mut cwds: HashMap<SessionId, String> = HashMap::new();
+        let mut titles: HashMap<SessionId, String> = HashMap::new();
         loop {
             let heard = tokio::select! {
                 heard = events.recv() => heard,
@@ -116,11 +119,16 @@ pub fn spawn(
                 Ok(WorkerMsg::SessionClosed { session, .. }) => {
                     sessions.remove(&session);
                     cwds.remove(&session);
+                    titles.remove(&session);
                     continue;
                 }
                 Ok(
                     WorkerMsg::SessionOpened { summary, .. } | WorkerMsg::SessionChanged(summary),
                 ) => {
+                    if let Some(tx) = sessions.get(&summary.id) {
+                        let _gone = tx.send(Input::Title(summary.title.clone()));
+                    }
+                    titles.insert(summary.id, summary.title);
                     let Some(cwd) = summary.cwd else { continue };
                     cwds.insert(summary.id, cwd.clone());
                     if let Some(tx) = sessions.get(&summary.id) {
@@ -141,6 +149,9 @@ pub fn spawn(
                 let (tx, rx) = mpsc::unbounded_channel();
                 if let Some(cwd) = cwds.get(&session) {
                     let _queued = tx.send(Input::Cwd(cwd.clone()));
+                }
+                if let Some(title) = titles.get(&session) {
+                    let _queued = tx.send(Input::Title(title.clone()));
                 }
                 tokio::spawn(observe(host.clone(), session, Arc::clone(&sources), rx));
                 tx
@@ -169,6 +180,7 @@ async fn observe(
         transcripts: Some(Transcripts::default()),
         status: None,
         cwd: String::new(),
+        title: String::new(),
         hooks: 0,
     };
     let mut tick = tokio::time::interval(TICK);
@@ -183,6 +195,12 @@ async fn observe(
                         take(&on.host, observed.cwd(&cwd));
                     }
                     on.cwd = cwd;
+                }
+                Some(Input::Title(title)) => {
+                    if let Some(observed) = on.observed.as_mut() {
+                        take(&on.host, observed.title(&title));
+                    }
+                    on.title = title;
                 }
                 Some(Input::Permission(event)) => {
                     if let Some(observed) = on.observed.as_mut() {
@@ -223,6 +241,8 @@ struct Session {
     status: Option<AgentEvent>,
     /// The terminal's working directory.
     cwd: String,
+    /// The terminal's title.
+    title: String,
     hooks: u64,
 }
 
@@ -274,6 +294,7 @@ impl Session {
         }
         let mut observed = Observed::new(native, "", Some(self.terminal), &self.cwd, WallMs::now());
         take(&self.host, observed.drain());
+        take(&self.host, observed.title(&self.title));
         if let Some(status) = &self.status {
             take(&self.host, observed.status(status));
         }

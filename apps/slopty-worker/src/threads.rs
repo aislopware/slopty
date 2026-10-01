@@ -112,6 +112,7 @@ pub fn open(
 pub fn start(daemon: &Daemon, asks: Asks) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
+    threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
     drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks));
 }

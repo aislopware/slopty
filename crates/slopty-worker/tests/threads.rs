@@ -10,9 +10,11 @@ mod threads {
     use slopty_core::WallMs;
     use slopty_proto::thread::wire::{Outcome, TableFrame, ThreadFrame};
     use slopty_proto::thread::{
-        Action, AgentId, Cap, Changed, Clipped, Cursor, Drive, IntentId, Item, ItemBody, ItemId,
-        PartKey, TableState, ThreadId, ThreadMeta, ThreadState, Turn, TurnId, TurnState, Usage,
+        Action, AgentId, Cap, Changed, Clipped, Cursor, Delivery, Drive, Edge, IntentId, Item,
+        ItemBody, ItemId, PartKey, Pending, PendingState, TableState, ThreadId, ThreadMeta,
+        ThreadState, TreeRef, Turn, TurnId, TurnState, Usage, UserMessage,
     };
+    use slopty_worker::thread::compose::TYPED_NOT_SENT;
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::{Follower, Host};
 
@@ -360,5 +362,76 @@ mod threads {
         let again = host.intent(thread, send, |_| panic!("acted on twice"));
         assert_eq!(again, Some(Outcome::Accepted));
         assert_eq!(host.start(id, || panic!("started twice")), Outcome::Started { thread });
+    }
+
+    fn prompt(id: &str, n: u32, words: &str) -> Action {
+        Action::ItemStarted(Item {
+            id: ItemId(id.to_owned()),
+            turn: TurnId(n),
+            at_ms: WallMs::ZERO,
+            body: ItemBody::User(UserMessage {
+                text: Clipped::whole(words),
+                images: vec![],
+                command: None,
+                intent: None,
+            }),
+        })
+    }
+
+    fn intent_of(state: &ThreadState, id: &str) -> Option<IntentId> {
+        state.items.iter().find(|i| i.id.0 == id).and_then(|i| match &i.body {
+            ItemBody::User(message) => message.intent,
+            _ => None,
+        })
+    }
+
+    /// What the worker adds to a thread and its agent never tells (the intent a message came
+    /// from, each turn's snapshots, what waits to be sent) outlives the thread being read again
+    /// from the agent's session, after a worker restart too. A message that was being typed is
+    /// not typed again.
+    #[tokio::test]
+    async fn what_the_worker_owns_outlives_a_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let meta = meta();
+        let thread = meta.id;
+        host.create(meta.clone()).unwrap();
+        let (sent, waiting, sending) = (IntentId::new(), IntentId::new(), IntentId::new());
+        host.typed(thread, sent, "hello there");
+        let tree = TreeRef("4b825dc6".to_owned());
+        let pending = |intent, state| Pending {
+            intent,
+            text: "later".to_owned(),
+            delivery: Delivery::Queue,
+            state,
+        };
+        host.apply(
+            thread,
+            vec![
+                turn(1),
+                prompt("p1", 1, "  hello there\n"),
+                Action::Snapshot { turn: TurnId(1), edge: Edge::Before, tree: tree.clone() },
+                Action::PendingSet(vec![
+                    pending(waiting, PendingState::Waiting),
+                    pending(sending, PendingState::Sending),
+                ]),
+            ],
+        );
+        assert_eq!(
+            intent_of(&state(&host, thread).0, "p1"),
+            Some(sent),
+            "the item is the intent's"
+        );
+        drop(host);
+
+        let host = open(dir.path());
+        host.reset(thread, ThreadState::new(meta)).unwrap();
+        host.apply(thread, vec![turn(1), prompt("p1", 1, "hello there")]);
+        let (again, _) = state(&host, thread);
+        assert_eq!(intent_of(&again, "p1"), Some(sent));
+        assert_eq!(again.turns.first().and_then(|t| t.before.clone()), Some(tree));
+        let states: Vec<_> = again.pending.iter().map(|p| (p.intent, p.state.clone())).collect();
+        let typed = PendingState::Held { reason: TYPED_NOT_SENT.to_owned() };
+        assert_eq!(states, [(waiting, PendingState::Waiting), (sending, typed)]);
     }
 }

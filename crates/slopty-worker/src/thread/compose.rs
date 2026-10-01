@@ -166,6 +166,15 @@ impl Composer {
         }
     }
 
+    /// Go on with what every thread has waiting, as after a restart of the worker.
+    pub fn resume(&self) {
+        for thread in self.host.threads() {
+            if self.host.update(thread, |s| (vec![], !s.pending.is_empty())) == Some(true) {
+                self.kick(thread);
+            }
+        }
+    }
+
     /// Go on with what `thread` has to send.
     pub fn kick(&self, thread: ThreadId) {
         let _task = self.sender(thread);
@@ -268,6 +277,7 @@ async fn compose(c: Composer, thread: ThreadId, mut jobs: mpsc::UnboundedReceive
         let held = match next.unwrap_or(Next::Gone) {
             Next::Gone => return,
             Next::Message { intent, text, delivery } => {
+                c.host.typed(thread, intent, &text);
                 let left = send(&c, session, &text).await;
                 let after = c.host.update(thread, |state| sent(state, intent, left.as_deref()));
                 if left.is_none() && delivery == Delivery::Queue {
