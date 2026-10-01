@@ -14,18 +14,21 @@
 //! by `cargo xtask fuzz`): every viewer, applying the frames it was sent by absolute line index,
 //! shows what a second engine fed the same bytes shows whole; every frame comes back from the
 //! wire as it went; a scrollback page holds no more lines than asked; and a checkpoint replayed
-//! into a fresh engine of the same size shows the same cells and cursor.
+//! into a fresh engine of the same size shows the same lines and cursor.
 //!
-//! A replayed checkpoint is held to its cells as they draw, not to all a line carries: a cell
-//! never written comes back as a space, and a blank's pen can differ where it draws nothing
-//! (a foreground colour, bold or blink on a space). Two things do not come back at all,
-//! the lines' semantic prompt marks (OSC 133) and their hyperlinks (OSC 8). Those two are open
-//! findings (`docs/decisions/testing.md`, "Terminal output is fuzzed through the engine").
+//! A replayed checkpoint is held to each line's cells as they draw, its semantic prompt mark
+//! (OSC 133), its hyperlinks (OSC 8) and its soft wrap. Only what draws nothing may differ: a
+//! cell never written comes back as a space, and a space's pen can differ where it shows
+//! nothing (a foreground colour, bold or blink).
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use slopty_engine::{EngineConfig, GhosttyEngine};
-use slopty_grid::{Cell, CellWidth, Color, Line, StyleFlags, Underline};
+use slopty_grid::{
+    Cell, CellText, CellWidth, Color, Hyperlink, Line, LineFlags, SemanticMark, StyleFlags,
+    Underline,
+};
 use slopty_proto::codec;
 use slopty_proto::input::CellMetrics;
 use slopty_proto::terminal::{Frame, TermSize};
@@ -139,7 +142,10 @@ fn replayed(subject: &mut GhosttyEngine, mirror: &mut GhosttyEngine, size: TermS
         fresh.full_frame(0).expect("the replay's frame"),
         mirror.full_frame(0).expect("the mirror's frame"),
     );
-    assert_eq!(cells(&again), cells(&truth), "the checkpoint's screen");
+    let (got, want) = (drawn_lines(&again), drawn_lines(&truth));
+    assert_eq!(got.len(), want.len(), "the checkpoint's rows");
+    let differ: Vec<_> = got.iter().zip(&want).enumerate().filter(|(_, (g, w))| g != w).collect();
+    assert!(differ.is_empty(), "the checkpoint's screen, (row, (replayed, truth)): {differ:#?}");
     assert_eq!(again.cursor, truth.cursor, "the checkpoint's cursor");
 }
 
@@ -168,23 +174,63 @@ fn lines(frame: &Frame) -> Vec<String> {
     frame.updates.iter().map(|u| format!("{:?}", u.line)).collect()
 }
 
-/// A frame's cells, row by row, as they draw: a blank that shows nothing (a cell never written,
-/// or a space whose style marks nothing a space shows, no background, inverse, underline,
-/// strike or overline) is [`Cell::BLANK`].
-fn cells(frame: &Frame) -> Vec<Vec<Cell>> {
-    frame.updates.iter().map(|u| u.line.cells.iter().map(drawn).collect()).collect()
+/// A frame's lines as they draw: what a replay must give back.
+fn drawn_lines(frame: &Frame) -> Vec<Drawn> {
+    frame
+        .updates
+        .iter()
+        .map(|u| Drawn {
+            cells: u.line.cells.iter().map(drawn).collect(),
+            mark: u.line.mark,
+            links: u.line.links.clone(),
+            wrapped: u.line.flags.contains(LineFlags::WRAPPED),
+        })
+        .collect()
+}
+
+/// A line as it draws: its cells (a blank that shows nothing, a cell never written or a space
+/// whose style marks nothing a space shows, no background, inverse, underline, strike or
+/// overline, is [`Cell::BLANK`], and a cell holding only a background is a space in it), its
+/// prompt mark, its links and its soft wrap.
+#[derive(PartialEq)]
+struct Drawn {
+    cells: Vec<Cell>,
+    mark: SemanticMark,
+    links: Vec<Hyperlink>,
+    wrapped: bool,
+}
+
+/// One line of text, a styled cell as `[text style]`, then what the line carries.
+impl std::fmt::Debug for Drawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut text = String::new();
+        for cell in &self.cells {
+            let shown = if cell.text.as_str().is_empty() { "·" } else { cell.text.as_str() };
+            if cell.style == slopty_grid::Style::default() && cell.width == CellWidth::Narrow {
+                text.push_str(shown);
+            } else {
+                write!(text, "[{shown} {:?} {:?}]", cell.width, cell.style)?;
+            }
+        }
+        f.debug_struct("Drawn")
+            .field("text", &text)
+            .field("mark", &self.mark)
+            .field("links", &self.links)
+            .field("wrapped", &self.wrapped)
+            .finish()
+    }
 }
 
 fn drawn(cell: &Cell) -> Cell {
     let shown = StyleFlags::INVERSE | StyleFlags::STRIKETHROUGH | StyleFlags::OVERLINE;
     let style = cell.style;
     let empty = matches!(cell.text.as_str(), "" | " ") && cell.width == CellWidth::Narrow;
-    if empty
-        && style.bg == Color::Default
-        && style.underline == Underline::None
-        && !style.flags.intersects(shown)
-    {
+    let plain = style.underline == Underline::None && !style.flags.intersects(shown);
+    if empty && plain && style.bg == Color::Default {
         Cell::BLANK
+    } else if empty && plain {
+        // The replay writes a cell an erase left a background in as a space in it.
+        Cell { text: CellText::from_char(' '), ..cell.clone() }
     } else {
         cell.clone()
     }

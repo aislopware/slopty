@@ -246,12 +246,7 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
                     cached(inputs, &tree, &build("clippy ios"), |_| {
                         let sh = lane("clippy ios")?;
                         // Linux runs whatever iOS found, so one gate names every failure.
-                        let ios = lint_ios(&sh);
-                        let linux = lint_linux(&sh);
-                        match (ios, linux) {
-                            (Err(ios), Err(linux)) => Err(anyhow::anyhow!("{ios:#}; {linux:#}")),
-                            (ios, linux) => ios.and(linux),
-                        }
+                        both(lint_ios(&sh), lint_linux(&sh))
                     })
                 }),
             ));
@@ -739,23 +734,56 @@ pub fn lint(sh: &Shell) -> Result<()> {
     lint_linux(sh)
 }
 
-/// Clippy for Linux on every one of [`LINUX_CRATES`] (`tools::lint_linux`).
+/// Clippy for Linux on every one of [`LINUX_CRATES`] (`tools::lint_linux`), and on xtask,
+/// which the deep checks run on Linux runners.
 pub fn lint_linux(sh: &Shell) -> Result<()> {
-    crate::tools::lint_linux(sh, &LINUX_CRATES)
+    let crates = crate::tools::lint_linux(sh, &LINUX_CRATES);
+    let targets: Vec<String> = crate::tools::LINUX_TRIPLES
+        .iter()
+        .flat_map(|t| ["--target".to_owned(), (*t).to_owned()])
+        .collect();
+    let xtask = quiet_step(
+        "clippy linux-gnu (x86_64 + aarch64), xtask",
+        cmd!(sh, "cargo clippy -p xtask {targets...} --all-targets -- -D warnings")
+            .env("CARGO_FEATURE_NO_NEON", "1"),
+    );
+    both(crates, xtask)
 }
 
 /// Clippy on the host with every target (tests, benches, examples) in one pass, the live
-/// `slopty-e2e` targets the tests lane leaves out among them.
+/// `slopty-e2e` targets the tests lane leaves out among them; then on the fuzz crate, a
+/// workspace of its own that no other lane builds, in its own target dir (`fuzz/target`, where
+/// `cargo xtask fuzz --replay` builds it too).
 pub fn lint_host(sh: &Shell) -> Result<()> {
     let host = TRIPLES[0];
     let live = crate::e2e::LIVE;
-    quiet_step(
+    let workspace = quiet_step(
         &format!("clippy {host}"),
         cmd!(
             sh,
             "cargo clippy --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
         ),
-    )
+    );
+    let fuzz = if sh.path_exists("fuzz/Cargo.toml") {
+        quiet_step(
+            &format!("clippy {host} (fuzz)"),
+            cmd!(
+                sh,
+                "cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets --target {host} -- -D warnings"
+            ),
+        )
+    } else {
+        Ok(())
+    };
+    both(workspace, fuzz)
+}
+
+/// Both results, with both errors when both failed.
+fn both(a: Result<()>, b: Result<()>) -> Result<()> {
+    match (a, b) {
+        (Err(a), Err(b)) => Err(anyhow::anyhow!("{a:#}; {b:#}")),
+        (a, b) => a.and(b),
+    }
 }
 
 /// Clippy on the two iOS triples together in one invocation (cargo builds them side by side
@@ -874,10 +902,7 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
     let pending = message.map_or(Ok(()), |file| {
         quiet_step("committed (message)", cmd!(sh, "committed --commit-file {file}"))
     });
-    match (history, pending) {
-        (Err(history), Err(pending)) => Err(anyhow::anyhow!("{history:#}; {pending:#}")),
-        (history, pending) => history.and(pending),
-    }
+    both(history, pending)
 }
 
 #[cfg(test)]

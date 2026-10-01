@@ -12303,6 +12303,13 @@ with libghostty built `ReleaseSafe`. The corpus started from the nine captures i
 | run | executions/s | coverage | features | corpus | found |
 | --- | --- | --- | --- | --- | --- |
 | 300 s, one job | 19 | 4 750 | 21 126 | 831 | 2 checkpoint replay bugs, no trap, no panic, no viewer divergence |
+| 300 s, two jobs, every line held to the oracle (marks, links, wraps) | 37 | 5 276 | 27 713 | 1 186 | 6 (50 before that round's fixes) |
+| 300 s, two jobs, after aislopware/ghostty#3's first fixes | 28 | 5 407 | 29 097 | 1 348 | 6: coloured blanks, an empty flagged row, a link on an empty cell, the alternate screen's region, a stale prompt flag |
+| 300 s, two jobs, after all of them | 15 | 5 489 | 30 175 | 1 522 | nothing |
+
+The corpus carries over from run to run, so later runs start deeper. Every artifact the runs
+found now passes, and one of each kind is kept under `fuzz/regressions/terminal`, which
+`cargo xtask fuzz --replay` replays (decisions/testing.md, "What it found next").
 
 Resident memory per execution, on the same inputs replayed:
 
@@ -12319,6 +12326,80 @@ terminal target runs with an 8 GiB RSS limit and every target with `-malloc_limi
 cargo xtask fuzz terminal --time 300
 cargo xtask fuzz --replay           # the kept regressions, on a plain build
 ```
+
+## 2026-10-01 — terminal checkpoints held to every line, and what a frame pays for it
+
+Mac Studio M1 Max, release build, retired instructions per op, one run each (other lanes
+building, so wall times are only indicative). Before: the tree at `640f9477` with ghostty
+`89c9624f0` and libghostty-rs `2f8b499`, built from `git archive` in `target/bench-before`.
+After: this tree with ghostty `874ada99a` (aislopware/ghostty#1 to #4) and libghostty-rs
+`24b9ceff` (aislopware/libghostty-rs#1 to #3).
+
+```sh
+SLOPTY_BENCH_OUT=$PWD/target/bench/terminal-after.jsonl nice -n 10 cargo nextest run --release \
+  -p slopty-engine --run-ignored only -E 'test(/_cost$/)' --no-capture --no-fail-fast
+```
+
+| series | before | after | change | p50 / p95 before | p50 / p95 after |
+| --- | --- | --- | --- | --- | --- |
+| `frame_cost.take_frame.60x12` (a typed byte's frame) | 18 922 | 19 011 | +0.5 % | 1.13 / 1.38 µs | 1.13 / 1.33 µs |
+| `frame_cost.take_frame.200x60` | 45 009 | 44 911 | −0.2 % | 2.42 / 2.63 µs | 2.46 / 2.71 µs |
+| `frame_cost.take_frame_unchanged` (both sizes) | 901 / 997 | 901 / 997 | 0 | | |
+| `scroll_frame_cost.80x24` (an Enter at a bottom prompt) | 123 543 | 123 508 | 0 | 7.79 / 9.17 µs | 7.67 / 8.54 µs |
+| `scroll_frame_cost.200x60` | 361 877 | 362 843 | +0.3 % | 25.0 / 26.5 µs | 25.3 / 28.8 µs |
+| `fetch_lines_cost.4096_rows` | 103 166 442 | 104 251 230 | +1.1 % | 7.72 / 9.69 ms | 7.72 / 9.22 ms |
+| `checkpoint_cost.format` (10 024 coloured lines) | 45 654 778 | 50 644 004 | +10.9 % | 2.58 ms | 2.67 ms |
+| `checkpoint_cost.replay_one_chunk` | 33 245 557 | 34 380 073 | +3.4 % | 2.26 ms | 2.38 ms |
+| `checkpoint_cost.replay_64k_chunks` | 33 146 737 | 33 076 974 | −0.2 % | | |
+
+`frame_cost.write` moved between 765 and 865 over runs of the same build, so its +2.5 % is
+noise. Every other `_cost` series moved by less than 1 %, except the search series, which
+moved by up to 2.3 % in a run whose untouched series (`png_decode_cost`) moved by 1.2 % too.
+
+**What the frame path paid on the way, and how it went.** The first working version of these
+fixes cost a typed byte's frame +13.8 % (60×12) and +17.9 % (200×60), and a scroll frame
++14 to +16 %. Taken apart one change at a time:
+
+- A test of every cell for one holding only a background colour, about 7 instructions per cell
+  even with a row-level guard in front of it (it changed how the whole cell loop compiled).
+  libghostty had no row flag for such a cell, so the fork now has one (`Row.background`,
+  aislopware/ghostty#4), and the engine reads the colours after the row's loop, on a flagged
+  row only. Reading the flag before the loop cost `fetch_lines_cost` +22 % the same way;
+  read after the loop it costs nothing measurable.
+- `row_above_wraps` was placed between `next_row`'s `#[inline(never)]` and the function, which
+  moved the attribute onto it and let `next_row` inline into the frame loop.
+- A walk over every row before the frame to find a row whose wrap changed above a clean row,
+  with a grid lookup for each, and a grid lookup for the row above each changed row. A frame
+  now notes a changed wrap while it visits the changed row and sends the clean row below
+  again with only its flag changed. A changed row whose row above is clean takes its wrap from
+  its own line as last sent.
+
+`fetch_lines_cost` keeps +1.1 %: one lookup of the row above per line served, for `WRAPPED`.
+Passing the row read before instead measured +1.7 %, so the lookup stays.
+
+**What a checkpoint pays.** Formatting it costs +10.9 %. It now writes every row's prompt
+flag and every cell's content (OSC 133), hyperlinks, and the steps that set prompt flags right
+across a wrap. A replay costs +3.4 % in one chunk and nothing in 64 KiB chunks. A shell
+session's history (the probe below, 10 000 lines with OSC 133 marks and OSC 8 links) replays
+in 792.7 M instructions, against 52.8 M when the checkpoint dropped the marks and the links:
+about what the original output cost (799.4 M). libghostty takes about 25 000 instructions per
+OSC 8 link, the bulk of it.
+
+**The binary snapshot, measured again for size.** libghostty's own snapshot (`GHOSTSNP`, decided
+in decisions/terminal.md, "#90") keeps both screens, but a coloured cell takes 8 bytes in it:
+
+| history | snapshot | encode | compressed |
+| --- | --- | --- | --- |
+| 10 000 lines, coloured | 2.07 MB | 0.55 ms (decode 2.68 ms) | |
+| 10 000 lines, the shell probe | 1.41 MB | 0.82 ms (decode 2.27 ms) | |
+| 50 000 lines at 80 columns, digits | 4.11 MB | 2.5 ms | zlib level 1: 0.14 MB in 1.9 ms |
+| 50 000 lines at 200 columns, digits | 10.12 MB | | |
+| 50 000 lines at 120 columns, coloured | 47.20 MB | 12.3 ms | zlib level 1: 10.96 MB in 184 ms; fdeflate: 27.6 MB |
+| 50 000 lines at 200 columns, coloured | 79.82 MB | | |
+| 50 000 lines, the shell probe | 4.94 MB | | |
+
+A full coloured history is past `MAX_CHECKPOINT_BYTES` (12 MiB) raw, and compressing it costs
+more than the VT replay, so checkpoints stay VT.
 
 ## 2026-10-01 — the soak's footprint slope against its window
 

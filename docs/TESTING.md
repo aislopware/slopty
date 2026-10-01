@@ -225,12 +225,14 @@ outside the workspace (nightly, AddressSanitizer, debug assertions). The control
 ways, the server's links and the unidirectional streams go through the real framing
 (`codec::try_take`, as `FramedRecv` reads it) in pieces of a size the fuzzer picks. The
 datagrams are covered too: the client's datagram, the terminal copy with its frame head, and the
-media header, the cursor and the pasteboard origin. The terminal target writes a program's output through the worker's engine, libghostty's VT
-parser built `ReleaseSafe` so a parser fault traps: every viewer applying the frames it was sent
-must show what a second engine fed the same bytes shows, a scrollback page holds no more lines
-than asked, and a checkpoint replayed into a fresh engine shows the same cells and cursor. Its
-seeds are captures of real programs' output (`fuzz/seeds/terminal`) and its dictionary the VT
-tokens (`fuzz/dicts/terminal.dict`). The reassembler gets real packetized
+media header, the cursor and the pasteboard origin. The terminal target writes a program's
+output through the worker's engine, libghostty's VT parser built `ReleaseSafe` so a parser
+fault traps. Every viewer applying the frames it was sent must show what a second engine fed
+the same bytes shows, and a scrollback page holds no more lines than asked. A checkpoint
+replayed into a fresh engine must show the same lines, each with its cells as they draw, its
+prompt mark, its links and its soft wrap, and the same cursor. Its seeds are captures of real
+programs' output (`fuzz/seeds/terminal`) and its dictionary the VT tokens
+(`fuzz/dicts/terminal.dict`). The reassembler gets real packetized
 fragments and Reed–Solomon parity, reordered, lost, repeated or damaged, with NACKs answered from
 the packetizer. The worker is fuzzed on NACKs and receiver reports. The worker's control socket
 gets its JSON line. A target panics on a crash and on a broken invariant: a decoded message must

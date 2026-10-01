@@ -19,7 +19,12 @@ mod crash {
 
     /// The child: installs the reporter, which crashes as `SLOPTY_CRASH_TEST` asks; or, under
     /// [`CHILD_ENV`], crashes the way it names. Does nothing in the parent's own run.
+    ///
+    /// Never inlined, so its frame is named by its whole path from the symbol table: a sanitized
+    /// build inlines it into the harness's `FnOnce::call_once` shim, which a stripped build
+    /// would then name in its place.
     #[test]
+    #[inline(never)]
     fn child() {
         let (Some(data), ask) = (std::env::var_os("SLOPTY_DATA_DIR"), std::env::var(CHILD_ENV))
         else {
@@ -81,12 +86,17 @@ mod crash {
     }
 
     fn segfaults_on_a_named_thread() {
-        let worker = std::thread::Builder::new().name("slopty-encoder".to_owned()).spawn(|| {
-            // SAFETY: none; the child crashes here on purpose. The load faults and the process dies
-            // of SIGSEGV before anything reads the value.
-            unsafe { std::ptr::with_exposed_provenance::<u8>(24).read_volatile() }
-        });
+        let worker =
+            std::thread::Builder::new().name("slopty-encoder".to_owned()).spawn(faults_at_24);
         let _never = worker.unwrap().join();
+    }
+
+    /// The named thread's body, never inlined so the report names it by its path.
+    #[inline(never)]
+    fn faults_at_24() -> u8 {
+        // SAFETY: none; the child crashes here on purpose. The load faults and the process dies
+        // of SIGSEGV before anything reads the value.
+        unsafe { std::ptr::with_exposed_provenance::<u8>(24).read_volatile() }
     }
 
     fn crash(trigger: Trigger) -> (tempfile::TempDir, Crashed) {
@@ -118,12 +128,34 @@ mod crash {
         &crashed.reports[0]
     }
 
+    /// The first frame in `function`, a path: the function itself or a closure or generic
+    /// instance of it. A trait shim that only mentions it in its type
+    /// (`<crash::crash::child::{closure#0} as FnOnce<()>>::call_once`) is not in it.
     fn find<'a>(report: &'a Report, function: &str) -> &'a Frame {
+        let within = |name: &str| {
+            name.strip_prefix(function).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with("::") || rest.starts_with('<')
+            })
+        };
         report
             .frames
             .iter()
-            .find(|f| f.function.as_deref().is_some_and(|name| name.contains(function)))
+            .find(|f| f.function.as_deref().is_some_and(within))
             .unwrap_or_else(|| panic!("no frame in {function}:\n{}", describe(report)))
+    }
+
+    /// Where the standard library's sources sit, in the prebuilt library's paths
+    /// (`/rustc/<commit>/library/…`) and in one built with the program (`-Zbuild-std`).
+    const STD_SOURCES: [&str; 3] =
+        ["/library/core/src/", "/library/std/src/", "/library/alloc/src/"];
+
+    /// The first frame of code outside Rust's standard library: where the faulting
+    /// instruction was, past what was inlined into it from `core` and `std` (a sanitized build
+    /// carries their debug info, so those inlined frames come first).
+    fn first_own(report: &Report) -> Option<&Frame> {
+        report.frames.iter().find(|f| {
+            f.file.as_deref().is_none_or(|file| !STD_SOURCES.iter().any(|s| file.contains(s)))
+        })
     }
 
     fn describe(report: &Report) -> String {
@@ -250,11 +282,8 @@ mod crash {
         let report = only(&crashed);
         assert_eq!(report.thread.as_deref(), Some("slopty-encoder"), "the thread");
         assert!(matches!(report.kind, Kind::Signal { address: 24, .. }), "{report:?}");
-        let first = report.frames.first().and_then(|f| f.function.as_deref());
-        assert!(
-            first.is_some_and(|f| f.contains("crash::crash::segfaults_on_a_named_thread")),
-            "the thread's closure faulted: {first:?}"
-        );
+        let first = first_own(report).and_then(|f| f.function.as_deref());
+        assert_eq!(first, Some("crash::crash::faults_at_24"), "the thread's body faulted");
     }
 
     /// A shipped build: this test binary with its debug info stripped (`strip -S`, as the dist

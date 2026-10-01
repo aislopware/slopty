@@ -35,6 +35,7 @@ use crate::graphics::{self, ImageUpload, Ledger, Shipped};
 use crate::placeholder::{self, Runs};
 use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
 
+mod carried;
 mod read;
 mod redraw;
 mod restored;
@@ -189,6 +190,12 @@ pub struct GhosttyEngine {
     progress: Rc<std::cell::Cell<Progress>>,
     /// The pointer shape the program asked for (`OSC 22`) as last reported.
     pointer: PointerShape,
+    /// Nothing was written yet: a checkpoint written first brings its marks back (see
+    /// [`carried`]).
+    fresh: bool,
+    /// A checkpoint is being replayed: the marks its screens carry are taken from its payloads,
+    /// and the OSC 133 marks the formatter wrote into them are not counted again.
+    restoring: bool,
 }
 
 /// The primary screen's numbering, parked while a program has the alternate screen.
@@ -471,6 +478,8 @@ impl GhosttyEngine {
             overrides: ColorOverrides::default(),
             progress,
             pointer: PointerShape::Text,
+            fresh: true,
+            restoring: false,
         };
         engine.reanchor()?;
         Ok(engine)
@@ -485,10 +494,12 @@ impl GhosttyEngine {
     }
 
     /// The whole terminal as the VT byte stream that rebuilds it in a fresh engine of the same
-    /// size: palette, modes, scrolling region, working directory (OSC 7), keyboard
-    /// state, every retained row (history then screen, soft wraps kept), and the cursor with its
-    /// pending style and hyperlink. libghostty-vt's own formatter writes it, so what a program
-    /// drew comes back exactly as its cells, not as an approximation from the grid.
+    /// size: palette, modes, tab stops, scrolling region, working directory (OSC 7), keyboard
+    /// state, every retained row (history then screen, soft wraps kept, each row's prompt flag
+    /// and each cell's semantic content), and the cursor with its pending style, hyperlink and
+    /// semantic content, then the prompt marks and command blocks the engine keeps. libghostty-vt's
+    /// own formatter writes it, so what a program drew comes back exactly as its cells, not as
+    /// an approximation from the grid.
     ///
     /// When the alternate screen is active the formatter can only see that screen, so the bytes
     /// are the primary screen as of the moment the program switched (kept by [`Self::write`])
@@ -517,7 +528,19 @@ impl GhosttyEngine {
         // Enter the alternate screen here, saving the primary cursor the snapshot just placed,
         // and home: the formatter writes content from wherever the cursor is, and it is where
         // the primary left it. Its own `?1049h` (in the modes it emits) is then a no-op.
-        out.extend_from_slice(b"\x1b[?1049h\x1b[H");
+        out.extend_from_slice(b"\x1b[?1049h");
+        // The scrolling region is the terminal's, not a screen's: the one the primary's blob
+        // set would scroll the alternate screen's rows away as they are written. Its own blob
+        // sets it again after them; the left and right margins went with `?69` above.
+        out.extend_from_slice(b"\x1b[r");
+        // The formatter writes a screen as if into a fresh terminal and sets the cursor's pen,
+        // hyperlink, protection, character sets and semantic content after it. The primary's
+        // were set at the end of its blob, and the switch carries the cursor and the character
+        // sets over: put them back to the defaults on the alternate screen, which leaves the
+        // primary's saved for the way back.
+        out.extend_from_slice(FRESH_PEN);
+        out.extend_from_slice(FRESH_CHARSETS);
+        out.extend_from_slice(b"\x1b[H");
         out.extend_from_slice(&active);
         Ok(())
     }
@@ -535,28 +558,26 @@ impl GhosttyEngine {
 
     /// The active screen and the terminal state around it, as VT bytes.
     ///
-    /// The formatter leaves two things to us. It drops trailing blank rows, so a primary screen
-    /// that has scrolled would come back with too little history and its rows shifted up; the
-    /// missing rows are replayed as line feeds, placed before any scrolling region so they
-    /// scroll into history and not inside the region. And its cursor position comes before
-    /// the scrolling region, which homes the cursor when set; the cursor is written last here
-    /// instead, with origin mode lifted around it so the row is absolute.
+    /// The formatter writes every row, the blank ones at the bottom too, so a primary screen
+    /// that has scrolled comes back with all of its history, and leaves a soft-wrapped row
+    /// for the replay to wrap. Its cursor position would come before the scrolling region,
+    /// which homes the cursor when set, so the cursor is written last here instead; then the
+    /// content the cursor writes with, and the marks the engine keeps (see [`carried`]).
     fn format_active_screen(&self) -> Result<Vec<u8>, EngineError> {
         let options = FormatterOptions::new()
             .with_format(Format::Vt)
-            .with_unwrap(false)
+            .with_unwrap(true)
             .with_trim(false)
+            .with_trailing_rows(true)
             // Not the palette: the formatter writes all 256 entries as OSC 4 sets, which would
             // come back as the program's changes over whatever the next driver paints with.
             // The program's own colour changes are written below.
             .with_palette(false)
             .with_modes(true)
             .with_scrolling_region(true)
-            // Not tab stops: emitting them (`CSI 3 g`, then `CSI n G` + `ESC H` per stop) leaves
-            // the cursor at the last stop and the content that follows starts there, shifted.
-            // Programs do not set tab stops; the defaults every 8 columns are what a fresh
-            // engine has anyway.
-            .with_tabstops(false)
+            // The stops a program set (`tabs 4`), then home: `CSI 3 g`, and `CSI n G` and
+            // `ESC H` for each stop.
+            .with_tabstops(true)
             .with_pwd(true)
             .with_keyboard(true)
             .with_cursor(false)
@@ -564,26 +585,15 @@ impl GhosttyEngine {
             .with_hyperlink(true)
             .with_protection(true)
             .with_kitty_keyboard(true)
-            .with_charsets(true);
+            .with_charsets(true)
+            // Every row's prompt flag and every cell's semantic content (OSC 133); the marks
+            // the engine keeps of them follow in the payload.
+            .with_semantic_prompt(true);
         let mut formatter = Formatter::new(&self.term, options)?;
         let bytes = formatter.format_alloc(None)?;
         let mut out = colour_sets(&self.overrides);
-        out.reserve(bytes.len().saturating_add(64));
-        if self.on_alt {
-            // No history behind the alternate screen: nothing to scroll back into place.
-            out.extend_from_slice(&bytes);
-        } else {
-            let (before, after) = bytes.split_at(margins_at(&bytes).map_or(bytes.len(), |m| m.at));
-            out.extend_from_slice(before);
-            // Rows are separated by CR LF and nothing else in the output contains one, so the
-            // cursor stands on row `separators` of `total`; feed lines until it is on the last.
-            let total = self.term.scrollback_rows()?.saturating_add(usize::from(self.term.rows()?));
-            let separators = memchr::memmem::find_iter(&bytes, b"\r\n").count();
-            for _ in 0..total.saturating_sub(1).saturating_sub(separators) {
-                out.extend_from_slice(b"\r\n");
-            }
-            out.extend_from_slice(after);
-        }
+        out.reserve(bytes.len().saturating_add(128));
+        out.extend_from_slice(&bytes);
         let (mut row, mut col) =
             (u32::from(self.term.cursor_y()?), u32::from(self.term.cursor_x()?));
         if self.term.mode(Mode::ORIGIN)? {
@@ -596,7 +606,42 @@ impl GhosttyEngine {
         out.extend_from_slice(
             format!("\x1b[{};{}H", row.saturating_add(1), col.saturating_add(1)).as_bytes(),
         );
+        out.extend_from_slice(self.cursor_content()?);
+        let marks = carried::Payload {
+            base: self.base,
+            exit_marks: &self.exit_marks,
+            prompt_starts: &self.prompt_starts,
+            commands: &self.commands,
+        };
+        out.extend_from_slice(marks.to_string().as_bytes());
         Ok(out)
+    }
+
+    /// The OSC 133 step that gives the cursor back the content it writes with: the formatter
+    /// leaves it in whatever its last row ended in. Output is `D`, which unlike `C` never
+    /// takes a row's prompt flag off. Prompt content flags the row it starts on, so it is given
+    /// back only on a row flagged that way already; on any other the cursor writes output
+    /// rather than mark a row the program never marked.
+    fn cursor_content(&self) -> Result<&'static [u8], EngineError> {
+        const OUTPUT: &[u8] = b"\x1b]133;D\x1b\\";
+        Ok(match self.term.cursor_semantic_content()? {
+            CellSemanticContent::Output => OUTPUT,
+            CellSemanticContent::Input if self.term.cursor_semantic_clear_eol()? => {
+                b"\x1b]133;I\x1b\\"
+            }
+            CellSemanticContent::Input => b"\x1b]133;B\x1b\\",
+            CellSemanticContent::Prompt => {
+                let at = Point::Active(PointCoordinate {
+                    x: self.term.cursor_x()?,
+                    y: u32::from(self.term.cursor_y()?),
+                });
+                match self.term.grid_ref(at)?.row()?.semantic_prompt()? {
+                    RowSemanticPrompt::Prompt => b"\x1b]133;P;k=i\x1b\\",
+                    RowSemanticPrompt::Continuation => b"\x1b]133;P;k=c\x1b\\",
+                    RowSemanticPrompt::None => OUTPUT,
+                }
+            }
+        })
     }
 
     /// Absolute index one past the newest line (history + screen).
@@ -674,6 +719,28 @@ impl GhosttyEngine {
         }
     }
 
+    /// Replay a checkpoint into this fresh engine: each screen's bytes, then the marks its
+    /// payload carries in place of the ones the replay recorded (see [`carried`]).
+    fn restore(&mut self, mut bytes: &[u8]) {
+        self.restoring = true;
+        while let Some((screen, body, rest)) = carried::split(bytes) {
+            self.feed(screen);
+            if let Some(marks) = carried::decode(body, self.base) {
+                self.exit_marks = marks.exit_marks;
+                self.prompt_starts = marks.prompt_starts;
+                self.commands = marks.commands;
+                self.generation = self.generation.wrapping_add(1);
+            } else {
+                tracing::warn!("a checkpoint's marks did not read; its screen has none");
+            }
+            bytes = rest;
+        }
+        self.restoring = false;
+        if !bytes.is_empty() {
+            self.feed(bytes);
+        }
+    }
+
     /// Keep the primary screen for a checkpoint made on the alternate screen. A program that
     /// starts right after a checkpoint (nothing written since) reuses it rather than formatting
     /// the whole history again on the session's thread.
@@ -700,6 +767,8 @@ impl GhosttyEngine {
         std::mem::swap(&mut taken, &mut *self.marks.borrow_mut());
         for pending in taken.drain(..) {
             match pending {
+                // A checkpoint's screens carry their marks; the formatter's are its cells'.
+                Pending::Mark { .. } if self.restoring => {}
                 Pending::Mark { mark, row, col, screen } => {
                     // A mark on a screen that is gone again: the alternate screen's marks are
                     // dropped with it, and a switch in from the primary settles before it.
@@ -959,6 +1028,11 @@ impl GhosttyEngine {
         // Placeholder cells of virtual kitty placements, gathered from every row (a run that
         // did not change still places its image in this frame).
         let mut runs = Runs::default();
+        // The last row visited and whether it soft-wraps into the next.
+        let mut above: Option<(u16, bool)> = None;
+        // A line's wrap is the row above's (see `row_above_wraps`): the clean rows below a
+        // visited row whose wrap changed, and their wrap now.
+        let mut rewrapped_below: Vec<(u16, bool)> = Vec::new();
         while let Some((at, row)) = next_row(&mut row_iter, sparse, y) {
             if at != y {
                 self.shown.carry(&mut shown, first, y..at);
@@ -981,8 +1055,22 @@ impl GhosttyEngine {
                 } else {
                     self.remarked_rows.remove(&abs)
                 };
-            let build =
-                rebuild || dirty_rows.get(usize::from(y)) == Some(true) || forced || remarked;
+            // Last, of a clean row: the row above wraps otherwise than the line the viewers
+            // hold says, or the record does not say what they hold.
+            let build = rebuild
+                || dirty_rows.get(usize::from(y)) == Some(true)
+                || forced
+                || remarked
+                || (!sparse
+                    && hold.is_none()
+                    && known
+                    && above.is_some_and(|(at, wraps)| {
+                        at.wrapping_add(1) == y
+                            && self
+                                .shown
+                                .at(abs)
+                                .is_none_or(|held| held.flags.contains(LineFlags::WRAPPED) != wraps)
+                    }));
             if !build && take != Take::Joiner {
                 shown.push(if known { self.shown.take(abs) } else { None });
                 // Not dirty: the row reads as it did when its print was taken.
@@ -1004,13 +1092,32 @@ impl GhosttyEngine {
                 (false, false, false)
             };
             let (wrapped, row_semantic) = if build {
-                (
-                    raw.is_wrap_continuation()?,
-                    raw.semantic_prompt().unwrap_or(RowSemanticPrompt::None),
-                )
+                let wrapped = match above {
+                    Some((at, wraps)) if at.wrapping_add(1) == y => wraps,
+                    // During a hold the live grid is past the rows the frame shows.
+                    _ if hold.is_some() => raw.is_wrap_continuation()?,
+                    // The row above is clean, so it wraps as it did when this row's line was
+                    // last flagged.
+                    _ if sparse && let Some(held) = self.shown.at(abs) => {
+                        held.flags.contains(LineFlags::WRAPPED)
+                    }
+                    _ => row_above_wraps(&self.term, y)?,
+                };
+                (wrapped, raw.semantic_prompt().unwrap_or(RowSemanticPrompt::None))
             } else {
                 (false, RowSemanticPrompt::None)
             };
+            let wraps = raw.is_wrapped()?;
+            above = Some((y, wraps));
+            if sparse
+                && dirty_rows.get(usize::from(y).saturating_add(1)) == Some(false)
+                && self
+                    .shown
+                    .at(abs.saturating_add(1))
+                    .is_none_or(|held| held.flags.contains(LineFlags::WRAPPED) != wraps)
+            {
+                rewrapped_below.push((y.saturating_add(1), wraps));
+            }
             let row_flags =
                 (build && !forced && !remarked && !placeholders).then_some((wrapped, row_semantic));
             // The line the viewers hold at this index, when the row still reads as it did when
@@ -1158,6 +1265,12 @@ impl GhosttyEngine {
                     x = x.saturating_add(1);
                 }
                 line.links = links.finish(x);
+                // A cell holding only a background colour has no style id, and its own row
+                // flag: read after the row, since a check in the loop above costs every cell
+                // of every row.
+                if raw.has_background()? {
+                    paint_backgrounds(&mut line, layout, row.cells_raw()?)?;
+                }
                 line.flags.set(LineFlags::WRAPPED, wrapped);
                 // The render state copies a row when the terminal dirtied it; a forced or
                 // remarked row was not, so its prompt flag is read from the live grid.
@@ -1257,6 +1370,9 @@ impl GhosttyEngine {
         }
         if sparse {
             self.shown.carry(&mut shown, first, y..rows);
+        }
+        if !rewrapped_below.is_empty() {
+            self.rewrap(&rewrapped_below, &mut shown, &mut updates, hold.is_some(), scrollback)?;
         }
         // Every run was gathered from the rows it lies on, and a row visited or not has the
         // placeholder cells it had when the record last read it.
@@ -1433,6 +1549,62 @@ impl GhosttyEngine {
         Ok(out)
     }
 
+    /// Send the clean rows `rows` again with their wrap now (see `row_above_wraps`). Only the
+    /// flag changed, so each sends the line `shown` holds flagged anew, or one read from the
+    /// grid when it holds none (never during a hold, whose grid is past the rows shown).
+    #[cold]
+    #[inline(never)]
+    fn rewrap(
+        &self,
+        rows: &[(u16, bool)],
+        shown: &mut [Option<Arc<Line>>],
+        updates: &mut Vec<RowUpdate>,
+        held: bool,
+        scrollback: u64,
+    ) -> Result<(), EngineError> {
+        for &(at, wraps) in rows {
+            let Some(slot) = shown.get_mut(usize::from(at)) else { continue };
+            let line = match slot.as_deref() {
+                Some(line) => {
+                    let mut line = line.clone();
+                    line.flags.set(LineFlags::WRAPPED, wraps);
+                    line
+                }
+                None if !held => self.read_line(
+                    u32::try_from(scrollback.saturating_add(u64::from(at))).unwrap_or(u32::MAX),
+                    self.size.cols,
+                )?,
+                None => continue,
+            };
+            let line = Arc::new(line);
+            *slot = Some(Arc::clone(&line));
+            updates.push(RowUpdate { row: at, line });
+        }
+        updates.sort_unstable_by_key(|u| u.row);
+        Ok(())
+    }
+
+    /// Give each cell of screen row `screen_y`'s `line` that holds only a background colour
+    /// its colour (see [`paint_backgrounds`]).
+    #[cold]
+    #[inline(never)]
+    fn paint_line_backgrounds(
+        &self,
+        line: &mut Line,
+        screen_y: u32,
+        layout: Option<&CellLayout>,
+    ) -> Result<(), EngineError> {
+        for (x, slot) in (0..).zip(line.cells.iter_mut()) {
+            let raw =
+                self.term.grid_ref(Point::Screen(PointCoordinate { x, y: screen_y }))?.cell()?;
+            let tag = cell_fields(layout, raw)?.content_tag;
+            if background_only(tag) {
+                slot.style = background_style(tag, raw)?;
+            }
+        }
+        Ok(())
+    }
+
     /// One row of the grid as a [`Line`]. What `FetchLines` serves, 4096 rows at a time: the
     /// row's flags say which per-cell lookups can be skipped (no styling, no multi-codepoint
     /// clusters, no links), a style is resolved once per run of cells sharing it, and a cell's
@@ -1509,7 +1681,19 @@ impl GhosttyEngine {
             set_cell(&mut line, x, Cell { text, style, width });
         }
         line.links = links.finish(cols);
-        line.flags.set(LineFlags::WRAPPED, row.is_wrap_continuation()?);
+        // After the row, as in a frame: a check in the loop above costs every cell.
+        if row.has_background()? {
+            self.paint_line_backgrounds(&mut line, screen_y, layout)?;
+        }
+        let wrapped = match screen_y.checked_sub(1) {
+            Some(above) => self
+                .term
+                .grid_ref(Point::Screen(PointCoordinate { x: 0, y: above }))?
+                .row()?
+                .is_wrapped()?,
+            None => false,
+        };
+        line.flags.set(LineFlags::WRAPPED, wrapped);
         let abs = self.base.saturating_add(u64::from(screen_y));
         line.mark = first_semantic.map_or(SemanticMark::Unknown, |first| {
             convert::semantic_mark(
@@ -1567,6 +1751,15 @@ fn csi_with_final(bytes: &[u8], last: u8) -> Option<(usize, u32)> {
         Some((at, first))
     })
 }
+
+/// A fresh terminal's pen: no style, no hyperlink, no protection, and output content
+/// (`OSC 133;D`, the one step to output that never takes a row's prompt flag off).
+const FRESH_PEN: &[u8] = b"\x1b[0m\x1b]8;;\x1b\\\x1b[0\"q\x1b]133;D\x1b\\";
+
+/// The character sets as a fresh terminal prints with them: ASCII, which libghostty prints as
+/// it does its default UTF-8, designated into G0 to G3 (`ESC ( B` and the like), G0 invoked
+/// into GL (`SI`) and G2 into GR (`LS2R`).
+const FRESH_CHARSETS: &[u8] = b"\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b}";
 
 /// The sequences that put every mode `blob` sets back to its default, in order. The alternate
 /// screen switches themselves are left alone; the caller enters the alternate screen itself.
@@ -1777,6 +1970,41 @@ fn cluster_text(chars: &[char]) -> CellText {
         .map_or(CellText::EMPTY, CellText::from_cluster)
 }
 
+/// Whether a cell holds only a background colour (what an erase or a scroll under a coloured
+/// pen leaves): it has no style of its own, the colour is its content, and no row flag says
+/// the row holds one.
+const fn background_only(content: CellContentTag) -> bool {
+    matches!(content, CellContentTag::BgColorPalette | CellContentTag::BgColorRgb)
+}
+
+/// Give each cell of `line` that holds only a background colour its colour.
+fn paint_backgrounds(
+    line: &mut Line,
+    layout: Option<&CellLayout>,
+    cells: impl Iterator<Item = VtCell>,
+) -> Result<(), libghostty_vt::Error> {
+    for (slot, rc) in line.cells.iter_mut().zip(cells) {
+        let tag = cell_fields(layout, rc)?.content_tag;
+        if background_only(tag) {
+            slot.style = background_style(tag, rc)?;
+        }
+    }
+    Ok(())
+}
+
+/// The style of a cell [`background_only`] holds.
+#[cold]
+fn background_style(content: CellContentTag, cell: VtCell) -> Result<Style, libghostty_vt::Error> {
+    let bg = match content {
+        CellContentTag::BgColorRgb => {
+            let RgbColor { r, g, b } = cell.bg_color_rgb()?;
+            slopty_grid::Color::Rgb(r, g, b)
+        }
+        _ => slopty_grid::Color::Palette(cell.bg_color_palette()?.0),
+    };
+    Ok(Style { bg, ..Style::DEFAULT })
+}
+
 /// Every field of a cell, decoded with the linked build's layout (looked up once per frame
 /// or row by the caller) and read through libghostty's getters when there is none.
 fn cell_fields(
@@ -1845,6 +2073,23 @@ fn blank_line(spare: Option<Line>, cols: u16) -> Line {
         }
         _ => Line::blank(cols),
     }
+}
+
+/// Whether the row above viewport row `y` soft-wraps into it, the row above the viewport
+/// for the first. A line continues the one above when that one wrapped: reflow and
+/// selection go by that row's flag, and the continuation flag libghostty keeps on the row
+/// below can outlive it (a scroll region moved the row above, the history let it go).
+fn row_above_wraps(term: &Terminal<'_, '_>, y: u16) -> Result<bool, EngineError> {
+    let point = match y.checked_sub(1) {
+        Some(above) => Point::Viewport(PointCoordinate { x: 0, y: u32::from(above) }),
+        None => match term.scrollback_rows()?.checked_sub(1) {
+            Some(above) => {
+                Point::Screen(PointCoordinate { x: 0, y: u32::try_from(above).unwrap_or(u32::MAX) })
+            }
+            None => return Ok(false),
+        },
+    };
+    Ok(term.grid_ref(point)?.row()?.is_wrapped()?)
 }
 
 /// The next row a frame reads and its screen row (`y` is the one after the last read): every
@@ -2089,7 +2334,11 @@ fn may_touch_osc_state(bytes: &[u8]) -> bool {
 impl GhosttyEngine {
     /// Feed PTY output.
     pub fn write(&mut self, bytes: &[u8]) {
-        self.feed(bytes);
+        if std::mem::take(&mut self.fresh) && carried::holds(bytes) {
+            self.restore(bytes);
+        } else {
+            self.feed(bytes);
+        }
         // libghostty has no colour-change or pointer-change callback. The current colours
         // against the defaults are eight reads and two palette copies, so they and the pointer
         // are looked at only after a write that could have changed them, and once more after
@@ -3159,6 +3408,82 @@ mod tests {
         assert!(e.modes().unwrap().contains(TermModes::MOUSE_MOTION));
         e.encode_mouse(&at(MouseAction::Motion, None), &mut out).unwrap();
         assert_eq!(out, b"\x1b[<35;3;1M", "1003 reports a move with no button down");
+    }
+
+    /// A line continues the one above when that one soft-wrapped, as reflow and selection have
+    /// it: not when a scroll region moved the row that wrapped away from it (libghostty's
+    /// continuation flag stays on the row below), and still when a line was inserted after it.
+    #[test]
+    fn a_line_is_wrapped_when_the_one_above_wraps_into_it() {
+        let wrapped = |e: &mut GhosttyEngine| -> Vec<bool> {
+            let frame = e.full_frame(0).unwrap();
+            frame.updates.iter().map(|u| u.line.flags.contains(LineFlags::WRAPPED)).collect()
+        };
+        let mut e = engine(5, 4);
+        e.write(b"\x1b[3;1H0123456789");
+        assert_eq!(wrapped(&mut e), [false, false, false, true]);
+        e.write(b"\x1b[1;3r\x1b[3;1H\n\x1b[r");
+        // The region scrolled the row that wrapped up, onto a blank it now wraps into; the
+        // row below the region continues nothing.
+        assert_eq!(wrapped(&mut e), [false, false, true, false]);
+        let screen = e.total_lines().unwrap() - 4;
+        let (_, lines) = e.lines(LineIndex(screen), 4).unwrap();
+        let fetched: Vec<bool> =
+            lines.iter().map(|l| l.flags.contains(LineFlags::WRAPPED)).collect();
+        assert_eq!(fetched, [false, false, true, false], "the history's lines say the same");
+        let mut e = engine(5, 4);
+        e.write(b"0123456789\x1b[2;1H\x1b[L");
+        assert_eq!(wrapped(&mut e), [false, true, false, false], "the line inserted continues it");
+    }
+
+    /// A row whose wrap changed while the row below it did not sends that row again, with
+    /// only its flag changed; and a changed row whose row above did not change keeps the wrap
+    /// it had.
+    #[test]
+    fn a_wrap_changed_above_a_clean_row_reaches_the_viewers() {
+        let rows = |frame: Option<Frame>| -> Vec<(u16, String, bool)> {
+            frame.map_or_else(Vec::new, |f| {
+                f.updates
+                    .iter()
+                    .map(|u| {
+                        let text = u.line.text().trim_end().to_owned();
+                        (u.row, text, u.line.flags.contains(LineFlags::WRAPPED))
+                    })
+                    .collect()
+            })
+        };
+        // The cursor stays off the rows looked at: a row it leaves is drawn again anyway.
+        let mut e = engine(5, 4);
+        e.write(b"0123456789\x1b[4;1H");
+        let _first = e.take_frame(0).unwrap();
+        e.write(b"\x1b[1;3H\x1b[K\x1b[4;1H");
+        let sent = rows(e.take_frame(0).unwrap());
+        assert!(sent.contains(&(0, "01".to_owned(), false)), "{sent:?}");
+        assert!(
+            sent.contains(&(1, "56789".to_owned(), false)),
+            "the erase took the wrap off the row above: {sent:?}"
+        );
+        e.write(b"\x1b[2;1H01234567\x1b[1;1H");
+        let _wrapped = e.take_frame(0).unwrap();
+        e.write(b"\x1b[3;2Hy\x1b[1;1H");
+        let sent = rows(e.take_frame(0).unwrap());
+        assert!(sent.contains(&(2, "5y7".to_owned(), true)), "{sent:?}");
+    }
+
+    /// A combining mark that arrives in a later read than its letter reaches the viewers, and
+    /// so does an emoji's presentation selector (fuzz: the frame kept the bare letter).
+    #[test]
+    fn a_mark_written_after_its_letter_is_a_frame() {
+        let mut e = engine(10, 3);
+        for (letter, mark, cluster) in
+            [("e", "\u{301}", "e\u{301}"), ("\u{2764}", "\u{fe0f}", "\u{2764}\u{fe0f}")]
+        {
+            e.write(format!("\r\x1b[K{letter}").as_bytes());
+            let _letter = e.take_frame(0).unwrap();
+            e.write(mark.as_bytes());
+            let frame = e.take_frame(0).unwrap().expect("the mark is a frame");
+            assert_eq!(frame.updates[0].line.cells[0].text.as_str(), cluster);
+        }
     }
 
     /// A caret shape set in a write of its own (zsh's `zle-line-init` after the prompt) is a
@@ -4447,6 +4772,298 @@ mod checkpoint_tests {
                 palette: vec![(1, [0xe0, 0x6c, 0x75]), (200, [0x12, 0x34, 0x56])],
             }]
         );
+    }
+
+    /// What a checkpoint of `a` replays into a fresh engine of its size.
+    fn replayed(a: &mut GhosttyEngine) -> GhosttyEngine {
+        let mut state = Vec::new();
+        a.checkpoint(&mut state).unwrap();
+        let mut b = engine(a.size.cols, a.size.rows, 100);
+        b.write(&state);
+        b
+    }
+
+    /// The screen's rows as a full frame has them.
+    fn screen_lines(e: &mut GhosttyEngine) -> Vec<Line> {
+        e.full_frame(0).unwrap().updates.iter().map(|u| Line::clone(&u.line)).collect()
+    }
+
+    /// Cells a program never wrote stay unstyled through a checkpoint, between and after
+    /// cells it drew struck through and overlined: the formatter wrote them as spaces in the
+    /// pen of the cell before them (fuzz `regressions/terminal/checkpoint-struck-blanks`).
+    #[test]
+    fn a_checkpoint_keeps_the_cells_between_styled_ones_unstyled() {
+        let mut a = engine(20, 3, 100);
+        a.write(b"\x1b[9;53ma\tb\x1b[0m\r\n\x1b[7mreverse\x1b[2;12Hreverse\x1b[0m");
+        let mut b = replayed(&mut a);
+        let styles = |lines: &[Line]| -> Vec<Vec<Style>> {
+            lines.iter().map(|l| l.cells.iter().map(|c| c.style).collect()).collect()
+        };
+        assert_eq!(styles(&screen_lines(&mut b)), styles(&screen_lines(&mut a)));
+    }
+
+    /// A screen drawn on the alternate screen with the character sets a program chose there
+    /// comes back as drawn, though the primary's own sets are replayed before it; and the
+    /// program finds its sets where it left them on its way back to the primary (fuzz
+    /// `regressions/terminal/checkpoint-lost-dec-graphics-glyph`).
+    #[test]
+    fn a_checkpoint_draws_the_alternate_screen_in_its_own_character_sets() {
+        let mut a = engine(10, 2, 100);
+        a.write(b"\x1b(0lqk\x1b[?1049h\x1b(B3h\x1b(0");
+        let mut b = replayed(&mut a);
+        assert_eq!(all_text(&b), all_text(&a));
+        assert_eq!(all_text(&b), ["   3h", ""], "drawn from where the primary's cursor was");
+        a.write(b"x\x1b[?1049lq");
+        b.write(b"x\x1b[?1049lq");
+        assert_eq!(all_text(&b), all_text(&a));
+        assert_eq!(all_text(&b), ["\u{250c}\u{2500}\u{2510}\u{2500}", ""]);
+
+        let mut a = engine(10, 2, 100);
+        a.write(b"\x1b(0\x1b[?47h3h");
+        let b = replayed(&mut a);
+        assert_eq!(all_text(&b), all_text(&a));
+        assert_eq!(all_text(&b), ["3\u{2424}", ""]);
+    }
+
+    /// A checkpoint taken on the alternate screen draws it with a fresh pen, not with the
+    /// style, hyperlink and protection the primary's cursor had.
+    #[test]
+    fn a_checkpoint_draws_the_alternate_screen_with_a_fresh_pen() {
+        let mut a = engine(12, 2, 100);
+        a.write(b"\x1b[4;31m\x1b]8;;https://example.com\x1b\\\x1b[1\"q\x1b[?1049h\x1b[0m");
+        a.write(b"\x1b]8;;\x1b\\\x1b[0\"qplain");
+        let mut b = replayed(&mut a);
+        assert_eq!(screen_lines(&mut b)[0].cells[0].style, Style::default());
+        assert!(screen_lines(&mut b)[0].links.is_empty(), "no hyperlink");
+        assert_eq!(screen_lines(&mut b), screen_lines(&mut a));
+    }
+
+    /// Hyperlinks come back through a checkpoint, each with its URI and on its cells (fuzz:
+    /// every capture with an `OSC 8`).
+    #[test]
+    fn a_checkpoint_keeps_the_hyperlinks() {
+        let mut a = engine(30, 3, 100);
+        a.write(b"see \x1b]8;id=doc;https://example.com/a\x1b\\docs\x1b]8;;\x1b\\ and ");
+        a.write(b"\x1b[1m\x1b]8;;https://example.com/b\x1b\\bold\x1b]8;;\x1b\\\x1b[0m\r\n");
+        a.write(b"\x1b]8;;https://example.com/c\x1b\\open");
+        let mut b = replayed(&mut a);
+        let links = |lines: &[Line]| -> Vec<Vec<Hyperlink>> {
+            lines.iter().map(|l| l.links.clone()).collect()
+        };
+        let (got, want) = (links(&screen_lines(&mut b)), links(&screen_lines(&mut a)));
+        assert_eq!(got, want);
+        assert_eq!(want.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1, 0]);
+        b.write(b" more");
+        a.write(b" more");
+        assert_eq!(links(&screen_lines(&mut b)), links(&screen_lines(&mut a)), "the open link");
+    }
+
+    /// Soft wraps come back with a checkpoint, so the replayed screen reflows on a resize as
+    /// the original does: a long line, a wide character that did not fit, a typed command
+    /// past the edge, and a line written with autowrap and insert later switched off and on.
+    #[test]
+    fn a_checkpoint_keeps_the_soft_wraps() {
+        let wraps = |lines: &[Line]| -> Vec<bool> {
+            lines.iter().map(|l| l.flags.contains(LineFlags::WRAPPED)).collect()
+        };
+        let inputs: [&[u8]; 4] = [
+            b"0123456789abcde\r\nxy",
+            "012345678\u{4e2d}x".as_bytes(),
+            b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\echo 0123456789",
+            b"0123456789abc\r\n\x1b[?7l\x1b[4h",
+        ];
+        for input in inputs {
+            let mut a = engine(10, 4, 100);
+            a.write(input);
+            let mut b = replayed(&mut a);
+            let want = screen_lines(&mut a);
+            assert!(wraps(&want)[1], "{input:?}: the second row continues the first");
+            assert_eq!(screen_lines(&mut b), want, "{input:?}");
+            for e in [&mut a, &mut b] {
+                e.resize(TermSize { cols: 7, ..e.size }).unwrap();
+            }
+            assert_eq!(all_text(&b), all_text(&a), "{input:?} reflowed");
+        }
+    }
+
+    /// What an erase and a scroll under a coloured pen leave holds only the colour, with no
+    /// style and no row flag of its own: the screen and the history show it all the same, and
+    /// so does a checkpoint (fuzz, a scroll under a background left the row blank).
+    #[test]
+    fn a_background_left_by_an_erase_or_a_scroll_shows() {
+        let red = Style { bg: slopty_grid::Color::Palette(1), ..Style::DEFAULT };
+        let blue = Style { bg: slopty_grid::Color::Rgb(0, 0, 80), ..Style::DEFAULT };
+        let mut a = engine(6, 2, 100);
+        a.write(b"\x1b[41m\x1b[K\x1b[0mab\r\n\x1b[48;2;0;0;80m\n\x1b[0m");
+        let lines = screen_lines(&mut a);
+        let bg = |line: &Line| line.cells.iter().map(|c| c.style).collect::<Vec<_>>();
+        assert_eq!(bg(&lines[1]), vec![blue; 6], "the row a scroll brought in");
+        let (_, history) = a.lines(LineIndex(a.base), 1).unwrap();
+        assert_eq!(bg(&history[0])[2..], [red; 4], "past the text, in the history");
+        let mut b = replayed(&mut a);
+        let drawn =
+            |e: &mut GhosttyEngine| -> Vec<Vec<Style>> { screen_lines(e).iter().map(bg).collect() };
+        assert_eq!(drawn(&mut b), drawn(&mut a));
+    }
+
+    /// A scrolling region set before the program entered the alternate screen still holds
+    /// there, and the replay of that screen's rows does not scroll inside it (fuzz, the rows
+    /// past the region's bottom scrolled the ones in it away).
+    #[test]
+    fn a_region_set_before_the_alternate_screen_scrolls_none_of_it() {
+        let mut a = engine(6, 5, 100);
+        a.write(b"\x1b[2;3r\x1b[?1049h\x1b[1;1Ha\x1b[2;1Hb\x1b[3;1Hc\x1b[4;1Hd\x1b[5;1He");
+        let mut b = replayed(&mut a);
+        assert_eq!(all_text(&b), all_text(&a));
+        assert_eq!(all_text(&a), ["a", "b", "c", "d", "e"]);
+        for e in [&mut a, &mut b] {
+            e.write(b"\x1b[3;1H\nx");
+        }
+        assert_eq!(all_text(&b), all_text(&a), "the region still scrolls rows 2 and 3");
+    }
+
+    /// The tab stops a program set come back with a checkpoint.
+    #[test]
+    fn a_checkpoint_keeps_the_tab_stops() {
+        let mut a = engine(20, 3, 100);
+        a.write(b"\x1b[3g\x1b[5G\x1bH\x1b[11G\x1bH\r");
+        let mut b = replayed(&mut a);
+        for e in [&mut a, &mut b] {
+            e.write(b"\ta\tb");
+        }
+        assert_eq!(all_text(&b), all_text(&a));
+        assert_eq!(all_text(&a)[0], "    a     b");
+    }
+
+    /// A shell's prompt (`OSC 133;A`), its input (`B`), the output (`C`) and the end with a
+    /// status (`D`).
+    fn command(e: &mut GhosttyEngine, typed: &str, output: &str, exit: Option<u8>) {
+        e.write(
+            format!("\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\{typed}\r\n\x1b]133;C\x1b\\").as_bytes(),
+        );
+        e.write(output.as_bytes());
+        if let Some(exit) = exit {
+            e.write(format!("\x1b]133;D;{exit}\x1b\\").as_bytes());
+        }
+    }
+
+    type Placed = (u64, (u64, u64), bool, Option<u8>);
+
+    /// The blocks as their marks place them: the prompt's line, the output's lines, and how
+    /// the command ended.
+    fn blocks(e: &GhosttyEngine) -> Vec<Placed> {
+        let all = e.commands(None).unwrap();
+        all.into_iter().map(|c| (c.prompt_line, c.output, c.finished, c.exit)).collect()
+    }
+
+    /// The command blocks come back with a checkpoint: its prompt's and output's rows and how
+    /// it ended, and the command still running, which its end then ends. Replaying them ends
+    /// nothing a waiter would see.
+    #[test]
+    fn a_checkpoint_keeps_the_command_blocks() {
+        let mut a = engine(30, 6, 100);
+        command(&mut a, "false", "no\r\n", Some(1));
+        a.write(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\\r\n");
+        // Output on its prompt's own row: replayed, its cells start the output (`C`), and the
+        // step that leaves the cursor writing output (`D`) must not end the command.
+        a.write(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\sleep 9\x1b]133;C\x1b\\ working");
+        let mut b = replayed(&mut a);
+        assert_eq!(blocks(&b), blocks(&a));
+        assert_eq!(a.commands(None).unwrap().len(), 2);
+        assert_eq!(b.commands_ended(), 0, "the replay ended no command");
+        for e in [&mut a, &mut b] {
+            e.write(b"done\r\n\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\$ ");
+        }
+        assert_eq!(blocks(&b), blocks(&a));
+        assert!(b.commands(None).unwrap().iter().all(|c| c.finished));
+    }
+
+    /// Every line's prompt mark comes back with a checkpoint: the prompt rows with their
+    /// statuses and where their input starts, a two-row command line, the output and the
+    /// rows never written (fuzz: every capture with an `OSC 133`).
+    #[test]
+    fn a_checkpoint_keeps_every_lines_prompt_mark() {
+        let mut a = engine(30, 8, 100);
+        command(&mut a, "false", "no\r\n", Some(1));
+        a.write(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\echo 'a\r\n> b'\r\n\x1b]133;C\x1b\\a\r\nb\r\n");
+        a.write(b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\");
+        let mut b = replayed(&mut a);
+        let marks =
+            |lines: &[Line]| -> Vec<SemanticMark> { lines.iter().map(|l| l.mark).collect() };
+        let want = marks(&screen_lines(&mut a));
+        assert_eq!(marks(&screen_lines(&mut b)), want);
+        assert!(matches!(want[0], SemanticMark::Prompt { exit: None, input: Some(2) }), "{want:?}");
+        assert!(want.contains(&SemanticMark::Prompt { exit: Some(1), input: Some(2) }), "{want:?}");
+    }
+
+    /// The cursor writes on after a checkpoint with the content it had, whatever the row the
+    /// formatter wrote last ended in: the rest of a prompt, a command line going on to a
+    /// second row, or output after the command started on its prompt's row.
+    #[test]
+    fn a_checkpoint_keeps_what_the_cursor_writes() {
+        let typed = |e: &GhosttyEngine| -> Vec<String> {
+            e.commands(None).unwrap().into_iter().map(|c| c.command).collect()
+        };
+        let marks =
+            |lines: &[Line]| -> Vec<SemanticMark> { lines.iter().map(|l| l.mark).collect() };
+        let cases: [(&[u8], &[u8], Option<&str>); 3] = [
+            (b"\x1b]133;A\x1b\\$", b" \x1b]133;B\x1b\\ls\r\n\x1b]133;C\x1b\\", Some("ls")),
+            (
+                b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\",
+                b"echo 'a\r\nb'\r\n\x1b]133;C\x1b\\a\r\nb\r\n",
+                Some("echo 'a\nb'"),
+            ),
+            // The command's text is not read from its prompt's row when its output starts
+            // there too, replayed or not.
+            (b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\ls\x1b]133;C\x1b\\", b" out\r\n", None),
+        ];
+        for (before, after, command) in cases {
+            let mut a = engine(30, 6, 100);
+            a.write(before);
+            let mut b = replayed(&mut a);
+            for e in [&mut a, &mut b] {
+                e.write(after);
+                e.write(b"\x1b]133;D;0\x1b\\\x1b]133;A\x1b\\$ ");
+            }
+            assert_eq!(typed(&b), typed(&a), "{before:?}");
+            if let Some(command) = command {
+                assert_eq!(typed(&a), [command], "{before:?}");
+            }
+            assert_eq!(marks(&screen_lines(&mut b)), marks(&screen_lines(&mut a)), "{before:?}");
+        }
+    }
+
+    /// A program started from a prompt takes the alternate screen with the cursor the prompt
+    /// left; replayed, the alternate screen is drawn as the program drew it, and the primary's
+    /// prompt comes back on the way back.
+    #[test]
+    fn a_checkpoint_on_the_alternate_screen_keeps_both_screens_marks() {
+        let mut a = engine(30, 6, 100);
+        a.write(b"\x1b]133;A\x1b\\$ \x1b]133;B\x1b\\vim\x1b[?1049hediting\r\n\x1b]133;C\x1b\\out");
+        let mut b = replayed(&mut a);
+        let marks =
+            |lines: &[Line]| -> Vec<SemanticMark> { lines.iter().map(|l| l.mark).collect() };
+        assert_eq!(marks(&screen_lines(&mut b)), marks(&screen_lines(&mut a)));
+        for e in [&mut a, &mut b] {
+            e.write(b"\x1b[?1049l\r\n\x1b]133;C\x1b\\done\r\n\x1b]133;D;0\x1b\\");
+        }
+        assert_eq!(marks(&screen_lines(&mut b)), marks(&screen_lines(&mut a)));
+        assert_eq!(blocks(&b), blocks(&a));
+    }
+
+    /// A checkpoint taken while a program has the alternate screen keeps the primary's
+    /// blocks for the way back.
+    #[test]
+    fn a_checkpoint_on_the_alternate_screen_keeps_the_primarys_command_blocks() {
+        let mut a = engine(30, 6, 100);
+        command(&mut a, "true", "", Some(0));
+        command(&mut a, "vim", "\x1b[?1049hediting", None);
+        let mut b = replayed(&mut a);
+        for e in [&mut a, &mut b] {
+            e.write(b"\x1b[?1049l\x1b]133;D;0\x1b\\");
+        }
+        assert_eq!(blocks(&b), blocks(&a));
+        assert_eq!(a.commands(None).unwrap().len(), 2);
     }
 
     #[test]

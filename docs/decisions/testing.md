@@ -901,15 +901,85 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     second engine fed the same bytes shows whole. Every frame comes back from the wire as it
     went. A scrollback page holds no more lines than asked. A checkpoint replayed into a fresh
     engine shows the same cells and cursor.
-  - **What the checkpoint oracle forgives.** A cell never written comes back as a space, and a
-    blank's pen may differ where it draws nothing. During a synchronized update (mode 2026) the
-    check waits, since the replay holds its screen too.
-  - **Open findings, for the engine's owner.** A checkpoint loses the lines' OSC 133 prompt
-    marks (they come back as output) and their OSC 8 hyperlinks, so the oracle leaves both out
-    until the checkpoint carries them. The fuzzer also found two replay bugs, kept under
-    `target/fuzz/findings/`. Blanks come back struck through or overlined when the pen carries
-    those styles (autowrap off, then a resize). A DEC special-graphics glyph (`ESC ( 0`, on the
-    alternate screen) is lost.
+  - **What the checkpoint oracle holds a replay to.** Each line's cells as they draw, its
+    prompt mark, its hyperlinks and its soft wrap, and the cursor. Only what draws nothing may
+    differ: a cell never written comes back as a space, and a space's pen (a foreground colour,
+    bold, blink) shows nothing. During a synchronized update (mode 2026) the check waits, since
+    the replay holds its screen too.
+  - **What it found, and where each was fixed.** A checkpoint lost a lot more than its cells.
+    Each fix was made where the loss was. Most were in libghostty's VT formatter, fixed in our
+    fork (aislopware/ghostty#1 and #2, carried through aislopware/libghostty-rs#1 and #2).
+    None duplicates an open ghostty-org pull request.
+    - Blanks between and after styled cells came back in the pen of the cell before them, so
+      the gap a tab left between struck-through cells came back struck through. The formatter
+      now closes the style before the spaces that stand for them. Regression:
+      `fuzz/regressions/terminal/checkpoint-struck-blanks`.
+    - Hyperlinks were written for HTML only. VT output now opens each with OSC 8, keeping its
+      explicit id, and closes it where it ends.
+    - No OSC 133 state at all, so every row came back as output. The formatter's new
+      `semantic_prompt` option writes every row's prompt flag and every cell's content. The
+      engine then gives the cursor back the content it writes with, and carries its own prompt
+      starts, statuses and command blocks in an OSC of its own after each screen (`OSC 6973`,
+      `slopty-engine`'s `ghostty/carried.rs`). Replaying a checkpoint counts none of the marks
+      the formatter writes, so nothing waiting on a command's end is woken.
+    - Soft wraps never came back, since the formatter ended every row with a newline. The engine
+      now formats with `unwrap`, which leaves a wrapped row for the replay to wrap. Three gaps in
+      that path are fixed in the formatter. A wrapped row followed by one with no text shifted
+      every later row up by one. The semantic prompt state carries across a wrap, with a
+      newline where a wrap would not bring the next row back as it is. Wraparound and insert
+      mode were set before the contents, so a row never wrapped and text was inserted rather
+      than written.
+    - Trailing blank rows were left out, and the engine padded them back by counting the
+      formatter's newlines, which a wrapped row no longer writes. The formatter's new
+      `trailing_rows` option writes them.
+    - On the alternate screen, the primary's character sets and pen were carried in. A DEC
+      special-graphics designation (`ESC ( 0`) made the alternate screen's text come back as
+      line drawing. The engine now resets the pen, the character sets and the cursor's content
+      before the alternate screen's contents. Regression:
+      `fuzz/regressions/terminal/checkpoint-lost-dec-graphics-glyph`.
+    - Tab stops a program set were left out. They were dropped because the formatter once left
+      the cursor at the last stop, and it now homes after them.
+  - **What it found next, with every line held to the oracle.** A second round of fixes in the
+    fork (aislopware/ghostty#3 and #4, carried through aislopware/libghostty-rs#3), and two in
+    the engine.
+    - A replay's wrap gives the new row the prompt flag the wrap does, not the one the row has.
+      The formatter now sets both rows' flags right after the wrap. On a single column there
+      is no column to step back to, so it prints that column again.
+    - A row the replay wrapped into that held only a prompt flag was never entered. As the
+      last row it was lost, and the newline after it took off the soft wrap before it. The
+      formatter now enters it by its end. Regression: `checkpoint-lost-flagged-empty-row`.
+    - A wrap that scrolls fills the new row with the pen's background (background colour
+      erase), and the blanks the row ended in kept that colour. Such a row now ends with an
+      erase under the default pen. Regression: `checkpoint-wrap-scroll-coloured-blanks`.
+    - Two kinds of cell were written as plain blanks and lost. One holds only a background (an
+      erase under a coloured pen). The other is empty under a hyperlink: a wide character that
+      a single column or a right margin cannot hold prints as one. Regression:
+      `checkpoint-lost-link-on-empty-cell`.
+    - A resize without reflow that cut a wide character at the new edge left half of it.
+    - The scrolling region belongs to the terminal, not to a screen, so the primary's region
+      scrolled the alternate screen's rows away as they replayed. The engine resets it before
+      them. Regression: `checkpoint-alt-screen-scrolled-by-primary-region`.
+  - **Stale frames, found through the checkpoint.** The mirror's frames are the truth, so a
+    frame that went stale shows up as a checkpoint that does not match.
+    - libghostty left a row clean when a zero-width mark attached to the cell before it without
+      clustering, and when the row's prompt flag changed (OSC 133, a newline or a wrap in a
+      prompt, output at the first column). The render state copies only dirty rows, so it kept
+      the old text or flag. Upstream lets the prompt flag go stale on purpose, since its
+      renderer draws nothing of it, but the engine's marks are drawn. The fork now dirties a row
+      on both, and its render state tests hold the flag to that. Regression:
+      `frame-stale-prompt-flag`.
+    - The engine drew a cell that holds only a background as default, since it read colours
+      from cell styles alone. Such a cell has no style, so no row flag said a row held one, and
+      a check of every cell put a keystroke's frame up by 4 to 5 %. The fork now flags the row
+      (`Row.background`, read as `GHOSTTY_ROW_DATA_BACKGROUND`), and the engine reads those
+      colours on a flagged row only (aislopware/ghostty#4).
+    - `WRAPPED` was read from libghostty's `wrap_continuation`, a cache that a scrolling region,
+      an inserted or deleted line and history eviction leave stale. It is now the row above's
+      own wrap flag, which reflow and selection use. A line's `WRAPPED` therefore changes when
+      only the row above it changes. A frame sends the clean row below a changed one again
+      with only the flag changed, and a changed row whose row above is clean takes its wrap
+      from its own line as last sent. A first version walked every row and looked the row
+      above up in the grid, and cost a keystroke's frame about 1 %.
   - **Memory, not a leak.** Under AddressSanitizer the target's resident memory grows by about
     0.5 MB per execution. Plain `ReleaseFast` and `ReleaseSafe` builds of the same inputs stay
     flat at 8 to 12 MB, and LeakSanitizer reports no leak. The terminal target therefore gets an

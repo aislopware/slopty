@@ -28,16 +28,16 @@ const SINCE_ROWS: u64 = 4096;
 /// and its end (`133;D`) with the cursor where the mark was written.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Block {
-    prompt: u64,
-    output: Option<u64>,
-    end: Option<End>,
+    pub prompt: u64,
+    pub output: Option<u64>,
+    pub end: Option<End>,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct End {
-    line: u64,
-    col: u16,
-    exit: Option<u8>,
+pub(super) struct End {
+    pub line: u64,
+    pub col: u16,
+    pub exit: Option<u8>,
 }
 
 /// The screen as text.
