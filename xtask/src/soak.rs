@@ -846,9 +846,18 @@ fn thread_names(pid: i32) -> Option<BTreeMap<String, u32>> {
     Some(names)
 }
 
+/// Each of `pid`'s threads by its name's [`stem`], counted, from `/proc/<pid>/task/*/comm`
+/// (proc(5)). `None` once the process is gone.
 #[cfg(not(target_vendor = "apple"))]
-fn thread_names(_pid: i32) -> Option<BTreeMap<String, u32>> {
-    None
+fn thread_names(pid: i32) -> Option<BTreeMap<String, u32>> {
+    let mut names = BTreeMap::new();
+    for task in std::fs::read_dir(format!("/proc/{pid}/task")).ok()?.flatten() {
+        // A thread that ended between the listing and this read has no name to count.
+        let Ok(name) = std::fs::read_to_string(task.path().join("comm")) else { continue };
+        let count = names.entry(stem(name.trim_end_matches('\n'))).or_insert(0_u32);
+        *count = count.saturating_add(1);
+    }
+    Some(names)
 }
 
 /// `name` with a trailing UUID replaced by `*`, and `(unnamed)` for no name.
@@ -1246,7 +1255,6 @@ mod tests {
     use super::*;
 
     /// This process's threads, read by name: one started here under its own name is there.
-    #[cfg(target_vendor = "apple")]
     #[test]
     fn a_process_s_threads_read_by_name() {
         // A thread names itself as it starts, so it answers once its name is set.

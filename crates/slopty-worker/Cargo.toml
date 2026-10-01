@@ -50,6 +50,8 @@ objc2.workspace = true
 # A worktree's index follows its whole tree on one FSEvents stream (`find::watch`).
 objc2-core-foundation = { workspace = true, features = [ "CFArray", "CFString" ] }
 objc2-core-services = { workspace = true, features = [ "FSEvents", "dispatch2" ] }
+# Xcode's version, read from its `version.plist` rather than by running `xcodebuild` (`facts`).
+plist.workspace = true
 
 [dev-dependencies]
 # The encoder's measurement surface (VBV mode, property probes) for `tests/screen.rs`.

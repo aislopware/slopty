@@ -19,6 +19,7 @@ use slopty_proto::dnd::{FromHelper, ToHelper};
 use slopty_proto::drag::{DragEvent, DragId, DragInput, DragItem, DragOp};
 use slopty_proto::input::MouseButton;
 use slopty_proto::screen::ScreenInput;
+#[cfg(target_os = "macos")]
 use slopty_proto::transfer::{INLINE_CLIP_BYTES, MAX_CLIP_ITEMS, Rep};
 use slopty_worker::screen::drag::out::{DragOut, OutAct, OutHeard, Presses, Watching};
 use slopty_worker::screen::drag::{Act, BUSY, Claim, Drags, DropIn, Heard};
@@ -394,6 +395,10 @@ pub const WATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(8)
 /// press, reads it every [`WATCH_EVERY`] once the button moves held until the release, and says
 /// what a drag that began carries, once ([`Watching`]).
 #[derive(Debug, Default)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only a Mac has a drag pasteboard to watch")
+)]
 pub struct PressWatch {
     /// The pasteboard watched, when not the system's drag pasteboard ([`Dnd::watching`]).
     board: Option<String>,
@@ -404,6 +409,7 @@ pub struct PressWatch {
 
 impl PressWatch {
     /// Ask the watch `watching`, starting its thread at the first press.
+    #[cfg(target_os = "macos")]
     pub fn ask(&mut self, watching: Watching) {
         let count = if watching == Watching::Mark { mark_count(self.board.as_deref()) } else { 0 };
         if let Some(to) = &self.to
@@ -411,9 +417,14 @@ impl PressWatch {
         {
             return;
         }
-        if watching != Watching::Mark || !cfg!(target_os = "macos") {
-            return;
+        if watching == Watching::Mark {
+            self.start(count);
         }
+    }
+
+    /// Start the watch's thread, marked at `count`.
+    #[cfg(target_os = "macos")]
+    fn start(&mut self, count: isize) {
         let (to, asked) = std::sync::mpsc::channel();
         let (said, began) = mpsc::unbounded_channel();
         let board = self.board.clone();
@@ -422,7 +433,7 @@ impl PressWatch {
             .spawn(move || watch_presses(board.as_deref(), &asked, &said));
         match spawned {
             Ok(_detached) => {
-                let _sent = to.send((watching, count));
+                let _sent = to.send((Watching::Mark, count));
                 self.to = Some(to);
                 self.began = Some(began);
             }
@@ -442,7 +453,6 @@ impl PressWatch {
     }
 }
 
-/// The watch's thread: as [`PressWatch`] asks, until it goes.
 /// The drag pasteboard's count as a press is seen, on the stream's task: the watch's thread
 /// may start after an app's drag has.
 #[cfg(target_os = "macos")]
@@ -450,11 +460,7 @@ fn mark_count(board: Option<&str>) -> isize {
     slopty_dnd::watch::change_count(board)
 }
 
-#[cfg(not(target_os = "macos"))]
-const fn mark_count(_board: Option<&str>) -> isize {
-    0
-}
-
+/// The watch's thread: as [`PressWatch`] asks, until it goes.
 #[cfg(target_os = "macos")]
 fn watch_presses(
     board: Option<&str>,
@@ -489,14 +495,6 @@ fn watch_presses(
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn watch_presses(
-    _board: Option<&str>,
-    _asked: &std::sync::mpsc::Receiver<(Watching, isize)>,
-    _said: &mpsc::UnboundedSender<Vec<DragItem>>,
-) {
 }
 
 /// What a drag's items hold as the client hears it begin: each named file by its path here,
@@ -685,7 +683,13 @@ impl Outward {
     /// See `input` before it goes to the app: the watch follows the left button, and a drag out
     /// on the tile follows the pointer and its release.
     pub fn see(&mut self, input: &ScreenInput) -> Vec<OutAct> {
-        if let Some(watching) = self.presses.input(input) {
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(unused_variables, reason = "only a Mac has a drag pasteboard to watch")
+        )]
+        let watching = self.presses.input(input);
+        #[cfg(target_os = "macos")]
+        if let Some(watching) = watching {
             self.watch.ask(watching);
         }
         let held = self.presses.held();

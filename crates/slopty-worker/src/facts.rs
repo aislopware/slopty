@@ -86,8 +86,6 @@ const AGENTS: [Tool; 7] = [
 const TOOLCHAINS: &[Tool] = &[
     Tool::version("rustc", "rustc"),
     Tool::version("cargo", "cargo"),
-    #[cfg(target_os = "macos")]
-    Tool { name: "xcode", program: "xcodebuild", args: &["-version"], after: None },
     Tool::version("docker", "docker"),
     Tool::version("node", "node"),
     Tool::version("bun", "bun"),
@@ -138,13 +136,17 @@ pub async fn gather(own: Own) -> Facts {
     let (login, stand_ins) = tokio::join!(login_path(), StandIns::find());
     let search = Arc::new(SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)));
     let (agents, toolchains, rust_targets, gpus, power, probes) = tokio::join!(
-        versions(&search, stand_ins, &AGENTS),
-        versions(&search, stand_ins, TOOLCHAINS),
+        versions(&search, &stand_ins, &AGENTS),
+        versions(&search, &stand_ins, TOOLCHAINS),
         rust_targets(&search),
         gpus(&search),
         power(),
         probes(&search, own.probes, PROBE_WAIT),
     );
+    let mut toolchains = toolchains;
+    if let Some(xcode) = stand_ins.xcode {
+        toolchains.insert("xcode".to_owned(), Fact::Text(xcode));
+    }
     let mut facts = Facts::new();
     facts.insert("agents".to_owned(), Fact::Map(agents));
     facts.insert("toolchains".to_owned(), Fact::Map(toolchains));
@@ -164,7 +166,7 @@ pub async fn gather(own: Own) -> Facts {
 }
 
 /// The versions of those of `tools` installed here, by name.
-async fn versions(search: &Arc<SearchPath>, stand_ins: StandIns, tools: &'static [Tool]) -> Facts {
+async fn versions(search: &Arc<SearchPath>, stand_ins: &StandIns, tools: &'static [Tool]) -> Facts {
     let mut running = JoinSet::new();
     for tool in tools {
         let Some(program) = search.resolve(tool.program).filter(|p| stand_ins.answer(p)) else {
@@ -393,10 +395,12 @@ async fn login_path() -> Option<OsString> {
 /// Whether macOS's stand-ins in `/usr/bin` have something behind them. With nothing there, the
 /// developer tools' shims and `java` put up an installer dialog instead of answering, so they
 /// are not run.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct StandIns {
     developer: bool,
     java: bool,
+    /// Xcode's version, when the developer directory is an Xcode's ([`xcode_version`]).
+    xcode: Option<String>,
 }
 
 impl StandIns {
@@ -405,31 +409,44 @@ impl StandIns {
         let search = SearchPath::of(None);
         let answers = async |program: &str, args: &[&str]| {
             let ran = run(search.command(Path::new(program), args), VERSION_WAIT, LISTING_MAX);
-            ran.await.is_some_and(|ran| ran.ok)
+            ran.await.filter(|ran| ran.ok)
         };
         let (developer, java) = tokio::join!(
             answers("/usr/bin/xcode-select", &["-p"]),
             answers("/usr/libexec/java_home", &[]),
         );
-        Self { developer, java }
+        let xcode = developer.as_ref().and_then(|dir| xcode_version(Path::new(&dir.out)));
+        Self { developer: developer.is_some(), java: java.is_some(), xcode }
     }
 
     /// Only macOS puts stand-ins in `/usr/bin`.
     #[cfg(not(target_os = "macos"))]
     fn find() -> impl Future<Output = Self> {
-        std::future::ready(Self { developer: true, java: true })
+        std::future::ready(Self { developer: true, java: true, xcode: None })
     }
 
     /// Whether `program` answers rather than asking to install something.
-    fn answer(self, program: &Path) -> bool {
+    fn answer(&self, program: &Path) -> bool {
         match program.to_str() {
             Some("/usr/bin/java") => self.java,
-            Some(
-                "/usr/bin/git" | "/usr/bin/python3" | "/usr/bin/swift" | "/usr/bin/xcodebuild",
-            ) => self.developer,
+            Some("/usr/bin/git" | "/usr/bin/python3" | "/usr/bin/swift") => self.developer,
             _ => true,
         }
     }
+}
+
+/// The version of the Xcode whose developer directory is `developer` (what `xcode-select -p`
+/// prints), from the `version.plist` beside it; `None` for the command line tools alone, which
+/// have none.
+///
+/// Never by running `xcodebuild -version`: after an Xcode update, until its components are
+/// installed, any `xcodebuild` puts up a dialog asking for the person's password to install
+/// them, and a worker probing every [`REFRESH`] put it up again and again.
+#[cfg(target_os = "macos")]
+fn xcode_version(developer: &Path) -> Option<String> {
+    let plist = plist::Value::from_file(developer.parent()?.join("version.plist")).ok()?;
+    let version = plist.as_dictionary()?.get("CFBundleShortVersionString")?.as_string()?;
+    Some(version.to_owned())
 }
 
 /// How a command ended, when it did in time.
@@ -608,15 +625,31 @@ mod tests {
     /// macOS's stand-ins run only with something behind them; every other program runs.
     #[test]
     fn a_stand_in_with_nothing_behind_it_is_not_run() {
-        let bare = StandIns { developer: false, java: false };
+        let bare = StandIns { developer: false, java: false, xcode: None };
         assert!(!bare.answer(Path::new("/usr/bin/git")));
         assert!(!bare.answer(Path::new("/usr/bin/java")));
         assert!(bare.answer(Path::new("/opt/homebrew/bin/git")));
-        let full = StandIns { developer: true, java: true };
+        let full = StandIns { developer: true, java: true, xcode: None };
         assert!(
-            full.answer(Path::new("/usr/bin/xcodebuild"))
-                && full.answer(Path::new("/usr/bin/java"))
+            full.answer(Path::new("/usr/bin/swift")) && full.answer(Path::new("/usr/bin/java"))
         );
+    }
+
+    /// Xcode's version is read from the plist beside its developer directory, and the command
+    /// line tools alone, with no plist, have no Xcode.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn xcode_is_read_from_its_plist_and_never_run() {
+        let xcode = tempfile::tempdir().unwrap();
+        let developer = xcode.path().join("Developer");
+        std::fs::create_dir_all(&developer).unwrap();
+        assert_eq!(xcode_version(&developer), None, "no plist, no Xcode");
+        let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+                     <key>CFBundleShortVersionString</key><string>27.0</string>\
+                     <key>ProductBuildVersion</key><string>27A266a</string></dict></plist>";
+        std::fs::write(xcode.path().join("version.plist"), plist).unwrap();
+        assert_eq!(xcode_version(&developer).as_deref(), Some("27.0"));
+        assert!(TOOLCHAINS.iter().all(|tool| tool.program != "xcodebuild"));
     }
 
     #[test]
