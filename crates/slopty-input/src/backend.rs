@@ -346,6 +346,12 @@ pub trait Backend {
     fn spring_delay_s(&mut self) -> f64 {
         crate::nudge::DEFAULT_SPRING_DELAY_S
     }
+    /// Whether a window `target`, owned by `pid`, is on screen with nothing of another window
+    /// over the global point `at`: a press posted through the HID tap there reaches it. A
+    /// stand-in that keeps no window list answers no, and so does a display.
+    fn uncovered_at(&mut self, _target: CaptureTarget, _pid: i32, _at: CGPoint) -> bool {
+        false
+    }
 }
 
 /// The worker's Caps Lock claim ([`crate::CapsClaims`]).
@@ -368,6 +374,12 @@ thread_local! {
 impl Backend for System {
     fn spring_delay_s(&mut self) -> f64 {
         crate::nudge::spring_delay_s()
+    }
+
+    fn uncovered_at(&mut self, target: CaptureTarget, pid: i32, at: CGPoint) -> bool {
+        let CaptureTarget::Window(id) = target else { return false };
+        let point = Rect { x: at.x, y: at.y, w: 1.0, h: 1.0 };
+        slopty_capture::window_on_screen(id) && !slopty_capture::occluded(id, &point, pid)
     }
 
     fn owner_pid(&self, target: CaptureTarget) -> Option<i32> {
@@ -822,6 +834,8 @@ pub struct Recorder {
     pub clock_ns: u64,
     /// The Caps Lock claim this recorder's injectors share: its own, and its clones'.
     pub caps_claims: SharedCaps,
+    /// What [`Backend::uncovered_at`] answers: the window is on top where it is pressed.
+    pub uncovered: bool,
 }
 
 impl Recorder {
@@ -897,6 +911,10 @@ impl Backend for Recorder {
 
     fn caps_claims(&self) -> SharedCaps {
         std::sync::Arc::clone(&self.caps_claims)
+    }
+
+    fn uncovered_at(&mut self, _target: CaptureTarget, _pid: i32, _at: CGPoint) -> bool {
+        self.uncovered
     }
 }
 

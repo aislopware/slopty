@@ -23,6 +23,7 @@
 
 #[cfg(target_os = "macos")]
 #[path = "child.rs"]
+#[expect(dead_code, reason = "shared with the drop target, which stamps its lines")]
 mod child;
 
 #[cfg(target_os = "macos")]

@@ -1171,10 +1171,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis`; live in a guest,
       `the_workers_helper_lands_a_drop_at_the_point` (MEASUREMENTS, "the drop in, carried"):
       a drop with its files whole reaches the target 5 ms after the release (median of ten),
-      so it lands RTT/2 and about 5 ms after the client's drop. The badge turns copy 50–85 ms
-      after the drag crosses onto a target, which misses the plan's `RTT + 25 ms` before the
-      network is counted; the helper reads every 8 ms, so the rest is the drag manager's. The
-      app e2e with a recording worker (`--dnd-record`) is not built yet.
+      so it lands RTT/2 and about 5 ms after the client's drop. The badge turned copy 50–85 ms
+      after the drag crossed onto a target; P3 found why and cut the helper's part of it
+      ("The badge, timed" below).
       - *No gpui-fast hook.* The window's one drop view, a subview of GPUI's, registers for file
         URLs, promises and every format the clipboard carries, and AppKit gives a drag to the
         deepest view registered for its types. It asks the workspace what each point is over:
@@ -1215,8 +1214,66 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         drop, leave and catch must arrive. The stream tells every step of a drag, and only an
         operation replaces the same drag's operation still waiting. A stream that closes, or a
         client that goes, mid-drag counts as its leave.
-    - *P3 — drag out on macOS.* Drag-pasteboard watch, HID follow, catcher,
-      `OutBegan`/`OutCaught`, the client's hand-over and its in-tile icons.
+    - ✅ *P3 — drag out on macOS* (2026-10-01). As built, with the rulings below: the
+      injector's press through the HID tap (`slopty_input::Injector`, `DragStep::Locate`); the
+      watch (`slopty_dnd::watch::change_count`, `Found::carried`) on a thread of the stream's
+      own (`apps/slopty-worker/src/dnd.rs`, `PressWatch`, `Outward`); the worker's `DragOut`
+      (`slopty_worker::screen::drag::out`) and the catch's data kept for fetches
+      (`Drags::keep`, `Source::Drag` in `xfer::send_clip`); the catcher's `Ready` and its
+      `Operation` once the drag is over it (`slopty_dnd::helper`); on the client
+      `slopty_client::dnd::out` (`Outgoing`, `Shared`), the tile's icons and hand-over
+      (`slopty-ui` `screen/drop.rs`), the workspace's drag on (`workspace/remote/drag_out.rs`)
+      and data items in `slopty_platform::drag::drag_out_items`. Tests:
+      `a_left_press_on_an_uncovered_window_goes_through_the_hid_tap` and
+      `a_held_press_on_a_display_cancels_and_a_point_is_located` (`slopty-input`);
+      `a_drag_pasteboard_change_is_watched_only_while_the_left_button_is_held`,
+      `catch_wiggles_over_the_catcher_and_lets_go`,
+      `the_catch_says_what_it_took_and_keeps_what_does_not_ride_inline` and
+      `a_drag_out_ends_on_the_tile_or_says_why_it_was_not_caught` (`slopty-worker`);
+      `a_drag_out_is_seen_caught_and_told` (the daemon, on a named pasteboard);
+      `a_none_between_two_targets_is_not_said` (`slopty-dnd`);
+      `a_drag_out_offers_its_items_and_finds_them_once_caught` (`slopty-client`);
+      `leaving_the_tile_during_a_worker_drag_hands_it_over` (`slopty-ui`); live in a guest,
+      `a_window_streams_press_drags_out_and_the_catch_takes_it` and
+      `the_badge_follows_a_drag_across_touching_targets` (MEASUREMENTS, "the badge, timed, and
+      a drag out of a window"). Coming back onto a tile of the same worker, and the app e2e
+      with a recording worker, are still to do.
+      - *A window stream's left press goes through the HID tap when its window is on top at
+        the point*, raised by the click as before, until its release, which puts the real
+        pointer back. One something covers there keeps its own route, since the HID tap would
+        reach what covers it: a click still lands, and a drag from that press cannot begin.
+        Every other button and every key keep the stream's route.
+      - *The count is marked where the press is seen*, on the stream's task, and the watch's
+        thread reads it every 8 ms from the first move with the button held: a thread started
+        at the press was slower than an app beginning its drag.
+      - *The catch waits for the catcher's word.* The drag manager enters a new target a step
+        or two after the pointer reaches it, so a release right after two moves would drop on
+        the app's own window. The worker carries the drag 4 pixels out and back, again every
+        250 ms up to four times, and lets go only once the catcher says the drag is over it
+        (`FromHelper::Operation`). A catch that never shows or is never reached ends with
+        Escape and the release, and the client hears why (`OutFailed`).
+      - *What the catch took*: each file, named or called in, an item with its path on the
+        worker; then each item's data, inline while the event's 64 KiB lasts and kept past it
+        for the client to fetch under the drag (the last two catches are kept).
+      - *The hand-over* is a window-wide pointer listener on the tile: the move that leaves the
+        tile with the button held begins this Mac's own drag from that very event, and the
+        tile's release is then the catch's. A named file is a promise kept from its path at
+        once, a promised one waits up to 30 s for the catch to name it, and data is given as
+        a target reads it: inline, or fetched under the drag for at most 5 s. Data read before
+        the catch is in gives nothing, since a target reads on the main thread the catch is
+        heard on.
+      - *The badge, timed.* The helper's cursor watch was a timer on its main thread, where
+        AppKit tracks the drag, and it fired 10–39 ms after the cursor changed. It now reads the
+        cursor's seed every 1 ms on a thread of its own (user-interactive) and says the copy a
+        median of 3 ms after the target enters (16 ms at most in twenty crossings). What is left is the drag manager's: it steps a drag
+        every 16–33 ms in the guest, and enters a target 22–100 ms after the pointer reaches
+        it, leaving the last target on one step and entering the next on a later one. The
+        arrow between those steps was the badge's flicker to none. The helper now holds a none
+        that follows a take until the drag manager has stepped twice more
+        (`draggingSession:movedToPoint:`) or 50 ms passed, so crossing from one target to
+        another never says none, and a refusal still shows at most 37 ms after the drag enters
+        the refusing target. The plan's `RTT + 25 ms` holds for the worker's part only where the
+        drag manager steps at the display's rate; in the guest, its own steps are most of it.
     - *P4 — iPad and iPhone.* The drop proposal, a drop held for its upload, the edge chip.
     - *P5 — lazy files.* The ⏸ File Provider domains (**Worker files paste into Finder through
       a File Provider domain**) on both ends: a dropped file exists at once as a placeholder

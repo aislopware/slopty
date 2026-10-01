@@ -288,5 +288,7 @@ impl Hover {
     }
 }
 
+pub mod out;
+
 #[cfg(test)]
 mod tests;

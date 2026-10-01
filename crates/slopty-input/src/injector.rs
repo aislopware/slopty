@@ -160,6 +160,9 @@ struct Drag {
     rest_us: u64,
     /// What the nudges' microseconds count from.
     epoch: Instant,
+    /// The client's own left press on a window stream began it ([`Injector::follow_press`]),
+    /// and its release ends it.
+    pressed: bool,
 }
 
 impl Drag {
@@ -450,10 +453,19 @@ impl<B: Backend> Injector<B> {
                 if *down {
                     self.ensure_active();
                 }
+                let left = *button == MouseButton::Left;
+                if left && *down {
+                    self.follow_press(at);
+                }
                 self.flags = flags_for(*mods);
                 let (kind, cg_button, number) = button_event(*button, *down);
                 self.set_held(*button, *down);
-                self.post_mouse(kind, at, cg_button, number, i64::from((*clicks).max(1)))
+                let posted =
+                    self.post_mouse(kind, at, cg_button, number, i64::from((*clicks).max(1)));
+                if left && !*down && self.drag.is_some_and(|d| d.pressed) {
+                    self.leave_drag();
+                }
+                posted
             }
             ScreenInput::Scroll { dx, dy, precise, phase, momentum, x, y, mods, time_us } => {
                 let at = self.point(*x, *y)?;
@@ -582,7 +594,11 @@ impl<B: Backend> Injector<B> {
                 self.leave_drag();
                 Ok(())
             }
-            DragStep::Cancel => self.cancel_drag(),
+            DragStep::Cancel => self.cancel_held(),
+            DragStep::Locate { x, y, answer } => {
+                let _gone = answer.send(self.point(x, y).map(|at| (at.x, at.y)));
+                Ok(())
+            }
         };
         if let Err(e) = done {
             tracing::debug!(target = ?self.target, error = %e, "drag step");
@@ -713,9 +729,32 @@ impl<B: Backend> Injector<B> {
                 self.backend.pointer()
             }
         };
+        self.feed_hid(home, false);
+    }
+
+    /// Feed this stream's pointer through the HID tap from now on, the real pointer at `home`
+    /// to go back to after; `pressed` when the client's own press began it.
+    fn feed_hid(&mut self, home: Option<CGPoint>, pressed: bool) {
         self.placed.follow_real();
         let rest_us = nudge::rest_us(self.backend.spring_delay_s());
-        self.drag = Some(Drag { home, nudge: None, rest_us, epoch: Instant::now() });
+        self.drag = Some(Drag { home, nudge: None, rest_us, epoch: Instant::now(), pressed });
+    }
+
+    /// A left press at the global point `at` on a window stream goes through the HID tap, its
+    /// drags and its release after it, when the window is on top there: an app begins a drag
+    /// session only from a press the window server saw (P0 (4)), and the drag manager follows
+    /// the real pointer, so a drag out of the app can begin and be carried
+    /// (`docs/decisions/audio.md`, "Drag out"). The release puts the real pointer back where it
+    /// was. A window something covers at the point keeps its own route for the press, since the
+    /// HID tap would reach what covers it, and a drag cannot begin from that press. Display
+    /// streams go through the HID tap anyway.
+    fn follow_press(&mut self, at: CGPoint) {
+        let Route::Pid(pid) = self.route else { return };
+        if self.drag.is_some() || !self.backend.uncovered_at(self.target, pid, at) {
+            return;
+        }
+        let home = self.backend.pointer();
+        self.feed_hid(home, true);
     }
 
     /// Whether a drag is being fed through the HID tap ([`Self::enter_drag`]).
@@ -808,16 +847,34 @@ impl<B: Backend> Injector<B> {
         if self.drag.is_none() {
             return Ok(());
         }
+        let escaped = self.escape();
+        self.leave_drag();
+        escaped
+    }
+
+    /// End a drag with nothing dropped: one fed through the HID tap as [`Self::cancel_drag`]
+    /// does, or one the client's left press holds on a display stream, whose Escape and release
+    /// go through the HID tap as all its input does. Nothing held posts nothing.
+    fn cancel_held(&mut self) -> Result<(), InputError> {
+        if self.drag.is_some() || self.held & MouseButton::Left.bit() == 0 {
+            return self.cancel_drag();
+        }
+        let escaped = self.escape();
+        self.release_buttons();
+        escaped
+    }
+
+    /// Escape through the HID tap, carrying no modifier but Caps Lock's: with ⌘ or ⌥⌘ still
+    /// held it would be a system shortcut (⌥⌘⎋ opens Force Quit).
+    fn escape(&mut self) -> Result<(), InputError> {
         let flags = self.flags & CGEventFlags::MaskAlphaShift;
         let vk = keymap::virtual_key(KeyCode::Escape).ok_or(InputError::Create);
-        let escaped = vk.and_then(|vk| {
+        vk.and_then(|vk| {
             [true, false].into_iter().try_for_each(|down| {
                 let event = Event::Key { vk, down, modifier: false, repeat: false };
                 self.backend.post(Post { route: Route::Hid, flags, event })
             })
-        });
-        self.leave_drag();
-        escaped
+        })
     }
 
     /// Stop feeding the drag: a button still held is let go where the drag rests, through the
@@ -2153,6 +2210,55 @@ mod tests {
         assert_eq!(inj.placed.get(), crate::Pointer::Placed(Some((100.0, 50.0))));
     }
 
+    /// A left press on a window stream whose window is on top at the point goes through the HID
+    /// tap with its drags and its release, under one number, so an app there can begin a drag
+    /// from it; the release puts the real pointer back and the window's own route is back. A
+    /// covered window keeps its route for the press, and so does any other button.
+    #[test]
+    fn a_left_press_on_an_uncovered_window_goes_through_the_hid_tap() {
+        let button = |button, down| ScreenInput::Button {
+            button,
+            down,
+            clicks: 1,
+            x: 20.0,
+            y: 40.0,
+            mods: Mods::empty(),
+        };
+        let mut inj = window();
+        inj.backend.pointer = Some(pt(40.0, 30.0));
+        inj.backend.uncovered = true;
+        inj.inject(&button(MouseButton::Left, true)).unwrap();
+        assert!(inj.dragging(), "fed through the HID tap while held");
+        let number = inj.press_number().expect("held");
+        inj.inject(&ScreenInput::Move { x: 60.0, y: 40.0 }).unwrap();
+        inj.inject(&button(MouseButton::Left, false)).unwrap();
+        assert!(!inj.dragging(), "the release ends it");
+        inj.inject(&ScreenInput::Move { x: 0.0, y: 0.0 }).unwrap();
+        inj.inject(&button(MouseButton::Middle, true)).unwrap();
+        inj.inject(&button(MouseButton::Middle, false)).unwrap();
+        let hid = Route::Hid;
+        let seen = mice(inj.backend());
+        assert_eq!(
+            seen[..5],
+            [
+                (CGEventType::LeftMouseDown, pt(110.0, 70.0), number, hid),
+                (CGEventType::LeftMouseDragged, pt(130.0, 70.0), number, hid),
+                (CGEventType::LeftMouseUp, pt(110.0, 70.0), number, hid),
+                (CGEventType::MouseMoved, pt(40.0, 30.0), 0, hid),
+                (CGEventType::MouseMoved, pt(100.0, 50.0), 0, BOUND),
+            ],
+            "the real pointer back where it was, then the window's route again"
+        );
+        assert!(seen[5..].iter().all(|m| m.3 == BOUND), "another button keeps the route");
+
+        let mut covered = window();
+        covered.backend.pointer = Some(pt(40.0, 30.0));
+        covered.inject(&button(MouseButton::Left, true)).unwrap();
+        assert!(!covered.dragging(), "something over the window there");
+        covered.inject(&button(MouseButton::Left, false)).unwrap();
+        assert!(mice(covered.backend()).iter().all(|m| m.3 == BOUND));
+    }
+
     /// A display stream's drag moves the real pointer as all its input does, so nothing is
     /// raised and the pointer is left where the drag ended.
     #[test]
@@ -2285,6 +2391,40 @@ mod tests {
     /// Cancelling a drag posts Escape through the HID tap, press and release, before letting
     /// go of the button, so the session ends before the release drops anything; then the drag
     /// is left. Cancelling outside a drag posts nothing.
+    /// A drag out of an app that the client's left press holds on a display stream ends with
+    /// Escape then the release, through the HID tap; with nothing held a cancel posts nothing.
+    /// Locating a point answers it in global points and posts nothing.
+    #[test]
+    fn a_held_press_on_a_display_cancels_and_a_point_is_located() {
+        let mut inj = display();
+        inj.drag_step(DragStep::Cancel);
+        assert!(inj.backend().posts.is_empty());
+        inj.inject(&ScreenInput::Button {
+            button: MouseButton::Left,
+            down: true,
+            clicks: 1,
+            x: 5.0,
+            y: 5.0,
+            mods: Mods::empty(),
+        })
+        .unwrap();
+        let (answer, located) = tokio::sync::oneshot::channel();
+        inj.drag_step(DragStep::Locate { x: 10.0, y: 20.0, answer });
+        assert_eq!(located.blocking_recv().unwrap().unwrap(), (110.0, 70.0));
+        assert_eq!(inj.backend().posts.len(), 1, "located with nothing posted");
+        inj.drag_step(DragStep::Cancel);
+        let escape = keymap::virtual_key(KeyCode::Escape).unwrap();
+        let key = |down| Event::Key { vk: escape, down, modifier: false, repeat: false };
+        let after: Vec<(Route, Event)> =
+            inj.backend().posts[1..].iter().map(|p| (p.route, p.event.clone())).collect();
+        assert_eq!(after[..2], [(Route::Hid, key(true)), (Route::Hid, key(false))]);
+        assert!(
+            matches!(after[2], (Route::Hid, Event::Mouse { kind: CGEventType::LeftMouseUp, .. })),
+            "{after:?}"
+        );
+        assert_eq!(inj.press_number(), None, "let go");
+    }
+
     #[test]
     fn cancelling_a_drag_escapes_before_the_release() {
         let mut inj = window();

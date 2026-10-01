@@ -25,8 +25,10 @@
 //! ([`backend`]). A press, its drags and its release carry one event number, as AppKit follows
 //! a drag by it. A drag session a worker feeds for a drop goes through the HID tap for its
 //! life, since the drag manager follows the real pointer ([`Injector::enter_drag`]), and a drag
-//! resting there is nudged so spring-loaded targets spring ([`nudge`]). The stream's task
-//! carries such a drag as [`DragStep`]s ([`InputSink::drag`]).
+//! resting there is nudged so spring-loaded targets spring ([`nudge`]). A left press on a window
+//! stream whose window is on top at the point goes through the HID tap too, until its release, so
+//! an app can begin a drag of its own from it; the release puts the real pointer back. The stream's
+//! task carries such a drag as [`DragStep`]s ([`InputSink::drag`]).
 //!
 //! [`InputSink`] is the worker's input seam, compiled on every target; [`CgEvents`] is the
 //! macOS implementation (`docs/decisions/topology.md`): the stream's [`Injector`] on an
@@ -167,14 +169,25 @@ pub enum DragStep {
     },
     /// Let go where the drag rests: the drop. The stream's own route is back after it.
     Release,
-    /// End the drag with nothing dropped. The stream's own route is back after it.
+    /// End the drag with nothing dropped. The stream's own route is back after it. A drag out
+    /// of an app that the client's own press holds ends the same way.
     Cancel,
+    /// Answer where `(x, y)` is on the worker's screens, in global points, and nothing else:
+    /// where the helper puts its catcher for a drag out of an app.
+    Locate {
+        /// Where, in stream pixels.
+        x: f32,
+        /// Where.
+        y: f32,
+        /// The point in global points, or why there is none.
+        answer: tokio::sync::oneshot::Sender<Result<(f64, f64), InputError>>,
+    },
 }
 
 impl DragStep {
     /// Answer a step that cannot be taken here.
     pub fn refuse(self, why: InputError) {
-        if let Self::Enter { answer, .. } = self {
+        if let Self::Enter { answer, .. } | Self::Locate { answer, .. } = self {
             let _gone = answer.send(Err(why));
         }
     }

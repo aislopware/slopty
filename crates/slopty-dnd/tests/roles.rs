@@ -26,16 +26,78 @@ mod roles {
     use slopty_proto::dnd::{FromHelper, Given, SourceItem, ToHelper};
     use slopty_proto::drag::{DragId, DragOp};
 
-    use crate::harness::{App, Hand, Numbers, at_arg, centre, file, live, ms, pace};
+    use crate::harness::{App, Hand, Numbers, at_arg, centre, file, live, ms, pace, uptime_us};
 
     /// Where the helper's source waits: the point the client's drag entered.
     const SOURCE_AT: (f64, f64) = (90.0, 90.0);
     /// The test's drop target, in global points from the main display's top left.
     const TARGET: (f64, f64, f64, f64) = (240.0, 160.0, 280.0, 200.0);
+    /// A second drop target, just right of the first.
+    const NEXT: (f64, f64, f64, f64) = (520.0, 160.0, 240.0, 200.0);
+    /// A third, just below the second, that refuses the drop.
+    const BELOW_NEXT: (f64, f64, f64, f64) = (520.0, 360.0, 240.0, 160.0);
     /// The window an app on the worker drags out of.
     const APP: (f64, f64, f64, f64) = (60.0, 60.0, 60.0, 60.0);
     /// Where the catcher waits: where the client's pointer left the tile.
     const CATCH_AT: (f64, f64) = (700.0, 300.0);
+
+    /// The system cursor's changes, stamped on the uptime clock, read every 500 µs on a thread
+    /// of the test's own until stopped.
+    struct CursorTimes {
+        watching: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        changes: std::thread::JoinHandle<Vec<(u64, u16, u16, u32)>>,
+    }
+
+    impl CursorTimes {
+        fn start() -> Self {
+            let watching = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let changes = std::thread::spawn({
+                let watching = std::sync::Arc::clone(&watching);
+                move || {
+                    let mut watch = slopty_capture::CursorWatch::new();
+                    let mut changes = Vec::new();
+                    while watching.load(std::sync::atomic::Ordering::Relaxed) {
+                        if let Some(shape) = watch.poll() {
+                            let digest = shape
+                                .bgra
+                                .iter()
+                                .fold(0_u32, |h, b| h.rotate_left(5) ^ u32::from(*b));
+                            changes.push((uptime_us(), shape.w, shape.h, digest));
+                        }
+                        pace(Duration::from_micros(500));
+                    }
+                    changes
+                }
+            });
+            Self { watching, changes }
+        }
+
+        /// The changes, each as ms from `from_us` with its size and digest.
+        fn stop(self, from_us: u64) -> Vec<String> {
+            self.watching.store(false, std::sync::atomic::Ordering::Relaxed);
+            self.changes
+                .join()
+                .expect("the cursor watch")
+                .into_iter()
+                .map(|(at, w, h, digest)| {
+                    format!("{:.1} {w}x{h} #{digest:08x}", ms_from(at, from_us))
+                })
+                .collect()
+        }
+    }
+
+    /// `at_us` as ms after `from_us`, on the uptime clock.
+    fn ms_from(at_us: u64, from_us: u64) -> f64 {
+        #[expect(clippy::cast_precision_loss, reason = "µs of uptime apart")]
+        let ms = (at_us as f64 - from_us as f64) / 1000.0;
+        ms
+    }
+
+    /// The `t_us=` stamp of a line the test's apps said, as ms after `from_us`.
+    fn stamp_ms(line: &str, from_us: u64) -> Option<f64> {
+        let at = line.split(' ').find_map(|kv| kv.strip_prefix("t_us=")?.parse::<u64>().ok())?;
+        Some(ms_from(at, from_us))
+    }
 
     fn point((x, y): (f64, f64)) -> String {
         format!("{x},{y}")
@@ -435,7 +497,7 @@ mod roles {
         let mut wire = Wire::start();
         let mut target = App::target(TARGET, "copy", &[]);
         let mut hand = Hand::new(Numbers::Injector);
-        let (mut badge_ms, mut land_ms, mut end_ms) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut land_ms, mut end_ms) = (Vec::new(), Vec::new());
         let mut ready_ms = Vec::new();
         for round in 0..10 {
             let drag = DragId::new();
@@ -477,9 +539,11 @@ mod roles {
                 wire.wait(Duration::from_secs(2), |m| matches!(m, FromHelper::Began { .. }));
             assert!(began.is_some(), "the press began the helper's session");
             let mark = target.mark();
+            let cursor = CursorTimes::start();
             let (tx, ty) = centre(TARGET);
             let (left, top, width, height) = TARGET;
             let mut crossed = None;
+            let mut crossed_up = 0;
             for step in 1..=24_u32 {
                 let (px, py) = crate::harness::lerp(SOURCE_AT, (tx, ty), f64::from(step) / 24.0);
                 #[expect(clippy::cast_possible_truncation, reason = "points on a display")]
@@ -488,6 +552,7 @@ mod roles {
                     (left..left + width).contains(&px) && (top..top + height).contains(&py);
                 if inside && crossed.is_none() {
                     crossed = Some(Instant::now());
+                    crossed_up = uptime_us();
                 }
                 pace(ms(8));
             }
@@ -505,10 +570,14 @@ mod roles {
                     _ => None,
                 })
                 .collect();
-            eprintln!("round {round}: operations ms from crossing onto the target {ops:?}");
-            let copy = ops.iter().rev().take_while(|(_, op)| *op == DragOp::Copy).last();
-            let (badge_ms_now, _) = copy.copied().expect("the target's copy, read off the cursor");
-            badge_ms.push(badge_ms_now);
+            let changes = cursor.stop(crossed_up);
+            let entered_ms =
+                target.since(mark, "entered").pop().and_then(|l| stamp_ms(&l, crossed_up));
+            eprintln!(
+                "round {round}: from crossing onto the target, ms: the target entered {entered_ms:?}; the cursor changed {changes:?}; the helper said {ops:?}"
+            );
+            let last = ops.last().map(|(_, op)| *op);
+            assert_eq!(last, Some(DragOp::Copy), "the target's copy, read off the cursor: {ops:?}");
             pace(ms(100));
             hand.injector.drag_step(DragStep::Release);
             let released = Instant::now();
@@ -536,11 +605,271 @@ mod roles {
         target.show();
         let line = |v: &[f64]| v.iter().map(|m| format!("{m:.1}")).collect::<Vec<_>>().join(" ");
         eprintln!(
-            "MEASURE dnd carried: source at the point ms [{}]; badge after crossing onto the target ms [{}]; release → target's perform ms [{}]; release → helper's end ms [{}]",
+            "MEASURE dnd carried: source at the point ms [{}]; release → target's perform ms [{}]; release → helper's end ms [{}]",
             line(&ready_ms),
-            line(&badge_ms),
             line(&land_ms),
             line(&end_ms)
+        );
+    }
+
+    /// A drag out of an app's window, carried as the worker carries one: the client's press on
+    /// the window's stream goes through the HID tap, so the app begins its drag from it; the
+    /// drag pasteboard's count, read every 8 ms from the first move, says it began and what it
+    /// carries; the catcher goes under the real pointer, the drag is carried out and back over
+    /// it until it says the drag is there, and the release lands it, the file taken where it is
+    /// and the promise called in. The app sees a copy.
+    #[test]
+    fn a_window_streams_press_drags_out_and_the_catch_takes_it() {
+        use slopty_core::WindowId;
+        use slopty_input::Injector;
+        use slopty_proto::input::{Mods, MouseButton};
+        use slopty_proto::screen::{CaptureTarget, ScreenInput};
+
+        if !live() {
+            return;
+        }
+        let (_keep, whole) = file();
+        let landing = tempfile::tempdir().unwrap();
+        let landing_dir = landing.path().canonicalize().unwrap();
+        let app_at = at_arg(APP);
+        let mut app = App::source(&[
+            "--at",
+            &app_at,
+            "--begin",
+            "dragged",
+            "--file",
+            &whole,
+            "--promise",
+            "promised by the app.bin:2048:200",
+            "--image",
+            "clear",
+            "--level",
+            "floating",
+        ]);
+        let mut wire = Wire::start();
+        // A 1:1 stream of the app's window: stream pixels are points from its top left.
+        let mut injector = Injector::new(CaptureTarget::Window(WindowId(app.window)), 1.0);
+        let button = |down, (x, y): (f32, f32)| ScreenInput::Button {
+            button: MouseButton::Left,
+            down,
+            x,
+            y,
+            clicks: 1,
+            mods: Mods::empty(),
+        };
+        #[expect(clippy::cast_possible_truncation, reason = "points of a small window")]
+        let (width, height) = (APP.2 as f32, APP.3 as f32);
+        let mut at = (width / 2.0, height / 2.0);
+        let mut watch = DragWatch::drag();
+        pace(ms(300));
+        watch.mark_at(slopty_dnd::watch::change_count(None));
+        let pressed = Instant::now();
+        injector.inject(&button(true, at)).expect("pressed");
+        assert!(injector.dragging(), "a press on the window on top goes through the HID tap");
+        pace(ms(30));
+        let mut seen = None;
+        for _ in 0..8 {
+            at.0 = (at.0 + 3.0).min(width);
+            injector.inject(&ScreenInput::Move { x: at.0, y: at.1 }).expect("moved");
+            pace(ms(8));
+            if seen.is_none() {
+                seen = watch.began().map(|found| (pressed.elapsed(), found));
+            }
+        }
+        let (seen_after, found) =
+            seen.expect("the drag pasteboard's count moved as the drag began");
+        assert!(
+            found
+                .iter()
+                .any(|f| f.file.as_ref().is_some_and(|f| f.path.to_string_lossy() == whole)),
+            "the drag names the file: {found:?}"
+        );
+        // The client's pointer leaves the tile: the catch.
+        let drag = DragId::new();
+        let caught_at = Instant::now();
+        let (answer, located) = tokio::sync::oneshot::channel();
+        injector.drag_step(DragStep::Locate { x: at.0, y: at.1, answer });
+        let (gx, gy) = located.blocking_recv().expect("answered").expect("a point");
+        let dir = landing_dir.to_string_lossy().into_owned();
+        wire.send(&ToHelper::CatcherAt { drag, x: gx, y: gy, dir });
+        let ready = wire.wait(
+            Duration::from_secs(10),
+            |m| matches!(m, FromHelper::Ready { drag: d } if *d == drag),
+        );
+        assert!(ready.is_some(), "the catcher is under the pointer");
+        let shown = caught_at.elapsed();
+        let mut over = None;
+        for _ in 0..4 {
+            injector.inject(&ScreenInput::Move { x: at.0 - 4.0, y: at.1 }).expect("moved");
+            injector.inject(&ScreenInput::Move { x: at.0, y: at.1 }).expect("moved");
+            over = wire.wait(
+                Duration::from_millis(250),
+                |m| matches!(m, FromHelper::Operation { drag: d, op: DragOp::Copy } if *d == drag),
+            );
+            if over.is_some() {
+                break;
+            }
+        }
+        assert!(over.is_some(), "the drag reached the catcher");
+        let reached = caught_at.elapsed();
+        let released = Instant::now();
+        injector.inject(&button(false, at)).expect("released");
+        assert!(!injector.dragging(), "the window's own route is back");
+        let caught = wire.wait(
+            Duration::from_secs(10),
+            |m| matches!(m, FromHelper::Caught { drag: d, .. } if *d == drag),
+        );
+        let (_, caught) = caught.expect("the catch says what it took");
+        let landed = released.elapsed();
+        let FromHelper::Caught { files, promises, .. } = caught else { panic!("{caught:?}") };
+        assert_eq!(files, std::slice::from_ref(&whole), "the file, taken where it is");
+        assert_eq!(promises, 1, "one promise called in");
+        let promised = wire.wait(
+            Duration::from_secs(10),
+            |m| matches!(m, FromHelper::Promised { drag: d, .. } if *d == drag),
+        );
+        let Some((_, FromHelper::Promised { path: Some(path), .. })) = promised else {
+            panic!("the promise was kept: {promised:?}")
+        };
+        let path = std::path::Path::new(&path).canonicalize().unwrap();
+        assert_eq!(path, landing_dir.join("promised by the app.bin"), "in the drag's folder");
+        assert!(app.wait(Duration::from_secs(5), |l| l.starts_with("ended op=1")), "a copy");
+        assert!(std::path::Path::new(&whole).exists(), "the file was not moved");
+        wire.send(&ToHelper::Stop { drag });
+        let ms_of = |d: Duration| d.as_secs_f64() * 1000.0;
+        eprintln!(
+            "MEASURE dnd drag out: press → drag seen {:.1} ms; catch → catcher up {:.1} ms, → drag over it {:.1} ms; release → caught {:.1} ms",
+            ms_of(seen_after),
+            ms_of(shown),
+            ms_of(reached),
+            ms_of(landed)
+        );
+    }
+
+    /// What the badge says as a drag crosses between targets that touch, on the uptime clock
+    /// the test's apps stamp their lines with. From one target that takes the drop onto
+    /// another the drag manager leaves the first and enters the next on separate steps, with
+    /// the arrow between, and the helper says no none for it. Onto one that refuses, the none
+    /// is said once the drag manager has stepped on; back onto one that takes, the copy is said
+    /// as the target answers.
+    #[test]
+    fn the_badge_follows_a_drag_across_touching_targets() {
+        if !live() {
+            return;
+        }
+        let (_keep, whole) = file();
+        let mut wire = Wire::start();
+        let mut first = App::target(TARGET, "copy", &[]);
+        let mut next = App::target(NEXT, "copy", &[]);
+        let mut refusing = App::target(BELOW_NEXT, "none", &[]);
+        let mut hand = Hand::new(Numbers::Injector);
+        let (mut gaps, mut nones, mut copies) = (Vec::new(), Vec::new(), Vec::new());
+        // From one target's centre to another's, 24 moves 8 ms apart; the moment of the first
+        // move inside `onto`, on both clocks, and what the helper said meanwhile and 80 ms on,
+        // as ms from that moment.
+        let glide = |hand: &mut Hand, wire: &Wire, from, onto: (f64, f64, f64, f64)| {
+            let _earlier = wire.drain();
+            let (left, top, width, height) = onto;
+            let mut crossed = None;
+            for step in 1..=24_u32 {
+                let (px, py) = crate::harness::lerp(from, centre(onto), f64::from(step) / 24.0);
+                #[expect(clippy::cast_possible_truncation, reason = "points on a display")]
+                hand.injector.drag_step(DragStep::Move { x: px as f32, y: py as f32 });
+                let inside =
+                    (left..left + width).contains(&px) && (top..top + height).contains(&py);
+                if inside && crossed.is_none() {
+                    crossed = Some((Instant::now(), uptime_us()));
+                }
+                pace(ms(8));
+            }
+            pace(ms(80));
+            let (at, up) = crossed.expect("the glide ends inside");
+            let said: Vec<(f64, DragOp)> = wire
+                .drain()
+                .into_iter()
+                .filter_map(|(when, m)| match m {
+                    FromHelper::Operation { op, .. } => {
+                        let after = when.saturating_duration_since(at).as_secs_f64();
+                        let before = at.saturating_duration_since(when).as_secs_f64();
+                        Some(((after - before) * 1000.0, op))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (up, said)
+        };
+        for round in 0..10 {
+            let drag = DragId::new();
+            let (answer, mapped) = tokio::sync::oneshot::channel();
+            let (sx, sy) = SOURCE_AT;
+            #[expect(clippy::cast_possible_truncation, reason = "points on a display")]
+            hand.injector.drag_step(DragStep::Enter { x: sx as f32, y: sy as f32, answer });
+            let (x, y) = mapped.blocking_recv().expect("answered").expect("a point");
+            let items = vec![SourceItem {
+                file: Some(whole.clone()),
+                is_file: true,
+                types: vec![],
+                given: vec![],
+            }];
+            wire.send(&ToHelper::SourceAt { drag, x, y, items });
+            let ready = wire.wait(
+                Duration::from_secs(40),
+                |m| matches!(m, FromHelper::Ready { drag: d } if *d == drag),
+            );
+            assert!(ready.is_some(), "the source is at the point");
+            #[expect(clippy::cast_possible_truncation, reason = "points on a display")]
+            hand.injector.drag_step(DragStep::Press { x: sx as f32, y: sy as f32 });
+            let began =
+                wire.wait(Duration::from_secs(2), |m| matches!(m, FromHelper::Began { .. }));
+            assert!(began.is_some(), "the press began the helper's session");
+            let _onto_first = glide(&mut hand, &wire, SOURCE_AT, TARGET);
+            pace(ms(150));
+            let (marks, markn) = (first.mark(), next.mark());
+            let cursor = CursorTimes::start();
+            let (up, said) = glide(&mut hand, &wire, centre(TARGET), NEXT);
+            let changes = cursor.stop(up);
+            let exited = first.since(marks, "exited").pop().and_then(|l| stamp_ms(&l, up));
+            let entered = next.since(markn, "entered").pop().and_then(|l| stamp_ms(&l, up));
+            eprintln!(
+                "round {round}, copy onto copy, ms from the move onto the next: the first exited {exited:?}; the next entered {entered:?}; the cursor changed {changes:?}; the helper said {said:?}"
+            );
+            assert!(
+                !said.iter().any(|(_, op)| *op == DragOp::None),
+                "the badge never fell to none between the two: {said:?}"
+            );
+            let (exited, entered) = (exited.expect("it left"), entered.expect("it entered"));
+            gaps.push(entered - exited);
+            let markr = refusing.mark();
+            let (up, said) = glide(&mut hand, &wire, centre(NEXT), BELOW_NEXT);
+            let entered = refusing.since(markr, "entered").pop().and_then(|l| stamp_ms(&l, up));
+            eprintln!(
+                "round {round}, copy onto none: the refusing one entered {entered:?}; the helper said {said:?}"
+            );
+            let none = said.iter().find(|(_, op)| *op == DragOp::None).expect("a none");
+            nones.push(none.0 - entered.expect("it entered"));
+            let markn = next.mark();
+            let (up, said) = glide(&mut hand, &wire, centre(BELOW_NEXT), NEXT);
+            let entered = next.since(markn, "entered").pop().and_then(|l| stamp_ms(&l, up));
+            eprintln!(
+                "round {round}, none onto copy: the next entered {entered:?}; the helper said {said:?}"
+            );
+            let copy = said.iter().find(|(_, op)| *op == DragOp::Copy).expect("a copy");
+            copies.push(copy.0 - entered.expect("it entered"));
+            hand.injector.drag_step(DragStep::Cancel);
+            let ended = wire.wait(
+                Duration::from_secs(5),
+                |m| matches!(m, FromHelper::Ended { drag: d, .. } if *d == drag),
+            );
+            assert!(ended.is_some(), "the cancel ended the helper's session");
+            wire.send(&ToHelper::Stop { drag });
+            pace(ms(200));
+        }
+        let line = |v: &[f64]| v.iter().map(|m| format!("{m:.1}")).collect::<Vec<_>>().join(" ");
+        eprintln!(
+            "MEASURE dnd badge: copy onto copy, the next entered after the first exited ms [{}]; onto a refusing target, its entry → the none said ms [{}]; back onto one that takes, its entry → the copy said ms [{}]",
+            line(&gaps),
+            line(&nones),
+            line(&copies)
         );
     }
 }

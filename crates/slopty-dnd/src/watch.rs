@@ -43,6 +43,21 @@ pub struct Found {
     pub promised: Option<String>,
     /// Its text, up to [`TEXT_MAX`] bytes.
     pub text: Option<String>,
+    /// The types it carries as data, when it names and promises no file: every type but the
+    /// bookkeeping: file promises', dynamic types and legacy spellings of a file's URL.
+    pub carried: Vec<String>,
+}
+
+/// Types never carried as data: file promises' bookkeeping, the system's dynamic types and
+/// legacy spellings of a file's URL, which the files already say.
+pub(crate) fn bookkeeping(uti: &str, promises: &[String]) -> bool {
+    uti.starts_with("dyn.")
+        || uti.starts_with("com.apple.pasteboard.promised-")
+        || uti.starts_with("NSFilenamesPboardType")
+        || uti == "com.apple.NSFilePromiseItemMetaData"
+        || uti == "public.file-url"
+        || uti == "CorePasteboardFlavorType 0x6675726C"
+        || promises.iter().any(|p| p == uti)
 }
 
 /// A watch on a pasteboard's change count, for a drag beginning.
@@ -74,6 +89,12 @@ impl DragWatch {
     /// Note the count now, at a press: only a change after this is a drag.
     pub fn mark(&mut self) {
         self.marked = self.board.changeCount();
+    }
+
+    /// Note `count` as the count at the press, read where the press was seen
+    /// ([`change_count`]): only a change after it is a drag.
+    pub const fn mark_at(&mut self, count: isize) {
+        self.marked = count;
     }
 
     /// Whether the count moved since the mark.
@@ -108,6 +129,18 @@ impl DragWatch {
     }
 }
 
+/// The change count of the drag pasteboard, or of the one called `name` (a test's), now: read
+/// where a press is seen, so a drag that begins before the watch next looks still counts.
+#[must_use]
+pub fn change_count(name: Option<&str>) -> isize {
+    let board = match name {
+        Some(name) => NSPasteboard::pasteboardWithName(&NSString::from_str(name)),
+        // SAFETY: framework-provided constant string.
+        None => NSPasteboard::pasteboardWithName(unsafe { NSPasteboardNameDrag }),
+    };
+    board.changeCount()
+}
+
 fn found(item: &NSPasteboardItem, promises: &[String]) -> Found {
     let types: Vec<String> = item.types().iter().map(|t| t.to_string()).collect();
     let has = |uti: &str| types.iter().any(|t| t == uti);
@@ -139,7 +172,12 @@ fn found(item: &NSPasteboardItem, promises: &[String]) -> Found {
     } else {
         None
     };
-    Found { types, file, promised, text }
+    let carried = if file.is_none() && promised.is_none() {
+        types.iter().filter(|t| !bookkeeping(t, promises)).cloned().collect()
+    } else {
+        Vec::new()
+    };
+    Found { types, file, promised, text, carried }
 }
 
 #[cfg(test)]
@@ -150,7 +188,7 @@ mod tests {
     use super::*;
 
     /// A write moves the count and is reported once; a folder reads as a folder; text past the
-    /// cap is left out; nothing is reported before a change.
+    /// cap is left out, though its type is still carried; nothing is reported before a change.
     #[test]
     fn a_change_is_reported_once_with_what_the_items_hold() {
         let dir = tempfile::tempdir().unwrap();
@@ -176,6 +214,9 @@ mod tests {
         let folder = found[0].file.as_ref().expect("the folder's URL");
         assert!(folder.folder, "{folder:?}");
         assert_eq!(found[1].text, None, "past the cap: {:?}", found[1].types);
+        assert!(found[0].carried.is_empty(), "a file carries no data: {:?}", found[0].types);
+        assert!(found[1].carried.iter().any(|t| t == "public.utf8-plain-text"), "{found:?}");
+        assert!(!found[1].carried.iter().any(|t| t.starts_with("dyn.")), "{found:?}");
         assert_eq!(watch.began(), None, "reported once");
         watch.mark();
         assert!(!watch.changed(), "marked at the current count");

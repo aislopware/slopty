@@ -32,6 +32,8 @@ pub const SIDE: f64 = 8.0;
 pub trait SourceEvents {
     /// The session began at `at`.
     fn began(&self, at: (f64, f64));
+    /// The drag manager took the session a step on, to `at`.
+    fn moved(&self, at: (f64, f64));
     /// The session ended at `at` with `operation` (`NSDragOperation` bits; 0 when nothing
     /// took the drop).
     fn ended(&self, operation: u64, at: (f64, f64));
@@ -84,6 +86,11 @@ define_class!(
         #[unsafe(method(draggingSession:willBeginAtPoint:))]
         fn will_begin(&self, _session: &NSDraggingSession, at: NSPoint) {
             self.ivars().events.began(window::global(at));
+        }
+
+        #[unsafe(method(draggingSession:movedToPoint:))]
+        fn moved(&self, _session: &NSDraggingSession, at: NSPoint) {
+            self.ivars().events.moved(window::global(at));
         }
 
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]

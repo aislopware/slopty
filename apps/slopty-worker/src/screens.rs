@@ -24,7 +24,7 @@ use slopty_worker::screen::{
 use tokio::sync::mpsc;
 
 use crate::Daemon;
-use crate::dnd::{Carrying, Dnd};
+use crate::dnd::{Carrying, Dnd, OutNext, Outward};
 
 /// The most a stream holds its client's keys and text behind an input-source switch it asked
 /// for. The switch is answered once the worker hears it (`sources::SETTLE_MOST` bounds that),
@@ -295,11 +295,17 @@ pub async fn serve<P: Platform>(
     let mut hold_until: Option<tokio::time::Instant> = None;
     // A drag from the client crossing the worker from this stream's tile.
     let mut carrying: Option<Carrying> = None;
+    // Drags out of the apps the stream shows, under the client's own press.
+    let mut outward = Outward::new(dnd);
     let by_client = loop {
         tokio::select! {
             command = commands.recv() => match command {
                 None => break false,
                 Some(Command::Close) => break true,
+                Some(Command::Input(ScreenInput::Drag(DragInput::Catch { drag }))) => {
+                    let acts = outward.catch(drag);
+                    act_out(stream, client, acts, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
+                }
                 Some(Command::Input(ScreenInput::Drag(input))) => {
                     let id = stream.id();
                     let mut tell = |event| telling.push(ScreenEvent::Drag { stream: id, event });
@@ -339,7 +345,7 @@ pub async fn serve<P: Platform>(
                     claimed = None;
                     hold_until = None;
                     for command in std::mem::take(&mut held) {
-                        take_command(stream, client, command, &mut input_at, &mut next_probe);
+                        feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                     }
                 }
                 // Applied on top of a resize's build under way, not under it.
@@ -357,7 +363,7 @@ pub async fn serve<P: Platform>(
                     held.push_back(command);
                 }
                 Some(command) => {
-                    take_command(stream, client, command, &mut input_at, &mut next_probe);
+                    feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                 }
             },
             applied = async {
@@ -377,7 +383,7 @@ pub async fn serve<P: Platform>(
                 }
                 hold_until = None;
                 for command in std::mem::take(&mut held) {
-                    take_command(stream, client, command, &mut input_at, &mut next_probe);
+                    feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                 }
             }
             () = async {
@@ -389,7 +395,7 @@ pub async fn serve<P: Platform>(
                 tracing::debug!(stream = %stream.id(), "input source switch unanswered; typing on");
                 hold_until = None;
                 for command in std::mem::take(&mut held) {
-                    take_command(stream, client, command, &mut input_at, &mut next_probe);
+                    feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                 }
             }
             changed = heard.changed(), if claimed.is_some() && sourcing.is_none() => {
@@ -470,6 +476,13 @@ pub async fn serve<P: Platform>(
                     }
                 }
             }
+            next = outward.next() => {
+                let acts = match next {
+                    OutNext::Began(items) => outward.begin(dnd, client, items),
+                    OutNext::Heard(heard) => outward.hear(heard),
+                };
+                act_out(stream, client, acts, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
+            }
             permit = out.reserve(), if !telling.is_empty() => match permit {
                 Ok(permit) => telling.send(permit),
                 Err(_gone) => telling.clear(),
@@ -490,6 +503,7 @@ pub async fn serve<P: Platform>(
         let acts = on.hear(Heard::Input(DragInput::Leave { drag: on.drag() }));
         on.act(acts, stream, dnd, |_told| {});
     }
+    outward.end(dnd);
     // What is still untold is moot: the stream is ending, and `Closed` says so.
     by_client
 }
@@ -554,6 +568,55 @@ impl Telling {
 /// Whether `command` is read under the worker's input source: a key or text.
 const fn typed(command: &Command) -> bool {
     matches!(command, Command::Input(ScreenInput::Key { .. } | ScreenInput::Text { .. }))
+}
+
+/// When input is taken and when the geometry is next probed ([`take_command`]).
+type Clocks<'a> = (&'a mut Option<tokio::time::Instant>, &'a mut tokio::time::Instant);
+
+/// The stream's drags out, and the worker's drags they go through.
+type Outgoing<'a, 'b> = (&'a mut Outward, Option<&'b Dnd>);
+
+/// Take `command` as [`take_command`] does, its input seen first by the stream's drags out,
+/// and then the input a drag out posts as the client's own.
+fn feed<P: Platform>(
+    stream: &mut Pipeline<P>,
+    client: ClientId,
+    command: Command,
+    clocks: Clocks<'_>,
+    (outward, dnd): Outgoing<'_, '_>,
+    telling: &mut Telling,
+) {
+    let (input_at, next_probe) = clocks;
+    let mut queue = std::collections::VecDeque::from([command]);
+    while let Some(command) = queue.pop_front() {
+        if let Command::Input(input) = &command {
+            let acts = outward.see(input);
+            let id = stream.id();
+            let tell = |event| telling.push(ScreenEvent::Drag { stream: id, event });
+            let inputs = outward.act(acts, stream, dnd, tell);
+            queue.extend(inputs.into_iter().map(Command::Input));
+        }
+        take_command(stream, client, command, input_at, next_probe);
+    }
+}
+
+/// Do a drag out's `acts`, and post the input it asks for as the client's own.
+fn act_out<P: Platform>(
+    stream: &mut Pipeline<P>,
+    client: ClientId,
+    acts: Vec<slopty_worker::screen::drag::out::OutAct>,
+    clocks: Clocks<'_>,
+    (outward, dnd): Outgoing<'_, '_>,
+    telling: &mut Telling,
+) {
+    let id = stream.id();
+    let tell = |event| telling.push(ScreenEvent::Drag { stream: id, event });
+    let inputs = outward.act(acts, stream, dnd, tell);
+    let (input_at, next_probe) = clocks;
+    for input in inputs {
+        let clocks = (&mut *input_at, &mut *next_probe);
+        feed(stream, client, Command::Input(input), clocks, (&mut *outward, dnd), telling);
+    }
 }
 
 fn take_command<P: Platform>(
@@ -1094,6 +1157,10 @@ pub mod fake {
                 DragStep::Move { .. } => "move",
                 DragStep::Release => "release",
                 DragStep::Cancel => "cancel",
+                DragStep::Locate { x, y, answer } => {
+                    let _gone = answer.send(Ok((f64::from(x), f64::from(y))));
+                    "locate"
+                }
             };
             if let Some(tx) = DRAGGED.lock().get(&self.display) {
                 let _gone = tx.send(name);
@@ -2332,5 +2399,110 @@ mod dragging {
         commands.send(Command::Close).unwrap();
         task.await.unwrap();
         drop(busy_events);
+    }
+
+    /// An app's drag under the client's press is seen on the drag pasteboard once the button
+    /// moves held, and told with what it carries; the client's catch puts the helper's catcher
+    /// where the pointer is, carries the drag out and back over it, lets go once the catcher
+    /// says the drag is over it, and tells the client what was caught, files by their path
+    /// here and data past the event's budget kept for its fetch.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_drag_out_is_seen_caught_and_told() {
+        use slopty_input::pasteboard::clip_type;
+        use slopty_proto::dnd::CaughtData;
+        use slopty_proto::input::{Mods, MouseButton};
+
+        let mut queued = note(33);
+        let target = CaptureTarget::Display(slopty_core::DisplayId(33));
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let (mut pipeline, _opened) =
+            Pipeline::<Fake<Plain>>::open(StreamId(33), target, Quality::default(), sink, |_e| {})
+                .await
+                .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let transfers = Arc::new(slopty_worker::xfer::Transfers::new(dir.path().to_path_buf()));
+        let (to_helper, mut helper) = mpsc::unbounded_channel();
+        let name = format!("com.aislopware.slopty.test.worker.dragout.{}", std::process::id());
+        let dnd = Arc::new(Dnd::with_helper(transfers, to_helper).watching(&name));
+        let (commands, mut commanded) = mpsc::unbounded_channel();
+        let (out, mut events) = mpsc::channel(64);
+        let serving = Arc::clone(&dnd);
+        let task = tokio::spawn(async move {
+            let claim = unsourced();
+            serve(
+                &mut pipeline,
+                ClientId::new(),
+                &mut commanded,
+                &out,
+                None,
+                &claim,
+                Some(&serving),
+            )
+            .await;
+            pipeline.close().await;
+        });
+        let next_input = async |queued: &mut mpsc::UnboundedReceiver<super::fake::Queued>| {
+            within(queued.recv()).await.input
+        };
+        let left = |down, x| ScreenInput::Button {
+            button: MouseButton::Left,
+            down,
+            x,
+            y: 30.0,
+            clicks: 1,
+            mods: Mods::empty(),
+        };
+        commands.send(Command::Input(left(true, 40.0))).unwrap();
+        commands.send(Command::Input(ScreenInput::Move { x: 44.0, y: 30.0 })).unwrap();
+        assert_eq!(next_input(&mut queued).await, left(true, 40.0));
+        assert_eq!(next_input(&mut queued).await, ScreenInput::Move { x: 44.0, y: 30.0 });
+        // The app begins its drag: what it carries goes on the drag pasteboard.
+        let board = slopty_platform::pasteboard::MacPasteboard::named(&name);
+        board.copy(&[("public.utf8-plain-text", b"dragged words")]);
+        let DragEvent::OutBegan { drag, items } = told(&mut events).await else {
+            panic!("the drag out is told first")
+        };
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].reps[0].inline.as_deref(), Some(&b"dragged words"[..]));
+
+        commands.send(Command::Input(ScreenInput::Drag(DragInput::Catch { drag }))).unwrap();
+        let ToHelper::CatcherAt { drag: at, x, y, .. } = within(helper.recv()).await else {
+            panic!("the catcher goes up")
+        };
+        assert_eq!((at, x, y), (drag, 44.0, 30.0), "where the pointer last was");
+        let says = |said| dnd.drags().tell(drag, Heard::Helper(said));
+        says(FromHelper::Ready { drag });
+        assert_eq!(next_input(&mut queued).await, ScreenInput::Move { x: 48.0, y: 30.0 });
+        assert_eq!(next_input(&mut queued).await, ScreenInput::Move { x: 44.0, y: 30.0 });
+        says(FromHelper::Operation { drag, op: DragOp::Copy });
+        assert_eq!(next_input(&mut queued).await, left(false, 44.0), "let go over the catcher");
+
+        let file = dir.path().join("kept.txt");
+        std::fs::write(&file, b"kept").unwrap();
+        let big = vec![1_u8; slopty_proto::transfer::INLINE_CLIP_BYTES + 1];
+        let size = big.len() as u64;
+        let data = vec![CaughtData {
+            item: 1,
+            uti: "public.png".to_owned(),
+            bytes: Some(big.clone()),
+            size,
+        }];
+        let files = vec![file.to_string_lossy().into_owned()];
+        says(FromHelper::Caught { drag, files, data, promises: 0 });
+        let DragEvent::OutCaught { drag: caught, items } = told(&mut events).await else {
+            panic!("what was caught")
+        };
+        assert_eq!(caught, drag);
+        let path = items[0].file.as_ref().and_then(|f| f.path.clone());
+        assert_eq!(path, Some(file.to_string_lossy().into_owned()), "by its path here");
+        let png = clip_type("public.png");
+        assert_eq!(items[1].reps[0].inline, None, "past the budget: fetched");
+        assert_eq!(dnd.drags().kept(drag, 1, &png).as_deref(), Some(&*big));
+        assert_eq!(within(helper.recv()).await, ToHelper::Stop { drag });
+        assert_eq!(dnd.drags().live(), None, "the worker is free again");
+        board.release();
+        commands.send(Command::Close).unwrap();
+        task.await.unwrap();
     }
 }

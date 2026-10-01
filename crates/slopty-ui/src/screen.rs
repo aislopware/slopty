@@ -151,6 +151,11 @@ pub enum ScreenViewEvent {
     /// A paste of files: the view holds its input, the paste chord first, until
     /// [`ScreenView::release_paste`] once the files are on the worker's pasteboard.
     PasteFiles(crate::clipboard::ClipFiles),
+    /// A drag out of the worker's app left the tile with the button held: the workspace drags
+    /// what it carries on from the mouse event being handled (`drop`).
+    DragOut(Arc<slopty_client::dnd::out::Shared>),
+    /// A drag out of the worker's app could not be caught there: why, for a person.
+    DragOutFailed(String),
 }
 
 /// What the worker answered to `Open`, plus what we asked for.
@@ -459,6 +464,8 @@ pub struct ScreenView {
     readout_timer: Option<Task<()>>,
     /// A drag from this device over the tile (`drop`).
     drop: Option<drop::Dropping>,
+    /// A drag out of the worker's app under this tile's press (`drop`).
+    taking: Option<drop::Taking>,
     _pump: Task<()>,
 }
 
@@ -1015,6 +1022,7 @@ impl ScreenView {
             readout_gen: 0,
             readout_timer: None,
             drop: None,
+            taking: None,
             _pump: pump,
         }
     }
@@ -2145,6 +2153,9 @@ impl ScreenView {
     fn mouse_up(&mut self, ev: &MouseUpEvent, _w: &mut Window, cx: &mut Context<Self>) {
         let button = proto_button(ev.button);
         let Some(at) = self.buttons.iter().position(|&b| b == button) else { return };
+        if button == slopty_proto::input::MouseButton::Left {
+            self.drag_out_released(cx);
+        }
         self.buttons.swap_remove(at);
         let (x, y) = self.to_stream_edge(ev.position);
         let now = cx.background_executor().now();
@@ -2837,6 +2848,14 @@ impl Render for ScreenView {
             // input method compose; typed text arrives in `replace_text_in_range`.
             move |bounds, (), window, cx| {
                 window.handle_input(&focus, ElementInputHandler::new(bounds, handler.clone()), cx);
+                // Anywhere in the window, not just over the tile: a drag out of the worker's
+                // app is handed over as it leaves (`drop`).
+                let leaving = handler.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        leaving.update(cx, |view, cx| view.drag_out_moved(event, cx));
+                    }
+                });
                 let dragger = handler.clone();
                 window.on_mouse_event(move |event: &TouchDragEvent, phase, window, cx| {
                     if phase != gpui::DispatchPhase::Bubble {
@@ -3028,6 +3047,7 @@ impl Render for ScreenView {
             // The system's drag is the pointer while one is over the tile.
             .children(self.cursor_overlay(drawn.filter(|_| self.drop.is_none())))
             .children(self.drop_ring())
+            .children(self.taking_icons(self.frame_to_body(self.zoom.to_frame(self.pointer_spot(now).0))))
             .children(console)
             .children(readout)
             .children(hud)

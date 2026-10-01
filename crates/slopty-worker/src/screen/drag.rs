@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use parking_lot::Mutex;
 use slopty_core::ClientId;
 use slopty_input::InputError;
@@ -513,10 +514,17 @@ struct Inner {
     /// What was heard for a drag before its stream claimed it: a file can land before the
     /// stream's task has taken the entry the control stream carried ahead of it.
     early: Vec<(DragId, Heard)>,
+    /// What the last catches of drags out took past their events' budgets, newest last, for
+    /// the client to fetch under the drag (`out::OutAct::Keep`).
+    kept: std::collections::VecDeque<(DragId, out::Kept)>,
 }
 
 /// The most early news kept: a drag's files and representations.
 const EARLY: usize = 256;
+
+/// How many catches' data is kept: the client fetches it as its own drop lands, so only the
+/// latest drags out are still being dropped.
+const KEPT: usize = 2;
 
 #[derive(Debug)]
 struct Live {
@@ -600,11 +608,35 @@ impl Drags {
         }
     }
 
+    /// Keep what the catch of `drag` took past its event's budget, for the client to fetch.
+    pub fn keep(&self, drag: DragId, data: out::Kept) {
+        let mut inner = self.inner.lock();
+        inner.kept.retain(|(of, _)| *of != drag);
+        inner.kept.push_back((drag, data));
+        while inner.kept.len() > KEPT {
+            inner.kept.pop_front();
+        }
+        drop(inner);
+    }
+
+    /// Representation `kind` of item `item` that the catch of `drag` kept.
+    #[must_use]
+    pub fn kept(&self, drag: DragId, item: u16, kind: &ClipType) -> Option<Bytes> {
+        let inner = self.inner.lock();
+        let (_, data) = inner.kept.iter().find(|(of, _)| *of == drag)?;
+        let found = data.iter().find(|(n, k, _)| *n == item && k == kind);
+        let bytes = found.map(|(_, _, bytes)| bytes.clone());
+        drop(inner);
+        bytes
+    }
+
     /// Forget what was kept for `drag`: its stream will never claim it.
     pub fn forget(&self, drag: DragId) {
         self.inner.lock().early.retain(|(of, _)| *of != drag);
     }
 }
+
+pub mod out;
 
 #[cfg(test)]
 mod tests;

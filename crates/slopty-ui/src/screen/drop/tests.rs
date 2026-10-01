@@ -167,3 +167,70 @@ fn a_full_queue_coalesces_a_drags_moves_and_keeps_its_steps(cx: &mut TestAppCont
     let last = mv((OUTBOX_DEPTH + 4) as f32);
     assert_eq!(got, [step(enter), last, step(drop_at), step(DragInput::Leave { drag })]);
 }
+
+/// A drag an app on the worker begins under the tile's press is drawn at the pointer while it
+/// stays on the tile; leaving the tile with the button held hands it over once, to go on as
+/// this Mac's own drag, and asks the worker to catch it, whose release the catch then makes.
+/// One let go on the tile drops on the worker, and nothing is handed over.
+#[gpui::test]
+fn leaving_the_tile_during_a_worker_drag_hands_it_over(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui::{Modifiers, MouseButton};
+    use slopty_proto::drag::{DragId, DragItem};
+
+    use crate::screen::ScreenViewEvent;
+
+    let (view, mut rx, cx) = windowed(cx);
+    let handed = Rc::new(RefCell::new(Vec::new()));
+    let seen = Rc::clone(&handed);
+    cx.update(|_window, cx| {
+        cx.subscribe(&view, move |_v, event: &ScreenViewEvent, _cx| {
+            if let ScreenViewEvent::DragOut(shared) = event {
+                seen.borrow_mut().push(shared.drag());
+            }
+        })
+        .detach();
+    });
+    let items = vec![DragItem { file: None, promised: None, reps: Vec::new() }];
+    let held = Some(MouseButton::Left);
+    let none = Modifiers::none();
+    let begin = |cx: &mut VisualTestContext| {
+        let p = at(&view, cx, 0.5, 0.5);
+        cx.simulate_mouse_down(p, MouseButton::Left, none);
+        let drag = DragId::new();
+        let began = DragEvent::OutBegan { drag, items: items.clone() };
+        view.update(cx, |v, cx| v.drag_heard(&began, cx));
+        cx.simulate_mouse_move(at(&view, cx, 0.6, 0.5), held, none);
+        cx.run_until_parked();
+        drag
+    };
+
+    let drag = begin(cx);
+    assert!(cx.debug_bounds("screen-drag-out-items").is_some(), "drawn at the pointer");
+    let _sent = std::iter::from_fn(|| rx.try_recv().ok()).count();
+    cx.simulate_mouse_move(point(px(600.0), px(150.0)), held, none);
+    cx.simulate_mouse_move(point(px(650.0), px(150.0)), held, none);
+    cx.run_until_parked();
+    assert_eq!(*handed.borrow(), [drag], "handed over once");
+    assert_eq!(drags(&mut rx), [DragInput::Catch { drag }]);
+    assert!(cx.debug_bounds("screen-drag-out-items").is_none(), "this Mac's drag draws them now");
+    cx.simulate_mouse_up(point(px(650.0), px(150.0)), MouseButton::Left, none);
+    let released = std::iter::from_fn(|| rx.try_recv().ok()).any(|m| {
+        matches!(
+            m,
+            ClientMsg::Screen(ScreenRequest::Input {
+                input: ScreenInput::Button { down: false, .. },
+                ..
+            })
+        )
+    });
+    assert!(!released, "the catch lets go on the worker");
+
+    let _on_tile = begin(cx);
+    cx.simulate_mouse_up(at(&view, cx, 0.6, 0.5), MouseButton::Left, none);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("screen-drag-out-items").is_none(), "dropped on the worker");
+    assert_eq!(handed.borrow().len(), 1, "nothing more handed over");
+}

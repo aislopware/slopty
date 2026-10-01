@@ -1,9 +1,11 @@
-//! Dragging a worker's file out of the app (macOS): a file promise per file.
+//! Dragging a worker's file out of the app (macOS): a file promise per file, and data items.
 //!
 //! Finder, Mail or any app that takes files receives an `NSFilePromiseProvider`: the file does
 //! not exist here until the drop, when the receiver names where it goes and the promise is kept
 //! by bringing the file down from the worker. That runs on an operation queue of its own, never
-//! the main thread, so a large file does not stall the UI.
+//! the main thread, so a large file does not stall the UI. Data (a drag out of a worker's app
+//! of text or a picture) goes as an `NSPasteboardItem` whose types are declared up front and
+//! whose bytes are asked for only when the receiver reads them ([`Data`]).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -18,11 +20,12 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
-    NSDraggingSource, NSFilePromiseProvider, NSFilePromiseProviderDelegate, NSPasteboardWriting,
+    NSDraggingSource, NSFilePromiseProvider, NSFilePromiseProviderDelegate, NSPasteboard,
+    NSPasteboardItem, NSPasteboardItemDataProvider, NSPasteboardType, NSPasteboardWriting,
     NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSError, NSObject, NSOperationQueue, NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSArray, NSData, NSError, NSObject, NSOperationQueue, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 
 /// Makes the promised file exist at exactly this path; the error is for a person.
@@ -43,12 +46,31 @@ impl std::fmt::Debug for Promise {
     }
 }
 
+/// Gives the bytes of one type of a data item when the receiver reads it, on the main thread;
+/// `None` when they are not there.
+pub type Give = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
+/// One data item of a drag: the types it offers, richest first, and what gives their bytes.
+#[derive(Clone)]
+pub struct Data {
+    /// Uniform type identifiers.
+    pub types: Vec<String>,
+    /// Gives each type's bytes.
+    pub give: Give,
+}
+
+impl std::fmt::Debug for Data {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Data").field("types", &self.types).finish_non_exhaustive()
+    }
+}
+
 /// Drags kept alive after they start: a promise provider holds its delegate weakly, and the
 /// write can come long after the drop. The oldest go once there are this many.
 const LIVE_DRAGS: usize = 16;
 
-/// A drag begun: its source and the delegates of its promises.
-type Live = (Retained<Source>, Vec<Retained<Keeper>>);
+/// A drag begun: its source, the delegates of its promises and the givers of its data.
+type Live = (Retained<Source>, Vec<Retained<Keeper>>, Vec<Retained<Giver>>);
 
 thread_local! {
     static LIVE: RefCell<VecDeque<Live>> = RefCell::default();
@@ -126,6 +148,44 @@ impl Keeper {
 define_class!(
     // SAFETY:
     // - `NSObject` has no subclassing requirements.
+    // - `Giver` does not implement `Drop`.
+    #[unsafe(super(NSObject))]
+    #[name = "SloptyDragDataGiver"]
+    #[ivars = Give]
+    struct Giver;
+
+    unsafe impl NSObjectProtocol for Giver {}
+
+    unsafe impl NSPasteboardItemDataProvider for Giver {
+        #[unsafe(method(pasteboard:item:provideDataForType:))]
+        fn provide_data(
+            &self,
+            _pasteboard: Option<&NSPasteboard>,
+            item: &NSPasteboardItem,
+            kind: &NSPasteboardType,
+        ) {
+            let uti = kind.to_string();
+            let Some(bytes) = (self.ivars())(&uti) else {
+                tracing::debug!(uti, "drag data not there");
+                return;
+            };
+            let set = item.setData_forType(&NSData::with_bytes(&bytes), kind);
+            tracing::debug!(uti, bytes = bytes.len(), set, "drag data given");
+        }
+    }
+);
+
+impl Giver {
+    fn new(give: Give) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(give);
+        // SAFETY: `NSObject`'s `init` on a freshly allocated instance with ivars set.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+define_class!(
+    // SAFETY:
+    // - `NSObject` has no subclassing requirements.
     // - `Source` does not implement `Drop`.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -159,8 +219,14 @@ impl Source {
 /// That event is a press or a drag of the left button. Returns whether a drag began: `false`
 /// off the main thread, with no mouse event, or with nothing to drag.
 pub fn drag_out(files: Vec<Promise>) -> bool {
+    drag_out_items(files, Vec::new())
+}
+
+/// Start dragging `files` and `data` out of the window, from the mouse event being handled, as
+/// [`drag_out`] does.
+pub fn drag_out_items(files: Vec<Promise>, data: Vec<Data>) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
-    if files.is_empty() {
+    if files.is_empty() && data.is_empty() {
         return false;
     }
     let app = NSApplication::sharedApplication(mtm);
@@ -202,16 +268,47 @@ pub fn drag_out(files: Vec<Promise>) -> bool {
         keepers.push(keeper);
         items.push(item);
     }
+    let mut givers = Vec::with_capacity(data.len());
+    #[expect(deprecated, reason = "`iconForContentType:` needs UniformTypeIdentifiers")]
+    let text_icon = NSWorkspace::sharedWorkspace().iconForFileType(&NSString::from_str("txt"));
+    for data in data {
+        let giver = Giver::new(data.give);
+        let board_item = NSPasteboardItem::new();
+        let types: Vec<Retained<NSString>> =
+            data.types.iter().map(|t| NSString::from_str(t)).collect();
+        let declared = board_item.setDataProvider_forTypes(
+            ProtocolObject::from_ref(&*giver),
+            &NSArray::from_retained_slice(&types),
+        );
+        if !declared {
+            continue;
+        }
+        let writer: &ProtocolObject<dyn NSPasteboardWriting> =
+            ProtocolObject::from_ref(&*board_item);
+        let item = NSDraggingItem::initWithPasteboardWriter(NSDraggingItem::alloc(), writer);
+        #[expect(clippy::cast_precision_loss, reason = "a handful of items")]
+        let offset = items.len() as f64 * 8.0;
+        let frame = NSRect::new(
+            NSPoint::new(at.x - 16.0 + offset, at.y - 16.0 - offset),
+            NSSize::new(32.0, 32.0),
+        );
+        // SAFETY: AppKit rule: the contents of a dragging frame may be an `NSImage`.
+        unsafe {
+            item.setDraggingFrame_contents(frame, Some(&text_icon));
+        }
+        givers.push(giver);
+        items.push(item);
+    }
     let source = Source::new(mtm);
     let session = view.beginDraggingSessionWithItems_event_source(
         &NSArray::from_retained_slice(&items),
         &event,
         ProtocolObject::from_ref(&*source),
     );
-    tracing::info!(files = keepers.len(), ?session, "drag out");
+    tracing::info!(files = keepers.len(), data = givers.len(), ?session, "drag out");
     LIVE.with(|live| {
         let mut live = live.borrow_mut();
-        live.push_back((source, keepers));
+        live.push_back((source, keepers, givers));
         while live.len() > LIVE_DRAGS {
             live.pop_front();
         }

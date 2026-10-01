@@ -70,7 +70,8 @@ mod macos {
             ) -> NSDragOperation {
                 let at = info.draggingLocation();
                 say(&format!(
-                    "entered x={:.0} y={:.0} mask={} sequence={} types={}",
+                    "entered t_us={} x={:.0} y={:.0} mask={} sequence={} types={}",
+                    child::uptime_us(),
                     at.x,
                     at.y,
                     info.draggingSourceOperationMask().0,
@@ -89,14 +90,19 @@ mod macos {
                 #[expect(clippy::cast_possible_truncation, reason = "a window's points")]
                 let point = (at.x.round() as i64, at.y.round() as i64);
                 if self.ivars().last.replace(point) != point {
-                    say(&format!("updated x={} y={}", point.0, point.1));
+                    say(&format!(
+                        "updated t_us={} x={} y={}",
+                        child::uptime_us(),
+                        point.0,
+                        point.1
+                    ));
                 }
                 self.ivars().answer
             }
 
             #[unsafe(method(draggingExited:))]
             fn dragging_exited(&self, _info: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
-                say("exited");
+                say(&format!("exited t_us={}", child::uptime_us()));
             }
 
             #[unsafe(method(prepareForDragOperation:))]

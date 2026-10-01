@@ -49,6 +49,8 @@ mod macos {
             say(&format!("began x={x:.0} y={y:.0}"));
         }
 
+        fn moved(&self, _at: (f64, f64)) {}
+
         fn ended(&self, operation: u64, (x, y): (f64, f64)) {
             say(&format!("ended op={operation} x={x:.0} y={y:.0}"));
         }

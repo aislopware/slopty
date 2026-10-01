@@ -19,6 +19,15 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
+/// The machine's uptime in microseconds, the clock every process here shares
+/// (`NSProcessInfo.systemUptime`): lines that carry it can be laid on one timeline.
+pub fn uptime_us() -> u64 {
+    let seconds = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "µs of uptime")]
+    let us = (seconds * 1e6) as u64;
+    us
+}
+
 /// One line on stdout, flushed: the parent reads them as they come.
 pub fn say(line: &str) {
     let mut out = std::io::stdout().lock();

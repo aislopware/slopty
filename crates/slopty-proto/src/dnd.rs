@@ -75,7 +75,7 @@ pub enum ToHelper {
         drag: DragId,
     },
     /// Put the catcher under the global point `(x, y)` for the worker's own drag `drag`,
-    /// calling its promised files into `dir`.
+    /// calling its promised files into `dir`: answered [`FromHelper::Ready`] once it is up.
     CatcherAt {
         /// The drag.
         drag: DragId,
@@ -91,7 +91,8 @@ pub enum ToHelper {
 /// Helper → worker.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FromHelper {
-    /// The source window is up under the point: the worker presses into it now.
+    /// The source window is up under the point, and the worker presses into it now; or the
+    /// catcher is, and the worker carries its drag onto it.
     Ready {
         /// The drag.
         drag: DragId,

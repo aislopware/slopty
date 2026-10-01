@@ -15,7 +15,7 @@ use objc2::runtime::AnyClass;
 use objc2_app_kit::{NSFilePromiseReceiver, NSPasteboard, NSPasteboardItem};
 use objc2_foundation::NSArray;
 
-use crate::watch::DragWatch;
+use crate::watch::{DragWatch, bookkeeping};
 
 /// What a catcher took at the drop, before any promised file is written.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -32,18 +32,6 @@ pub struct Caught {
 
 /// A promised file called into the catcher's folder, or why it is not there.
 pub type Promised = Result<PathBuf, String>;
-
-/// Types a catcher never keeps as data: file promises' bookkeeping, the system's dynamic types
-/// and legacy spellings of a file's URL, which the files already say.
-fn bookkeeping(uti: &str, promises: &[String]) -> bool {
-    uti.starts_with("dyn.")
-        || uti.starts_with("com.apple.pasteboard.promised-")
-        || uti.starts_with("NSFilenamesPboardType")
-        || uti == "com.apple.NSFilePromiseItemMetaData"
-        || uti == "public.file-url"
-        || uti == "CorePasteboardFlavorType 0x6675726C"
-        || promises.iter().any(|p| p == uti)
-}
 
 /// What a drop on `board` carries, taken as [`Caught`] says, and the promise of each item that
 /// promises a file and names none, in item order.

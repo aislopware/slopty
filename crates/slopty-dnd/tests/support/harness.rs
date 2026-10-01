@@ -59,6 +59,14 @@ pub fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
+/// The machine's uptime in microseconds, the clock the test's apps stamp their lines with.
+pub fn uptime_us() -> u64 {
+    let seconds = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "µs of uptime")]
+    let us = (seconds * 1e6) as u64;
+    us
+}
+
 /// The path of one of this crate's test apps: nextest's (right in an archive run in the
 /// guest), else cargo's.
 pub fn bin(name: &str) -> String {

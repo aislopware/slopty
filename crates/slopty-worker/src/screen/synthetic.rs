@@ -75,10 +75,11 @@ impl InputSink for Poke {
     }
 
     /// A drawn screen has no desktop to drag on: each step counts as input, and the entry's
-    /// point is its own pixel, as if the stream were at the origin at one pixel a point.
+    /// point, and any point located, is its own pixel, as if the stream were at the origin at
+    /// one pixel a point.
     fn drag(&mut self, step: DragStep) {
         slopty_capture::synthetic::take_input();
-        if let DragStep::Enter { x, y, answer } = step {
+        if let DragStep::Enter { x, y, answer } | DragStep::Locate { x, y, answer } = step {
             let _gone = answer.send(Ok((f64::from(x), f64::from(y))));
         }
     }

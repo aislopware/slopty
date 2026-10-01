@@ -10,10 +10,12 @@
 //!   data arrives ([`ToHelper::Data`]). A target that reads something not yet there waits for it, a
 //!   while, on the main thread, as AppKit's providers do; the worker lets go of a drop only once
 //!   everything is here, so only a target that reads while it hovers ever waits.
-//! - While a session is on, the system cursor is read every [`CURSOR_EVERY`] and classed
-//!   ([`crate::operation`]), and each change of what the target would do goes out as
-//!   [`FromHelper::Operation`].
-//! - [`ToHelper::CatcherAt`] puts the [`Catcher`] under a point for a drag out of an app here.
+//! - While a session is on, a thread of its own reads the system cursor every [`CURSOR_EVERY`] and
+//!   classes it ([`crate::operation`]), and each change of what the target would do goes out as
+//!   [`FromHelper::Operation`]. Not the main thread: AppKit tracks the drag there, and a timer on
+//!   it fired 10–39 ms after the cursor changed (MEASUREMENTS.md, "the badge, timed").
+//! - [`ToHelper::CatcherAt`] puts the [`Catcher`] under a point for a drag out of an app here, and
+//!   says [`FromHelper::Ready`] once it shows there, for the drag to be carried onto it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
@@ -36,16 +39,20 @@ use slopty_proto::drag::{DragId, DragOp};
 
 use crate::catcher::{Catcher, CatcherEvents, Caught, Promised};
 use crate::items::{Item, Provide, file_url_bytes};
-use crate::operation::Cursors;
+use crate::operation::{Badge, Cursors};
 use crate::source::{Source, SourceEvents};
 use crate::window;
 
 /// The type a file's URL is on the pasteboard.
 const FILE_URL: &str = "public.file-url";
 
-/// How often the system cursor is read while a session is on: what the target would do reaches
-/// the worker within this of the cursor changing.
-pub const CURSOR_EVERY: Duration = Duration::from_millis(8);
+/// How often the system cursor's seed is read while a session is on: what the target would do
+/// reaches the worker within this of the cursor changing. A seed read is tens of nanoseconds.
+pub const CURSOR_EVERY: Duration = Duration::from_millis(1);
+
+/// The scales AppKit's cursors are read at, once, when the helper starts: a 1080p display's and
+/// a Retina one's.
+const SCALES: [u8; 2] = [1, 2];
 
 /// The longest a target reading something not yet here waits for it.
 pub const PROVIDE_WAIT: Duration = Duration::from_secs(5);
@@ -195,7 +202,7 @@ struct Main {
     /// The drag the source or the catcher is for.
     drag: Rc<RefCell<Option<DragId>>>,
     /// Reads the cursor while a session is on.
-    watch: Rc<RefCell<Option<Retained<NSTimer>>>>,
+    watch: Rc<RefCell<Option<Watch>>>,
     /// Waits for the source's window to show before saying it is ready.
     showing: RefCell<Option<Retained<NSTimer>>>,
 }
@@ -208,20 +215,28 @@ thread_local! {
 struct Told {
     out: Sender<FromHelper>,
     drag: Rc<RefCell<Option<DragId>>>,
-    watch: Rc<RefCell<Option<Retained<NSTimer>>>>,
+    watch: Rc<RefCell<Option<Watch>>>,
+    cursors: Arc<[Cursors]>,
+    /// The drag manager's steps of the session on, which a none waits for ([`Badge`]).
+    steps: Arc<AtomicU64>,
 }
 
 impl SourceEvents for Told {
     fn began(&self, _at: (f64, f64)) {
         let Some(drag) = *self.drag.borrow() else { return };
         let _gone = self.out.send(FromHelper::Began { drag });
-        self.watch.replace(Some(watch_cursor(drag, self.out.clone())));
+        self.steps.store(0, Ordering::Relaxed);
+        let (out, cursors, steps) =
+            (self.out.clone(), Arc::clone(&self.cursors), Arc::clone(&self.steps));
+        self.watch.replace(Watch::start(drag, out, cursors, steps));
+    }
+
+    fn moved(&self, _at: (f64, f64)) {
+        self.steps.fetch_add(1, Ordering::Relaxed);
     }
 
     fn ended(&self, operation: u64, _at: (f64, f64)) {
-        if let Some(timer) = self.watch.take() {
-            timer.invalidate();
-        }
+        self.watch.take();
         let Some(drag) = *self.drag.borrow() else { return };
         // The source allows Copy alone, so any operation is a copy.
         let op = if operation == 0 { DragOp::None } else { DragOp::Copy };
@@ -236,7 +251,11 @@ struct Catching {
 }
 
 impl CatcherEvents for Catching {
-    fn entered(&self) {}
+    /// The drag is over the catcher, which takes a copy: the worker lets go now.
+    fn entered(&self) {
+        let Some(drag) = *self.drag.lock() else { return };
+        let _gone = self.out.send(FromHelper::Operation { drag, op: DragOp::Copy });
+    }
 
     fn caught(&self, caught: Caught) {
         let Some(drag) = *self.drag.lock() else { return };
@@ -270,46 +289,53 @@ impl CatcherEvents for Catching {
     }
 }
 
-thread_local! {
-    /// AppKit's cursors at the scale last read, kept for the helper's life: reading them is
-    /// AppKit image work no drag should wait on twice.
-    static REFERENCES: RefCell<Option<Cursors>> = const { RefCell::new(None) };
+/// What a drop does where the system cursor is `shape`, by AppKit's cursors at its scale; a
+/// copy at a scale none was read at, as for a cursor that is none of AppKit's.
+fn operation_of(cursors: &[Cursors], shape: &slopty_proto::screen::CursorShape) -> DragOp {
+    cursors
+        .iter()
+        .find(|c| c.scale() == shape.scale)
+        .map_or(DragOp::Copy, |c| c.class(shape).0.op())
 }
 
-/// What a drop does where the system cursor is `shape`.
-fn operation_of(shape: &slopty_proto::screen::CursorShape) -> DragOp {
-    REFERENCES.with(|references| {
-        let mut references = references.borrow_mut();
-        if references.as_ref().is_none_or(|c| c.scale() != shape.scale) {
-            *references = Some(Cursors::at(shape.scale));
-        }
-        references.as_ref().map_or(DragOp::Copy, |c| c.class(shape).0.op())
-    })
+/// The thread that reads the system cursor while a session is on; it ends when this goes.
+struct Watch {
+    _stop: Sender<()>,
 }
 
-/// Read the system cursor every [`CURSOR_EVERY`] and say each change of what a drop would do.
-fn watch_cursor(drag: DragId, out: Sender<FromHelper>) -> Retained<NSTimer> {
-    let watch = RefCell::new(slopty_capture::CursorWatch::new());
-    let last: RefCell<Option<DragOp>> = RefCell::new(None);
-    let tick = RcBlock::new(move |_timer| {
-        let Some(shape) = watch.borrow_mut().poll() else { return };
-        let op = operation_of(&shape);
-        if last.replace(Some(op)) != Some(op) {
-            let _gone = out.send(FromHelper::Operation { drag, op });
+impl Watch {
+    /// Read the cursor every [`CURSOR_EVERY`] and say what a drop would do as [`Badge`] says
+    /// it, by the session's `steps`, until the watch goes; `None` when no thread would start.
+    fn start(
+        drag: DragId,
+        out: Sender<FromHelper>,
+        cursors: Arc<[Cursors]>,
+        steps: Arc<AtomicU64>,
+    ) -> Option<Self> {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let watching = move || {
+            slopty_platform::user_interactive_thread();
+            let mut watch = slopty_capture::CursorWatch::new();
+            let (mut badge, mut seen) = (Badge::default(), None);
+            while stopped.recv_timeout(CURSOR_EVERY) == Err(mpsc::RecvTimeoutError::Timeout) {
+                if let Some(shape) = watch.poll() {
+                    seen = Some(operation_of(&cursors, &shape));
+                }
+                let Some(op) = seen else { continue };
+                if let Some(op) = badge.see(op, steps.load(Ordering::Relaxed), Instant::now()) {
+                    let _gone = out.send(FromHelper::Operation { drag, op });
+                }
+            }
+        };
+        let thread = std::thread::Builder::new().name("slopty-dnd-cursor".to_owned());
+        match thread.spawn(watching) {
+            Ok(_detached) => Some(Self { _stop: stop }),
+            Err(e) => {
+                tracing::warn!(%drag, error = %e, "no thread to read the cursor on");
+                None
+            }
         }
-    });
-    // SAFETY: AppKit rule: a repeating timer, its block kept by the timer, made on this, the
-    // main thread, and added below to this thread's run loop.
-    let timer = unsafe {
-        NSTimer::timerWithTimeInterval_repeats_block(CURSOR_EVERY.as_secs_f64(), true, &tick)
-    };
-    // SAFETY: AppKit rule: a timer is added to the run loop of the thread it fires on, this
-    // one, in the common modes, so it fires while AppKit tracks the drag; the mode is a
-    // framework-provided constant string.
-    unsafe {
-        NSRunLoop::currentRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
     }
-    timer
 }
 
 /// How long the source's window may take to show at its point before the helper says it is
@@ -393,7 +419,8 @@ fn on_main(msg: ToHelper) {
                     main.source.stop();
                     main.catcher.stop();
                     main.table.stop(drag);
-                    for timer in [main.watch.take(), main.showing.take()].into_iter().flatten() {
+                    main.watch.take();
+                    if let Some(timer) = main.showing.take() {
                         timer.invalidate();
                     }
                     main.drag.replace(None);
@@ -403,6 +430,11 @@ fn on_main(msg: ToHelper) {
                 main.source.stop();
                 main.drag.replace(Some(drag));
                 main.catcher.at((x, y), PathBuf::from(dir));
+                let window = main.catcher.window_number();
+                let showing = ready_when_shown(window, (x, y), drag, main.out.clone());
+                if let Some(earlier) = main.showing.replace(showing) {
+                    earlier.invalidate();
+                }
             }
             // The reader thread fills the table itself: a target may be waiting on the main
             // thread for it.
@@ -476,7 +508,17 @@ pub fn run() -> ExitCode {
     let table = Arc::new(Table::default());
     let drag = Rc::new(RefCell::new(None));
     let watch = Rc::new(RefCell::new(None));
-    let told = Told { out: out.clone(), drag: Rc::clone(&drag), watch: Rc::clone(&watch) };
+    // The first cursor read in a process pays for the window server's connection, and reading
+    // AppKit's cursors for their images, so both are paid before any drag.
+    let warmed = slopty_capture::warm_cursor();
+    let cursors: Arc<[Cursors]> = SCALES.into_iter().map(Cursors::at).collect();
+    let told = Told {
+        out: out.clone(),
+        drag: Rc::clone(&drag),
+        watch: Rc::clone(&watch),
+        cursors,
+        steps: Arc::default(),
+    };
     let source = Source::new(mtm, Box::new(told));
     let catching = Arc::new(Catching { out: out.clone(), drag: Mutex::new(None) });
     let events: Arc<dyn CatcherEvents> = Arc::<Catching>::clone(&catching);
@@ -486,12 +528,6 @@ pub fn run() -> ExitCode {
         let table = Arc::clone(&table);
         main.replace(Some(Main { source, catcher, table, out, drag, watch, showing }));
     });
-    // The first cursor read in a process pays for the window server's connection, and the
-    // first read of AppKit's cursors for their images, so both are paid before any drag.
-    let warmed = slopty_capture::warm_cursor();
-    if let Some(shape) = slopty_capture::CursorWatch::new().poll() {
-        operation_of(&shape);
-    }
     tracing::debug!(warm_ms = warmed.as_millis(), "drag helper up");
     let writer = std::thread::Builder::new().name("slopty-dnd-out".to_owned()).spawn(move || {
         write(&said);

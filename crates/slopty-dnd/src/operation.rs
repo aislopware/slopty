@@ -8,6 +8,8 @@
 //! alone, so those three are all it shows. A cursor that is none of AppKit's, an app's own, says
 //! nothing, and is taken as a copy: the drop then decides.
 
+use std::time::{Duration, Instant};
+
 use objc2::rc::Retained;
 use objc2_app_kit::{NSCursor, NSImageRep};
 use objc2_core_graphics::{CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
@@ -107,6 +109,48 @@ impl Cursors {
     }
 }
 
+/// How many of the drag manager's steps a drop of none waits for after one that took: the step
+/// it entered the next target on and one more.
+pub const NONE_STEPS: u64 = 2;
+
+/// The longest a none waits for them, should the drag stop moving.
+pub const NONE_WAIT: Duration = Duration::from_millis(50);
+
+/// What a drop does, as said: each change of the cursor's operation, but a none that follows an
+/// operation that took only once the drag manager has had its next step.
+///
+/// The drag manager leaves one target on a step of the drag and enters the next on a later one,
+/// so between two targets that both take the drop the cursor is the arrow for a step: 4–61 ms,
+/// median 26, in a guest whose drag manager steps every 30 ms (MEASUREMENTS.md, "the badge,
+/// timed"). Said as it is, the client's badge would flicker to none at every crossing. Waiting
+/// for [`NONE_STEPS`] steps (`draggingSession:movedToPoint:`) or [`NONE_WAIT`] hides that,
+/// and a refusal still shows within a step or two.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Badge {
+    said: Option<DragOp>,
+    /// When the cursor turned none after a take: the drag's step then, and the time.
+    held: Option<(u64, Instant)>,
+}
+
+impl Badge {
+    /// The cursor's operation is `op` at the drag's step `steps`, at `now`: what to say, if
+    /// anything.
+    pub fn see(&mut self, op: DragOp, steps: u64, now: Instant) -> Option<DragOp> {
+        if op.takes() || !self.said.is_some_and(DragOp::takes) {
+            self.held = None;
+            return (self.said.replace(op) != Some(op)).then_some(op);
+        }
+        let (since, at) = *self.held.get_or_insert((steps, now));
+        let stepped = steps >= since.saturating_add(NONE_STEPS);
+        if !stepped && now.saturating_duration_since(at) < NONE_WAIT {
+            return None;
+        }
+        self.held = None;
+        self.said = Some(op);
+        Some(op)
+    }
+}
+
 /// How many pixels of two pictures of one size differ by more than a quarter in any byte.
 fn differing(a: &[u8], b: &[u8]) -> usize {
     a.as_chunks::<4>()
@@ -176,6 +220,29 @@ mod tests {
             *pixel = [0, 0, 0, 255];
         }
         (4, 4, bgra)
+    }
+
+    /// Each change is said once. A none after a take waits for the drag manager's next step
+    /// and one more, or for [`NONE_WAIT`], and a take meanwhile hides it: crossing from one
+    /// target to the next never flickers to none. A none with nothing taken before is said at
+    /// once, and so is a take after a none.
+    #[test]
+    fn a_none_between_two_targets_is_not_said() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut badge = Badge::default();
+        assert_eq!(badge.see(DragOp::None, 0, ms(0)), Some(DragOp::None), "none at first");
+        assert_eq!(badge.see(DragOp::None, 0, ms(1)), None, "said once");
+        assert_eq!(badge.see(DragOp::Copy, 1, ms(2)), Some(DragOp::Copy));
+        assert_eq!(badge.see(DragOp::None, 2, ms(3)), None, "the step that left the first");
+        assert_eq!(badge.see(DragOp::None, 3, ms(30)), None, "one step on");
+        assert_eq!(badge.see(DragOp::Copy, 3, ms(31)), None, "the next took: no flicker");
+        assert_eq!(badge.see(DragOp::None, 4, ms(40)), None);
+        assert_eq!(badge.see(DragOp::None, 6, ms(41)), Some(DragOp::None), "two steps on");
+        assert_eq!(badge.see(DragOp::Link, 6, ms(42)), Some(DragOp::Link), "a take at once");
+        assert_eq!(badge.see(DragOp::None, 6, ms(43)), None, "the drag stopped moving");
+        assert_eq!(badge.see(DragOp::None, 6, ms(92)), None);
+        assert_eq!(badge.see(DragOp::None, 6, ms(93)), Some(DragOp::None), "after the wait");
     }
 
     /// The system cursor classes as the reference of its size it matches, and means that

@@ -36,6 +36,8 @@ objc2-core-graphics.workspace = true
 # window shows (`helper`).
 slopty-capture.workspace = true
 slopty-core.workspace = true
+# The helper's cursor watch runs as user-interactive work, which a person's drag is (`helper`).
+slopty-platform.workspace = true
 # The helper's messages from and to the worker (`helper`), what a drop does (`operation`).
 slopty-proto.workspace = true
 # The helper's table of what each item gives, filled by its reader thread while a target waits on

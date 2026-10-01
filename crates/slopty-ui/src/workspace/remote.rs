@@ -21,6 +21,8 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
 use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
 
+#[cfg(target_os = "macos")]
+mod drag_out;
 mod drop_in;
 
 pub use drop_in::DropIn;

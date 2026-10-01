@@ -851,6 +851,17 @@ impl WorkspaceView {
                         let view = view.downgrade();
                         this.paste_files_in_window(tile, &view, files.clone(), cx);
                     }
+                    #[cfg(target_os = "macos")]
+                    crate::screen::ScreenViewEvent::DragOut(shared) => {
+                        if !this.drag_out_of(tile.worker, shared) {
+                            this.show_notice("The drag could not go on here".to_owned(), cx);
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    crate::screen::ScreenViewEvent::DragOut(_) => {}
+                    crate::screen::ScreenViewEvent::DragOutFailed(why) => {
+                        this.show_notice(format!("The drag did not come out: {why}"), cx);
+                    }
                 })
                 .detach();
                 // Its facts, copied whenever it changes: its first frame, its sound.

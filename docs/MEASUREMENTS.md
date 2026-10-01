@@ -11033,6 +11033,67 @@ ms of the moves.
   and one promise. The promise's file arrived whole in the catcher's folder, and the app saw a
   copy.
 
+## 2026-10-01 — the badge, timed, and a drag out of a window
+
+macOS 26 in a tart guest (4 cores, 8 GB, `--no-graphics`), each test once, ten rounds where a
+test has rounds:
+
+```sh
+cargo xtask vm live -p slopty-dnd --test roles
+```
+
+Every stamp is on the uptime clock (`NSProcessInfo.systemUptime`): the test's drop targets stamp
+their `entered`, `updated` and `exited` lines with it, a thread of the test's own reads the
+system cursor every 500 µs and stamps each change, and the helper's messages are stamped as the
+test reads them off its pipe. A drag is carried in 24 moves 8 ms apart.
+
+**Where the badge's 50–85 ms went** (`the_workers_helper_lands_a_drop_at_the_point`, from the
+move that crossed onto the target, before the change):
+
+| | ms |
+| --- | --- |
+| the target's `draggingEntered:` | 24–59 |
+| the copy cursor shows | within 0.3–2 of the entry |
+| the helper says copy (a timer on its main thread every 8 ms) | 42–82, so 4–39 after the cursor (10, 10, 11, 12, 17, 18, 29, 31, 39 and 4) |
+| the helper says copy (its own thread, the seed every 1 ms) | 0–2 after the cursor |
+
+- The helper's timer ran on the main thread, where AppKit tracks the drag, and fired late. On
+  a thread of its own the copy follows the cursor within 2 ms.
+- The targets' `draggingUpdated:` come 16–33 ms apart while the moves come every 8 ms: the drag
+  manager steps the drag at that pace, and enters a target on a later step than the one that
+  left the last.
+
+**Across touching targets** (`the_badge_follows_a_drag_across_touching_targets`, two that take a
+copy side by side and one below the second that refuses; two runs, twenty crossings each way):
+
+| | ms |
+| --- | --- |
+| copy onto copy: the next's `entered` after the first's `exited` | 19–47, median 30 |
+| copy onto copy: a none said between them | never (the arrow showed for that gap before the hold) |
+| onto the refusing one: its `entered` → the helper says none | 4 before to 37 after, median 18 |
+| back onto one that takes: its `entered` → the helper says copy | 0.9–16, median 3 |
+
+- The none waits for two more steps of the drag manager (`draggingSession:movedToPoint:`) or 50
+  ms, whichever is first, so the arrow between two targets is never said. Once the gap ran past
+  the hold, the none came 4 ms before the refusing target's entry.
+
+**A drag out of a window** (`a_window_streams_press_drags_out_and_the_catch_takes_it`, one run):
+the injector presses on a 1:1 stream of the test app's window, which is on top, through the HID
+tap, and moves 3 points every 8 ms; the app begins its drag of a file and a promise.
+
+| | ms |
+| --- | ---: |
+| press → the drag pasteboard's count moved (read after each move) | 174.5 |
+| catch → the catcher up under the pointer (`Ready`) | 30.6 |
+| catch → the catcher says the drag is over it | 170.3 |
+| release → the catch says what it took | 22.0 |
+
+- The file is taken where it is, the promise is called into the drag's folder whole (2048
+  bytes), and the app sees a copy.
+- One run, so a sample, not a spread. The catcher needed more than one carry out and back
+  (each waits 250 ms) before the drag manager entered it. The drag was seen only after the
+  app's own drag threshold and the moves past it.
+
 ## 2026-10-01 — the drop in, carried: the helper's source, the badge, the release
 
 macOS 26 in a tart guest (4 cores, 8 GB, `--no-graphics`), ten drops in one run:
@@ -11061,9 +11122,9 @@ time is on the test's clock, at the moment it read the message or the line. The 
   began no session (the run before this one).
 - Over the guest's desktop the drag already shows copy, since Finder's desktop takes files. On
   crossing onto the target the cursor goes to the arrow 4–37 ms after the crossing and to copy
-  50–85 ms after it. The helper reads the cursor every 8 ms, so the rest is the drag manager's
-  own lag. That is 25–60 ms over the plan's `RTT + 25 ms` for the badge before the network is
-  counted, and the client's badge flickers to none in between.
+  50–85 ms after it, and the client's badge flickers to none in between. That this was the
+  drag manager's alone was wrong: the next entry times each part and finds the helper's
+  watch 10–39 ms late.
 - A drop with its files whole reaches the target 5 ms after the release (median), so the drop
   lands RTT/2 plus about 5 ms after the client's drop. One release in ten took 374 ms; the
   guest's other work is the likely cause, not yet shown.

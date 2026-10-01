@@ -403,10 +403,26 @@ pub async fn send_clip(
 ) {
     use slopty_proto::transfer::ClipMsg;
     use slopty_worker::clip::Fetched;
-    let (clip, asked) = (Arc::clone(&daemon.clip), rep.clone());
-    // Off the runtime: a representation the poll left alone is read off the pasteboard now.
-    let fetched = tokio::task::spawn_blocking(move || clip.fetch(&asked, max)).await;
-    let bytes = match fetched.unwrap_or(Fetched::Unavailable) {
+    let fetched = if let Source::Drag(drag) = rep.source {
+        // What the catch of a drag out kept: the client's own drop is fetching it.
+        match daemon.dnd.drags().kept(drag, rep.item, &rep.kind) {
+            Some(bytes) => {
+                let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                if max.is_some_and(|max| size > max) {
+                    Fetched::TooBig(size)
+                } else {
+                    Fetched::Data(bytes)
+                }
+            }
+            None => Fetched::Unavailable,
+        }
+    } else {
+        let (clip, asked) = (Arc::clone(&daemon.clip), rep.clone());
+        // Off the runtime: a representation the poll left alone is read off the pasteboard now.
+        let fetched = tokio::task::spawn_blocking(move || clip.fetch(&asked, max)).await;
+        fetched.unwrap_or(Fetched::Unavailable)
+    };
+    let bytes = match fetched {
         Fetched::Data(bytes) if bytes.len() > INLINE_CLIP_BYTES => bytes,
         Fetched::Data(bytes) => {
             let data = ClipMsg::Data { rep, bytes: bytes.to_vec() };
