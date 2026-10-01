@@ -39,6 +39,8 @@ mod carried;
 mod read;
 mod redraw;
 mod restored;
+#[cfg(test)]
+mod session_state;
 
 pub use read::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 
@@ -188,6 +190,8 @@ pub struct GhosttyEngine {
     overrides: ColorOverrides,
     /// The program's progress report as last reported, shared with libghostty's callback.
     progress: Rc<std::cell::Cell<Progress>>,
+    /// The title and the directory as last reported, shared with libghostty's callbacks.
+    reported: Rc<RefCell<Reported>>,
     /// The pointer shape the program asked for (`OSC 22`) as last reported.
     pointer: PointerShape,
     /// Nothing was written yet: a checkpoint written first brings its marks back (see
@@ -416,7 +420,8 @@ impl GhosttyEngine {
         let light = Rc::new(std::cell::Cell::new(is_light(dark.bg)));
 
         let events: Events = Rc::new(RefCell::new(Vec::new()));
-        install_callbacks(&mut term, &events, &light)?;
+        let reported = Rc::new(RefCell::new(Reported::default()));
+        install_callbacks(&mut term, &events, &light, &reported)?;
         let progress = Rc::new(std::cell::Cell::new(Progress::default()));
         install_progress(&mut term, &events, &progress)?;
         let render = Rc::new(RefCell::new(RenderState::new()?));
@@ -477,6 +482,7 @@ impl GhosttyEngine {
             graphics_gen: 0,
             overrides: ColorOverrides::default(),
             progress,
+            reported,
             pointer: PointerShape::Text,
             fresh: true,
             restoring: false,
@@ -494,12 +500,14 @@ impl GhosttyEngine {
     }
 
     /// The whole terminal as the VT byte stream that rebuilds it in a fresh engine of the same
-    /// size: palette, modes, tab stops, scrolling region, working directory (OSC 7), keyboard
-    /// state, every retained row (history then screen, soft wraps kept, each row's prompt flag
-    /// and each cell's semantic content), and the cursor with its pending style, hyperlink and
-    /// semantic content, then the prompt marks and command blocks the engine keeps. libghostty-vt's
-    /// own formatter writes it, so what a program drew comes back exactly as its cells, not as
-    /// an approximation from the grid.
+    /// size: palette, modes, tab stops, scrolling region, keyboard state (the kitty keyboard
+    /// stack whole), every retained row (history then screen, soft wraps kept, each row's prompt
+    /// flag, each cell's semantic content and protection), and the cursor (its position with a
+    /// pending wrap, shape, pen, hyperlink, semantic content and the state `DECSC` saved), then
+    /// the prompt marks and command blocks the engine keeps, and last the session's title,
+    /// working directory (OSC 7), pointer shape and progress. libghostty-vt's own formatter
+    /// writes the screens, so what a program drew comes back exactly as its cells, not as an
+    /// approximation from the grid.
     ///
     /// When the alternate screen is active the formatter can only see that screen, so the bytes
     /// are the primary screen as of the moment the program switched (kept by [`Self::write`])
@@ -512,6 +520,54 @@ impl GhosttyEngine {
     ///
     /// When the formatter fails.
     pub fn checkpoint(&mut self, out: &mut Vec<u8>) -> Result<(), EngineError> {
+        self.screens(out)?;
+        self.session_tail(out);
+        Ok(())
+    }
+
+    /// The program's state no screen holds, which the session tells every viewer: the title,
+    /// the directory, the pointer shape and the progress report. It follows the screens, so no
+    /// prompt mark replayed after it drops the progress.
+    ///
+    /// The directory is the one last reported rather than libghostty's: a full reset clears
+    /// libghostty's and the shell is still where it was, and a value `OSC 7` gave that is no
+    /// directory was never the session's.
+    fn session_tail(&self, out: &mut Vec<u8>) {
+        if let Ok(title) = self.term.title()
+            && !title.is_empty()
+        {
+            out.extend_from_slice(b"\x1b]2;");
+            out.extend_from_slice(title.as_bytes());
+            out.extend_from_slice(b"\x1b\\");
+        }
+        let reported = self.reported.borrow();
+        if !reported.pwd.is_empty() {
+            out.extend_from_slice(b"\x1b]7;");
+            out.extend_from_slice(reported.pwd.as_bytes());
+            out.extend_from_slice(b"\x1b\\");
+        }
+        if self.pointer != PointerShape::default() {
+            let name = convert::pointer_name(self.pointer);
+            out.extend_from_slice(format!("\x1b]22;{name}\x1b\\").as_bytes());
+        }
+        let progress = self.progress.get();
+        let state = match progress.state {
+            ProgressState::None => return,
+            ProgressState::Set => 1,
+            ProgressState::Error => 2,
+            ProgressState::Indeterminate => 3,
+            ProgressState::Paused => 4,
+        };
+        let report = match progress.percent {
+            Some(percent) => format!("\x1b]9;4;{state};{percent}\x1b\\"),
+            None => format!("\x1b]9;4;{state}\x1b\\"),
+        };
+        out.extend_from_slice(report.as_bytes());
+    }
+
+    /// The screens of a checkpoint: the active one, or the primary as it was when the program
+    /// switched followed by the alternate screen.
+    fn screens(&mut self, out: &mut Vec<u8>) -> Result<(), EngineError> {
         if !self.on_alt {
             let active = self.primary_now()?;
             out.extend_from_slice(active);
@@ -529,6 +585,9 @@ impl GhosttyEngine {
         // and home: the formatter writes content from wherever the cursor is, and it is where
         // the primary left it. Its own `?1049h` (in the modes it emits) is then a no-op.
         out.extend_from_slice(b"\x1b[?1049h");
+        // The cursor's shape is the terminal's, and the primary's blob set the one it had then:
+        // give the alternate screen the default back for its own blob to set its shape over.
+        out.extend_from_slice(b"\x1b[0 q");
         // The scrolling region is the terminal's, not a screen's: the one the primary's blob
         // set would scroll the alternate screen's rows away as they are written. Its own blob
         // sets it again after them; the left and right margins went with `?69` above.
@@ -560,9 +619,10 @@ impl GhosttyEngine {
     ///
     /// The formatter writes every row, the blank ones at the bottom too, so a primary screen
     /// that has scrolled comes back with all of its history, and leaves a soft-wrapped row
-    /// for the replay to wrap. Its cursor position would come before the scrolling region,
-    /// which homes the cursor when set, so the cursor is written last here instead; then the
-    /// content the cursor writes with, and the marks the engine keeps (see [`carried`]).
+    /// for the replay to wrap. It writes the cursor last, after the margins: its position
+    /// (relative to them under origin mode, with a pending wrap kept), its shape, and the state
+    /// `DECSC` saved. Then come the content the cursor writes with, and the marks the engine
+    /// keeps (see [`carried`]).
     fn format_active_screen(&self) -> Result<Vec<u8>, EngineError> {
         let options = FormatterOptions::new()
             .with_format(Format::Vt)
@@ -578,9 +638,10 @@ impl GhosttyEngine {
             // The stops a program set (`tabs 4`), then home: `CSI 3 g`, and `CSI n G` and
             // `ESC H` for each stop.
             .with_tabstops(true)
-            .with_pwd(true)
+            // The directory goes in the session's state, after the screens.
+            .with_pwd(false)
             .with_keyboard(true)
-            .with_cursor(false)
+            .with_cursor(true)
             .with_style(true)
             .with_hyperlink(true)
             .with_protection(true)
@@ -594,18 +655,6 @@ impl GhosttyEngine {
         let mut out = colour_sets(&self.overrides);
         out.reserve(bytes.len().saturating_add(128));
         out.extend_from_slice(&bytes);
-        let (mut row, mut col) =
-            (u32::from(self.term.cursor_y()?), u32::from(self.term.cursor_x()?));
-        if self.term.mode(Mode::ORIGIN)? {
-            // Setting or clearing origin mode homes the cursor, so it cannot be lifted around
-            // the move: address the cursor the way the program does, relative to the margins.
-            let margins = margins_at(&bytes).unwrap_or_default();
-            row = row.saturating_sub(margins.top);
-            col = col.saturating_sub(margins.left);
-        }
-        out.extend_from_slice(
-            format!("\x1b[{};{}H", row.saturating_add(1), col.saturating_add(1)).as_bytes(),
-        );
         out.extend_from_slice(self.cursor_content()?);
         let marks = carried::Payload {
             base: self.base,
@@ -795,6 +844,10 @@ impl GhosttyEngine {
     /// every line the numbering, the marks and the command blocks refer to is gone. A new
     /// numbering starts with no marks, and no blocks but a command still running.
     fn forget_screen(&mut self) {
+        // libghostty clears the title without a callback for it.
+        if std::mem::take(&mut self.reported.borrow_mut().titled) {
+            self.events.borrow_mut().push(EngineEvent::Title(String::new()));
+        }
         self.primary_anchor = None;
         self.primary_marks = None;
         self.primary_commands.clear();
@@ -1708,50 +1761,6 @@ impl GhosttyEngine {
     }
 }
 
-/// The margins the formatter wrote, if any, and where its first margin sequence starts.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-struct Margins {
-    /// Byte offset of the first of `DECSTBM` / `DECSLRM`.
-    at: usize,
-    /// Top margin, 0-based.
-    top: u32,
-    /// Left margin, 0-based.
-    left: u32,
-}
-
-/// The formatter writes `DECSTBM` (`CSI top ; bottom r`) and `DECSLRM` (`CSI left ; right s`)
-/// independently, each only when set. Cells never hold an escape and nothing else it writes
-/// ends in `r` or in `s` with parameters, so the first match of each is it.
-fn margins_at(bytes: &[u8]) -> Option<Margins> {
-    let stbm = csi_with_final(bytes, b'r');
-    let slrm = csi_with_final(bytes, b's');
-    let at = match (stbm, slrm) {
-        (Some((a, _)), Some((b, _))) => a.min(b),
-        (Some((a, _)), None) | (None, Some((a, _))) => a,
-        (None, None) => return None,
-    };
-    Some(Margins {
-        at,
-        top: stbm.map_or(0, |(_, first)| first.saturating_sub(1)),
-        left: slrm.map_or(0, |(_, first)| first.saturating_sub(1)),
-    })
-}
-
-/// The first `CSI params final` in `bytes` whose parameters are digits and `;` only (at least
-/// one digit) and whose final byte is `last`: its offset and its first parameter.
-fn csi_with_final(bytes: &[u8], last: u8) -> Option<(usize, u32)> {
-    memchr::memmem::find_iter(bytes, b"\x1b[").find_map(|at| {
-        let rest = bytes.get(at.saturating_add(2)..).unwrap_or_default();
-        let params = rest.iter().take_while(|b| b.is_ascii_digit() || **b == b';').count();
-        if params == 0 || rest.get(params) != Some(&last) {
-            return None;
-        }
-        let first = rest.get(..params)?.split(|b| *b == b';').next()?;
-        let first: u32 = std::str::from_utf8(first).ok()?.parse().ok()?;
-        Some((at, first))
-    })
-}
-
 /// A fresh terminal's pen: no style, no hyperlink, no protection, and output content
 /// (`OSC 133;D`, the one step to output that never takes a row's prompt flag off).
 const FRESH_PEN: &[u8] = b"\x1b[0m\x1b]8;;\x1b\\\x1b[0\"q\x1b]133;D\x1b\\";
@@ -2129,10 +2138,21 @@ const fn check_size(size: TermSize) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// What the engine last told its session of the title and the directory. A full reset clears
+/// both in libghostty without a callback, and the session still holds them.
+#[derive(Debug, Default)]
+struct Reported {
+    /// The last title reported was not empty.
+    titled: bool,
+    /// The `OSC 7` value the last directory reported was read from.
+    pwd: String,
+}
+
 fn install_callbacks(
     term: &mut Terminal<'static, 'static>,
     events: &Events,
     light: &Rc<std::cell::Cell<bool>>,
+    reported: &Rc<RefCell<Reported>>,
 ) -> Result<(), EngineError> {
     let for_scheme = Rc::clone(light);
     term.on_color_scheme(move |_| Some(scheme(for_scheme.get())))?;
@@ -2149,14 +2169,17 @@ fn install_callbacks(
         let body = String::from_utf8_lossy(n.body()).chars().take(NOTIFICATION_CHARS).collect();
         for_notify.borrow_mut().push(EngineEvent::Notification { title, body });
     })?;
-    let for_title = Rc::clone(events);
+    let (for_title, title_reported) = (Rc::clone(events), Rc::clone(reported));
     term.on_title_changed(move |t| {
         let title = t.title().unwrap_or_default().to_owned();
+        title_reported.borrow_mut().titled = !title.is_empty();
         for_title.borrow_mut().push(EngineEvent::Title(title));
     })?;
-    let for_pwd = Rc::clone(events);
+    let (for_pwd, pwd_reported) = (Rc::clone(events), Rc::clone(reported));
     term.on_pwd_changed(move |t| {
-        if let Some(path) = cwd_from_osc7(t.pwd().unwrap_or_default()) {
+        let pwd = t.pwd().unwrap_or_default();
+        if let Some(path) = cwd_from_osc7(pwd) {
+            pwd.clone_into(&mut pwd_reported.borrow_mut().pwd);
             for_pwd.borrow_mut().push(EngineEvent::Cwd(path));
         }
     })?;
@@ -4924,8 +4947,8 @@ mod checkpoint_tests {
         }
     }
 
-    /// What an erase and a scroll under a coloured pen leave holds only the colour, with no
-    /// style and no row flag of its own: the screen and the history show it all the same, and
+    /// What an erase, a scroll and a line shift under a coloured pen leave holds only the
+    /// colour, with no style of its own: the screen and the history show it all the same, and
     /// so does a checkpoint (fuzz, a scroll under a background left the row blank).
     #[test]
     fn a_background_left_by_an_erase_or_a_scroll_shows() {
@@ -4942,6 +4965,22 @@ mod checkpoint_tests {
         let drawn =
             |e: &mut GhosttyEngine| -> Vec<Vec<Style>> { screen_lines(e).iter().map(bg).collect() };
         assert_eq!(drawn(&mut b), drawn(&mut a));
+        // A full erase too, on either screen (fuzz: ED 2 left every row unflagged, and the
+        // frames blank).
+        for erase in [&b"x\x1b[41m\x1b[2J"[..], b"\x1b[?1049hx\x1b[41m\x1b[2J"] {
+            let mut e = engine(6, 2, 100);
+            e.write(erase);
+            assert_eq!(drawn(&mut e), vec![vec![red; 6]; 2], "{erase:?}");
+        }
+        // And the row a line deleted, a line inserted or a reverse index at the top brings in
+        // (fuzz: each reset the row after filling it, which took its flag off).
+        for (shift, row) in
+            [(&b"x\x1b[41m\x1b[M"[..], 1), (b"x\x1b[41m\x1b[L", 0), (b"x\x1b[41m\x1bM", 0)]
+        {
+            let mut e = engine(6, 2, 100);
+            e.write(shift);
+            assert_eq!(drawn(&mut e)[row], vec![red; 6], "{shift:?}");
+        }
     }
 
     /// A scrolling region set before the program entered the alternate screen still holds
@@ -5189,7 +5228,6 @@ mod checkpoint_tests {
             a.checkpoint(&mut v).unwrap();
             v
         };
-        assert!(margins_at(&checkpoint).is_some());
         let mut b = engine(20, 4, 100);
         b.write(&checkpoint);
         assert_eq!(all_text(&b), all_text(&a));
@@ -5382,16 +5420,6 @@ mod checkpoint_tests {
         }
         through_engine.report().unwrap();
         through_vt.report().unwrap();
-    }
-
-    #[test]
-    fn margins_are_read_from_the_formatter_sequences() {
-        let bytes = b"abc\x1b[3;10r\x1b[2;7s\x1b]7;file:///\x1b\\";
-        assert_eq!(margins_at(bytes), Some(Margins { at: 3, top: 2, left: 1 }));
-        assert_eq!(margins_at(b"\x1b[3;10r"), Some(Margins { at: 0, top: 2, left: 0 }));
-        // DECSLRM alone (full-height margins, a left margin): still found, padding before it.
-        assert_eq!(margins_at(b"x\x1b[0m\x1b[5;20s"), Some(Margins { at: 5, top: 0, left: 4 }));
-        assert!(margins_at(b"\x1b]4;0;rgb:00/00/00\x1b\\\x1b[?1049h\x1b[s").is_none());
     }
 
     #[test]

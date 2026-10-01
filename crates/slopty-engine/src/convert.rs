@@ -212,6 +212,47 @@ pub const fn pointer(shape: mouse::Shape) -> PointerShape {
     }
 }
 
+/// The W3C name `OSC 22` asks for `shape` by, as libghostty reads it.
+#[must_use]
+pub const fn pointer_name(shape: PointerShape) -> &'static str {
+    match shape {
+        PointerShape::Text => "text",
+        PointerShape::Default => "default",
+        PointerShape::ContextMenu => "context-menu",
+        PointerShape::Help => "help",
+        PointerShape::Pointer => "pointer",
+        PointerShape::Progress => "progress",
+        PointerShape::Wait => "wait",
+        PointerShape::Cell => "cell",
+        PointerShape::Crosshair => "crosshair",
+        PointerShape::VerticalText => "vertical-text",
+        PointerShape::Alias => "alias",
+        PointerShape::Copy => "copy",
+        PointerShape::Move => "move",
+        PointerShape::NoDrop => "no-drop",
+        PointerShape::NotAllowed => "not-allowed",
+        PointerShape::Grab => "grab",
+        PointerShape::Grabbing => "grabbing",
+        PointerShape::AllScroll => "all-scroll",
+        PointerShape::ColResize => "col-resize",
+        PointerShape::RowResize => "row-resize",
+        PointerShape::NResize => "n-resize",
+        PointerShape::EResize => "e-resize",
+        PointerShape::SResize => "s-resize",
+        PointerShape::WResize => "w-resize",
+        PointerShape::NeResize => "ne-resize",
+        PointerShape::NwResize => "nw-resize",
+        PointerShape::SeResize => "se-resize",
+        PointerShape::SwResize => "sw-resize",
+        PointerShape::EwResize => "ew-resize",
+        PointerShape::NsResize => "ns-resize",
+        PointerShape::NeswResize => "nesw-resize",
+        PointerShape::NwseResize => "nwse-resize",
+        PointerShape::ZoomIn => "zoom-in",
+        PointerShape::ZoomOut => "zoom-out",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2978,10 +2978,96 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`ghostty_paste_encode`). The binding's `Terminal::paste` already failed a refused write
     itself, so that check is now redundant but harmless.
   - The rest is ghostty's OpenGL error message and its VOUCHED list.
-  - **Left open.** A checkpoint does not carry the pointer shape: the formatter writes no
-    `OSC 22`, and neither does `checkpoint`. So a shape a program set before the last
-    checkpoint comes back as the I-beam after a worker restart, until the program sets it
-    again.
+  - **Left open, closed by the next entry.** A checkpoint did not carry the pointer shape: the
+    formatter writes no `OSC 22`, and neither did `checkpoint`. So a shape a program set
+    before the last checkpoint came back as the I-beam after a worker restart, until the
+    program set it again.
   - Cost: every engine `*_cost` series stayed within its run-to-run spread, so no budget or
     MEASUREMENTS entry changes. On reruns, `take_frame_unchanged` and `write` move by 25–50
     instructions on their own.
+
+- ✅ **A checkpoint carries the session's whole state** (2026-10-01). A worker that restarts
+  rebuilds each session from its last checkpoint and the output since. The session's state is
+  what its viewers were told and what shapes their input, so the checkpoint has to carry all of
+  it. A sweep checked each piece against a fresh engine the checkpoint replays into
+  (`ghostty/session_state.rs`). Findings:
+
+  | State | Before | Now |
+  | --- | --- | --- |
+  | Colours (OSC 4/10/11/12) | carried (`colour_sets`) | carried |
+  | Directory (OSC 7) | carried by the formatter, lost after a full reset | the last one reported, written by the engine |
+  | Title (OSC 0/2) | lost | carried; a full reset now reports it cleared |
+  | Pointer shape (OSC 22) | lost | carried by its W3C name (`convert::pointer_name`) |
+  | Progress (OSC 9;4) | lost | carried, after the screens so no replayed prompt drops it |
+  | Modes: bracketed paste, mouse tracking and its formats (9, 1000–1003, 1005, 1006, 1015, 1016), focus, cursor visibility and blink, application cursor and keypad, alternate scroll, 2027, 2031, 2048 | carried | carried |
+  | modifyOtherKeys, the kitty keyboard flags in force | carried | carried |
+  | The kitty keyboard stack below the flags in force | lost | carried whole |
+  | Cursor shape (DECSCUSR) | lost | carried |
+  | Cursor position, a pending wrap at the right edge | the position only | both, and under origin mode from the margins |
+  | The state DECSC saved | lost | carried |
+  | Protected cells (DECSCA) | lost | carried |
+  | Pen, open hyperlink, character sets, margins, tab stops, insert, autowrap, origin, newline mode, reverse wrap | carried | carried |
+  | Kitty graphics | lost | **lost, left open** |
+
+  - **The fork's formatter does the screen's part** (aislopware/ghostty #5 to #9,
+    `80e1f1535`, pinned by libghostty-rs #4 to #8). The cursor extra now writes DECSCUSR when a program set the shape, and
+    the state DECSC saved, saved again with DECSC. It also addresses the cursor from the
+    margins under origin mode, which retires the engine's own `CUP` and its parsing of the
+    margins out of the blob. A saved slot that the live state holds at UTF-8 is given back
+    as ASCII, because nothing designates UTF-8 again and the two print the same. The kitty
+    extra replays the stack's ring from its oldest live entry. A replay's ring is the same
+    ring rotated, and it behaves the same. VT content writes DECSCA around protected runs.
+    Protection is written as DEC protection, so a cell an ISO area (SPA/EPA) protected comes
+    back DEC-protected. The difference is ED and EL, which erase DEC-protected cells.
+  - **The engine does the session's part** (`session_tail`). The title, the directory as last
+    reported, the pointer shape and the progress follow the screens. libghostty clears its
+    title and its directory on a full reset without a callback. The engine now reports the
+    title cleared. It keeps the directory, because the shell is still in it, and writes that
+    one into the checkpoint rather than libghostty's empty one. Entering the alternate screen
+    in a checkpoint now sets the cursor shape back to the default first (`CSI 0 SP q`), so the
+    alternate screen's own blob sets its shape over a clean one.
+  - **What the fuzzer found next, fixed in the fork (#6 to #9).** The cell under a pending wrap is
+    written again, and it went through the page formatter as if it were a row. The semantic
+    prompt replay flagged the row and ended it with a carriage return, which left the cursor
+    in the first column. A cell formatted alone now keeps its row's flag. Prompt content on a
+    row with no prompt flag needs a `P`, and `P` flags the row it is written on. So the
+    formatter writes the `P` on a row already flagged and then moves to the cell (#7), and
+    the content survives because the parser's semantic state outlives a cursor move. Only
+    when no row is flagged, or origin mode is on and the address would be wrong, is the cell
+    written as output, the same rule the engine's `cursor_content` follows. An empty cell
+    under a pending wrap was written as a bare space, under whatever content the parser was
+    left in, so a saved cursor over an erased cell came back as input after a last row that
+    ended in input. It now takes its content first like any other cell (#8). A pending wrap
+    was written only at the last column, but under left and right margins a print leaves it
+    at the right margin, so the replay's next character overwrote that cell rather than wrap
+    (#9). Separately,
+    `Screen.clearRows` reset each row after clearing it, and so dropped the background flag
+    from #4. A full erase (ED 2) under a coloured pen then left its background cells out of
+    every frame. This was a live-frame bug, not only a checkpoint one. Deleting or inserting
+    lines, and a reverse index at the top, did the same through `Row.reset`, which now keeps
+    the flag the fill set (#9).
+  - **Kitty graphics are left open.** The formatter writes no image. Upstream's PR #12182
+    (open since April) adds a `kitty_graphics` extra. Taking it means re-sending each image's
+    pixels in every checkpoint, so it comes with a decision on checkpoint size and cadence
+    that this change did not make.
+  - Tests: `a_checkpoint_carries_the_state_the_session_reports_and_shows` (36 sequences,
+    holding the replay's events, frame modes and cursor, and key, mouse, focus and paste
+    encoding to the original's). `a_replay_goes_on_as_the_engine_checkpointed` (27 sequences,
+    each followed by the bytes that show what it set). `the_pointer_shape_comes_back_from_a_checkpoint`
+    (every shape by its name). `a_full_reset_clears_the_title_and_keeps_the_directory`. The
+    fork's formatter tests cover the screen part. The terminal fuzzer's oracle now holds a
+    replay to the subject's modes, input encoding and session state. A replay of a checkpoint
+    taken at the parser's ground state is also fed what follows and compared at the next
+    checkpoint (fuzz/src/terminal.rs). It is held to the cells, links and wraps but not to the
+    marks, because a row wrapped into later takes its flag from the cursor's content, which
+    can still differ when no row was flagged (above). A resize drops that replay: a reflow
+    treats a replayed space and a cell never written differently, and the next checkpoint
+    starts a new one. `fuzz/regressions/terminal` keeps one input of each fault found.
+  - Cost, against a copy of the tree with this change taken out (the engine at HEAD, ghostty
+    `18fa7131b`), five runs each, interleaved: `checkpoint_cost.format` is +0.9 % at the
+    median (50.57 M to 51.01 M instructions for 10 000 lines, about 0.1 ms), the price of
+    checking every cell's protection. A first cut that checked it inline in the formatter's
+    cell loop cost +4.3 %. The fast run now compares the style and the protection in one
+    masked compare, and a protection change goes out of line. The replay series and every
+    frame-path series are the copy's, to the run-to-run step of 25 to 50 instructions
+    (`take_frame_unchanged` 901 and 997, `write` 813 against 815).

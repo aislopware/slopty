@@ -14,7 +14,14 @@
 //! by `cargo xtask fuzz`): every viewer, applying the frames it was sent by absolute line index,
 //! shows what a second engine fed the same bytes shows whole; every frame comes back from the
 //! wire as it went; a scrollback page holds no more lines than asked; and a checkpoint replayed
-//! into a fresh engine of the same size shows the same lines and cursor.
+//! into a fresh engine of the same size shows the same lines and cursor, holds the same modes,
+//! encodes the same keys and mouse reports, and reports the same session state (the title, the
+//! directory, the program's colours, the pointer shape and the progress). The replay is then fed
+//! what the subject is fed, and at the next checkpoint it must still show what the subject shows
+//! (from a checkpoint taken at the parser's ground state, as the worker takes them, and with no
+//! resize since, whose reflow tells a space the replay wrote from a cell never written):
+//! the state a checkpoint carries without showing it (the saved cursor, the kitty keyboard stack,
+//! protected cells, a pending wrap) shows there.
 //!
 //! A replayed checkpoint is held to each line's cells as they draw, its semantic prompt mark
 //! (OSC 133), its hyperlinks (OSC 8) and its soft wrap. Only what draws nothing may differ: a
@@ -24,14 +31,16 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use slopty_engine::{EngineConfig, GhosttyEngine};
+use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine};
 use slopty_grid::{
     Cell, CellText, CellWidth, Color, Hyperlink, Line, LineFlags, SemanticMark, StyleFlags,
     Underline,
 };
 use slopty_proto::codec;
-use slopty_proto::input::CellMetrics;
-use slopty_proto::terminal::{Frame, TermSize};
+use slopty_proto::input::{
+    CellMetrics, KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent,
+};
+use slopty_proto::terminal::{ColorOverrides, Frame, PointerShape, Progress, TermSize};
 
 /// Scrollback the engines keep: small, so a script reaches its eviction.
 const SCROLLBACK: u32 = 64;
@@ -60,6 +69,8 @@ pub fn run(data: &[u8]) {
     first.apply(&round_trip(&subject.full_frame(0).expect("a first frame")));
     let mut viewers = vec![first];
     let _first = mirror.full_frame(0).expect("the mirror's first frame");
+    let mut session = Session::default();
+    let mut replica: Option<GhosttyEngine> = None;
     while let Some((&op, rest)) = script.split_first() {
         script = rest;
         match op {
@@ -69,7 +80,12 @@ pub fn run(data: &[u8]) {
                 script = rest;
                 subject.write(bytes);
                 mirror.write(bytes);
-                let _events = (subject.drain_events(), mirror.drain_events());
+                session.fold(subject.drain_events());
+                let _events = mirror.drain_events();
+                if let Some(replica) = &mut replica {
+                    replica.write(bytes);
+                    let _events = replica.drain_events();
+                }
                 let frame = subject.take_frame(0).expect("a frame");
                 let Some(frame) = frame else { continue };
                 let frame = round_trip(&frame);
@@ -91,6 +107,9 @@ pub fn run(data: &[u8]) {
                 let size = pick_size(cols, rows);
                 subject.resize(size).expect("a resize");
                 mirror.resize(size).expect("the mirror's resize");
+                // A replay writes a blank cell as a space, which draws the same but reflows
+                // differently, so a replay that went through a resize is no longer compared.
+                replica = None;
                 // A resize is sent whole to everyone.
                 let frame = round_trip(&subject.full_frame(0).expect("a full frame"));
                 for viewer in &mut viewers {
@@ -122,31 +141,148 @@ pub fn run(data: &[u8]) {
             }
             0xfc..=0xff => {
                 let size = subject.size();
-                replayed(&mut subject, &mut mirror, size);
+                replayed(&mut subject, &mut mirror, &mut replica, &session, size);
             }
         }
     }
 }
 
-/// A checkpoint of `subject` replayed into a fresh engine shows what `mirror` shows. Not during
-/// a synchronized update: the checkpoint carries the mode, so the replay holds its screen too.
-fn replayed(subject: &mut GhosttyEngine, mirror: &mut GhosttyEngine, size: TermSize) {
+/// A checkpoint of `subject` replayed into a fresh engine shows what `mirror` shows, holds its
+/// modes, encodes input as it does and reports `session`; the replay of the last checkpoint,
+/// fed everything since, still shows what `mirror` shows. Not during a synchronized update: the
+/// checkpoint carries the mode, so the replay holds its screen too.
+fn replayed(
+    subject: &mut GhosttyEngine,
+    mirror: &mut GhosttyEngine,
+    replica: &mut Option<GhosttyEngine>,
+    session: &Session,
+    size: TermSize,
+) {
     if subject.hold_remaining().is_some() {
         return;
+    }
+    let truth = mirror.full_frame(0).expect("the mirror's frame");
+    if let Some(mut went_on) = replica.take() {
+        let again = went_on.full_frame(0).expect("the replica's frame");
+        // Not its marks: a cursor with prompt content on a row the prompt never flagged is
+        // replayed writing output when no other row is flagged to give it on, since no OSC 133
+        // step gives a cursor prompt content without flagging its row (the engine's
+        // `cursor_content`), and a row wrapped into later takes its flag from the content.
+        same_screen(&unmarked(&again), &unmarked(&truth), "a replay fed what followed it");
     }
     let mut state = Vec::new();
     subject.checkpoint(&mut state).expect("a checkpoint");
     let Some(mut fresh) = engine(size) else { return };
     fresh.write(&state);
-    let (again, truth) = (
-        fresh.full_frame(0).expect("the replay's frame"),
-        mirror.full_frame(0).expect("the mirror's frame"),
-    );
-    let (got, want) = (drawn_lines(&again), drawn_lines(&truth));
-    assert_eq!(got.len(), want.len(), "the checkpoint's rows");
+    let mut replayed = Session::default();
+    replayed.fold(fresh.drain_events());
+    let again = fresh.full_frame(0).expect("the replay's frame");
+    same_screen(&again, &truth, "the checkpoint");
+    assert_eq!(again.modes, truth.modes, "the checkpoint's modes");
+    assert_eq!(&replayed, session, "the checkpoint's session state");
+    assert_eq!(inputs(&mut fresh), inputs(subject), "the checkpoint's input encoding");
+    // A sequence the subject is still in the middle of has no bytes in a checkpoint, so what
+    // follows reads differently in the replay. The worker checkpoints at the ground state.
+    if subject.at_ground().expect("the parser's state") {
+        *replica = Some(fresh);
+    }
+}
+
+/// `frame` with every line's semantic mark taken off.
+fn unmarked(frame: &Frame) -> Frame {
+    let mut frame = frame.clone();
+    for update in &mut frame.updates {
+        std::sync::Arc::make_mut(&mut update.line).mark = SemanticMark::Unknown;
+    }
+    frame
+}
+
+/// `again`'s lines and cursor are `truth`'s, as they draw.
+fn same_screen(again: &Frame, truth: &Frame, what: &str) {
+    let (got, want) = (drawn_lines(again), drawn_lines(truth));
+    assert_eq!(got.len(), want.len(), "{what}: the rows");
     let differ: Vec<_> = got.iter().zip(&want).enumerate().filter(|(_, (g, w))| g != w).collect();
-    assert!(differ.is_empty(), "the checkpoint's screen, (row, (replayed, truth)): {differ:#?}");
-    assert_eq!(again.cursor, truth.cursor, "the checkpoint's cursor");
+    assert!(differ.is_empty(), "{what}: the screen, (row, (replayed, truth)): {differ:#?}");
+    assert_eq!(again.cursor, truth.cursor, "{what}: the cursor");
+}
+
+/// The state a session keeps from its engine's events, as the worker does: the last of each.
+#[derive(Debug, Default, PartialEq)]
+struct Session {
+    title: Option<String>,
+    cwd: Option<String>,
+    colors: ColorOverrides,
+    pointer: PointerShape,
+    progress: Progress,
+}
+
+impl Session {
+    fn fold(&mut self, events: Vec<EngineEvent>) {
+        for event in events {
+            match event {
+                // An empty title is no title: a checkpoint writes none.
+                EngineEvent::Title(title) => self.title = Some(title).filter(|t| !t.is_empty()),
+                EngineEvent::Cwd(cwd) => self.cwd = Some(cwd),
+                EngineEvent::Colors(colors) => self.colors = colors,
+                EngineEvent::Pointer(pointer) => self.pointer = pointer,
+                EngineEvent::Progress(progress) => self.progress = progress,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// What a few keys and a click encode as: the modes and the kitty keyboard flags that shape
+/// input, seen from outside.
+fn inputs(engine: &mut GhosttyEngine) -> Vec<Vec<u8>> {
+    let key = |code, text: Option<&str>, mods| KeyEvent {
+        seq: 1,
+        action: KeyAction::Press,
+        code,
+        mods,
+        consumed_mods: Mods::empty(),
+        text: text.map(str::to_owned),
+        unshifted: None,
+        composing: false,
+        option_as_alt: false,
+    };
+    let keys = [
+        key(KeyCode::A, Some("a"), Mods::CTRL),
+        key(KeyCode::Enter, Some("\r"), Mods::SHIFT),
+        key(KeyCode::Escape, None, Mods::empty()),
+        key(KeyCode::ArrowUp, None, Mods::empty()),
+        key(KeyCode::Numpad1, Some("1"), Mods::empty()),
+        key(KeyCode::Backspace, None, Mods::empty()),
+    ];
+    let mut out: Vec<Vec<u8>> = keys
+        .iter()
+        .map(|k| {
+            let mut bytes = Vec::new();
+            engine.encode_key(k, &mut bytes).expect("a key encodes");
+            bytes
+        })
+        .collect();
+    let click = |action| MouseEvent {
+        action,
+        button: Some(MouseButton::Left),
+        mods: Mods::empty(),
+        col: 0,
+        row: 0,
+        px: 2,
+        py: 2,
+    };
+    let mut mouse = Vec::new();
+    for action in [MouseAction::Press, MouseAction::Release] {
+        engine.encode_mouse(&click(action), &mut mouse).expect("a click encodes");
+    }
+    out.push(mouse);
+    let mut paste = Vec::new();
+    engine.encode_paste("p", &mut paste).expect("a paste encodes");
+    out.push(paste);
+    let mut focus = Vec::new();
+    engine.encode_focus(true, &mut focus).expect("a focus encodes");
+    out.push(focus);
+    out
 }
 
 /// Two bytes as a size small enough to run fast, never zero.
