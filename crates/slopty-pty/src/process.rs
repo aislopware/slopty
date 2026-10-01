@@ -36,8 +36,14 @@ pub struct Foreground {
 /// tty has no foreground group or the platform would not say.
 #[must_use]
 pub fn foreground(fd: impl AsFd) -> Option<Foreground> {
-    let pid = rustix::termios::tcgetpgrp(fd).ok()?;
-    imp::describe(pid.as_raw_nonzero().get())
+    use std::os::fd::AsRawFd as _;
+    // Not rustix's `tcgetpgrp`: macOS answers 0 for a tty whose foreground group has gone (its
+    // last member exited), and rustix makes a non-zero `Pid` of whatever comes back, a debug
+    // assertion in a test build and an invalid value in a release one.
+    // SAFETY: `tcgetpgrp(3)` reads the descriptor's foreground group and writes nothing; the fd
+    // is borrowed for the call.
+    let pid = unsafe { libc::tcgetpgrp(fd.as_fd().as_raw_fd()) };
+    (pid > 0).then_some(pid).and_then(imp::describe)
 }
 
 #[cfg(target_os = "macos")]
@@ -429,5 +435,26 @@ mod tests {
         assert!(fg.cwd.is_some(), "{fg:?}");
         child.start_kill().expect("kill");
         let _reaped = child.wait().await;
+    }
+
+    /// A tty whose program has exited has no foreground group, which macOS answers with 0:
+    /// no process, and no panic on the way.
+    #[tokio::test]
+    async fn a_tty_whose_program_exited_has_no_foreground() {
+        let size = TermSize { cols: 40, rows: 10, metrics: CellMetrics::default() };
+        let pty = Pty::open(size).expect("openpt");
+        let mut child = pty
+            .spawn(&crate::SpawnSpec {
+                command: vec!["/bin/sh".into(), "-c".into(), "exit 0".into()],
+                cwd: Some(std::env::temp_dir()),
+                env: Vec::new(),
+                size,
+            })
+            .expect("spawn")
+            .child;
+        let master = crate::PtyMaster::new(pty.into_master()).expect("master");
+        let status = child.wait().await.expect("reaped");
+        assert!(status.success(), "{status:?}");
+        assert_eq!(foreground(master.as_fd()), None);
     }
 }
