@@ -12997,6 +12997,48 @@ cargo xtask vm ssh -- '/tmp/ptmx_churn --ignored --nocapture'
 cargo xtask vm stop
 ```
 
+## 2026-10-02 — scrollback memory and idle compression
+
+Release, mac-studio, other sessions building beside it. `memory_cost`
+(`crates/slopty-engine/src/ghostty/memory/tests.rs`) fills an 80×24 terminal with 10 000 lines,
+reads libghostty's own count of its pages (`GHOSTTY_TERMINAL_DATA_MEMORY_USAGE`, ghostty #14499),
+compresses the history a step at a time as an idle session does (`GhosttyEngine::compress_history`),
+and formats the screen before and after. Plain is a line of text; coloured is a 256-colour style
+per word; shell is a marked prompt, a command and a 20-line listing whose names are coloured and
+linked (OSC 133, OSC 8). An empty terminal holds 409 600 bytes (one page and the screen).
+
+```sh
+cargo nextest run --release -p slopty-engine --run-ignored only -E 'test(memory_cost)' --no-capture
+```
+
+| history | resident | a line | compressed | a line | pages compressed | steps |
+| --- | --- | --- | --- | --- | --- | --- |
+| plain | 6.96 MB | 657 B | 0.55 MB | 14 B | 16 of 17 (141 kB) | 18 |
+| coloured | 9.19 MB | 880 B | 2.81 MB | 241 B | 16 of 17 (2.27 MB) | 18 |
+| shell | 12.81 MB | 1 241 B | 2.22 MB | 181 B | 16 of 17 (1.47 MB) | 18 |
+
+A step compresses about a page: 0.79 M instructions (59 µs) plain, 6.9 M (0.64 ms, p95 0.70 ms)
+coloured, 4.7 M (0.59 ms, p95 0.66 ms) shell. The page the screen is on stays resident. Address
+space is not given back (7.4, 10.8 and 14.5 MB reserved).
+
+**A checkpoint used to undo it.** ghostty's formatter read each page through `Node.page()`, which
+restores a compressed page for good: one checkpoint took the plain history from 0.55 MB back to
+6.96 MB. The fork's formatter now decodes a compressed page into a buffer of its own
+(aislopware/ghostty #10, as ghostty's snapshot encoder and search already did) and the history
+stays compressed. Decoding costs the format of 10 000 lines:
+
+| history | format, resident | format, compressed |
+| --- | --- | --- |
+| plain | 43.7 M (2.30 ms) | 46.7 M (2.43 ms), +7 % |
+| coloured | 128.5 M (7.58 ms) | 165.6 M (9.56 ms), +29 % |
+| shell | 90.5 M (5.13 ms) | 115.7 M (7.14 ms), +28 % |
+
+**The scrollback limit bounds it.** At a 2 000-line limit, 10 000 coloured lines hold 1.62 MB, no
+more than 2 000 lines did (2.16 MB): pruning is by whole pages (`scrollback_memory_stays_within_its_bound`).
+
+No frame or fetch series moved against a copy of the tree without the change: `take_frame_unchanged`
+901 and 997, `write` 813, `fetch_lines_cost.4096_rows` 104.21 M.
+
 ## 2026-10-02 — a turn snapshot of this repository
 
 What a turn's snapshot costs the worker (`repo::snapshot::Repo::take`: `git add -A` and

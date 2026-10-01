@@ -3071,3 +3071,35 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     masked compare, and a protection change goes out of line. The replay series and every
     frame-path series are the copy's, to the run-to-run step of 25 to 50 instructions
     (`take_frame_unchanged` 901 and 997, `write` 813 against 815).
+
+- ✅ **An idle session compresses its history, largest first, and a checkpoint leaves it
+  compressed** (2026-10-02). libghostty can compress the pages of a terminal's history in place
+  and now counts its own memory (ghostty #14499, bound as `Terminal::memory_usage` in
+  aislopware/libghostty-rs #10). Compressed, 10 000 lines of history hold 14 to 241 bytes a line
+  in place of 657 to 1 241 (MEASUREMENTS, "scrollback memory and idle compression"), and the
+  worker's memory is mostly these pages.
+  - **When.** A session that has had no output, no viewer request and no resize for
+    `COMPRESS_AFTER` (2 s) asks for the worker's turn and then steps through its history a page
+    at a time, 1 ms apart, on its own actor thread, until libghostty says the pass is complete.
+    Anything the session does stops it, and a key typed during a step waits for that step (up to
+    0.7 ms). ghostty's own renderer waits 250 ms; the 2 s here keeps compression out of the
+    pauses between keys, as the checkpoint's `CHECKPOINT_AFTER_INPUT` does. The agent watcher's
+    probes do not count as activity, or a watched session would never be quiet.
+  - **Largest first, one at a time** (`slopty_worker::compress`). Each session runs on a thread
+    of its own, so sessions that fall quiet together would compress on as many cores at once.
+    They take turns instead, and the waiting session holding the most resident memory goes next.
+  - **Nothing is redone.** A finished pass is not repeated until libghostty's activity token
+    moves (`GhosttyEngine::history_compressed`). A viewer's fetch of history restores the pages
+    it reads without moving the token, so the engine forgets the pass, and the next quiet spell
+    compresses them again.
+  - **A checkpoint reads compressed history without restoring it** (aislopware/ghostty #10).
+    ghostty's formatter read pages through `Node.page()`, which restores a compressed page for
+    good, so every checkpoint brought the whole history back (0.55 MB to 6.96 MB for 10 000
+    plain lines). It now decodes each compressed page into a buffer of its own, as ghostty's
+    snapshot encoder and search do. Decoding makes a checkpoint of compressed history 7 to 29 %
+    slower to format. That is paid once per quiet spell, off the frame path.
+  - Tests: engine `idle_compression_frees_memory_and_every_read_is_the_same`,
+    `scrollback_memory_stays_within_its_bound`; worker `turns_go_one_at_a_time_to_the_largest_first`
+    and `a_quiet_session_compresses_its_history` (a real shell's 20 000 lines); fork "Terminal vt
+    formats compressed history without restoring it"; binding
+    `memory_usage_grows_with_scrollback_and_compression_lowers_it`.

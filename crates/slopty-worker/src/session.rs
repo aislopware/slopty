@@ -11,7 +11,7 @@ use std::time::Duration;
 use bytes::{Buf as _, Bytes, BytesMut};
 use slopty_core::{ClientId, SessionId};
 use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, TextSince};
-use slopty_engine::{EngineConfig, EngineEvent, GhosttyEngine, ImageUpload};
+use slopty_engine::{Compression, EngineConfig, EngineEvent, GhosttyEngine, ImageUpload, Memory};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
     ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, PointerShape,
@@ -22,6 +22,7 @@ use slopty_pty::protocol::OutputFrame;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::WorkerError;
+use crate::compress::{Compressor, Turn};
 use crate::restore::Place;
 
 /// While output keeps flowing, frames go out no closer together than this: 125 frames per
@@ -160,6 +161,7 @@ enum Cmd {
     Snapshot { reply: oneshot::Sender<Snapshot> },
     ResizeUnviewed { size: TermSize, reply: oneshot::Sender<u16> },
     Probe { reply: oneshot::Sender<Probe> },
+    Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
     Launch { line: String },
@@ -336,6 +338,7 @@ impl std::fmt::Debug for Cmd {
             Self::Snapshot { .. } => "Snapshot",
             Self::ResizeUnviewed { .. } => "ResizeUnviewed",
             Self::Probe { .. } => "Probe",
+            Self::Memory { .. } => "Memory",
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
             Self::Launch { .. } => "Launch",
@@ -425,6 +428,13 @@ impl SessionHandle {
         let (reply, rx) = oneshot::channel();
         self.send(Cmd::Probe { reply })?;
         rx.await.map_err(|_gone| WorkerError::SessionClosed)
+    }
+
+    /// What the session's terminal holds in memory, compressed history included.
+    pub async fn memory(&self) -> Result<Memory, WorkerError> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Cmd::Memory { reply })?;
+        rx.await.map_err(|_gone| WorkerError::SessionClosed)?
     }
 
     /// Read the terminal as text, on the actor's thread.
@@ -874,6 +884,15 @@ struct Actor {
     line_editor: bool,
     /// The line [`SessionHandle::type_at_first_prompt`] waits to type, and until when.
     launch: Option<(String, tokio::time::Instant)>,
+    /// When the history is next looked at for compressing: [`COMPRESS_AFTER`] into a quiet
+    /// spell, then a step at a time while this session holds the worker's turn.
+    compress_due: Option<tokio::time::Instant>,
+    /// The worker's turn to compress ([`crate::compress`]), asked for.
+    compress_turn: Option<oneshot::Receiver<Turn>>,
+    /// The turn, held while steps remain.
+    compressing: Option<Turn>,
+    /// Compressing frees no memory on this platform.
+    compress_unsupported: bool,
 }
 
 /// A session's output is looked at for a local server's address at most this often once it
@@ -898,6 +917,13 @@ const CHECKPOINT_AFTER_INPUT: Duration = Duration::from_secs(2);
 /// A checkpoint is also taken once this many bytes were tapped since the last one, so ptyd's
 /// ring (4 MiB by default) never overflows under a flood and the replay stays bounded.
 const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;
+/// An idle session's history is compressed once its output, its viewers' requests and its
+/// size have been still this long. Compressing goes a page at a time on the actor's thread
+/// (55 µs to 0.9 ms a page, MEASUREMENTS "Scrollback memory and idle compression"), so a key
+/// typed during a step waits for it; someone typing pauses for less than this.
+const COMPRESS_AFTER: Duration = Duration::from_secs(2);
+/// Between two steps, for whatever else the actor has to do.
+const COMPRESS_STEP_GAP: Duration = Duration::from_millis(1);
 /// Larger states are not sent: ptyd hands the state and its ring over in one frame, and a
 /// state this size means a history far past any configured scrollback.
 const CHECKPOINT_MAX_BYTES: usize = slopty_pty::protocol::MAX_CHECKPOINT_BYTES;
@@ -1024,6 +1050,10 @@ impl Actor {
             prompted,
             line_editor: false,
             launch: None,
+            compress_due: None,
+            compress_turn: None,
+            compressing: None,
+            compress_unsupported: false,
         })
     }
 
@@ -1062,7 +1092,10 @@ impl Actor {
                         self.flush_frame();
                         self.activity.send_if_modified(|a| !std::mem::replace(&mut a.exited, true));
                     }
-                    Ok(n) => self.on_output(buf.get(..n).unwrap_or_default()),
+                    Ok(n) => {
+                        self.on_output(buf.get(..n).unwrap_or_default());
+                        self.quiet_again();
+                    }
                     Err(e) => {
                         tracing::warn!(session = %self.id, error = %e, "pty read failed");
                         self.pty_closed = true;
@@ -1084,9 +1117,75 @@ impl Actor {
                 () = sleep_until_due(self.progress_due) => {
                     self.progress_told_now(tokio::time::Instant::now());
                 }
+                () = sleep_until_due(self.compress_due) => self.compress_step(),
+                turn = turn_of(&mut self.compress_turn) => {
+                    self.compress_turn = None;
+                    if let Some(turn) = turn {
+                        self.compressing = Some(turn);
+                        self.compress_due = Some(tokio::time::Instant::now());
+                    }
+                }
             }
         }
         tracing::debug!(session = %self.id, "actor stopped");
+    }
+
+    /// The session did something (output, a viewer's request, a resize): any compressing
+    /// stops, and the next waits for [`COMPRESS_AFTER`] of quiet.
+    fn quiet_again(&mut self) {
+        self.compressing = None;
+        self.compress_turn = None;
+        if !self.compress_unsupported {
+            let now = tokio::time::Instant::now();
+            self.compress_due = Some(now.checked_add(COMPRESS_AFTER).unwrap_or(now));
+        }
+    }
+
+    /// The compress timer: quiet long enough to ask for the worker's turn, or a step of the
+    /// turn this session holds.
+    fn compress_step(&mut self) {
+        self.compress_due = None;
+        if self.compressing.is_none() {
+            match self.engine.history_compressed() {
+                Ok(true) => {}
+                Ok(false) => match self.engine.memory() {
+                    Ok(m) if m.compression_supported => {
+                        self.compress_turn =
+                            Some(Compressor::shared().ask(self.id, m.resident_bytes));
+                    }
+                    Ok(_) => self.compress_unsupported = true,
+                    Err(e) => tracing::warn!(session = %self.id, error = %e, "memory usage"),
+                },
+                Err(e) => tracing::warn!(session = %self.id, error = %e, "compression activity"),
+            }
+            return;
+        }
+        match self.engine.compress_history() {
+            Ok(Compression::Pending) => {
+                let now = tokio::time::Instant::now();
+                self.compress_due = Some(now.checked_add(COMPRESS_STEP_GAP).unwrap_or(now));
+            }
+            Ok(Compression::Done) => {
+                self.compressing = None;
+                if let Ok(m) = self.engine.memory() {
+                    tracing::debug!(
+                        session = %self.id,
+                        resident_bytes = m.resident_bytes,
+                        compressed_pages = m.compressed_pages,
+                        pages = m.pages,
+                        "history compressed"
+                    );
+                }
+            }
+            Ok(Compression::Unsupported) => {
+                self.compressing = None;
+                self.compress_unsupported = true;
+            }
+            Err(e) => {
+                self.compressing = None;
+                tracing::warn!(session = %self.id, error = %e, "compression failed");
+            }
+        }
     }
 
     /// Bytes just read from the master.
@@ -1878,6 +1977,7 @@ impl Actor {
         if size == self.engine.size() {
             return;
         }
+        self.quiet_again();
         if let Err(e) = slopty_pty::pty::set_size(self.master.as_fd(), size) {
             tracing::warn!(session = %self.id, error = %e, "TIOCSWINSZ failed");
         }
@@ -1968,6 +2068,9 @@ impl Actor {
                 }
                 let _ignored = reply.send(viewers);
             }
+            Cmd::Memory { reply } => {
+                let _ignored = reply.send(self.engine.memory().map_err(WorkerError::from));
+            }
             Cmd::Probe { reply } => {
                 // A child that already exited has no foreground process; asking would only
                 // read whatever the kernel put in its place.
@@ -2038,6 +2141,7 @@ impl Actor {
 
     fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {
         tracing::trace!(session = %self.id, queued_us = at.elapsed().as_micros(), "request");
+        self.quiet_again();
         let mut bytes = Vec::new();
         let mut key = None;
         let result = match req {
@@ -2182,6 +2286,14 @@ impl Actor {
 
 fn engine_error(e: &slopty_engine::EngineError) -> TermEvent {
     TermEvent::Error(TermError::Engine(e.to_string()))
+}
+
+/// The turn asked for, when it comes; never, when none was asked for.
+async fn turn_of(asked: &mut Option<oneshot::Receiver<Turn>>) -> Option<Turn> {
+    match asked {
+        Some(turn) => turn.await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 async fn sleep_until_due(due: Option<tokio::time::Instant>) {

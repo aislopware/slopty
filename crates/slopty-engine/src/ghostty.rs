@@ -18,6 +18,7 @@ use libghostty_vt::terminal::{
     ProgressState as VtProgress,
 };
 use libghostty_vt::{Terminal, focus, key, mouse, paste};
+pub use memory::{Compression, Memory};
 use slopty_core::{Duration, MonoTime};
 use slopty_grid::{
     Cell, CellText, CellWidth, Cursor, Hyperlink, Line, LineFlags, LineIndex, RowUpdate,
@@ -36,6 +37,7 @@ use crate::placeholder::{self, Runs};
 use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
 
 mod carried;
+mod memory;
 mod read;
 mod redraw;
 mod restored;
@@ -86,6 +88,10 @@ pub struct GhosttyEngine {
     anchor: Option<Anchor>,
     primary_anchor: Option<Anchor>,
     term: Terminal<'static, 'static>,
+    /// libghostty's activity token when a pass compressing the history last finished: nothing
+    /// is left to compress until it moves, or until a read of the history restores pages
+    /// (which does not move it).
+    compressed_at: std::cell::Cell<Option<libghostty_vt::terminal::CompressionActivity>>,
     /// Shared with the render-hold callback, which captures a frame into it.
     render: Rc<RefCell<RenderState<'static>>>,
     hold: Rc<std::cell::Cell<Option<Hold>>>,
@@ -437,6 +443,7 @@ impl GhosttyEngine {
             render,
             hold,
             rows_iter: RowIterator::new()?,
+            compressed_at: std::cell::Cell::new(None),
             cells_iter: CellIterator::new()?,
             key_enc: key::Encoder::new()?,
             key_ev: key::Event::new()?,
@@ -2493,6 +2500,10 @@ impl GhosttyEngine {
         // The range asked for, less what was dropped: a range wholly below the oldest line
         // kept is empty, not the lines after it.
         let end = start.0.saturating_add(u64::from(count)).min(total).max(first);
+        if first < total.saturating_sub(u64::from(self.size.rows)) {
+            // Reading compressed history restores its pages: the next idle pass takes them.
+            self.compressed_at.set(None);
+        }
         let mut out = Vec::with_capacity(usize::try_from(end.saturating_sub(first)).unwrap_or(0));
         let cols = self.size.cols;
         let mut abs = first;

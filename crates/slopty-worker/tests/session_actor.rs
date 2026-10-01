@@ -2212,4 +2212,38 @@ done"#
         session.close();
         let _killed = child.kill().await;
     }
+
+    /// A session that has been quiet a while compresses its history, which frees most of what
+    /// it holds (MEASUREMENTS, "Scrollback memory and idle compression"), and reading it back
+    /// still gives every line.
+    #[tokio::test]
+    async fn a_quiet_session_compresses_its_history() {
+        let (session, mut child, _taps) = start_keeping(
+            &["/bin/sh", "-c", "seq 1 20000; echo filled; exec sleep 60"],
+            Vec::new(),
+            None,
+            50_000,
+        );
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+        let (full, compressed) = loop {
+            let memory = session.memory().await.unwrap();
+            if !memory.compression_supported {
+                session.close();
+                let _killed = child.kill().await;
+                return;
+            }
+            if memory.compressed_pages > 0 {
+                break (memory, session.memory().await.unwrap());
+            }
+            assert!(tokio::time::Instant::now() < deadline, "never compressed: {memory:?}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(compressed.resident_bytes <= full.resident_bytes);
+        let read = session.read(session::Read::Output { since: None, max: 30_000 }).await.unwrap();
+        let session::Text::Output(text) = read else { panic!("{read:?}") };
+        assert!(text.lines.iter().any(|l| l == "12345"), "a compressed line reads back");
+        assert!(text.lines.iter().any(|l| l == "filled"), "and the last");
+        session.close();
+        let _killed = child.kill().await;
+    }
 }

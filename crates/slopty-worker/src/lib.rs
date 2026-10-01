@@ -15,6 +15,7 @@
 pub mod caps;
 pub mod changes;
 pub mod clip;
+pub mod compress;
 pub mod conversation;
 pub mod facts;
 pub mod file;
