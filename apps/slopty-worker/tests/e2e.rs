@@ -20,7 +20,8 @@ mod tests {
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
     use slopty_proto::transfer::{
-        ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Purpose, Rep,
+        ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Purpose, Rep, TunnelHost,
+        TunnelOpen, TunnelRefusal,
     };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -4233,13 +4234,159 @@ mod tests {
             tokio::io::copy(&mut rd, &mut wr).await.unwrap();
             wr.shutdown().await.unwrap();
         });
-        let (mut send, mut rx) = streams::open_tunnel(&worker.conn, port).await.unwrap();
+        let open = TunnelOpen { host: TunnelHost::Loopback, port };
+        let (mut send, mut rx) = streams::open_tunnel(&worker.conn, &open).await.unwrap();
         let request: Vec<u8> = (0..300_000_u32).map(|i| (i % 241) as u8).collect();
         send.write_all(&request).await.unwrap();
         send.finish().unwrap();
         let echoed = tokio::time::timeout(STEP, drain(&mut rx)).await.unwrap();
         assert!(echoed == request, "the bytes come back whole and in order");
         tokio::time::timeout(STEP, server).await.unwrap().unwrap();
+    }
+
+    /// A tunnel names its host for the worker's resolver or as an address: a name only the
+    /// worker resolves (macOS answers `*.localhost` with its loopback) and an IP both reach
+    /// the server, and the worker says why when one cannot be reached.
+    #[tokio::test]
+    async fn a_tunnel_reaches_a_named_host_and_says_why_it_cannot() {
+        use tokio::io::AsyncWriteExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = echo.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _peer) = echo.accept().await.unwrap();
+                let (mut rd, mut wr) = socket.split();
+                tokio::io::copy(&mut rd, &mut wr).await.unwrap();
+                wr.shutdown().await.unwrap();
+            }
+            echo
+        });
+        let hosts = [
+            TunnelHost::Name("only-the-worker.localhost".to_owned()),
+            TunnelHost::Ip(std::net::Ipv4Addr::LOCALHOST.into()),
+        ];
+        for host in hosts {
+            let open = TunnelOpen { host: host.clone(), port };
+            let (mut send, mut rx) = streams::open_tunnel(&worker.conn, &open).await.unwrap();
+            send.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            send.finish().unwrap();
+            let echoed = tokio::time::timeout(STEP, drain(&mut rx)).await.unwrap();
+            assert_eq!(echoed, b"GET / HTTP/1.1\r\n\r\n", "{host:?}");
+        }
+        // The listener is gone, so its port refuses.
+        drop(tokio::time::timeout(STEP, server).await.unwrap().unwrap());
+        let refused = [
+            (TunnelHost::Name("nowhere.invalid".to_owned()), TunnelRefusal::Unresolved),
+            (TunnelHost::Loopback, TunnelRefusal::Refused),
+            (TunnelHost::Name("only-the-worker.localhost".to_owned()), TunnelRefusal::Refused),
+        ];
+        for (host, why) in refused {
+            let open = TunnelOpen { host: host.clone(), port };
+            let (_send, mut rx) = streams::open_tunnel(&worker.conn, &open).await.unwrap();
+            let read = tokio::time::timeout(STEP, rx.chunk(1024)).await.unwrap();
+            let Err(slopty_net::NetError::Reset(code)) = read else {
+                panic!("{host:?}: {read:?}");
+            };
+            assert_eq!(TunnelRefusal::from_code(code), Some(why), "{host:?}");
+        }
+    }
+
+    /// What a page's connection costs through the worker: a forwarded loopback port against
+    /// the worker's proxy, by address and by a name the worker resolves. Each sample is a fresh
+    /// connection's GET to a server on the worker, to its first byte and to its last, the
+    /// three ways interleaved. `docs/MEASUREMENTS.md`, "a page through the worker's proxy".
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "measurement: cargo test -p slopty-workerd --release --test e2e tunnel_cost -- --ignored --nocapture"]
+    async fn tunnel_cost() {
+        use slopty_testkit::stats::{Spread, us};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        const SAMPLES: usize = 300;
+        const BODY: usize = 32 << 10;
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let link = slopty_client::WorkerLink::start_forwarding(worker);
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = server.local_addr().unwrap().port();
+        drop(tokio::spawn(async move {
+            let answer = [
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {BODY}\r\nConnection: close\r\n\r\n")
+                    .into_bytes(),
+                vec![b'x'; BODY],
+            ]
+            .concat();
+            loop {
+                let (mut socket, _peer) = server.accept().await.unwrap();
+                let answer = answer.clone();
+                drop(tokio::spawn(async move {
+                    let mut request = [0_u8; 1024];
+                    let _read = socket.read(&mut request).await;
+                    let _sent = socket.write_all(&answer).await;
+                }));
+            }
+        }));
+        let remote = link.remote();
+        let forward = remote.forward(port).unwrap();
+        let proxy = remote.proxy().unwrap();
+        let socks = async move |target: Vec<u8>| {
+            let mut page = tokio::net::TcpStream::connect(("127.0.0.1", proxy)).await.unwrap();
+            page.write_all(&[5, 1, 0]).await.unwrap();
+            let mut reply = [0_u8; 10];
+            page.read_exact(&mut reply[..2]).await.unwrap();
+            page.write_all(&[&[5, 1, 0][..], &target].concat()).await.unwrap();
+            page.read_exact(&mut reply).await.unwrap();
+            page
+        };
+        let name = b"only-the-worker.localhost";
+        let named = [&[3, 25][..], name, &port.to_be_bytes()].concat();
+        let by_ip = [&[1, 127, 0, 0, 1][..], &port.to_be_bytes()].concat();
+        let mut times: [(Vec<Duration>, Vec<Duration>); 3] = Default::default();
+        for round in 0..SAMPLES + 20 {
+            for (way, (first, last)) in times.iter_mut().enumerate() {
+                let started = std::time::Instant::now();
+                let mut page = match way {
+                    0 => tokio::net::TcpStream::connect(("127.0.0.1", forward)).await.unwrap(),
+                    1 => socks(by_ip.clone()).await,
+                    _ => socks(named.clone()).await,
+                };
+                page.set_nodelay(true).unwrap();
+                page.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+                let mut buf = vec![0_u8; 64 << 10];
+                let n = page.read(&mut buf).await.unwrap();
+                let to_first = started.elapsed();
+                let mut got = n;
+                loop {
+                    let n = page.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    got += n;
+                }
+                assert!(got > BODY, "the whole answer");
+                // The first rounds warm the link and the resolver's cache.
+                if round >= 20 {
+                    first.push(to_first);
+                    last.push(started.elapsed());
+                }
+            }
+        }
+        for (way, (first, last)) in
+            ["forward", "proxy by address", "proxy by name"].iter().zip(&times)
+        {
+            let f = Spread::of_durations(first).unwrap();
+            let l = Spread::of_durations(last).unwrap();
+            eprintln!(
+                "{way}: first byte p50 {} p95 {} p99 {}; last byte p50 {} p95 {} p99 {} (n {})",
+                us(f.p50),
+                us(f.p95),
+                us(f.p99),
+                us(l.p50),
+                us(l.p95),
+                us(l.p99),
+                f.n
+            );
+        }
     }
 
     /// A tunnel whose header has not arrived (lost, and waiting for its retransmission) holds
@@ -4260,7 +4407,8 @@ mod tests {
         // One byte of a four-byte length prefix: the worker has the stream, not its header.
         let (mut stalled, _stalled_rx) = worker.conn.open_bi().await.unwrap();
         stalled.write_all(&[1]).await.unwrap();
-        let (mut send, mut rx) = streams::open_tunnel(&worker.conn, port).await.unwrap();
+        let open = TunnelOpen { host: TunnelHost::Loopback, port };
+        let (mut send, mut rx) = streams::open_tunnel(&worker.conn, &open).await.unwrap();
         send.write_all(b"after the stalled one").await.unwrap();
         send.finish().unwrap();
         let echoed = tokio::time::timeout(STEP, drain(&mut rx)).await.unwrap();

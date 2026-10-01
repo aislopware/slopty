@@ -42,12 +42,17 @@ impl std::fmt::Debug for WebView {
 }
 
 impl WebView {
-    /// A page loading `url`, for the window whose GPUI view is `gpui` (its
-    /// `raw_window_handle` AppKit handle). It is in no view until the tile's native host
-    /// adopts [`Self::view`]. Events go to `sink`. `None` off the main thread or for an
-    /// address `NSURL` refuses.
+    /// A page of `worker` loading `url`, for the window whose GPUI view is `gpui` (its
+    /// `raw_window_handle` AppKit handle), in that worker's data store (`super::route`). It is
+    /// in no view until the tile's native host adopts [`Self::view`]. Events go to `sink`.
+    /// `None` off the main thread or for an address `NSURL` refuses.
     #[must_use]
-    pub fn new(gpui: NonNull<c_void>, url: &str, sink: Rc<dyn Fn(WebEvent)>) -> Option<Self> {
+    pub fn new(
+        gpui: NonNull<c_void>,
+        worker: u128,
+        url: &str,
+        sink: Rc<dyn Fn(WebEvent)>,
+    ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let address = NSURL::URLWithString(&NSString::from_str(url))?;
         // SAFETY: `raw_window_handle`'s AppKit rule: the handle is a live `NSView` of the
@@ -56,6 +61,10 @@ impl WebView {
         let zero = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
         // SAFETY: WebKit rule: a configuration made by `new` is complete.
         let config = unsafe { WKWebViewConfiguration::new(mtm) };
+        // SAFETY: WebKit rule: a configuration takes any store before the view is made.
+        unsafe {
+            config.setWebsiteDataStore(&super::store(worker, mtm));
+        }
         if cfg!(debug_assertions) {
             developer_extras(&config);
         }

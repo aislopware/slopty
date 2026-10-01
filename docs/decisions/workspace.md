@@ -224,6 +224,62 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   both reach it (`slopty-client` `remote_link`); two headless workspaces show one item at
   their own ports; the app e2e opens a page whose port the test's own server already holds
   here, so it loads through a forward on another port.
+  (Amended 2026-10-01: any other host goes through the worker's proxy now; see "A browser
+  tile reaches every host the worker reaches", next.)
+
+- ✅ **A browser tile reaches every host the worker reaches** (2026-10-01, gap audit #10,
+  MEASUREMENTS.md "a page through the worker's proxy"). A tunnel named only a port on the
+  worker's loopback, so a page on a container, a LAN machine or a name only the worker's
+  resolver knows did not load, and a loopback page's calls to such hosts failed with it. A
+  tunnel now names its host (`TunnelOpen { host: TunnelHost, port }`: `Loopback`, a `Name`
+  for the worker's resolver, `/etc/hosts` and DNS included, or an `Ip`). The worker dials it,
+  each address the resolver gives for a name in turn, 5 s each, and a target it cannot reach
+  resets the stream with a `TunnelRefusal` code (refused, unresolved, unreachable). It keeps a
+  name's addresses for each client for a minute, the one that answered last first, since a
+  lookup cost a loaded worker 1.2 ms and a page opens many connections at once; an address
+  that stops answering is looked up again at once.
+  - *The client serves the worker's network as a SOCKS5 proxy* (`tunnel::Proxy`, RFC 1928,
+    CONNECT without authentication) on its loopback, one per link, started the first time a
+    page asks (`Remote::proxy`). Each worker's pages keep a `WKWebsiteDataStore` of their own,
+    named by the worker's key (`dataStoreForIdentifier:`), which also keeps two workers'
+    `localhost:3000` cookies apart and lasts between launches. The workspace sets the store's
+    `proxyConfigurations` to the link's proxy (`slopty_platform::web::route`) before any
+    page of that link loads. WebKit hands back one store per identifier and applies a new
+    configuration to the pages already open, so a new link reroutes them where they are.
+    `proxyConfigurations` is macOS 14 and iOS 17, under the 26.5 floor. objc2-web-kit leaves it
+    out (the header refines it for Swift), and objc2 binds no Network.framework, so the two
+    `nw_*` constructors are declared in `web.rs`. HTTP CONNECT was the other choice; WebKit
+    treats both alike, and SOCKS5 carries the name the page asked for with no parsing of HTTP.
+  - *The loopback keeps its forwards and their port rewrite.* The research plan had the
+    rewrite go. Measured on this Mac (macOS 26), WebKit never sends `localhost`, `localhost.`,
+    `127.0.0.1` or `[::1]` to a proxy, whatever the configuration: clearing the excluded
+    domains changes nothing, and matching `localhost` alone sends nothing through. Names under
+    `.localhost`, `.local` and every other host do go, by name (address type 3), and an
+    address by address. So `worker_port` still picks the loopback pages out, and every other
+    address loads as it is.
+  - *A CONNECT is answered at once*, before the worker dials. The page's request then leaves
+    right behind the tunnel's header, so a new connection costs the round trip a forward's
+    does, not two. The price is the error: a target the worker cannot reach resets a socket
+    WebKit thought connected, and WebKit says only that the connection was lost. So the proxy
+    keeps the worker's reason per host and port, written before the page's socket is reset
+    and cleared at the target's first byte, and a page that fails on a proxied host asks for
+    it (`BrowserEvent::Failed`, `Remote::refusal`): the tile then says "the worker finds no
+    host named db", "nothing listens on port 8080 of db" or "the worker can't reach db".
+  - *Nothing filters the hosts.* A client role can already run a shell on the worker, so
+    reaching the worker's network through it grants nothing new; the tailnet's grants decide
+    who is a client. The worker logs each tunnel's host and port at debug.
+  - Tests: the wire's goldens (`tunnel_open`, `tunnel_open_name`, `tunnel_open_ip`) and the
+    refusal codes (`slopty-proto` `units`); a named host, an address, and each refusal against
+    the real worker (`a_tunnel_reaches_a_named_host_and_says_why_it_cannot`), and its kept
+    lookups (`a_name_is_kept_answered_first_until_it_ages`); the proxy's
+    address types, its refusal kept before the reset, and what it does not serve
+    (`slopty-client` `tunnel::proxy`); the link's proxy port and its refusal
+    (`remote_link`); the workspace loading a page on another host as it is through the proxy
+    and saying why one failed (`a_page_on_any_other_host_loads_through_the_workers_proxy`);
+    and the app e2e, where a page on `only-the-worker.localhost` first shows the worker's own
+    refusal of a port nothing listens on, which proves the path, then loads through it as it
+    is, and `nowhere.invalid` says the worker finds no such host
+    (`a_page_on_a_host_only_the_worker_names_loads_through_its_proxy`).
 
 - ✅ **A file tile is an editor** (2026-09-25). The user wanted to fix a line where they read
   it rather than type `$EDITOR` into a shell, so the file tile's body is gpui-kit's code

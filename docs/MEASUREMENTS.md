@@ -12632,3 +12632,41 @@ off the shared clock p50 0.038 / max 0.038 ms on loopback, and p50 0.319 / max 0
 5 ms each way. Placing a capture with its bound costs the decoder's callback 8.2–11.0 ns a
 picture against 8.0–9.4 ns for the anchor alone, in the same run (`clock_path_cost`, 2 000 000
 each, three rounds).
+
+## 2026-10-01 — a page through the worker's proxy
+
+A browser tile's page on any host but the loopback now goes through a SOCKS5 proxy on the
+client, each connection a tunnel the worker dials (`docs/decisions/workspace.md`, "A browser
+tile reaches every host the worker reaches"). A loopback page still goes through a forwarded
+port, which is how every page loaded before. `tunnel_cost` times a fresh connection's GET of a
+32 KiB page from a server on the real worker, to the answer's first byte and to its last. It
+runs three ways, interleaved 300 times after 20 to warm up: a forward, the proxy given an
+address, and the proxy given a name (`only-the-worker.localhost`, which the worker's resolver
+answers with `::1` and `127.0.0.1`, while the server listens on IPv4 only). Client and worker
+are on one Mac over loopback QUIC, release build, mac-studio, load 10 to 20. A path that crosses
+a network adds its round trip to every way alike.
+
+```
+cargo test -p slopty-workerd --release --test e2e tunnel_cost -- --ignored --nocapture
+```
+
+| way | first byte p50 / p95 / p99 | last byte p50 / p95 / p99 |
+| --- | --- | --- |
+| forward | 274 / 475 / 613 µs | 579 / 815 / 1 031 µs |
+| proxy, by address | 330 / 548 / 705 µs | 634 / 916 / 1 062 µs |
+| proxy, by name | 326 / 604 / 1 549 µs | 638 / 901 / 1 854 µs |
+
+The proxy costs a connection 56 µs at the median over a forward: the greeting and the request,
+two exchanges with a process on the same machine. A CONNECT is answered before the worker
+dials, so none of them waits on the link.
+
+**The name cost 0.8 ms more until the worker kept its lookups.** In the first run, at the same
+load, the forward's first byte was 443 µs at p50, the address's 529 µs and the name's 1 345 µs
+(p99 992 / 1 142 / 5 319 µs). A probe in the worker's `connect` put the gap in the lookup:
+`tokio::net::lookup_host` took 1 214 µs at p50 in the worker. The same lookup takes 172 µs in a
+quiet process of its own, so the rest is the hop to the blocking pool on a loaded worker. Dialling
+the refused `::1` first cost 28 µs. A page opens many connections to its host at once, so the
+worker now keeps a name's addresses for each client for a minute, as Chromium keeps a system
+lookup (`HostCache`), with the address that answered last first. An address that stops
+answering is looked up again at once, so a host that moved costs one dial. The table above is
+that run: the name now costs what the address does.

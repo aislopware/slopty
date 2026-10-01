@@ -1,7 +1,8 @@
 //! Web pages in tiles: opening one (a forwarded port, an address typed into the palette), a
 //! view per browser item, the address field in its header and the page's history, and the
-//! port each page loads from served on this client.
+//! port or proxy each page loads through served on this client.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, Context, Entity, Window};
@@ -227,6 +228,7 @@ impl WorkspaceView {
                     }
                     BrowserEvent::Released => this.pending_focus_self = true,
                     BrowserEvent::Open(url) => this.open_beside(item, url, cx),
+                    BrowserEvent::Failed => this.explain_failure(item, cx),
                     BrowserEvent::Closed => this.close_page(item, cx),
                 }
                 cx.notify();
@@ -243,22 +245,18 @@ impl WorkspaceView {
         self.browser_links.retain(|id, _| browsers.contains_key(id));
     }
 
-    /// Where each page loads on this client: an address on the worker's loopback goes to the
-    /// local port this client serves that port on, asked of the worker's link the first time
-    /// and again whenever the link is a new one.
+    /// Where each page loads on this client, worked out the first time and again whenever
+    /// the worker's link is a new one. The worker's proxy serves the link's pages first, so
+    /// every host they ask for is the worker's to reach. An address on the worker's loopback,
+    /// which a page never proxies, goes to the local port this client serves that port on;
+    /// any other loads as it is, through the proxy.
     pub(super) fn serve_browsers(&mut self, cx: &mut Context<Self>) {
         let views: Vec<Entity<BrowserView>> = self.browsers.values().cloned().collect();
+        let mut routed = HashSet::new();
         for view in views {
             let (id, key, url, needs) = {
                 let v = view.read(cx);
                 (v.id(), v.worker(), v.url().to_owned(), v.needs_local())
-            };
-            let Some(port) = crate::browser::worker_port(&url) else {
-                if needs {
-                    view.update(cx, |v, cx| v.set_local(Some(url), cx));
-                    self.page_changed(id, cx);
-                }
-                continue;
             };
             let Some(remote) = self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone())
             else {
@@ -272,6 +270,24 @@ impl WorkspaceView {
                 continue;
             }
             self.browser_links.insert(id, Arc::downgrade(&remote));
+            let proxy = remote.proxy();
+            if let Some(proxy) = proxy
+                && routed.insert(key)
+            {
+                tracing::info!(item = %id, proxy, "the worker's network served here");
+                crate::browser::route(key, proxy);
+            }
+            let Some(port) = crate::browser::worker_port(&url) else {
+                view.update(cx, |v, cx| match proxy {
+                    Some(_) => v.set_local(Some(url), cx),
+                    None => v.unreachable(
+                        "The worker's network could not be served here".to_owned(),
+                        cx,
+                    ),
+                });
+                self.page_changed(id, cx);
+                continue;
+            };
             let local = remote.forward(port);
             tracing::info!(item = %id, port, ?local, "browser tile's port served here");
             view.update(cx, |v, cx| match local {
@@ -280,5 +296,28 @@ impl WorkspaceView {
             });
             self.page_changed(id, cx);
         }
+    }
+
+    /// The page of `item` failed to load: when the worker could not reach its host, the tile
+    /// says that instead of the page's own word for it.
+    fn explain_failure(&mut self, item: ItemId, cx: &mut Context<Self>) {
+        let Some(view) = self.browsers.get(&item).cloned() else { return };
+        let (key, url) = {
+            let v = view.read(cx);
+            (v.worker(), v.url().to_owned())
+        };
+        if crate::browser::worker_port(&url).is_some() {
+            return;
+        }
+        let Some((host, port)) = crate::browser::host_port(&url) else { return };
+        let Some(remote) = self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone())
+        else {
+            return;
+        };
+        let Some(why) = remote.refusal(host, port) else { return };
+        let text = crate::browser::refusal_text(why, host, port);
+        tracing::info!(%item, %host, port, ?why, "the worker could not reach the page");
+        view.update(cx, |v, cx| v.unreachable(text, cx));
+        self.page_changed(item, cx);
     }
 }

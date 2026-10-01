@@ -22,7 +22,7 @@ mod tests {
     use slopty_proto::orchestration::Port;
     use slopty_proto::transfer::{
         BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Purpose, Rep,
-        XferMsg,
+        TunnelHost, TunnelOpen, TunnelRefusal, XferMsg,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::mpsc;
@@ -486,7 +486,7 @@ mod tests {
             let conn = client.conn.clone();
             tokio::spawn(async move {
                 let (open, mut send, mut rx) = streams::accept_tunnel(&conn).await.unwrap();
-                assert_eq!(open.port, wanted);
+                assert_eq!(open, TunnelOpen { host: TunnelHost::Loopback, port: wanted });
                 let request = drain(&mut rx).await;
                 send.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
                 send.write_all(&request).await.unwrap();
@@ -554,6 +554,42 @@ mod tests {
         first.tx.send(&WorkerMsg::Ports { session, ports: Vec::new() }).await.unwrap();
         assert!(forwarded(&mut first_events).await.is_empty());
         assert!(std::net::TcpListener::bind(("127.0.0.1", wanted)).is_err(), "still served");
+    }
+
+    /// The link serves the worker's network on one proxy port, stable while it lives: a page's
+    /// SOCKS5 CONNECT by name reaches the worker as that name, and the worker's refusal of it
+    /// is the link's to tell.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_link_serves_the_workers_network_and_tells_its_refusals() {
+        let (client, link, _events) = pair().await;
+        let proxy = link.remote().proxy().expect("a proxy port");
+        assert_eq!(link.remote().proxy(), Some(proxy), "asking again is stable");
+        let worker = {
+            let conn = client.conn.clone();
+            tokio::spawn(async move {
+                let (open, mut send, mut rx) = streams::accept_tunnel(&conn).await.unwrap();
+                send.reset(TunnelRefusal::Unresolved.code().into()).unwrap();
+                rx.stop();
+                open
+            })
+        };
+        let mut page = tokio::net::TcpStream::connect(("127.0.0.1", proxy)).await.unwrap();
+        page.write_all(&[5, 1, 0]).await.unwrap();
+        let mut method = [0_u8; 2];
+        page.read_exact(&mut method).await.unwrap();
+        let target = b"db.internal";
+        let request = [&[5, 1, 0, 3, 11][..], target, &5432_u16.to_be_bytes()].concat();
+        page.write_all(&request).await.unwrap();
+        let mut reply = [0_u8; 10];
+        page.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], 0, "answered at once");
+        let open = tokio::time::timeout(WAIT, worker).await.unwrap().unwrap();
+        let host = TunnelHost::Name("db.internal".to_owned());
+        assert_eq!(open, TunnelOpen { host, port: 5432 });
+        let mut rest = Vec::new();
+        let read = tokio::time::timeout(WAIT, page.read_to_end(&mut rest)).await.unwrap();
+        assert!(read.is_err(), "the page's connection is reset");
+        assert_eq!(link.remote().refusal("db.internal", 5432), Some(TunnelRefusal::Unresolved));
     }
 
     /// A worker that closes a greeting with `NOT_GRANTED`, as it does for a node the tailnet

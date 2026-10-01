@@ -53,6 +53,8 @@ objc2-foundation = { workspace = true, features = [
     "NSNotification",
     # The screen's unlock, heard from the login window (`resume`).
     "NSDistributedNotificationCenter",
+    # A worker's pages keep their own data store, named by the worker (`web`).
+    "NSUUID",
 ] }
 # Local notifications, their taps and the icon badge (`notify`).
 objc2-user-notifications = { workspace = true, features = [
@@ -117,6 +119,7 @@ objc2-web-kit = { workspace = true, features = [
     "WKSnapshotConfiguration",
     "WKWebView",
     "WKWebViewConfiguration",
+    "WKWebsiteDataStore",
 ] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
@@ -166,6 +169,7 @@ objc2-web-kit = { workspace = true, features = [
     "WKNavigationDelegate",
     "WKSnapshotConfiguration",
     "WKWebViewConfiguration",
+    "WKWebsiteDataStore",
 ] }
 
 [dev-dependencies]

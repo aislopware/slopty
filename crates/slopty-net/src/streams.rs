@@ -211,16 +211,20 @@ pub async fn read_uni(recv: RecvStream) -> Result<Uni, NetError> {
     })
 }
 
-/// Client: open a tunnel to `port` on the worker, at [`TUNNEL_PRIORITY`].
-pub async fn open_tunnel(conn: &Connection, port: u16) -> Result<(SendStream, RawRecv), NetError> {
+/// Client: open a tunnel to `open`'s host and port as the worker reaches them, at
+/// [`TUNNEL_PRIORITY`].
+pub async fn open_tunnel(
+    conn: &Connection,
+    open: &TunnelOpen,
+) -> Result<(SendStream, RawRecv), NetError> {
     let (send, recv) = conn.open_bi().await.map_err(|e| NetError::stream(&e))?;
     send.set_priority(TUNNEL_PRIORITY).map_err(|e| NetError::stream(&e))?;
     let mut head = FramedSend::<TunnelOpen>::new(send);
-    head.send(&TunnelOpen { port }).await?;
+    head.send(open).await?;
     Ok((head.into_inner(), RawRecv::new(BytesMut::new(), recv)))
 }
 
-/// Worker: accept the next tunnel a client opens and read the port it asks for.
+/// Worker: accept the next tunnel a client opens and read where it asks to go.
 ///
 /// Every bidirectional stream after the control stream is one. As with [`accept_uni`], an
 /// accept loop reads each header with [`read_tunnel`] on a task of its own.
@@ -231,7 +235,7 @@ pub async fn accept_tunnel(
     read_tunnel(send, recv).await
 }
 
-/// Worker: put a tunnel's send half at [`TUNNEL_PRIORITY`] and read the port it asks for.
+/// Worker: put a tunnel's send half at [`TUNNEL_PRIORITY`] and read where it asks to go.
 pub async fn read_tunnel(
     send: SendStream,
     recv: RecvStream,

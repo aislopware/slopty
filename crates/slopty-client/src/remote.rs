@@ -1,6 +1,7 @@
 //! What the UI asks of a worker beyond the control stream: files up and down, the bytes of a
-//! clipboard offer, and a port of the worker served here. Behind a trait so the UI's tests can
-//! record the calls.
+//! clipboard offer, and the worker's ports and network served here.
+//!
+//! Behind a trait so the UI's tests can record the calls.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
 use slopty_net::{ClientMsg, Connection};
-use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, RepRef, XferMsg};
+use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, RepRef, TunnelRefusal, XferMsg};
 use tokio::sync::mpsc;
 
 use crate::LinkEvent;
@@ -45,6 +46,19 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// where: the same port when it is free here, else the next free one. `None` on a link
     /// that forwards nothing, or when no local port could be had.
     fn forward(&self, port: u16) -> Option<u16>;
+
+    /// Serve every other host the worker reaches here, until the link goes, and say where: a
+    /// SOCKS5 proxy's port on this machine's loopback ([`crate::tunnel::Proxy`]). `None` on
+    /// a link that serves nothing, or when no local port could be had.
+    fn proxy(&self) -> Option<u16> {
+        None
+    }
+
+    /// Why the worker could not reach `host:port` the last time a page asked through
+    /// [`Self::proxy`], unless it has answered since.
+    fn refusal(&self, _host: &str, _port: u16) -> Option<TunnelRefusal> {
+        None
+    }
 
     /// Hand the worker's word on `shared`'s drag out to it as the link reads it, off the main
     /// thread, where a target's read of its data waits ([`crate::dnd::out::DragOuts`]). A
@@ -180,6 +194,17 @@ impl Remote for LinkRemote {
         // A listener is a tokio socket and its accept loop a tokio task: both need the runtime.
         let _runtime = self.runtime.enter();
         forwards.lock().pin(port)
+    }
+
+    fn proxy(&self) -> Option<u16> {
+        let forwards = self.forwards.as_ref()?;
+        let _runtime = self.runtime.enter();
+        forwards.lock().proxy().map(crate::tunnel::Proxy::local)
+    }
+
+    fn refusal(&self, host: &str, port: u16) -> Option<TunnelRefusal> {
+        let forwards = self.forwards.as_ref()?;
+        forwards.lock().refusal(host, port)
     }
 
     #[cfg(target_vendor = "apple")]

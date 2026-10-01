@@ -11,9 +11,11 @@ use slopty_client::tunnel::Forward;
 use slopty_client::xfer::XferError;
 use slopty_core::XferId;
 use slopty_platform::pasteboard::{Memory, Pasteboard, TEXT_UTI};
+use slopty_platform::web::WebEvent;
 use slopty_proto::orchestration::Port;
 use slopty_proto::transfer::{
-    ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Rep, RepRef, XferMsg,
+    ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Rep, RepRef, TunnelRefusal,
+    XferMsg,
 };
 
 use super::*;
@@ -27,6 +29,7 @@ enum Call {
     Cancel(XferId),
     SendClip(RepRef, Fetched, bool),
     Forward(u16),
+    Proxy,
     #[cfg_attr(not(target_os = "macos"), expect(dead_code, reason = "a drag out is the Mac's"))]
     WatchDragOut(slopty_proto::drag::DragId),
 }
@@ -36,6 +39,9 @@ enum Call {
 /// `PNG`, and a download of one writes a file of that name whose text is the path.
 #[derive(Debug)]
 struct Recorder(mpsc::UnboundedSender<Call>, u16);
+
+/// Where a [`Recorder`] serves its worker's network.
+const PROXY: u16 = 1080;
 
 /// The `public.file-url` of each file a worker copied.
 const WORKER_FILES: [&[u8]; 2] = [b"file:///Users/w/a%20b.txt", b"file:///Users/w/c.txt"];
@@ -74,6 +80,15 @@ impl Remote for Recorder {
     fn forward(&self, port: u16) -> Option<u16> {
         self.0.send(Call::Forward(port)).unwrap();
         port.checked_add(self.1)
+    }
+
+    fn proxy(&self) -> Option<u16> {
+        self.0.send(Call::Proxy).unwrap();
+        Some(PROXY)
+    }
+
+    fn refusal(&self, host: &str, _port: u16) -> Option<TunnelRefusal> {
+        (host == "nowhere.internal").then_some(TunnelRefusal::Unresolved)
     }
 
     fn watch_drag_out(&self, shared: &Arc<slopty_client::dnd::out::Shared>) {
@@ -863,6 +878,42 @@ fn a_browser_item_is_the_worker_s_address_served_at_each_client_s_own_port(
             Some("http://localhost:5174/app".to_owned())
         ]
     );
+}
+
+/// A page on a host only the worker names waits for the worker's link, then loads as it is
+/// through the worker's proxy, asked of the link once and never forwarded; a load the worker
+/// could not reach says why.
+#[gpui::test]
+fn a_page_on_any_other_host_loads_through_the_workers_proxy(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    let page = |url: &str, seq, cx: &mut VisualTestContext| {
+        let kind = ItemKind::Browser { url: url.to_owned() };
+        let tile = arrives(&view, cx, &studio, kind, seq);
+        view.read_with(cx, |v, _| v.browser(tile.item).cloned()).expect("a page view")
+    };
+    let admin = page("http://db-admin:8080/", 1, cx);
+    let local = admin.read_with(cx, |b, _| b.local_url().map(str::to_owned));
+    assert_eq!(local.as_deref(), Some("http://db-admin:8080/"), "loaded as it is");
+    let mut asked = Vec::new();
+    while let Ok(call) = calls.try_recv() {
+        asked.push(call);
+    }
+    assert!(matches!(asked[..], [Call::Proxy]), "the proxy, and no forward: {asked:?}");
+
+    let nowhere = page("http://nowhere.internal/", 2, cx);
+    cx.update(|window, cx| {
+        nowhere.update(cx, |p, cx| {
+            p.native_event(
+                WebEvent::Failed("A server with the specified hostname could not be found.".into()),
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+    let failed = nowhere.read_with(cx, |b, _| b.page().failed.clone());
+    assert_eq!(failed.as_deref(), Some("the worker finds no host named nowhere.internal"));
 }
 
 /// A drop's landing (where the platform received files an app promised) lives exactly as long

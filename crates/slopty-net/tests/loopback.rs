@@ -13,7 +13,7 @@ mod tests {
     use slopty_net::{HostAddr, NetError, WorkerMsg};
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::terminal::TermEvent;
-    use slopty_proto::transfer::{BulkHeader, Purpose};
+    use slopty_proto::transfer::{BulkHeader, Purpose, TunnelHost, TunnelOpen};
     use tokio::time::Instant;
 
     fn hello() -> Hello {
@@ -224,7 +224,10 @@ mod tests {
                 send.write_all(&down).await.unwrap();
                 send.finish().unwrap();
                 let (open, mut send, mut rx) = streams::accept_tunnel(&client.conn).await.unwrap();
-                assert_eq!(open.port, 5173);
+                assert_eq!(
+                    open,
+                    TunnelOpen { host: TunnelHost::Name("db".to_owned()), port: 5173 }
+                );
                 let echo = drain(&mut rx).await;
                 send.write_all(&echo).await.unwrap();
                 send.finish().unwrap();
@@ -245,7 +248,8 @@ mod tests {
         };
         assert_eq!(got.purpose, Purpose::Download);
         assert_eq!(drain(&mut rx).await, down);
-        let (mut send, mut rx) = streams::open_tunnel(&conn.conn, 5173).await.unwrap();
+        let open = TunnelOpen { host: TunnelHost::Name("db".to_owned()), port: 5173 };
+        let (mut send, mut rx) = streams::open_tunnel(&conn.conn, &open).await.unwrap();
         send.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
         send.finish().unwrap();
         assert_eq!(drain(&mut rx).await, b"GET / HTTP/1.1\r\n\r\n", "half-close ends the echo");

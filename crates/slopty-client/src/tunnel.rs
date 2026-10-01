@@ -6,15 +6,25 @@
 //! free one serves instead, and the forward says so. Each accepted connection is one tunnel
 //! stream to the worker, which joins it to its own `127.0.0.1:<port>`; a finished direction is
 //! a half-closed socket.
+//!
+//! Every other host the worker reaches is served by [`Proxy`], a SOCKS5 proxy a page takes as
+//! its own. A page's own network stack never sends a loopback host to a proxy, so the loopback
+//! keeps these forwards.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use slopty_core::SessionId;
-use slopty_net::Connection;
+use slopty_net::streams::RawRecv;
+use slopty_net::{Connection, NetError, SendStream};
 use slopty_proto::orchestration::Port;
+use slopty_proto::transfer::{TunnelHost, TunnelOpen, TunnelRefusal};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+
+pub use self::proxy::Proxy;
+
+mod proxy;
 
 /// How far past a taken port a forward looks for a free one before it takes any port.
 const NEXT_FREE: u16 = 20;
@@ -71,6 +81,8 @@ pub struct Forwards {
     pinned: BTreeSet<u16>,
     /// One listener per worker port, whichever sessions report it.
     listeners: BTreeMap<u16, Listener>,
+    /// The worker's network for this client's pages, once one asks.
+    proxy: Option<Proxy>,
 }
 
 impl std::fmt::Debug for Forwards {
@@ -83,7 +95,32 @@ impl Forwards {
     /// Forwards over `conn`, none yet.
     #[must_use]
     pub fn new(conn: Connection) -> Self {
-        Self { conn, sessions: HashMap::new(), pinned: BTreeSet::new(), listeners: BTreeMap::new() }
+        Self {
+            conn,
+            sessions: HashMap::new(),
+            pinned: BTreeSet::new(),
+            listeners: BTreeMap::new(),
+            proxy: None,
+        }
+    }
+
+    /// The worker's network served here, started the first time it is asked for: every host
+    /// the worker reaches, through a SOCKS5 proxy on this machine's loopback, until the link
+    /// goes. `None` when no loopback port could be had. Call it inside the link's runtime.
+    pub fn proxy(&mut self) -> Option<&Proxy> {
+        if self.proxy.is_none() {
+            match Proxy::start(self.conn.clone()) {
+                Ok(proxy) => self.proxy = Some(proxy),
+                Err(e) => tracing::warn!(error = %e, "no local port for the worker's network"),
+            }
+        }
+        self.proxy.as_ref()
+    }
+
+    /// Why the worker last could not reach `host:port` for a page ([`Proxy::refusal`]).
+    #[must_use]
+    pub fn refusal(&self, host: &str, port: u16) -> Option<TunnelRefusal> {
+        self.proxy.as_ref()?.refusal(host, port)
     }
 
     /// `session` listens on `ports` now (the whole set). Listeners start for new ports and stop
@@ -162,6 +199,7 @@ impl Forwards {
         self.listeners.clear();
         self.sessions.clear();
         self.pinned.clear();
+        self.proxy = None;
     }
 }
 
@@ -201,7 +239,8 @@ async fn accept(tcp: TcpListener, conn: Connection, port: u16) {
         tracing::debug!(port, %from, "tunnel");
         let conn = conn.clone();
         tokio::spawn(async move {
-            if let Err(e) = splice(socket, &conn, port, OPEN_WITHIN).await {
+            let open = TunnelOpen { host: TunnelHost::Loopback, port };
+            if let Err(e) = splice(socket, &conn, &open, OPEN_WITHIN).await {
                 tracing::debug!(port, error = %e, "tunnel ended");
             }
         });
@@ -244,28 +283,61 @@ fn gone_before_taken(e: &std::io::Error) -> bool {
     matches!(e.kind(), ConnectionAborted | ConnectionReset | Interrupted)
 }
 
-/// Join a local connection to a tunnel stream until both directions finish. A stream not had
-/// `within` resets the connection. A clean end of one direction half-closes it and the other
-/// goes on; a failure of either ends both, each side reset so neither waits on the other: the
-/// browser's socket when the worker's side failed, the stream when the browser's did.
+/// Join a local connection to a tunnel stream to `open` until both directions finish
+/// ([`join`]). A stream not had `within` resets the connection.
 async fn splice(
     socket: TcpStream,
     conn: &Connection,
-    port: u16,
+    open: &TunnelOpen,
     within: std::time::Duration,
 ) -> Result<(), String> {
     // Keystrokes into a forwarded dev server's websocket are as latency-bound as a terminal's.
     let _nodelay = socket.set_nodelay(true);
-    let opened = tokio::time::timeout(within, slopty_net::streams::open_tunnel(conn, port)).await;
-    let (mut send, mut recv) = match opened {
-        Ok(opened) => opened.map_err(|e| e.to_string())?,
-        Err(_elapsed) => {
+    let (send, recv) = match open_within(conn, open, within).await {
+        Ok(stream) => stream,
+        Err(e) => {
             // A zero linger turns the close into a reset: the peer sees a refused request, not
             // an empty answer.
             let _linger = socket.set_zero_linger();
-            return Err(format!("no tunnel stream within {within:?}"));
+            return Err(e);
         }
     };
+    join(socket, send, recv, |_| ()).await.map_err(|broke| broke.to_string())
+}
+
+/// A tunnel stream to `open`, unless none is had `within`: opening waits only while the worker
+/// grants no more streams.
+async fn open_within(
+    conn: &Connection,
+    open: &TunnelOpen,
+    within: std::time::Duration,
+) -> Result<(SendStream, RawRecv), String> {
+    match tokio::time::timeout(within, slopty_net::streams::open_tunnel(conn, open)).await {
+        Ok(opened) => opened.map_err(|e| e.to_string()),
+        Err(_elapsed) => Err(format!("no tunnel stream within {within:?}")),
+    }
+}
+
+/// What the worker's side of a tunnel said first, told before the local connection hears it.
+#[derive(Clone, Copy, Debug)]
+enum Heard {
+    /// A byte: the target answered.
+    Answered,
+    /// A reset with a reason: the worker could not reach the target.
+    Refused(TunnelRefusal),
+}
+
+/// Join a local connection to its tunnel stream until both directions finish; `heard` is told
+/// what the worker's side said first, before the connection hears it. A clean end of one
+/// direction half-closes it and the other goes on; a failure of either ends both, each side
+/// reset so neither waits on the other: the browser's socket when the worker's side failed, the
+/// stream when the browser's did.
+async fn join(
+    socket: TcpStream,
+    mut send: SendStream,
+    mut recv: RawRecv,
+    heard: impl FnOnce(Heard),
+) -> Result<(), Broke> {
     let (mut from_app, mut to_app) = socket.into_split();
     let up = async {
         let mut buf = vec![0_u8; CHUNK];
@@ -278,7 +350,21 @@ async fn splice(
         }
     };
     let down = async {
-        while let Some(chunk) = recv.chunk(CHUNK).await.map_err(Broke::tunnel)? {
+        let mut heard = Some(heard);
+        loop {
+            let chunk = match recv.chunk(CHUNK).await.map_err(Broke::from_worker) {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(broke) => {
+                    if let (Broke::Refused(why), Some(heard)) = (&broke, heard.take()) {
+                        heard(Heard::Refused(*why));
+                    }
+                    return Err(broke);
+                }
+            };
+            if let Some(heard) = heard.take() {
+                heard(Heard::Answered);
+            }
             to_app.write_all(&chunk).await.map_err(Broke::app)?;
         }
         to_app.shutdown().await.map_err(Broke::app)
@@ -288,7 +374,7 @@ async fn splice(
         Err(broke) => broke,
     };
     match &broke {
-        Broke::Tunnel(_) => {
+        Broke::Tunnel(_) | Broke::Refused(_) => {
             // A zero linger turns the close into a reset, as when no stream could be had. The
             // halves go back together first: a write half dropped alone sends a FIN, and the
             // peer would read that clean end before the reset.
@@ -301,7 +387,7 @@ async fn splice(
             recv.stop();
         }
     }
-    Err(broke.to_string())
+    Err(broke)
 }
 
 /// Which side of a tunnel failed.
@@ -311,6 +397,8 @@ enum Broke {
     App(String),
     /// The stream to the worker.
     Tunnel(String),
+    /// The worker could not reach the target, and said why.
+    Refused(TunnelRefusal),
 }
 
 impl Broke {
@@ -321,6 +409,16 @@ impl Broke {
     fn tunnel(e: impl std::fmt::Display) -> Self {
         Self::Tunnel(e.to_string())
     }
+
+    /// A read of the worker's side that failed: a reset with a reason is a refusal.
+    fn from_worker(e: NetError) -> Self {
+        match e {
+            NetError::Reset(code) => {
+                TunnelRefusal::from_code(code).map_or_else(|| Self::tunnel(e), Self::Refused)
+            }
+            e => Self::tunnel(e),
+        }
+    }
 }
 
 impl std::fmt::Display for Broke {
@@ -328,6 +426,7 @@ impl std::fmt::Display for Broke {
         match self {
             Self::App(e) => write!(f, "local connection: {e}"),
             Self::Tunnel(e) => write!(f, "tunnel stream: {e}"),
+            Self::Refused(why) => write!(f, "the worker could not reach it: {why:?}"),
         }
     }
 }
@@ -340,16 +439,17 @@ mod tests {
 
     use slopty_net::Connection;
     use slopty_net::streams::accept_tunnel;
+    use slopty_proto::transfer::{TunnelHost, TunnelOpen};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::task::JoinHandle;
 
     use super::{keep_accepting, splice};
 
-    const PATIENCE: Duration = Duration::from_secs(5);
+    pub(super) const PATIENCE: Duration = Duration::from_secs(5);
 
     /// A client's connection to a worker, and the worker's end of it.
-    async fn linked() -> (Connection, Connection) {
+    pub(super) async fn linked() -> (Connection, Connection) {
         let loopback = SocketAddr::from(([127, 0, 0, 1], 0));
         let worker = slopty_net::endpoint::bind(loopback, true).unwrap();
         let client = slopty_net::endpoint::bind(loopback, false).unwrap();
@@ -365,7 +465,8 @@ mod tests {
         let browser = TcpStream::connect(local.local_addr().unwrap()).await.unwrap();
         let (accepted, _from) = local.accept().await.unwrap();
         let conn = conn.clone();
-        let splicing = tokio::spawn(async move { splice(accepted, &conn, 80, PATIENCE).await });
+        let open = TunnelOpen { host: TunnelHost::Loopback, port: 80 };
+        let splicing = tokio::spawn(async move { splice(accepted, &conn, &open, PATIENCE).await });
         (browser, splicing)
     }
 
@@ -481,7 +582,8 @@ mod tests {
         let local = TcpListener::bind(loopback).await.unwrap();
         let mut browser = TcpStream::connect(local.local_addr().unwrap()).await.unwrap();
         let (accepted, _from) = local.accept().await.unwrap();
-        let ended = splice(accepted, &conn, 80, Duration::from_millis(200)).await;
+        let open = TunnelOpen { host: TunnelHost::Loopback, port: 80 };
+        let ended = splice(accepted, &conn, &open, Duration::from_millis(200)).await;
         assert_eq!(held.len(), usize::try_from(slopty_net::endpoint::MAX_STREAMS).unwrap());
         assert!(ended.unwrap_err().contains("no tunnel stream"));
         let mut byte = [0_u8; 1];

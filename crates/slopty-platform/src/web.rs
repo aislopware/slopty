@@ -15,6 +15,7 @@
 //! The keyboard differs by platform; each module says how.
 
 use std::cell::{Cell, RefCell};
+use std::ffi::{CString, c_char};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -23,13 +24,16 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, NSObjectProtocol};
 use objc2::{
-    DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _, define_class, msg_send,
+    AnyThread as _, DefinedClass as _, MainThreadMarker, MainThreadOnly, Message as _,
+    define_class, msg_send,
 };
 use objc2_foundation::{
-    NSDictionary, NSError, NSNumber, NSObject, NSProgress, NSString, NSURL, NSURLRequest,
+    NSArray, NSDictionary, NSError, NSNumber, NSObject, NSProgress, NSString, NSURL, NSURLRequest,
+    NSUUID,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationResponsePolicy,
+    WKWebsiteDataStore,
 };
 
 #[cfg(target_os = "ios")]
@@ -271,6 +275,82 @@ pub enum Edit {
     Cut,
     /// Select all: the field with the caret, or the page.
     SelectAll,
+}
+
+// `<Network/endpoint.h>` and `<Network/proxy_config.h>`; objc2 binds no Network.framework.
+// Both return a retained OS object (`NW_RETURNS_RETAINED`), which under `OS_OBJECT_USE_OBJC`
+// is an Objective-C object: the array `proxyConfigurations` takes holds them as such.
+#[link(name = "Network", kind = "framework")]
+unsafe extern "C" {
+    fn nw_endpoint_create_host(hostname: *const c_char, port: *const c_char) -> *mut AnyObject;
+    fn nw_proxy_config_create_socksv5(proxy_endpoint: *mut AnyObject) -> *mut AnyObject;
+}
+
+/// The data store of `worker`'s pages: its cookies, caches and storage, kept between launches
+/// and apart from every other worker's (two workers' `localhost:3000` are two sites), and the
+/// proxy its pages reach the worker's network through ([`route`]). `WebKit` hands back the one
+/// store for an identifier, so every page of a worker shares it.
+fn store(worker: u128, mtm: MainThreadMarker) -> Retained<WKWebsiteDataStore> {
+    if worker == 0 {
+        // `dataStoreForIdentifier:` throws for the null UUID; a key of 0 is a test's.
+        // SAFETY: WebKit rule: a non-persistent store may be made at any time on the main
+        // thread.
+        return unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+    }
+    // `NSUUID::from_bytes` fails objc2's debug check of `initWithUUIDBytes:`, whose concrete
+    // class takes a `char *`: the string form names the same UUID.
+    let text = uuid_text(worker);
+    let Some(identifier) = NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(&text))
+    else {
+        // SAFETY: as for the null key above.
+        return unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
+    };
+    // SAFETY: WebKit rule: any identifier but the null UUID names a store, made if it is new.
+    unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) }
+}
+
+/// `value` as a UUID is written: `01020304-0506-0708-090a-0b0c0d0e0f10`.
+fn uuid_text(value: u128) -> String {
+    format!(
+        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+        value >> 96,
+        (value >> 80) & 0xffff,
+        (value >> 64) & 0xffff,
+        (value >> 48) & 0xffff,
+        value & 0xffff_ffff_ffff
+    )
+}
+
+/// Send `worker`'s pages through the SOCKS5 proxy on this machine's `127.0.0.1:port`.
+///
+/// Every host they ask for but the loopback, which `WebKit` never proxies, is then the
+/// worker's to resolve and dial. It holds for the pages open now and those opened later, until
+/// it is routed anew (the worker's next link). Main thread only; elsewhere it does nothing.
+pub fn route(worker: u128, port: u16) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(proxy) = socks(port) else { return };
+    let configurations = NSArray::from_retained_slice(&[proxy]);
+    let store = store(worker, mtm);
+    // SAFETY: WebKit rule (`WKWebsiteDataStore.h`, macOS 14 and iOS 17): `proxyConfigurations`
+    // is a copied `NSArray` of `nw_proxy_config_t`. The bindings leave it out, as the header
+    // refines it for Swift.
+    let () = unsafe { msg_send![&*store, setProxyConfigurations: &*configurations] };
+    tracing::debug!(port, "pages proxied to their worker");
+}
+
+/// A SOCKS5 proxy configuration for `127.0.0.1:port`.
+fn socks(port: u16) -> Option<Retained<AnyObject>> {
+    let port = CString::new(port.to_string()).ok()?;
+    // SAFETY: Network.framework rule (`endpoint.h`): the host and port are NUL-terminated
+    // strings it copies.
+    let endpoint = unsafe { nw_endpoint_create_host(c"127.0.0.1".as_ptr(), port.as_ptr()) };
+    // SAFETY: `NW_RETURNS_RETAINED`: the endpoint is ours to release, which `from_raw` takes on.
+    let endpoint = unsafe { Retained::from_raw(endpoint) }?;
+    // SAFETY: Network.framework rule (`proxy_config.h`): a host endpoint makes a SOCKS5
+    // configuration, which retains what it keeps of it.
+    let config = unsafe { nw_proxy_config_create_socksv5(Retained::as_ptr(&endpoint).cast_mut()) };
+    // SAFETY: `NW_RETURNS_RETAINED`, as for the endpoint.
+    unsafe { Retained::from_raw(config) }
 }
 
 struct DelegateIvars {
@@ -692,6 +772,15 @@ fn zoom_in(web: &AnyObject, zoom: f64) {
 
 #[cfg(test)]
 mod tests {
+    /// A worker's store is named by its key written as a UUID, as the worker writes its id.
+    #[test]
+    fn a_key_is_written_as_its_uuid() {
+        use super::uuid_text;
+        let key = 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10;
+        assert_eq!(uuid_text(key), "01020304-0506-0708-090a-0b0c0d0e0f10");
+        assert_eq!(uuid_text(u128::MAX), "ffffffff-ffff-ffff-ffff-ffffffffffff");
+    }
+
     use super::*;
 
     #[test]

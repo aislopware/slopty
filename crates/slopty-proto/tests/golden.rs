@@ -20,7 +20,7 @@ mod golden {
     };
     use slopty_proto::transfer::{
         BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Purpose, Rep,
-        RepRef, Source, TunnelOpen, UniHead, XferMsg,
+        RepRef, Source, TunnelHost, TunnelOpen, UniHead, XferMsg,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
     use uuid::Uuid;
@@ -1444,7 +1444,18 @@ mod golden {
             }),
         );
         snap("uni_session", &UniHead::Session { session });
-        snap("tunnel_open", &TunnelOpen { port: 5173 });
+        snap("tunnel_open", &TunnelOpen { host: TunnelHost::Loopback, port: 5173 });
+        snap(
+            "tunnel_open_name",
+            &TunnelOpen { host: TunnelHost::Name("postgres-admin".to_owned()), port: 8080 },
+        );
+        snap(
+            "tunnel_open_ip",
+            &TunnelOpen {
+                host: TunnelHost::Ip(std::net::Ipv4Addr::new(10, 0, 0, 7).into()),
+                port: 443,
+            },
+        );
         snap(
             "worker_ports",
             &WorkerMsg::Ports {

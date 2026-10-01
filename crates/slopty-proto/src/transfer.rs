@@ -6,6 +6,7 @@
 //! never queue behind a file. A forwarded TCP connection is a bidirectional stream that opens
 //! with [`TunnelOpen`] and carries raw bytes both ways.
 
+use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -81,12 +82,62 @@ pub enum UniHead {
 
 /// First message on a tunnel: a client-opened bidirectional stream other than the control one.
 ///
-/// It is a TCP connection the client accepted, to be joined to `127.0.0.1:port` on the worker.
-/// Raw bytes follow both ways; a finished stream is a half-closed socket.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// It is a TCP connection the client accepted, to be joined to `host:port` as the worker
+/// reaches it. Raw bytes follow both ways; a finished stream is a half-closed socket. A target
+/// the worker cannot reach resets the stream with a [`TunnelRefusal`] code.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TunnelOpen {
-    /// The worker port.
+    /// Where the worker dials.
+    pub host: TunnelHost,
+    /// The port there.
     pub port: u16,
+}
+
+/// The host a tunnel joins, as the worker reaches it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum TunnelHost {
+    /// The worker's own loopback: IPv4 first, then IPv6 (a dev server bound to `localhost`
+    /// on macOS is often on `::1` only).
+    Loopback,
+    /// A name for the worker's resolver, `/etc/hosts` and its DNS included: a container, a
+    /// LAN machine, anything only the worker can name.
+    Name(String),
+    /// An address the worker dials as it is.
+    Ip(IpAddr),
+}
+
+/// Why the worker reset a tunnel before any byte moved: the stream's reset code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TunnelRefusal {
+    /// The host answered and nothing listens on the port.
+    Refused,
+    /// The worker's resolver has no address for the name.
+    Unresolved,
+    /// No route to the host, or it did not answer in time.
+    Unreachable,
+}
+
+impl TunnelRefusal {
+    /// The reset code that carries it. Zero is no reason: a connection that broke once open.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Refused => 1,
+            Self::Unresolved => 2,
+            Self::Unreachable => 3,
+        }
+    }
+
+    /// The reason a reset `code` carries, if it carries one.
+    #[must_use]
+    pub const fn from_code(code: u64) -> Option<Self> {
+        match code {
+            1 => Some(Self::Refused),
+            2 => Some(Self::Unresolved),
+            3 => Some(Self::Unreachable),
+            _ => None,
+        }
+    }
 }
 
 /// Who wrote something to a clipboard.

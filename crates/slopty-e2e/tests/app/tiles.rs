@@ -395,6 +395,57 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
     stack.shutdown().await;
 }
 
+/// A page on a host only the worker names loads through the worker's proxy as it is, its
+/// address never rewritten, and the worker's own word says why when it cannot reach one. The
+/// worker's resolver answers `*.localhost` with its loopback, and the page's network never
+/// resolves a proxied name itself: the refusal the first page shows, which only the worker can
+/// give, proves the path the last one loads by.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_page_on_a_host_only_the_worker_names_loads_through_its_proxy() {
+    let dead = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let port = serve_page();
+    let refused = format!("http://only-the-worker.localhost:{dead}/");
+    let unresolved = "http://nowhere.invalid/".to_owned();
+    let named = format!("http://only-the-worker.localhost:{port}/");
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    let page_of = |d: &Dump, url: &str| {
+        d.items.iter().filter_map(|i| i.browser.as_ref()).find(|b| b.url == url).cloned()
+    };
+
+    let says = [
+        (&refused, format!("nothing listens on port {dead} of only-the-worker.localhost")),
+        (&unresolved, "the worker finds no host named nowhere.invalid".to_owned()),
+    ];
+    for (url, why) in says {
+        drv.ok(&Command::OpenUrl { url: url.clone() }).await.unwrap();
+        drv.wait_for(&format!("{url} says why"), STEP, |d| {
+            page_of(d, url).and_then(|b| b.failed).as_deref() == Some(why.as_str())
+        })
+        .await
+        .unwrap();
+    }
+
+    let asked = std::time::Instant::now();
+    drv.ok(&Command::OpenUrl { url: named.clone() }).await.unwrap();
+    let dump = drv
+        .wait_for("the named page, loaded", STEP, |d| {
+            page_of(d, &named).is_some_and(|b| b.title == "Slopty test page" && !b.loading)
+        })
+        .await
+        .unwrap();
+    let took = asked.elapsed();
+    let page = page_of(&dump, &named).unwrap();
+    assert_eq!(page.local_url.as_deref(), Some(named.as_str()), "loaded as it is");
+    assert_eq!(page.page_url, named, "the web view's address is the worker's");
+    assert!(page.failed.is_none(), "{page:?}");
+    eprintln!("the named page loaded {took:?} after it was asked for");
+    stack.shutdown().await;
+}
+
 /// The browser tiles of the dump, in the order the workspace lists them.
 fn pages(d: &Dump) -> Vec<&slopty_e2e::ItemInfo> {
     d.items.iter().filter(|i| i.kind == "browser").collect()

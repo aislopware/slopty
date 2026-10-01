@@ -1,10 +1,12 @@
-//! A browser tile: a web page, usually a server on the worker reached through a forwarded
-//! port, in a native web view laid over the tile.
+//! A browser tile: a web page the worker reaches, in a native web view laid over the tile.
 //!
 //! The item's address is the worker's (`http://localhost:5173/` means port 5173 on the
-//! worker), so every client of the worker opens the same page. Each client serves that port
-//! on its own loopback, at whatever local port it could get, and rewrites the address to it
-//! before the page loads ([`local_url`]).
+//! worker, `http://db-admin:8080/` the host the worker's resolver names), so every client of
+//! the worker opens the same page. A page's network never proxies the loopback, so each client
+//! serves a loopback port on its own loopback, at whatever local port it could get, and
+//! rewrites the address to it before the page loads ([`local_url`]). Every other host goes
+//! through the worker's proxy (`slopty_client::tunnel::Proxy`) as it is, in the worker's own
+//! data store (`slopty_platform::web::route`).
 //!
 //! GPUI cannot draw a page, so the page is the platform's web view (`slopty_platform::web`),
 //! which the window composes with GPUI's content through a native host: the tile's body is a
@@ -36,6 +38,7 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 pub use native::{Dialog, DialogKind, Edit};
 use slopty_client::layout::WorkerKey;
 use slopty_core::ItemId;
+use slopty_proto::transfer::TunnelRefusal;
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
@@ -102,6 +105,9 @@ pub enum BrowserEvent {
     /// A pop-up or a `_blank` link asked for this address, as the worker names it: a tile of
     /// its own beside this one.
     Open(String),
+    /// The page failed to load: the workspace may know why better than the page does (the
+    /// worker could not reach its host), and say so ([`BrowserView::unreachable`]).
+    Failed,
     /// The page closed its own window (`window.close()`): its tile goes.
     Closed,
 }
@@ -428,7 +434,8 @@ impl BrowserView {
         let sink: Rc<dyn Fn(native::Event)> = Rc::new(move |event| {
             let _sent = tx.send(event);
         });
-        let opened = self.native.create(window, address, sink) && self.compose_in(window, cx);
+        let opened =
+            self.native.create(window, self.worker, address, sink) && self.compose_in(window, cx);
         if !opened {
             self.native = native::Native::default();
             self.page.failed = Some("This device has no web view".to_owned());
@@ -556,6 +563,7 @@ impl BrowserView {
                 tracing::info!(item = %self.id, %why, "page failed");
                 self.page.failed = Some(why);
                 self.page.loading = false;
+                cx.emit(BrowserEvent::Failed);
                 cx.notify();
             }
             native::Event::Snapshot(png) => {
@@ -1000,10 +1008,19 @@ fn split_origin(url: &str) -> Option<(&str, &str, &str)> {
 /// The worker's port an address names, when its host is the worker's loopback.
 ///
 /// Those hosts are `localhost`, `127.0.0.1` and `[::1]`; the port is the one this client has
-/// to serve for the page to load. `None` for any other host, which every client reaches as it
-/// is.
+/// to serve for the page to load. `None` for any other host, which reaches the worker through
+/// its proxy: a page's network never proxies the loopback.
 #[must_use]
 pub fn worker_port(url: &str) -> Option<u16> {
+    let (host, port) = host_port(url)?;
+    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+    loopback.then_some(port)
+}
+
+/// The host an address names, an IPv6 one without its brackets, and its port, the scheme's
+/// own when it names none.
+#[must_use]
+pub fn host_port(url: &str) -> Option<(&str, u16)> {
     let (scheme, authority, _) = split_origin(url)?;
     let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
         let (host, after) = v6.split_once(']')?;
@@ -1014,14 +1031,27 @@ pub fn worker_port(url: &str) -> Option<u16> {
             None => (authority, None),
         }
     };
-    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
-    if !loopback {
-        return None;
-    }
-    match port {
-        Some(port) => port.parse().ok(),
-        None if scheme.eq_ignore_ascii_case("https") => Some(443),
-        None => Some(80),
+    let port = match port {
+        Some(port) => port.parse().ok()?,
+        None if scheme.eq_ignore_ascii_case("https") => 443,
+        None => 80,
+    };
+    Some((host, port))
+}
+
+/// Send `worker`'s pages, open and to come, through the worker's proxy at this client's
+/// `127.0.0.1:port`.
+pub fn route(worker: WorkerKey, port: u16) {
+    slopty_platform::web::route(worker.value(), port);
+}
+
+/// Why a page could not load, when the worker could not reach its `host:port`.
+#[must_use]
+pub fn refusal_text(why: TunnelRefusal, host: &str, port: u16) -> String {
+    match why {
+        TunnelRefusal::Unresolved => format!("the worker finds no host named {host}"),
+        TunnelRefusal::Refused => format!("nothing listens on port {port} of {host}"),
+        TunnelRefusal::Unreachable => format!("the worker can't reach {host}"),
     }
 }
 
@@ -1363,6 +1393,7 @@ mod native {
 
     use gpui::Window;
     use gpui::composition::NativeHost;
+    use slopty_client::layout::WorkerKey;
     pub use slopty_platform::web::{Dialog, DialogKind, Edit};
     pub(super) use slopty_platform::web::{Download, WebEvent as Event};
 
@@ -1419,21 +1450,26 @@ mod native {
             self.view.as_ref().and_then(slopty_platform::web::WebView::window_number)
         }
 
-        /// Open the page for `window`; `false` when the platform has no web view to give.
+        /// Open `worker`'s page for `window`; `false` when the platform has no web view to
+        /// give.
         pub(super) fn create(
             &mut self,
             window: &Window,
+            worker: WorkerKey,
             url: &str,
             sink: Rc<dyn Fn(Event)>,
         ) -> bool {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let worker = worker.value();
             self.view = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
                 #[cfg(target_os = "macos")]
                 Ok(RawWindowHandle::AppKit(handle)) => {
-                    slopty_platform::web::WebView::new(handle.ns_view, url, sink)
+                    slopty_platform::web::WebView::new(handle.ns_view, worker, url, sink)
                 }
                 #[cfg(target_os = "ios")]
-                Ok(RawWindowHandle::UiKit(_)) => slopty_platform::web::WebView::new(url, sink),
+                Ok(RawWindowHandle::UiKit(_)) => {
+                    slopty_platform::web::WebView::new(worker, url, sink)
+                }
                 _ => None,
             };
             self.view.is_some()

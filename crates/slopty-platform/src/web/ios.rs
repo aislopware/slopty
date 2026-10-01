@@ -42,16 +42,20 @@ impl std::fmt::Debug for WebView {
 }
 
 impl WebView {
-    /// A page loading `url`, in no view until the tile's native host adopts [`Self::view`].
-    /// Events go to `sink`. `None` off the main thread, for an address `NSURL` refuses, or
-    /// without `WebKit`.
+    /// A page of `worker` loading `url`, in that worker's data store (`super::route`), in no
+    /// view until the tile's native host adopts [`Self::view`]. Events go to `sink`. `None`
+    /// off the main thread, for an address `NSURL` refuses, or without `WebKit`.
     #[must_use]
-    pub fn new(url: &str, sink: Rc<dyn Fn(WebEvent)>) -> Option<Self> {
+    pub fn new(worker: u128, url: &str, sink: Rc<dyn Fn(WebEvent)>) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let address = NSURL::URLWithString(&NSString::from_str(url))?;
         let class = AnyClass::get(c"WKWebView")?;
         // SAFETY: WebKit rule: a configuration made by `new` is complete.
         let config = unsafe { WKWebViewConfiguration::new(mtm) };
+        // SAFETY: WebKit rule: a configuration takes any store before the view is made.
+        unsafe {
+            config.setWebsiteDataStore(&super::store(worker, mtm));
+        }
         // SAFETY: `NSObject` rule: `alloc` on a class returns a fresh instance to initialise.
         let allocated: Allocated<UIView> = unsafe { msg_send![class, alloc] };
         // SAFETY: WebKit rule: `WKWebView` is a `UIView` whose designated initialiser takes a

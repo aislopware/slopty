@@ -15,6 +15,19 @@ mod units {
     use slopty_proto::{ClientMsg, WorkerMsg};
     use zerocopy::FromZeros as _;
 
+    /// A tunnel's refusal rides its reset code, pinned both ways; zero is a connection that
+    /// broke once open, no refusal.
+    #[test]
+    fn a_tunnel_refusal_is_its_reset_code() {
+        use slopty_proto::transfer::TunnelRefusal::{self, Refused, Unreachable, Unresolved};
+        for (why, code) in [(Refused, 1), (Unresolved, 2), (Unreachable, 3)] {
+            assert_eq!(why.code(), code);
+            assert_eq!(TunnelRefusal::from_code(code.into()), Some(why));
+        }
+        assert_eq!(TunnelRefusal::from_code(0), None);
+        assert_eq!(TunnelRefusal::from_code(4), None);
+    }
+
     /// A stripe's media stream names its stream and its place, and the top stripe's is the
     /// stream's own.
     #[test]

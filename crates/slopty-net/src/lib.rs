@@ -51,7 +51,7 @@ mod udp;
 pub mod worker;
 
 pub use addr::HostAddr;
-pub use noq::{Connection, Endpoint};
+pub use noq::{Connection, Endpoint, SendStream};
 pub use slopty_proto::{ClientMsg, WorkerMsg};
 
 /// Transport errors.
@@ -93,6 +93,10 @@ pub enum NetError {
     /// The peer closed the stream or connection.
     #[error("closed")]
     Closed,
+    /// The peer reset the stream with this code: what a tunnel's worker says when it cannot
+    /// reach the target (`slopty_proto::transfer::TunnelRefusal`).
+    #[error("stream reset by the peer: code {0}")]
+    Reset(u64),
     /// Something waited on the peer longer than it may.
     #[error("{0} timed out")]
     TimedOut(&'static str),
@@ -151,9 +155,13 @@ impl NetError {
     /// worth logging.
     /// A close by the peer with [`worker::close_code::NOT_GRANTED`] anywhere in the chain is
     /// [`NetError::NotGranted`], and one with [`worker::close_code::WRONG_BUILD`] is
-    /// [`NetError::WrongBuild`], with the build its reason names.
+    /// [`NetError::WrongBuild`], with the build its reason names. A stream the peer reset is
+    /// [`NetError::Reset`], with the code it gave.
     #[must_use]
     pub fn stream(e: &(dyn std::error::Error + 'static)) -> Self {
+        if let Some(noq::ReadError::Reset(code)) = e.downcast_ref() {
+            return Self::Reset(code.into_inner());
+        }
         if let Some(close) = closed_with(e) {
             let code = close.error_code.into_inner();
             if code == u64::from(worker::close_code::NOT_GRANTED) {
@@ -240,6 +248,13 @@ mod tests {
             matches!(&normal, NetError::Stream(text) if text.contains("closed by peer")),
             "{normal}"
         );
+    }
+
+    /// A reset stream keeps its code, which is how a tunnel says why it went nowhere.
+    #[test]
+    fn a_reset_keeps_its_code() {
+        let reset = noq::ReadError::Reset(noq::VarInt::from_u32(2));
+        assert!(matches!(NetError::stream(&reset), NetError::Reset(2)));
     }
 
     /// Clippy reads only the nearest `clippy.toml`, so this crate's copies the workspace's and
