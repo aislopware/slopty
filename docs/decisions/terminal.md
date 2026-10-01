@@ -2959,3 +2959,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: the terminal fuzzer holds every replayed line to the oracle, marks, links and wraps
     included, and `fuzz/regressions/terminal` keeps one input of each loss it found
     (decisions/testing.md, "What it found next"); `carried.rs`'s round-trip tests.
+
+- ✅ **ghostty on 0081d4530: an empty `OSC 22` gives the pointer back** (2026-10-01). The ghostty
+  fork (`aislopware/ghostty` `18fa7131b`) is our 30 commits (PRs #1–#4) rebased onto ghostty
+  `0081d4530`, eight commits past `76895d97b`. The rebase was clean and `zig build test-lib-vt`
+  passes. libghostty-rs `a49587b` only moves the pin. The headers did not change, so the
+  bindings are byte for byte the same.
+  - **#14495, an empty `OSC 22` resets the pointer: taken, and needed.** Before it, `OSC 22 ;`
+    with no name was logged as an unknown shape and ignored. A program had no way to give its
+    pointer back, and the session kept its last shape. libghostty-vt now sets its initial
+    shape, `text`, which the engine reports as `PointerShape::Text`, the wire's default. The
+    session's pointer follows, and an attach is told nothing. Ghostty's app picks `default`
+    over `text` while mouse tracking is on, but that choice lives in its termio, not in
+    libghostty-vt. Test: engine `an_empty_pointer_shape_gives_the_pointer_back` covers ST, BEL
+    and a reset split across two writes.
+  - **#14494, a paste fails after any refused write: no effect on Slopty.** The fix is in
+    `ghostty_terminal_paste`. The engine encodes pastes with `paste::encode`
+    (`ghostty_paste_encode`). The binding's `Terminal::paste` already failed a refused write
+    itself, so that check is now redundant but harmless.
+  - The rest is ghostty's OpenGL error message and its VOUCHED list.
+  - **Left open.** A checkpoint does not carry the pointer shape: the formatter writes no
+    `OSC 22`, and neither does `checkpoint`. So a shape a program set before the last
+    checkpoint comes back as the I-beam after a worker restart, until the program sets it
+    again.
+  - Cost: every engine `*_cost` series stayed within its run-to-run spread, so no budget or
+    MEASUREMENTS entry changes. On reruns, `take_frame_unchanged` and `write` move by 25–50
+    instructions on their own.

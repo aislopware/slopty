@@ -3281,6 +3281,44 @@ mod tests {
         assert_eq!(pointers(&e), [PointerShape::Text], "the I-beam asked for again");
     }
 
+    /// An empty `OSC 22` gives the pointer back: the engine reports the I-beam the terminal
+    /// starts with, so the session's pointer (the last one reported, what an attach is told
+    /// while it is not the default) is the default again rather than the program's last shape.
+    #[test]
+    fn an_empty_pointer_shape_gives_the_pointer_back() {
+        let pointers = |e: &GhosttyEngine| -> Vec<PointerShape> {
+            e.drain_events()
+                .into_iter()
+                .filter_map(|ev| match ev {
+                    EngineEvent::Pointer(p) => Some(p),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut e = engine(10, 3);
+        for (reset, how) in [
+            (&b"\x1b]22;\x1b\\"[..], "ST"),
+            (b"\x1b]22;\x07", "BEL"),
+            (b"\x1b]22;", "split across two writes"),
+        ] {
+            e.write(b"\x1b]22;pointer\x07");
+            assert_eq!(pointers(&e), [PointerShape::Pointer], "{how}: the program's shape");
+            e.write(reset);
+            if how.starts_with("split") {
+                e.write(b"\x1b\\");
+            }
+            assert_eq!(pointers(&e), [PointerShape::Text], "{how}: the default again");
+            assert_eq!(e.pointer, PointerShape::default(), "{how}: the session's pointer");
+        }
+        e.write(b"\x1b]22;\x07");
+        assert_eq!(pointers(&e), [], "a reset at the default changes nothing");
+
+        let mut fresh = engine(10, 3);
+        fresh.write(b"\x1b]22;grab\x07ab\x1b]22;\x1b\\cd");
+        let last = pointers(&fresh).last().copied().unwrap_or_default();
+        assert_eq!(last, PointerShape::default(), "a replay that set and reset it ends at default");
+    }
+
     #[test]
     fn the_kitty_keyboard_mode_is_on_when_any_flag_is_pushed() {
         let mut e = engine(10, 3);
