@@ -155,6 +155,7 @@ impl Workspace {
             v.set_server_status(None, cx);
             v.forget_server_agents(None, cx);
             v.forget_projects(cx);
+            v.set_server_caller(None);
         });
         if had_server && address.is_none() {
             self.directory_cache.send_replace(Cache::Remove);
@@ -188,9 +189,11 @@ impl Workspace {
                 }
                 Err(_dropped) => return,
             };
-            let kept = this.update(cx, |ws, _cx| match &mut ws.server {
+            let kept = this.update(cx, |ws, cx| match &mut ws.server {
                 Some(slot) if ws.server_generation == generation => {
+                    let caller = task.caller();
                     slot.task = Some(task);
+                    ws.view.update(cx, |v, _cx| v.set_server_caller(Some(caller)));
                     true
                 }
                 _ => false,

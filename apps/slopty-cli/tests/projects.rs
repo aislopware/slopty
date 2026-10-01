@@ -1418,7 +1418,8 @@ mod tests {
     /// open. Its `review_report` blocks the merge, so the task goes back and its agent's next
     /// prompt brings the findings through its hooks; the reviewer's terminal stays to be read.
     /// The person reads the work and approves it with `slopty task review`, the reviewer is
-    /// let go, and the queue fast-forwards `main` to the commit both checked.
+    /// let go, and the queue fast-forwards `main` to the commit both checked. Then the person
+    /// lets the project go with `slopty project delete`.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_reviewer_s_block_goes_back_to_the_agent_and_the_person_s_word_merges_it() {
         use slopty_proto::project::{REVIEW_DIFF, Reviewer, StepKind};
@@ -1610,6 +1611,12 @@ mod tests {
                 "Merge began",
                 "Merge done"
             ]
+        );
+        let gone = slopty(&root, server.quic_addr(), &["project", "delete", "demo"]).await;
+        assert!(gone.contains("demo"), "{gone}");
+        assert!(
+            matches!(hub.dispatch(Verb::ProjectList).await, Outcome::Projects(p) if p.is_empty()),
+            "the person let it go"
         );
         server.shutdown().await;
     }

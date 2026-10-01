@@ -835,6 +835,10 @@ impl Hub {
             Verb::TaskReview { project, task, verdict } => {
                 self.task_review(caller, from, (&project, task), verdict)
             }
+            Verb::ProjectDelete { .. } if caller == Caller::Agent => {
+                error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
+            }
+            Verb::ProjectDelete { project } => self.project_delete(&project),
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
@@ -1632,7 +1636,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WorkingOn { .. }
         | Verb::TaskReport { .. }
         | Verb::TaskMerge { .. }
-        | Verb::TaskReview { .. } => None,
+        | Verb::TaskReview { .. }
+        | Verb::ProjectDelete { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }

@@ -11,22 +11,32 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::{AppContext as _, Context, Entity, Window};
 use slopty_client::layout::WorkerKey;
+use slopty_client::server::ServerCaller;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::ItemKind;
-use slopty_proto::project::{ProjectId, ProjectUpdate, ProjectsPart};
+use slopty_proto::orchestration::{Outcome, TermRef, Verb};
+use slopty_proto::project::{
+    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, TaskId,
+};
 
 use super::WorkspaceView;
 use super::actions::ToggleProjectBoard;
 use super::agents::agent_ask_line;
 use crate::icons::Status;
-use crate::project::model::{Board, Lane, Projects};
-use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen};
+use crate::project::model::{Board, Lane, Projects, TaskAction};
+use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject};
 
 /// What the palette and the header call turning a tile to its board.
 pub(crate) const SHOW_BOARD: &str = "Show project board";
 /// What a terminal says when asked for a board it has none of.
 pub(crate) const NO_PROJECT: &str = "No project runs in this terminal";
+/// What a board's action says when this client has no server to send it to.
+pub(crate) const NO_SERVER: &str = "No server to send it to";
+/// What "Start a project here" says away from a terminal.
+pub(crate) const NO_TERMINAL: &str = "Stand in a terminal to start a project there";
+/// What the person says approving a task's work from the board.
+pub(crate) const APPROVED_HERE: &str = "Approved by the person";
 
 /// What the workspace keeps about projects.
 #[derive(Default)]
@@ -43,6 +53,10 @@ pub(super) struct ProjectsState {
     pub focus: HashSet<ProjectId>,
     /// Something a board shows changed since the boards were last handed what they show.
     pub dirty: bool,
+    /// How the boards' actions reach the server, while the app is linked to one.
+    pub caller: Option<ServerCaller>,
+    /// A project just started here, whose board shows once the mirror hears of it.
+    pub opening: Option<ProjectId>,
 }
 
 /// `id` as the workspace keys workers: the one the app gives the server's worker ids.
@@ -51,7 +65,40 @@ pub const fn worker_key(id: WorkerId) -> WorkerKey {
     WorkerKey::new(id.as_uuid().as_u128())
 }
 
+/// The worker id behind `key`: [`worker_key`] the other way. A UUID's simple form is its
+/// 128 bits in hex, which is all a key holds.
+fn worker_id(key: WorkerKey) -> Option<WorkerId> {
+    format!("{:032x}", key.value()).parse().ok()
+}
+
+/// A project name made from `name` (a directory's), as [`ProjectId`] takes it, and not one
+/// of `taken`: lowercase, every run of anything else a dash, and `-2`, `-3`… when it is.
+fn project_name(name: &str, taken: impl Fn(&ProjectId) -> bool) -> Option<ProjectId> {
+    let mut slug = String::new();
+    for c in name.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            slug.push(c);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    // Room for the widest suffix the loop below can add.
+    slug.truncate(ProjectId::MAX_LEN - 4);
+    let slug = slug.trim_end_matches('-');
+    let slug = if slug.is_empty() { "project" } else { slug };
+    (1..1000_u16)
+        .map(|n| if n == 1 { slug.to_owned() } else { format!("{slug}-{n}") })
+        .filter_map(|name| ProjectId::new(name).ok())
+        .find(|id| !taken(id))
+}
+
 impl WorkspaceView {
+    /// How the boards' actions reach the server: set while the app is linked to one, and
+    /// cleared when it lets the server go.
+    pub fn set_server_caller(&mut self, caller: Option<ServerCaller>) {
+        self.projects.caller = caller;
+    }
+
     /// One part of the server's snapshot of its projects: the first part replaces them all.
     pub fn projects_part(&mut self, part: ProjectsPart, cx: &mut Context<Self>) {
         let _touched = self.projects.mirror.apply_part(part);
@@ -214,8 +261,14 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// Something a board shows changed: they are handed it in the next frame.
+    /// Something a board shows changed: they are handed it in the next frame. A project just
+    /// started here shows its board as soon as it is heard of.
     fn projects_moved(&mut self, cx: &mut Context<Self>) {
+        if let Some(project) =
+            self.projects.opening.take_if(|p| self.projects.mirror.get(p).is_some())
+        {
+            self.open_project(&project, cx);
+        }
         self.projects.dirty = true;
         self.changed(cx);
         cx.notify();
@@ -299,17 +352,147 @@ impl WorkspaceView {
         let view = cx.new(|cx| ProjectView::new(id, theme, cx));
         let asked = project.clone();
         let subscription =
-            cx.subscribe(&view, move |this, _view, event: &ProjectEvent, cx| match *event {
-                ProjectEvent::Open(node) => this.open_node(&asked, node, cx),
+            cx.subscribe(&view, move |this, _view, event: &ProjectEvent, cx| match event {
+                ProjectEvent::Open(node) => this.open_node(&asked, *node, cx),
                 ProjectEvent::Output(term) => {
                     this.open_output(term.session, "The verifier's terminal has closed", cx);
                 }
                 ProjectEvent::Reviewer(term) => {
                     this.open_output(term.session, "The reviewer's session has closed", cx);
                 }
+                ProjectEvent::Act(task, action) => this.act_on_task(&asked, *task, *action, cx),
+                ProjectEvent::SetPush(push) => {
+                    let verb = Verb::ProjectSet {
+                        project: asked.clone(),
+                        orchestrator: None,
+                        verifier: None,
+                        review: None,
+                        push: Some(*push),
+                        limits: LimitsChange::default(),
+                        metadata: None,
+                    };
+                    this.send_to_server(verb, |_, _| (), cx);
+                }
+                ProjectEvent::Delete => {
+                    this.send_to_server(
+                        Verb::ProjectDelete { project: asked.clone() },
+                        |_, _| (),
+                        cx,
+                    );
+                }
+                ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
             });
         self.projects.subscriptions.insert(project.clone(), subscription);
         self.projects.views.insert(project, view);
+    }
+
+    /// A board's action on a task, as the person's word to the server: a merge and a retry
+    /// both put the task in the merge queue, which checks it afresh; an approval stands over
+    /// the reviewer's.
+    fn act_on_task(
+        &mut self,
+        project: &ProjectId,
+        task: TaskId,
+        action: TaskAction,
+        cx: &mut Context<Self>,
+    ) {
+        let project = project.clone();
+        let verb = match action {
+            TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
+            TaskAction::Approve => Verb::TaskReview {
+                project,
+                task,
+                verdict: ReviewVerdict {
+                    approved: true,
+                    summary: APPROVED_HERE.to_owned(),
+                    findings: Vec::new(),
+                },
+            },
+        };
+        self.send_to_server(verb, |_, _| (), cx);
+    }
+
+    /// Send `verb` to the server and hand its answer to `then`; a refusal is said as a
+    /// notice, in the server's words.
+    fn send_to_server(
+        &mut self,
+        verb: Verb,
+        then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(caller) = self.projects.caller.clone() else {
+            self.show_notice(NO_SERVER.to_owned(), cx);
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let outcome = caller.call(verb).await;
+            this.update(cx, |this, cx| match outcome {
+                Outcome::Error { message, .. } => this.show_notice(message, cx),
+                _ => then(this, cx),
+            })
+        })
+        .detach();
+    }
+
+    /// "Start a project here": make a project of the focused terminal's repository, with the
+    /// terminal as its orchestrator, and show its board once the server has it. It is named
+    /// for the directory and lands on the branch checked out.
+    pub(super) fn start_project(
+        &mut self,
+        _: &StartProject,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.focused_session() else {
+            self.show_notice(NO_TERMINAL.to_owned(), cx);
+            return;
+        };
+        if let Some(project) =
+            self.projects.mirror.of_orchestrator(session).map(|b| b.project.id.clone())
+        {
+            self.open_project(&project, cx);
+            return;
+        }
+        let Some(worker) = self.worker_of_session(session).and_then(worker_id) else {
+            self.show_notice(NO_TERMINAL.to_owned(), cx);
+            return;
+        };
+        let summary = self.summary(session);
+        let Some(repo) = summary.and_then(|s| s.repo.clone().or_else(|| s.cwd.clone())) else {
+            self.show_notice("This terminal has no directory to start a project in".to_owned(), cx);
+            return;
+        };
+        let target = summary.and_then(|s| s.branch.clone()).unwrap_or_else(|| "main".to_owned());
+        let title = repo.trim_end_matches('/').rsplit('/').next().unwrap_or(&repo).to_owned();
+        let mirror = &self.projects.mirror;
+        let Some(project) = project_name(&title, |id| mirror.get(id).is_some()) else {
+            self.show_notice(format!("No name is left for a project of {title}"), cx);
+            return;
+        };
+        let verb = Verb::ProjectCreate {
+            project: project.clone(),
+            title,
+            repo,
+            target,
+            verifier: None,
+            review: None,
+            push: false,
+            orchestrator: Some(TermRef { worker, session }),
+            limits: LimitsChange::default(),
+            metadata: None,
+        };
+        self.send_to_server(
+            verb,
+            move |this, cx| {
+                // The server's word of the new project may come before or after its answer.
+                if this.projects.mirror.get(&project).is_some() {
+                    this.open_project(&project, cx);
+                } else {
+                    this.projects.opening = Some(project);
+                }
+            },
+            cx,
+        );
     }
 
     /// How each agent of `board` is doing, as this client sees it.

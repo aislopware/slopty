@@ -354,6 +354,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Clear the screen and history", IconName::Eraser, Box::new(ClearScreen)),
     ];
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));
+    items.extend(crate::project::palette_items(&workspace));
     items.extend(crate::file::pages_palette_items(&workspace));
     items.extend(crate::file::editor_palette_items(&workspace));
     // Only a debug build's page is open to Web Inspector, and only the Mac has one of its own.

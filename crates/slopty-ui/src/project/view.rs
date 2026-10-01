@@ -7,14 +7,16 @@
 //! first. Every node that runs somewhere opens its agent's tile with a click or ↩.
 
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Div, ElementId, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle, SharedString,
-    Stateful, StatefulInteractiveElement as _, Styled as _, Task, Window, div, px, relative,
+    AnyElement, AppContext as _, Context, Div, ElementId, EventEmitter, FocusHandle, Focusable,
+    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Task,
+    Window, div, px, relative,
 };
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
@@ -25,10 +27,13 @@ use slopty_proto::project::{
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::model::{
-    Board, Lane, TreeRow, finding_place, queue_words, review_detail, short_commit, state_status,
-    state_word, verdict_detail, verdict_tail,
+    Board, Lane, TaskAction, TreeRow, finding_place, queue_words, review_detail, short_commit,
+    state_status, state_word, verdict_detail, verdict_tail,
 };
-use super::{Lens, OpenNode, SelectNext, SelectPrevious, ShowBoard, ShowTimeline, ShowTree};
+use super::{
+    ApproveTask, DeleteProject, Lens, MergeTask, OpenNode, RetryTask, SelectNext, SelectPrevious,
+    ShowBoard, ShowTerminal, ShowTimeline, ShowTree, TogglePush,
+};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
@@ -59,6 +64,8 @@ const INDENT: f32 = 16.0;
 const ARRIVE: f32 = 4.0;
 /// How often the timeline's ages move on: they say minutes at the finest.
 const AGE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// The most facts a row's or a card's second line holds: two separators.
+const META_PARTS: usize = 3;
 /// The progress bar's height, at zoom 1.
 const BAR_H: f32 = 3.0;
 
@@ -66,7 +73,7 @@ const BAR_H: f32 = 3.0;
 pub type Node = Option<TaskId>;
 
 /// What a board tells the workspace.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectEvent {
     /// Open this node's agent in its tile.
     Open(Node),
@@ -74,7 +81,18 @@ pub enum ProjectEvent {
     Output(TermRef),
     /// Open the Claude Code session a task's reviewer reads its work in.
     Reviewer(TermRef),
+    /// Do this to a task ([`Board::actions`]).
+    Act(TaskId, TaskAction),
+    /// Push the target after each merge, or stop.
+    SetPush(bool),
+    /// Let the project go; the person pressed for it twice.
+    Delete,
+    /// Say this: what was asked of the board cannot be done now.
+    Say(String),
 }
+
+/// How long a first "Delete the project" waits for the second that does it.
+const DELETE_CONFIRM: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What a task's checks show on its card and its row: its verifier or its reviewer at work,
 /// or the last word that still speaks.
@@ -162,11 +180,15 @@ pub struct ProjectView {
     zoom: f32,
     width: f32,
     theme: Theme,
+    /// The theme a hover hint draws by, shared by every hint the board makes.
+    hint_theme: Rc<Theme>,
     focus: FocusHandle,
     scroll: ScrollHandle,
     plate: Plate,
     /// Moves the timeline's ages on once a minute while the timeline shows.
     tick: Option<Task<()>>,
+    /// When "Delete the project" was asked once, waiting for the second ask that does it.
+    delete_asked: Option<std::time::Instant>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -200,11 +222,13 @@ impl ProjectView {
             picked: None,
             zoom: 1.0,
             width: 0.0,
+            hint_theme: Rc::new(theme.clone()),
             theme,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             plate: Plate::default(),
             tick: None,
+            delete_asked: None,
             #[cfg(test)]
             renders: 0,
         }
@@ -272,6 +296,7 @@ impl ProjectView {
     /// Draw by another theme.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme != theme {
+            self.hint_theme = Rc::new(theme.clone());
             self.theme = theme;
             cx.notify();
         }
@@ -351,6 +376,44 @@ impl ProjectView {
             None => return,
         };
         cx.emit(ProjectEvent::Open(node));
+    }
+
+    /// Do `action` to the task the keyboard stands on, or say why not.
+    pub fn act_on_picked(&self, action: TaskAction, cx: &mut Context<Self>) {
+        let Some(board) = &self.seen.board else { return };
+        let Some(Some(task)) = self.picked() else {
+            cx.emit(ProjectEvent::Say(format!("Stand on a task to {}", verb_of(action))));
+            return;
+        };
+        if board.actions(task).contains(&action) {
+            cx.emit(ProjectEvent::Act(task, action));
+        } else {
+            cx.emit(ProjectEvent::Say(format!("#{task} has nothing to {}", verb_of(action))));
+        }
+    }
+
+    /// Push the target after each merge, or stop, as the project does not now.
+    pub fn toggle_push(&self, cx: &mut Context<Self>) {
+        if let Some(board) = &self.seen.board {
+            cx.emit(ProjectEvent::SetPush(!board.project.push));
+        }
+    }
+
+    /// The first ask says what a second does; a second within five seconds lets the project
+    /// go.
+    pub fn delete(&mut self, cx: &mut Context<Self>) {
+        let Some(board) = &self.seen.board else { return };
+        let now = std::time::Instant::now();
+        if self.delete_asked.is_some_and(|at| now.duration_since(at) < DELETE_CONFIRM) {
+            self.delete_asked = None;
+            cx.emit(ProjectEvent::Delete);
+            return;
+        }
+        self.delete_asked = Some(now);
+        let title = &board.project.title;
+        cx.emit(ProjectEvent::Say(format!(
+            "Delete again to let {title} go. Its terminals stay; its tasks and timeline do not"
+        )));
     }
 
     /// Everything the keyboard can stand on, in the order the lens draws it.
@@ -456,16 +519,61 @@ pub(super) fn lanes_across(width: f32, zoom: f32) -> u16 {
     (2..=lanes).rev().find(|&n| width >= f32::from(n) * LANE_W * zoom).unwrap_or(1)
 }
 
-/// A lane's tone: the mark its tasks wear.
+/// A lane's tone: colour for the two lanes that need the person, and for the rest the ink
+/// of how far along they are, the finished a step brighter than what is still to do.
 const fn lane_tone(theme: &Theme, lane: Lane) -> Rgb {
     let s = &theme.surfaces;
     match lane {
         Lane::NeedsYou => s.warn,
         Lane::Failed => s.error,
-        Lane::Working | Lane::Verifying => s.accent,
-        Lane::UpNext => s.text_muted,
-        Lane::ReadyToMerge | Lane::Merged => s.success,
+        Lane::Working | Lane::Verifying | Lane::UpNext => s.text_muted,
+        Lane::ReadyToMerge | Lane::Merged => s.text_secondary,
     }
+}
+
+/// The push toggle's one name, said as pressed or not.
+pub(crate) const PUSH: &str = "Push after each merge";
+/// The header's way back to the orchestrator's terminal.
+pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
+
+/// Where a project's work lands and how it is checked, as one sentence: "slopty → main,
+/// verified by cargo gate and reviewed".
+fn place_line(project: &slopty_proto::project::Project) -> String {
+    let place = format!("{} \u{2192} {}", project.repo, project.target);
+    match (&project.verifier, project.review.is_some()) {
+        (Some(verifier), true) => format!("{place}, verified by {verifier} and reviewed"),
+        (Some(verifier), false) => format!("{place}, verified by {verifier}"),
+        (None, true) => format!("{place}, reviewed"),
+        (None, false) => place,
+    }
+}
+
+/// What an action does, as "nothing to …" and "stand on a task to …" say it.
+const fn verb_of(action: TaskAction) -> &'static str {
+    match action {
+        TaskAction::Merge => "merge",
+        TaskAction::Retry => "retry",
+        TaskAction::Approve => "approve",
+    }
+}
+
+/// A status's tone on the board: colour only for what needs the person, warn for *Needs
+/// you* and error for *Failed*; every other state is the muted ink, and recedes.
+const fn board_tone(theme: &Theme, status: Status) -> Rgb {
+    let s = &theme.surfaces;
+    match status {
+        Status::NeedsYou => s.warn,
+        Status::Failed => s.error,
+        Status::Idle | Status::Working | Status::Running | Status::Done | Status::Away => {
+            s.text_muted
+        }
+    }
+}
+
+/// What a row says to a screen reader: its parts that say anything, comma by comma.
+fn said(parts: &[&str]) -> SharedString {
+    let parts: Vec<&str> = parts.iter().copied().filter(|p| !p.is_empty()).collect();
+    SharedString::from(parts.join(", "))
 }
 
 /// An element id for the `n`th of a kind.
@@ -483,25 +591,42 @@ impl ProjectView {
         px(v * self.zoom)
     }
 
-    /// The name, where the work lands, and how far along it is.
-    fn header(&self, board: &Board) -> Div {
+    /// The name, where the work lands and how it is checked, how far along it is and how
+    /// many of its agents run, and its two controls: pushing, and the way back to the
+    /// orchestrator's terminal. The readouts are columns, so the line under the title is a
+    /// sentence and not a string of facts.
+    fn header(&self, board: &Board, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let project = &board.project;
         let (merged, total) = board.progress();
         let progress = (total > 0).then(|| format!("{merged} of {total} merged"));
-        let live = board.live();
-        let limit = project.limits.live_per_project;
-        let mut place =
-            vec![project.id.to_string(), format!("{} \u{2192} {}", project.repo, project.target)];
-        if let Some(verifier) = &project.verifier {
-            place.push(format!("verified by {verifier}"));
-        }
-        if project.review.is_some() {
-            place.push("reviewed before it merges".to_owned());
-        }
-        place.push(format!("{live} of {limit} agents live"));
+        let live = format!("{} of {} live", board.live(), project.limits.live_per_project);
+        let place = place_line(project);
+        let readout = |id: &'static str, text: String| {
+            crate::kit::tabular(div())
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .flex_none()
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_secondary))
+                .child(SharedString::from(text))
+        };
+        let push = project.push;
+        let push_toggle =
+            crate::kit::icon_toggle(theme, "project-push", IconName::Upload, PUSH, push, self.zoom)
+                .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                    cx.emit(ProjectEvent::SetPush(!push));
+                }));
+        let terminal = crate::kit::icon_button_at(
+            theme,
+            "project-terminal",
+            IconName::SquareTerminal,
+            SHOW_TERMINAL,
+            self.zoom,
+        )
+        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::Open(None))));
         let title = div()
             .flex()
             .items_center()
@@ -526,15 +651,10 @@ impl ProjectView {
                     .text_color(hsla(s.text))
                     .child(SharedString::from(project.title.clone())),
             )
-            .children(progress.map(|p| {
-                crate::kit::tabular(div())
-                    .id("project-progress")
-                    .debug_selector(|| "project-progress".to_owned())
-                    .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
-                    .text_color(hsla(s.text_secondary))
-                    .child(SharedString::from(p))
-            }));
+            .child(readout("project-live", live))
+            .children(progress.map(|p| readout("project-progress", p)))
+            .child(push_toggle)
+            .child(terminal);
         let meta = div()
             .id("project-place")
             .debug_selector(|| "project-place".to_owned())
@@ -544,7 +664,7 @@ impl ProjectView {
             .text_ellipsis()
             .text_size(self.z(theme.typography.meta()))
             .text_color(hsla(s.text_muted))
-            .child(dotted(theme, place.join(" \u{b7} ")));
+            .child(SharedString::from(place));
         div()
             .flex_none()
             .flex()
@@ -558,11 +678,56 @@ impl ProjectView {
             .child(self.bar(board))
     }
 
+    /// A task's actions, as buttons on its row or card: what needs the person to move on.
+    fn actions(
+        &self,
+        board: &Board,
+        task: TaskId,
+        prefix: &str,
+        cx: &Context<Self>,
+    ) -> Option<Div> {
+        let actions = board.actions(task);
+        if actions.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let buttons = actions.into_iter().map(|action| {
+            let id = action.selector(prefix, task);
+            let selector = id.clone();
+            let el = div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("{} #{task}", action.label())))
+                .flex_none()
+                .px(self.z(sp.xs))
+                .rounded(self.z(theme.radii.sm))
+                .border_1()
+                .border_color(hsla(s.border))
+                .text_size(self.z(theme.typography.meta()))
+                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                .text_color(hsla(s.text))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.overlay)))
+                .child(action.label());
+            tab_stop(el, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+                cx.stop_propagation();
+                cx.emit(ProjectEvent::Act(task, action));
+            }))
+        });
+        Some(div().flex_none().flex().items_center().gap(self.z(sp.xxs)).children(buttons))
+    }
+
     /// Every task at once: a segment each, in its own lane's tone, left to right as the lanes
     /// run. The bar is the board seen from across the room.
     fn bar(&self, board: &Board) -> Div {
         let theme = &self.theme;
         let total = board.tasks.len();
+        // The bar's legend: what each segment counts, in the lanes' own words.
+        let legend = self.summary();
+        let hint_theme = Rc::clone(&self.hint_theme);
         let track = div()
             .id("project-bar")
             .debug_selector(|| "project-bar".to_owned())
@@ -575,7 +740,12 @@ impl ProjectView {
             .gap(self.z(1.0))
             .rounded(self.z(BAR_H))
             .overflow_hidden()
-            .bg(hsla(theme.surfaces.border_subtle));
+            .bg(hsla(theme.surfaces.border_subtle))
+            .tooltip(move |_window, cx| {
+                let theme = Rc::clone(&hint_theme);
+                let legend = legend.clone();
+                cx.new(|_| crate::kit::Hint::new(legend, "", theme)).into()
+            });
         if total == 0 {
             return div().child(track);
         }
@@ -722,7 +892,8 @@ impl ProjectView {
         // A row under "Needs you" says no word its heading says.
         let word = card
             .filter(|_| mark.is_none())
-            .map(|c| (state_word(c.state), state_status(c.state).tone(theme)));
+            .map(|c| (state_word(c.state), board_tone(theme, state_status(c.state))));
+        let actions = node.and_then(|task| self.actions(board, task, prefix, cx));
         let settled = card.is_some_and(|c| c.state == TaskState::Merged);
         // The tree shows a verifier running or failed under its row; a pass is a word in it.
         let check = card
@@ -765,19 +936,19 @@ impl ProjectView {
                     .text_size(self.z(theme.typography.meta()))
                     .text_color(hsla(tone))
                     .child(word)
-            }));
-        let second = div()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .text_size(self.z(theme.typography.meta()))
-            .text_color(hsla(s.text_muted))
-            .child(dotted(theme, meta.clone()));
-        let label = SharedString::from(match word {
-            Some((word, _)) => format!("{title}, {word}, {meta}"),
-            None => format!("{title}, {meta}"),
+            }))
+            .children(actions);
+        let second = (!meta.is_empty()).then(|| {
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_muted))
+                .child(dotted(theme, meta.clone()))
         });
+        let label = said(&[&title, word.map_or("", |(word, _)| word), &meta]);
         let selector = key.clone();
         let row = div()
             .id(SharedString::from(key.clone()))
@@ -812,7 +983,7 @@ impl ProjectView {
                     .flex()
                     .flex_col()
                     .child(first)
-                    .child(second)
+                    .children(second)
                     .children(check.as_ref().map(|c| self.check_block(&key, c, cx))),
             );
         let arrive = ElementId::Name(format!("{key}-in").into());
@@ -851,7 +1022,7 @@ impl ProjectView {
                 theme,
                 status,
                 self.z(theme.typography.icon()),
-                hsla(status.tone(theme)),
+                hsla(board_tone(theme, status)),
             )),
             None => slot.child(
                 icon(theme, IconName::Bot, IconSize::Inline, hsla(theme.surfaces.text_secondary))
@@ -860,8 +1031,11 @@ impl ProjectView {
         }
     }
 
-    /// A node's second line: where it runs, its branch and worktree, what it still waits on,
-    /// what runs inside it, and what its agent says it is doing.
+    /// A node's second line, the three facts that matter most of what moves it on (what it
+    /// waits on, the step it is at, its place in the queue, its last pass, where it merged),
+    /// what its agent says it is doing, where it runs, its branch and pull request, that it
+    /// only reads, and what runs inside it. Two separators at the most: the rest is on its
+    /// card's other lines, the timeline, and its agent's tile.
     fn node_meta(
         &self,
         board: &Board,
@@ -870,25 +1044,11 @@ impl ProjectView {
         check: Option<&Check<'_>>,
     ) -> String {
         let mut parts: Vec<String> = Vec::new();
-        if let Some(worker) = board.worker(node) {
-            parts.push(self.worker_name(worker));
-        } else if card.is_some() {
-            parts.push("Not placed".to_owned());
-        }
         if let Some(card) = card {
-            if let Some(branch) = &card.branch {
-                parts.push(branch.clone());
-            }
-            if let Some(pr) = &card.pr {
-                parts.push(format!("#{}", pr.number));
-            }
             let waits = board.waiting_on(card.id);
             if !waits.is_empty() && matches!(card.state, TaskState::Planned) {
                 let list: Vec<String> = waits.iter().map(|t| format!("#{t}")).collect();
                 parts.push(format!("after {}", list.join(", ")));
-            }
-            if card.read_only {
-                parts.push("reads only".to_owned());
             }
             // A step under way or failed says so on the row; one done is the timeline's, and a
             // check running, or a word with its own block, says it there.
@@ -916,12 +1076,27 @@ impl ProjectView {
                 let pushed = if *pushed { ", pushed" } else { "" };
                 parts.push(format!("into {target} at {}{pushed}", short_commit(head)));
             }
+            if let Some(status) = card.status.as_deref().filter(|s| !s.is_empty()) {
+                parts.push(crate::kit::first_line(status).to_owned());
+            }
+        }
+        if let Some(worker) = board.worker(node) {
+            parts.push(self.worker_name(worker));
+        }
+        if let Some(card) = card {
+            if let Some(branch) = &card.branch {
+                parts.push(branch.clone());
+            }
+            if let Some(pr) = &card.pr {
+                parts.push(format!("PR #{}", pr.number));
+            }
+            if card.read_only {
+                parts.push("reads only".to_owned());
+            }
         }
         let counts = card.map_or(board.orchestrator_natives, |c| c.natives);
         parts.extend(natives_line(counts));
-        if let Some(status) = card.and_then(|c| c.status.as_deref()).filter(|s| !s.is_empty()) {
-            parts.push(crate::kit::first_line(status).to_owned());
-        }
+        parts.truncate(META_PARTS);
         parts.join(" \u{b7} ")
     }
 
@@ -957,25 +1132,40 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let (status, word, detail, tail) = match check {
+        // Red is for a run that failed; a reviewer asking for changes is a word, not an alarm.
+        let (glyph, tone, word, detail, tail) = match check {
             Check::Running { line, review: false, .. } => {
-                (Status::Working, "Verifying", line.clone(), Vec::new())
+                let status = Status::Working;
+                (status.icon(), board_tone(theme, status), "Verifying", line.clone(), Vec::new())
             }
             Check::Running { line, review: true, .. } => {
-                (Status::Working, "Reviewing", line.clone(), Vec::new())
+                let status = Status::Working;
+                (status.icon(), board_tone(theme, status), "Reviewing", line.clone(), Vec::new())
             }
             Check::Verdict { run, .. } if run.passed => {
-                (Status::Done, "Passed", verdict_detail(run), Vec::new())
+                (IconName::CircleCheck, s.text_secondary, "Passed", verdict_detail(run), Vec::new())
             }
-            Check::Verdict { run, .. } => {
-                (Status::Failed, "Failed", verdict_detail(run), verdict_tail(run, TAIL_LINES))
-            }
-            Check::Review { run, .. } if run.verdict.approved => {
-                (Status::Done, "Approved", review_detail(run), Vec::new())
-            }
-            Check::Review { run, .. } => {
-                (Status::Failed, "Changes asked", review_detail(run), Vec::new())
-            }
+            Check::Verdict { run, .. } => (
+                IconName::CircleX,
+                s.error,
+                "Failed",
+                verdict_detail(run),
+                verdict_tail(run, TAIL_LINES),
+            ),
+            Check::Review { run, .. } if run.verdict.approved => (
+                IconName::CircleCheck,
+                s.text_secondary,
+                "Approved",
+                review_detail(run),
+                Vec::new(),
+            ),
+            Check::Review { run, .. } => (
+                IconName::MessageSquareWarning,
+                s.text_secondary,
+                "Changes asked",
+                review_detail(run),
+                Vec::new(),
+            ),
         };
         let review = check.is_review();
         let (link_word, link_label) = if review {
@@ -983,7 +1173,6 @@ impl ProjectView {
         } else {
             ("Output", "Show the verifier's output")
         };
-        let tone = status.tone(theme);
         let output = check.term().map(|term| {
             let id = format!("{key}-output");
             let selector = id.clone();
@@ -1020,7 +1209,10 @@ impl ProjectView {
             .items_center()
             .gap(self.z(sp.xs))
             .min_w_0()
-            .child(status_icon(theme, status, self.z(theme.typography.icon()), hsla(tone)))
+            .child(
+                icon(theme, glyph, IconSize::Inline, hsla(tone))
+                    .size(self.z(theme.typography.icon())),
+            )
             .child(div().flex_none().text_color(hsla(tone)).child(word))
             .child(
                 crate::kit::tabular(div())
@@ -1097,38 +1289,60 @@ impl ProjectView {
             .saturating_sub(TAIL_LINES)
             .saturating_add(usize::from(run.more));
         let rows = shown.map(|f| {
-            let tone = if f.blocking { s.error } else { s.text_muted };
+            // What blocks reads at the default ink with its ✕, the rest muted: no red, which
+            // says a run failed.
+            let tone = if f.blocking { s.text } else { s.text_muted };
+            let severity = div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(self.z(sp.xxs))
+                .text_color(hsla(tone))
+                .when(f.blocking, |el| {
+                    el.child(
+                        icon(theme, IconName::X, IconSize::Inline, hsla(tone))
+                            .size(self.z(theme.typography.icon())),
+                    )
+                })
+                .child(sentence_case(&f.severity));
+            let place = finding_place(f).map(|place| {
+                // The file's own name and line, as narrow as a card is: the path is in the
+                // session and in what the agent was told.
+                let short = place.rsplit('/').next().unwrap_or(&place).to_owned();
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .font_family(mono.clone())
+                    .text_size(self.z(theme.typography.caption()))
+                    .text_color(hsla(s.text_muted))
+                    .child(short)
+            });
+            // Its words under its severity and place, the lane's width and two lines of it:
+            // the reviewer's session holds the rest.
+            let body = div()
+                .min_w_0()
+                .overflow_hidden()
+                .line_clamp(2)
+                .text_ellipsis()
+                .text_color(hsla(s.text_secondary))
+                .child(crate::kit::first_line(&f.body).to_owned());
             div()
                 .flex()
-                .items_baseline()
-                .gap(self.z(sp.xs))
+                .flex_col()
                 .min_w_0()
-                .child(div().flex_none().text_color(hsla(tone)).child(sentence_case(&f.severity)))
-                .children(finding_place(f).map(|place| {
-                    // The file's own name and line, as narrow as a card is: the path is in the
-                    // session and in what the agent was told.
-                    let short = place.rsplit('/').next().unwrap_or(&place).to_owned();
-                    div()
-                        .flex_none()
-                        .max_w(relative(0.4))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .font_family(mono.clone())
-                        .text_size(self.z(theme.typography.caption()))
-                        .text_color(hsla(s.text_muted))
-                        .child(short)
-                }))
                 .child(
                     div()
-                        .flex_1()
+                        .flex()
+                        .items_baseline()
+                        .gap(self.z(sp.xs))
                         .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(hsla(s.text_secondary))
-                        .child(crate::kit::first_line(&f.body).to_owned()),
+                        .child(severity)
+                        .children(place),
                 )
+                .child(body)
         });
         let more = (rest > 0).then(|| {
             let word = if rest == 1 { "finding" } else { "findings" };
@@ -1282,8 +1496,7 @@ impl ProjectView {
         let key = format!("project-card-{}", card.id);
         let arrive = ElementId::Name(format!("{key}-in").into());
         let selector = key.clone();
-        let label =
-            SharedString::from(format!("{}, {}, {meta}", card.title, state_word(card.state)));
+        let label = said(&[&card.title, state_word(card.state), &meta]);
         let el = div()
             .id(SharedString::from(key))
             .debug_selector(move || selector)
@@ -1320,9 +1533,10 @@ impl ProjectView {
                             .text_ellipsis()
                             .text_color(hsla(s.text))
                             .child(SharedString::from(card.title.clone())),
-                    ),
+                    )
+                    .children(self.actions(board, card.id, "project-card", cx)),
             )
-            .child(
+            .children((!meta.is_empty()).then(|| {
                 div()
                     .min_w_0()
                     .overflow_hidden()
@@ -1330,8 +1544,8 @@ impl ProjectView {
                     .text_ellipsis()
                     .text_size(self.z(theme.typography.meta()))
                     .text_color(hsla(s.text_muted))
-                    .child(dotted(theme, meta)),
-            )
+                    .child(dotted(theme, meta))
+            }))
             .children(block)
             .children(why.map(|why| {
                 div()
@@ -1524,7 +1738,7 @@ fn natives_line(counts: NativeCounts) -> Option<String> {
         (None, None) => None,
         (Some(a), None) => Some(a),
         (None, Some(t)) => Some(t),
-        (Some(a), Some(t)) => Some(format!("{a} \u{b7} {t}")),
+        (Some(a), Some(t)) => Some(format!("{a}, {t}")),
     }
 }
 
@@ -1536,33 +1750,32 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         Moment::Orchestrator { .. } => (IconName::Bot, s.text_secondary),
         Moment::Limits { .. } => (IconName::ListFilter, s.text_muted),
         Moment::Claimed { .. } => (IconName::Lock, s.text_muted),
-        Moment::Assigned { .. } => (IconName::SquareTerminal, s.accent),
+        Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),
         Moment::State { to, .. } => {
             let status = state_status(*to);
-            (status.icon(), status.tone(theme))
+            (status.icon(), board_tone(theme, status))
         }
         Moment::Branch { pr: Some(_), .. } => (IconName::GitPullRequest, s.text_secondary),
         Moment::Branch { .. } => (IconName::GitBranch, s.text_secondary),
-        Moment::Verified(run) if run.passed => (IconName::CircleCheck, s.success),
+        Moment::Verified(run) if run.passed => (IconName::CircleCheck, s.text_secondary),
         Moment::Verified(_) => (IconName::CircleX, s.error),
-        Moment::Reviewed(run) if run.verdict.approved => (IconName::CircleCheck, s.success),
-        Moment::Reviewed(_) => (IconName::MessageSquareWarning, s.error),
+        Moment::Reviewed(run) if run.verdict.approved => (IconName::CircleCheck, s.text_secondary),
+        Moment::Reviewed(_) => (IconName::MessageSquareWarning, s.text_secondary),
         Moment::AgentGone { .. } => (IconName::Power, s.text_muted),
         Moment::Note { .. } => (IconName::MessageSquare, s.text_secondary),
         Moment::Reported { report } => match report.kind {
             ReportKind::Checkpoint => (IconName::Flag, s.text_secondary),
             ReportKind::NeedsInput => (IconName::MessageSquareWarning, s.warn),
             ReportKind::Stuck => (IconName::CircleAlert, s.error),
-            ReportKind::Done => (IconName::CircleCheck, s.success),
+            ReportKind::Done => (IconName::CircleCheck, s.text_secondary),
         },
         Moment::Delivered { .. } => (IconName::Inbox, s.text_muted),
         Moment::Step(step) => match (step.kind, &step.state) {
             (_, StepState::Failed { .. }) => (IconName::CircleX, s.error),
             (StepKind::Clone, _) => (IconName::FolderGit2, s.text_secondary),
-            (StepKind::Home, StepState::Done { .. }) => (IconName::GitBranch, s.success),
+            (StepKind::Home, StepState::Done { .. }) => (IconName::GitBranch, s.text_secondary),
             (StepKind::Home, _) => (IconName::Download, s.text_secondary),
             (StepKind::Verify, _) => (IconName::ListChecks, s.text_secondary),
-            (StepKind::Merge, StepState::Done { .. }) => (IconName::GitMerge, s.success),
             (StepKind::Merge, _) => (IconName::GitMerge, s.text_secondary),
             (StepKind::Review, _) => (IconName::Eye, s.text_secondary),
         },
@@ -1592,6 +1805,20 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &ShowTree, _w, cx| this.show(Lens::Tree, cx)))
             .on_action(cx.listener(|this, _: &ShowBoard, _w, cx| this.show(Lens::Board, cx)))
             .on_action(cx.listener(|this, _: &ShowTimeline, _w, cx| this.show(Lens::Timeline, cx)))
+            .on_action(cx.listener(|this, _: &MergeTask, _w, cx| {
+                this.act_on_picked(TaskAction::Merge, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RetryTask, _w, cx| {
+                this.act_on_picked(TaskAction::Retry, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ApproveTask, _w, cx| {
+                this.act_on_picked(TaskAction::Approve, cx);
+            }))
+            .on_action(cx.listener(|this, _: &TogglePush, _w, cx| this.toggle_push(cx)))
+            .on_action(cx.listener(|_this, _: &ShowTerminal, _w, cx| {
+                cx.emit(ProjectEvent::Open(None));
+            }))
+            .on_action(cx.listener(|this, _: &DeleteProject, _w, cx| this.delete(cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -1608,7 +1835,7 @@ impl Render for ProjectView {
             Lens::Board => self.board(&board, cx),
             Lens::Timeline => self.timeline(&board, cx),
         };
-        root.child(self.header(&board))
+        root.child(self.header(&board, cx))
             .children(self.needs_you(&board, cx))
             .child(self.lenses(cx))
             .child(

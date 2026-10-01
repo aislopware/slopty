@@ -94,6 +94,8 @@ pub enum Keep {
     Watch(Watched),
     /// A terminal no longer watched.
     Unwatch(SessionId),
+    /// A project the person let go, with all it held.
+    Forget(ProjectId),
 }
 
 /// One change a project took, whole: what the store's log keeps, and what a client is pushed
@@ -136,6 +138,7 @@ impl ProjectsFile {
                 }
             }
             Keep::Unwatch(session) => self.watched.retain(|w| w.term.session != *session),
+            Keep::Forget(project) => self.projects.retain(|r| r.project.id != *project),
         }
     }
 
@@ -928,6 +931,12 @@ impl Projects {
     }
 
     /// A project's record.
+    /// Let `id` go with its tasks, its queue and its timeline. Its terminals are not the
+    /// store's: they run on, as terminals.
+    pub(crate) fn delete(&mut self, id: &ProjectId) -> Result<(), Refused> {
+        self.records.remove(id).map(|_| ()).ok_or_else(|| unknown_project(id))
+    }
+
     pub(crate) fn project(&self, id: &ProjectId) -> Result<&Project, Refused> {
         self.records.get(id).map(|r| &r.project).ok_or_else(|| unknown_project(id))
     }

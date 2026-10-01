@@ -802,6 +802,36 @@ impl Hub {
     }
 
     /// Every project whole, with what runs now.
+    /// The person lets `project` go: its record, its lane's work, a reviewer reading for it
+    /// and the reports waiting in it. Every client is sent the projects afresh, which a
+    /// snapshot's first part replaces whole, as no change says a project is gone.
+    pub(super) fn project_delete(&self, project: &ProjectId) -> Outcome {
+        let mut guard = self.inner.state.lock();
+        let state = &mut *guard;
+        if let Err(refused) = state.projects.delete(project) {
+            return refused;
+        }
+        let readers: Vec<TermRef> = state
+            .reviews
+            .iter()
+            .filter(|((p, _), _)| p == project)
+            .map(|(_, reading)| reading.term())
+            .collect();
+        state.reviews.retain(|(p, _), _| p != project);
+        keep(state, Keep::Forget(project.clone()));
+        let projects = Self::projects_snapshot(state);
+        let seq = self.inner.log.lock().next.saturating_sub(1);
+        for part in parts(seq, projects) {
+            self.announce(FromServer::Projects(Box::new(part)));
+        }
+        drop(guard);
+        for term in readers {
+            self.close_soon(term);
+        }
+        tracing::info!(%project, "project let go");
+        Outcome::Done
+    }
+
     pub(super) fn projects_snapshot(state: &mut State) -> Vec<ProjectStatus> {
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };

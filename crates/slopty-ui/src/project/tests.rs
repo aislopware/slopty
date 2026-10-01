@@ -503,3 +503,52 @@ fn a_review_speaks_while_it_holds_and_says_what_it_found() {
         ]
     );
 }
+
+/// What the person can do to a task from the board: merge what is done and not queued, retry
+/// a step that failed on the way to the target, approve over a reviewer that asked for changes
+/// or said nothing once the verifier passed, and nothing to a task that reads or has merged.
+#[test]
+fn a_task_offers_what_moves_it_on() {
+    use super::fixtures::{queued, review, run, step};
+    use super::model::TaskAction;
+
+    let worker = WorkerId::new();
+    let failed = |kind| StepState::Failed { why: format!("{kind:?} broke") };
+    let done = card(1, "Done, nothing queued it", TaskState::Done, None);
+    let in_queue = queued(card(2, "In the queue", TaskState::Done, None), 5, "2222222");
+    let mut verify = card(3, "Its verifier failed", TaskState::Waiting, None);
+    verify.verified = Some(run(false, "3333333"));
+    verify.step = Some(step(StepKind::Verify, worker, failed(StepKind::Verify), None));
+    let mut asked = card(4, "Changes asked", TaskState::Waiting, None);
+    asked.verified = Some(run(true, "4444444"));
+    asked.reviewed = Some(review(false, "4444444", None));
+    let mut silent = card(5, "The reviewer said nothing", TaskState::Waiting, None);
+    silent.verified = Some(run(true, "5555555"));
+    silent.step = Some(step(StepKind::Review, worker, failed(StepKind::Review), None));
+    let mut unverified = card(6, "Changes asked, not verified", TaskState::Waiting, None);
+    unverified.reviewed = Some(review(false, "6666666", None));
+    let mut reads = card(7, "Reads only", TaskState::Done, None);
+    reads.read_only = true;
+    let merged = card(8, "Merged", TaskState::Merged, None);
+    let mut clone = card(9, "Its clone failed", TaskState::Waiting, None);
+    clone.step = Some(step(StepKind::Clone, worker, failed(StepKind::Clone), None));
+    let mut merge = card(10, "Its merge failed", TaskState::Done, None);
+    merge.step = Some(step(StepKind::Merge, worker, failed(StepKind::Merge), None));
+    merge.merge = Some(slopty_proto::project::Merge::Queued { since_ms: AT });
+    let mirror =
+        one(vec![done, in_queue, verify, asked, silent, unverified, reads, merged, clone, merge]);
+    let b = board(&mirror);
+    let of = |n| b.actions(TaskId(n));
+    assert_eq!(of(1), [TaskAction::Merge]);
+    assert_eq!(of(2), [], "the queue already holds it");
+    assert_eq!(of(3), [TaskAction::Retry]);
+    assert_eq!(of(4), [TaskAction::Approve]);
+    assert_eq!(of(5), [TaskAction::Retry, TaskAction::Approve]);
+    assert_eq!(of(6), [], "the project's verifier has not passed it");
+    assert_eq!(of(7), [], "a task that only reads has nothing to land");
+    assert_eq!(of(8), []);
+    assert_eq!(of(9), [], "a clone is the worker's to make again, not the merge queue's");
+    assert_eq!(of(10), [TaskAction::Retry]);
+    assert_eq!(of(99), [], "no such task");
+    assert_eq!(TaskAction::Merge.selector("project-card", TaskId(1)), "project-card-merge-1");
+}

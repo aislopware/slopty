@@ -777,6 +777,22 @@ pub async fn project_status<D: Dispatch>(
     project_answer(dispatch, None, Verb::ProjectStatus { project, since, timeout_ms }).await
 }
 
+/// Let a project go, as the person: its tasks, queue and timeline. Its terminals run on.
+///
+/// # Errors
+/// The project is not named or not known, or the caller is an agent.
+pub async fn project_delete<D: Dispatch>(
+    dispatch: &D,
+    project: &str,
+    key: Option<IdempotencyKey>,
+) -> Result<(), ToolError> {
+    let project = project_named(Some(project), &Own::default())?;
+    match dispatch.send(key, Verb::ProjectDelete { project }).await {
+        Outcome::Done => Ok(()),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
 /// A task or a worker to run beside or away from: `#3` or `3` is a task, anything else a
 /// worker's name or id.
 pub async fn peer<D: Dispatch>(res: &mut Resolver<'_, D>, given: &str) -> Result<Peer, ToolError> {

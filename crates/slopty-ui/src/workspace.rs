@@ -1733,6 +1733,7 @@ impl gpui::Render for WorkspaceView {
         root.on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::toggle_conversation))
             .on_action(cx.listener(Self::toggle_project_board))
+            .on_action(cx.listener(Self::start_project))
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))

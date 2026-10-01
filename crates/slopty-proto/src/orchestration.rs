@@ -792,6 +792,12 @@ pub enum Verb {
         /// The branch work lands on.
         target: String,
     },
+    /// The person lets a project go: its board, its tasks and its queue. The terminals that
+    /// worked in it stay, as terminals. Answered with [`Outcome::Done`].
+    ProjectDelete {
+        /// Which.
+        project: ProjectId,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -874,6 +880,7 @@ impl Verb {
             | Self::TaskMerge { .. }
             | Self::TaskReview { .. }
             | Self::ReviewCheckout { .. }
+            | Self::ProjectDelete { .. }
             | Self::Verify { .. }
             | Self::Rebase { .. }
             | Self::FastForward { .. } => true,

@@ -1842,3 +1842,35 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
     .expect("the second trip ends");
     assert_eq!(failed, nothing);
 }
+
+/// Only the person lets a project go. Every client is sent the projects afresh without it, its
+/// store forgets it, and its name is free again.
+#[tokio::test]
+async fn the_person_lets_a_project_go_and_every_client_hears_it() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let mut kept = hub.keep_projects();
+    create(&hub, None).await;
+    new_task(&hub, Placement::default()).await;
+    let mut pushed = hub.subscribe();
+    let delete = || Verb::ProjectDelete { project: project() };
+    let theirs = hub.dispatch_as(Speaker::Agent, None, delete()).await;
+    refused(&theirs, ErrorCode::Forbidden);
+    assert!(matches!(hub.dispatch(delete()).await, Outcome::Done));
+    let mut fresh = Vec::new();
+    while let Ok(msg) = pushed.try_recv() {
+        if let FromServer::Projects(part) = msg {
+            fresh.push(*part);
+        }
+    }
+    let [part] = fresh.as_slice() else { panic!("one part: {fresh:?}") };
+    assert!(part.first && part.last && part.projects.is_empty(), "{part:?}");
+    assert!(matches!(hub.dispatch(Verb::ProjectList).await, Outcome::Projects(p) if p.is_empty()));
+    refused(&hub.dispatch(delete()).await, ErrorCode::UnknownProject);
+
+    let mut file = ProjectsFile::default();
+    while let Ok(keep) = kept.try_recv() {
+        file.apply(&keep);
+    }
+    assert!(file.projects.is_empty(), "the store's replay forgets it: {file:?}");
+    create(&hub, None).await;
+}

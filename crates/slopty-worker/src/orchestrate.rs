@@ -278,6 +278,7 @@ impl Orchestrator {
             | Verb::ProjectSet { .. }
             | Verb::TaskMerge { .. }
             | Verb::TaskReview { .. }
+            | Verb::ProjectDelete { .. }
             | Verb::ProjectList
             | Verb::ProjectStatus { .. }
             | Verb::TaskCreate { .. }

@@ -103,6 +103,11 @@ pub enum ProjectCmd {
         #[arg(long)]
         metadata: Option<String>,
     },
+    /// Let a project go: its tasks, queue and timeline. The terminals that worked in it stay.
+    Delete {
+        /// The project.
+        project: String,
+    },
     /// Every project.
     List,
     /// A project's tree, bounds and timeline.
@@ -449,6 +454,11 @@ pub async fn project(
             let edit = ProjectEdit { orchestrator, verifier, review, push, limits, metadata };
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
+        }
+        ProjectCmd::Delete { project } => {
+            ops::project_delete(link, &project, key).await?;
+            println!("Let {project} go");
+            Ok(())
         }
         ProjectCmd::List => {
             let list = ops::projects(link).await?;

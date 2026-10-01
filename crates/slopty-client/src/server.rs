@@ -92,6 +92,29 @@ impl ServerCaller {
     }
 }
 
+impl ServerCaller {
+    /// A caller with no link behind it: its verbs wait in the [`CallQueue`] returned, to be
+    /// answered there. What a view is tested with, against no server.
+    #[must_use]
+    pub fn queued() -> (Self, CallQueue) {
+        let (calls, queued) = mpsc::channel(CALL_DEPTH);
+        (Self { calls }, CallQueue { queued })
+    }
+}
+
+/// The verbs a [`ServerCaller::queued`] sent, each with the way to answer it.
+#[derive(Debug)]
+pub struct CallQueue {
+    queued: mpsc::Receiver<Call>,
+}
+
+impl CallQueue {
+    /// The next verb sent, if one waits, and where its answer goes.
+    pub fn try_next(&mut self) -> Option<(Verb, oneshot::Sender<Outcome>)> {
+        self.queued.try_recv().ok().map(|call| (call.verb, call.reply))
+    }
+}
+
 /// A verb waiting for the link, and where its answer goes.
 #[derive(Debug)]
 struct Call {

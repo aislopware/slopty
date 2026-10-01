@@ -176,6 +176,40 @@ impl Lane {
     }
 }
 
+/// What the person does to a task from its card or row ([`Board::actions`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TaskAction {
+    /// Ask for its merge.
+    Merge,
+    /// Check it again from the start, and merge it if it passes.
+    Retry,
+    /// Approve its work over its reviewer.
+    Approve,
+}
+
+impl TaskAction {
+    /// Its button's word.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Merge => "Merge",
+            Self::Retry => "Retry",
+            Self::Approve => "Approve",
+        }
+    }
+
+    /// Its button's element name, for `task` on the row or card named by `prefix`.
+    #[must_use]
+    pub fn selector(self, prefix: &str, task: TaskId) -> String {
+        let word = match self {
+            Self::Merge => "merge",
+            Self::Retry => "retry",
+            Self::Approve => "approve",
+        };
+        format!("{prefix}-{word}-{task}")
+    }
+}
+
 /// One line of the tree, in the order it is drawn.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TreeRow {
@@ -473,6 +507,42 @@ impl Board {
             !matches!(card.state, TaskState::Merged | TaskState::Verifying)
         };
         speaks.then_some(run)
+    }
+
+    /// What the person can do to `task` from the board, besides opening its agent:
+    /// - merge a finished task the queue does not hold, as no check queued it;
+    /// - retry what failed on its way to the target (its branch home, its verifier, its reviewer,
+    ///   its merge), which checks it afresh;
+    /// - approve its work over a reviewer that asked for changes or ended with nothing said, once
+    ///   its verifier passed.
+    ///
+    /// A task that only reads, or is merged, has nothing to merge.
+    #[must_use]
+    pub fn actions(&self, task: TaskId) -> Vec<TaskAction> {
+        let Some(card) = self.tasks.get(&task) else { return Vec::new() };
+        if card.read_only || card.state == TaskState::Merged {
+            return Vec::new();
+        }
+        let failed = card.step.as_ref().filter(|s| matches!(s.state, StepState::Failed { .. }));
+        let mut out = Vec::new();
+        if card.state == TaskState::Done && card.merge.is_none() {
+            out.push(TaskAction::Merge);
+        }
+        let retried = |kind: StepKind| {
+            matches!(kind, StepKind::Home | StepKind::Verify | StepKind::Review | StepKind::Merge)
+        };
+        if failed.is_some_and(|s| retried(s.kind)) {
+            out.push(TaskAction::Retry);
+        }
+        let passed =
+            card.verified.as_ref().map_or_else(|| self.project.verifier.is_none(), |r| r.passed);
+        let asked = card.reviewed.as_ref().is_some_and(|r| !r.verdict.approved)
+            && card.state != TaskState::Done;
+        let silent = failed.is_some_and(|s| s.kind == StepKind::Review) && card.reviewed.is_none();
+        if passed && (asked || silent) {
+            out.push(TaskAction::Approve);
+        }
+        out
     }
 
     /// The reviewer's last word on `task` while it still speaks to what the task is now, as

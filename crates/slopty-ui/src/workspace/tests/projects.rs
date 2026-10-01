@@ -2,7 +2,7 @@
 //! with the server's changes, and every row a way to its agent's tile.
 
 use slopty_core::WorkerId;
-use slopty_proto::orchestration::TermRef;
+use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{Moment, ProjectUpdate, TaskId, TaskState};
 
 use super::*;
@@ -551,6 +551,209 @@ fn the_palette_and_an_agent_reach_the_board(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(orchestrator_tile));
+    assert!(shown(&view, cx, orchestrator));
+}
+
+/// Every verb the board sent so far, each answered with `answer`.
+fn sent(
+    queue: &mut slopty_client::server::CallQueue,
+    cx: &VisualTestContext,
+    answer: impl Fn(&Verb) -> Outcome,
+) -> Vec<Verb> {
+    cx.run_until_parked();
+    let mut verbs = Vec::new();
+    while let Some((verb, reply)) = queue.try_next() {
+        let _gone = reply.send(answer(&verb));
+        verbs.push(verb);
+    }
+    cx.run_until_parked();
+    verbs
+}
+
+fn done(_: &Verb) -> Outcome {
+    Outcome::Done
+}
+
+fn click(cx: &mut VisualTestContext, selector: &str) {
+    let at = cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str())).expect(selector);
+    cx.simulate_click(at.center(), Modifiers::none());
+    cx.run_until_parked();
+}
+
+/// The board's actions reach the server as the person's word. A finished task's Merge and a
+/// changes-asked task's Approve are buttons on its row and its card, which send `TaskMerge`
+/// and an approving `TaskReview` without opening the agent; a refusal is said in the server's
+/// words. The header's push toggle sets the project's pushing, and its terminal button turns
+/// the tile back to the orchestrator. "Delete the project" asks twice. With no server, the
+/// board says so.
+#[gpui::test]
+fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
+    use slopty_proto::orchestration::ErrorCode;
+
+    use crate::project::fixtures::{review, run};
+    use crate::project::{ApproveTask, DeleteProject, MergeTask};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let mut asked = card(4, "Read the snapshot", TaskState::Waiting, None);
+    asked.verified = Some(run(true, "4a7aa6d0"));
+    asked.reviewed = Some(review(false, "4a7aa6d0", None));
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(
+            11,
+            task_changed("board", card(5, "Land it", TaskState::Done, None), None),
+            cx,
+        );
+        v.project_update(12, task_changed("board", asked, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let project = fixtures::id("board");
+
+    click(cx, "project-row-merge-5");
+    assert_eq!(
+        sent(&mut queue, cx, done),
+        [Verb::TaskMerge { project: project.clone(), task: TaskId(5) }]
+    );
+    assert!(shown(&view, cx, orchestrator), "the button held the row's own click back");
+    assert!(
+        cx.debug_bounds("project-row-merge-1").is_none(),
+        "a task at work has nothing to merge"
+    );
+
+    click(cx, "project-row-approve-4");
+    let refused = |_: &Verb| Outcome::Error {
+        code: ErrorCode::Conflict,
+        message: "#4 changed under the board".into(),
+    };
+    let verbs = sent(&mut queue, cx, refused);
+    let [Verb::TaskReview { task: TaskId(4), verdict, .. }] = verbs.as_slice() else {
+        panic!("an approval: {verbs:?}");
+    };
+    assert!(verdict.approved && verdict.findings.is_empty(), "{verdict:?}");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("#4 changed under the board"),
+        "a refusal in the server's words"
+    );
+
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| b.show(Lens::Board, cx));
+    cx.run_until_parked();
+    for part in ["project-card-merge-5", "project-card-approve-4"] {
+        assert!(cx.debug_bounds(Box::leak(part.to_owned().into_boxed_str())).is_some(), "{part}");
+    }
+    b.update(cx, |b, cx| b.show(Lens::Tree, cx));
+    cx.run_until_parked();
+
+    click(cx, "project-push");
+    let verbs = sent(&mut queue, cx, done);
+    assert!(
+        matches!(verbs.as_slice(), [Verb::ProjectSet { push: Some(true), orchestrator: None, .. }]),
+        "{verbs:?}"
+    );
+
+    // From the keyboard, the action names the task stood on.
+    cx.dispatch_action(MergeTask);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("Stand on a task to merge")
+    );
+    b.update(cx, |b, cx| {
+        b.select_by(1, cx);
+        b.select_by(1, cx);
+    });
+    assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(1))));
+    cx.dispatch_action(ApproveTask);
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("#1 has nothing to approve")
+    );
+    assert_eq!(sent(&mut queue, cx, done), []);
+
+    cx.dispatch_action(DeleteProject);
+    cx.run_until_parked();
+    assert!(sent(&mut queue, cx, done).is_empty(), "the first ask only says what a second does");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some(
+            "Delete again to let Ship the project board go. Its terminals stay; its tasks and \
+             timeline do not"
+        )
+    );
+    cx.dispatch_action(DeleteProject);
+    assert_eq!(sent(&mut queue, cx, done), [Verb::ProjectDelete { project }]);
+
+    click(cx, "project-terminal");
+    assert!(!shown(&view, cx, orchestrator), "the header's way back to the terminal");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(None);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    click(cx, "project-row-merge-5");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some(super::super::projects::NO_SERVER)
+    );
+}
+
+/// "Start a project here" makes a project of the focused terminal's directory, named for it
+/// and kept clear of the names taken, with the terminal as its orchestrator, and shows its
+/// board once the server's word of it arrives. A terminal that already orchestrates one shows
+/// that one.
+#[gpui::test]
+fn a_project_starts_in_the_focused_terminal(cx: &mut TestAppContext) {
+    use crate::project::StartProject;
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (orchestrator_tile, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, _cx| v.set_server_caller(Some(caller)));
+    let here = SessionId::new();
+    let tile =
+        opens_in(&view, cx, &setup.fake, here, setup.fake.me, 3, Some("/Users/me/src/Board"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+
+    view.update_in(cx, |v, w, cx| v.start_project(&StartProject, w, cx));
+    let verbs = sent(&mut queue, cx, done);
+    let [Verb::ProjectCreate { project, title, repo, target, orchestrator: Some(term), .. }] =
+        verbs.as_slice()
+    else {
+        panic!("a project: {verbs:?}");
+    };
+    assert_eq!(project.as_str(), "board-2", "\"board\" is taken");
+    assert_eq!(
+        (title.as_str(), repo.as_str(), target.as_str()),
+        ("Board", "/Users/me/src/Board", "main")
+    );
+    assert_eq!(*term, TermRef { worker, session: here });
+    assert!(!shown(&view, cx, here), "not before the server's word of it");
+
+    let mut made = fixtures::project("board-2", Some(*term));
+    made.title = "Board".into();
+    let update = ProjectUpdate {
+        project: made.id.clone(),
+        record: Some(made),
+        task: None,
+        native: None,
+        entry: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.project_update(20, update, cx));
+    cx.run_until_parked();
+    assert!(shown(&view, cx, here), "its board shows once the server has it");
+    assert_eq!(focused(&view, cx), Some(tile));
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
+    cx.run_until_parked();
+    view.update_in(cx, |v, w, cx| v.start_project(&StartProject, w, cx));
+    assert_eq!(sent(&mut queue, cx, done), [], "it already orchestrates one");
     assert!(shown(&view, cx, orchestrator));
 }
 

@@ -416,6 +416,12 @@ mod golden_project {
         snap("task_merged_card", &card.card(&Natives::default()));
     }
 
+    /// The person letting a project go.
+    #[test]
+    fn project_delete() {
+        snap("project_delete", &request(Verb::ProjectDelete { project: project_id() }));
+    }
+
     /// A task's fresh-context review: the checkout the reviewer reads, its verdict, and the
     /// card that carries it.
     #[test]

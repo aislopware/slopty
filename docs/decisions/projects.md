@@ -1094,6 +1094,67 @@ Tests:
 - Tests: `slopty_s_own_wiring_is_noted_and_its_role_kept` (`slopty-agent`) and
   `a_project_s_agent_comes_back_with_its_tools_role_and_lock` (`slopty-worker::restore`).
 
+## The board acts, and a project can be let go (2026-10-01)
+
+**What moves a task on is a button on its row and its card.** ✅ 2026-10-01
+- Before: the board only showed. Merging a task no check queued, trying a failed step again,
+  or overruling a reviewer took `slopty task merge` or `slopty task review` in a shell.
+- Now `Board::actions` names what the person can do to each task, and the row and the card
+  draw it as small buttons. The palette and the keys `m`, `r` and `a` do the same to the task
+  the board stands on:
+  - **Merge** a finished task the merge queue does not hold;
+  - **Retry** a failed home, verify, review or merge step. Both send `TaskMerge`, which runs
+    the verifier again on the branch;
+  - **Approve** over a reviewer that asked for changes or ended with nothing said, once the
+    verifier passed. This sends `TaskReview`, approving, as the person.
+- A task that only reads, or is merged, offers nothing. A failed clone is the worker's to make
+  again, so it offers no Retry.
+- A button holds back the row's own click, so pressing one never opens the agent. A refusal is
+  shown as a notice in the server's own words. With no server linked, the board says so.
+- The header gains the push toggle (`ProjectSet { push }`) and a button that turns the tile
+  back to the orchestrator's terminal. Before, the orchestrator's own row was the only way
+  back, and nothing showed it.
+- Tests: `a_task_offers_what_moves_it_on` (`slopty-ui::project`) and
+  `the_boards_actions_reach_the_server` (`slopty-ui::workspace`, over `ServerCaller::queued`).
+
+**A project is the person's to let go: `ProjectDelete`.** ✅ 2026-10-01
+- The verb removes the project, its tasks and its timeline from the store, with a `Forget`
+  record in the log. Its reviewers' sessions close. The agents' terminals stay, since they
+  may hold work the person still wants.
+- An agent asking for it is refused with `Forbidden`. The verb is server-only: no worker
+  carries it, and no MCP tool offers it.
+- `ProjectUpdate` has no removal. So the server sends every client a fresh projects
+  snapshot, and that snapshot's first part replaces the client's mirror. Adding a removal to
+  the update would have been one more wire shape for a rare event.
+- The board asks twice: the first "Delete the project" says what a second does, and only a
+  second within 5 s sends the verb. The CLI's `slopty project delete <name>` sends it at once,
+  since a typed name is deliberate.
+- Tests: `the_person_lets_a_project_go_and_every_client_hears_it` (`slopty-server`), the
+  `project_delete` golden, and the CLI reviewer e2e ending in `slopty project delete`.
+
+**"Start a project here".** ✅ 2026-10-01
+- The palette's line makes the focused terminal the orchestrator of a new project, and its
+  board shows as soon as the server's word of it arrives.
+- The project is named for the repository's directory, and kept clear of the names taken
+  (`-2`, `-3`). It lands on the branch checked out, or `main`.
+- A terminal that already orchestrates a project shows that project's board instead.
+- Test: `a_project_starts_in_the_focused_terminal`.
+
+**The board follows the design rules.** ✅ 2026-10-01
+- Colour is spent only on what needs the person:
+  - warn for *Needs you*, and error for *Failed*;
+  - every other mark, state word and lane in the muted ink, with finished lanes a step
+    brighter.
+- "Passed", "Approved" and "Changes asked" are words with a glyph, not colours. Red is kept for
+  a run that failed. A blocking finding is the default ink with a ✕.
+- A row's or card's second line holds three facts at most, so two separators. They are what
+  moves the task on, what its agent says, then where it runs. "Not placed" is gone, since it
+  repeated on almost every row.
+- The header's line is a sentence ("slopty → main, verified by cargo gate"). The live count
+  and the progress are readouts at the right.
+- The bar's hover says what each segment counts.
+- A finding wraps to two lines, so it is no longer cut to a few characters in a narrow lane.
+
 ## Phases
 
 1. **Wiring and state.** Built 2026-09-30, except the tile.

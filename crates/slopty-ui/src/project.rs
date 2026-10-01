@@ -33,8 +33,62 @@ gpui::actions!(
         ShowBoard,
         /// The timeline: what happened, newest first.
         ShowTimeline,
+        /// Ask for the merge of the task the keyboard stands on.
+        MergeTask,
+        /// Check the task the keyboard stands on again from the start.
+        RetryTask,
+        /// Approve the work of the task the keyboard stands on over its reviewer.
+        ApproveTask,
+        /// Push the target after each merge, or stop.
+        TogglePush,
+        /// Turn the orchestrator's tile back to its terminal.
+        ShowTerminal,
+        /// Let the project go: its tasks, its queue, its timeline.
+        DeleteProject,
+        /// Make a project of the focused terminal's directory, with that terminal as its
+        /// orchestrator.
+        StartProject,
     ]
 );
+
+/// A board's key context, as bindings name it.
+const BOARD: &[Option<&str>] = &[Some(CTX)];
+/// The workspace's, for what a board need not be shown for.
+const WORKSPACE: &[Option<&str>] = &[Some("Workspace && !Screen")];
+
+/// The board's commands and their keys, beside the ones the keymap holds for it: a row's
+/// actions on bare keys, as its other keys are, and what is rare or cannot be taken back on
+/// none.
+#[must_use]
+pub fn key_bindings() -> Vec<crate::keymap::Command> {
+    use crate::keymap::{Command, Scope};
+    vec![
+        Command::new(Scope::Project, "merge_task", MergeTask, &["m"], BOARD),
+        Command::new(Scope::Project, "retry_task", RetryTask, &["r"], BOARD),
+        Command::new(Scope::Project, "approve_task", ApproveTask, &["a"], BOARD),
+        Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
+        Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
+        Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
+        Command::new(Scope::Workspace, "start_project", StartProject, &[], WORKSPACE),
+    ]
+}
+
+/// The palette's lines for a project's board and for starting one, with their keys.
+#[must_use]
+pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
+    let line = |label: &str, icon: IconName, action: Box<dyn gpui::Action>| {
+        crate::palette::PaletteItem::new(label, icon, action, bindings)
+    };
+    vec![
+        line("Start a project here", IconName::Workflow, Box::new(StartProject)),
+        line("Merge the task", IconName::GitBranch, Box::new(MergeTask)),
+        line("Retry the task", IconName::RotateCw, Box::new(RetryTask)),
+        line("Approve the task's work", IconName::Check, Box::new(ApproveTask)),
+        line("Push after each merge", IconName::Upload, Box::new(TogglePush)),
+        line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
+        line("Delete the project", IconName::X, Box::new(DeleteProject)),
+    ]
+}
 
 /// One way of looking at a project.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]

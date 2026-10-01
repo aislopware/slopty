@@ -471,6 +471,7 @@ pub fn defaults() -> Vec<Command> {
         c(Terminal, "note_last_block", t::NoteLastBlock, &[], &[TERMINAL]),
         c(Terminal, "clear_screen", t::ClearScreen, &["cmd-k"], &[TERMINAL]),
     ]);
+    out.extend(crate::project::key_bindings());
     out
 }
 
