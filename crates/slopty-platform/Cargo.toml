@@ -174,3 +174,5 @@ objc2-web-kit = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile.workspace = true
+# The Linux service tests stand in for `loginctl` behind a lock.
+parking_lot.workspace = true
