@@ -123,8 +123,9 @@ pub struct FileMeta {
     /// Last modification; zero when unknown.
     pub mtime_ms: WallMs,
     /// Where it is on the machine it is dragged from, for the other end to fetch it there by
-    /// path (`XferMsg::Fetch`): a file a drag out of a worker's app names. `None` in a drop from
-    /// the client, whose files come up as the drag's own upload.
+    /// path (`XferMsg::Fetch`): a file a drag out of a worker's app names. In a drop from the
+    /// client, `None` for a file that comes up as the drag's own upload, and the worker's path
+    /// for one of a drag out of that worker coming back, which stays where it is.
     pub path: Option<String>,
 }
 

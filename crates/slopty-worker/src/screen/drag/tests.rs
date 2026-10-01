@@ -85,6 +85,35 @@ fn enter_maps_then_places_the_source_then_presses_and_drags() {
     );
 }
 
+/// A drag out of this worker's app coming back names its files where they are: the source
+/// gives each at its own path from the start, and the drop is let go at once, with nothing to
+/// wait for.
+#[test]
+fn a_drag_back_names_the_workers_own_files_and_lets_go_at_once() {
+    let drag = DragId::new();
+    let mut own = file("report.pdf");
+    if let Some(meta) = own.file.as_mut() {
+        meta.path = Some("/Users/w/Documents/report.pdf".to_owned());
+    }
+    let (mut drop_in, _acts) =
+        DropIn::enter(drag, (10.0, 20.0), DragOps::COPY, &[own], Path::new(DIR));
+    let acts = drop_in.hear(Heard::Mapped(Ok((110.0, 220.0))));
+    let [Act::Helper(ToHelper::SourceAt { items: source, .. }), Act::Deadline(_)] = acts.as_slice()
+    else {
+        panic!("{acts:?}")
+    };
+    assert_eq!(source[0].file.as_deref(), Some("/Users/w/Documents/report.pdf"));
+    drop_in.hear(Heard::Helper(FromHelper::Ready { drag }));
+    drop_in.hear(Heard::Helper(FromHelper::Began { drag }));
+    let dropped = drop_in.hear(Heard::Input(DragInput::Drop {
+        drag,
+        x: 10.0,
+        y: 20.0,
+        promised: Vec::new(),
+    }));
+    assert_eq!(dropped, [Act::Release, Act::Deadline(Some(LAND_WAIT))]);
+}
+
 /// A live drag is carried only where it went: a move to the point it is at posts nothing, and
 /// another drag's input does nothing.
 #[test]

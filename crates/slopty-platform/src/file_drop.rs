@@ -62,26 +62,40 @@ pub enum Over {
     Remote(slopty_proto::drag::DragOp),
 }
 
+/// What the app does with a drop over a remote tile.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Taken {
+    /// Refused: it slides back.
+    Refused,
+    /// Taken, and the files it promises are called in.
+    CallIn,
+    /// Taken with everything it carries already where the drop needs it: nothing is called
+    /// in, as for a drag this app began from the same worker.
+    AsIs,
+}
+
 /// Where a host view's drags and drops go, on the main thread.
 pub trait DropSink {
     /// A drag is at `at` (the view's points from its top left), carrying what is on `board`,
     /// which its source lets a target copy, link or move as `allowed` says: what it is over.
-    /// The app follows the drag from one remote tile to another, and off them, itself.
+    /// `own` is the tag of a drag this app began ([`crate::drag::drag_out_items`]). The app
+    /// follows the drag from one remote tile to another, and off them, itself.
     #[cfg(target_os = "macos")]
     fn over(
         &self,
         at: (f64, f64),
         board: &dyn crate::pasteboard::Pasteboard,
         allowed: slopty_proto::drag::DragOps,
+        own: Option<u64>,
     ) -> Over;
     /// The drag left the window from over a remote tile, or ended there with no drop.
     #[cfg(target_os = "macos")]
     fn left(&self);
-    /// Dropped at `at` over a remote tile: whether it is taken. When it is, the `promised`
-    /// files it promises are called in, and arrive at [`Self::arrived`] marked
-    /// [`Dropped::remote`].
+    /// Dropped at `at` over a remote tile, promising `promised` files: what the app does with
+    /// it. Files called in arrive at [`Self::arrived`] marked [`Dropped::remote`].
     #[cfg(target_os = "macos")]
-    fn dropped(&self, at: (f64, f64), promised: usize) -> bool;
+    fn dropped(&self, at: (f64, f64), promised: usize) -> Taken;
     /// Files a drop called in have arrived, or failed to.
     fn arrived(&self, dropped: Dropped);
 }
@@ -573,7 +587,8 @@ mod macos {
             };
             let at = self.location(sender);
             let board = MacPasteboard::of(sender.draggingPasteboard());
-            let over = sink.over(at, &board, allowed(sender.draggingSourceOperationMask()));
+            let own = crate::drag::own_tag(sender);
+            let over = sink.over(at, &board, allowed(sender.draggingSourceOperationMask()), own);
             let was = ivars.route.get();
             match over {
                 Over::Remote(op) => {
@@ -647,11 +662,12 @@ mod macos {
                 if named(&pasteboard).is_empty() { receivers(&pasteboard) } else { Vec::new() };
             let at = self.location(sender);
             let expected = promised(&receivers);
-            if !sink.dropped(at, expected) {
-                return false;
-            }
-            if expected > 0 {
-                self.receive(&receivers, at, true);
+            match sink.dropped(at, expected) {
+                super::Taken::Refused => return false,
+                super::Taken::CallIn if expected > 0 => {
+                    self.receive(&receivers, at, true);
+                }
+                super::Taken::CallIn | super::Taken::AsIs => {}
             }
             true
         }

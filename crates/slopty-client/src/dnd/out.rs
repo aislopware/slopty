@@ -8,10 +8,18 @@
 //! drag and answers what the local drag offers ([`Offer`]) and, as a target reads, where each
 //! piece is: a named file at its path on the worker from the start, a promised file once the
 //! catch has called it in, data inline or fetched under the drag ([`Source::Drag`]).
+//!
+//! A target reads a drag's data on this device's main thread, which is where the tile hears the
+//! worker, so a read before the catch is in could never see it there. The link's control reader
+//! hands the catch to every drag out it is told of ([`DragOuts`]) as it arrives, and a read
+//! waits for it there ([`Shared::data`]).
+
+use std::sync::{Arc, Weak};
+use std::time::{Duration, Instant};
 
 use slopty_platform::pasteboard::{clip_type, uti_of_type};
-use slopty_proto::drag::{DragEvent, DragId, DragItem};
-use slopty_proto::transfer::{RepRef, Source};
+use slopty_proto::drag::{DragEvent, DragId, DragItem, FileMeta};
+use slopty_proto::transfer::{Rep, RepRef, Source};
 
 /// What the local drag offers for one item of a drag out.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -142,14 +150,57 @@ impl Outgoing {
     /// Where the `promise`-th promised file is.
     #[must_use]
     pub fn promised(&self, promise: usize) -> FileAt {
-        let Some(caught) = &self.caught else { return FileAt::Waiting };
-        let named = self.began.iter().filter(|i| i.file.is_some()).count();
-        let path = caught
-            .iter()
-            .filter_map(|i| i.file.as_ref())
-            .nth(named.saturating_add(promise))
-            .and_then(|f| f.path.clone());
+        if self.caught.is_none() {
+            return FileAt::Waiting;
+        }
+        let path = self.caught_promise(promise).and_then(|f| f.path.clone());
         path.map_or(FileAt::Gone, FileAt::At)
+    }
+
+    /// The `promise`-th promised file as the catch named it: the catch lists the named files
+    /// first, then the promised ones it kept.
+    fn caught_promise(&self, promise: usize) -> Option<&FileMeta> {
+        let named = self.began.iter().filter(|i| i.file.is_some()).count();
+        let caught = self.caught.as_ref()?;
+        caught.iter().filter_map(|i| i.file.as_ref()).nth(named.saturating_add(promise))
+    }
+
+    /// What the drag carries back onto a tile of its own worker, where nothing needs to come
+    /// up: each file by its path there (a promised one once the catch named it, else it is
+    /// left out) and each data item's representations that ride inline.
+    #[must_use]
+    pub fn back(&self) -> Vec<DragItem> {
+        let (mut promise, mut data) = (0_usize, 0_usize);
+        self.began
+            .iter()
+            .filter_map(|item| {
+                if item.file.is_some() {
+                    return Some(item.clone());
+                }
+                if item.promised.is_some() {
+                    let n = promise;
+                    promise = promise.saturating_add(1);
+                    let file = self.caught_promise(n).filter(|f| f.path.is_some()).cloned()?;
+                    return Some(DragItem { file: Some(file), promised: None, reps: Vec::new() });
+                }
+                let n = data;
+                data = data.saturating_add(1);
+                let reps: Vec<Rep> = item
+                    .reps
+                    .iter()
+                    .filter_map(|r| match self.data(n, uti_of_type(&r.kind)) {
+                        DataAt::Bytes(bytes) => Some(Rep {
+                            kind: r.kind.clone(),
+                            size: u64::try_from(bytes.len()).ok(),
+                            hash: None,
+                            inline: Some(bytes),
+                        }),
+                        DataAt::Fetch(_) | DataAt::Waiting | DataAt::Gone => None,
+                    })
+                    .collect();
+                (!reps.is_empty()).then_some(DragItem { file: None, promised: None, reps })
+            })
+            .collect()
     }
 
     /// Where the `item`-th data item's bytes are as `uti`: inline as it began, else as the catch
@@ -211,33 +262,89 @@ impl Shared {
         failed
     }
 
+    /// What it carries back onto its own worker ([`Outgoing::back`]).
+    #[must_use]
+    pub fn back(&self) -> Vec<DragItem> {
+        self.out.lock().back()
+    }
+
     /// What the local drag offers ([`Outgoing::offers`]).
     #[must_use]
     pub fn offers(&self) -> Vec<Offer> {
         self.out.lock().offers()
     }
 
-    /// Where the `item`-th data item's bytes are as `uti` now ([`Outgoing::data`]): never
-    /// waited for, since a target reads them on the main thread the catch is heard on.
+    /// Where the `item`-th data item's bytes are as `uti` ([`Outgoing::data`]), waiting up to
+    /// `within` for the catch to say. Only a drag out the link was told of
+    /// ([`crate::remote::Remote::watch_drag_out`]) hears the catch while the main thread waits
+    /// here.
     #[must_use]
-    pub fn data(&self, item: usize, uti: &str) -> DataAt {
-        self.out.lock().data(item, uti)
+    pub fn data(&self, item: usize, uti: &str, within: Duration) -> DataAt {
+        self.wait(within, |out| match out.data(item, uti) {
+            DataAt::Waiting => None,
+            at => Some(at),
+        })
+        .unwrap_or(DataAt::Waiting)
     }
 
     /// Where the `promise`-th promised file is, waiting up to `within` for the catch to say.
     #[must_use]
-    pub fn promised(&self, promise: usize, within: std::time::Duration) -> FileAt {
-        let until = std::time::Instant::now().checked_add(within);
+    pub fn promised(&self, promise: usize, within: Duration) -> FileAt {
+        self.wait(within, |out| match out.promised(promise) {
+            FileAt::Waiting => None,
+            at => Some(at),
+        })
+        .unwrap_or(FileAt::Waiting)
+    }
+
+    /// What `look` finds, looking again each time the worker is heard, for up to `within`.
+    fn wait<T>(&self, within: Duration, look: impl Fn(&Outgoing) -> Option<T>) -> Option<T> {
+        let until = Instant::now().checked_add(within);
         let mut out = self.out.lock();
         loop {
-            match out.promised(promise) {
-                FileAt::Waiting => {}
-                at => return at,
+            if let Some(found) = look(&out) {
+                return Some(found);
             }
-            let Some(until) = until else { return FileAt::Waiting };
+            let until = until?;
             if self.changed.wait_until(&mut out, until).timed_out() {
-                return out.promised(promise);
+                return look(&out);
             }
+        }
+    }
+}
+
+/// The drags out of one worker's apps that its link tells, off the main thread.
+///
+/// The link's control reader hands the worker's word on each to it as it arrives
+/// ([`crate::remote::Remote::watch_drag_out`]). Each is held weakly, so one the person's drag
+/// is done with goes with it.
+#[derive(Debug, Default)]
+pub struct DragOuts {
+    watched: parking_lot::Mutex<Vec<Weak<Shared>>>,
+}
+
+impl DragOuts {
+    /// Hand the worker's word on `shared`'s drag to it from now on.
+    pub fn watch(&self, shared: &Arc<Shared>) {
+        let held = Arc::downgrade(shared);
+        let mut watched = self.watched.lock();
+        watched.retain(|w| w.strong_count() > 0 && !w.ptr_eq(&held));
+        watched.push(held);
+    }
+
+    /// The worker said `event` of a drag: the drag out it is about hears it.
+    pub fn heard(&self, event: &DragEvent) {
+        let (DragEvent::OutCaught { drag, .. } | DragEvent::OutFailed { drag, .. }) = event else {
+            return;
+        };
+        let found = self
+            .watched
+            .lock()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|shared| shared.drag() == *drag);
+        if let Some(shared) = found {
+            let _said = shared.heard(event);
         }
     }
 }
@@ -264,8 +371,7 @@ fn promised_name(kind: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use slopty_core::WallMs;
-    use slopty_proto::drag::FileMeta;
-    use slopty_proto::transfer::{ClipFormat, ClipType, Rep};
+    use slopty_proto::transfer::{ClipFormat, ClipType};
 
     use super::*;
 
@@ -335,10 +441,10 @@ mod tests {
         assert_eq!(out.data(0, &png_uti), DataAt::Fetch(fetch));
         assert_eq!(out.data(0, "public.tiff"), DataAt::Gone);
 
-        let shared = std::sync::Arc::new(Shared::new(Outgoing::began(drag, out.items().to_vec())));
+        let shared = Arc::new(Shared::new(Outgoing::began(drag, out.items().to_vec())));
         let waiter = {
-            let shared = std::sync::Arc::clone(&shared);
-            std::thread::spawn(move || shared.promised(0, std::time::Duration::from_secs(5)))
+            let shared = Arc::clone(&shared);
+            std::thread::spawn(move || shared.promised(0, Duration::from_secs(5)))
         };
         let caught = vec![file("a.txt", "/w/a.txt"), file("b.pdf", "/w/b.pdf")];
         assert_eq!(shared.heard(&DragEvent::OutCaught { drag, items: caught }), None);
@@ -351,5 +457,71 @@ mod tests {
         let error = DragEvent::OutFailed { drag, error: "no catch".to_owned() };
         assert_eq!(failed.heard(&error).as_deref(), Some("no catch"));
         assert_eq!(failed.promised(0), FileAt::Gone);
+    }
+
+    /// Back onto its own worker a drag carries its files by their paths there, the promised one
+    /// once the catch named it and not before, and only the data that rides inline: the rest
+    /// would have to come down to go up again.
+    #[test]
+    fn a_drag_out_carries_back_its_paths_and_inline_data() {
+        let drag = DragId::new();
+        let text = rep(ClipFormat::Text, Some(b"fox"));
+        let png = rep(ClipFormat::Png, None);
+        let data = DragItem { file: None, promised: None, reps: vec![text.clone(), png.clone()] };
+        let promised =
+            DragItem { file: None, promised: Some("com.adobe.pdf".to_owned()), reps: Vec::new() };
+        let named = file("a.txt", "/w/a.txt");
+        let mut out = Outgoing::began(drag, vec![named.clone(), promised, data]);
+        let text_only =
+            DragItem { file: None, promised: None, reps: vec![Rep { size: Some(3), ..text }] };
+        assert_eq!(out.back(), [named.clone(), text_only.clone()], "before the catch");
+
+        let invoice = file("Invoice.pdf", "/w/.slopty/drag/d/Invoice.pdf");
+        let caught = vec![
+            named.clone(),
+            invoice.clone(),
+            DragItem { file: None, promised: None, reps: vec![png] },
+        ];
+        out.heard(&DragEvent::OutCaught { drag, items: caught });
+        assert_eq!(
+            out.back(),
+            [named, invoice, text_only],
+            "the promise named, the picture not inline"
+        );
+    }
+
+    /// Data a target reads before the catch is in waits for it, and the link's reader hands the
+    /// catch to the drag it names, on its own thread: a read on the main thread gets the bytes
+    /// though the main thread hears nothing. A drag nobody holds any more is let go,
+    /// and a read with nothing coming stops at its wait.
+    #[test]
+    fn data_read_before_the_catch_waits_for_it_off_the_main_thread() {
+        let drag = DragId::new();
+        let png = rep(ClipFormat::Png, None);
+        let data = DragItem { file: None, promised: None, reps: vec![png] };
+        let shared = Arc::new(Shared::new(Outgoing::began(drag, vec![data])));
+        let outs = Arc::new(DragOuts::default());
+        outs.watch(&shared);
+        let other = Arc::new(Shared::new(Outgoing::began(DragId::new(), Vec::new())));
+        outs.watch(&other);
+        drop(other);
+        let png_uti = uti_of_type(&ClipType::Format(ClipFormat::Png)).to_owned();
+        assert_eq!(shared.data(0, &png_uti, Duration::from_millis(20)), DataAt::Waiting);
+
+        let reader = {
+            let outs = Arc::clone(&outs);
+            std::thread::spawn(move || {
+                let inline = rep(ClipFormat::Png, Some(b"png"));
+                let caught = vec![DragItem { file: None, promised: None, reps: vec![inline] }];
+                outs.heard(&DragEvent::OutCaught { drag: DragId::new(), items: Vec::new() });
+                outs.heard(&DragEvent::OutCaught { drag, items: caught });
+            })
+        };
+        let read = shared.data(0, &png_uti, Duration::from_secs(5));
+        assert_eq!(read, DataAt::Bytes(b"png".to_vec()), "the catch, from the reader's thread");
+        reader.join().unwrap();
+        assert_eq!(outs.watched.lock().len(), 2, "the gone one is still listed");
+        outs.watch(&shared);
+        assert_eq!(outs.watched.lock().len(), 1, "let go at the next watch, and none twice");
     }
 }

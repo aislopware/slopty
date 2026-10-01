@@ -773,6 +773,9 @@ pub struct WorkspaceView {
     /// keeps the promises itself.
     #[cfg(target_os = "macos")]
     drag_sink: Option<remote::DragSink>,
+    /// The drags out of a worker's app this window carried on.
+    #[cfg(target_os = "macos")]
+    drags_out: remote::DragsOut,
     /// Forwarded ports, by session.
     ports: HashMap<SessionId, Vec<slopty_client::tunnel::Forward>>,
     focus: FocusHandle,
@@ -944,6 +947,8 @@ impl WorkspaceView {
             drop_landing: None,
             #[cfg(target_os = "macos")]
             drag_sink: None,
+            #[cfg(target_os = "macos")]
+            drags_out: remote::DragsOut::default(),
             ports: HashMap::new(),
             focus: cx.focus_handle(),
         }

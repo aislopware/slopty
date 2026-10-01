@@ -1236,7 +1236,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `leaving_the_tile_during_a_worker_drag_hands_it_over` (`slopty-ui`); live in a guest,
       `a_window_streams_press_drags_out_and_the_catch_takes_it` and
       `the_badge_follows_a_drag_across_touching_targets` (MEASUREMENTS, "the badge, timed, and
-      a drag out of a window"). Coming back onto a tile of the same worker is still to do.
+      a drag out of a window").
       - *A window stream's left press goes through the HID tap when its window is on top at
         the point*, raised by the click as before, until its release, which puts the real
         pointer back. One something covers there keeps its own route, since the HID tap would
@@ -1258,9 +1258,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         tile with the button held begins this Mac's own drag from that very event, and the
         tile's release is then the catch's. A named file is a promise kept from its path at
         once, a promised one waits up to 30 s for the catch to name it, and data is given as
-        a target reads it: inline, or fetched under the drag for at most 5 s. Data read before
-        the catch is in gives nothing, since a target reads on the main thread the catch is
-        heard on.
+        a target reads it: inline, or fetched under the drag for at most 5 s.
+      - *A drag out coming back onto a tile of its own worker moves no bytes.* Each drag out
+        this window carries on goes with a tag on its `NSDraggingSource`
+        (`slopty_platform::drag::drag_out_items`), which AppKit shows only to a destination in
+        this app, so the destination knows its own drag from any other
+        (`DropSink::over`'s `own`). Back over a tile of the worker it came from, the drag's
+        items are the worker's own files by their paths there (a promised one once the catch
+        named it, else it is left out) and the data that rode inline
+        (`Outgoing::back`). Nothing goes up and no promise is called in: the drop is taken as
+        it is (`file_drop::Taken::AsIs`). The worker's source names each such file where it
+        is, and the release does not wait for it (`DropIn::item`, `source_items`). Over
+        another worker's tile the same drag is an ordinary drop, whose promises bring the
+        files down to send them up. Tests: `a_drag_out_carries_back_its_paths_and_inline_data`,
+        `a_drag_out_back_over_its_worker_names_its_files_there` and
+        `a_drag_back_names_the_workers_own_files_and_lets_go_at_once`.
+      - *Data read before the catch is in waits for it.* A target reads a drag's data on this
+        Mac's main thread, where the tile hears the worker, so the catch could never arrive
+        while a read waited for it there, and such a read gave nothing. The workspace now tells
+        the worker's link of each drag out it carries on (`Remote::watch_drag_out`), and the
+        link's control reader hands the catch to that drag as it reads it
+        (`slopty_client::dnd::out::DragOuts`). A read waits up to 3 s for it, past the catcher's
+        showing and its four carries; a catch a slow promise in the same drag holds longer
+        still gives that read nothing. Tests:
+        `data_read_before_the_catch_waits_for_it_off_the_main_thread`,
+        `a_drag_outs_catch_reaches_a_read_waiting_off_the_apps_events` (the link, against a
+        scripted worker) and `a_drag_out_going_on_here_is_heard_by_the_link`.
       - *The badge, timed.* The helper's cursor watch was a timer on its main thread, where
         AppKit tracks the drag, and it fired 10–39 ms after the cursor changed. It now reads the
         cursor's seed every 1 ms on a thread of its own (user-interactive) and says the copy a

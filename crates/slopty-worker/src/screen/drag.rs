@@ -239,7 +239,8 @@ impl DropIn {
             name: item.file.as_ref().map(|f| f.name.clone()),
             is_file: item.file.is_some() || item.promised.is_some(),
             promise_open: item.file.is_none() && item.promised.is_some(),
-            landed: None,
+            // A drag out of this worker's own app, back: its files are where they always were.
+            landed: item.file.as_ref().and_then(|f| f.path.as_deref()).map(PathBuf::from),
             reps,
         }
     }
@@ -478,13 +479,15 @@ fn gone_file(drag: DragId, n: u16) -> Act {
 pub const FILE_URL: &str = "public.file-url";
 
 /// What the helper's source declares for `items`: the inline data given at once, and each named
-/// file's URL where it will land, under `dir`.
+/// file's URL where it will land, under `dir`, or where it is for a file of this worker's own.
 #[must_use]
 pub fn source_items(items: &[DragItem], dir: &Path) -> Vec<SourceItem> {
     items
         .iter()
         .map(|item| SourceItem {
-            file: item.file.as_ref().map(|f| dir.join(&f.name).to_string_lossy().into_owned()),
+            file: item.file.as_ref().map(|f| {
+                f.path.clone().unwrap_or_else(|| dir.join(&f.name).to_string_lossy().into_owned())
+            }),
             is_file: item.file.is_some() || item.promised.is_some(),
             types: item
                 .reps

@@ -245,7 +245,12 @@ fn carry(
             };
             board.copy_files(&urls.iter().map(String::as_str).collect::<Vec<_>>());
             let over = view.update(cx, |v, cx| {
-                v.drag_over(state, point(px(x), px(y)), &board, DragOps::COPY, cx)
+                let carried = slopty_ui::workspace::remote::Carried {
+                    board: &board,
+                    allowed: DragOps::COPY,
+                    own: None,
+                };
+                v.drag_over(state, point(px(x), px(y)), carried, cx)
             });
             let op = match over {
                 Over::Local => "local",
@@ -258,7 +263,7 @@ fn carry(
         }
         Command::DragDrop { x, y } => {
             let taken = view.update(cx, |v, cx| v.drag_dropped(state, point(px(x), px(y)), 0, cx));
-            Reply::Taken { taken }
+            Reply::Taken { taken: taken != slopty_platform::file_drop::Taken::Refused }
         }
         Command::DragLeave => {
             view.update(cx, |v, cx| v.drag_left(state, cx));

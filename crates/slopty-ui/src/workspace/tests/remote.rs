@@ -27,6 +27,8 @@ enum Call {
     Cancel(XferId),
     SendClip(RepRef, Fetched, bool),
     Forward(u16),
+    #[cfg_attr(not(target_os = "macos"), expect(dead_code, reason = "a drag out is the Mac's"))]
+    WatchDragOut(slopty_proto::drag::DragId),
 }
 
 /// Records the calls; serves a worker port here `offset` ports up, as a client whose ports
@@ -72,6 +74,10 @@ impl Remote for Recorder {
     fn forward(&self, port: u16) -> Option<u16> {
         self.0.send(Call::Forward(port)).unwrap();
         port.checked_add(self.1)
+    }
+
+    fn watch_drag_out(&self, shared: &Arc<slopty_client::dnd::out::Shared>) {
+        self.0.send(Call::WatchDragOut(shared.drag())).unwrap();
     }
 }
 
@@ -962,6 +968,13 @@ fn streaming(
     tile
 }
 
+/// A drag from this Mac carrying `board`, for a copy, tagged `own` when this window began it.
+#[cfg(target_os = "macos")]
+fn carried(board: &dyn Pasteboard, own: Option<u64>) -> crate::workspace::remote::Carried<'_> {
+    use slopty_proto::drag::DragOps;
+    crate::workspace::remote::Carried { board, allowed: DragOps::COPY, own }
+}
+
 /// The drag steps sent to a worker.
 #[cfg(target_os = "macos")]
 fn drag_steps(sent: Vec<ClientMsg>) -> Vec<slopty_proto::drag::DragInput> {
@@ -985,7 +998,7 @@ fn drag_steps(sent: Vec<ClientMsg>) -> Vec<slopty_proto::drag::DragInput> {
 #[gpui::test]
 fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestAppContext) {
     use slopty_platform::file_drop::Over;
-    use slopty_proto::drag::{DragEvent, DragInput, DragOp, DragOps};
+    use slopty_proto::drag::{DragEvent, DragInput, DragOp};
     use slopty_proto::transfer::{INLINE_CLIP_BYTES, Source};
 
     use crate::workspace::remote::DropIn;
@@ -1005,7 +1018,7 @@ fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestApp
     drag_board.copy_items(&[&[("public.file-url", url.as_bytes())], &[("public.png", &picture)]]);
     let mut state = DropIn::default();
     let over = |state: &mut DropIn, p, cx: &mut VisualTestContext| {
-        view.update_in(cx, |v, _w, cx| v.drag_over(state, p, &drag_board, DragOps::COPY, cx))
+        view.update_in(cx, |v, _w, cx| v.drag_over(state, p, carried(&drag_board, None), cx))
     };
 
     assert_eq!(over(&mut state, header, cx), Over::Local, "the header is GPUI's");
@@ -1050,7 +1063,100 @@ fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestApp
     empty.copy(&[("dyn.ah62d4rv4gu8y", b"x")]);
     let mut fresh = DropIn::default();
     let refused =
-        view.update_in(cx, |v, _w, cx| v.drag_over(&mut fresh, body, &empty, DragOps::COPY, cx));
+        view.update_in(cx, |v, _w, cx| v.drag_over(&mut fresh, body, carried(&empty, None), cx));
     assert_eq!(refused, Over::Remote(DragOp::None), "nothing a remote app takes");
     assert_eq!(fresh.drag(), None);
+}
+
+/// A drag out the tile hands over goes on as this Mac's drag, and the worker's link is told of
+/// it first, so the catch reaches it off the main thread where a target's read of its data
+/// waits.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_drag_out_going_on_here_is_heard_by_the_link(cx: &mut TestAppContext) {
+    use slopty_client::dnd::out::{Outgoing, Shared};
+    use slopty_proto::drag::{DragId, DragItem, FileMeta};
+    let (view, cx) = workspace(cx);
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    let parked = Rc::new(std::cell::Cell::new(0_usize));
+    let sink = Rc::clone(&parked);
+    view.update_in(cx, |v, _w, _cx| {
+        v.set_drag_sink(Rc::new(move |promises| {
+            sink.set(promises.len());
+            true
+        }));
+    });
+    let drag = DragId::new();
+    let file = FileMeta {
+        name: "a.txt".to_owned(),
+        size: 1,
+        folder: false,
+        mode: 0o644,
+        mtime_ms: WallMs::ZERO,
+        path: Some("/Users/w/a.txt".to_owned()),
+    };
+    let items = vec![DragItem { file: Some(file), promised: None, reps: Vec::new() }];
+    let shared = Arc::new(Shared::new(Outgoing::began(drag, items)));
+    let began = view.update_in(cx, |v, _w, _cx| v.drag_out_of(studio.key, &shared));
+    assert!(began);
+    assert_eq!(parked.get(), 1, "the file goes on as a promise");
+    assert!(matches!(calls.try_recv(), Ok(Call::WatchDragOut(d)) if d == drag));
+}
+
+/// A drag out of a worker's app that comes back over a tile of that worker names the worker's
+/// own files by their paths there: nothing goes up, and the drop is taken as it is, with no
+/// promise called in. Any other drag over the tile reads its pasteboard and sends its files up.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_drag_out_back_over_its_worker_names_its_files_there(cx: &mut TestAppContext) {
+    use slopty_client::dnd::out::{Outgoing, Shared};
+    use slopty_platform::file_drop::{Over, Taken};
+    use slopty_proto::drag::{DragId, DragInput, DragItem, DragOp, FileMeta};
+
+    use crate::workspace::remote::DropIn;
+    let (view, cx) = workspace(cx);
+    let (mut studio, mut calls, _board) = connect_remote(&view, cx);
+    let tile = streaming(&view, cx, &studio, StreamId(1));
+    studio.drain();
+    view.update_in(cx, |v, _w, _cx| v.set_drag_sink(Rc::new(|_promises| true)));
+    let file = FileMeta {
+        name: "a.txt".to_owned(),
+        size: 1,
+        folder: false,
+        mode: 0o644,
+        mtime_ms: WallMs::ZERO,
+        path: Some("/Users/w/a.txt".to_owned()),
+    };
+    let own = DragItem { file: Some(file), promised: None, reps: Vec::new() };
+    let shared = Arc::new(Shared::new(Outgoing::began(DragId::new(), vec![own.clone()])));
+    assert!(view.update_in(cx, |v, _w, _cx| v.drag_out_of(studio.key, &shared)));
+    while calls.try_recv().is_ok() {}
+    let body = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn").center();
+    let dir = tempfile::tempdir().unwrap();
+    let here = dir.path().join("here.txt");
+    std::fs::write(&here, b"here").unwrap();
+    let board = Memory::default();
+    board.copy_files(&[&slopty_client::dnd::file_url(&here).unwrap()]);
+    let over = |state: &mut DropIn, own, cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, _w, cx| v.drag_over(state, body, carried(&board, own), cx))
+    };
+
+    let mut state = DropIn::default();
+    assert_eq!(over(&mut state, Some(1), cx), Over::Remote(DragOp::Copy));
+    let steps = drag_steps(studio.drain());
+    let [DragInput::Enter { items, .. }] = steps.as_slice() else { panic!("{steps:?}") };
+    assert_eq!(items, &[own], "the worker's own file, by its path there");
+    assert!(calls.try_recv().is_err(), "nothing goes up");
+    let taken = view.update_in(cx, |v, _w, cx| v.drag_dropped(&mut state, body, 1, cx));
+    assert_eq!(taken, Taken::AsIs, "no promise called in");
+    let steps = drag_steps(studio.drain());
+    assert!(matches!(steps.as_slice(), [DragInput::Drop { promised, .. }] if promised.is_empty()));
+
+    let mut other = DropIn::default();
+    assert_eq!(over(&mut other, Some(7), cx), Over::Remote(DragOp::Copy), "a drag of no tag here");
+    let steps = drag_steps(studio.drain());
+    let Some(DragInput::Enter { items, .. }) = steps.last() else { panic!("{steps:?}") };
+    let named = items[0].file.as_ref().map(|f| (f.name.as_str(), f.path.is_none()));
+    assert_eq!(named, Some(("here.txt", true)), "this Mac's file, to go up");
+    assert!(matches!(calls.try_recv(), Ok(Call::Upload(..))), "and it goes up");
 }

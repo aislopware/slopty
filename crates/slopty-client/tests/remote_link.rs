@@ -578,4 +578,54 @@ mod tests {
         }
         assert_eq!(closes, [true, true, false]);
     }
+
+    /// The catch of a drag out reaches the drag from the link's own reader: data a target reads
+    /// on a thread that hears nothing else (as the main thread, blocked in the read, hears
+    /// nothing) gets the bytes the catch kept inline, while the event still waits unread for
+    /// the app.
+    #[cfg(target_vendor = "apple")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_drag_outs_catch_reaches_a_read_waiting_off_the_apps_events() {
+        use slopty_client::dnd::out::{DataAt, Outgoing, Shared};
+        use slopty_core::StreamId;
+        use slopty_proto::drag::{DragEvent, DragId, DragItem};
+        use slopty_proto::screen::ScreenEvent;
+        let (mut client, link, mut events) = pair().await;
+        let drag = DragId::new();
+        let lazy =
+            Rep { kind: ClipType::Format(ClipFormat::Png), size: None, hash: None, inline: None };
+        let began = vec![DragItem { file: None, promised: None, reps: vec![lazy] }];
+        let shared = std::sync::Arc::new(Shared::new(Outgoing::began(drag, began)));
+        link.remote().watch_drag_out(&shared);
+        let uti = slopty_platform::pasteboard::uti_of_type(&ClipType::Format(ClipFormat::Png));
+        let reader = {
+            let shared = std::sync::Arc::clone(&shared);
+            std::thread::spawn(move || shared.data(0, uti, WAIT))
+        };
+        let png = Rep {
+            kind: ClipType::Format(ClipFormat::Png),
+            size: Some(3),
+            hash: None,
+            inline: Some(b"png".to_vec()),
+        };
+        let items = vec![DragItem { file: None, promised: None, reps: vec![png] }];
+        let event = DragEvent::OutCaught { drag, items };
+        client
+            .tx
+            .send(&WorkerMsg::Screen(ScreenEvent::Drag { stream: StreamId(1), event }))
+            .await
+            .unwrap();
+        let read = tokio::task::spawn_blocking(move || reader.join().unwrap()).await.unwrap();
+        assert_eq!(read, DataAt::Bytes(b"png".to_vec()));
+        let told = tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(LinkEvent::Control(WorkerMsg::Screen(ScreenEvent::Drag { .. }))) =
+                    events.recv().await
+                {
+                    return;
+                }
+            }
+        });
+        told.await.unwrap();
+    }
 }

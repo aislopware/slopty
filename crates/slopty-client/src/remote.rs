@@ -14,6 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::LinkEvent;
 use crate::clip::{ClipCache, Fetched, fits_inline};
+#[cfg(target_vendor = "apple")]
+use crate::dnd::out::{DragOuts, Shared};
 use crate::tunnel::Forwards;
 use crate::xfer::{self, Uplink, XferError};
 
@@ -43,6 +45,12 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// where: the same port when it is free here, else the next free one. `None` on a link
     /// that forwards nothing, or when no local port could be had.
     fn forward(&self, port: u16) -> Option<u16>;
+
+    /// Hand the worker's word on `shared`'s drag out to it as the link reads it, off the main
+    /// thread, where a target's read of its data waits ([`crate::dnd::out::DragOuts`]). A
+    /// remote with no link hears nothing.
+    #[cfg(target_vendor = "apple")]
+    fn watch_drag_out(&self, _shared: &Arc<Shared>) {}
 }
 
 /// The [`Remote`] of a live link.
@@ -54,11 +62,15 @@ pub struct LinkRemote {
     runtime: tokio::runtime::Handle,
     /// The link's port forwards, shared with its control reader; `None` when it forwards none.
     forwards: Option<Arc<Mutex<Forwards>>>,
+    /// The drags out its control reader hands the worker's word to.
+    #[cfg(target_vendor = "apple")]
+    drag_outs: Arc<DragOuts>,
 }
 
 impl LinkRemote {
     /// The remote of a link: its uplink and clipboard cache, where its failures are reported,
-    /// the runtime its tasks run on, and its port forwards if it has any.
+    /// the runtime its tasks run on, its port forwards if it has any, and the drags out its
+    /// control reader tells.
     #[must_use]
     pub const fn new(
         up: Uplink,
@@ -66,8 +78,17 @@ impl LinkRemote {
         events: mpsc::Sender<LinkEvent>,
         runtime: tokio::runtime::Handle,
         forwards: Option<Arc<Mutex<Forwards>>>,
+        #[cfg(target_vendor = "apple")] drag_outs: Arc<DragOuts>,
     ) -> Self {
-        Self { up, clips, events, runtime, forwards }
+        Self {
+            up,
+            clips,
+            events,
+            runtime,
+            forwards,
+            #[cfg(target_vendor = "apple")]
+            drag_outs,
+        }
     }
 
     const fn conn(&self) -> &Connection {
@@ -159,5 +180,10 @@ impl Remote for LinkRemote {
         // A listener is a tokio socket and its accept loop a tokio task: both need the runtime.
         let _runtime = self.runtime.enter();
         forwards.lock().pin(port)
+    }
+
+    #[cfg(target_vendor = "apple")]
+    fn watch_drag_out(&self, shared: &Arc<Shared>) {
+        self.drag_outs.watch(shared);
     }
 }

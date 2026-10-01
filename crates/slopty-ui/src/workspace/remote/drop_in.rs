@@ -8,6 +8,9 @@
 //! Anywhere else GPUI's own drop handling takes it. A drop of promised files waits for them to
 //! be written here, then names them and sends them up. How the drop ended comes back from the
 //! worker through the tile, and a drop that did not land says why.
+//!
+//! A drag out of a worker's app that comes back over a tile of that same worker carries the
+//! worker's own files by their paths there, and nothing comes down or goes up for it.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,6 +20,8 @@ use gpui::{AnyWindowHandle, AsyncApp, Context, Pixels, Point, WeakEntity, point,
 use slopty_client::clip::Fetched;
 use slopty_client::dnd::{self, Outcome};
 use slopty_client::layout::TileRef;
+#[cfg(target_os = "macos")]
+use slopty_platform::file_drop::Taken;
 use slopty_platform::file_drop::{DropSink, Dropped};
 use slopty_proto::drag::{DragId, Promised};
 #[cfg(target_os = "macos")]
@@ -35,6 +40,28 @@ pub struct DropIn {
     waiting: Option<Waiting>,
 }
 
+/// What a drag from this device carries, as the platform hands it over.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub struct Carried<'a> {
+    /// The drag's pasteboard.
+    pub board: &'a dyn slopty_platform::pasteboard::Pasteboard,
+    /// What its source lets a target do.
+    pub allowed: slopty_proto::drag::DragOps,
+    /// The tag of a drag this window began ([`super::DragsOut`]), if it is one.
+    pub own: Option<u64>,
+}
+
+#[cfg(target_os = "macos")]
+impl std::fmt::Debug for Carried<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Carried")
+            .field("allowed", &self.allowed)
+            .field("own", &self.own)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The remote tile a drag is over.
 #[derive(Clone, Debug)]
 struct OverTile {
@@ -42,6 +69,9 @@ struct OverTile {
     /// The drag the tile carries to the worker, and the items that promise files; `None` when
     /// the drag carries nothing a remote app could take.
     drag: Option<(DragId, Vec<u16>)>,
+    /// A drag out of this tile's worker, back: its files are already there.
+    #[cfg(target_os = "macos")]
+    back: bool,
 }
 
 /// A drop on a remote tile, waiting for the files its promises write here.
@@ -79,20 +109,21 @@ impl WorkspaceView {
         (body && remote && self.screen(tile.item).is_some()).then_some(tile)
     }
 
-    /// A drag carrying what is on `board`, which its source lets a target take as `allowed`
-    /// says, is at `p`: what it is over. Entering a remote tile begins the worker's drag and
-    /// the drag's upload; leaving one ends both.
+    /// A drag carrying `carried` is at `p`: what it is over. Entering a remote tile begins
+    /// the worker's drag and the drag's upload; leaving one ends both. A drag this window
+    /// began, back over a tile of the worker it came from, carries that worker's own files,
+    /// and uploads nothing.
     #[cfg(target_os = "macos")]
     pub fn drag_over(
         &mut self,
         state: &mut DropIn,
         p: Point<Pixels>,
-        board: &dyn slopty_platform::pasteboard::Pasteboard,
-        allowed: slopty_proto::drag::DragOps,
+        carried: Carried<'_>,
         cx: &mut Context<Self>,
     ) -> slopty_platform::file_drop::Over {
         use slopty_platform::file_drop::Over;
         use slopty_proto::drag::DragOp;
+        let Carried { board, allowed, own } = carried;
         let target = self.remote_body(p);
         if let Some(over) = &state.over
             && Some(over.tile) == target
@@ -108,15 +139,20 @@ impl WorkspaceView {
         }
         let Some(tile) = target else { return Over::Local };
         let Some(screen) = self.screen(tile.item).cloned() else { return Over::Local };
-        let read = dnd::read(board);
+        let back = own.and_then(|tag| self.drags_out.from(tag, tile.worker)).map(|s| s.back());
+        let is_back = back.is_some();
+        let read = back.map_or_else(
+            || dnd::read(board),
+            |items| dnd::Read { items, files: Vec::new(), pushes: Vec::new() },
+        );
         if read.is_empty() {
-            state.over = Some(OverTile { tile, drag: None });
+            state.over = Some(OverTile { tile, drag: None, back: is_back });
             return Over::Remote(DragOp::None);
         }
         let drag = screen.update(cx, |v, cx| v.drag_enter(p, &read, allowed, cx));
         let promises = (0_u16..).zip(&read.items).filter(|(_, i)| i.promised.is_some());
         let promises = promises.map(|(n, _)| n).collect();
-        tracing::info!(%drag, items = read.items.len(), files = read.files.len(), "drag over a remote tile");
+        tracing::info!(%drag, items = read.items.len(), files = read.files.len(), back = is_back, "drag over a remote tile");
         if !read.files.is_empty() {
             let _started = self.upload(tile, &read.files, Upload::to_drag(tile, drag), cx);
         }
@@ -126,7 +162,7 @@ impl WorkspaceView {
                 remote.send_clip(rep, Fetched::Data(push.bytes), false);
             }
         }
-        state.over = Some(OverTile { tile, drag: Some((drag, promises)) });
+        state.over = Some(OverTile { tile, drag: Some((drag, promises)), back: is_back });
         Over::Remote(screen.update(cx, |v, _cx| v.drag_move(p)))
     }
 
@@ -156,33 +192,40 @@ impl WorkspaceView {
         }
     }
 
-    /// Dropped at `p` over a remote tile, `promised` files called in for it: whether it is
-    /// taken. A drop the worker said nothing takes is refused, and slides back. One that waits
-    /// for promised files shows its ring meanwhile.
+    /// Dropped at `p` over a remote tile, promising `promised` files: what becomes of it. A
+    /// drop the worker said nothing takes is refused, and slides back. One that waits for
+    /// promised files has them called in, and shows its ring meanwhile. A drag back onto its
+    /// own worker is taken as it is.
+    #[cfg(target_os = "macos")]
     pub fn drag_dropped(
         &mut self,
         state: &mut DropIn,
         p: Point<Pixels>,
         promised: usize,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(over) = state.over.take() else { return false };
+    ) -> Taken {
+        let Some(over) = state.over.take() else { return Taken::Refused };
         let (Some((drag, items)), Some(screen)) =
             (over.drag.clone(), self.screen(over.tile.item).cloned())
         else {
             self.leave_tile(&over, cx);
-            return false;
+            return Taken::Refused;
         };
         if !screen.read(cx).drag_takes() {
             self.leave_tile(&over, cx);
-            return false;
+            return Taken::Refused;
+        }
+        let sent = |taken| if taken { Taken::CallIn } else { Taken::Refused };
+        if over.back {
+            let taken = screen.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx));
+            return if taken { Taken::AsIs } else { Taken::Refused };
         }
         if promised == 0 {
-            return screen.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx));
+            return sent(screen.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx)));
         }
         screen.update(cx, |v, cx| v.drag_hold(p, cx));
         state.waiting = Some(Waiting { tile: over.tile, drag, at: p, items });
-        true
+        Taken::CallIn
     }
 
     /// The files a remote drop's promises wrote are here, or failed: they are named in the
@@ -308,8 +351,10 @@ impl DropSink for Sink {
         at: (f64, f64),
         board: &dyn slopty_platform::pasteboard::Pasteboard,
         allowed: slopty_proto::drag::DragOps,
+        own: Option<u64>,
     ) -> slopty_platform::file_drop::Over {
-        self.with(|v, state, cx| v.drag_over(state, points(at), board, allowed, cx))
+        let carried = Carried { board, allowed, own };
+        self.with(|v, state, cx| v.drag_over(state, points(at), carried, cx))
             .unwrap_or(slopty_platform::file_drop::Over::Local)
     }
 
@@ -319,8 +364,9 @@ impl DropSink for Sink {
     }
 
     #[cfg(target_os = "macos")]
-    fn dropped(&self, at: (f64, f64), promised: usize) -> bool {
-        self.with(|v, state, cx| v.drag_dropped(state, points(at), promised, cx)).unwrap_or(false)
+    fn dropped(&self, at: (f64, f64), promised: usize) -> Taken {
+        self.with(|v, state, cx| v.drag_dropped(state, points(at), promised, cx))
+            .unwrap_or(Taken::Refused)
     }
 
     fn arrived(&self, dropped: Dropped) {

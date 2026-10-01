@@ -6,6 +6,9 @@
 //! the main thread, so a large file does not stall the UI. Data (a drag out of a worker's app
 //! of text or a picture) goes as an `NSPasteboardItem` whose types are declared up front and
 //! whose bytes are asked for only when the receiver reads them ([`Data`]).
+//!
+//! A drag can carry a tag of the app's own, so a drop back onto this app's window knows the
+//! drag for one it began (`DropSink::over`, in [`crate::file_drop`]).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -19,10 +22,10 @@ use objc2::{
     msg_send,
 };
 use objc2_app_kit::{
-    NSApplication, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
-    NSDraggingSource, NSFilePromiseProvider, NSFilePromiseProviderDelegate, NSPasteboard,
-    NSPasteboardItem, NSPasteboardItemDataProvider, NSPasteboardType, NSPasteboardWriting,
-    NSWorkspace,
+    NSApplication, NSDragOperation, NSDraggingContext, NSDraggingInfo, NSDraggingItem,
+    NSDraggingSession, NSDraggingSource, NSFilePromiseProvider, NSFilePromiseProviderDelegate,
+    NSPasteboard, NSPasteboardItem, NSPasteboardItemDataProvider, NSPasteboardType,
+    NSPasteboardWriting, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSData, NSError, NSObject, NSOperationQueue, NSPoint, NSRect, NSSize, NSString, NSURL,
@@ -190,6 +193,7 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "SloptyDragSource"]
+    #[ivars = Option<u64>]
     struct Source;
 
     unsafe impl NSObjectProtocol for Source {}
@@ -207,8 +211,8 @@ define_class!(
 );
 
 impl Source {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    fn new(mtm: MainThreadMarker, tag: Option<u64>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(tag);
         // SAFETY: `NSObject`'s `init` on a freshly allocated instance.
         unsafe { msg_send![super(this), init] }
     }
@@ -219,12 +223,13 @@ impl Source {
 /// That event is a press or a drag of the left button. Returns whether a drag began: `false`
 /// off the main thread, with no mouse event, or with nothing to drag.
 pub fn drag_out(files: Vec<Promise>) -> bool {
-    drag_out_items(files, Vec::new())
+    drag_out_items(files, Vec::new(), None)
 }
 
 /// Start dragging `files` and `data` out of the window, from the mouse event being handled, as
-/// [`drag_out`] does.
-pub fn drag_out_items(files: Vec<Promise>, data: Vec<Data>) -> bool {
+/// [`drag_out`] does, tagged `tag` for a drop back onto this app
+/// ([`crate::file_drop::DropSink::over`]).
+pub fn drag_out_items(files: Vec<Promise>, data: Vec<Data>, tag: Option<u64>) -> bool {
     let Some(mtm) = MainThreadMarker::new() else { return false };
     if files.is_empty() && data.is_empty() {
         return false;
@@ -299,7 +304,7 @@ pub fn drag_out_items(files: Vec<Promise>, data: Vec<Data>) -> bool {
         givers.push(giver);
         items.push(item);
     }
-    let source = Source::new(mtm);
+    let source = Source::new(mtm, tag);
     let session = view.beginDraggingSessionWithItems_event_source(
         &NSArray::from_retained_slice(&items),
         &event,
@@ -314,4 +319,12 @@ pub fn drag_out_items(files: Vec<Promise>, data: Vec<Data>) -> bool {
         }
     });
     true
+}
+
+/// The tag of the drag `sender` carries when this app began it with one ([`drag_out_items`]):
+/// AppKit names the source only to a destination in the source's own app.
+pub(crate) fn own_tag(sender: &ProtocolObject<dyn NSDraggingInfo>) -> Option<u64> {
+    let source = sender.draggingSource()?;
+    let source = source.downcast::<Source>().ok()?;
+    *source.ivars()
 }

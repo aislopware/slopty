@@ -150,6 +150,10 @@ impl WorkerLink {
         let control_events = events_tx.clone();
         let (control_table, control_clips) = (Arc::clone(&table), Arc::clone(&clips));
         let control_files = Arc::clone(&file_join);
+        #[cfg(target_vendor = "apple")]
+        let drag_outs = Arc::new(crate::dnd::out::DragOuts::default());
+        #[cfg(target_vendor = "apple")]
+        let control_drags = Arc::clone(&drag_outs);
         let forwards = Arc::new(Mutex::new(Forwards::new(quic.clone())));
         let shared_forwards = forward.then(|| Arc::clone(&forwards));
         tasks.spawn(async move {
@@ -165,6 +169,13 @@ impl WorkerLink {
                     }
                 };
                 tracing::trace!(kind = msg.kind(), "control message");
+                #[cfg(target_vendor = "apple")]
+                if let WorkerMsg::Screen(slopty_proto::screen::ScreenEvent::Drag {
+                    event, ..
+                }) = &msg
+                {
+                    control_drags.heard(event);
+                }
                 let event = match msg {
                     WorkerMsg::Xfer(x) if control_table.on_control(&x) => continue,
                     WorkerMsg::Clip(c) if control_clips.on_control(&c) => continue,
@@ -314,6 +325,8 @@ impl WorkerLink {
             events_tx,
             tokio::runtime::Handle::current(),
             shared_forwards,
+            #[cfg(target_vendor = "apple")]
+            drag_outs,
         ));
         Self {
             ack,

@@ -23,8 +23,12 @@ use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
 
 #[cfg(target_os = "macos")]
 mod drag_out;
+#[cfg(target_os = "macos")]
+pub(super) use drag_out::DragsOut;
 mod drop_in;
 
+#[cfg(target_os = "macos")]
+pub use drop_in::Carried;
 pub use drop_in::DropIn;
 
 use super::actions::{ListPorts, SaveCopy};
