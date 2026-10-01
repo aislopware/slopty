@@ -45,10 +45,13 @@ store-failure-output = true
 
 # The icon test compiles with `actool` and renders with `ictool`, whose services start cold on a
 # fresh runner: 124 s there against 7 s here (run 36765252672). Started last, as its binary
-# sorts, it ran alone at the end of a 318 s run; started first, it runs beside the rest.
+# sorts, it ran alone at the end of a 318 s run; started first, it runs beside the rest. Beside
+# the rest it took 165 s, then passed the lane's 180 s (run 36906102487): the cold start is
+# Apple's services', not the test's, so it alone is given 360 s.
 [[profile.ci.overrides]]
 filter = 'package(xtask) & test(=icon::tests::compiles_and_the_prompt_reads_at_every_size_and_appearance)'
 priority = 100
+slow-timeout = { period = "60s", terminate-after = 6, grace-period = "10s" }
 
 [[profile.default.overrides]]
 filter = 'test(/^(proptest|fuzz|slow)_/)'
