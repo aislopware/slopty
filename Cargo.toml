@@ -124,6 +124,11 @@ tokio = { version = "1.53.1", features = [
     "process",
     "fs",
 ] }
+# Codex's app-server control socket speaks WebSocket over a Unix socket; only the handshake and
+# framing are wanted, never a TCP or TLS connector.
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = [ "handshake" ] }
+# A WebSocket is a `Stream` and a `Sink`, read and written through `StreamExt` and `SinkExt`.
+futures-util = { version = "0.3.34", default-features = false, features = [ "sink" ] }
 
 # observability
 tracing = "0.1.44"

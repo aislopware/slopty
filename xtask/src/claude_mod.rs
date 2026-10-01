@@ -294,7 +294,7 @@ fn serve_sink(stream: UnixStream, tx: &mpsc::Sender<Value>) -> Result<()> {
 }
 
 /// One HTTP/1.1 request, `(request line, body)`; `None` at the end of the connection.
-fn request(reader: &mut impl std::io::BufRead) -> Result<Option<(String, Vec<u8>)>> {
+pub fn request(reader: &mut impl std::io::BufRead) -> Result<Option<(String, Vec<u8>)>> {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(None);

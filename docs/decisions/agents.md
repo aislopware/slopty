@@ -408,3 +408,45 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   "Mark reviewed" keeps every file shown, so "Since reviewed" is what changed after. Line
   comments are anchored by their line's text, dropped when it changes, and go as one message
   of `path L<n>: body` lines. A keep or revert the worker acted on asks for the review again.
+
+- ✅ **Codex: Slopty is one more client of the user's app-server, and the first answer to an
+  approval settles it** (2026-10-02, verified against Codex 0.160.0;
+  `crates/slopty-agent/src/codex/`, `xtask/src/codex/`; `crates/slopty-agent/tests/codex.rs`
+  over `tests/fixtures/codex/approval.jsonl`).
+  - **Types from the pinned build.** `cargo xtask codex schema` runs the official 0.160.0
+    build's `codex app-server generate-json-schema --experimental` and turns the definitions the
+    methods Slopty speaks reach into serde types: 12 client requests, the 5 approval and
+    question requests, 27 notifications. The generator is xtask's own, about a thousand lines,
+    because the bundle's shapes are few (objects, string enums, unions tagged by a property or
+    by their one key, untagged unions, options, and an object that is also a union, read
+    flattened). typify was the plan's choice, but it brings a dependency tree and its own
+    naming for shapes that need neither. The file is checked in, so a Codex bump shows as a
+    diff of its wire.
+  - **The socket.** The daemon's control socket,
+    `$CODEX_HOME/app-server-control/app-server-control.sock`, speaks WebSocket, one JSON-RPC
+    message per text frame, without the `"jsonrpc"` field;
+    `codex app-server proxy` only copies bytes, so a client has to speak WebSocket itself
+    (tokio-tungstenite, the handshake only). The path in `CODEX_HOME` is a symlink to a socket
+    in a short shared directory (`/tmp/codex-daemon-<uid>/<hash>`), because a socket's path
+    must fit in 104 bytes on macOS. A client connects to the symlink's target for the same
+    reason.
+  - **A thread can be resumed only once its first turn has written it.** `thread/resume` of a
+    thread with no turns yet fails with "no rollout found", so a second client joins after
+    the first turn.
+  - **Approvals with two clients, as recorded.** With Slopty and a Codex TUI both following one
+    thread, the app-server sends `item/commandExecution/requestApproval` to both, under one
+    request id, and both show `waitingOnApproval` in the thread's status. The first answer
+    settles it. Both clients hear `serverRequest/resolved` for that id, and the turn goes on.
+    A second answer, sent after that, gets no reply: the app-server logs "could not find
+    callback" and drops it. So the face can offer the approval beside the TUI. Whoever answers
+    first wins, and the other side's card is closed by `serverRequest/resolved` rather than by
+    an error to its own answer.
+  - **The recording.** `cargo xtask codex fixtures` runs the official build's app-server on its
+    control socket in a scratch `CODEX_HOME` outside the repository, so no `AGENTS.md` or git
+    state is read. The model is a canned Responses API on loopback, set up as a custom provider
+    with retries off. Plugins and apps are off, so nothing is fetched. The policy is
+    `on-request` in a read-only sandbox, and the model asks to run a command with escalated
+    permissions. The paths, the host name, every UUID, the user agent and every time are
+    scrubbed. The fixture tests read every recorded frame through the generated types. What
+    either side sent reads back to the same JSON, and the routing above is asserted as
+    recorded.

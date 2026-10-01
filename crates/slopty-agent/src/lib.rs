@@ -30,6 +30,9 @@
 //! Claude Code runs Slopty's mod ([`claude_mod`]), [`live`] adds what the model is writing
 //! before the transcript has it. Nothing here drives the agent or answers for the person on its
 //! own.
+//!
+//! Codex is reached through its app-server instead, as one more client of the person's daemon
+//! beside its TUI ([`codex`]).
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -39,6 +42,7 @@
 )]
 
 pub mod claude_mod;
+pub mod codex;
 pub mod commands;
 pub mod conversation;
 pub mod detect;

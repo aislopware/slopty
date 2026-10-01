@@ -47,6 +47,14 @@ zed itself so it is never behind zed while longbridge lags.
   mod's against a canned local API with no account. Both run the official Claude Code build
   that xtask fetches from npm into `target/claude/<version>/`, checked against the registry's
   sha512; `SLOPTY_CLAUDE` points at another binary of the same pinned version.
+- `cargo xtask codex schema [--check]` writes the Codex app-server types
+  (`crates/slopty-agent/src/codex/protocol.rs`) from the pinned build's
+  `generate-json-schema --experimental`, and `cargo xtask codex fixtures` records
+  `crates/slopty-agent/tests/fixtures/codex/` from that build's app-server against a canned
+  Responses API, with nothing signed in and nothing fetched. The build comes from npm into
+  `target/codex/<version>/`, checked against the registry's sha512; `SLOPTY_CODEX` points at
+  another binary of the same pinned version. A Codex bump is the version in `xtask/src/codex.rs`,
+  then both commands, and the diff is the wire change.
 - `cargo xtask linux` cross-builds the terminal-only Linux worker (`slopty-ptyd`,
   `slopty-worker`, `slopty`) for `aarch64-unknown-linux-gnu` under `target/linux`, with
   `cargo zigbuild` (`cargo binstall cargo-zigbuild`; zig is the one libghostty-vt takes).

@@ -32,6 +32,10 @@ rustix.workspace = true
 # The daemons' footprint, descriptors and threads for `soak`, and the percentiles.
 slopty-testkit.workspace = true
 toml.workspace = true
+# `codex fixtures` speaks to a real app-server over its WebSocket control socket.
+futures-util.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
 
 [dev-dependencies]
 # The icon tests read ictool's PNGs with their colour profile and 16-bit samples; tiny-skia's
