@@ -1173,11 +1173,27 @@ impl Stack {
 /// (`slopty_platform::web`), and a run's worker is a new one every time.
 #[cfg(target_os = "macos")]
 fn remove_page_store(root: &Path) {
-    let Ok(id) = std::fs::read_to_string(root.join("worker").join("worker-id")) else { return };
-    let Some(home) = std::env::var_os("HOME") else { return };
+    if let Some(store) = page_store(root) {
+        let _gone = std::fs::remove_dir_all(store);
+    }
+}
+
+/// The run's worker's id, as it writes it.
+#[must_use]
+pub fn worker_id(root: &Path) -> Option<String> {
+    let id = std::fs::read_to_string(root.join("worker").join("worker-id")).ok()?;
+    Some(id.trim().to_owned())
+}
+
+/// Where the app keeps the run's worker's web data store.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn page_store(root: &Path) -> Option<PathBuf> {
+    let id = worker_id(root)?;
+    let home = std::env::var_os("HOME")?;
     // An app run from its binary, as here, keeps its stores under the binary's name.
     let stores = Path::new(&home).join("Library/WebKit/slopty-app/WebsiteDataStore");
-    let _gone = std::fs::remove_dir_all(stores.join(id.trim().to_ascii_lowercase()));
+    Some(stores.join(id.to_ascii_lowercase()))
 }
 
 /// Give the run's named pasteboards back to the system once its processes are gone.

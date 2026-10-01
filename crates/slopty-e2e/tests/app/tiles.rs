@@ -443,6 +443,17 @@ async fn a_page_on_a_host_only_the_worker_names_loads_through_its_proxy() {
     assert_eq!(page.page_url, named, "the web view's address is the worker's");
     assert!(page.failed.is_none(), "{page:?}");
     eprintln!("the named page loaded {took:?} after it was asked for");
+
+    let root = stack.dir.path().to_path_buf();
+    let store = slopty_e2e::harness::page_store(&root).expect("the worker's id");
+    assert!(store.exists(), "the worker's pages keep a store of their own: {}", store.display());
+    let id = slopty_e2e::harness::worker_id(&root).unwrap();
+    stack.driver.ok(&Command::ForgetWorker { id }).await.unwrap();
+    let deadline = std::time::Instant::now() + STEP;
+    while store.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!store.exists(), "a forgotten worker's pages keep nothing: {}", store.display());
     stack.shutdown().await;
 }
 

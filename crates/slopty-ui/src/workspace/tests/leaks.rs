@@ -284,9 +284,22 @@ fn a_removed_worker_with_open_tiles_leaves_nothing(cx: &mut TestAppContext) {
         });
         arrives(&view, cx, &laptop, ItemKind::Note { text: "plan".into() }, 3);
         arrives(&view, cx, &laptop, ItemKind::File { path: "/w/main.rs".into() }, 4);
-        arrives(&view, cx, &laptop, ItemKind::Browser { url: "http://127.0.0.1:3000/".into() }, 5);
+        let page = arrives(
+            &view,
+            cx,
+            &laptop,
+            ItemKind::Browser { url: "http://127.0.0.1:3000/".into() },
+            5,
+        );
         arrives(&view, cx, &laptop, ItemKind::Folder { path: "/w".into() }, 6);
-        view.update_in(cx, |v, _w, cx| v.remove_worker(key, cx));
+        assert!(view.read_with(cx, |v, _| v.browser(page.item).is_some()), "the page is open");
+        // The page goes with the worker at once, not at the next draw, which a hidden window
+        // never makes: its web view holds the worker's data store, which a forgotten worker's
+        // pages must give up.
+        view.update_in(cx, |v, _w, cx| {
+            v.remove_worker(key, cx);
+            assert!(v.browser(page.item).is_none(), "the page went before any draw");
+        });
         cx.run_until_parked();
     });
 }

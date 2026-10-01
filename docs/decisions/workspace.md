@@ -280,6 +280,14 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
     refusal of a port nothing listens on, which proves the path, then loads through it as it
     is, and `nowhere.invalid` says the worker finds no such host
     (`a_page_on_a_host_only_the_worker_names_loads_through_its_proxy`).
+  - Forgetting a worker deletes its pages' store, cookies and storage with it
+    (`slopty_platform::web::forget`, 2026-10-01). Its pages go with its tiles at once: they
+    used to wait for the workspace's next draw, which a hidden window never makes, so a
+    forgotten worker's pages kept running and WebKit refused the removal as "in use". WebKit
+    still lets go of a store a little after its last view, so the app asks again over about
+    eight seconds. Tests: `a_removed_worker_with_open_tiles_leaves_nothing` (the page gone
+    before any draw) and the app e2e above, which forgets the worker and sees its store go
+    from `~/Library/WebKit`.
 
 - ✅ **A file tile is an editor** (2026-09-25). The user wanted to fix a line where they read
   it rather than type `$EDITOR` into a shell, so the file tile's body is gpui-kit's code

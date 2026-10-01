@@ -25,7 +25,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta,
     ScrollWheelEvent, TouchPhase, Window, point, px, size,
 };
-use slopty_core::{ItemId, SessionId};
+use slopty_core::{ItemId, SessionId, WorkerId};
 use slopty_e2e::{
     BrowserItemInfo, Button, Command, Dump, FaceInfo, FileItemInfo, FrameInfo, ItemInfo,
     LatencyInfo, ProjectInfo, Reply, ScreenInfo, TerminalInfo, WindowInfo, WorkerInfo,
@@ -738,6 +738,13 @@ fn apply(
             };
             let view = workspace.read(cx).view.clone();
             view.update(cx, |view, cx| view.reveal_session(session, cx));
+            Reply::Ok
+        }
+        Command::ForgetWorker { id } => {
+            let Ok(id) = id.trim().parse::<WorkerId>() else {
+                return Reply::Error { message: format!("not a worker id: {id}") };
+            };
+            workspace.update(cx, |ws, cx| ws.forget_worker(id, window, cx));
             Reply::Ok
         }
         Command::AddDisplay => {

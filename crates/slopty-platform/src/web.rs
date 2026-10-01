@@ -297,16 +297,56 @@ fn store(worker: u128, mtm: MainThreadMarker) -> Retained<WKWebsiteDataStore> {
         // thread.
         return unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
     }
-    // `NSUUID::from_bytes` fails objc2's debug check of `initWithUUIDBytes:`, whose concrete
-    // class takes a `char *`: the string form names the same UUID.
-    let text = uuid_text(worker);
-    let Some(identifier) = NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(&text))
-    else {
+    let Some(identifier) = identifier(worker) else {
         // SAFETY: as for the null key above.
         return unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) };
     };
     // SAFETY: WebKit rule: any identifier but the null UUID names a store, made if it is new.
     unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) }
+}
+
+/// The identifier of `worker`'s data store.
+fn identifier(worker: u128) -> Option<Retained<NSUUID>> {
+    // `NSUUID::from_bytes` fails objc2's debug check of `initWithUUIDBytes:`, whose concrete
+    // class takes a `char *`: the string form names the same UUID.
+    NSUUID::initWithUUIDString(NSUUID::alloc(), &NSString::from_str(&uuid_text(worker)))
+}
+
+/// Delete `worker`'s data store once the person has forgotten the worker, and tell `done`
+/// whether it went.
+///
+/// Its cookies, caches and storage go with it. `WebKit` refuses while it still holds the store
+/// for a page, which can outlast the page's view a little: `done` then gets its reason. Main
+/// thread only.
+pub fn forget(worker: u128, done: impl FnOnce(Result<(), String>) + 'static) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return done(Err("not on the main thread".to_owned()));
+    };
+    if worker == 0 {
+        return done(Ok(()));
+    }
+    let Some(identifier) = identifier(worker) else {
+        return done(Err("no identifier for the worker".to_owned()));
+    };
+    let done = Cell::new(Some(done));
+    let handler = RcBlock::new(move |error: *mut NSError| {
+        // SAFETY: WebKit rule: the handler's error is nil or an `NSError` that lives for the
+        // call.
+        let why = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
+        if let Some(done) = done.take() {
+            done(why.map_or(Ok(()), Err));
+        }
+    });
+    // SAFETY: WebKit rule (`WKWebsiteDataStore.h`): any identifier but the null UUID may be
+    // removed on the main thread; one never made, or still in use, is an error the handler
+    // gets.
+    unsafe {
+        WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(
+            &identifier,
+            &handler,
+            mtm,
+        );
+    }
 }
 
 /// `value` as a UUID is written: `01020304-0506-0708-090a-0b0c0d0e0f10`.

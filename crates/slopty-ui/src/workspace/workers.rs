@@ -488,6 +488,9 @@ impl WorkspaceView {
             self.file_tile_gone(&view, cx);
         }
         self.folders.remove(&id);
+        // The page goes with its tile, and the worker's store with its last page.
+        self.browsers.remove(&id);
+        self.browser_links.remove(&id);
         self.screens.remove(&id);
         self.titles.remove(&id);
         self.unseen.remove(&id);

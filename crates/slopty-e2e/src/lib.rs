@@ -117,6 +117,11 @@ pub enum Command {
         /// `host[:port]`.
         address: String,
     },
+    /// Forget a worker added by address, as the hosts popover would.
+    ForgetWorker {
+        /// Its id, as the worker writes it.
+        id: String,
+    },
     /// Dispatch keystrokes in GPUI's binding syntax, space separated (`cmd-n`, `enter`,
     /// `ctrl-c`, `a`).
     Keys {
