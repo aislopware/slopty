@@ -2,10 +2,10 @@
 //! orchestrator's share apart, and from each agent's thread meters its cost, its context and
 //! the plan's quota.
 //!
-//! Time comes from the server, which follows every agent's status ([`Spent`]), so it is there
-//! for every node on every worker. Cost, context and quota come from the agents' own threads
-//! ([`Meters`]), handed to the board by session as this client hears them; a node whose
-//! thread it has not heard shows its time alone.
+//! Time comes from the server, which follows every agent's status
+//! ([`slopty_proto::project::Spent`]), so it is there for every node on every worker. Cost, context
+//! and quota come from the agents' own threads ([`Meters`]), handed to the board by session as this
+//! client hears them; a node whose thread it has not heard shows its time alone.
 
 use std::collections::HashMap;
 

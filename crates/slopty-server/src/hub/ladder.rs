@@ -1,10 +1,11 @@
 //! The fleet's attention ladder, and the notices it sends by where the person is
 //! (`slopty_proto::thread::attention`, `docs/decisions/agents.md`).
 //!
-//! Each worker publishes its thread table ([`ToServer::Threads`]); the hub keeps the rows and
-//! ranks them again whenever a row, a terminal or a project moves: a subagent folds into the
-//! thread it hangs from, and the rest roll up per tile, worker, project node, project and the
-//! fleet. A ladder that differs from the last goes to every link.
+//! Each worker publishes its thread table
+//! ([`slopty_proto::server::ToServer::Threads`]); the hub keeps the rows and ranks them again
+//! whenever a row, a terminal or a project moves: a subagent folds into the thread it hangs from,
+//! and the rest roll up per tile, worker, project node, project and the fleet. A ladder that
+//! differs from the last goes to every link.
 //!
 //! A thread that hangs from no other and climbs to needing the person, fails, or comes to rest
 //! from working, is a notice. It goes to no client when the thread's tile is on screen where

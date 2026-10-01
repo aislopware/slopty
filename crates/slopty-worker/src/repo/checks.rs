@@ -28,7 +28,7 @@ pub enum Failed {
     Said(String),
 }
 
-/// `program` on `path`, else in [`KNOWN`].
+/// `program` on `path`, else in the places Homebrew and the system put it.
 #[must_use]
 pub fn find(program: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let on_path = path.map(std::env::split_paths).into_iter().flatten();
