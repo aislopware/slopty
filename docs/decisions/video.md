@@ -2423,3 +2423,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a stripe at 60) rather than time, and waits for a measurement on the worker's path.
   - Not taken: capturing each stripe as a stream of its own (ruled out above: two captures
     share no display time).
+
+- ✅ **A session the system takes away is rebuilt at the size in force** (2026-10-01). On a
+  starved machine VideoToolbox malfunctioned in one session (`kVTVideoEncoderMalfunctionErr`)
+  and answered every frame after it with `kVTVideoEncoderNotAvailableNowErr` for as long as the
+  session lived, while sessions beside it in the same process went on coding. The worker
+  logged each as a dropped frame and kept feeding the dead session, so the stream sent nothing
+  more and the client's refreshes went unanswered (MEASUREMENTS.md, "an encoder session that
+  malfunctions"). That is the shape of the clock test's failure on CI (run 36813467628): one
+  frame that did not decode, then 22 refreshes and no picture.
+  - *The codec names it.* A frame back with `kVTInvalidSessionErr`, `kVTSessionMalfunctionErr`,
+    `kVTVideoEncoderMalfunctionErr` or `kVTVideoEncoderNotAvailableNowErr`, from the output
+    callback or the submit, marks the session lost, and from then on `encode` refuses every
+    frame as `CodecError::EncoderLost`, the one that found it out included when the callback
+    ran inside the submit. The decoder already did the same on its side (`session_lost`).
+  - *The geometry tick replaces it.* The first refusal from a session records its number and
+    wakes the tick, which builds new sessions at the size, quality and chroma in force, as a
+    chroma switch does: keyframes, and nothing for the client to hear but them. Only while that
+    session is still in force and nothing is staged in its place, so the captures it refuses
+    while its replacements build ask for no second build. A build that fails leaves it in, and
+    the next tick tries again.
+  - *A keyframe's slots are not the rung's.* The captures the mailbox replaced while a keyframe
+    was in the encoder count as neither taken nor lost in `EncoderWatch`'s window. Charged, a
+    cold 494 ms first keyframe cut the ceiling to 4 frames a second for 7.5 s
+    (MEASUREMENTS.md, "a keyframe charged to the rung").
+  - *A keyframe is marked in flight before its submit.* An aligned session runs the callback
+    that clears the mark inside the submit, so a mark set afterwards outlived the keyframe and
+    left the refreshes of the next 400 ms unanswered.
+  - *The stream tests wait on the stream, not the clock* (`next_or_stopped`). They follow the
+    geometry when the stream wakes it, as the app's loop does, and fail after 10 s without a
+    picture only when both sides ran (the worker captured, the client task reported) and no
+    frame was inside VideoToolbox. A machine that did not run the stream is the runner's
+    timeout to call; a stream that ran and sent nothing has stopped.
+  - Tests: `a_frame_back_from_a_malfunction_loses_the_session`,
+    `an_invalidated_session_is_lost` (codec);
+    `a_session_taken_away_is_replaced_and_the_stream_goes_on`,
+    `a_keyframe_coded_inside_the_submit_is_not_left_in_flight`,
+    `a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on` (worker);
+    `a_slow_keyframe_costs_the_rung_nothing` (media).

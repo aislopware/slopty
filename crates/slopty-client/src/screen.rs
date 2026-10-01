@@ -334,6 +334,8 @@ struct Inflight {
     failed: Option<Failed>,
     /// Failures on frames nothing refers to, which need no refresh.
     failed_discardable: u64,
+    /// VideoToolbox's status for the newest failure, until the worker takes it.
+    status: Option<i32>,
 }
 
 /// Failures since the worker last looked, folded into one.
@@ -375,6 +377,7 @@ impl Inflight {
     /// nothing refers to, failed with the session intact, took no reference with it, so it asks
     /// for nothing.
     fn failed(&mut self, failure: DecodeFailure) {
+        self.status = Some(failure.status);
         let parked = self.take(failure.pts_us);
         if parked.is_some_and(|p| p.discardable) && !failure.session_lost() {
             self.failed_discardable = self.failed_discardable.saturating_add(1);
@@ -437,6 +440,12 @@ pub struct ScreenStats {
     pub refreshes: u64,
     /// Decoder rejections.
     pub decode_errors: u64,
+    /// VideoToolbox's status for the newest of them (zero for a frame it dropped without naming
+    /// an error); `None` before the first, and for a failure that was not VideoToolbox's (no
+    /// parameter sets yet, a malformed unit).
+    pub decode_failure: Option<i32>,
+    /// Frames in the decoders now: handed to them, and neither a picture nor a failure back.
+    pub decoding: u64,
     /// Datagrams seen.
     pub datagrams: u64,
     /// The stream is coded as two stripes now ([`Stitched`]).
@@ -1368,6 +1377,11 @@ impl Worker {
             if let Err(e) = lane.decoder.decode(&frame.data, pts) {
                 let _gone = lane.inflight.lock().take(pts);
                 counters.decode_errors = counters.decode_errors.saturating_add(1);
+                counters.decode_failure = if let slopty_codec::CodecError::Os { status, .. } = &e {
+                    Some(*status)
+                } else {
+                    None
+                };
                 let Some(keyframe) =
                     refresh_after_refusal(discardable, lane.decoder.ready(), restarts)
                 else {
@@ -1398,16 +1412,20 @@ impl Worker {
             if !lane.news.swap(false, Ordering::Acquire) {
                 continue;
             }
-            let (acks, failed, failed_discardable) = {
+            let (acks, failed, failed_discardable, status) = {
                 let mut inflight = lane.inflight.lock();
                 (
                     std::mem::take(&mut inflight.acks),
                     inflight.failed.take(),
                     std::mem::take(&mut inflight.failed_discardable),
+                    inflight.status.take(),
                 )
             };
             for token in acks {
                 lane.reassembler.ack_ltr(token);
+            }
+            if status.is_some() {
+                counters.decode_failure = status;
             }
             counters.decode_errors = counters.decode_errors.saturating_add(failed_discardable);
             let Some(failed) = failed else { continue };
@@ -1483,6 +1501,11 @@ impl Worker {
         self.counters.hold_p95 = report.hold_p95.to_std();
         self.counters.jitter = report.owd_jitter.to_std();
         self.counters.queue_depth = report.queue_depth;
+        self.counters.decoding = [Some(&self.top), self.lower.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|lane| u64::try_from(lane.inflight.lock().parked.len()).unwrap_or(u64::MAX))
+            .sum();
         self.counters.first_decoded_at = *self.output.first_decoded.lock();
         self.counters.seam_tears = self.output.stitch.lock().tears;
         self.counters.clock = self.clock.estimate();

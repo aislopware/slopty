@@ -12432,3 +12432,65 @@ none composited.
 ```sh
 cargo test -p slopty-ui --release --lib -- --ignored --nocapture terminal_frames_cost measure_the_navigator_scrolling
 ```
+
+## 2026-10-01 — a keyframe charged to the rung
+
+Mac Studio M1 Max, macOS 27.0. The drawn screen at a quarter of its 3024 × 1964 (756 × 492),
+streamed to a client in the same process, each session's first frame held back 500 ms
+(`SLOPTY_COLD_MS`), as a cold encoder or a busy machine holds it. `EncoderWatch` charged the
+captures the mailbox replaced during that keyframe to the rung: one capture of a 60 fps window
+taken, so the ceiling fell to what the window was fed. Five runs each way, interleaved, from
+copies of the test binary:
+
+| | frames coded, first second | second second | lowest ceiling | pictures decoded in 2 s |
+| --- | --- | --- | --- | --- |
+| charged | 4–10 | 2–10 | 2–10 fps | 5–20 |
+| excused (`EncoderWatch::fed`) | 24–28 | 57–60 | 60 fps | 82–84 |
+
+Without the injected delay both builds code 53–59 frames in each second. At the whole
+3024 × 1964 the ceiling falls to about 52 either way, which is that encoder's own rate. Before
+the change the clock test sometimes ran at a ceiling of 4 and took about 13 s; after it, 3.9 to
+5.5 s, with one keyframe a session.
+
+```sh
+SLOPTY_COLD_MS=500 cargo test -p slopty-worker --lib -- --ignored --exact --nocapture \
+  screen::synthetic::tests::measure_a_new_streams_first_seconds
+```
+
+## 2026-10-01 — an encoder session that malfunctions
+
+Mac Studio M1 Max, macOS 27.0. Eight copies of the worker's test binary at background QoS
+(`taskpolicy -b`, the efficiency cores), each running three or four of the drawn-screen stream
+tests, the load average between 27 and 83 with other sessions building. Each run lasted under
+four minutes.
+
+- With a debug log on, one copy's clock test stream had a frame come back with
+  `kVTVideoEncoderMalfunctionErr` (−12912), then every one of the next 264 with
+  `kVTVideoEncoderNotAvailableNowErr` (−12915), while the other tests' sessions in that process
+  went on coding. The client had no video for 10 s and asked for a refresh 24 times. The
+  worker treated each failure as a dropped frame.
+- A striped stream in a run without the log stopped the same way on its top stripe: over 50 s
+  the client decoded lower stripes only, asked 100 times, and the worker counted no capture
+  coded.
+- The CI failure this was found for (run 36813467628) has that shape: 33 frames handed to the
+  decoder, 32 pictures, one decode error, then 22 refreshes and no picture for 10 s.
+
+With the codec naming the loss (`CodecError::EncoderLost`) and the geometry tick rebuilding, the
+deterministic test (`a_session_taken_away_is_replaced_and_the_stream_goes_on`, the first session
+refusing every frame from its twentieth) shows 20 pictures, one new build and 100 more. With its
+replacement taking 200 ms to build, a bare "lost" flag built three sessions and the check that the
+lost session is still in force built two.
+
+What still stopped those copies after the fix was the machine itself: the worker captured two
+frames in over 10 s, each keyframe spent 7.7 to 8.8 s inside VideoToolbox, and the client task
+went 10 s without a report. The stream tests now wait through that (`next_or_stopped`) and fail
+only when both sides ran.
+
+```sh
+cargo test -p slopty-worker --lib --no-run   # then, from a copy of the binary off this volume:
+taskpolicy -b ./slopty_worker-<hash> --exact --nocapture \
+  screen::synthetic::tests::two_stripes_meet_at_the_seam_row_for_row \
+  screen::synthetic::tests::the_clock_probes_time_captures_as_the_shared_clock_does \
+  screen::synthetic::tests::a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on \
+  screen::synthetic::tests::a_session_taken_away_is_replaced_and_the_stream_goes_on
+```

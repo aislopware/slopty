@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU64, Ordering};
 
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, Type as _,
@@ -32,12 +32,13 @@ use objc2_video_toolbox::{
     kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
     kVTCompressionPropertyKey_YCbCrMatrix, kVTEncodeFrameOptionKey_AcknowledgedLTRTokens,
     kVTEncodeFrameOptionKey_ForceKeyFrame, kVTEncodeFrameOptionKey_ForceLTRRefresh,
-    kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+    kVTInvalidSessionErr, kVTProfileLevel_H264_High_AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
     kVTPropertyNotSupportedErr, kVTPropertySupportedValueListKey,
     kVTSampleAttachmentKey_QualityMetrics, kVTSampleAttachmentKey_RequireLTRAcknowledgementToken,
     kVTSampleAttachmentQualityMetricsKey_ChromaBlueMeanSquaredError,
     kVTSampleAttachmentQualityMetricsKey_ChromaRedMeanSquaredError,
-    kVTSampleAttachmentQualityMetricsKey_LumaMeanSquaredError,
+    kVTSampleAttachmentQualityMetricsKey_LumaMeanSquaredError, kVTSessionMalfunctionErr,
+    kVTVideoEncoderMalfunctionErr, kVTVideoEncoderNotAvailableNowErr,
     kVTVideoEncoderSpecification_EnableLowLatencyRateControl,
     kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder,
 };
@@ -160,11 +161,49 @@ const fn submission(options_keyframe: bool, options_refresh: bool, ltr: bool) ->
     (keyframe, options_refresh && ltr && !keyframe)
 }
 
+/// Whether a frame that came back with `status` says the session is gone for good: every frame
+/// after it fails too, and only a new session codes.
+///
+/// That is `kVTInvalidSessionErr` (`mediaserverd` restarting), `kVTSessionMalfunctionErr`, or
+/// the hardware encoder's own malfunction. `kVTVideoEncoderNotAvailableNowErr` is one as well:
+/// on a starved machine a session whose encoder malfunctioned answered every frame after it with
+/// that, for as long as it lived, while new sessions beside it coded (MEASUREMENTS.md, "an
+/// encoder session that malfunctions").
+const fn encoder_lost(status: i32) -> bool {
+    status == kVTInvalidSessionErr
+        || status == kVTSessionMalfunctionErr
+        || status == kVTVideoEncoderMalfunctionErr
+        || status == kVTVideoEncoderNotAvailableNowErr
+}
+
 struct Shared {
     sink: Sink,
     codec: VideoCodec,
     /// Frames the session gave up: dropped by rate control or failed.
     dropped: AtomicU64,
+    /// The status of the first frame that came back from a session gone for good
+    /// ([`encoder_lost`]); zero while it codes.
+    lost: AtomicI32,
+}
+
+impl Shared {
+    fn new(sink: Sink, codec: VideoCodec) -> Self {
+        Self { sink, codec, dropped: AtomicU64::new(0), lost: AtomicI32::new(0) }
+    }
+
+    /// A frame came back with `status`, which says the session is gone: the first such status
+    /// is the one kept.
+    fn lose(&self, status: i32) {
+        let _kept = self.lost.compare_exchange(0, status, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// Whether the session is gone, as [`CodecError::EncoderLost`].
+    fn lost(&self) -> Result<(), CodecError> {
+        match self.lost.load(Ordering::Acquire) {
+            0 => Ok(()),
+            status => Err(CodecError::EncoderLost { status }),
+        }
+    }
 }
 
 /// A hardware encoder.
@@ -233,7 +272,7 @@ impl Encoder {
         if chroma == Chroma::Full && config.codec != VideoCodec::Hevc {
             return Err(CodecError::NoFullChroma(config.codec));
         }
-        let shared = Arc::new(Shared { sink, codec: config.codec, dropped: AtomicU64::new(0) });
+        let shared = Arc::new(Shared::new(sink, config.codec));
         // SAFETY: framework-provided constant string.
         let hardware_key =
             unsafe { kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder };
@@ -600,12 +639,17 @@ impl Encoder {
     }
 
     /// Submit one picture. `pts_us` is echoed on the packet; use the capture timestamp.
+    ///
+    /// [`CodecError::EncoderLost`] once a frame came back from a session the system took away,
+    /// this one included when its callback ran inside the submit: the session codes nothing
+    /// more, and the caller replaces it.
     pub fn encode(
         &self,
         image: &CVPixelBuffer,
         pts_us: u64,
         options: &FrameOptions,
     ) -> Result<(), CodecError> {
+        self.shared.lost()?;
         let format = CVPixelBufferGetPixelFormatType(image);
         if self.config.chroma == Chroma::Full && format != pixel_format(Chroma::Full) {
             return Err(CodecError::NotFullChroma(format));
@@ -664,10 +708,13 @@ impl Encoder {
                 &raw mut flags,
             )
         };
-        if status == 0 {
+        if encoder_lost(status) {
+            self.shared.lose(status);
+        } else {
+            check("VTCompressionSessionEncodeFrame", status)?;
             self.place();
         }
-        check("VTCompressionSessionEncodeFrame", status)
+        self.shared.lost()
     }
 
     /// After the first frame, which placed the session: tell it the rate it now runs at, the one
@@ -786,6 +833,9 @@ unsafe extern "C-unwind" fn output_callback(
         // picture it can decode arrives.
         tracing::debug!(status, ?flags, refresh, "encoder dropped a frame");
         shared.dropped.fetch_add(1, Ordering::Relaxed);
+        if encoder_lost(status) {
+            shared.lose(status);
+        }
         return;
     }
     let Some(sample) = NonNull::new(sample) else { return };
@@ -1640,6 +1690,68 @@ mod tests {
         encoder.flush().unwrap();
         let out = collect(&rx, 1);
         assert_eq!(out.iter().map(|p| (p.pts_us, p.keyframe)).collect::<Vec<_>>(), [(2, true)]);
+    }
+
+    /// A frame that comes back from a malfunctioning encoder takes the session with it: every
+    /// frame handed to it afterwards is refused as [`CodecError::EncoderLost`], with the status
+    /// the frame came back with. A frame merely dropped (rate control, a busy encoder) loses
+    /// nothing.
+    #[test]
+    fn a_frame_back_from_a_malfunction_loses_the_session() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let encoder = encoder(tx);
+        let keyframe = FrameOptions { force_keyframe: true, ..FrameOptions::default() };
+        encoder.encode(&frame(0), 1, &keyframe).unwrap();
+        encoder.flush().unwrap();
+        let refcon = Arc::as_ptr(&encoder.shared).cast_mut().cast::<c_void>();
+        // SAFETY: the refcon is the encoder's own `Shared`, alive for the call; a null sample
+        // with a status or the dropped flag is what VideoToolbox passes for a frame it gave up.
+        unsafe {
+            output_callback(
+                refcon,
+                ptr::null_mut(),
+                0,
+                VTEncodeInfoFlags::FrameDropped,
+                ptr::null_mut(),
+            );
+        }
+        encoder.encode(&frame(1), 2, &FrameOptions::default()).unwrap();
+        encoder.flush().unwrap();
+        // SAFETY: as above.
+        unsafe {
+            output_callback(
+                refcon,
+                ptr::null_mut(),
+                kVTVideoEncoderMalfunctionErr,
+                VTEncodeInfoFlags::empty(),
+                ptr::null_mut(),
+            );
+        }
+        for pts in [3, 4] {
+            let refused = encoder.encode(&frame(2), pts, &keyframe);
+            assert!(
+                matches!(refused, Err(CodecError::EncoderLost { status }) if status == kVTVideoEncoderMalfunctionErr),
+                "{refused:?}"
+            );
+        }
+        let out = collect(&rx, 2);
+        assert_eq!(out.iter().map(|p| p.pts_us).collect::<Vec<_>>(), [1, 2], "none after it");
+    }
+
+    /// A session the system invalidated refuses the frame handed to it as
+    /// [`CodecError::EncoderLost`], the status VideoToolbox answered the submit with.
+    #[test]
+    fn an_invalidated_session_is_lost() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let encoder = encoder(tx);
+        // SAFETY: invalidating a live session is always allowed; it stays retained, and the
+        // encoder's `Drop` invalidating it again is a no-op.
+        unsafe { encoder.session.invalidate() }
+        let refused = encoder.encode(&frame(0), 1, &FrameOptions::default());
+        assert!(
+            matches!(refused, Err(CodecError::EncoderLost { status }) if encoder_lost(status)),
+            "{refused:?}"
+        );
     }
 
     /// 4:4:4 is an HEVC profile; H.264 has none on this encoder.

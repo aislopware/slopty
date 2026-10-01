@@ -1522,6 +1522,10 @@ struct Shared<P: Platform = Native> {
     /// target moved, was resized or went, or a frame came while the client was told the source
     /// is idle ([`Pipeline::geometry_quiet`]).
     geometry_wake: Arc<tokio::sync::Notify>,
+    /// The session the system took away last ([`CodecError::EncoderLost`]), zero for none: it
+    /// codes nothing more, and while it is in force the geometry tick builds new ones at the
+    /// size in force ([`Pipeline::check_geometry`]).
+    encoder_lost: AtomicU64,
     /// The client was last told the source is idle ([`Pipeline::check_source`]).
     source_idle: AtomicBool,
     counters: Counters,
@@ -1592,6 +1596,7 @@ impl<P: Platform> Shared<P> {
             cursor_wake: tokio::sync::Notify::new(),
             cursor_wakes: AtomicU64::new(0),
             geometry_wake: Arc::new(tokio::sync::Notify::new()),
+            encoder_lost: AtomicU64::new(0),
             source_idle: AtomicBool::new(false),
             counters: Counters::new(),
         }
@@ -2240,6 +2245,12 @@ impl<P: Platform> Shared<P> {
             }
             self.tell(&mut lives, i, fps);
             coder.submitted(pts, now, stripes);
+            // Marked in flight before the submit, as the callback that clears the mark may run
+            // inside it: marked after, a keyframe already out read as one still being encoded
+            // and the refreshes of the next 400 ms went unanswered.
+            if options.get(i).and_then(Option::as_ref).is_some_and(|(o, _)| o.force_keyframe) {
+                coder.keyframe_submitted_us.store(now.max(1), Ordering::Relaxed);
+            }
         }
         let outcomes = self.submit(&mut lives, &frame.image, pts, &options);
         let mut stale = false;
@@ -2248,9 +2259,6 @@ impl<P: Platform> Shared<P> {
             let (Some(outcome), Some((options, standalone))) = (outcome, asked) else { continue };
             match outcome {
                 Ok(()) => {
-                    if options.force_keyframe {
-                        coder.keyframe_submitted_us.store(now.max(1), Ordering::Relaxed);
-                    }
                     if *standalone {
                         self.counters.refreshes_idr.fetch_add(1, Ordering::Relaxed);
                     }
@@ -2269,7 +2277,17 @@ impl<P: Platform> Shared<P> {
                         CodecError::WrongSize { .. } => {
                             tracing::debug!(stream = %self.id, i, error = %e, "a capture of the old size dropped");
                         }
+                        CodecError::EncoderLost { .. } => {
+                            let session = coder.session.load(Ordering::Relaxed);
+                            if self.encoder_lost.swap(session, Ordering::Relaxed) != session {
+                                tracing::warn!(stream = %self.id, i, session, error = %e, "the encoder session is gone: new ones");
+                                self.geometry_wake.notify_one();
+                            }
+                        }
                         _ => tracing::warn!(stream = %self.id, i, error = %e, "encode failed"),
+                    }
+                    if options.force_keyframe {
+                        coder.keyframe_submitted_us.store(0, Ordering::Relaxed);
                     }
                     let mut pending = coder.pending.lock();
                     pending.keyframe |= options.force_keyframe;
@@ -4070,6 +4088,9 @@ impl<P: Platform> Pipeline<P> {
         }
         let spend = self.follow_spend();
         let Some(native) = self.resize.observe(native, self.native, probe.at) else {
+            if let Some(rebuild) = self.follow_lost() {
+                return Some(rebuild);
+            }
             if let Some(rebuild) = self.follow_chroma() {
                 return Some(rebuild);
             }
@@ -4127,6 +4148,23 @@ impl<P: Platform> Pipeline<P> {
             return None;
         }
         tracing::info!(stream = %self.id, striped = layout.is_some(), spend = ?self.gate.spend(), "rebuilding for the stripes");
+        Some(self.start_rebuild(self.native, self.desired, self.encoder_config))
+    }
+
+    /// Sessions in place of one the system took away ([`Shared::encoder_lost`]), at the size,
+    /// quality and chroma in force: new sessions, so keyframes, and nothing for the client to
+    /// hear but the keyframes. Only while the lost session is in force: the frames it refuses
+    /// while its replacements build, or before they go in at the next encode, ask for nothing
+    /// more.
+    fn follow_lost(&mut self) -> Option<Rebuild<P>> {
+        let lost = self.shared.encoder_lost.load(Ordering::Relaxed);
+        let in_force = [&self.shared.top, &self.shared.lower]
+            .iter()
+            .any(|coder| coder.session.load(Ordering::Relaxed) == lost);
+        if lost == 0 || !in_force || self.shared.staged.lock().is_some() {
+            return None;
+        }
+        tracing::info!(stream = %self.id, "rebuilding for a lost encoder session");
         Some(self.start_rebuild(self.native, self.desired, self.encoder_config))
     }
 
@@ -6571,11 +6609,24 @@ mod tests {
         layers: Arc<Mutex<Vec<bool>>>,
         /// Frames it says it dropped.
         dropped: Arc<AtomicU64>,
+        /// Where it hands each frame's packet inside the submit, as an aligned VideoToolbox
+        /// session does; `None` holds them.
+        inline: Option<Emit>,
     }
+
+    /// A packet handed on from inside a [`Recorder`]'s submit.
+    type Emit = Arc<dyn Fn(EncodedPacket) + Send + Sync>;
 
     /// A [`Recorder`] session numbered `session`, logging to `log`, of [`a_frame`]'s size.
     fn recorder(session: u64, log: Log) -> Recorder {
-        Recorder { session, log, size: (16, 16), layers: Arc::default(), dropped: Arc::default() }
+        Recorder {
+            session,
+            log,
+            size: (16, 16),
+            layers: Arc::default(),
+            dropped: Arc::default(),
+            inline: None,
+        }
     }
 
     impl slopty_codec::VideoEncoder for Recorder {
@@ -6591,7 +6642,7 @@ mod tests {
         fn encode(
             &self,
             image: &Self::Image,
-            _pts_us: u64,
+            pts_us: u64,
             options: &FrameOptions,
         ) -> Result<(), CodecError> {
             let size = (image.width(), image.height());
@@ -6599,6 +6650,9 @@ mod tests {
                 return Err(CodecError::WrongSize { image: size, session: self.size });
             }
             self.log.lock().push((self.session, options.force_keyframe));
+            if let Some(emit) = &self.inline {
+                emit(EncodedPacket { pts_us, ..packet(900, options.force_keyframe, None, false) });
+            }
             Ok(())
         }
 
@@ -6860,6 +6914,36 @@ mod tests {
         shared.top.keyframe_submitted_us.store(long_ago, Ordering::Relaxed);
         shared.request_refresh(0, 0, false);
         assert_eq!(asked(&shared), (false, true), "one that never came out answers nothing");
+    }
+
+    /// A session that codes inside the submit hands its keyframe on before the submit returns,
+    /// as an aligned VideoToolbox session does: nothing is in flight once it is out, and a
+    /// refresh asked for after it is answered.
+    #[test]
+    fn a_keyframe_coded_inside_the_submit_is_not_left_in_flight() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let log = Log::default();
+        let weak = Arc::downgrade(&shared);
+        let inline: Emit = Arc::new(move |packet| {
+            if let Some(shared) = weak.upgrade() {
+                shared.on_session_packet(0, 1, &packet);
+            }
+        });
+        let session = Recorder { inline: Some(inline), ..recorder(1, Arc::clone(&log)) };
+        drop(shared.install(whole(session), [1, 0]));
+        *shared.held.lock() = Some(a_frame());
+        shared.owed.store(true, Ordering::Relaxed);
+        let mut held = shared.held.lock();
+        assert_eq!(shared.try_encode(&mut held, true, host_now_us()), Attempt::Sent);
+        drop(held);
+        assert_eq!(*log.lock(), vec![(1, true)], "the session's keyframe went in");
+        assert!(!wire.sent.lock().is_empty(), "and came out inside the submit");
+        assert_eq!(shared.top.keyframe_submitted_us.load(Ordering::Relaxed), 0, "none in flight");
+
+        shared.request_refresh(0, 0, true);
+        assert!(shared.top.pending.lock().keyframe, "a keyframe asked for after it: answered");
     }
 
     /// A resize's encoder is built off the stream's task: starting it answers at once however

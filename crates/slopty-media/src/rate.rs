@@ -268,6 +268,9 @@ pub struct EncoderWatch {
     /// Encode time of the window's frames back, keyframes aside, and how many there were.
     encode_us: u64,
     encoded: u32,
+    /// Slots of the rung that keyframes spent in the encoder this window: the captures the
+    /// mailbox replaced in them are a keyframe's cost, not a rung the encoder cannot feed.
+    excused: u32,
 }
 
 /// A window's verdict ([`EncoderWatch::fed`]).
@@ -281,7 +284,8 @@ pub struct Fed {
 }
 
 impl EncoderWatch {
-    const DEFAULT: Self = Self { late: 0, rung: 0, taken: 0, lost: 0, encode_us: 0, encoded: 0 };
+    const DEFAULT: Self =
+        Self { late: 0, rung: 0, taken: 0, lost: 0, encode_us: 0, encoded: 0, excused: 0 };
 
     /// Weigh the window at the rung `fps`: a new rung starts a new one.
     const fn weigh(&mut self, fps: u16) {
@@ -295,9 +299,21 @@ impl EncoderWatch {
     /// rung under `fps`. The run starts again from there.
     ///
     /// A keyframe's time is not a frame's: a session's first one takes 50–130 ms at 3024 × 1964,
-    /// and counted it would cap a window at 52 frames a second.
+    /// and counted it would cap a window at 52 frames a second. Nor are the captures the mailbox
+    /// replaced while it was coded: the slots it spent are excused from the window's losses
+    /// ([`Self::fed`]). Charged, a first keyframe of 494 ms (a cold encoder, at 756 × 492)
+    /// left one capture of a 60 fps window taken and set the ceiling at 4 frames a second, held
+    /// for the 7.5 s a window takes at that rung (MEASUREMENTS.md, "a keyframe charged to the
+    /// rung").
     pub const fn returned(&mut self, encode_us: u64, fps: u16, keyframe: bool) -> Option<u16> {
-        if !keyframe {
+        if keyframe {
+            #[expect(clippy::cast_possible_truncation, reason = "clamped to a u32 first")]
+            let slots = match encode_us.checked_div(period_us(fps)) {
+                Some(slots) if slots < u32::MAX as u64 => slots as u32,
+                Some(_) | None => u32::MAX,
+            };
+            self.excused = self.excused.saturating_add(slots);
+        } else {
             self.encode_us = self.encode_us.saturating_add(encode_us);
             self.encoded = self.encoded.saturating_add(1);
         }
@@ -323,11 +339,12 @@ impl EncoderWatch {
     }
 
     /// A capture went into the encoder at `fps`. The window's verdict once it holds
-    /// `ENCODER_WINDOW` due captures; the next window starts with the next capture.
+    /// `ENCODER_WINDOW` due captures, the ones replaced in a keyframe's slots not counted; the
+    /// next window starts with the next capture.
     pub const fn fed(&mut self, fps: u16) -> Option<Fed> {
         self.weigh(fps);
         self.taken = self.taken.saturating_add(1);
-        let due = self.taken.saturating_add(self.lost);
+        let due = self.taken.saturating_add(self.lost.saturating_sub(self.excused));
         if due < ENCODER_WINDOW {
             return None;
         }
@@ -1268,8 +1285,24 @@ mod tests {
     /// `encode_us` inside the submit with a one-frame mailbox in front of it: the watch's verdict
     /// when the window closes. Every capture is due at the rung (the rung is the beat or above).
     fn fed_through_the_mailbox(beat_us: u64, encode_us: u64, fps: u16) -> Fed {
+        fed_after_a_keyframe(beat_us, None, encode_us, fps)
+    }
+
+    /// [`fed_through_the_mailbox`], the window's first frame a keyframe coded in `keyframe_us`
+    /// when there is one.
+    fn fed_after_a_keyframe(
+        beat_us: u64,
+        keyframe_us: Option<u64>,
+        encode_us: u64,
+        fps: u16,
+    ) -> Fed {
         let mut w = EncoderWatch::default();
-        let (mut busy_until, mut waiting) = (0_u64, false);
+        let (mut busy_until, mut waiting, mut first) = (0_u64, false, keyframe_us);
+        let mut code = |w: &mut EncoderWatch| {
+            let took = first.take();
+            let _late = w.returned(took.unwrap_or(encode_us), fps, took.is_some());
+            took.unwrap_or(encode_us)
+        };
         for i in 0_u64..1_000 {
             let at = i.saturating_mul(beat_us);
             // The encoder takes the capture left for it as soon as it is free.
@@ -1277,16 +1310,14 @@ mod tests {
                 if let Some(verdict) = w.fed(fps) {
                     return verdict;
                 }
-                let _late = w.returned(encode_us, fps, false);
-                busy_until = busy_until.saturating_add(encode_us);
+                busy_until = busy_until.saturating_add(code(&mut w));
                 waiting = false;
             }
             if at >= busy_until {
                 if let Some(verdict) = w.fed(fps) {
                     return verdict;
                 }
-                let _late = w.returned(encode_us, fps, false);
-                busy_until = at.saturating_add(encode_us);
+                busy_until = at.saturating_add(code(&mut w));
                 continue;
             }
             if waiting {
@@ -1309,6 +1340,24 @@ mod tests {
         let at_60 = fed_through_the_mailbox(16_667, 15_200, 60);
         assert_eq!(at_60, Fed { fps: 60, ceiling: None }, "the same encoder at 60 keeps up");
         let four_k = fed_through_the_mailbox(16_667, 23_000, 60);
+        assert_eq!(four_k.ceiling, Some(four_k.fps), "{four_k:?}");
+        assert!((40..=43).contains(&four_k.fps), "4K at 23 ms a frame: {four_k:?}");
+    }
+
+    /// The captures the mailbox replaces while a keyframe is coded are the keyframe's, not the
+    /// rung's: a session's first keyframe that takes 494 ms (a cold encoder) leaves the 60 rung
+    /// standing for an encoder that codes its frames in 2 ms, where it had cut the ceiling to 4
+    /// frames a second; and an encoder slow at every frame is still capped at what it codes.
+    #[test]
+    fn a_slow_keyframe_costs_the_rung_nothing() {
+        let beat = 16_667;
+        let cold = fed_after_a_keyframe(beat, Some(494_000), 2_000, 60);
+        assert_eq!(cold, Fed { fps: 60, ceiling: Some(500) }, "a cold first keyframe: room");
+        let cold = fed_after_a_keyframe(beat, Some(494_000), 15_200, 60);
+        assert_eq!(cold, Fed { fps: 60, ceiling: None }, "a cold first keyframe");
+        let idr = fed_after_a_keyframe(beat, Some(130_000), 15_200, 60);
+        assert_eq!(idr, Fed { fps: 60, ceiling: None }, "an IDR at 3024 × 1964");
+        let four_k = fed_after_a_keyframe(beat, Some(130_000), 23_000, 60);
         assert_eq!(four_k.ceiling, Some(four_k.fps), "{four_k:?}");
         assert!((40..=43).contains(&four_k.fps), "4K at 23 ms a frame: {four_k:?}");
     }

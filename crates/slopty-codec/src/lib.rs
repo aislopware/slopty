@@ -67,6 +67,13 @@ pub enum CodecError {
         /// The status code.
         status: i32,
     },
+    /// The system took the encoder session away: no frame handed to it comes out again, and
+    /// only a new session codes. `status` is what its frames came back with.
+    #[error("the encoder session is gone: OSStatus {status}")]
+    EncoderLost {
+        /// The status code.
+        status: i32,
+    },
     /// The bitstream has no parameter sets and no decoder exists yet.
     #[error("no parameter sets seen yet; waiting for a keyframe")]
     NoParameterSets,

@@ -930,6 +930,80 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Longer than any picture takes on a machine that is only busy, while nothing is inside
+    /// VideoToolbox: past it the stream has stopped.
+    const STALLED: Duration = Duration::from_secs(10);
+
+    /// One geometry tick, as the app's loop runs it when the stream wakes it: the probe read
+    /// off the runtime, and a build it starts waited for and put in.
+    async fn follow<P: Platform>(stream: &mut Pipeline<P>) {
+        let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
+        let Some(mut rebuild) = stream.check_geometry(&probe) else { return };
+        eprintln!("the geometry tick builds new sessions");
+        match rebuild.built().await {
+            Ok(built) => {
+                let _told = stream.finish_rebuild(rebuild, built);
+            }
+            Err(e) => {
+                eprintln!("the geometry tick's build failed: {e}");
+                stream.rebuild_failed(&rebuild);
+            }
+        }
+    }
+
+    /// Wait for the client's next picture, on the stream and not on the clock: a slow machine
+    /// only takes longer. Meanwhile the geometry is followed whenever the stream wakes it, as
+    /// the app's loop follows it ([`follow`]), which is where a session the system took away
+    /// is replaced.
+    ///
+    /// [`STALLED`] without a picture fails with what both ends saw (`what` says where the test
+    /// was), unless the machine is what held the picture up. That is a frame inside
+    /// VideoToolbox, being coded on the worker or decoded on the client (on a starved machine
+    /// one keyframe at 756 × 492 has taken 12 s there), or a side that did not run at all over
+    /// the wait: a worker that captured nothing, or a client task that reported nothing, which
+    /// a heartbeat every quarter second makes it do while it runs. Waiting on the machine is
+    /// the runner's to time out; a stream whose two sides ran and still sent no picture has
+    /// stopped. `false` once the client's stream has ended.
+    async fn next_or_stopped<P: Platform>(
+        frames: &mut tokio::sync::watch::Receiver<Option<Arc<slopty_client::screen::Presentable>>>,
+        stream: &mut Pipeline<P>,
+        handle: &slopty_client::screen::ScreenHandle,
+        what: impl Fn() -> String,
+    ) -> bool {
+        let wake = stream.geometry_wake();
+        let ran = |stream: &Pipeline<P>| (stream.stats().captured, handle.stats().datagrams);
+        let mut since = ran(stream);
+        loop {
+            tokio::select! {
+                changed = frames.changed() => return changed.is_ok(),
+                () = wake.notified() => follow(stream).await,
+                () = tokio::time::sleep(STALLED) => {
+                    let coding = stream.shared.held.try_lock().is_none();
+                    let client = handle.stats();
+                    let now = ran(stream);
+                    let (captured, reported) = (now.0 > since.0, now.1 > since.1);
+                    since = now;
+                    let held = if coding {
+                        "a frame being coded in VideoToolbox"
+                    } else if client.decoding > 0 {
+                        "frames being decoded in VideoToolbox"
+                    } else if !captured {
+                        "a worker that captured nothing"
+                    } else if !reported {
+                        "a client task that reported nothing"
+                    } else {
+                        panic!(
+                            "no picture for {STALLED:?} {}, both sides running and none inside VideoToolbox: client {client:?}, worker {:?}",
+                            what(),
+                            stream.stats()
+                        );
+                    };
+                    eprintln!("no picture for {STALLED:?} {}: {held}, waiting on it", what());
+                }
+            }
+        }
+    }
+
     /// The pixel format of the next picture the client decodes whose format `wanted` accepts,
     /// and whether its input strip read back; `None` when none comes within 30 s.
     async fn next_picture(
@@ -1066,9 +1140,6 @@ mod tests {
     /// estimate states plus the width of the two clock reads.
     #[test]
     fn the_clock_probes_time_captures_as_the_shared_clock_does() {
-        /// Longer than any picture takes on a machine that is only busy: past it the stream
-        /// has stopped.
-        const STALLED: Duration = Duration::from_secs(10);
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
         runtime.unwrap().block_on(async {
@@ -1082,7 +1153,7 @@ mod tests {
                 });
                 let wire = Arc::new(Wire::new(router.clone(), line, None));
                 let quality = Quality { scale: 0.25, ..Quality::default() };
-                let (stream, opened) = Pipeline::<Synthetic>::open(
+                let (mut stream, opened) = Pipeline::<Synthetic>::open(
                     STREAM,
                     CaptureTarget::Display(DISPLAY.id),
                     quality,
@@ -1112,19 +1183,15 @@ mod tests {
                 );
                 let mut frames = handle.frames();
                 let clocks = anchor();
-                // Waits on the stream, not on the clock: a slow machine only takes longer. A
-                // stream that stops handing out pictures, or whose probes never come back while
-                // it does, fails with what the client saw.
+                // A stream that stops handing out pictures ([`next_or_stopped`]), or whose probes
+                // never come back while it does, fails with what both ends saw.
                 let mut errors = Vec::new();
                 let mut seen = 0_u32;
                 while errors.len() < 60 {
-                    let next = tokio::time::timeout(STALLED, frames.changed()).await;
-                    assert!(
-                        next.is_ok_and(|changed| changed.is_ok()),
-                        "no picture for {STALLED:?} after {seen}, {} timed: {:?}",
-                        errors.len(),
-                        handle.stats()
-                    );
+                    let timed = errors.len();
+                    let what = || format!("after {seen}, {timed} timed, {one_way:?} each way");
+                    let next = next_or_stopped(&mut frames, &mut stream, &handle, what).await;
+                    assert!(next, "the client's stream ended");
                     let Some(frame) = frames.borrow_and_update().clone() else { continue };
                     seen += 1;
                     let (Some(estimated), Some(exact)) =
@@ -1154,6 +1221,270 @@ mod tests {
                 drain.abort();
                 stream.close().await;
             }
+        });
+    }
+
+    /// The drawn screen whose first encoder session the system takes away at its
+    /// [`TAKEN_AFTER`]th frame, as VideoToolbox took one on a starved machine
+    /// (MEASUREMENTS.md, "an encoder session that malfunctions").
+    enum Malfunctioning {}
+
+    impl Platform for Malfunctioning {
+        type Audio = slopty_codec::Opus;
+        type Capture = Studio;
+        type Input = Poke;
+        type Video = TakenAway;
+    }
+
+    /// The frames [`Malfunctioning`]'s first session codes before it is taken away.
+    const TAKEN_AFTER: u32 = 20;
+
+    /// How long [`Malfunctioning`]'s replacement takes to build: a dozen captures, each refused
+    /// by the session it replaces.
+    const TAKEN_REBUILD: Duration = Duration::from_millis(200);
+
+    /// Sessions built for [`Malfunctioning`].
+    static TAKEN_BUILT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// VideoToolbox, the first session of which answers every frame from its
+    /// [`TAKEN_AFTER`]th on as the codec answers for a session the system took away.
+    struct TakenAway {
+        session: slopty_codec::VideoToolbox,
+        /// Frames it codes before it is taken away; `None` for one that keeps coding.
+        lasts: Option<u32>,
+        frames: std::sync::atomic::AtomicU32,
+    }
+
+    impl slopty_codec::VideoEncoder for TakenAway {
+        type Image = PixelBuffer;
+
+        fn new(
+            config: slopty_codec::EncoderConfig,
+            sink: impl Fn(slopty_codec::EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, slopty_codec::CodecError> {
+            let session = slopty_codec::VideoToolbox::new(config, sink)?;
+            let built = TAKEN_BUILT.fetch_add(1, Ordering::Relaxed);
+            if built == 1 {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "stands in for a replacement built on a busy machine, off the runtime"
+                )]
+                std::thread::sleep(TAKEN_REBUILD);
+            }
+            Ok(Self { session, lasts: (built == 0).then_some(TAKEN_AFTER), frames: 0.into() })
+        }
+
+        fn encode(
+            &self,
+            image: &PixelBuffer,
+            pts_us: u64,
+            options: &slopty_codec::FrameOptions,
+        ) -> Result<(), slopty_codec::CodecError> {
+            let frame = self.frames.fetch_add(1, Ordering::Relaxed);
+            if self.lasts.is_some_and(|lasts| frame >= lasts) {
+                let status = objc2_video_toolbox::kVTVideoEncoderMalfunctionErr;
+                return Err(slopty_codec::CodecError::EncoderLost { status });
+            }
+            self.session.encode(image, pts_us, options)
+        }
+
+        fn set_bitrate(&self, bps: u32) -> Result<(), slopty_codec::CodecError> {
+            self.session.set_bitrate(bps)
+        }
+
+        fn set_frame_rate(&self, fps: u16) -> Result<(), slopty_codec::CodecError> {
+            self.session.set_frame_rate(fps)
+        }
+
+        fn set_temporal_layers(&self, on: bool) -> Result<bool, slopty_codec::CodecError> {
+            self.session.set_temporal_layers(on)
+        }
+
+        fn frames_dropped(&self) -> u64 {
+            self.session.frames_dropped()
+        }
+    }
+
+    /// A session the system takes away is replaced once, and the stream goes on: the drawn
+    /// screen through the real encoder and decoder, its first session refusing every frame from
+    /// its twentieth on ([`TakenAway`]). The refusal wakes the geometry tick, which builds new
+    /// sessions at the size in force; the captures the lost session refuses while they build
+    /// ([`TAKEN_REBUILD`]) ask for no more, their keyframe answers the client, and a hundred
+    /// pictures come after it.
+    #[test]
+    fn a_session_taken_away_is_replaced_and_the_stream_goes_on() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
+            let quality = Quality { scale: 0.25, ..Quality::default() };
+            let (mut stream, opened) = Pipeline::<Malfunctioning>::open(
+                STREAM,
+                CaptureTarget::Display(DISPLAY.id),
+                quality,
+                wire,
+                |_event| {},
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, width, height, .. } = opened else {
+                panic!("{opened:?}")
+            };
+            let control = stream.control();
+            let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+            let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+            let uplink = Uplink {
+                control: reports_tx,
+                feedback: Box::new(move |bytes| {
+                    answer(&control, &bytes);
+                    true
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(1))),
+            };
+            let handle =
+                spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+            let mut frames = handle.frames();
+            let (mut before, mut after) = (0_u32, 0_u32);
+            while after < 100 {
+                let what = || format!("after {before} pictures before the loss, {after} after");
+                let next = next_or_stopped(&mut frames, &mut stream, &handle, what).await;
+                assert!(next, "the client's stream ended");
+                if TAKEN_BUILT.load(Ordering::Relaxed) > 1 {
+                    after += 1;
+                } else {
+                    before += 1;
+                }
+            }
+            let built = TAKEN_BUILT.load(Ordering::Relaxed);
+            let worker = stream.stats();
+            eprintln!(
+                "{before} pictures, the session taken away, {after} on {built} sessions; worker {worker:?}"
+            );
+            assert!(before <= TAKEN_AFTER, "the first session's pictures: {before}");
+            assert_eq!(built, 2, "one replacement, built once");
+            let picture = frames.borrow().clone().expect("a picture");
+            assert_eq!(
+                picture.size(),
+                (usize::try_from(width).unwrap(), usize::try_from(height).unwrap()),
+                "at the size in force"
+            );
+            drop(handle);
+            drain.abort();
+            stream.close().await;
+        });
+    }
+
+    /// The worker's end of the link with one frame's bitstream garbled on the way: every data
+    /// fragment of frame `frame` has its back half flipped, so it arrives whole and fails to
+    /// decode.
+    struct Garble {
+        wire: Wire,
+        frame: u32,
+        garbled: std::sync::atomic::AtomicU32,
+    }
+
+    impl DatagramSink for Garble {
+        fn send(&self, datagrams: &[Bytes]) -> Result<(), Refused> {
+            let garble = |datagram: &Bytes| {
+                let header = slopty_proto::media::MediaHeader::parse(datagram).map(|(h, _)| *h);
+                let ours = header.is_some_and(|h| {
+                    h.kind() == Some(slopty_proto::media::Kind::VideoData)
+                        && h.frame.get() == self.frame
+                });
+                if !ours {
+                    return datagram.clone();
+                }
+                self.garbled.fetch_add(1, Ordering::Relaxed);
+                let mut bytes = datagram.to_vec();
+                let half = bytes.len() / 2;
+                for byte in bytes.iter_mut().skip(half) {
+                    *byte ^= 0x5a;
+                }
+                Bytes::from(bytes)
+            };
+            let datagrams: Vec<Bytes> = datagrams.iter().map(garble).collect();
+            self.wire.send(&datagrams)
+        }
+
+        fn max_size(&self) -> Option<usize> {
+            self.wire.max_size()
+        }
+
+        fn held(&self) -> usize {
+            self.wire.held()
+        }
+
+        fn cwnd(&self) -> u64 {
+            self.wire.cwnd()
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// A frame that arrives whole and does not decode costs a refresh, and the stream goes on:
+    /// the drawn screen through the real encoder and decoder, its twentieth frame garbled on the
+    /// way ([`Garble`]), the client's refresh answered by the stream's control. The decoder
+    /// fails on it, the client asks, and a hundred pictures come after it.
+    #[test]
+    fn a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let router = ScreenRouter::new();
+            let wire = Wire::new(router.clone(), None, None);
+            let garble = Arc::new(Garble { wire, frame: 20, garbled: 0.into() });
+            let quality = Quality { scale: 0.25, ..Quality::default() };
+            let (mut stream, opened) = Pipeline::<Synthetic>::open(
+                STREAM,
+                CaptureTarget::Display(DISPLAY.id),
+                quality,
+                Arc::<Garble>::clone(&garble),
+                |_event| {},
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, .. } = opened else { panic!("{opened:?}") };
+            let control = stream.control();
+            let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+            let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+            let uplink = Uplink {
+                control: reports_tx,
+                feedback: Box::new(move |bytes| {
+                    answer(&control, &bytes);
+                    true
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(1))),
+            };
+            let handle =
+                spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+            let mut frames = handle.frames();
+            let (mut pictures, mut after) = (0_u32, 0_u32);
+            while after < 100 {
+                let what = || format!("after {pictures} pictures, {after} since the failure");
+                let next = next_or_stopped(&mut frames, &mut stream, &handle, what).await;
+                assert!(next, "the client's stream ended");
+                pictures += 1;
+                if handle.stats().decode_errors > 0 {
+                    after += 1;
+                }
+            }
+            let client = handle.stats();
+            eprintln!(
+                "garbled {} datagrams of frame 20: {} decode error(s), status {:?}, {} refresh(es), {pictures} pictures",
+                garble.garbled.load(Ordering::Relaxed),
+                client.decode_errors,
+                client.decode_failure,
+                client.refreshes
+            );
+            assert!(garble.garbled.load(Ordering::Relaxed) > 0, "frame 20 went by: {client:?}");
+            assert!(client.refreshes > 0, "the failure asked for a refresh: {client:?}");
+            assert!(client.decode_failure.is_some(), "VideoToolbox named it: {client:?}");
+            drop(handle);
+            drain.abort();
+            stream.close().await;
         });
     }
 
@@ -1339,12 +1670,39 @@ mod tests {
         sum as f64 / n.max(1) as f64
     }
 
+    /// The overlap error of a capture's two stripe pictures at every shift from −6 to 6 rows,
+    /// the lower stripe's coded from `lower_top`.
+    fn overlap_errors(
+        top: &[u8],
+        lower: &[u8],
+        width: usize,
+        lower_top: usize,
+    ) -> Vec<(isize, f64)> {
+        (-6..=6).map(|shift| (shift, overlap_error(top, lower, width, lower_top, shift))).collect()
+    }
+
+    /// Whether the stripes meet unshifted: no shift matches as well as none, by a quarter.
+    ///
+    /// The unshifted error is the two sessions' coding noise, and that is not small next to the
+    /// page's own difference from one row to the next in the first frames after the keyframe,
+    /// or when a busy encoder is fed captures further apart: 3.96 against 7.78 at the second
+    /// frame here, where the stream's later frames read 0.2 against 9. So the margin is a ratio
+    /// and not a multiple plus a constant, which failed on that frame. A stripe a row off moves
+    /// the curve's minimum off zero whatever the noise, and the test checks this rule says so
+    /// on every picture it passes.
+    fn meets_unshifted(errors: &[(isize, f64)]) -> bool {
+        let aligned = errors.iter().find(|(shift, _)| *shift == 0).map_or(f64::INFINITY, |e| e.1);
+        errors.iter().filter(|(shift, _)| *shift != 0).all(|&(_, error)| error > 1.25 * aligned)
+    }
+
     /// A display coded as two stripes reaches the client as two pictures of one capture, each
     /// from a session of its own, that meet at the seam row for row. The stripes the worker
     /// announces tile the picture; the client shows the top one's rows above the seam and the
     /// lower one's from the seam down; and over the rows both code, a capture's two pictures
-    /// match best unshifted, by a margin, on text that scrolls 3 rows a frame: a stripe a row
-    /// off matches best shifted. Drawn, never captured.
+    /// match best unshifted, by a margin, on text that scrolls 3 rows a frame, where the same
+    /// pictures with the lower one moved a row match best shifted ([`meets_unshifted`]). A
+    /// capture whose stripes went up apart, one late past the stitch's wait, is compared once
+    /// both have been shown. Drawn, never captured.
     #[test]
     fn two_stripes_meet_at_the_seam_row_for_row() {
         let runtime =
@@ -1352,7 +1710,7 @@ mod tests {
         runtime.unwrap().block_on(async {
             let router = ScreenRouter::new();
             let wire = Arc::new(Wire::new(router.clone(), None, None));
-            let (stream, opened) = Pipeline::<Synthetic>::open_padded(
+            let (mut stream, opened) = Pipeline::<Synthetic>::open_padded(
                 STREAM,
                 CaptureTarget::Display(DISPLAY.id),
                 Quality { chroma: Chroma::Subsampled, ..Quality::default() },
@@ -1387,48 +1745,64 @@ mod tests {
                 spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
             let mut frames = handle.frames();
             let lower_top = usize::try_from(lower.coded_top).unwrap();
-            let (mut checked, mut apart) = (0, 0);
-            let wait = async {
-                while checked < 12 && frames.changed().await.is_ok() {
-                    let Some(picture) = frames.borrow_and_update().clone() else { continue };
-                    let Some(stitched) = &picture.stripes else { continue };
-                    // One stripe late past the stitch's wait, or coded alone for a refresh, goes
-                    // up beside the other's previous picture: the client counts that, and the
-                    // rows cannot match across two captures of a scroll.
-                    if stitched.lower.pts_us != picture.frame.pts_us {
-                        apart += 1;
-                        continue;
-                    }
-                    assert_eq!(stitched.top_rows, top.shown_rows);
-                    assert_eq!(stitched.lower_from, lower.shown_from());
-                    assert_eq!(
-                        picture.size(),
-                        (usize::try_from(width).unwrap(), usize::try_from(height).unwrap()),
-                        "the stripes together are the picture"
-                    );
-                    let (w, top_luma) = luma(picture.frame.image.as_cv());
-                    let (lower_w, lower_luma) = luma(stitched.lower.image.as_cv());
-                    assert_eq!(w, lower_w);
-                    let errors: Vec<(isize, f64)> = (-6..=6)
-                        .map(|shift| {
-                            (shift, overlap_error(&top_luma, &lower_luma, w, lower_top, shift))
-                        })
-                        .collect();
-                    let aligned = errors.iter().find(|(shift, _)| *shift == 0).unwrap().1;
-                    let off = errors
-                        .iter()
-                        .filter(|(shift, _)| *shift != 0)
-                        .map(|&(_, error)| error)
-                        .fold(f64::INFINITY, f64::min);
-                    eprintln!("seam: unshifted {aligned:.2}, best shifted {off:.2}");
-                    assert!(
-                        aligned < 6.0 && off > 2.0_f64.mul_add(aligned, 1.0),
-                        "the stripes meet unshifted: {errors:?}"
-                    );
-                    checked += 1;
+            // Each stripe's pictures as they went up, newest last, until the other stripe's
+            // picture of the same capture has gone up too.
+            let (mut tops, mut lowers) = (VecDeque::new(), VecDeque::new());
+            let (mut checked, mut apart, mut last, mut pictures) = (0, 0, None, 0_u32);
+            while checked < 12 {
+                let what =
+                    || format!("after {pictures} pictures, {checked} compared, {apart} apart");
+                let next = next_or_stopped(&mut frames, &mut stream, &handle, what).await;
+                assert!(next, "the client's stream ended");
+                pictures += 1;
+                assert!(
+                    pictures < 600,
+                    "{pictures} pictures, {checked} pairs: {:?}",
+                    handle.stats()
+                );
+                let Some(picture) = frames.borrow_and_update().clone() else { continue };
+                let Some(stitched) = &picture.stripes else { continue };
+                assert_eq!(stitched.top_rows, top.shown_rows);
+                assert_eq!(stitched.lower_from, lower.shown_from());
+                assert_eq!(
+                    picture.size(),
+                    (usize::try_from(width).unwrap(), usize::try_from(height).unwrap()),
+                    "the stripes together are the picture"
+                );
+                // One stripe late past the stitch's wait, or coded alone for a refresh, goes
+                // up beside the other's previous picture: the client counts that, and the
+                // rows cannot match across two captures of a scroll.
+                if stitched.lower.pts_us != picture.frame.pts_us {
+                    apart += 1;
                 }
-            };
-            tokio::time::timeout(Duration::from_secs(30), wait).await.expect("stitched pictures");
+                for (kept, frame) in [(&mut tops, &picture.frame), (&mut lowers, &stitched.lower)] {
+                    let newer = |newest: &slopty_codec::DecodedFrame| newest.pts_us < frame.pts_us;
+                    if kept.back().is_none_or(newer) {
+                        kept.push_back(frame.clone());
+                    }
+                    while kept.len() > 8 {
+                        kept.pop_front();
+                    }
+                }
+                let both = tops.iter().rev().find(|t| {
+                    last.is_none_or(|last| t.pts_us > last)
+                        && lowers.iter().any(|l| l.pts_us == t.pts_us)
+                });
+                let Some(top_picture) = both else { continue };
+                let pts = top_picture.pts_us;
+                let lower_picture = lowers.iter().find(|l| l.pts_us == pts).unwrap();
+                last = Some(pts);
+                let (w, top_luma) = luma(top_picture.image.as_cv());
+                let (lower_w, lower_luma) = luma(lower_picture.image.as_cv());
+                assert_eq!(w, lower_w);
+                let errors = overlap_errors(&top_luma, &lower_luma, w, lower_top);
+                let at = |shift| errors.iter().find(|e| e.0 == shift).map_or(f64::NAN, |e| e.1);
+                eprintln!("seam: unshifted {:.2}, a row off {:.2} / {:.2}", at(0), at(-1), at(1));
+                assert!(meets_unshifted(&errors), "the stripes meet unshifted: {errors:?}");
+                let a_row_off = overlap_errors(&top_luma, &lower_luma, w, lower_top + 1);
+                assert!(!meets_unshifted(&a_row_off), "a stripe a row off: {a_row_off:?}");
+                checked += 1;
+            }
             assert_eq!(checked, 12);
             eprintln!("stripes of two captures: {apart}, seam tears {}", handle.stats().seam_tears);
             drop(handle);
@@ -2046,5 +2420,146 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// A new stream's first two seconds: frames encoded in each, the lowest ceiling its encoder
+    /// watch set and when the ceiling was back at the rung, for the drawn screen at a quarter
+    /// (the size the stream tests use) or at `SLOPTY_SCALE`, its first frame `SLOPTY_COLD_MS`
+    /// slower ([`ColdStart`]), or with `SLOPTY_WHOLE=1` this Mac's display drawn at its own
+    /// size. Run each in a process of its own, so the first keyframe meets a cold encoder as
+    /// a worker's first stream does (`docs/MEASUREMENTS.md`, "a keyframe charged to the rung").
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_a_new_streams_first_seconds() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            if std::env::var("SLOPTY_WHOLE").is_ok_and(|v| v == "1") {
+                let ScreenEvent::Listing { displays, .. } =
+                    Pipeline::<Drawn>::listing().await.unwrap()
+                else {
+                    panic!("no listing")
+                };
+                let display = displays.first().expect("a display").id;
+                first_seconds::<Drawn>(CaptureTarget::Display(display), Quality::default()).await;
+            } else {
+                let scale =
+                    std::env::var("SLOPTY_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.25);
+                let quality = Quality { scale, ..Quality::default() };
+                first_seconds::<ColdStart>(CaptureTarget::Display(DISPLAY.id), quality).await;
+            }
+        });
+    }
+
+    /// The drawn screen whose sessions each spend `SLOPTY_COLD_MS` (default none) more on their
+    /// first frame, as a cold encoder does: a worker's first session, a fresh process, a busy
+    /// machine.
+    enum ColdStart {}
+
+    impl Platform for ColdStart {
+        type Audio = slopty_codec::Opus;
+        type Capture = Studio;
+        type Input = Poke;
+        type Video = Cold;
+    }
+
+    /// VideoToolbox, slower by `SLOPTY_COLD_MS` on a session's first frame.
+    struct Cold {
+        session: slopty_codec::VideoToolbox,
+        warm: std::sync::atomic::AtomicBool,
+    }
+
+    impl slopty_codec::VideoEncoder for Cold {
+        type Image = PixelBuffer;
+
+        fn new(
+            config: slopty_codec::EncoderConfig,
+            sink: impl Fn(slopty_codec::EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, slopty_codec::CodecError> {
+            let session = slopty_codec::VideoToolbox::new(config, sink)?;
+            Ok(Self { session, warm: false.into() })
+        }
+
+        fn encode(
+            &self,
+            image: &PixelBuffer,
+            pts_us: u64,
+            options: &slopty_codec::FrameOptions,
+        ) -> Result<(), slopty_codec::CodecError> {
+            if !self.warm.swap(true, Ordering::Relaxed) {
+                let cold: u64 =
+                    std::env::var("SLOPTY_COLD_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "stands in for a cold session's first encode, which blocks the submit"
+                )]
+                std::thread::sleep(Duration::from_millis(cold));
+            }
+            self.session.encode(image, pts_us, options)
+        }
+
+        fn set_bitrate(&self, bps: u32) -> Result<(), slopty_codec::CodecError> {
+            self.session.set_bitrate(bps)
+        }
+
+        fn set_frame_rate(&self, fps: u16) -> Result<(), slopty_codec::CodecError> {
+            self.session.set_frame_rate(fps)
+        }
+
+        fn set_temporal_layers(&self, on: bool) -> Result<bool, slopty_codec::CodecError> {
+            self.session.set_temporal_layers(on)
+        }
+
+        fn frames_dropped(&self) -> u64 {
+            self.session.frames_dropped()
+        }
+    }
+
+    /// [`measure_a_new_streams_first_seconds`] on `target` at `quality`, decoded by a client in
+    /// this process whose loss feedback the stream answers, as the stream tests run it.
+    async fn first_seconds<P: Platform>(target: CaptureTarget, quality: Quality) {
+        let router = ScreenRouter::new();
+        let wire = Arc::new(Wire::new(router.clone(), None, None));
+        let (stream, opened) =
+            Pipeline::<P>::open(STREAM, target, quality, wire, |_event| {}).await.unwrap();
+        let ScreenEvent::Opened { codec, width, height, .. } = opened else { panic!("{opened:?}") };
+        let control = stream.control();
+        let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+        let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+        let uplink = Uplink {
+            control: reports_tx,
+            feedback: Box::new(move |bytes| {
+                answer(&control, &bytes);
+                true
+            }),
+            rtt: Box::new(|| Some(Duration::from_millis(1))),
+        };
+        let handle =
+            spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+        let (opened_at, mut lowest, mut back_at) = (Instant::now(), u16::MAX, None);
+        let mut encoded = [0_u64; 2];
+        while opened_at.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let ceiling = stream.shared.fps_ceiling.load(Ordering::Relaxed);
+            if ceiling < lowest {
+                (lowest, back_at) = (ceiling, None);
+            } else if ceiling >= 60 && lowest < 60 && back_at.is_none() {
+                back_at = Some(opened_at.elapsed());
+            }
+            let second = usize::from(opened_at.elapsed() >= Duration::from_secs(1));
+            encoded[second] = stream.stats().encoded;
+        }
+        let worker = stream.stats();
+        eprintln!(
+            "MEASURE a new stream at {width}×{height}: {} frames encoded in its first second, {} in its second; lowest ceiling {lowest}, back at 60 after {back_at:?}; slowest encode {:.0} ms, slowest capture → packetized {:.0} ms, client decoded {}",
+            encoded[0],
+            encoded[1].saturating_sub(encoded[0]),
+            worker.encode.max_us as f64 / 1e3,
+            worker.latency_max_us as f64 / 1e3,
+            handle.stats().frames,
+        );
+        drop(handle);
+        drain.abort();
+        stream.close().await;
     }
 }
