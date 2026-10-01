@@ -120,3 +120,15 @@ filter = '''
 | (package(slopty-shape) & test(=relay::tests::a_short_wait_ends_when_it_was_asked_to))
 '''
 retries = { backoff = "fixed", count = 2, delay = "1s" }
+
+# `cargo xtask deep miri`: the pure crates' tests under the interpreter, 50–100 times slower than
+# native. A test still running after 20 minutes is ended and fails, so one slow test is a finding
+# and not a night.
+[profile.miri]
+slow-timeout = { period = "300s", terminate-after = 4, grace-period = "10s" }
+fail-fast = false
+
+[profile.miri.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true

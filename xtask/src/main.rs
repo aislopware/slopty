@@ -17,8 +17,12 @@ mod fixtures;
 mod fuzz;
 mod gate;
 mod icon;
+// HIToolbox's input sources: macOS only. Elsewhere `xtask ime` says so, so the deep checks
+// that run on Linux runners build the rest.
+#[cfg(target_os = "macos")]
 mod ime;
 mod ios;
+mod land;
 mod linux;
 mod nightly;
 mod prune;
@@ -75,14 +79,19 @@ enum Cmd {
         #[arg(short = 'p', long = "package", required = true)]
         packages: Vec<String>,
     },
-    /// Run the full pre-commit gate: fmt, clippy on every triple, tests, docs, deny, shear, typos.
+    /// The pre-commit gate on the staged tree: fmt, taplo, deny, hakari, shear, typos, committed
+    /// and host clippy, then the next step. The other lanes run in CI once `land` pushes.
     Gate {
-        /// Fix what can be fixed (fmt, clippy --fix, typos -w, taplo fmt) before checking.
+        /// Fix what can be fixed (fmt, hakari, shear, typos -w, taplo fmt) before checking.
         #[arg(long)]
         fix: bool,
-        /// Only run the fast checks (fmt + clippy + unit tests on the host triple).
-        #[arg(long)]
-        quick: bool,
+        /// Every lane here, as CI runs them: the tests, clippy for iOS and Linux, and rustdoc too.
+        #[arg(long, conflicts_with = "lanes")]
+        full: bool,
+        /// The message of the commit about to be made, for `committed` to check; the gate leaves
+        /// it for `git commit -F`.
+        #[arg(short, long)]
+        message: Option<String>,
         /// Check the working tree in place instead of the index snapshot under
         /// `target/gate/tree` (CI, where the tree is the commit).
         #[arg(long)]
@@ -100,6 +109,9 @@ enum Cmd {
         #[arg(long = "lane", value_enum)]
         lanes: Vec<gate::LaneId>,
     },
+    /// After a commit on main: push it to the `gate` branch, where CI runs every gate lane and
+    /// fast-forwards main to it once all pass.
+    Land(land::LandOpts),
     /// Delete the build units and incremental caches nothing has used for a while, in every
     /// target dir under `target/`, then the least recently used until `target/` is within its
     /// budget and its volume above the free-space floor (also run, skipping busy dirs, after
@@ -263,18 +275,28 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Setup { no_tools, lanes } => setup::run(&sh, no_tools, &lanes),
         Cmd::Doctor => doctor::run(&sh),
+        #[cfg(target_os = "macos")]
         Cmd::Ime { id, all } => ime::run(id.as_deref(), all),
+        #[cfg(not(target_os = "macos"))]
+        Cmd::Ime { .. } => anyhow::bail!("input sources are macOS's"),
         Cmd::Check { packages } => {
             let checked = check::run(&sh, &packages);
             prune::auto();
             checked
         }
-        Cmd::Gate { fix, quick, in_place, since_pass, ci, lanes } => {
-            let opts = gate::Options { fix, quick, in_place: in_place || ci, since_pass };
-            let gated = gate::run_only(&sh, opts, &gate::Only { lanes, ci });
+        Cmd::Gate { fix, full, message, in_place, since_pass, ci, lanes } => {
+            let lanes = if lanes.is_empty() && !full && !ci { gate::QUICK.to_vec() } else { lanes };
+            let in_place = in_place || ci;
+            let next = gate::next_step(message.is_some());
+            let opts = gate::Options { fix, in_place, since_pass, message };
+            let gated = gate::run_only(&sh, &opts, &gate::Only { lanes, ci });
             prune::auto();
+            if gated.is_ok() && !in_place {
+                print!("{next}");
+            }
             gated
         }
+        Cmd::Land(opts) => land::run(&sh, &opts),
         Cmd::Prune { idle_hours, budget_gb, floor_gb, dry_run, no_wait } => {
             let mut limits = prune::Limits::from_env()?;
             if let Some(gb) = budget_gb {

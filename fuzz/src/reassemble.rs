@@ -214,6 +214,7 @@ impl Run {
             ltr_refresh: refresh,
             capture_ts_us: 0,
             discardable: false,
+            stripes: 0,
         };
         let number = self.packetizer.next_frame();
         let mut shipped = Vec::new();

@@ -230,12 +230,28 @@ impl WorkspaceView {
     /// depends on how busy the machine was; the predictors and the dump keep the live figure.
     pub fn pin_rtt_readout(&mut self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
         self.pinned_rtt = rtt;
+        let keys: Vec<WorkerKey> = self.workers.keys().copied().collect();
+        for key in keys {
+            self.tell_screens_rtt(key, cx);
+        }
         cx.notify();
     }
 
     /// The round trip the readouts show for `w`: its link's, or the pinned one once it has one.
     pub(super) fn shown_rtt(&self, w: &Worker) -> Option<std::time::Duration> {
-        w.rtt.map(|live| self.pinned_rtt.unwrap_or(live))
+        shown_rtt(self.pinned_rtt, w.rtt)
+    }
+
+    /// Hand `key`'s remote windows its link's round trip, which times their pointer hold, and
+    /// the one their overlays print.
+    fn tell_screens_rtt(&self, key: WorkerKey, cx: &mut Context<Self>) {
+        let Some(w) = self.workers.get(&key) else { return };
+        let (live, shown) = (w.rtt, self.shown_rtt(w));
+        for item in w.doc.items() {
+            if let Some(view) = self.screens.get(&item.id) {
+                view.update(cx, |v, cx| v.set_rtt(live, shown, cx));
+            }
+        }
     }
 
     /// Link RTT of `key`, fanned out to its terminals' predictors and its windows' overlays.
@@ -250,17 +266,12 @@ impl WorkspaceView {
         let changed = w.rtt.map(label) != rtt.map(label);
         let was = std::mem::replace(&mut w.rtt, rtt);
         let sessions: Vec<SessionId> = w.sessions.keys().copied().collect();
-        let items: Vec<ItemId> = w.doc.items().map(|i| i.id).collect();
         for session in sessions {
             if let Some(view) = self.terminals.get(&session) {
                 view.update(cx, |v, _| v.set_rtt(rtt));
             }
         }
-        for item in items {
-            if let Some(view) = self.screens.get(&item) {
-                view.update(cx, |v, cx| v.set_rtt(rtt, cx));
-            }
-        }
+        self.tell_screens_rtt(key, cx);
         // The bars and the navigator show it: repaint only when what they print moved.
         if changed && self.rtt_shown(key, was, rtt) {
             cx.notify();
@@ -804,7 +815,7 @@ impl WorkspaceView {
             ScreenEvent::Opened { stream, target, codec, width, height, .. } => {
                 let theme = self.theme.clone();
                 let quality = self.quality_for();
-                let show_stats = self.show_stats;
+                let (show_stats, pinned) = (self.show_stats, self.pinned_rtt);
                 let Some(w) = self.workers.get_mut(&key) else { return };
                 let Some(link) = w.link.clone() else { return };
                 let sized = w.sized.as_mut().and_then(|s| s.opened(stream).then(|| s.item()));
@@ -816,7 +827,7 @@ impl WorkspaceView {
                 let handle = (link.open_screen)(stream, codec);
                 let opened =
                     crate::screen::Opened { stream, target, size: (width, height), quality };
-                let rtt = w.rtt;
+                let (rtt, shown) = (w.rtt, shown_rtt(pinned, w.rtt));
                 let hook = self.paste_hook(key);
                 let view = cx.new(|cx| {
                     let mut view = ScreenView::new(opened, handle, link.out.clone(), theme, cx);
@@ -826,7 +837,7 @@ impl WorkspaceView {
                     view
                 });
                 view.update(cx, |v, cx| {
-                    v.set_rtt(rtt, cx);
+                    v.set_rtt(rtt, shown, cx);
                     if show_stats {
                         v.set_hud(true, cx);
                     }
@@ -1197,4 +1208,12 @@ impl WorkspaceView {
     ) -> Option<slopty_client::relay::RelayNotice> {
         self.workers.get(&key)?.relay.notice(cx.background_executor().now())
     }
+}
+
+/// The round trip a readout shows for a link measured at `live`: `pinned` once there is one.
+fn shown_rtt(
+    pinned: Option<std::time::Duration>,
+    live: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    live.map(|live| pinned.unwrap_or(live))
 }

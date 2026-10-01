@@ -1,5 +1,11 @@
 //! `xtask gate`: everything that must be green before a commit lands.
 //!
+//! Here, before a commit, the gate runs the lanes that take seconds to a minute ([`QUICK`]: the
+//! tools and host clippy) and prints the next step. The rest (tests, clippy for iOS and Linux,
+//! rustdoc) runs on GitHub Actions when `cargo xtask land` pushes the commit to the `gate`
+//! branch, and `main` moves to it only once every lane there passed (`.github/workflows/ci.yml`).
+//! `--full` runs every lane here, as `cargo xtask release` and CI do.
+//!
 //! The gate checks a **snapshot of the index** (`target/gate/tree`, synced from the staged
 //! blobs before every run), not the working tree: several agents edit this one checkout at
 //! once, so the tree stays free to edit while the gate runs and what passed is exactly what
@@ -30,18 +36,24 @@ use xshell::{Shell, cmd};
 use crate::tools::{LINUX_CRATES, TRIPLES, has, host_only_present, quiet_step, repo_root};
 
 /// Gate options.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Options {
     /// Apply automatic fixes first.
     pub fix: bool,
-    /// Fast subset only.
-    pub quick: bool,
     /// Check the working tree in place instead of a snapshot (CI, or a tree nobody edits).
     pub in_place: bool,
     /// Run only the tests of the packages changed since the tests lane last passed, and of
     /// their dependents.
     pub since_pass: bool,
+    /// The message of the commit about to be made, which `committed` checks beside the history.
+    pub message: Option<String>,
 }
+
+/// The lanes a gate runs here before a commit: about a minute once the host build is warm.
+pub const QUICK: [LaneId; 2] = [LaneId::Tools, LaneId::ClippyHost];
+
+/// Where a gate given `--message` leaves it, for `git commit -F`.
+const MESSAGE_FILE: &str = "target/gate/COMMIT_MSG";
 
 /// The build lanes, each with its own target dir and a share of the cores. The host clippy
 /// pass and the tests are the long ones; the rest fill the gaps.
@@ -105,6 +117,11 @@ pub struct Only {
 }
 
 impl Only {
+    /// The lanes run here before a commit ([`QUICK`]).
+    pub fn quick() -> Self {
+        Self { lanes: QUICK.to_vec(), ci: false }
+    }
+
     fn wants(&self, lane: LaneId) -> bool {
         self.lanes.is_empty() || self.lanes.contains(&lane)
     }
@@ -123,12 +140,8 @@ fn lane_shell(tree: &Utf8Path, gate_dir: &Utf8Path, name: &str, share: bool) -> 
     Ok(sh)
 }
 
-pub fn run(sh: &Shell, opts: Options) -> Result<()> {
-    run_only(sh, opts, &Only::default())
-}
-
-/// [`run`] on the lanes `only` names.
-pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
+/// The gate on the lanes `only` names.
+pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
     let started = Instant::now();
     crate::upstream::warn_if_stale();
     let root = repo_root()?;
@@ -151,6 +164,15 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
         shear(sh, true)?;
         typos(sh, true)?;
     }
+    let message = root.join(MESSAGE_FILE);
+    match &opts.message {
+        Some(text) => std::fs::write(&message, text)?,
+        None => match std::fs::remove_file(&message) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        },
+    }
+    let message = opts.message.is_some().then_some(message.as_path());
     // In place, the tree is whatever is on disk, which no record describes: every lane runs.
     let (tree, inputs) = if opts.in_place {
         (root.clone(), None)
@@ -169,7 +191,6 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
     };
 
     // Seconds of tool checks, then minutes of compiles: a tool failure stops the gate first.
-    let quick = opts.quick;
     let first: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
         let fmt_check = only.wants(LaneId::Tools).then(|| {
             scope.spawn(|| -> Result<()> {
@@ -178,15 +199,17 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
                 fmt(&sh, false)
             })
         });
-        let tools = (!quick && only.wants(LaneId::Tools)).then(|| {
+        let tools = only.wants(LaneId::Tools).then(|| {
             scope.spawn(|| {
                 let tools = Lane {
                     name: "tools",
                     scope: Scope::Tree,
-                    extra: tools_extra(&checkout()?)?,
+                    extra: tools_extra(&checkout()?, opts.message.as_deref())?,
                     since_pass: false,
                 };
-                cached(inputs, &tree, &tools, |_| tools_lane(|| lane("tools"), &checkout()?))
+                cached(inputs, &tree, &tools, |_| {
+                    tools_lane(|| lane("tools"), &checkout()?, message)
+                })
             })
         });
         let mut results = Vec::new();
@@ -198,7 +221,10 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
         }
         results
     });
-    report(&first, started)?;
+    let profile = if only.ci { NEXTEST_CI_PROFILE } else { NEXTEST_PROFILE };
+    // nextest keeps its reports under the workspace, not the target dir.
+    let junit = tree.join("target").join("nextest").join(profile).join("junit.xml");
+    report(&first, started, &junit)?;
 
     let build = |name| Lane { name, scope: Scope::Build, extra: String::new(), since_pass: false };
     let second: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
@@ -213,7 +239,7 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
                 }),
             ));
         }
-        if !quick && only.wants(LaneId::ClippyIos) {
+        if only.wants(LaneId::ClippyIos) {
             handles.push((
                 "clippy ios",
                 scope.spawn(|| {
@@ -231,7 +257,6 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
             ));
         }
         if only.wants(LaneId::Tests) {
-            let profile = if only.ci { NEXTEST_CI_PROFILE } else { NEXTEST_PROFILE };
             handles.push((
                 "tests",
                 scope.spawn(|| {
@@ -247,7 +272,7 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
                 }),
             ));
         }
-        if !quick && only.wants(LaneId::Rustdoc) {
+        if only.wants(LaneId::Rustdoc) {
             handles.push((
                 "rustdoc",
                 scope.spawn(|| {
@@ -257,7 +282,7 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
         }
         handles.into_iter().map(|(name, handle)| (name, join(handle))).collect()
     });
-    report(&second, started)?;
+    report(&second, started, &junit)?;
     if only.lanes.is_empty() {
         println!("✔ gate passed ({:.1?})", started.elapsed());
     } else {
@@ -267,24 +292,95 @@ pub fn run_only(sh: &Shell, opts: Options, only: &Only) -> Result<()> {
     Ok(())
 }
 
+/// What to run once a gate on the index passed: commit what it checked (with the message it was
+/// given, if any), then land it.
+pub fn next_step(message: bool) -> String {
+    let commit =
+        if message { format!("git commit -F {MESSAGE_FILE}") } else { "git commit".to_owned() };
+    format!(
+        "next: {commit}\n      \
+         (restage nothing: the index is what passed)\n\
+         then: cargo xtask land\n      \
+         (CI runs every lane on the `gate` branch, and main moves there once all pass)\n"
+    )
+}
+
 fn join(handle: std::thread::ScopedJoinHandle<'_, Result<()>>) -> Result<()> {
     handle.join().unwrap_or_else(|panic| Err(anyhow::anyhow!("lane panicked: {panic:?}")))
 }
 
-/// Print every failed lane and fail if there was one.
-fn report(results: &[(&str, Result<()>)], started: Instant) -> Result<()> {
-    let failed: Vec<&str> = results
+/// Print every failed lane and fail if there was one. On GitHub Actions the run's summary names
+/// each failed lane, its failed step and, for the tests, every test that failed (from `junit`).
+fn report(results: &[(&str, Result<()>)], started: Instant, junit: &Utf8Path) -> Result<()> {
+    let failed: Vec<(&str, String)> = results
         .iter()
         .filter_map(|(name, result)| {
-            let e = result.as_ref().err()?;
-            eprintln!("✘ {name}: {e:#}");
-            Some(*name)
+            let e = format!("{:#}", result.as_ref().err()?);
+            eprintln!("✘ {name}: {e}");
+            Some((*name, e))
         })
         .collect();
-    if !failed.is_empty() {
-        bail!("gate failed: {} ({:.1?})", failed.join(", "), started.elapsed());
+    if failed.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        let tests = std::fs::read_to_string(junit).map(|x| failed_tests(&x)).unwrap_or_default();
+        let mut file = std::fs::OpenOptions::new().append(true).create(true).open(summary)?;
+        std::io::Write::write_all(&mut file, summary_of(&failed, &tests).as_bytes())?;
+    }
+    let names: Vec<&str> = failed.iter().map(|(name, _)| *name).collect();
+    bail!("gate failed: {} ({:.1?})", names.join(", "), started.elapsed());
+}
+
+/// The run summary's account of `failed` lanes, with the failed `tests` under the tests lane.
+fn summary_of(failed: &[(&str, String)], tests: &[String]) -> String {
+    let mut text = String::new();
+    for (lane, error) in failed {
+        let _written = writeln!(text, "### ✘ gate lane failed: {lane}\n\n{error}\n");
+        if *lane == "tests" {
+            for test in tests {
+                let _written = writeln!(text, "- `{test}`");
+            }
+            if !tests.is_empty() {
+                text.push('\n');
+            }
+        }
+    }
+    text
+}
+
+/// The tests a nextest `JUnit` report says failed, as `binary test`. A test that failed and then
+/// passed on a retry is flaky (`<flakyFailure>`), not failed.
+fn failed_tests(junit: &str) -> Vec<String> {
+    junit
+        .split("<testcase ")
+        .skip(1)
+        .filter_map(|case| {
+            let (head, body) = case.split_once('>')?;
+            let body = if head.ends_with('/') {
+                ""
+            } else {
+                body.split("</testcase>").next().unwrap_or_default()
+            };
+            let failed = body.contains("<failure") || body.contains("<error");
+            failed.then(|| format!("{} {}", attribute(head, "classname"), attribute(head, "name")))
+        })
+        .collect()
+}
+
+/// The unescaped value of `key` in an element's attributes.
+fn attribute(head: &str, key: &str) -> String {
+    let value = format!(" {head}")
+        .split_once(&format!(" {key}=\""))
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(value, _)| value.to_owned())
+        .unwrap_or_default();
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// A lane as the pass records see it.
@@ -326,9 +422,10 @@ fn cached(
     inputs.record(name, &key)
 }
 
-/// What the tools lane reads besides the tree: the tools themselves, the history `committed`
-/// lints, and the day, so `cargo deny` sees new advisories at least daily.
-fn tools_extra(checkout: &Shell) -> Result<String> {
+/// What the tools lane reads besides the tree: the tools themselves, the history and the
+/// pending `message` `committed` lints, and the day, so `cargo deny` sees new advisories at
+/// least daily.
+fn tools_extra(checkout: &Shell, message: Option<&str>) -> Result<String> {
     let mut extra: String = ["cargo-deny", "cargo-hakari", "cargo-shear", "typos", "committed"]
         .into_iter()
         .map(pass::tool_id)
@@ -339,12 +436,20 @@ fn tools_extra(checkout: &Shell) -> Result<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() / 86_400);
     let _written = writeln!(extra, "head {head}\ntag {}\nday {day}", tag.unwrap_or_default());
+    if let Some(message) = message {
+        let _written = writeln!(extra, "message {message}");
+    }
     Ok(extra)
 }
 
 /// deny, hakari, shear and typos on the snapshot (each in a shell from `on_tree`) and
-/// `committed` on the checkout's history, side by side; every failure is reported.
-fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> Result<()> {
+/// `committed` on the checkout's history and the pending `message`, side by side; every failure
+/// is reported.
+fn tools_lane(
+    on_tree: impl Fn() -> Result<Shell> + Sync,
+    checkout: &Shell,
+    message: Option<&Utf8Path>,
+) -> Result<()> {
     let on_tree = &on_tree;
     let results: Vec<Result<()>> = std::thread::scope(|scope| {
         let handles = [
@@ -354,7 +459,7 @@ fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> R
             scope.spawn(move || typos(&on_tree()?, false)),
         ];
         // `committed` reads the history, which only the checkout has.
-        let mut results = vec![commits(checkout)];
+        let mut results = vec![commits(checkout, message)];
         results.extend(handles.into_iter().map(join));
         results
     });
@@ -754,22 +859,30 @@ fn taplo(sh: &Shell, apply: bool) -> Result<()> {
     quiet_step("taplo", cmd!(sh, "taplo fmt {check...} {files...}"))
 }
 
-/// Every commit since the last tag (or the root) follows Conventional Commits.
+/// Every commit since the last tag (or the root) follows Conventional Commits, and so does the
+/// `message` of the one about to be made.
 ///
 /// The tag is peeled to its commit: `cargo xtask release` writes **annotated** tags, and
 /// `committed` panics (`Option::unwrap()` on `None`, `committed/src/git.rs:10`) on a range whose
 /// start is a tag object rather than a commit. `v0.1.0..HEAD` crashed the step for every branch
 /// from the first release on; `v0.1.0^{commit}..HEAD` is the same range and does not.
-fn commits(sh: &Shell) -> Result<()> {
+fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
     let last_tag = cmd!(sh, "git describe --tags --abbrev=0").quiet().ignore_stderr().read().ok();
     let range =
         last_tag.map_or_else(|| "HEAD".to_owned(), |t| format!("{}^{{commit}}..HEAD", t.trim()));
-    quiet_step("committed", cmd!(sh, "committed {range} --no-merge-commit"))
+    let history = quiet_step("committed", cmd!(sh, "committed {range} --no-merge-commit"));
+    let pending = message.map_or(Ok(()), |file| {
+        quiet_step("committed (message)", cmd!(sh, "committed --commit-file {file}"))
+    });
+    match (history, pending) {
+        (Err(history), Err(pending)) => Err(anyhow::anyhow!("{history:#}; {pending:#}")),
+        (history, pending) => history.and(pending),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BINS_FRESH, SPAWNED_BINS, one_gpui};
+    use super::{BINS_FRESH, SPAWNED_BINS, failed_tests, next_step, one_gpui, summary_of};
 
     /// The gate builds what the tests look for, under the variable they read.
     #[test]
@@ -822,5 +935,61 @@ mod tests {
     fn a_second_gpui_package_fails() {
         let two = lock(&[("gpui", FORK), ("gpui", "git+https://github.com/zed-industries/zed")]);
         assert!(one_gpui(&two).is_err());
+    }
+
+    /// A nextest report as the `ci` profile writes it: a pass, a failure, a flaky pass, a
+    /// timeout and a name with markup in it.
+    const JUNIT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="slopty" tests="5" failures="2" errors="1">
+<testsuite name="slopty-grid" tests="2" failures="1">
+<testcase name="tests::passes" classname="slopty-grid" time="0.01"/>
+<testcase name="tests::breaks" classname="slopty-grid" time="0.02"><failure type="test failure">assertion failed</failure><system-err>panicked</system-err></testcase>
+</testsuite>
+<testsuite name="slopty-worker::session_actor" tests="3">
+<testcase name="actor::flakes" classname="slopty-worker::session_actor" time="1.0"><flakyFailure type="test failure">once</flakyFailure></testcase>
+<testcase name="actor::hangs" classname="slopty-worker::session_actor" time="60.0"><failure type="test timeout"/></testcase>
+<testcase name="actor::reads_&lt;T&gt;" classname="slopty-worker::session_actor" time="0.1"><error type="crash">SIGSEGV</error></testcase>
+</testsuite>
+</testsuites>"#;
+
+    #[test]
+    fn the_failed_tests_are_named_and_a_flaky_pass_is_not() {
+        assert_eq!(
+            failed_tests(JUNIT),
+            [
+                "slopty-grid tests::breaks",
+                "slopty-worker::session_actor actor::hangs",
+                "slopty-worker::session_actor actor::reads_<T>",
+            ],
+            "the failures, timeouts and crashes, unescaped"
+        );
+        assert!(failed_tests("").is_empty(), "no report, no tests");
+    }
+
+    #[test]
+    fn the_summary_names_each_failed_lane_and_the_failed_tests_under_theirs() {
+        let tests = failed_tests(JUNIT);
+        let failed = [
+            ("clippy host", "step failed: clippy aarch64-apple-darwin".to_owned()),
+            ("tests", "step failed: nextest (exit status: 100)".to_owned()),
+        ];
+        let summary = summary_of(&failed, &tests);
+        let clippy = summary.find("gate lane failed: clippy host").unwrap_or(usize::MAX);
+        let lane = summary.find("gate lane failed: tests").unwrap_or(usize::MAX);
+        let test = summary.find("- `slopty-grid tests::breaks`").unwrap_or(usize::MAX);
+        assert!(clippy < lane && lane < test, "{summary}");
+        assert!(summary.contains("clippy aarch64-apple-darwin"), "the step that failed: {summary}");
+        assert_eq!(summary.matches("\n- `").count(), 3, "one line a test: {summary}");
+    }
+
+    #[test]
+    fn the_next_step_commits_what_was_gated_then_lands_it() {
+        let with = next_step(true);
+        assert!(with.contains("git commit -F target/gate/COMMIT_MSG"), "{with}");
+        let without = next_step(false);
+        assert!(without.starts_with("next: git commit\n"), "{without}");
+        for text in [with, without] {
+            assert!(text.contains("then: cargo xtask land"), "{text}");
+        }
     }
 }

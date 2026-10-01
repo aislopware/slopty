@@ -2,8 +2,9 @@
 //!
 //! Flow: clean tree → `git cliff --bumped-version` (or an explicit version) → write
 //! `[workspace.package].version` → `cargo update --workspace` (lockfile) → regenerate
-//! `CHANGELOG.md` → commit `chore(release): vX.Y.Z` → annotated tag `vX.Y.Z`. Pushing the tag is
-//! left to the operator (CI builds the artifacts from it).
+//! `CHANGELOG.md` → commit `chore(release): vX.Y.Z` → annotated tag `vX.Y.Z`. Landing the commit
+//! and pushing the tag are left to the operator: CI gates the tag in full before it builds the
+//! artifacts from it.
 
 use anyhow::{Context as _, Result, bail};
 use xshell::{Shell, cmd};
@@ -17,7 +18,7 @@ pub struct Options {
     pub version: Option<String>,
     /// Print what would happen and stop before writing anything.
     pub dry_run: bool,
-    /// Skip `cargo gate` (it must have passed on this exact tree).
+    /// Skip the quick gate (it must have passed on this exact tree).
     pub skip_gate: bool,
 }
 
@@ -52,10 +53,7 @@ pub fn run(sh: &Shell, opts: &Options) -> Result<()> {
         bail!("{tag} already exists; no releasable commits since");
     }
     if !opts.skip_gate {
-        crate::gate::run(
-            sh,
-            crate::gate::Options { fix: false, quick: false, in_place: false, since_pass: false },
-        )?;
+        crate::gate::run_only(sh, &crate::gate::Options::default(), &crate::gate::Only::quick())?;
     }
     set_version(sh, &version)?;
     step("cargo update --workspace", &cmd!(sh, "cargo update --workspace --offline"))?;
@@ -64,7 +62,9 @@ pub fn run(sh: &Shell, opts: &Options) -> Result<()> {
     let message = format!("chore(release): {tag}");
     step("commit", &cmd!(sh, "git commit -q -m {message}"))?;
     step("tag", &cmd!(sh, "git tag -a {tag} -m {message}"))?;
-    println!("✔ {tag} committed and tagged; `git push --follow-tags` when ready");
+    println!(
+        "✔ {tag} committed and tagged; when ready: `cargo xtask land --wait && git push origin {tag}`"
+    );
     Ok(())
 }
 

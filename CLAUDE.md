@@ -21,9 +21,9 @@ in it until checked here.
 - Latency and smoothness come before features. A change on the input, terminal or frame path
   comes with a number, and an optimisation follows a measurement recorded in
   `docs/MEASUREMENTS.md`.
-- A commit lands only on a green `cargo gate`, with a Conventional Commits message. `committed`
-  lints it, and releases derive from the messages, so `CHANGELOG.md` and the version are never
-  edited by hand.
+- A commit is made only on a green `cargo gate`, and lands on main only once CI's full gate on
+  the `gate` branch is green, with a Conventional Commits message. `committed` lints it, and
+  releases derive from the messages, so `CHANGELOG.md` and the version are never edited by hand.
 - Every `unsafe` block states the framework or ABI rule it relies on. Apple constants come from
   the objc2 statics. A `CFSTR` macro constant is spelled once, next to its use, naming its header.
 - Wire types live in `slopty-proto` with insta goldens. A changed golden is a wire change. Nothing
@@ -63,12 +63,15 @@ in it until checked here.
   and our use of it are optimal: measure, and improve at the root when they are not. Never wait
   on upstream. Finish a good unfinished idea (an open pull request) in our fork now, and
   reconcile when upstream lands it.
-- **The gate checks the index, in the background.** Stage exactly what you mean to land
-  (`git add <paths>`). Then launch
-  `cargo gate > target/logs/gate.log 2>&1; echo GATE_EXIT=$? >> target/logs/gate.log`. Keep
-  working while it runs; unstaged edits are invisible to it. Read `GATE_EXIT=0` or "gate
-  passed" in the log, then `git commit` without restaging. The wrapper's own exit code is the
-  `echo`'s. Batch several changes per gate.
+- **The quick gate checks the index here; CI's full gate decides what lands.** Stage exactly
+  what you mean to land (`git add <paths>`). Then run
+  `cargo gate -m '<message>' > target/logs/gate.log 2>&1; echo GATE_EXIT=$? >> target/logs/gate.log`:
+  fmt, the tools, `committed` and host clippy, about a minute warm. Unstaged edits are invisible
+  to it. Read `GATE_EXIT=0` or "gate passed" in the log, then
+  `git commit -F target/gate/COMMIT_MSG` without restaging, and `cargo xtask land`. That pushes
+  to the `gate` branch, where CI runs every lane and fast-forwards main once all pass. Keep
+  working meanwhile. A red run names its lane and tests in the run's summary, and the fix lands
+  on top. The wrapper's own exit code is the `echo`'s. Batch several changes per land.
 - **Parallel work happens in this one checkout, with no worktrees.** Split the work by
   ownership. Each subagent owns a disjoint set of crates or files, named in its brief, and
   touches nothing else.

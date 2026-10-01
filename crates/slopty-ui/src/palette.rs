@@ -365,6 +365,13 @@ fn foot_key(theme: &Theme, key: &'static str, what: &'static str) -> gpui::Div {
         .child(what)
 }
 
+/// Whether `list`, as laid out, runs on below what it shows: more than its own padding under
+/// the last row is still to come.
+fn runs_on(list: &ListState) -> bool {
+    let left = list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y;
+    left > px(0.5)
+}
+
 /// The fade over the list's foot while there is more below. With no legend under it (glass),
 /// it meets the sheet's rounded foot and follows its corners, where a square band cut them off.
 fn more_fade(theme: &Theme, legend: bool) -> gpui::Div {
@@ -1304,9 +1311,6 @@ pub struct CommandPalette {
     brief: bool,
     /// A window narrower than this (a phone's) gets the palette as a sheet from the top.
     sheet_below: f32,
-    /// The sheet's list runs on past its foot: a fade there says so, since a touch list shows
-    /// no scrollbar.
-    more_below: bool,
     /// The last frame drew it as a phone's sheet.
     sheet: bool,
     /// It was dismissed or chose, and draws its way out until its owner drops it.
@@ -1401,7 +1405,6 @@ impl CommandPalette {
             chords: true,
             brief: false,
             sheet_below: 0.0,
-            more_below: false,
             sheet: false,
             leaving: false,
             plate: Plate::default(),
@@ -1556,14 +1559,6 @@ impl CommandPalette {
             remember_command(&item.label, cx);
         }
         cx.emit(PaletteEvent::Run(item.run.clone()));
-    }
-
-    /// Whether the list, as last laid out, runs on below what it shows: more than its own
-    /// padding under the last row is still to come.
-    fn runs_on(&self) -> bool {
-        let left =
-            self.list.max_offset_for_scrollbar().y + self.list.scroll_px_offset_for_scrollbar().y;
-        left > px(0.5)
     }
 
     /// Whether an input method holds uncommitted text in the field (a Telex word, kana before
@@ -1791,22 +1786,11 @@ impl Render for CommandPalette {
         };
         // A fade over the list's foot says there is more below: a touch list has no scrollbar,
         // and on a desktop the row the list's height cuts would otherwise end on the foot's
-        // band, read as a row that lost its bottom. The scroll's extent is the last
-        // layout's, so the frame after this one checks it again (a list just opened, or
-        // narrowed by a query) and draws once more only if it changed.
-        self.more_below = self.runs_on();
-        // Weakly: `cx.on_next_frame` holds the palette until a frame comes, and a hidden window
-        // draws none, so a dismissed palette would outlive its dismissal by one strong handle
-        // for every frame it drew.
-        let this = cx.weak_entity();
-        window.on_next_frame(move |_window, cx| {
-            let _gone = this.update(cx, |this, cx| {
-                if this.runs_on() != this.more_below {
-                    cx.notify();
-                }
-            });
-        });
-        let fade = self.more_below.then(|| more_fade(&theme, self.chords));
+        // band, read as a row that lost its bottom. It is judged once the list has laid out in
+        // the same frame, so a list just opened or narrowed by a query fades on its first.
+        let list = self.list.clone();
+        let fade =
+            crate::kit::painted_while(move |_| runs_on(&list), more_fade(&theme, self.chords));
         // Glass has no Esc: the field ends in Cancel, as iOS search does.
         let cancel = (!self.chords).then(|| {
             crate::kit::button(&theme, "palette-cancel", "Cancel", crate::kit::ButtonKind::Link)
@@ -1861,7 +1845,7 @@ impl Render for CommandPalette {
                                 ))
                             }),
                     )
-                    .children(fade),
+                    .child(fade),
             )
             .when(self.chords, |el| el.child(legend(&theme, verb)));
         // The phone's sheet dims what it came down over; on glass anywhere the dim is also what a
@@ -2086,6 +2070,23 @@ mod tests {
             .add_window_view(|window, cx| CommandPalette::new(items, Theme::default(), window, cx));
         cx.run_until_parked();
         (palette, cx)
+    }
+
+    /// A list that runs past the sheet's foot fades there in the frame that first draws it,
+    /// judged once the list has laid out. Judged from the frame before, the first frame had no
+    /// fade, and a capture taken before the next one (a phone's simulator may draw none while
+    /// idle) did not match the same state drawn from scratch.
+    #[gpui::test]
+    fn a_long_list_fades_at_its_foot_in_its_first_frame(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let items: Vec<PaletteItem> = (0..300)
+            .map(|i| PaletteItem::session(&format!("tile {i}"), SessionId::new()))
+            .collect();
+        let (_palette, cx) = cx
+            .add_window_view(|window, cx| CommandPalette::new(items, Theme::default(), window, cx));
+        assert!(cx.debug_bounds("palette-more").is_some(), "the fade, in the first frame");
+        let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
+        assert_eq!(stale, None, "the first frame is what a frame from scratch paints");
     }
 
     fn plate(palette: &Entity<CommandPalette>, cx: &VisualTestContext) -> Bounds<Pixels> {

@@ -41,6 +41,10 @@ const SANITIZED: &[&str] = &[
     "slopty-crash",
     "slopty-tailnet",
     "slopty-input",
+    // The drag-and-drop pasteboard calls, and the test kit's own `unsafe`: the counting global
+    // allocator every allocation test runs under, and the process and IOReport reads.
+    "slopty-dnd",
+    "slopty-testkit",
 ];
 
 /// Crates that install their own fatal-signal handlers and test that the process still dies of
@@ -67,10 +71,18 @@ const TSAN_CANNOT_RUN: &[(&str, &str)] = &[
     ("slopty-worker", "actor::closing_the_session_hangs_up_the_child"),
 ];
 
-/// The nextest filterset that leaves out [`TSAN_CANNOT_RUN`].
+/// Tests that count the instructions an operation takes against a budget, which
+/// `ThreadSanitizer` cannot run: it adds its own instructions at every memory access and atomic,
+/// so the count is the instrumentation's. `AddressSanitizer` leaves a loop of additions as it
+/// is and runs them. Only this reason puts a test here.
+const TSAN_COUNTS_INSTRUCTIONS: &[(&str, &str)] =
+    &[("slopty-testkit", "bench::tests::a_series_reports_per_operation_and_as_json")];
+
+/// The nextest filterset that leaves out [`TSAN_CANNOT_RUN`] and [`TSAN_COUNTS_INSTRUCTIONS`].
 fn tsan_filter() -> String {
     let skipped: Vec<String> = TSAN_CANNOT_RUN
         .iter()
+        .chain(TSAN_COUNTS_INSTRUCTIONS)
         .map(|(package, test)| format!("(package({package}) & test(={test}))"))
         .collect();
     format!("not ({})", skipped.join(" | "))
@@ -169,6 +181,13 @@ pub enum DeepCmd {
         /// Seconds a mutant may run before it counts as a timeout.
         #[arg(long, default_value_t = 120)]
         timeout: u64,
+        /// Only this share of the mutants, `k/n` counting from 0 (`cargo mutants --shard`), for a
+        /// crate split over several runners.
+        #[arg(long)]
+        shard: Option<String>,
+        /// Mutants built and tested at once, each in its own copy of the tree.
+        #[arg(long, default_value_t = 1)]
+        jobs: u32,
     },
 }
 
@@ -178,7 +197,9 @@ pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
         DeepCmd::Sanitize { which, package } => sanitize(sh, *which, package),
         DeepCmd::Features => features(sh),
         DeepCmd::Coverage { html } => coverage(sh, *html),
-        DeepCmd::Mutants { package, timeout } => mutants(sh, package, *timeout),
+        DeepCmd::Mutants { package, timeout, shard, jobs } => {
+            mutants(sh, package, *timeout, shard.as_deref(), *jobs)
+        }
         DeepCmd::Metal { filter, no_build } => metal(sh, filter.as_deref(), *no_build),
         DeepCmd::Loom => loom(sh),
         DeepCmd::Leaks { package, stacks } => leaks(sh, package, *stacks),
@@ -231,8 +252,22 @@ fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
     let _root = sh.push_env("INSTA_WORKSPACE_ROOT", sh.current_dir());
     let _update = sh.push_env("INSTA_UPDATE", "no");
     let packages = packages(chosen, PURE);
-    quiet_step("miri", cmd!(sh, "cargo +nightly miri test {packages...}"))
+    // Under nextest each test is its own interpreter, side by side on the cores, and the `miri`
+    // profile ends one that runs past its bound instead of the night.
+    let filter = MIRI_FILTER;
+    step(
+        "miri",
+        &cmd!(
+            sh,
+            "nice -n 10 cargo +nightly miri nextest run --profile miri --no-fail-fast {packages...} -E {filter}"
+        ),
+    )
 }
+
+/// What Miri leaves out: the allocation-budget targets, which count a real allocator over
+/// thousands of operations (an hour each under the interpreter, 2026-10-01) and hold no
+/// `unsafe` of their own; the code they drive runs under Miri in the other targets.
+const MIRI_FILTER: &str = "not binary(allocs)";
 
 /// `-Zbuild-std` so the standard library is instrumented too (a race through `std` is still
 /// a race); the host triple is passed explicitly because build-std needs it.
@@ -250,9 +285,9 @@ fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
         let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
         let packages = packages(chosen, &["slopty-codec"]);
         let host = TRIPLES[0];
-        return quiet_step(
+        return step(
             "realtime sanitizer",
-            cmd!(sh, "cargo +nightly nextest run --target {host} {packages...}"),
+            &cmd!(sh, "cargo +nightly nextest run --target {host} {packages...}"),
         );
     }
     let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir(flag)?);
@@ -273,9 +308,9 @@ fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
         let packages = packages(&group, &[]);
         let _options = options.map(|o| sh.push_env(options_var, o));
         let filter = &filter;
-        let ran = quiet_step(
+        let ran = step(
             &title,
-            cmd!(
+            &cmd!(
                 sh,
                 "nice -n 10 cargo +nightly nextest run -Zbuild-std --target {host} --no-fail-fast {packages...} {filter...}"
             ),
@@ -309,9 +344,9 @@ fn sanitized_groups(chosen: &[String]) -> Vec<(Vec<String>, Option<&'static str>
 fn features(sh: &Shell) -> Result<()> {
     let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("features")?);
     let host = TRIPLES[0];
-    quiet_step(
+    step(
         "cargo hack check --each-feature",
-        cmd!(
+        &cmd!(
             sh,
             "cargo hack check --workspace --each-feature --keep-going --target {host} --exclude xtask"
         ),
@@ -343,9 +378,9 @@ fn loom(sh: &Shell) -> Result<()> {
     let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("loom")?);
     let _flags = sh.push_env("RUSTFLAGS", "--cfg slopty_loom -C target-cpu=apple-m1");
     for (package, filter) in LOOM_MODELS {
-        quiet_step(
+        step(
             &format!("loom: {package}"),
-            cmd!(sh, "nice -n 10 cargo nextest run -p {package} --lib -E {filter}"),
+            &cmd!(sh, "nice -n 10 cargo nextest run -p {package} --lib -E {filter}"),
         )?;
     }
     Ok(())
@@ -517,17 +552,43 @@ fn metal(sh: &Shell, filter: Option<&str>, no_build: bool) -> Result<()> {
 }
 
 /// One crate at a time: mutants rebuilds per mutation, so the whole workspace would be hours.
-fn mutants(sh: &Shell, package: &str, timeout: u64) -> Result<()> {
+/// `cargo mutants` on `package` (one `shard` of it), its report under
+/// `target/deep/mutants/<package>[-<k>of<n>]/mutants.out`: `missed.txt` lists the changes no
+/// test caught, `caught.txt`, `timeout.txt` and `unviable.txt` the rest.
+fn mutants(sh: &Shell, package: &str, timeout: u64, shard: Option<&str>, jobs: u32) -> Result<()> {
     let timeout = timeout.to_string();
+    let jobs = jobs.max(1).to_string();
     let _env = sh.push_env("AWS_LC_SYS_CMAKE_BUILDER", "1");
-    cmd!(sh, "cargo mutants --package {package} --timeout {timeout} --output target/deep/mutants")
-        .run()
-        .context("cargo mutants")
+    let out = mutants_dir(package, shard);
+    let shard: Vec<&str> = shard.map(|s| vec!["--shard", s]).unwrap_or_default();
+    step(
+        &format!("cargo mutants: {package}"),
+        &cmd!(
+            sh,
+            "cargo mutants --package {package} --timeout {timeout} --jobs {jobs} {shard...} --output {out}"
+        ),
+    )
+}
+
+/// Where [`mutants`] writes for `package` and `shard`.
+fn mutants_dir(package: &str, shard: Option<&str>) -> String {
+    let name =
+        shard.map_or_else(|| package.to_owned(), |s| format!("{package}-{}", s.replace('/', "of")));
+    format!("target/deep/mutants/{name}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shard_of_mutants_writes_its_own_report() {
+        assert_eq!(mutants_dir("slopty-proto", None), "target/deep/mutants/slopty-proto");
+        assert_eq!(
+            mutants_dir("slopty-proto", Some("2/4")),
+            "target/deep/mutants/slopty-proto-2of4"
+        );
+    }
 
     #[test]
     fn a_deep_target_dir_is_absolute_under_the_workspace_target() {

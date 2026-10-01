@@ -68,6 +68,22 @@ mod tests {
         assert!(failed.is_empty(), "{} of {replayed} inputs still fail: {failed:#?}", failed.len());
     }
 
+    /// The captures `cargo xtask fuzz` seeds the `terminal` target with hold its invariants.
+    #[test]
+    fn every_terminal_capture_runs_clean() {
+        let dir = root().join("seeds/terminal");
+        let captures = names_in(&dir);
+        assert!(captures.len() >= 5, "{captures:?}");
+        let mut all = Vec::new();
+        for name in &captures {
+            let capture = fs::read(dir.join(name)).unwrap();
+            let script = slopty_fuzz::terminal::script(&capture);
+            assert!(catch_unwind(|| slopty_fuzz::terminal::run(&script)).is_ok(), "{name}");
+            all.extend(capture);
+        }
+        slopty_fuzz::terminal::run(&slopty_fuzz::terminal::script(&all));
+    }
+
     #[test]
     fn the_seeds_run_through_every_target() {
         // The shapes a target meets first: empty, one byte, and an input past every length check.

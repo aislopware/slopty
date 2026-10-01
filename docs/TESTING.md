@@ -125,6 +125,19 @@ measurement sits in `frame_time` and runs under `smooth`, alone. The live tests 
 `slopty-capture` and `slopty-input` still return early without `SLOPTY_SCREEN_E2E` or
 `SLOPTY_INPUT_E2E`, which the xtask sets for them.
 
+## Where the gate runs
+Layers 1 and 2, the doctests and every lint make up `cargo gate`, split between this Mac and
+GitHub Actions. Before a commit, `cargo gate` runs the cheap lanes on the staged tree: fmt,
+taplo, deny, hakari, shear, typos, `committed` (on the history, and on the pending message given
+with `-m`) and host clippy. It takes about a minute with a warm build. `cargo xtask land` then
+pushes the commit to the `gate` branch. CI runs every lane there, the tests and clippy for iOS
+and Linux and rustdoc among them, and fast-forwards main to the commit only when all of them
+pass. So main holds only commits the full gate passed. A red run's summary names the failed lane
+and each failed test, read from nextest's JUnit report. The fix lands as a new commit on top,
+and its run supersedes the red one. The tests a runner's virtual Mac cannot run (missing
+hardware) are listed in nextest's `ci` profile and run in every local `cargo gate --full`.
+`docs/DEV.md` ("Gate") has the flags and the workflow.
+
 ## Live lane in a VM
 A test that moves the real pointer, posts HID events, locks the screen, reaches the login window
 or needs a TCC grant runs in a macOS guest, never on this Mac (someone works on it over Parsec)

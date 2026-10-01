@@ -324,6 +324,7 @@ fn off_the_startup_disk(path: &Path) -> Result<()> {
 
 /// The whole disk the volume holding `path` was mounted from (`disk3` for `/dev/disk3s5`), or
 /// `None` for a volume from no local disk.
+#[cfg(target_os = "macos")]
 fn whole_disk_of(path: &Path) -> Result<Option<String>> {
     let stat = rustix::fs::statfs(path).with_context(|| format!("statfs {}", path.display()))?;
     let from: Vec<u8> =
@@ -331,7 +332,15 @@ fn whole_disk_of(path: &Path) -> Result<Option<String>> {
     Ok(whole_disk(&String::from_utf8_lossy(&from)))
 }
 
+/// No tart guest runs off this host: there is no disk to name.
+#[cfg(not(target_os = "macos"))]
+#[expect(clippy::unnecessary_wraps, reason = "the macOS twin's signature")]
+const fn whole_disk_of(_path: &Path) -> Result<Option<String>> {
+    Ok(None)
+}
+
 /// `disk<N>` from a device path `/dev/disk<N>[s<M>…]`; an APFS volume's `N` is its container's.
+#[cfg(any(target_os = "macos", test))]
 fn whole_disk(device: &str) -> Option<String> {
     let number: String =
         device.strip_prefix("/dev/disk")?.chars().take_while(char::is_ascii_digit).collect();

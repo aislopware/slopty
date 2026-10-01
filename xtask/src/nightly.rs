@@ -1,6 +1,7 @@
 //! `cargo xtask nightly`: the heavy lanes, run unattended on this Mac, one after another.
 //!
-//! Each check runs under `nice -n 10` with its output in `target/nightly/<date>/<check>.log`, and
+//! Each check runs at a lowered priority (`nice -n 19` and four cores on this Mac, `nice -n 10` on
+//! a CI runner) with its output in `target/nightly/<date>/<check>.log`, and
 //! writes `<check>.json` beside it (what ran, how long, passed, failed or skipped and why). A
 //! `summary.json` lists them all, and the command fails when any check failed. A check whose
 //! tool is missing (the nightly toolchain, `cargo-llvm-cov`, `cargo-hack`) is skipped, not failed,
@@ -15,10 +16,11 @@
 //! - `miri`, `sanitize-address`, `sanitize-thread`, `sanitize-realtime`, `coverage`, `features`,
 //!   `fuzz`: `cargo xtask deep` (`fuzz` runs every fuzz target for 30 s).
 //!
-//! `cargo xtask nightly install` writes a `LaunchAgent` that runs it at 03:00, at background
-//! priority; `uninstall` removes it. Nothing here plays a sound or draws on the screen.
+//! The bug-catching checks run every night on GitHub Actions (`.github/workflows/deep.yml`), not
+//! here: someone works on this Mac, over Parsec, while other sessions gate on it. A full run here
+//! is refused unless `--all-here` asks for it; `--only <check>` runs one. `uninstall` removes the
+//! `LaunchAgent` an earlier version installed. Nothing here plays a sound or draws on the screen.
 
-use std::fmt::Write as _;
 use std::fs::File;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -42,9 +44,7 @@ const PROPTEST_FILTER: &str = "binary(/_props$/) or (package(slopty-media) and b
 pub enum NightlyCmd {
     /// Run the checks now (the default).
     Run(NightlyOpts),
-    /// Write and load a `LaunchAgent` that runs `cargo xtask nightly` at 03:00.
-    Install,
-    /// Unload and remove that `LaunchAgent`.
+    /// Unload and remove the `LaunchAgent` that ran `cargo xtask nightly` at 03:00.
     Uninstall,
 }
 
@@ -53,6 +53,9 @@ pub struct NightlyOpts {
     /// Only these checks (repeat the flag).
     #[arg(long)]
     pub only: Vec<String>,
+    /// Run every check on this Mac, which a run without `--only` otherwise refuses outside CI.
+    #[arg(long)]
+    pub all_here: bool,
     /// Not these checks (repeat the flag).
     #[arg(long)]
     pub skip: Vec<String>,
@@ -71,6 +74,7 @@ impl Default for NightlyOpts {
     fn default() -> Self {
         Self {
             only: Vec::new(),
+            all_here: false,
             skip: Vec::new(),
             soak_minutes: 20,
             proptest_cases: 4_096,
@@ -100,7 +104,6 @@ pub fn run(sh: &Shell, cmd: Option<&NightlyCmd>) -> Result<()> {
     match cmd {
         None => nightly(sh, &NightlyOpts::default()),
         Some(NightlyCmd::Run(opts)) => nightly(sh, opts),
-        Some(NightlyCmd::Install) => install(sh),
         Some(NightlyCmd::Uninstall) => uninstall(sh),
     }
 }
@@ -208,6 +211,9 @@ fn unmet(sh: &Shell, need: Option<Need>) -> Option<String> {
 }
 
 fn nightly(sh: &Shell, opts: &NightlyOpts) -> Result<()> {
+    if let Some(refusal) = refused(opts, std::env::var_os("CI").is_some()) {
+        bail!("{refusal}");
+    }
     let root = repo_root()?;
     let date = cmd!(sh, "date +%Y-%m-%d").quiet().read()?;
     let dir = root.join("target/nightly").join(&date);
@@ -268,6 +274,15 @@ fn nightly(sh: &Shell, opts: &NightlyOpts) -> Result<()> {
     Ok(())
 }
 
+/// Why a run with `opts` does not start here: every check at once, on a machine that is not a CI
+/// runner, without `--all-here`.
+fn refused(opts: &NightlyOpts, ci: bool) -> Option<&'static str> {
+    (!ci && opts.only.is_empty() && !opts.all_here).then_some(
+        "the deep checks run on GitHub Actions (`.github/workflows/deep.yml`, `gh workflow run \
+         deep.yml`); run one here with `--only <check>`, or all of them with `--all-here`",
+    )
+}
+
 /// Run `check` under `nice`, its output in `<check>.log`; its result, also in `<check>.json`.
 fn run_check(sh: &Shell, check: &Check, dir: &Utf8Path) -> Result<serde_json::Value> {
     let log = dir.join(format!("{}.log", check.name));
@@ -281,9 +296,11 @@ fn run_check(sh: &Shell, check: &Check, dir: &Utf8Path) -> Result<serde_json::Va
     } else {
         println!("▶ {}", check.name);
         let out = File::create(&log).with_context(|| format!("creating {log}"))?;
+        let share = Share::here();
         let status = Command::new("nice")
-            .args(["-n", "10", &check.program])
+            .args(["-n", share.niceness, &check.program])
             .args(&check.args)
+            .envs(share.env.iter().copied())
             .envs(check.env.iter().map(|(k, v)| (*k, v.as_str())))
             .current_dir(repo_root()?)
             .stdin(Stdio::null())
@@ -307,78 +324,35 @@ fn run_check(sh: &Shell, check: &Check, dir: &Utf8Path) -> Result<serde_json::Va
     Ok(result)
 }
 
+/// How much of the machine a check may take. On a CI runner, which is the check's alone, all of
+/// it at a lowered priority. On this Mac, where someone works (over Parsec) and other sessions
+/// gate beside it, the lowest priority and four cores: cargo's jobs and nextest's test threads
+/// capped (MEASUREMENTS 2026-10-01, "a nightly that shares the Mac").
+struct Share {
+    niceness: &'static str,
+    env: &'static [(&'static str, &'static str)],
+}
+
+impl Share {
+    fn here() -> Self {
+        Self::on_ci(std::env::var_os("CI").is_some())
+    }
+
+    const fn on_ci(ci: bool) -> Self {
+        if ci {
+            Self { niceness: "10", env: &[] }
+        } else {
+            Self {
+                niceness: "19",
+                env: &[("CARGO_BUILD_JOBS", "4"), ("NEXTEST_TEST_THREADS", "4")],
+            }
+        }
+    }
+}
+
 fn plist_path() -> Result<Utf8PathBuf> {
     let home = std::env::var("HOME").context("HOME")?;
     Ok(Utf8PathBuf::from(home).join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
-}
-
-/// `s` as XML character data.
-fn xml(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
-
-/// The `LaunchAgent` that runs `cargo xtask nightly` in `root` at 03:00 with `path` for `PATH`.
-fn plist(cargo: &str, root: &Utf8Path, path: &str, home: &str) -> String {
-    let log = root.join("target/nightly/launchd.log");
-    let mut text = String::from(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n",
-    );
-    let _label = writeln!(text, "  <key>Label</key><string>{LABEL}</string>");
-    let _program = writeln!(
-        text,
-        "  <key>ProgramArguments</key>\n  <array>\n    <string>{}</string>\n    \
-         <string>xtask</string>\n    <string>nightly</string>\n  </array>",
-        xml(cargo)
-    );
-    let _dir =
-        writeln!(text, "  <key>WorkingDirectory</key><string>{}</string>", xml(root.as_str()));
-    let _env = writeln!(
-        text,
-        "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key><string>{}</string>\n    \
-         <key>HOME</key><string>{}</string>\n  </dict>",
-        xml(path),
-        xml(home)
-    );
-    let _when = writeln!(
-        text,
-        "  <key>StartCalendarInterval</key>\n  <dict>\n    <key>Hour</key><integer>3</integer>\n    \
-         <key>Minute</key><integer>0</integer>\n  </dict>"
-    );
-    let _quiet = writeln!(
-        text,
-        "  <key>ProcessType</key><string>Background</string>\n  \
-         <key>LowPriorityIO</key><true/>\n  <key>Nice</key><integer>10</integer>"
-    );
-    let _logs = writeln!(
-        text,
-        "  <key>StandardOutPath</key><string>{0}</string>\n  \
-         <key>StandardErrorPath</key><string>{0}</string>",
-        xml(log.as_str())
-    );
-    text.push_str("</dict>\n</plist>\n");
-    text
-}
-
-fn install(sh: &Shell) -> Result<()> {
-    let root = repo_root()?;
-    let cargo = cmd!(sh, "which cargo").quiet().read().context("cargo on PATH")?;
-    let path = std::env::var("PATH").context("PATH")?;
-    let home = std::env::var("HOME").context("HOME")?;
-    let file = plist_path()?;
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
-    }
-    std::fs::create_dir_all(root.join("target/nightly"))?;
-    std::fs::write(&file, plist(&cargo, &root, &path, &home))
-        .with_context(|| format!("writing {file}"))?;
-    let uid = cmd!(sh, "id -u").quiet().read()?;
-    let domain = format!("gui/{uid}");
-    let _unloaded = cmd!(sh, "launchctl bootout {domain}/{LABEL}").quiet().ignore_stderr().run();
-    cmd!(sh, "launchctl bootstrap {domain} {file}").run().context("launchctl bootstrap")?;
-    println!("✔ {LABEL} runs `cargo xtask nightly` at 03:00 ({file})");
-    Ok(())
 }
 
 fn uninstall(sh: &Shell) -> Result<()> {
@@ -397,27 +371,16 @@ fn uninstall(sh: &Shell) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A full run on this Mac needs `--all-here`; one check, or a CI runner, does not.
     #[test]
-    fn the_launch_agent_runs_the_nightly_at_three() {
-        let text = plist(
-            "/Users/me/.cargo/bin/cargo",
-            Utf8Path::new("/src/slopty"),
-            "/usr/bin:/bin",
-            "/Users/me",
-        );
-        for wanted in [
-            "<key>Label</key><string>dev.aislopware.slopty.nightly</string>",
-            "<string>/Users/me/.cargo/bin/cargo</string>",
-            "<string>nightly</string>",
-            "<key>WorkingDirectory</key><string>/src/slopty</string>",
-            "<key>Hour</key><integer>3</integer>",
-            "<key>Minute</key><integer>0</integer>",
-            "<key>ProcessType</key><string>Background</string>",
-            "/src/slopty/target/nightly/launchd.log",
-        ] {
-            assert!(text.contains(wanted), "{wanted} in\n{text}");
-        }
-        assert_eq!(xml("a<b&c"), "a&lt;b&amp;c");
+    fn a_full_local_run_is_refused_without_its_flag() {
+        let full = NightlyOpts::default();
+        assert!(refused(&full, false).is_some_and(|r| r.contains("deep.yml")));
+        assert!(refused(&full, true).is_none(), "a runner runs everything");
+        let one = NightlyOpts { only: vec!["miri".to_owned()], ..NightlyOpts::default() };
+        assert!(refused(&one, false).is_none());
+        let asked = NightlyOpts { all_here: true, ..NightlyOpts::default() };
+        assert!(refused(&asked, false).is_none());
     }
 
     #[test]
@@ -440,5 +403,16 @@ mod tests {
                 .filter(|c| c.name != "loom")
                 .all(|c| c.needs.is_some())
         );
+    }
+
+    /// On this Mac a check yields to everything and takes four cores; on a runner, the runner.
+    #[test]
+    fn a_local_run_yields_and_a_runner_does_not_cap() {
+        let here = Share::on_ci(false);
+        assert_eq!(here.niceness, "19");
+        assert!(here.env.contains(&("CARGO_BUILD_JOBS", "4")), "{:?}", here.env);
+        assert!(here.env.contains(&("NEXTEST_TEST_THREADS", "4")), "{:?}", here.env);
+        let runner = Share::on_ci(true);
+        assert_eq!((runner.niceness, runner.env.len()), ("10", 0));
     }
 }

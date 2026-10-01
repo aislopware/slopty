@@ -1,6 +1,8 @@
-//! Both ends of a client's feedback: on the worker, NACKs answered from the packetizer's history,
-//! receiver reports folded into the bitrate controller and the parity ratio, and clock probes
-//! echoed; on the client, the echoes placed on its clock.
+//! Both ends of a client's feedback.
+//!
+//! On the worker, NACKs are answered from the packetizer's history, receiver reports are folded
+//! into the bitrate controller and the parity ratio, and clock probes are echoed; on the client,
+//! the echoes are placed on its clock.
 //!
 //! Every field is the peer's to choose. A retransmission must be a datagram of the frame asked
 //! for, a data fragment of it, marked as a retransmission; the bitrate must stay between the
@@ -146,6 +148,7 @@ impl Worker {
                     ltr_refresh: false,
                     capture_ts_us: 0,
                     discardable: false,
+                    stripes: 0,
                 };
                 let _sent = self.packetizer.packetize(&frame, 0, |_| {});
             }
@@ -155,7 +158,7 @@ impl Worker {
                     self.nack(frame, &fragments);
                 }
                 Some(ClientDatagram::Feedback(Feedback::Clock { stream, sent_us })) => {
-                    self.echo(stream.0, sent_us);
+                    Self::echo(stream.0, sent_us);
                 }
                 _other => {}
             },
@@ -201,16 +204,20 @@ impl Worker {
     }
 
     /// The worker answers a probe, and the client reads the echo back as it was sent.
-    fn echo(&mut self, stream: u32, sent_us: u64) {
+    fn echo(stream: u32, sent_us: u64) {
         let (received, echoed) = (sent_us.wrapping_mul(3), sent_us.wrapping_mul(3) | 1);
         let datagram = ClockEcho::new(sent_us, received, echoed).datagram(stream, 7);
         let Some((header, payload)) = MediaHeader::parse(&datagram) else {
             panic!("an echo that is not a media datagram");
         };
-        assert_eq!((header.kind(), header.stream.get()), (Some(Kind::Clock), stream));
+        assert_eq!(
+            (header.kind(), header.stream.get()),
+            (Some(Kind::Clock), stream),
+            "an echo's header"
+        );
         let Some(echo) = ClockEcho::parse(payload) else { panic!("an echo that does not parse") };
-        assert_eq!((echo.sent.get(), echo.received.get()), (sent_us, received));
-        assert_eq!(echo.echoed.get(), echoed);
+        assert_eq!((echo.sent.get(), echo.received.get()), (sent_us, received), "an echo's times");
+        assert_eq!(echo.echoed.get(), echoed, "an echo's echo time");
     }
 
     /// The client takes an echo's readings, and its estimate stays one it can stand behind.
@@ -224,7 +231,8 @@ impl Worker {
         assert!(self.clock.counts().0 >= probes, "the probes counted went back");
         if let Some(estimate) = self.clock.estimate() {
             assert!(estimate.drift_ppm.unsigned_abs() <= 500, "{estimate:?}");
-            let least = (estimate.rtt / 2).saturating_sub(std::time::Duration::from_micros(1));
+            let half = estimate.rtt.checked_div(2).unwrap_or_default();
+            let least = half.saturating_sub(std::time::Duration::from_micros(1));
             assert!(estimate.bound >= least, "tighter than half the fastest trip: {estimate:?}");
         }
     }

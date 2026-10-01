@@ -123,6 +123,10 @@ fn cargo_fuzz<'a>(sh: &'a Shell, verb: &str) -> xshell::Cmd<'a> {
         "cargo +nightly fuzz {verb} --debug-assertions --target {host} --target-dir target/fuzz/build"
     )
     .env("RUSTC_WRAPPER", "")
+    // libghostty-vt is Zig, which ASan does not see into: built `ReleaseSafe`, an out-of-bounds
+    // index, an overflow or a bad cast in the parser traps instead of going on quietly, as the
+    // shipped `ReleaseFast` would.
+    .env("LIBGHOSTTY_VT_SYS_OPTIMIZE", "ReleaseSafe")
 }
 
 fn build(sh: &Shell) -> Result<()> {
@@ -153,6 +157,8 @@ fn fuzz(root: &Utf8Path, target: &str, seconds: u64, jobs: u32) -> Result<Vec<St
         .arg(&corpus)
         .arg(&seeds)
         .args(libfuzzer_flags(seconds, jobs, &artifacts))
+        .arg(format!("-rss_limit_mb={}", rss_limit_mb(target)))
+        .args(dictionary(root, target))
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
@@ -182,11 +188,27 @@ fn libfuzzer_flags(seconds: u64, jobs: u32, artifacts: &Utf8Path) -> Vec<String>
         "-ignore_ooms=1".to_owned(),
         "-ignore_timeouts=1".to_owned(),
         "-timeout=10".to_owned(),
-        "-rss_limit_mb=2048".to_owned(),
+        "-malloc_limit_mb=2048".to_owned(),
         "-max_len=65536".to_owned(),
         format!("-artifact_prefix={artifacts}/"),
         "-print_final_stats=1".to_owned(),
     ]
+}
+
+/// The resident size past which libFuzzer calls an input out of memory. 2 GiB, except for the
+/// `terminal` target: under `AddressSanitizer` its process grows about 0.4 MB with every run
+/// (878 MB after 2 000 runs of one input, with the quarantine off), which no malloc accounts
+/// for (`LeakSanitizer` finds nothing) and which a plain build does not show (8.5 MB after 200
+/// runs and after 2 000, with the parser built `ReleaseFast` or `ReleaseSafe`). A single input's
+/// own blow-up is still caught by `-malloc_limit_mb`.
+fn rss_limit_mb(target: &str) -> u32 {
+    if target == "terminal" { 8_192 } else { 2_048 }
+}
+
+/// `-dict=` with the target's dictionary, when `fuzz/dicts/<target>.dict` holds one.
+fn dictionary(root: &Utf8Path, target: &str) -> Option<String> {
+    let dict = root.join("fuzz/dicts").join(format!("{target}.dict"));
+    dict.exists().then(|| format!("-dict={dict}"))
 }
 
 /// Crash, leak, out-of-memory and timeout inputs written under `dir` since `since`.
@@ -251,9 +273,11 @@ fn keep(sh: &Shell, root: &Utf8Path, targets: &[String], artifact: &Utf8Path) ->
 }
 
 /// Seed corpora from the wire goldens: each hex snapshot as the stream or datagram it is, the
-/// JSON ones as control-socket lines. The fuzzer grows its own corpus beside them.
+/// JSON ones as control-socket lines; and the `terminal` target's from the captures under
+/// [`TERMINAL_SEEDS`]. The fuzzer grows its own corpus beside them.
 fn seed(root: &Utf8Path, chosen: &[String]) -> Result<()> {
-    let seeds = seeds_from(&root.join(SNAPSHOTS))?;
+    let mut seeds = seeds_from(&root.join(SNAPSHOTS))?;
+    seeds.extend(terminal_seeds(&root.join(TERMINAL_SEEDS))?);
     for target in chosen {
         let dir = root.join("target/fuzz/seeds").join(target);
         if dir.exists() {
@@ -265,6 +289,41 @@ fn seed(root: &Utf8Path, chosen: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Program output captured as it reached a terminal, one sequence family per file.
+const TERMINAL_SEEDS: &str = "fuzz/seeds/terminal";
+
+/// Each capture under `dir` as a `terminal` script (`fuzz/src/terminal.rs`): an 80 × 24 screen,
+/// the capture written in pieces of at most 64 bytes, then a viewer joining, a checkpoint, a
+/// resize to 40 × 12 and a checkpoint there. All the captures in one script too.
+fn terminal_seeds(dir: &Utf8Path) -> Result<Vec<(String, Vec<u8>)>> {
+    let mut captures = Vec::new();
+    for entry in dir.read_dir_utf8().with_context(|| format!("reading {dir}"))? {
+        let path = entry?.into_path();
+        if path.extension() == Some("vt") {
+            captures.push(std::fs::read(&path).with_context(|| format!("reading {path}"))?);
+        }
+    }
+    captures.sort();
+    let whole = captures.concat();
+    Ok(captures
+        .iter()
+        .chain(std::iter::once(&whole))
+        .map(|capture| ("terminal".to_owned(), terminal_script(capture)))
+        .collect())
+}
+
+/// `bytes` as a `terminal` script: the size, the writes, then the closing operations.
+fn terminal_script(bytes: &[u8]) -> Vec<u8> {
+    let mut script = vec![79, 23];
+    for piece in bytes.chunks(64) {
+        // `op % 64 + 1` bytes follow a write's op byte; a piece is 1 to 64 long.
+        script.push(u8::try_from(piece.len().saturating_sub(1)).unwrap_or(63));
+        script.extend_from_slice(piece);
+    }
+    script.extend_from_slice(&[0xf4, 0xfc, 0xf0, 39, 11, 0xfc]);
+    script
 }
 
 /// A golden snapshot: its name (`golden__<file>__<name>`) and body.
@@ -390,6 +449,22 @@ mod tests {
         for (target, _) in &seeds {
             assert!(targets.contains(target), "a seed for {target}, which is not a target");
         }
+    }
+
+    /// The script matches `slopty_fuzz::terminal::script`: the size, each piece after its
+    /// length less one, then join, checkpoint, resize to 40 × 12 and checkpoint.
+    #[test]
+    fn a_terminal_capture_becomes_its_script_and_every_capture_is_seeded() {
+        let capture: Vec<u8> = (0..70).collect();
+        let script = terminal_script(&capture);
+        assert_eq!(script.get(..3), Some(&[79, 23, 63][..]));
+        assert_eq!(script.get(67), Some(&5), "the second piece is 6 bytes long");
+        assert!(script.ends_with(&[0xf4, 0xfc, 0xf0, 39, 11, 0xfc]), "{script:?}");
+        let root = repo_root().unwrap();
+        let captures = root.join(TERMINAL_SEEDS).read_dir_utf8().unwrap().count();
+        let seeds = terminal_seeds(&root.join(TERMINAL_SEEDS)).unwrap();
+        assert_eq!(seeds.len(), captures + 1, "each capture and all of them together");
+        assert!(dictionary(&root, "terminal").is_some(), "the VT dictionary");
     }
 
     #[test]

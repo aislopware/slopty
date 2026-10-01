@@ -25,6 +25,7 @@ serde = "1.0.229"
 serde_json = "1.0.151"
 slopty-codec = { path = "../crates/slopty-codec" }
 slopty-core = { path = "../crates/slopty-core" }
+slopty-engine = { path = "../crates/slopty-engine" }
 slopty-grid = { path = "../crates/slopty-grid" }
 slopty-media = { path = "../crates/slopty-media" }
 slopty-proto = { path = "../crates/slopty-proto" }
@@ -150,6 +151,13 @@ bench = false
 [[bin]]
 name = "nal"
 path = "fuzz_targets/nal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal"
+path = "fuzz_targets/terminal.rs"
 test = false
 doc = false
 bench = false

@@ -19,6 +19,7 @@ pub mod feedback;
 pub mod nal;
 pub mod reassemble;
 pub mod stream;
+pub mod terminal;
 
 /// One fuzz target: its name (the file under `fuzz_targets/` and its directory under
 /// `regressions/`) and what it does with an input.
@@ -39,6 +40,7 @@ pub const TARGETS: &[Target] = &[
     ("feedback", feedback::run),
     ("ctl", stream::ctl),
     ("nal", nal::run),
+    ("terminal", terminal::run),
 ];
 
 /// The target named `name`.

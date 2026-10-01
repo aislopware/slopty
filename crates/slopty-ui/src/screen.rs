@@ -397,8 +397,12 @@ pub struct ScreenView {
     /// What is wrong with the stream, as last read.
     health: Option<Health>,
     _health: Task<()>,
-    /// Link RTT from the workspace, for the overlay.
+    /// The link's round trip, from the workspace: how long this client's hold on a display's
+    /// pointer outlasts [`LOCAL_HOLD`].
     rtt: Option<Duration>,
+    /// The round trip the overlay prints: the link's, unless the workspace pins what readouts
+    /// show (the e2e harness does, so a golden never carries the machine's load).
+    shown_rtt: Option<Duration>,
     /// Holds the device out of idle sleep (the Mac) or its screen on (the phone) for as long as
     /// this window streams; dropping the view lets go.
     _awake: Task<()>,
@@ -983,6 +987,7 @@ impl ScreenView {
             health: None,
             _health: Self::watch_health(cx),
             rtt: None,
+            shown_rtt: None,
             _awake: awake,
             _capture: capture,
             #[cfg(target_os = "macos")]
@@ -1347,10 +1352,17 @@ impl ScreenView {
         self.hud.is_some()
     }
 
-    /// Link RTT, shown in the overlay: drawn again with it while the overlay shows.
-    pub fn set_rtt(&mut self, rtt: Option<Duration>, cx: &mut Context<Self>) {
-        if self.rtt != rtt {
-            self.rtt = rtt;
+    /// The link's round trip `rtt`, which times the pointer hold, and the one the overlay
+    /// prints, `shown`: drawn again when the printed one moves while the overlay shows.
+    pub fn set_rtt(
+        &mut self,
+        rtt: Option<Duration>,
+        shown: Option<Duration>,
+        cx: &mut Context<Self>,
+    ) {
+        self.rtt = rtt;
+        if self.shown_rtt != shown {
+            self.shown_rtt = shown;
             if self.hud.is_some() {
                 cx.notify();
             }
@@ -1460,7 +1472,7 @@ impl ScreenView {
                 target_fps: self.quality.fps,
                 fps,
                 mbps,
-                rtt: self.rtt,
+                rtt: self.shown_rtt,
                 frame_age: self.glass.age(),
                 rate: self.rate,
                 stats: &stats,
@@ -5435,12 +5447,41 @@ mod tests {
         view.update(cx, |v, cx| v.set_rate(8_000_000, RateVerdict::Cut, false, cx));
         cx.run_until_parked();
         assert_eq!(renders(&view, cx), drawn.saturating_add(1), "the rate, drawn");
-        view.update(cx, |v, cx| v.set_rtt(Some(Duration::from_millis(12)), cx));
+        let rtt = Some(Duration::from_millis(12));
+        view.update(cx, |v, cx| v.set_rtt(rtt, rtt, cx));
         cx.run_until_parked();
         assert_eq!(renders(&view, cx), drawn.saturating_add(2), "the round trip, drawn");
-        view.update(cx, |v, cx| v.set_rtt(Some(Duration::from_millis(12)), cx));
+        view.update(cx, |v, cx| v.set_rtt(Some(Duration::from_millis(30)), rtt, cx));
         cx.run_until_parked();
-        assert_eq!(renders(&view, cx), drawn.saturating_add(2), "the same round trip: no frame");
+        assert_eq!(renders(&view, cx), drawn.saturating_add(2), "the same printed one: no frame");
+    }
+
+    /// The overlay prints the round trip the workspace pins (the e2e harness's), while the
+    /// pointer hold keeps timing itself off the link's own.
+    #[gpui::test]
+    fn the_overlay_prints_the_pinned_round_trip_and_the_hold_keeps_the_links(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, _rx, cx) = windowed(cx);
+        let (live, pinned) = (Duration::from_millis(40), Duration::from_millis(1));
+        view.update(cx, |v, cx| {
+            v.show_picture(picture(800, 600), cx);
+            v.set_rtt(Some(live), Some(pinned), cx);
+            v.set_hud(true, cx);
+        });
+        cx.executor().advance_clock(HUD_PERIOD);
+        cx.run_until_parked();
+        let printed = view.read_with(cx, |v, _| {
+            v.hud_text().map(|(summary, _)| summary.into_iter().map(|f| f.text).collect::<Vec<_>>())
+        });
+        let printed = printed.unwrap_or_default();
+        assert!(printed.iter().any(|t| t == "RTT 1.0 ms"), "{printed:?}");
+        let now = Instant::now();
+        let end = view.update(cx, |v, _| {
+            v.place((0.0, 0.0), now);
+            v.hold_end()
+        });
+        assert_eq!(end, now.checked_add(LOCAL_HOLD.saturating_add(live)), "the link's figure");
     }
 
     /// A picture of `w` × `h` for a test to put up.

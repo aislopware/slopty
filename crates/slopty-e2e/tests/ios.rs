@@ -142,10 +142,13 @@ mod tests {
         drv.type_text("echo ios-$((6*7))").await.unwrap();
         drv.keys("enter").await.unwrap();
         // The echo, and the prompt back under it (the cursor's row is the grid's a11y value):
-        // a frame rendered between the two is a different picture.
+        // a frame rendered between the two is a different picture. So is one between the
+        // prompt and zle taking the line: the command left the default block cursor, and only
+        // zle's line-init sets the insert bar again.
         let dump = drv
             .wait_for("the echo and the next prompt", STEP, |d| {
-                d.rows_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
+                d.terminals.iter().any(|t| t.cursor_shape == "Bar")
+                    && d.rows_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
                     && d.a11y_node("Terminal", None).is_some_and(|g| {
                         g.value
                             .as_deref()

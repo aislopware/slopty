@@ -4276,15 +4276,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     worker's socket paths past the 104-byte limit.
   - The iOS goldens are accepted again, now that the simulator build links ImageIO. Besides
     the navigator's filter and the palette's corners, each one takes the neutral theme's
-    darker hairlines, which landed while the simulator could not be built. Not
-    `ios-phone-terminal`: its shell now draws the unfocused (hollow) cursor with the soft
-    keyboard up, where the golden has the focused block, and that is for the terminal lane
-    to settle.
+    darker hairlines, which landed while the simulator could not be built.
+  - **The phone's terminal golden waits for zle's cursor.** Its cursor had flipped between a
+    block and a bar from one accepted golden to the next (both focused). The command leaves
+    the default block (the integration's `preexec` resets the shape), the next prompt draws,
+    and only then does zle's line-init set the insert bar, so a capture taken as the prompt
+    came back caught either one. The iOS e2e now also waits for the dump's `cursor_shape` to
+    be `Bar` before it renders, and `ios-phone-terminal` holds the bar the iPad already had.
   - **A phone's key bar fades on its first frame.** The trailing fade over the key row read
     how far the row scrolls from its last layout, so a bar just shown drew one frame with no
     fade (the retained oracle caught it on the iPhone). The caps have fixed widths, so the
     row's overflow is known before layout (`key_row_overflow`), and the fades read it with
     this frame's offset.
+  - **The palette's foot fades in its first frame too.** Whether its list runs on past the
+    foot was read from the frame before and checked again on the next one, which an idle
+    simulator may not draw, so the phone's palette was caught without its fade. The list's
+    rows have no fixed height, so the fade is `kit::painted_while` the list runs on, judged
+    once the list has laid out in the same frame.
   - **Onboarding lists are tone steps.** The tailnet's answers, the "Set up a worker" rows and
     this Mac's checklist (and an install's steps) sit on `raised`, with no hairline frame, and
     a row under the pointer steps up once to `overlay`, as a board card does (`first-run`,
@@ -4295,9 +4303,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`WorkspaceView::pin_rtt_readout`), as the workspace clock can be held. The app's e2e
     server pins `slopty_e2e::SHOWN_RTT`, a local link's 1 ms, from its first frame. The dump's
     `rtt_us`, the predictors and a remote window's hold keep the live figure, so the latency
-    measurements still see the real link. Left for the screen lane: the stream overlay's
-    "RTT" figure reads the live one.
+    measurements still see the real link. A remote window's stats overlay prints the pinned
+    figure too: `ScreenView::set_rtt` takes the link's round trip, which times the pointer
+    hold, and the one to print, which the workspace hands it from the same pin
+    (`stream-window-stats` says "RTT 1.0 ms").
   - Tests: `the_board_says_each_thing_once_and_fills_its_tile` (no band row on the board),
     `a_pinned_round_trip_is_what_the_readouts_show`,
     `the_fade_follows_the_sheets_corners_where_it_meets_them`,
-    `the_key_row_knows_its_overflow_before_layout`.
+    `the_key_row_knows_its_overflow_before_layout`,
+    `the_overlay_prints_the_pinned_round_trip_and_the_hold_keeps_the_links`,
+    `a_long_list_fades_at_its_foot_in_its_first_frame`.

@@ -1,12 +1,24 @@
 name: Deep
 
-# The checks too slow for every commit (`cargo xtask deep`): weekly, and on demand. Each job
-# is its own runner so a slow one never holds the others; a failure is a finding to file, not
-# a red gate.
+# The bug-catching checks too slow for every commit (`cargo xtask deep`, docs/TESTING.md "Beyond
+# the layers"). They run here and not on the Mac someone works on. Every night at 02:00 Bangkok
+# time, when nobody pushes; mutation testing once a week; and on demand
+# (`gh workflow run deep.yml`, `-f mutants=true` to add mutation testing). Each check is a job of
+# its own, so a slow one holds no other, on Linux where its crates build there and on macOS where
+# they need Apple's frameworks. A failure opens (or adds to) the "Deep checks failing" issue.
 on:
   schedule:
-    - cron: "0 3 * * 1"
+    - cron: "0 19 * * *"
+    - cron: "0 7 * * 6"
   workflow_dispatch:
+    inputs:
+      mutants:
+        description: Also run mutation testing
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,13 +27,29 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  deep:
+  # What needs macOS: the sanitized crates call Apple's frameworks, the loom model and the
+  # realtime sanitizer check the CoreAudio render path, `leaks` is macOS's own, and the rest build
+  # the whole workspace.
+  mac:
     name: ${{ matrix.check }}
+    if: github.event.schedule != '0 7 * * 6'
     runs-on: macos-26
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        check: [ features, miri, sanitize thread, sanitize address, coverage, fuzz ]
+        include:
+          - { check: sanitize address, run: deep sanitize address, slug: asan }
+          - { check: sanitize thread, run: deep sanitize thread, slug: tsan }
+          - { check: sanitize realtime, run: deep sanitize realtime, slug: rtsan }
+          - { check: loom, run: deep loom, slug: loom }
+          - { check: leaks, run: deep leaks, slug: leaks }
+          # Two minutes a target: the terminal target's surface is the widest.
+          - { check: fuzz, run: deep fuzz --time 120, slug: fuzz }
+          - { check: proptest, run: nightly run --only proptest, slug: proptest }
+          - { check: gpui seeds, run: nightly run --only gpui-iterations, slug: gpui }
+          - { check: features, run: deep features, slug: features }
+          - { check: coverage, run: deep coverage, slug: coverage }
     steps:
       - uses: actions/checkout@v5
         with:
@@ -34,23 +62,146 @@ jobs:
           targets: aarch64-apple-darwin
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: miri, rust-src, rustfmt
-      # sccache holds the compiled units; this keeps only the registry, git checkouts and the
-      # installed tools, so the two do not store every unit twice in the repository's cache
-      # quota. One per check, kept on failure: a finding is no reason to download it all again.
+          components: rust-src, rustfmt
+      # The gate's one entry of registry, git checkouts and tools (`ci.yml`). The gate saves it on
+      # its own branch, which a run on main cannot read, so one check saves it here: main's
+      # entry serves every branch, the gate's included, and the rest save none.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.check }}
+          shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
-          cache-on-failure: true
+          save-if: ${{ matrix.slug == 'features' }}
+      # What the fuzzers found interesting grows from night to night: restored from the last run,
+      # saved under this one's.
+      - if: matrix.slug == 'fuzz'
+        uses: actions/cache@v4
+        with:
+          path: target/fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
       - uses: cargo-bins/cargo-binstall@main
       - run: brew install zig
       - run: cargo xtask setup
-      - run: cargo xtask deep ${{ matrix.check }}
-      # A fuzz finding is its input: keep the crashes for `cargo xtask fuzz --keep`.
-      - uses: actions/upload-artifact@v4
-        if: failure() && matrix.check == 'fuzz'
+      - run: |
+          mkdir -p target/deep
+          cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
+      # Each check's report: its log, the tests' JUnit, `leaks`' reports, and the fuzzers'
+      # crashes (an input for `cargo xtask fuzz --keep`) and logs.
+      - if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
-          path: target/fuzz/artifacts
+          name: deep-${{ matrix.slug }}
+          path: |
+            target/deep/report.log
+            target/deep/**/junit.xml
+            target/deep/leaks/reports
+            target/nightly/**/*.log
+            target/fuzz/artifacts
+            target/fuzz/logs
           if-no-files-found: ignore
+
+  # Miri interprets the pure crates' tests, which build on Linux as they do here.
+  linux:
+    name: miri
+    if: github.event.schedule != '0 7 * * 6'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm --locked cargo-nextest@0.9.146
+      - run: |
+          mkdir -p target/deep
+          cargo xtask deep miri 2>&1 | tee target/deep/report.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deep-miri
+          path: |
+            target/deep/report.log
+            target/deep/**/junit.xml
+          if-no-files-found: ignore
+
+  # Mutation testing of the core crates: which changes no test catches. Weekly, as the code it
+  # reads changes slowly and a crate takes hours; the wire crate is split over four runners.
+  mutants:
+    name: mutants ${{ matrix.package }} ${{ matrix.shard }}
+    if: github.event.schedule == '0 7 * * 6' || inputs.mutants
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `cargo mutants --shard k/n` counts from 0.
+          - { package: slopty-core, shard: 0/1 }
+          - { package: slopty-grid, shard: 0/1 }
+          - { package: slopty-predict, shard: 0/1 }
+          - { package: slopty-proto, shard: 0/4 }
+          - { package: slopty-proto, shard: 1/4 }
+          - { package: slopty-proto, shard: 2/4 }
+          - { package: slopty-proto, shard: 3/4 }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm --locked cargo-mutants@27.1.0
+      - id: name
+        run: echo "slug=${{ matrix.package }}-${{ matrix.shard }}" | tr '/' 'o' >> "$GITHUB_OUTPUT"
+      # A missed mutant is a finding to rank, not a failure: the report is the result.
+      - run: |
+          mkdir -p target/deep
+          cargo xtask deep mutants -p ${{ matrix.package }} --shard ${{ matrix.shard }} --jobs 2 --timeout 300 2>&1 | tee target/deep/report.log || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-${{ steps.name.outputs.slug }}
+          path: |
+            target/deep/report.log
+            target/deep/mutants/*/mutants.out/*.txt
+            target/deep/mutants/*/mutants.out/outcomes.json
+          if-no-files-found: ignore
+
+  # A failing night opens an issue, or comments on the open one; a clean night closes it.
+  report:
+    needs: [mac, linux, mutants]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - run: |
+          failed=$(gh api "repos/$GH_REPO/actions/runs/${{ github.run_id }}/jobs" --paginate \
+            --jq '.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | "- [\(.name)](\(.html_url))"')
+          title="Deep checks failing"
+          open=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$failed" ]; then
+            body=$(printf 'The [Deep run](%s) on %s failed:\n\n%s\n\nEach job uploads its report as an artifact.' "$RUN_URL" "${{ github.sha }}" "$failed")
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "$body"
+            else
+              gh issue create --title "$title" --body "$body"
+            fi
+          elif [ -n "$open" ]; then
+            gh issue close "$open" --comment "The [Deep run]($RUN_URL) on ${{ github.sha }} passed."
+          fi

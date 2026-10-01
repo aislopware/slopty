@@ -743,3 +743,21 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     in between would fail and name it. In three soaks in a row the server held one thread more
     after the load (11 → 12). That is the server's to look at, and the named check will say
     which thread.
+
+- ✅ **A crate's integration tests stay one binary per file** (2026-10-01). Merging each crate's
+  `tests/*.rs` into one binary would save about a CI-minute, and it would cost churn out of
+  proportion. Rebuilding a crate's integration binaries against rebuilding only its smallest one
+  prices one more binary at 1.5–6 s of CPU on this Mac: 4.4 s in `slopty-net` (8 binaries,
+  49–71 s together), 1.5 s in `slopty-worker` (7, 32 s), 5.8 s in `slopty-proto` (5, 30 s), 3.6 s
+  in `slopty-client` (5, 22 s), 1.4 s in `slopty-cli` (5, 31 s). Outside `slopty-e2e` there are
+  74 integration binaries in 23 crates, so merging saves 51 links and 1.5–5 CPU-minutes, a minute
+  or so of a three-core runner's 26-minute build. Most of the test build is each library compiled
+  a second time for its unit tests, which merging leaves as it is. The price: every
+  `binary(…)` filter becomes a `test(…)` path (`.config/nextest.toml`'s groups, timeouts and the
+  gate's retry list, `nightly`'s proptest filter, `vm`'s `binary(inject)`, the e2e suites' and
+  `tailnet`'s `--test` names), the crash tests that re-run their own binary by test name change
+  their names, and the `.proptest-regressions` files move with their sources. MEASUREMENTS
+  2026-10-01, "the tests lane on a hosted runner, minute by minute".
+  - What was taken instead: `slopty-e2e`'s live targets, all `#[ignore]`d, build only with its
+    `live` feature, which `cargo xtask e2e` and host clippy pass: twelve units and about 92 s of
+    CPU out of every test build.

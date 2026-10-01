@@ -1,11 +1,16 @@
 name: CI
 
+# The gate. `cargo xtask land` pushes a commit made on main to the `gate` branch; every lane runs
+# here, and `promote` fast-forwards main to that commit once all of them passed. main itself is
+# never gated again: whatever it holds passed here first. A tag is gated, then released.
 on:
   push:
-    branches: [ main ]
+    branches: [ gate ]
     tags: [ "v*" ]
   pull_request:
 
+# One run per ref: a newer push to `gate` cancels the run in progress, since the commit it
+# carries sits on top of the older one and its green covers both. A tag's run is never cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref_type != 'tag' }}
@@ -17,7 +22,7 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  # `cargo gate`, one lane per runner. A hosted Mac has three cores and 7 GB: the five lanes
+  # `cargo gate --full`, one lane per runner. A hosted Mac has three cores and 7 GB: the five lanes
   # side by side on one of them took 80 minutes cold, each lane compiling the world on its own
   # target dir while swapping. Here each lane takes the whole runner (docs/decisions/tooling.md).
   gate:
@@ -46,8 +51,9 @@ jobs:
           components: rustfmt
       # sccache holds the compiled units; this keeps only the registry, git checkouts and the
       # installed tools, so the two do not store every unit twice in the repository's cache
-      # quota. One entry serves every lane, saved by the tools lane on main: its `cargo metadata`
-      # fetches every package and it installs the most tools. The toolchains are left out of the
+      # quota. One entry serves every lane, saved by the tools lane on `gate`: its
+      # `cargo metadata` fetches every package and it installs the most tools. A cache is read
+      # by its own branch and the ones based on main, so the Deep workflow saves its own on main. The toolchains are left out of the
       # key, since none of this depends on them. A key per lane saved 5 × 270 MB on each lockfile
       # change and filled the 10 GB quota the compile cache lives in (MEASUREMENTS 2026-10-01).
       # Saved on failure too: a red lane is no reason to download it all again.
@@ -57,12 +63,13 @@ jobs:
           add-rust-environment-hash-key: false
           cache-targets: false
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.lane == 'tools' }}
+          save-if: ${{ github.ref == 'refs/heads/gate' && matrix.lane == 'tools' }}
       - uses: cargo-bins/cargo-binstall@main
       # libghostty-vt-sys builds its library with zig in every lane that compiles.
       - if: matrix.lane != 'tools'
         run: brew install zig
       - run: cargo xtask setup --lane ${{ matrix.lane }}
+      # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       - run: cargo xtask gate --ci --lane ${{ matrix.lane }}
       # What a slow run is read from afterwards: each test's time, each unit of the build's, and
       # how much of the build the compile cache served.
@@ -76,6 +83,30 @@ jobs:
           if-no-files-found: ignore
       - if: always() && matrix.lane != 'tools'
         run: $SCCACHE_PATH --show-stats
+
+  # main moves to the commit every lane passed on, only forward: a push without force is
+  # refused unless main is an ancestor of it, and the check before says why in the summary.
+  promote:
+    needs: gate
+    if: github.ref == 'refs/heads/gate'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: |
+          git fetch --quiet origin main
+          short=${GITHUB_SHA:0:10}
+          if ! git merge-base --is-ancestor origin/main "$GITHUB_SHA"; then
+            echo "### ✘ not promoted: $short is not on top of main" >> "$GITHUB_STEP_SUMMARY"
+            echo "main is at $(git rev-parse --short=10 origin/main); rebase onto it and land again." >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$short is not a fast-forward of main"
+            exit 1
+          fi
+          git push origin "$GITHUB_SHA:refs/heads/main"
+          echo "### ✔ main fast-forwarded to $short" >> "$GITHUB_STEP_SUMMARY"
 
   # Unsigned, un-notarized artifacts for now; Developer-ID signing + notarization land with
   # `cargo xtask dist`.

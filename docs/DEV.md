@@ -23,6 +23,13 @@ zed itself so it is never behind zed while longbridge lags.
   Tools (the terminal, or the multiplexer if builds run inside one; only you can switch it). It
   also checks the free space against the floor below.
 - `bacon` for the watch loop; `cargo nextest run -p <crate>` for one crate.
+- Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
+  `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
+  gate takes about a minute with a warm build; it prints the next step when it passes. `land`
+  pushes the commit to the `gate` branch, where CI runs every lane, and main moves to that commit
+  only once all of them pass (below, "Gate"). A red run names the failed lane and tests in its
+  summary: fix it in a new commit and land again, since a newer push supersedes the run in
+  progress. `land --wait` blocks until main moved or the run failed, and says which.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask e2e <case>` runs the live tests (`docs/TESTING.md`); `cargo xtask e2e server`
   is the one for the server, its worker link, the CLI and MCP, and takes seconds.
@@ -108,19 +115,35 @@ zed itself so it is never behind zed while longbridge lags.
   whatever `vendor/ghostty` holds, and refuses a commit the ghostty fork does not have.
 
 ## Gate
-`cargo gate` is fmt, clippy `-D warnings` on all targets and all three Apple triples, clippy for
+The full gate is fmt, clippy `-D warnings` on all targets and all three Apple triples, clippy for
 Linux (`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` on the server's crates and
 the worker's that build there, `xtask/src/tools.rs` `LINUX_CRATES`, and
 `x86_64-unknown-linux-musl` on the server's), nextest,
-doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It checks the **index**,
-not the working tree: the staged blobs are synced into `target/gate/tree` (submodules checked
-out at the commit the index pins, under `target/gate/modules`) and checked in parallel lanes on
-`target/gate/*` target dirs. Several agents edit this one checkout at once, so stage exactly
-the change you mean to land (`git add <paths>`), gate it, and commit it; the tree stays free to
-edit meanwhile. `--quick` is fmt + host clippy + tests; `--fix` runs the fixers on the tree
-first (stage what they changed); `--in-place` checks the tree itself; `--lane <name>` (repeat
-for several: `tools`, which carries fmt, `clippy-host`, `clippy-ios`, `tests`, `rustdoc`) runs
-only those lanes, and a lane that runs alone takes every core. Per-lane times are in the log.
+doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
+- Here, `cargo gate` runs the lanes that take seconds to a minute: the tools lane (fmt with
+  nightly rustfmt, taplo, deny, hakari, shear, typos, and `committed` on the history since the
+  last tag) and host clippy. `-m '<message>'` has `committed` check the message of the commit
+  about to be made too, and leaves it in `target/gate/COMMIT_MSG` for `git commit -F`. It ends
+  by printing the next step.
+- On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
+  makes: the commits on main not yet on `origin/main`, pushed with a lease. Runs on that branch
+  form one concurrency group, and a newer push cancels the run in progress, because its commit
+  sits on top of the older one and its green covers both. When every lane passed, the `promote`
+  job fast-forwards main to that exact commit (`git push origin <sha>:main`); it refuses one
+  that is not on top of main, and main is never gated a second time. A failed lane writes the
+  run's summary: the lane, the step that failed and, for the tests, each failed test from the
+  JUnit report.
+
+`cargo gate --full` runs every lane here, as `cargo xtask release` once did; the release now runs
+the quick gate and CI gates its tag in full before it builds anything. The gate checks the
+**index**, not the working tree: the staged blobs are synced into `target/gate/tree`
+(submodules checked out at the commit the index pins, under `target/gate/modules`) and checked
+in parallel lanes on `target/gate/*` target dirs. Several agents edit this one checkout at
+once, so stage exactly the change you mean to land (`git add <paths>`), gate it, and commit it;
+the tree stays free to edit meanwhile. `--fix` runs the fixers on the tree first (stage what
+they changed); `--in-place` checks the tree itself; `--lane <name>` (repeat for several:
+`tools`, which carries fmt, `clippy-host`, `clippy-ios`, `tests`, `rustdoc`) runs only those
+lanes, and a lane that runs alone takes every core. Per-lane times are in the log.
 
 fmt and the tool checks (deny, hakari, shear, typos, taplo, `committed`) take seconds, so they
 run first, side by side, and a failure among them ends the gate before any compile. Then the
@@ -150,7 +173,7 @@ A pass on a retry shows as FLAKY in the log. Only a named test gets retries, nev
 The `ci` profile inherits `gate` (the same named retries and no others) and adds a runner's
 longer timeouts and a JUnit report.
 
-CI (`.github/workflows/ci.yml`) is the same gate, one lane per hosted runner: a matrix job per
+CI (`.github/workflows/ci.yml`) is the full gate, one lane per hosted runner: a matrix job per
 lane runs `cargo xtask setup --lane <lane>` (only that lane's tools) and
 `cargo xtask gate --ci --lane <lane>`. `--ci` checks in place, since the runner's tree is the
 commit, and gives the tests lane the `ci` profile. That profile's `default-filter` leaves out
