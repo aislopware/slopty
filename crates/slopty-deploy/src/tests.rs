@@ -148,7 +148,7 @@ fn binaries(head: impl Fn(&str) -> Vec<u8>) -> tempfile::TempDir {
 }
 
 fn plan(source: &tempfile::TempDir, update: bool) -> Plan {
-    Plan { source: source.path().to_path_buf(), update, server: None }
+    Plan { sources: vec![source.path().to_path_buf()], update, server: None }
 }
 
 /// Runs `deploy`, keeping what it said.
@@ -318,7 +318,7 @@ impl Runner for Scripted {
 
 fn mini(script: &str) -> (i32, &'static str, &'static str) {
     if script.starts_with("uname -sm") {
-        (0, "Darwin arm64\n100.64.0.2\n", "")
+        (0, "Darwin arm64\n100.64.0.2 51234 100.64.0.9 22\n", "")
     } else if script.contains("worker install") {
         (0, "installing\nup\n", "")
     } else if script.contains("worker doctor") {
@@ -589,7 +589,7 @@ async fn a_local_deploy_installs_in_place() {
         std::fs::write(odd.path().join(name), mac_arm64(name)).unwrap();
     }
     let runner = Scripted { local: true, ..Scripted::new(healthy) };
-    let (done, _) = run(&runner, &Plan { source: odd.path().to_path_buf(), ..plan }).await;
+    let (done, _) = run(&runner, &Plan { sources: vec![odd.path().to_path_buf()], ..plan }).await;
     assert!(matches!(done, Err(DeployError::Path { .. })), "{done:?}");
     assert_eq!(runner.ran(), ["uname -sm"], "nothing installed");
 }
@@ -616,4 +616,91 @@ async fn the_local_runner_runs_in_its_home() {
     lines.sort();
     assert_eq!(lines, ["one", "two"]);
     assert!(local.is_local());
+}
+
+/// With a build per platform, the one that runs on the machine goes up: a Linux box gets the
+/// Linux build an app carries beside its own, and a machine none fits is refused naming the
+/// first.
+#[tokio::test]
+async fn the_build_for_the_machine_is_the_one_that_goes() {
+    let mac = binaries(mac_arm64);
+    let linux = binaries(|_name| elf(ELF_X86_64));
+    let host = Host::new("Linux x86_64", 0, &health());
+    let both = Plan {
+        sources: vec![mac.path().to_path_buf(), linux.path().to_path_buf()],
+        ..plan(&mac, false)
+    };
+    run(&host.ssh(Echo::Terminal), &both).await.0.unwrap();
+    assert_eq!(std::fs::read(host.staged("slopty-worker")).unwrap(), elf(ELF_X86_64));
+
+    let arm = Host::new("Linux aarch64", 0, &health());
+    let refused = run(&arm.ssh(Echo::Terminal), &both).await.0.unwrap_err();
+    assert_eq!(refused.failure().title, "This build has no worker for Linux arm64");
+    assert!(refused.to_string().contains("is built for macOS arm64"), "the first named: {refused}");
+}
+
+/// An app bundle's own directory comes first, then each Linux build in its `Resources`; a dev
+/// tree's Linux cross-builds of the same profile stand in for those. A directory missing a
+/// binary is not offered.
+#[test]
+fn an_app_lists_the_builds_it_carries() {
+    let root = tempfile::tempdir().unwrap();
+    let fill = |dir: &Path| {
+        std::fs::create_dir_all(dir).unwrap();
+        for bin in WORKER_BINARIES {
+            std::fs::write(dir.join(bin), b"").unwrap();
+        }
+    };
+    let macos = root.path().join("Slopty.app/Contents/MacOS");
+    let workers = root.path().join("Slopty.app/Contents/Resources").join(BUNDLED_DIR);
+    fill(&macos);
+    fill(&workers.join("linux-x86_64"));
+    std::fs::create_dir_all(workers.join("linux-arm64")).unwrap();
+    assert_eq!(bundled(&macos), [macos.clone(), workers.join("linux-x86_64")]);
+
+    let debug = root.path().join("target/debug");
+    let cross = root.path().join("target/linux/aarch64-unknown-linux-gnu/debug");
+    fill(&debug);
+    fill(&cross);
+    assert_eq!(bundled(&debug), [debug.clone(), cross]);
+    let elsewhere = root.path().join("bin");
+    assert_eq!(bundled(&elsewhere), [elsewhere], "nothing beside an installed copy");
+}
+
+/// The server goes up as a worker does, then `slopty server install` runs there; it is dialled
+/// at the address `ssh` reached, then as named. On this machine it installs in place and is
+/// dialled at loopback.
+#[tokio::test]
+async fn a_server_is_put_on_a_machine_and_named_where_it_is_reached() {
+    fn served(script: &str) -> (i32, &'static str, &'static str) {
+        if script.contains("server install") { (0, "up\n", "") } else { mini(script) }
+    }
+    let source = binaries(mac_arm64);
+    std::fs::write(source.path().join("slopty-server"), mac_arm64("slopty-server")).unwrap();
+    let runner = Scripted::new(served);
+    let mut events = Vec::new();
+    let sources = [source.path().to_path_buf()];
+    let done = serve(&runner, &sources, &mut |e| events.push(e)).await.unwrap();
+    assert_eq!(done.addresses, ["100.64.0.9", "mini"]);
+    let ran = runner.ran();
+    assert!(ran.iter().any(|s| s.ends_with(&format!("{STAGE}/slopty-server"))), "{ran:?}");
+    assert_eq!(ran.last().unwrap(), &format!("{STAGE}/slopty server install --bin-dir {STAGE}"));
+    let uploads: Vec<&str> = events
+        .iter()
+        .filter_map(|e| if let Event::Step(Step::Upload { name }) = e { Some(*name) } else { None })
+        .collect();
+    assert_eq!(uploads, SERVER_BINARIES, "the server and its CLI, no worker");
+
+    let local = Scripted { local: true, ..Scripted::new(served) };
+    let done = serve(&local, &sources, &mut |_| {}).await.unwrap();
+    assert_eq!(done.addresses, ["127.0.0.1"]);
+    let bin = format!("\"{}\"", source.path().display());
+    assert_eq!(
+        local.ran().last().unwrap(),
+        &format!("{bin}/slopty server install --bin-dir {bin}")
+    );
+
+    let workers_only = binaries(mac_arm64);
+    let refused = serve(&runner, &[workers_only.path().to_path_buf()], &mut |_| {}).await;
+    assert!(matches!(refused, Err(DeployError::Mismatch { built: None, .. })), "{refused:?}");
 }

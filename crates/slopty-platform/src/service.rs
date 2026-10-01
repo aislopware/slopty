@@ -261,23 +261,36 @@ impl Session {
         }
     }
 
-    /// What the reader is told after an install. The systemd user manager stops a user's
-    /// services at their last logout unless it lingers, and a worker must outlive its SSH
-    /// session.
+    /// Let the services outlive the user's last login, and say what the person must do when
+    /// that could not be done here.
+    ///
+    /// The systemd user manager stops a user's services at their last logout unless it
+    /// lingers, and a worker installed over SSH must outlive that SSH session: this turns
+    /// lingering on (`loginctl enable-linger`, which logind lets a user do for themselves) when
+    /// it is off. launchd keeps a `LaunchAgent` for as long as the user is logged in at the Mac.
     #[must_use]
-    pub fn install_note(&self) -> Option<String> {
-        match self.manager {
-            Manager::Launchd => None,
-            Manager::Systemd => {
-                let user = std::env::var("USER").unwrap_or_default();
-                let lingers = Path::new("/var/lib/systemd/linger").join(&user).exists();
-                (!lingers).then(|| {
-                    format!(
-                        "run `loginctl enable-linger {user}` so it runs while you are logged out"
-                    )
-                })
-            }
+    pub fn keep_running(&self) -> Option<String> {
+        if self.manager == Manager::Launchd {
+            return None;
         }
+        let uid = self.uid.to_string();
+        let lingers = || {
+            self.runner
+                .run("loginctl", &["show-user", &uid, "--property=Linger", "--value"])
+                .is_ok_and(|said| said.trim() == "yes")
+        };
+        if lingers() {
+            return None;
+        }
+        let turned_on = self.runner.run("loginctl", &["enable-linger"]);
+        if turned_on.is_ok() && lingers() {
+            return None;
+        }
+        let why = turned_on.err().map(|e| format!(" ({e})")).unwrap_or_default();
+        Some(format!(
+            "it stops when you log out: run `sudo loginctl enable-linger $USER` there so it keeps \
+             running{why}"
+        ))
     }
 
     /// `service` as this manager's definition of `job`. `gui`: it needs the login session's
@@ -861,6 +874,66 @@ mod tests {
             }
             Ok(String::new())
         }
+    }
+
+    /// What `loginctl` says, as a stand-in runner: lingering until asked, and whether
+    /// `enable-linger` takes.
+    #[derive(Debug)]
+    struct Logind {
+        asked: parking_lot::Mutex<Vec<String>>,
+        lingers: std::sync::atomic::AtomicBool,
+        may_enable: bool,
+    }
+
+    impl Runner for Logind {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<String> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.asked.lock().push(format!("{program} {}", args.join(" ")));
+            match args.first() {
+                Some(&"show-user") => {
+                    Ok(if self.lingers.load(SeqCst) { "yes\n" } else { "no\n" }.to_owned())
+                }
+                Some(&"enable-linger") if self.may_enable => {
+                    self.lingers.store(true, SeqCst);
+                    Ok(String::new())
+                }
+                _ => Err(io::Error::other("Access denied")),
+            }
+        }
+    }
+
+    /// A systemd user that does not linger is made to, so a worker installed over SSH outlives
+    /// that login; when logind refuses, the person is told what to run. launchd needs nothing.
+    #[test]
+    fn a_systemd_install_lingers_so_it_outlives_the_login() {
+        let logind = |lingers: bool, may_enable: bool| {
+            let runner = Arc::new(Logind {
+                asked: parking_lot::Mutex::default(),
+                lingers: lingers.into(),
+                may_enable,
+            });
+            let (mut session, _calls) = stand_in(Manager::Systemd, Path::new("/home/me"));
+            session.runner = Arc::<Logind>::clone(&runner);
+            (session, runner)
+        };
+        let (session, runner) = logind(false, true);
+        assert_eq!(session.keep_running(), None);
+        assert_eq!(
+            *runner.asked.lock(),
+            [
+                "loginctl show-user 501 --property=Linger --value",
+                "loginctl enable-linger",
+                "loginctl show-user 501 --property=Linger --value",
+            ]
+        );
+        let (session, runner) = logind(true, false);
+        assert_eq!(session.keep_running(), None);
+        assert_eq!(runner.asked.lock().len(), 1, "lingering already: nothing to turn on");
+        let (session, _runner) = logind(false, false);
+        let note = session.keep_running().unwrap();
+        assert!(note.contains("sudo loginctl enable-linger") && note.contains("Access denied"));
+        let (session, _calls) = stand_in(Manager::Launchd, Path::new("/Users/me"));
+        assert_eq!(session.keep_running(), None);
     }
 
     /// A launchd session whose home is `home`, uid 501, and what its runner was asked.

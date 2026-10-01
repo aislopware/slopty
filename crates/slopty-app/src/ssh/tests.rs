@@ -32,6 +32,7 @@ struct StandIn {
     kept: RefCell<HashMap<WorkerId, Target>>,
     events: RefCell<Option<mpsc::UnboundedSender<Event>>>,
     finish: RefCell<Option<oneshot::Sender<Result<Deployed, Failure>>>>,
+    served: RefCell<Option<oneshot::Sender<Result<Served, Failure>>>>,
     dropped: Arc<AtomicBool>,
     /// The one address that answers an add, and the worker it adds.
     answers: String,
@@ -97,6 +98,27 @@ impl Deployer for StandIn {
 
     fn target_of(&self, worker: WorkerId) -> Option<Target> {
         self.kept.borrow().get(&worker).cloned()
+    }
+
+    fn serve(
+        &self,
+        to: &Target,
+        events: mpsc::UnboundedSender<Event>,
+    ) -> Pending<Result<Served, Failure>> {
+        self.asked.borrow_mut().push(format!("serve {}", to.host));
+        *self.events.borrow_mut() = Some(events);
+        let (tx, rx) = oneshot::channel();
+        *self.served.borrow_mut() = Some(tx);
+        Box::pin(async move { rx.await.unwrap_or_else(|_| Err(failure("the test let go"))) })
+    }
+
+    fn link_server(&self, address: &HostAddr) -> Pending<Result<ServerLink, String>> {
+        self.asked.borrow_mut().push(format!("link {address}"));
+        Box::pin(std::future::ready(Err(format!("nothing answered at {address}"))))
+    }
+
+    fn register_here(&self, server: &HostAddr) {
+        self.asked.borrow_mut().push(format!("register {server}"));
     }
 }
 
@@ -178,7 +200,7 @@ fn the_new_worker_is_reached_at_its_tailnet_name_first() {
 /// bar (a share while the binaries go up), and a failure marks where it stopped.
 #[test]
 fn the_steps_follow_the_deploy() {
-    let mut progress = Progress::new("mini".to_owned(), false);
+    let mut progress = Progress::new("mini".to_owned(), Kind::Install);
     let marks = |p: &Progress| p.view().steps.iter().map(|s| s.mark).collect::<Vec<_>>();
     assert_eq!(marks(&progress).first(), Some(&Mark::Running));
     assert_eq!(progress.view().bar, Bar::Busy);
@@ -205,7 +227,11 @@ fn the_steps_follow_the_deploy() {
     assert_eq!(view.bar, Bar::Hidden);
     assert!(view.failed.is_some());
     assert_eq!(
-        Progress::new("mini".to_owned(), true).view().steps.last().map(|s| s.title.as_str()),
+        Progress::new("mini".to_owned(), Kind::Update)
+            .view()
+            .steps
+            .last()
+            .map(|s| s.title.as_str()),
         Some("Reconnect")
     );
 }
@@ -495,4 +521,54 @@ fn reopening_the_panel_and_the_sheet_keeps_no_subscription(cx: &mut TestAppConte
         cx.run_until_parked();
     }
     assert_eq!(count(cx), before, "nothing left behind");
+}
+
+/// On the server panel the SSH entry sets up the server: its steps have no doctor to read, and
+/// once it is up it is connected to at each address it was reached at in turn; when none
+/// answers, the sheet says so with what the last said. This Mac's row runs the same steps here,
+/// with nothing to type.
+#[gpui::test]
+fn the_server_panel_sets_up_the_server(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    cx.simulate_resize(size(px(900.0), px(800.0)));
+    let deployer = StandIn::new("mini");
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
+    cx.update(|window, cx| {
+        ws.update(cx, |ws, cx| ws.show_add_worker(crate::Panel::Server, window, cx));
+    });
+    cx.run_until_parked();
+    let rows = ws.update(cx, |ws, cx| (ws.ssh_row(cx).is_some(), ws.serve_here_row(cx).is_some()));
+    assert_eq!(rows, (true, true), "both ways to set it up");
+    cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_ssh_at("mini", window, cx)));
+    cx.run_until_parked();
+    let heading = ws.read_with(cx, |ws, _| ws.adding.as_ref()?.ssh.as_ref().map(Sheet::heading));
+    assert_eq!(heading, Some(SERVE_HEADING));
+    click(cx, "ssh-install");
+    assert_eq!(deployer.asked(), ["serve mini"]);
+    let titles: Vec<String> =
+        sheet_progress(&ws, cx).expect("a run").view().steps.into_iter().map(|s| s.title).collect();
+    assert_eq!(
+        titles,
+        ["Connect to mini", "Copy the server", "Install and start it", "Connect to it"]
+    );
+
+    let finish = deployer.served.borrow_mut().take().expect("a server run");
+    let platform = Platform { os: Os::Linux, arch: Arch::X86_64 };
+    let addresses = vec!["100.64.0.9".to_owned(), "mini".to_owned()];
+    finish.send(Ok(Served { platform, addresses })).unwrap();
+    cx.run_until_parked();
+    assert_eq!(deployer.asked(), ["link 100.64.0.9:45560", "link mini:45560"], "each in turn");
+    let failed = sheet_progress(&ws, cx).and_then(|p| p.failure().cloned()).expect("none answered");
+    assert_eq!(failed.title, "The server runs on mini, and Slopty could not connect to it");
+    assert_eq!(failed.lines, ["nothing answered at mini:45560"]);
+
+    cx.update(|window, cx| ws.update(cx, |ws, cx| ws.serve_here(window, cx)));
+    cx.run_until_parked();
+    assert_eq!(deployer.asked(), ["serve 127.0.0.1"], "this Mac, with nothing typed");
+    let first =
+        sheet_progress(&ws, cx).and_then(|p| p.view().steps.first().map(|s| s.title.clone()));
+    assert_eq!(first.as_deref(), Some("Look at this Mac"));
 }

@@ -810,3 +810,56 @@ more full-window layer.
   The three scenarios take 61 s (MEASUREMENTS, "Deep checks widened, a stream soak, a loom
   model"). The cfg is our own, because a global `--cfg loom` switches tokio's and other crates'
   internals to loom as well.
+
+- ✅ **Bundles are signed with a stable identity** (2026-10-01, readiness audit item 15).
+  `cargo xtask bundle` signed ad hoc unless `--sign` named an identity, and nothing named one.
+  An ad hoc signature's designated requirement is the binary's hash, so every update of a Mac,
+  ours or a remote one where a deploy copies the daemons to `<data dir>/bin`, was a new program
+  to TCC. Someone had to be at that Mac to grant Screen Recording and Accessibility again.
+  - **Ruling.** A bundle is signed with `--sign`, else `$SLOPTY_SIGN_IDENTITY`, else the
+    keychain's Developer ID Application certificate, as `cargo xtask sign` already picks one
+    (`sign::resolve_identity`). Here that is the one Developer ID in the keychain, team
+    AJ4R8GWM7A. Each daemon is signed under its `LaunchAgent` label as identifier
+    (`dev.aislopware.slopty.worker`, `.ptyd`, `.server`, and `.cli` for the CLI); the app is
+    signed as the bundle, `dev.aislopware.slopty`. The designated requirement is then the
+    identifier and the team's certificate, which every later build of either shares, wherever
+    the binary runs from. The dev daemons `xtask sign` signs carry the same identifiers, so a
+    grant given to one is the other's too. A real identity signs with a secure timestamp and the
+    hardened runtime, which notarisation requires; no entitlements are needed, since nothing is
+    sandboxed, JIT-compiled or loads another team's library. The bundle step fails unless the
+    worker's requirement names its identifier and `certificate leaf[subject.OU]`, and no
+    `cdhash`.
+  - **Without the identity.** With no Developer ID certificate, or `--ad-hoc`, the bundle is
+    signed ad hoc and the step says so: it runs, and each update asks again for both grants.
+    An Apple Development certificate is not taken, because it expires within the year and its
+    grants with it. A person building Slopty for themselves can use their own Developer ID
+    through `$SLOPTY_SIGN_IDENTITY`: grants then follow that team.
+  - Tests: `bundle::tests::each_binary_is_signed_under_its_identifier` (the arguments for an
+    identity and for ad hoc) and `a_stable_requirement_names_the_identifier_and_team`; the
+    requirement check itself runs on every signed bundle.
+
+- ✅ **A release is what `cargo xtask dist` builds** (2026-10-01, readiness audit item 8).
+  The release job tarred `slopty-worker` and `slopty-ptyd` for macOS and nothing else: no app,
+  server, CLI or Linux build, and nothing signed, while every install needs the CLI and the app
+  is how a person starts.
+  - **What it builds.** The bundle (above), with the Linux workers and servers inside it; then
+    `Slopty-<v>-macos-arm64.zip` (`ditto`, which keeps the signatures), the Mac CLI, daemons
+    and server as a tarball, a worker and a server tarball per Linux CPU, the dSYMs and
+    `SHA256SUMS`, under `target/dist-out`.
+  - **It checks what it built**, from the files: the bundle's signature (`--strict --deep`),
+    every Mac binary arm64 (`lipo`), every Linux binary's ELF machine for its CPU, no
+    `GLIBC_` version past 2.28 in a worker, none at all in the static server, and every archive
+    listing something.
+  - **Notarisation when it can.** With a real identity and `notarytool` credentials
+    (`SLOPTY_NOTARY_PROFILE`, or an App Store Connect key in `APPLE_API_KEY_PATH`,
+    `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`) it submits, waits, staples and asks Gatekeeper
+    (`spctl --assess`). Otherwise it says which is missing and goes on: an un-notarised app runs
+    after the person confirms its first open in System Settings.
+  - **CI.** The `release` job runs `cargo xtask dist --out dist` for a gated tag, with a keychain
+    of its own holding the Developer ID from the `MACOS_CERTIFICATE` secrets and the notary key
+    from the `APPLE_API_KEY` secrets; without them it builds ad hoc and the run's summary says
+    so. It installs the Linux targets, zig and cargo-zigbuild for the cross-builds. Publishing
+    stays a tag's: nothing is uploaded otherwise.
+  - Tests: `dist::tests` (when notarisation runs, where its credentials come from, and reading a
+    binary's CPU and newest glibc). Run here on 2026-10-01 with `--no-notarize`: see the
+    workers entry of the same day for the Linux builds' smoke runs.

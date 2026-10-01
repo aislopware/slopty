@@ -38,8 +38,9 @@ pub mod actions {
 
 /// The entry's words, and the checklist's heading.
 pub const TITLE: &str = "Use this Mac as a worker";
-/// What a missing grant's line says to do: its button opens the list to do it in.
-pub const TURN_ON: &str = "Turn on slopty-worker in System Settings.";
+/// What a missing grant's line says to do: its button opens the list to do it in, and shows
+/// the worker in Finder, since a background worker's request may leave it out of that list.
+pub const TURN_ON: &str = "Turn on slopty-worker there, or drag it in from Finder.";
 /// What the entry's row says under its words: what pressing it does.
 pub const ROW_META: &str = "Runs the worker here and adds this Mac";
 /// The checklist's line under its heading.
@@ -65,7 +66,7 @@ pub trait Host: std::fmt::Debug {
     fn restart(&self) -> Pending<()>;
     /// Add the worker at `address` to this app's workers.
     fn add(&self, address: &str) -> Pending<Result<net::Added, String>>;
-    /// Open `pane` in System Settings.
+    /// Open `pane` in System Settings, with the worker shown in Finder to drag into its list.
     fn open(&self, pane: Pane);
 }
 
@@ -529,6 +530,13 @@ mod mac {
 
         fn open(&self, pane: Pane) {
             slopty_platform::privacy::open(pane);
+            // A `LaunchAgent`'s request often raises no prompt, so the worker is not in the
+            // list until it is dragged in or added with +.
+            let session = Session::native();
+            let installed = service::installed_args(session.manager, &session.file(WORKER));
+            if let Some(exe) = installed.as_ref().and_then(|args| args.first()) {
+                slopty_platform::web::reveal(std::path::Path::new(exe));
+            }
         }
     }
 }

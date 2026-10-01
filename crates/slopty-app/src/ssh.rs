@@ -25,7 +25,10 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_core::WorkerId;
 pub use slopty_deploy::Target;
-use slopty_deploy::{Deployed, Event, Failure, Server, Step};
+use slopty_deploy::{Deployed, Event, Failure, Served, Server, Step};
+use slopty_net::HostAddr;
+use slopty_net::endpoint::SERVER_PORT;
+use slopty_net::server::ServerLink;
 use slopty_proto::ctl::{Health, Tailscale};
 use slopty_ui::add_worker::{self, Bar, Install, Mark, StepLine, Updates};
 use slopty_ui::colors::hsla;
@@ -33,7 +36,7 @@ use slopty_ui::kit::{self, ButtonKind};
 use slopty_ui::workspace::WorkerStatus;
 use tokio::sync::mpsc;
 
-use crate::this_mac::Pending;
+use crate::this_mac::{self, Pending};
 use crate::{FIELD_H, Workspace, net};
 
 pub mod actions {
@@ -65,6 +68,21 @@ pub const ROW_META: &str = "Copies the worker there with ssh, then adds it";
 pub const BLURB: &str = "Slopty copies its worker to a Mac or Linux machine you reach with ssh.";
 /// The foot of the form: whose `ssh` it is.
 pub const USES: &str = "Uses your ssh config and agent.";
+/// The server panel's entry to the sheet, and what its row says under its words.
+pub const SERVE_TITLE: &str = "Set up the server over SSH";
+/// What the server's entry row says under its words.
+pub const SERVE_ROW_META: &str = "Runs the server on a machine you reach with ssh";
+/// The server sheet's heading.
+pub const SERVE_HEADING: &str = "Set up the server";
+/// The server sheet's line under its heading.
+pub const SERVE_BLURB: &str =
+    "Slopty runs its server on a Mac or Linux machine you reach with ssh, then connects to it.";
+/// The server panel's entry for this Mac.
+pub const SERVE_HERE_TITLE: &str = "Run the server on this Mac";
+/// What this Mac's server row says under its words.
+pub const SERVE_HERE_ROW_META: &str = "Starts it here and connects to it";
+/// How a run on this Mac names it.
+const THIS_MAC: &str = "this Mac";
 
 /// What the flows do to other machines.
 pub trait Deployer: std::fmt::Debug {
@@ -82,6 +100,47 @@ pub trait Deployer: std::fmt::Debug {
     fn remember(&self, worker: WorkerId, to: &Target);
     /// The way `worker`'s machine was reached, when it was installed from here.
     fn target_of(&self, worker: WorkerId) -> Option<Target>;
+    /// Put this build's server on `to` and start it, each event sent to `events` as it
+    /// happens. Dropping what it returns stops it. A deployer that sets up no server says so.
+    fn serve(
+        &self,
+        _to: &Target,
+        _events: mpsc::UnboundedSender<Event>,
+    ) -> Pending<Result<Served, Failure>> {
+        let none = Failure {
+            title: "This build sets up no server".to_owned(),
+            hint: None,
+            lines: Vec::new(),
+        };
+        Box::pin(std::future::ready(Err(none)))
+    }
+    /// Link to the server at `address`, as the panel's Connect does.
+    fn link_server(&self, address: &HostAddr) -> Pending<Result<ServerLink, String>> {
+        Box::pin(std::future::ready(Err(format!("this build links to no server at {address}"))))
+    }
+    /// This Mac's worker, when it is installed and registers with no server, registers with
+    /// `server` from now on.
+    fn register_here(&self, _server: &HostAddr) {}
+}
+
+/// What a run puts on the machine, and how its steps are named.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// A worker where there may be none: install it, then add it.
+    Install,
+    /// A worker on another build: replace it, then dial it again.
+    Update,
+    /// The server: install it, then connect to it.
+    Server,
+}
+
+/// What a sheet sets up: the add panel's worker, or the server panel's server.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sets {
+    /// A worker, added once it answers.
+    Worker,
+    /// The server, connected to once it answers.
+    Server,
 }
 
 /// Where a run is.
@@ -113,15 +172,18 @@ impl Stage {
         }
     }
 
-    fn title(self, host: &str, update: bool) -> String {
-        match (self, update) {
+    fn title(self, host: &str, kind: Kind) -> String {
+        match (self, kind) {
+            (Self::Reach, _) if host == THIS_MAC => "Look at this Mac".to_owned(),
             (Self::Reach, _) => format!("Connect to {host}"),
+            (Self::Copy, Kind::Server) => "Copy the server".to_owned(),
             (Self::Copy, _) => "Copy the worker".to_owned(),
-            (Self::Install, false) => "Install and start it".to_owned(),
-            (Self::Install, true) => "Install the new build".to_owned(),
+            (Self::Install, Kind::Install | Kind::Server) => "Install and start it".to_owned(),
+            (Self::Install, Kind::Update) => "Install the new build".to_owned(),
             (Self::Check, _) => "Check that it answers".to_owned(),
-            (Self::Join, false) => "Add it to Slopty".to_owned(),
-            (Self::Join, true) => "Reconnect".to_owned(),
+            (Self::Join, Kind::Install) => "Add it to Slopty".to_owned(),
+            (Self::Join, Kind::Update) => "Reconnect".to_owned(),
+            (Self::Join, Kind::Server) => "Connect to it".to_owned(),
         }
     }
 }
@@ -130,7 +192,7 @@ impl Stage {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Progress {
     host: String,
-    update: bool,
+    kind: Kind,
     stage: Stage,
     /// Bytes of the binaries sent, of all of them.
     sent: Option<(u64, u64)>,
@@ -144,10 +206,10 @@ pub struct Progress {
 impl Progress {
     /// A run against `host` that has not begun.
     #[must_use]
-    pub const fn new(host: String, update: bool) -> Self {
+    pub const fn new(host: String, kind: Kind) -> Self {
         Self {
             host,
-            update,
+            kind,
             stage: Stage::Reach,
             sent: None,
             line: None,
@@ -186,9 +248,9 @@ impl Progress {
         }
     }
 
-    /// The deploy is done: on to adding it, or dialling it again.
-    pub fn deployed(&mut self, deployed: &Deployed) {
-        self.machine = Some(deployed.platform.to_string());
+    /// The deploy is done: on to adding it, dialling it again, or connecting to the server.
+    pub fn deployed(&mut self, platform: slopty_deploy::Platform) {
+        self.machine = Some(platform.to_string());
         self.stage = Stage::Join;
     }
 
@@ -206,8 +268,10 @@ impl Progress {
     /// As drawn: a line per stage, the bar under the one that runs, and why it stopped.
     #[must_use]
     pub fn view(&self) -> Install {
+        // A server has no doctor to read: its install waits until it answers.
         let steps = STAGES
             .into_iter()
+            .filter(|stage| !(self.kind == Kind::Server && *stage == Stage::Check))
             .map(|stage| {
                 let mark = match stage.cmp(&self.stage) {
                     std::cmp::Ordering::Less => Mark::Done,
@@ -217,7 +281,7 @@ impl Progress {
                 };
                 StepLine {
                     slug: stage.slug(),
-                    title: stage.title(&self.host, self.update),
+                    title: stage.title(&self.host, self.kind),
                     detail: self.detail(stage, mark),
                     mark,
                 }
@@ -265,7 +329,7 @@ pub fn addresses(target: &Target, health: &Health) -> Vec<String> {
         .map(|a| a.port())
         .filter(|p| *p != slopty_net::endpoint::WORKER_PORT);
     let at = |host: &str| match port {
-        Some(port) => slopty_net::HostAddr::new(host, port).to_string(),
+        Some(port) => HostAddr::new(host, port).to_string(),
         None => host.to_owned(),
     };
     let mut hosts = Vec::new();
@@ -285,6 +349,7 @@ pub fn addresses(target: &Target, health: &Health) -> Vec<String> {
 /// The sheet: its fields, and the run under way or the one that failed.
 #[derive(Debug)]
 pub struct Sheet {
+    role: Sets,
     host: Entity<InputState>,
     user: Entity<InputState>,
     port: Entity<InputState>,
@@ -296,6 +361,24 @@ pub struct Sheet {
 }
 
 impl Sheet {
+    /// The sheet's heading, by what it sets up.
+    #[must_use]
+    pub const fn heading(&self) -> &'static str {
+        match self.role {
+            Sets::Worker => HEADING,
+            Sets::Server => SERVE_HEADING,
+        }
+    }
+
+    /// The line under its heading.
+    #[must_use]
+    pub const fn blurb(&self) -> &'static str {
+        match self.role {
+            Sets::Worker => BLURB,
+            Sets::Server => SERVE_BLURB,
+        }
+    }
+
     /// Whether an input method is composing in one of the fields: its keys are its own.
     pub fn composing(&self, cx: &gpui::App) -> bool {
         [&self.host, &self.user, &self.port].into_iter().any(|f| f.read(cx).is_composing())
@@ -346,6 +429,13 @@ impl Workspace {
         }
         let Some(adding) = &mut self.adding else { return };
         adding.this_mac = None;
+        let role = match adding.mode {
+            crate::Panel::Worker => Sets::Worker,
+            crate::Panel::Server => Sets::Server,
+        };
+        if adding.ssh.as_ref().is_some_and(|sheet| sheet.role != role) {
+            adding.ssh = None;
+        }
         if adding.ssh.is_none() {
             let field = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
                 let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
@@ -362,7 +452,8 @@ impl Workspace {
             host.update(cx, |input, cx| input.focus(window, cx));
             if let Some(adding) = &mut self.adding {
                 let enter = [a, b, c];
-                adding.ssh = Some(Sheet { host, user, port, note: None, run: None, _enter: enter });
+                adding.ssh =
+                    Some(Sheet { role, host, user, port, note: None, run: None, _enter: enter });
             }
         }
         cx.notify();
@@ -420,11 +511,15 @@ impl Workspace {
             }
         };
         sheet.note = None;
+        if sheet.role == Sets::Server {
+            let label = target.host.clone();
+            return self.start_serve(&target, label, cx);
+        }
         self.ssh_runs = self.ssh_runs.wrapping_add(1);
         let id = self.ssh_runs;
         let (tx, events) = mpsc::unbounded_channel();
         let deploy = deployer.deploy(&target, self.register_with(), tx);
-        let progress = Progress::new(target.host.clone(), false);
+        let progress = Progress::new(target.host.clone(), Kind::Install);
         let task = cx.spawn(async move |this, cx| {
             let apply = |ws: &mut Self, event: Event, cx: &mut Context<Self>| {
                 if let Some(run) = ws.ssh_run(id) {
@@ -442,7 +537,7 @@ impl Workspace {
             };
             let joined = this.update(cx, |ws, cx| {
                 let run = ws.ssh_run(id)?;
-                run.progress.deployed(&deployed);
+                run.progress.deployed(deployed.platform);
                 cx.notify();
                 Some(())
             });
@@ -548,7 +643,7 @@ impl Workspace {
             let Some(done) = drive(deploy, events, &this, cx, apply).await else { return };
             let _gone = this.update(cx, |ws, cx| ws.update_deployed(&owned, done, cx));
         });
-        let progress = Progress::new(host.to_owned(), true);
+        let progress = Progress::new(host.to_owned(), Kind::Update);
         self.updates.insert(host.to_owned(), UpdateRun { worker, progress, task: Some(task) });
         self.publish_updates(cx);
     }
@@ -564,7 +659,7 @@ impl Workspace {
         run.task = None;
         match done {
             Ok(deployed) => {
-                run.progress.deployed(&deployed);
+                run.progress.deployed(deployed.platform);
                 let worker = run.worker;
                 self.connect_now(worker);
             }
@@ -706,21 +801,148 @@ impl Workspace {
     pub(crate) fn ssh_row(&self, cx: &Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         self.deployer.as_ref()?;
         let glyph = slopty_ui::icons::IconName::Terminal;
-        let row = crate::entry_row(&self.theme, "install-over-ssh", glyph, TITLE, ROW_META)
+        let server = self.adding.as_ref().is_some_and(|a| a.mode == crate::Panel::Server);
+        let (id, title, meta) = if server {
+            ("serve-over-ssh", SERVE_TITLE, SERVE_ROW_META)
+        } else {
+            ("install-over-ssh", TITLE, ROW_META)
+        };
+        let row = crate::entry_row(&self.theme, id, glyph, title, meta)
             .on_click(cx.listener(|this, _ev, window, cx| this.open_ssh(window, cx)));
         Some(row)
+    }
+
+    /// The server panel's row that runs the server on this Mac; none on the worker panel or
+    /// where nothing can be installed.
+    pub fn serve_here_row(&self, cx: &Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+        self.deployer.as_ref()?;
+        self.adding.as_ref().filter(|a| a.mode == crate::Panel::Server)?;
+        let glyph = slopty_ui::icons::IconName::Monitor;
+        let row = crate::entry_row(
+            &self.theme,
+            "serve-here",
+            glyph,
+            SERVE_HERE_TITLE,
+            SERVE_HERE_ROW_META,
+        )
+        .on_click(cx.listener(|this, _ev, window, cx| this.serve_here(window, cx)));
+        Some(row)
+    }
+
+    /// Run the server on this Mac: the sheet's steps at once, with nothing to type.
+    pub fn serve_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.adding.as_ref().is_none_or(|a| a.mode != crate::Panel::Server) {
+            self.show_add_worker(crate::Panel::Server, window, cx);
+        }
+        self.open_ssh(window, cx);
+        self.start_serve(&Target::host(this_mac::LOOPBACK), THIS_MAC.to_owned(), cx);
+    }
+
+    /// Put the server on `target` (shown as `label`), then connect to it at the first address
+    /// that answers.
+    fn start_serve(&mut self, target: &Target, label: String, cx: &mut Context<Self>) {
+        let Some(deployer) = self.deployer.clone() else { return };
+        let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) else { return };
+        if sheet.running() {
+            return;
+        }
+        self.ssh_runs = self.ssh_runs.wrapping_add(1);
+        let id = self.ssh_runs;
+        let (tx, events) = mpsc::unbounded_channel();
+        let serve = deployer.serve(target, tx);
+        let progress = Progress::new(label.clone(), Kind::Server);
+        let task = cx.spawn(async move |this, cx| {
+            let apply = |ws: &mut Self, event: Event, cx: &mut Context<Self>| {
+                if let Some(run) = ws.ssh_run(id) {
+                    run.progress.apply(event);
+                    cx.notify();
+                }
+            };
+            let served = match drive(serve, events, &this, cx, apply).await {
+                None => return,
+                Some(Ok(served)) => served,
+                Some(Err(failure)) => {
+                    let _gone = this.update(cx, |ws, cx| ws.ssh_ended(id, Some(failure), cx));
+                    return;
+                }
+            };
+            let joining = this.update(cx, |ws, cx| {
+                let run = ws.ssh_run(id)?;
+                run.progress.deployed(served.platform);
+                cx.notify();
+                Some(())
+            });
+            if !matches!(joining, Ok(Some(()))) {
+                return;
+            }
+            let mut why = String::new();
+            for address in &served.addresses {
+                let address = match HostAddr::parse_with_port(address, SERVER_PORT) {
+                    Ok(address) => address,
+                    Err(e) => {
+                        why = e.to_string();
+                        continue;
+                    }
+                };
+                match deployer.link_server(&address).await {
+                    Ok(link) => {
+                        let _gone = this.update(cx, |ws, cx| ws.served(id, address, link, cx));
+                        return;
+                    }
+                    Err(e) => why = e,
+                }
+            }
+            let failure = Failure {
+                title: format!("The server runs on {label}, and Slopty could not connect to it"),
+                hint: Some(format!("Check that UDP {SERVER_PORT} reaches it from this Mac.")),
+                lines: vec![why],
+            };
+            let _gone = this.update(cx, |ws, cx| ws.ssh_ended(id, Some(failure), cx));
+        });
+        if let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) {
+            sheet.run = Some(Run { id, progress, task: Some(task) });
+        }
+        cx.notify();
+    }
+
+    /// The server the sheet's run `id` set up answered at `address`: it is this app's server
+    /// from now on, as a Connect from the panel makes it, and this Mac's worker registers with
+    /// it if it registers with none.
+    fn served(&mut self, id: u64, address: HostAddr, link: ServerLink, cx: &mut Context<Self>) {
+        if self.ssh_run(id).is_none() {
+            link.close();
+            return;
+        }
+        if let Err(e) = self.save_server(Some(&address)) {
+            link.close();
+            let failure = Failure {
+                title: "The server runs, and Slopty could not save it".to_owned(),
+                hint: None,
+                lines: vec![e],
+            };
+            return self.ssh_ended(id, Some(failure), cx);
+        }
+        if let Some(deployer) = &self.deployer {
+            deployer.register_here(&address);
+        }
+        let name = link.name.clone();
+        self.adding = None;
+        self.show_notice(format!("Connected to {name}"), cx);
+        self.set_server(Some(address), Some(link), cx);
+        self.refresh_menu(cx);
+        cx.notify();
     }
 }
 
 /// Await `deploy`, handing each event to `apply` on the workspace as it comes; what it ended
 /// with, or `None` when the workspace is gone.
-async fn drive(
-    mut deploy: Pending<Result<Deployed, Failure>>,
+async fn drive<T>(
+    mut deploy: Pending<Result<T, Failure>>,
     mut events: mpsc::UnboundedReceiver<Event>,
     this: &gpui::WeakEntity<Workspace>,
     cx: &mut gpui::AsyncApp,
     apply: impl Fn(&mut Workspace, Event, &mut Context<Workspace>),
-) -> Option<Result<Deployed, Failure>> {
+) -> Option<Result<T, Failure>> {
     let done = loop {
         tokio::select! {
             biased;
@@ -760,7 +982,12 @@ mod mac {
     use std::path::PathBuf;
 
     use slopty_core::WorkerId;
-    use slopty_deploy::{Deployed, Event, Failure, Local, Plan, Remembered, Runner, Server, Ssh};
+    use slopty_deploy::{
+        Deployed, Event, Failure, Local, Plan, Remembered, Runner, Served, Server, Ssh,
+    };
+    use slopty_net::HostAddr;
+    use slopty_net::server::ServerLink;
+    use slopty_platform::service::{Session, WORKER};
     use tokio::sync::mpsc;
 
     use super::{Deployer, Target};
@@ -800,21 +1027,12 @@ mod mac {
         ) -> Pending<Result<Deployed, Failure>> {
             let to = to.clone();
             let task = self.runtime.spawn(async move {
-                let source = slopty_platform::service::sibling_dir().map_err(|e| Failure {
-                    title: "Could not find the worker inside Slopty".to_owned(),
-                    hint: None,
-                    lines: vec![e.to_string()],
-                })?;
-                // This Mac's own worker needs no Remote Login: the plan runs here, in place.
-                let runner: Box<dyn Runner> = if to.is_this_machine().await {
-                    Box::new(Local::here())
-                } else {
-                    Box::new(Ssh::unattended(&to))
-                };
+                let source = here()?;
+                let runner = runner(&to).await;
                 let mut on = |event| {
                     let _gone = events.send(event);
                 };
-                let plan = Plan { source, update: true, server };
+                let plan = Plan { sources: slopty_deploy::bundled(&source), update: true, server };
                 slopty_deploy::deploy(runner.as_ref(), &plan, &mut on).await.map_err(|e| {
                     tracing::warn!(host = %to.host, error = %e, "deploy");
                     e.failure()
@@ -845,6 +1063,79 @@ mod mac {
 
         fn target_of(&self, worker: WorkerId) -> Option<Target> {
             Remembered::open_in(&self.data).get(&worker.to_string()).cloned()
+        }
+
+        fn serve(
+            &self,
+            to: &Target,
+            events: mpsc::UnboundedSender<Event>,
+        ) -> Pending<Result<Served, Failure>> {
+            let to = to.clone();
+            let task = self.runtime.spawn(async move {
+                let sources = slopty_deploy::bundled(&here()?);
+                let runner = runner(&to).await;
+                let mut on = |event| {
+                    let _gone = events.send(event);
+                };
+                slopty_deploy::serve(runner.as_ref(), &sources, &mut on).await.map_err(|e| {
+                    tracing::warn!(host = %to.host, error = %e, "serve");
+                    e.failure()
+                })
+            });
+            let died = Err(Failure {
+                title: "The install stopped".to_owned(),
+                hint: None,
+                lines: Vec::new(),
+            });
+            Aborting(task).pending(died)
+        }
+
+        fn link_server(&self, address: &HostAddr) -> Pending<Result<ServerLink, String>> {
+            let address = address.clone();
+            let task = self.runtime.spawn(async move {
+                net::link_server(&address).await.map_err(|e| format!("{e:#}"))
+            });
+            Aborting(task).pending(Err("connecting stopped".to_owned()))
+        }
+
+        fn register_here(&self, server: &HostAddr) {
+            let session = Session::native();
+            if !session.file(WORKER).is_file() {
+                return;
+            }
+            let path = slopty_settings::path_in(&self.data);
+            if slopty_settings::Settings::load(&path).settings.worker.server.is_some() {
+                return;
+            }
+            let saved = slopty_settings::save_server(
+                &self.data,
+                slopty_settings::ServerOf::Worker,
+                Some(server),
+            );
+            // The worker reads its server when it starts.
+            if let Err(e) = saved.and_then(|()| session.restart(WORKER).map_err(|e| e.to_string()))
+            {
+                tracing::warn!(%server, error = %e, "register this Mac's worker");
+            }
+        }
+    }
+
+    /// Where Slopty's own binaries are: beside the app.
+    fn here() -> Result<PathBuf, Failure> {
+        slopty_platform::service::sibling_dir().map_err(|e| Failure {
+            title: "Could not find the worker inside Slopty".to_owned(),
+            hint: None,
+            lines: vec![e.to_string()],
+        })
+    }
+
+    /// What runs a plan against `to`: this Mac itself when it names this Mac, which needs no
+    /// Remote Login and installs in place, else the system `ssh`.
+    async fn runner(to: &Target) -> Box<dyn Runner> {
+        if to.is_this_machine().await {
+            Box::new(Local::here())
+        } else {
+            Box::new(Ssh::unattended(to))
         }
     }
 }

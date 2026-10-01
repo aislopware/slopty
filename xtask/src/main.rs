@@ -11,6 +11,7 @@ mod check;
 mod claude;
 mod claude_mod;
 mod deep;
+mod dist;
 mod doctor;
 mod e2e;
 mod fixtures;
@@ -209,8 +210,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: run::RunCmd,
     },
-    /// macOS: build `Slopty.app` (app + worker daemons + CLI inside) and sign it.
+    /// macOS: build `Slopty.app` (app, worker daemons, server and CLI, and the Linux workers it
+    /// installs) and sign it with a stable identity when there is one.
     Bundle(bundle::BundleOpts),
+    /// Build everything a release publishes under `target/dist-out`: the app, the Mac CLI and
+    /// daemons, the Linux workers and servers, the dSYMs and their checksums; signed, notarised
+    /// when credentials are at hand, and checked. Publishing is CI's, on a tag.
+    Dist(dist::DistOpts),
     /// macOS: codesign the dev daemons so their TCC grants survive the next `cargo build`.
     Sign(sign::SignOpts),
     /// Resolve a crash report from a shipped build: finds the dSYM with the report's build UUID
@@ -233,12 +239,10 @@ enum Cmd {
         cmd: ios::IosCmd,
     },
     /// A terminal-only Linux worker: cross-build it (`build`, the default), run it in a Docker
-    /// Desktop container (`run`), or run the Linux end-to-end test against it from this Mac
-    /// (`e2e`).
-    Linux {
-        #[command(subcommand)]
-        cmd: Option<linux::LinuxCmd>,
-    },
+    /// Desktop container (`run`), run the Linux end-to-end test against it from this Mac
+    /// (`e2e`), deploy it and the server into a systemd container (`deploy`), or cross-build
+    /// what ships (`dist`).
+    Linux(linux::LinuxOpts),
     /// Cargo's target runner for test binaries (the gate and `check` set it): runs a `deps/`
     /// binary through a hard link in `run/`, out of a directory of 100 000 entries.
     #[command(hide = true)]
@@ -340,13 +344,14 @@ fn main() -> Result<()> {
         }
         Cmd::Changelog => cmd!(sh, "git cliff --unreleased --strip all").run().map_err(Into::into),
         Cmd::Run { cmd } => run::run(&sh, &cmd),
-        Cmd::Bundle(opts) => bundle::run(&sh, &opts).map(|_app| ()),
+        Cmd::Bundle(opts) => bundle::run(&sh, &opts).map(|_bundle| ()),
+        Cmd::Dist(opts) => dist::run(&sh, &opts),
         Cmd::Sign(opts) => sign::run(&sh, &opts),
         Cmd::Symbolicate(opts) => symbolicate::run(&sh, &opts),
         Cmd::Dsyms(opts) => symbolicate::dsyms(&sh, &opts),
         Cmd::Icon { out } => icon::run(&sh, &out),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
-        Cmd::Linux { cmd } => linux::run(&sh, cmd.unwrap_or(linux::LinuxCmd::Build)),
+        Cmd::Linux(opts) => linux::main(&sh, &opts),
         Cmd::Upstream { cmd } => upstream::run(&sh, &cmd),
         Cmd::TestRunner { binary, args } => runner::exec(&binary, &args),
         Cmd::Vm(opts) => vm::run(&sh, &opts),

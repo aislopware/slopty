@@ -145,7 +145,7 @@ async fn install_in(
              with `slopty add <this machine's tailnet name or IP>` or the app's \"Add a worker\""
         ),
     }
-    if let Some(note) = session.install_note() {
+    if let Some(note) = session.keep_running() {
         println!("{note}");
     }
     Ok(())
@@ -269,6 +269,9 @@ pub enum ServerCmd {
     Status,
     /// Whether this machine serves as a Tailscale peer relay, and why and how to make it one.
     Relay,
+    /// Put the server on another machine over `ssh` (a Mac, or Linux on arm64 or `x86_64`),
+    /// or replace the one there, and say where clients reach it.
+    Deploy(crate::deploy::ServerDeployOpts),
 }
 
 /// `slopty server install` options.
@@ -334,6 +337,12 @@ pub async fn server(cmd: ServerCmd, data_dir: &Path) -> Result<()> {
             print!("{}", crate::relay::read().await.report());
             Ok(())
         }
+        ServerCmd::Deploy(opts) => {
+            let source = binaries_source(opts.bin_dir())?;
+            let served = crate::deploy::serve(&opts, &source).await?;
+            print!("{}", crate::deploy::served(opts.target(), &served));
+            Ok(())
+        }
     }
 }
 
@@ -361,7 +370,7 @@ async fn install_server(opts: &ServerInstallOpts, data_dir: &Path) -> Result<()>
                      <this machine's tailnet name or IP>` or `server = \"…\"` under [client] in \
                      settings.toml"
                 );
-                if let Some(note) = session.install_note() {
+                if let Some(note) = session.keep_running() {
                     println!("{note}");
                 }
                 println!("{}", crate::relay::read().await.line());

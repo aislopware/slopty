@@ -54,11 +54,12 @@ zed itself so it is never behind zed while longbridge lags.
   `desktop-linux` context) and prints the loopback address to dial, such as
   `slopty ping --worker 127.0.0.1:<port>`; Ctrl-C removes the container. `cargo xtask linux e2e`
   runs the Linux end-to-end test against it (`docs/TESTING.md`). The daemons' logs go under
-  `target/logs/linux/<container>/`.
+  `target/logs/linux/<container>/`. `cargo xtask linux dist` cross-builds what ships (below,
+  "Install and release").
 - `cargo xtask run worker|app` to launch; `cargo xtask ios sim [--sim ipad]|device` for the phone/tablet;
-  `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI, the `dist` profile,
-  lean) under `target/bundle`, its dSYMs beside it in `dSYMs/<UUID>/`, with the icon rendered
-  from `assets/icon.svg` (`cargo xtask icon` previews it);
+  `cargo xtask bundle` builds a signed `Slopty.app` under `target/bundle` (below, "Install and
+  release"), its dSYMs beside it in `dSYMs/<UUID>/`, with the icon rendered from
+  `assets/icon.svg` (`cargo xtask icon` previews it);
   `cargo xtask symbolicate <report.json> [--dsyms <dir or .tar.gz>]` resolves a crash report
   from a shipped build to files, lines and inlined frames against the dSYMs of its UUID;
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
@@ -113,6 +114,56 @@ zed itself so it is never behind zed while longbridge lags.
   the pushed binding. Stage `vendor/ghostty` with `Cargo.lock`. `--no-push` stops after the
   checks with `vendor/ghostty` and the lock as they were. `sync --only libghostty-rs` pins
   whatever `vendor/ghostty` holds, and refuses a commit the ghostty fork does not have.
+
+## Install and release
+What a person installs, and how this tree makes it.
+- **`Slopty.app` is everything for a Mac.** `cargo xtask bundle` builds it in the `dist` profile:
+  the app, `slopty-worker`, `slopty-ptyd`, `slopty-server` and the `slopty` CLI in
+  `Contents/MacOS`, and in `Contents/Resources/workers/linux-arm64` and `linux-x86_64` the Linux
+  worker (`slopty-ptyd`, `slopty-worker`, `slopty`) and server that the app installs over SSH.
+  A worker or server must be this very build to let the app in, so the app carries every build it
+  installs. `--no-linux` leaves the Linux builds out (no zig needed, and no Linux installs);
+  `--debug` builds a dev bundle.
+- **Signing.** The bundle is signed with `--sign <identity>`, else `$SLOPTY_SIGN_IDENTITY`, else
+  the keychain's Developer ID Application certificate (`security find-identity -v -p
+  codesigning`; here team AJ4R8GWM7A), with a secure timestamp and the hardened runtime. Each
+  daemon is signed under its `LaunchAgent` label (`dev.aislopware.slopty.worker`, `.ptyd`,
+  `.server`, `.cli`), so a Screen Recording or Accessibility grant made once survives every
+  update, on this Mac and on each Mac a worker is deployed to. The bundle step checks that the
+  worker's designated requirement names its identifier and team. With no such certificate, or
+  `--ad-hoc`, it is signed ad hoc and says so: each update is then a new program to TCC and asks
+  again (`docs/decisions/tooling.md`, "Bundles are signed with a stable identity").
+- **The Linux builds.** `cargo xtask linux dist` cross-builds them with `cargo zigbuild` under
+  `target/linux`: the worker for `aarch64` and `x86_64` against glibc 2.28 (Debian 10, RHEL 8,
+  Ubuntu 20.04 and later), the server static on musl. It then runs each binary's `--version`
+  on `debian:buster-slim` and the server on `alpine:3`, for both CPUs, in Docker Desktop
+  (skipped, and said, when Docker is not running). The musl targets need
+  `rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl`.
+- **`cargo xtask dist`** builds a release under `target/dist-out` (`--out` elsewhere):
+  `Slopty-<v>-macos-arm64.zip` (the app), `slopty-<v>-macos-arm64.tar.gz` (the CLI, the daemons
+  and the server, signed as in the bundle, for a headless Mac),
+  `slopty-worker-<v>-linux-<cpu>.tar.gz`, `slopty-server-<v>-linux-<cpu>.tar.gz`,
+  `slopty-<v>-dSYMs.tar.gz` and `SHA256SUMS`. It checks what it made: the app's signature, every
+  Mac binary arm64, every Linux one for its CPU, no worker symbol past glibc 2.28, and a static
+  server. It notarises and staples the app when it is signed with a real identity and
+  `notarytool` credentials are set: `SLOPTY_NOTARY_PROFILE` (a `xcrun notarytool
+  store-credentials` profile), or `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID` and
+  `APPLE_API_ISSUER` (an App Store Connect key). Otherwise, or with `--no-notarize`, it says why
+  it skipped, and Gatekeeper asks the person to confirm the app's first open.
+- **Publishing is a tag's.** `cargo xtask release` makes the version commit and the tag. Pushing
+  the tag runs CI's gate on it, then the `release` job: `cargo xtask dist --out dist` on a
+  hosted Mac, signed with the Developer ID in the `MACOS_CERTIFICATE` (base64 `.p12`) and
+  `MACOS_CERTIFICATE_PASSWORD` secrets and notarised with the key in `APPLE_API_KEY` (base64
+  `.p8`), `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`. Without them it publishes ad hoc and
+  un-notarised, and the run's summary says so. The archives and `SHA256SUMS` go on the GitHub
+  release with the changelog's latest entry.
+- **Installing.** On a Mac: unzip `Slopty.app` into `/Applications` and open it. Its first run
+  offers this Mac as a worker or as the server, and a machine over SSH (a Mac, or Linux on
+  arm64 or `x86_64`) as either; nothing else is to be copied by hand. Headless:
+  `slopty worker install` or `slopty server install` from the Mac tarball, or from a Linux
+  tarball on Linux (systemd user units; lingering is turned on so they outlive the login).
+  `slopty worker deploy <ssh target>` does the same from this Mac, and registers the worker
+  with the server every verb reaches (`--server`, `--no-server`).
 
 ## Gate
 The full gate is fmt, clippy `-D warnings` on all targets and all three Apple triples, clippy for

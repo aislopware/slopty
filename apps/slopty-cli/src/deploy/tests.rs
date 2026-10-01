@@ -92,3 +92,41 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     assert!(said.contains("no server to register with"), "{said}");
     assert!(said.contains("slopty add studio.tail1234.ts.net"), "{said}");
 }
+
+/// `slopty server deploy` sends the server and its CLI through the `ssh` given, runs `server
+/// install` there, and points clients at the address `ssh` reached.
+#[tokio::test]
+async fn a_server_deploy_installs_the_server_and_names_where_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ssh, log) = (dir.path().join("ssh"), dir.path().join("log"));
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = format!(
+        "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
+         case $2 in\n\
+         *'uname -sm'*) echo 'Darwin arm64'; echo '100.64.0.2 51234 100.64.0.9 22' ;;\n\
+         *'server install'*) ;;\n\
+         *) eval \"$2\" ;;\n\
+         esac\n",
+        log = log.display(),
+        home = home.display(),
+    );
+    std::fs::write(&ssh, script).unwrap();
+    std::fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let mac_arm64 = [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01];
+    for name in slopty_deploy::SERVER_BINARIES {
+        std::fs::write(source.path().join(name), mac_arm64).unwrap();
+    }
+    let opts = ServerDeployOpts { target: "hub".to_owned(), bin_dir: None, ssh };
+    let up = serve(&opts, source.path()).await.unwrap();
+    assert_eq!(up.addresses, ["100.64.0.9", "hub"]);
+    assert!(home.join(STAGE).join("slopty-server").is_file(), "the server went up");
+    let scripts = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        scripts.contains(&format!("hub sh -c '{STAGE}/slopty server install --bin-dir {STAGE}'")),
+        "{scripts}"
+    );
+    let said = served("hub", &up);
+    assert!(said.contains("up on hub (macOS arm64)") && said.contains("--server 100.64.0.9"));
+}

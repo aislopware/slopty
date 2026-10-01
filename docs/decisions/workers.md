@@ -764,3 +764,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `service::tests::an_update_keeps_the_previous_worker_and_its_port` (`--update` on an empty
     machine). App `ssh::tests`: the sheet keeps the target of the worker it added, and Update
     deploys through the kept user and port.
+
+- ✅ **The app installs Linux workers and sets up the server, and both outlive the login**
+  (2026-10-01, readiness audit items 9 and 10). Installing a Linux worker from the app always
+  failed with "This build has no worker for Linux": the app sent the binaries beside itself,
+  and the bundle held only Mac builds. Nothing in the app set up a server, though the first run
+  calls the server the usual way in.
+  - **The app carries every build it installs.** A worker or server must be this very build to
+    let a client in, so fetching one from a release would fail for every build that is not a
+    release, and offline. `Slopty.app/Contents/Resources/workers/linux-arm64` and
+    `linux-x86_64` hold `slopty-ptyd`, `slopty-worker`, `slopty` and `slopty-server`, 36 MB for
+    arm64 and 41 MB for x86_64. `slopty_deploy::bundled` lists the app's own directory, then
+    those (in a dev tree, `target/linux/<triple>/<profile>`); a deploy sends the first whose
+    binaries all run on the machine `uname` names. The CLI does the same unless `--bin-dir` names one build.
+  - **What ships for Linux.** The worker links against glibc 2.28 through `cargo zigbuild`'s
+    versioned targets, so one build runs on Debian 10, RHEL 8, Ubuntu 20.04 and later. glibc
+    rather than musl because a Linux desktop's libraries are glibc's, and because musl's
+    allocator is the slower one on the terminal path. The server ships static on musl, as the
+    topology ruling has it. `cargo xtask linux dist` runs each binary's `--version` on
+    `debian:buster-slim` (glibc 2.28) and the server on `alpine:3`, both CPUs, in Docker Desktop.
+  - **Lingering.** A systemd user manager stops a user's units at their last logout, so a
+    worker installed over SSH died with the SSH session, which the app's install always is.
+    `Session::keep_running` (it replaced `install_note`) turns lingering on with `loginctl
+    enable-linger`, which logind lets a user do for themselves, and only when that fails tells
+    the person to run it with `sudo`. Every install on Linux runs it, worker or server.
+  - **The server, from the app.** The server panel's SSH entry is "Set up the server over SSH",
+    and "Run the server on this Mac" sits beside it (`ssh::Workspace::serve_here_row`, for the
+    panel to place). Both run `slopty_deploy::serve`: the same first step and upload as a
+    worker's deploy, then `slopty server install`, which waits until the server answers there.
+    This Mac's runs through `Local`, in place. Then the app links to it at the address `ssh`
+    reached (the third word of `$SSH_CONNECTION` there, which this Mac is known to reach), then
+    as named, or at loopback for this Mac, and saves it as `[client] server` as the panel's
+    Connect does. This Mac's worker, when installed with no server, registers with it and is
+    restarted, since a worker reads its server only when it starts. The CLI has the same as
+    `slopty server deploy <ssh target>`.
+  - Tests: `slopty-deploy` `the_build_for_the_machine_is_the_one_that_goes`,
+    `an_app_lists_the_builds_it_carries` and
+    `a_server_is_put_on_a_machine_and_named_where_it_is_reached`; `slopty-platform`
+    `a_systemd_install_lingers_so_it_outlives_the_login`; CLI
+    `a_server_deploy_installs_the_server_and_names_where_it_is`; app
+    `ssh::tests::the_server_panel_sets_up_the_server`. Live, `cargo xtask linux deploy`: a
+    container whose init is systemd, the user lingering, and this Mac's own `slopty worker
+    deploy` and `slopty server deploy` into it with xtask standing in for `ssh` (`docker exec`
+    as that user, as `xtask vm` stands in for the VM's). The worker and the server run as
+    active user units and answer from this Mac, and a second deploy updates the worker in
+    place.
+

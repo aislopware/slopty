@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
-use slopty_deploy::{Deployed, Event, Os, Plan, STAGE, Server, Ssh, Step};
+use slopty_deploy::{Deployed, Event, Os, Plan, STAGE, Served, Server, Ssh, Step};
 use slopty_proto::ctl::Tailscale;
 
 /// `slopty worker deploy` options.
@@ -20,7 +20,8 @@ pub struct DeployOpts {
     /// put back if the new one does not come up. With none there, one is installed.
     #[arg(long)]
     update: bool,
-    /// Where the binaries built for the target are (default: this binary's directory).
+    /// Where the binaries built for the target are (default: this binary's directory, and the
+    /// Linux builds an app bundle carries beside it).
     #[arg(long)]
     bin_dir: Option<PathBuf>,
     /// The `ssh` to run.
@@ -61,7 +62,7 @@ pub async fn deploy(
 ) -> Result<Deployed> {
     let server = if opts.no_server { None } else { register_with(server, data_dir).await? };
     let ssh = Ssh::new(opts.ssh.clone(), opts.target.clone());
-    let plan = Plan { source: source.to_path_buf(), update: opts.update, server };
+    let plan = Plan { sources: sources(opts.bin_dir(), source), update: opts.update, server };
     let target = &opts.target;
     let mut say = |event: Event| {
         if let Event::Step(Step::Upload { name }) = event {
@@ -82,6 +83,68 @@ async fn register_with(flag: Option<&str>, data_dir: &Path) -> Result<Option<Ser
     let found = slopty_net::discover::find(&endpoint).await;
     crate::client::close_endpoint(&endpoint).await;
     Ok(found.map(|found| server(&found.host_addr())))
+}
+
+/// `slopty server deploy` options.
+#[derive(Args, Debug, Clone)]
+pub struct ServerDeployOpts {
+    /// The machine, as `ssh` takes it: a `~/.ssh/config` host, `user@host`, a tailnet name.
+    target: String,
+    /// Where the binaries built for the target are (default: this binary's directory, and the
+    /// Linux builds an app bundle carries beside it).
+    #[arg(long)]
+    bin_dir: Option<PathBuf>,
+    /// The `ssh` to run.
+    #[arg(long, default_value = "ssh")]
+    ssh: PathBuf,
+}
+
+impl ServerDeployOpts {
+    /// The machine.
+    #[must_use]
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    /// `--bin-dir`.
+    #[must_use]
+    pub fn bin_dir(&self) -> Option<&Path> {
+        self.bin_dir.as_deref()
+    }
+}
+
+/// The binaries to send: `--bin-dir` alone, else `source`'s and the Linux builds beside it.
+fn sources(bin_dir: Option<&Path>, source: &Path) -> Vec<PathBuf> {
+    if bin_dir.is_some() { vec![source.to_path_buf()] } else { slopty_deploy::bundled(source) }
+}
+
+/// Put the server on `opts.target` from `source`, or replace the one there.
+///
+/// # Errors
+///
+/// When the machine or the binaries do not fit, a step there fails, or the server did not come
+/// up there.
+pub async fn serve(opts: &ServerDeployOpts, source: &Path) -> Result<Served> {
+    let ssh = Ssh::new(opts.ssh.clone(), opts.target.clone());
+    let target = &opts.target;
+    let mut say = |event: Event| {
+        if let Event::Step(Step::Upload { name }) = event {
+            println!("uploading {name} to {target}:{STAGE}");
+        }
+    };
+    let sources = sources(opts.bin_dir(), source);
+    Ok(slopty_deploy::serve(&ssh, &sources, &mut say).await?)
+}
+
+/// What the person reads once a server is up.
+#[must_use]
+pub fn served(target: &str, served: &Served) -> String {
+    let at = served.addresses.first().map_or(target, String::as_str);
+    format!(
+        "slopty-server is up on {target} ({}); point clients at it with `slopty --server {at}` or \
+         the app's \"Connect to a server\"\n",
+        served.platform
+    )
 }
 
 /// What the person reads once a deploy is done.

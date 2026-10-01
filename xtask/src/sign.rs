@@ -35,7 +35,7 @@ pub struct SignOpts {
 }
 
 /// The identifier a daemon is signed under.
-fn identifier(suffix: &str) -> String {
+pub fn identifier(suffix: &str) -> String {
     format!("{IDENTIFIER_PREFIX}.{suffix}")
 }
 
@@ -51,7 +51,7 @@ fn pick_identity(listing: &str) -> Option<&str> {
 }
 
 /// The identity to sign with: the flag, then the environment, then the keychain.
-fn resolve_identity(sh: &Shell, given: Option<&str>) -> Result<String> {
+pub fn resolve_identity(sh: &Shell, given: Option<&str>) -> Result<String> {
     if let Some(identity) = given.filter(|id| !id.trim().is_empty()) {
         return Ok(identity.to_owned());
     }
