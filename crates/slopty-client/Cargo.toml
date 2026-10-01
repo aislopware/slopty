@@ -44,5 +44,13 @@ headless = [  ]
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+# The observed Claude Code thread's id, and its fixtures, for `tests/threads.rs`.
+slopty-agent.workspace = true
 slopty-shape.workspace = true
+# The daemons the thread test spawns, found built (`slopty_testkit::bins`).
+slopty-testkit.workspace = true
 tempfile.workspace = true
+
+# The worker's own pasteboard, released when the thread test ends.
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+slopty-input.workspace = true

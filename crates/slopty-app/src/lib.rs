@@ -1110,7 +1110,10 @@ impl Workspace {
                     && !held
                 {
                     if std::mem::take(&mut replacing) {
-                        view.update(cx, |v, cx| v.disconnect_worker(key, status.clone(), cx));
+                        view.update(cx, |v, cx| {
+                            v.threads_unlinked(key, cx);
+                            v.disconnect_worker(key, status.clone(), cx);
+                        });
                     }
                     view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
                     // Woken: back online, or the server went away. Timed out: try it anyway.
@@ -1141,7 +1144,10 @@ impl Workspace {
                             redial.next(std::time::Instant::now())
                         };
                         if std::mem::take(&mut replacing) {
-                            view.update(cx, |v, cx| v.disconnect_worker(key, status.clone(), cx));
+                            view.update(cx, |v, cx| {
+                            v.threads_unlinked(key, cx);
+                            v.disconnect_worker(key, status.clone(), cx);
+                        });
                         }
                         view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
                         wait_or_wake(cx, &wake, delay).await;
@@ -1177,9 +1183,11 @@ impl Workspace {
                     }
                     ws.view.update(cx, |v, cx| {
                         if replaced {
+                            v.threads_unlinked(key, cx);
                             v.disconnect_worker(key, WorkerStatus::Relinking, cx);
                         }
                         v.connect_worker(key, worker_link, ack, cx);
+                        v.threads_linked(key, cx);
                     });
                     ws.refresh_menu(cx);
                     ws.update_linked(id, cx);
@@ -2865,23 +2873,31 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::AgentBranch(branch)) => {
             view.update(cx, |v, cx| v.agent_branch(branch, cx));
         }
+        LinkEvent::Control(WorkerMsg::Threads(frame)) => {
+            view.update(cx, |v, cx| v.thread_table(key, &frame, cx));
+        }
+        LinkEvent::Control(WorkerMsg::IntentDone(done)) => {
+            view.update(cx, |v, cx| v.thread_done(key, &done, cx));
+        }
+        LinkEvent::Thread { thread, frame } => {
+            view.update(cx, |v, cx| v.thread_frame(key, thread, frame, cx));
+        }
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
-        // read (`LinkEvent::Handoff`). Nothing here asks for the threads yet, so none of their
-        // frames come.
+        // read (`LinkEvent::Handoff`).
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
-            | WorkerMsg::Handoff(_)
-            | WorkerMsg::Threads(_)
-            | WorkerMsg::IntentDone(_),
-        )
-        | LinkEvent::Thread { .. } => {}
+            | WorkerMsg::Handoff(_),
+        ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
-            view.update(cx, |v, cx| v.disconnect_worker(key, status, cx));
+            view.update(cx, |v, cx| {
+                v.threads_unlinked(key, cx);
+                v.disconnect_worker(key, status, cx);
+            });
             let _dropped = this.update(cx, |ws, _cx| {
                 if let Some(slot) = ws.workers.iter_mut().find(|w| w.key == key) {
                     slot.link = None;
@@ -3210,6 +3226,8 @@ pub fn open_workspace(
             slopty_client::unsaved::Store::new(slopty_platform::dirs::data_dir().join("unsaved")),
             cx,
         );
+        // Each worker's threads, so an agent's thread draws in its first frame.
+        view.set_thread_cache(slopty_platform::dirs::data_dir().join("threads"));
         view.set_pasteboard(pasteboard());
         view.set_hardware_keyboard(hardware_keyboard_attached(), cx);
         #[cfg(feature = "e2e")]

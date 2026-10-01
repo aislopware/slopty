@@ -13063,3 +13063,31 @@ skips every file not touched since, where a fresh `read-tree HEAD` each time wou
 whole tree again, as the first one does. The spread between runs is the machine's load: both
 are two git processes. None of it is on the turn's path: the edge goes out at once and the
 snapshot follows as its own action.
+
+## 2026-10-02 — the thread view's path on the UI thread
+
+What the client pays per change for an agent's thread, over a snapshot's worth of a long one:
+`SNAPSHOT_TURNS` (20) turns of 40 commands each, every command with a 2 KiB output, 840 items in
+all, 1.8 MB as cached. A cached thread is read on the UI thread so it draws in the view's first
+frame; everything else here runs on every frame the thread moves.
+
+Mac Studio M1 Max, release, load average 22 to 50 from other sessions' builds, medians of 21
+runs:
+
+| What | Median |
+| --- | --- |
+| The cache read and decoded (the first frame of a cached thread) | 498 µs |
+| The cache encoded and written (off the UI thread) | 2.3 ms |
+| A streamed word applied to the mirror, its outbox settled | 0.17 µs |
+| The rows built again, settled turns folded | 3.4 µs |
+| The rows built again, every turn open | 17 µs |
+| The activity bar's stack | 0.08 µs |
+
+A streamed word costs well under a microsecond to apply and a few to lay out again; the rows
+are drawn from where they were built, so a row never searches the thread for its item. The
+first frame of a cached thread is the only read on the UI thread, at about 6 % of a 120 Hz
+frame for a long thread.
+
+```sh
+cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_thread_path --no-capture
+```

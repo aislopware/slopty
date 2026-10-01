@@ -1,0 +1,584 @@
+//! A thread as the view's rows: each turn's message, then its work, a settled turn folded to
+//! one line over its answer, the live turn whole, and the sends on their way at the foot.
+//!
+//! Nothing here draws. [`build`] runs over the mirror on every change and is cheap enough to:
+//! it walks the items once and allocates a row each.
+
+use std::collections::HashSet;
+use std::hash::{Hash as _, Hasher as _};
+use std::ops::Range;
+use std::time::Duration;
+
+use slopty_client::threads::Sent;
+use slopty_proto::thread::wire::Intent;
+use slopty_proto::thread::{
+    Delivery, IntentId, Item, ItemBody, ItemId, ThreadState, ToolDetail, ToolState, Turn, TurnId,
+    TurnState, kind,
+};
+
+/// How many kinds of work a fold names before it counts the rest.
+const NAMED: usize = 2;
+
+/// One row of the thread.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Row {
+    /// What the person sent.
+    User {
+        /// The item.
+        item: ItemId,
+    },
+    /// A settled turn's work as one line, open or folded.
+    Fold {
+        /// The turn.
+        turn: TurnId,
+        /// The reader opened it.
+        open: bool,
+    },
+    /// What the agent wrote.
+    Text {
+        /// The item.
+        item: ItemId,
+    },
+    /// The agent's reasoning.
+    Reasoning {
+        /// The item.
+        item: ItemId,
+    },
+    /// A tool call.
+    Tool {
+        /// The item.
+        item: ItemId,
+    },
+    /// A notice, a compaction, a review, or an item of a kind this client does not know: a
+    /// quiet line.
+    Note {
+        /// The item.
+        item: ItemId,
+    },
+    /// The agent is on its turn.
+    Working {
+        /// The turn.
+        turn: TurnId,
+    },
+    /// A message on its way, or one the worker turned down.
+    Sending {
+        /// Its intent.
+        intent: IntentId,
+    },
+}
+
+impl Row {
+    /// What names the row across rebuilds: the list keeps a row that keeps its key.
+    #[must_use]
+    pub fn key(&self) -> u64 {
+        let mut h = std::hash::DefaultHasher::new();
+        std::mem::discriminant(self).hash(&mut h);
+        match self {
+            Self::User { item }
+            | Self::Text { item }
+            | Self::Reasoning { item }
+            | Self::Tool { item }
+            | Self::Note { item } => item.hash(&mut h),
+            Self::Fold { turn, .. } | Self::Working { turn } => turn.hash(&mut h),
+            Self::Sending { intent } => intent.hash(&mut h),
+        }
+        h.finish()
+    }
+}
+
+/// What the rows are built from.
+#[derive(Clone, Copy, Debug)]
+pub struct Input<'a> {
+    /// The thread.
+    pub state: &'a ThreadState,
+    /// This client's intents the state does not show yet.
+    pub unshown: &'a [&'a Sent],
+    /// The settled turns the reader opened.
+    pub open: &'a HashSet<TurnId>,
+}
+
+/// The rows of a thread, and where in its items each row's content is.
+#[derive(Clone, Debug, Default)]
+pub struct Built {
+    /// The rows.
+    pub rows: Vec<Row>,
+    /// For each row, the items it draws ([`ThreadState::items`]): one item, a fold's whole
+    /// turn, or none.
+    pub spans: Vec<Range<usize>>,
+}
+
+impl Built {
+    fn push(&mut self, row: Row, span: Range<usize>) {
+        self.rows.push(row);
+        self.spans.push(span);
+    }
+}
+
+/// The rows of a thread.
+#[must_use]
+pub fn build(input: Input<'_>) -> Vec<Row> {
+    build_spans(input).rows
+}
+
+/// The rows of a thread, with where each row's items are: a row is drawn from them without a
+/// search.
+#[must_use]
+pub fn build_spans(input: Input<'_>) -> Built {
+    let state = input.state;
+    let capacity = state.items.len().saturating_add(4);
+    let mut built =
+        Built { rows: Vec::with_capacity(capacity), spans: Vec::with_capacity(capacity) };
+    let mut at = 0;
+    while let Some(first) = state.items.get(at) {
+        let turn = first.turn;
+        let len = state
+            .items
+            .get(at..)
+            .map_or(0, |rest| rest.iter().take_while(|i| i.turn == turn).count());
+        let run = at..at.saturating_add(len);
+        let items = state.items.get(run.clone()).unwrap_or_default();
+        let figures = state.turn(turn);
+        let settled = figures.is_some_and(|t| !matches!(t.state, TurnState::Active));
+        if turn == TurnId::BEFORE || !settled {
+            for (ix, item) in items.iter().enumerate() {
+                let at = run.start.saturating_add(ix);
+                built.push(row_of(item), at..at.saturating_add(1));
+            }
+        } else {
+            turn_rows(&mut built, turn, items, run.clone(), input.open.contains(&turn));
+        }
+        at = run.end;
+    }
+    if let Some(last) = state.last_turn().filter(|t| matches!(t.state, TurnState::Active)) {
+        built.push(Row::Working { turn: last.id }, 0..0);
+    }
+    for sent in input.unshown.iter().filter(|s| bubble(s)) {
+        built.push(Row::Sending { intent: sent.id }, 0..0);
+    }
+    built
+}
+
+/// Whether an unshown intent is drawn in the thread: a message sent now, or one the worker
+/// turned down. A queued one waits in the activity bar.
+const fn bubble(sent: &Sent) -> bool {
+    match &sent.intent {
+        Intent::Send { delivery: Delivery::Steer, .. } => true,
+        Intent::Send { delivery: Delivery::Queue, .. } => sent.failed(),
+        _ => false,
+    }
+}
+
+/// A settled turn: its message, the fold over its work, then its answer, the last thing the
+/// agent wrote. Opened, the work shows between the fold and the answer.
+fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>, open: bool) {
+    let answer = items.iter().rposition(|i| matches!(i.body, ItemBody::Text(_)));
+    let work = |ix: usize, i: &Item| Some(ix) != answer && !matches!(i.body, ItemBody::User(_));
+    let has_work = items.iter().enumerate().any(|(ix, i)| work(ix, i));
+    let mut folded = false;
+    for (ix, item) in items.iter().enumerate() {
+        let at = run.start.saturating_add(ix);
+        if !work(ix, item) {
+            built.push(row_of(item), at..at.saturating_add(1));
+            continue;
+        }
+        if !folded && has_work {
+            built.push(Row::Fold { turn, open }, run.clone());
+            folded = true;
+        }
+        if open {
+            built.push(row_of(item), at..at.saturating_add(1));
+        }
+    }
+}
+
+fn row_of(item: &Item) -> Row {
+    let id = item.id.clone();
+    match item.body {
+        ItemBody::User(_) => Row::User { item: id },
+        ItemBody::Text(_) => Row::Text { item: id },
+        ItemBody::Reasoning(_) => Row::Reasoning { item: id },
+        ItemBody::Tool(_) => Row::Tool { item: id },
+        ItemBody::Compaction(_)
+        | ItemBody::Notice(_)
+        | ItemBody::Review { .. }
+        | ItemBody::Extra { .. } => Row::Note { item: id },
+    }
+}
+
+/// What a settled turn's work adds up to.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Fold {
+    /// How it ended.
+    pub ended: Ended,
+    /// From its start to its end, when both are known.
+    pub took: Option<Duration>,
+    /// Tool calls.
+    pub steps: u32,
+    /// Commands run.
+    pub ran: u32,
+    /// Files read.
+    pub read: u32,
+    /// Searches of the files or the web, and pages fetched.
+    pub searched: u32,
+    /// Subagents started.
+    pub delegated: u32,
+    /// The files edited or written, each once, in the order first changed.
+    pub edited: Vec<String>,
+    /// Edit and write calls, a file edited twice counting twice.
+    pub edit_calls: u32,
+    /// Lines added by its edits.
+    pub added: u32,
+    /// Lines removed.
+    pub removed: u32,
+    /// Calls that failed.
+    pub failed: u32,
+}
+
+/// How a turn ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Ended {
+    /// It ran to its end.
+    #[default]
+    Complete,
+    /// The person stopped it.
+    Stopped,
+    /// It failed.
+    Failed,
+}
+
+impl Fold {
+    /// What `turn`'s `items` add up to.
+    #[must_use]
+    pub fn of(turn: &Turn, items: &[Item]) -> Self {
+        let mut fold = Self {
+            ended: match turn.state {
+                TurnState::Active | TurnState::Complete => Ended::Complete,
+                TurnState::Interrupted => Ended::Stopped,
+                TurnState::Failed { .. } => Ended::Failed,
+            },
+            took: turn
+                .ended_ms
+                .filter(|end| !turn.started_ms.is_zero() && *end > turn.started_ms)
+                .map(|end| Duration::from_millis(end.millis_since(turn.started_ms))),
+            added: turn.changed.added,
+            removed: turn.changed.removed,
+            ..Self::default()
+        };
+        let bump = |n: &mut u32| *n = n.saturating_add(1);
+        for item in items {
+            let ItemBody::Tool(call) = &item.body else { continue };
+            bump(&mut fold.steps);
+            if matches!(call.state, ToolState::Failed) {
+                bump(&mut fold.failed);
+            }
+            match (&call.detail, call.kind.as_str()) {
+                (Some(ToolDetail::Edit(d)), _) => fold.edit(&d.path),
+                (Some(ToolDetail::Write(d)), _) => fold.edit(&d.path),
+                (Some(ToolDetail::Exec(_)), _) | (None, kind::EXEC) => bump(&mut fold.ran),
+                (Some(ToolDetail::Read(_)), _) | (None, kind::READ) => bump(&mut fold.read),
+                (
+                    Some(ToolDetail::Search(_) | ToolDetail::Fetch(_) | ToolDetail::WebSearch(_)),
+                    _,
+                )
+                | (None, kind::SEARCH | kind::FETCH | kind::WEB_SEARCH) => {
+                    bump(&mut fold.searched);
+                }
+                (Some(ToolDetail::Agent(_)), _) | (None, kind::AGENT) => bump(&mut fold.delegated),
+                _ => {}
+            }
+        }
+        fold
+    }
+
+    fn edit(&mut self, path: &str) {
+        self.edit_calls = self.edit_calls.saturating_add(1);
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if !self.edited.iter().any(|e| e == name) {
+            self.edited.push(name.to_owned());
+        }
+    }
+
+    /// "Worked 55 s", "Stopped after 12 s", "Failed after 3 s", or the verb alone.
+    #[must_use]
+    pub fn lead(&self) -> String {
+        let took = self.took.map(crate::kit::duration);
+        match (self.ended, took) {
+            (Ended::Complete, Some(t)) => format!("Worked {t}"),
+            (Ended::Stopped, Some(t)) => format!("Stopped after {t}"),
+            (Ended::Failed, Some(t)) => format!("Failed after {t}"),
+            (Ended::Complete, None) => "Worked".to_owned(),
+            (Ended::Stopped, None) => "Stopped".to_owned(),
+            (Ended::Failed, None) => "Failed".to_owned(),
+        }
+    }
+
+    /// What the work was, the weightiest first: "ran a command", "read 3 files", then
+    /// "2 more" for the steps not named.
+    #[must_use]
+    pub fn what(&self) -> Vec<String> {
+        let say = |n: u32, one: &str, many: &str| {
+            if n == 1 { one.to_owned() } else { many.replace('#', &n.to_string()) }
+        };
+        let edited = u32::try_from(self.edited.len()).unwrap_or(u32::MAX);
+        let kinds = [
+            (
+                edited,
+                match self.edited.as_slice() {
+                    [one] => format!("edited {one}"),
+                    _ => format!("edited {edited} files"),
+                },
+                self.edit_calls,
+            ),
+            (self.ran, say(self.ran, "ran a command", "ran # commands"), self.ran),
+            (self.read, say(self.read, "read a file", "read # files"), self.read),
+            (self.searched, say(self.searched, "searched once", "searched # times"), self.searched),
+            (
+                self.delegated,
+                say(self.delegated, "started a subagent", "started # subagents"),
+                self.delegated,
+            ),
+        ];
+        let named: Vec<_> = kinds.into_iter().filter(|(n, ..)| *n > 0).take(NAMED).collect();
+        let steps_named = named.iter().map(|(.., steps)| *steps).fold(0, u32::saturating_add);
+        let rest = self.steps.saturating_sub(steps_named);
+        let mut out: Vec<String> = named.into_iter().map(|(_, words, _)| words).collect();
+        match (out.is_empty(), rest) {
+            (_, 0) => {}
+            (true, n) => out.push(say(n, "1 step", "# steps")),
+            (false, n) => out.push(format!("{n} more")),
+        }
+        out
+    }
+
+    /// The fold's line: "Worked 55 s: ran a command, read a file, 2 more".
+    #[must_use]
+    pub fn line(&self) -> String {
+        let what = self.what();
+        if what.is_empty() { self.lead() } else { format!("{}: {}", self.lead(), what.join(", ")) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_core::WallMs;
+    use slopty_proto::thread::detail::{EditDetail, ExecDetail, ExecStatus, ReadDetail};
+    use slopty_proto::thread::wire::Outcome;
+    use slopty_proto::thread::{Changed, Clipped, Patch, ToolCall, Usage, UserMessage};
+
+    use super::*;
+    use crate::conversation::thread::fixtures;
+
+    fn item(id: &str, turn: u32, body: ItemBody) -> Item {
+        Item { id: ItemId(id.to_owned()), turn: TurnId(turn), at_ms: WallMs::ZERO, body }
+    }
+
+    fn user(id: &str, turn: u32) -> Item {
+        item(
+            id,
+            turn,
+            ItemBody::User(UserMessage {
+                text: Clipped::whole("Fix it"),
+                images: Vec::new(),
+                command: None,
+                intent: None,
+            }),
+        )
+    }
+
+    fn text(id: &str, turn: u32) -> Item {
+        item(id, turn, ItemBody::Text(Clipped::whole("Done.")))
+    }
+
+    fn tool(id: &str, turn: u32, kind: &str, detail: Option<ToolDetail>) -> Item {
+        item(
+            id,
+            turn,
+            ItemBody::Tool(Box::new(ToolCall {
+                name: kind.to_owned(),
+                kind: kind.to_owned(),
+                title: String::new(),
+                input: Clipped::default(),
+                state: ToolState::Completed,
+                output: None,
+                images: Vec::new(),
+                detail,
+                child: None,
+                ended_ms: None,
+            })),
+        )
+    }
+
+    fn exec(id: &str, turn: u32) -> Item {
+        tool(
+            id,
+            turn,
+            kind::EXEC,
+            Some(ToolDetail::Exec(ExecDetail {
+                command: Clipped::whole("cargo test"),
+                description: None,
+                cwd: None,
+                background: false,
+                task: None,
+                status: ExecStatus::Done,
+                exit_code: Some(0),
+                stderr: None,
+                duration_ms: None,
+            })),
+        )
+    }
+
+    fn read(id: &str, turn: u32) -> Item {
+        tool(
+            id,
+            turn,
+            kind::READ,
+            Some(ToolDetail::Read(ReadDetail {
+                path: "src/lib.rs".to_owned(),
+                offset: None,
+                limit: None,
+                lines: None,
+                total_lines: None,
+            })),
+        )
+    }
+
+    fn edit(id: &str, turn: u32, path: &str) -> Item {
+        tool(
+            id,
+            turn,
+            kind::EDIT,
+            Some(ToolDetail::Edit(EditDetail {
+                path: path.to_owned(),
+                edits: 1,
+                replace_all: false,
+                patch: Patch::default(),
+            })),
+        )
+    }
+
+    fn turn(id: u32, state: TurnState, secs: u64) -> Turn {
+        Turn {
+            id: TurnId(id),
+            input: None,
+            state,
+            started_ms: WallMs::from_millis(1_000),
+            ended_ms: Some(WallMs::from_millis(secs.saturating_mul(1_000).saturating_add(1_000))),
+            usage: Usage::default(),
+            models: Vec::new(),
+            changed: Changed::default(),
+            before: None,
+            after: None,
+        }
+    }
+
+    fn state(turns: Vec<Turn>, items: Vec<Item>) -> ThreadState {
+        let mut state = fixtures::empty();
+        state.turns = turns;
+        state.items = items;
+        state
+    }
+
+    #[test]
+    fn a_settled_turn_folds_its_work_under_its_message_and_over_its_answer() {
+        let state = state(
+            vec![turn(1, TurnState::Complete, 55)],
+            vec![user("u", 1), exec("x", 1), text("mid", 1), read("r", 1), text("end", 1)],
+        );
+        let mut open = HashSet::new();
+        let rows = build(Input { state: &state, unshown: &[], open: &open });
+        let id = |s: &str| ItemId(s.to_owned());
+        assert_eq!(
+            rows,
+            [
+                Row::User { item: id("u") },
+                Row::Fold { turn: TurnId(1), open: false },
+                Row::Text { item: id("end") },
+            ]
+        );
+        open.insert(TurnId(1));
+        let rows = build(Input { state: &state, unshown: &[], open: &open });
+        assert_eq!(
+            rows,
+            [
+                Row::User { item: id("u") },
+                Row::Fold { turn: TurnId(1), open: true },
+                Row::Tool { item: id("x") },
+                Row::Text { item: id("mid") },
+                Row::Tool { item: id("r") },
+                Row::Text { item: id("end") },
+            ],
+            "opened, the work shows in its order"
+        );
+    }
+
+    #[test]
+    fn the_live_turn_never_folds_and_says_it_works() {
+        let mut live = turn(2, TurnState::Active, 0);
+        live.ended_ms = None;
+        let state = state(
+            vec![turn(1, TurnState::Complete, 3), live],
+            vec![user("u1", 1), text("a1", 1), user("u2", 2), exec("x", 2), text("a2", 2)],
+        );
+        let rows = build(Input { state: &state, unshown: &[], open: &HashSet::new() });
+        let id = |s: &str| ItemId(s.to_owned());
+        assert_eq!(
+            rows,
+            [
+                Row::User { item: id("u1") },
+                Row::Text { item: id("a1") },
+                Row::User { item: id("u2") },
+                Row::Tool { item: id("x") },
+                Row::Text { item: id("a2") },
+                Row::Working { turn: TurnId(2) },
+            ],
+            "a turn with nothing but its answer has no fold"
+        );
+    }
+
+    #[test]
+    fn a_message_on_its_way_is_a_bubble_and_a_queued_one_waits_in_the_bar() {
+        let state = state(Vec::new(), Vec::new());
+        let thread = state.meta.id;
+        let sent = |delivery, outcome| Sent {
+            id: IntentId::new(),
+            thread,
+            intent: Intent::Send { text: "hi".to_owned(), delivery },
+            outcome,
+        };
+        let now = sent(Delivery::Steer, None);
+        let queued = sent(Delivery::Queue, None);
+        let refused = sent(Delivery::Queue, Some(Outcome::Refused { reason: "No".to_owned() }));
+        let unshown = [&now, &queued, &refused];
+        let rows = build(Input { state: &state, unshown: &unshown, open: &HashSet::new() });
+        assert_eq!(rows, [Row::Sending { intent: now.id }, Row::Sending { intent: refused.id }]);
+    }
+
+    #[test]
+    fn a_fold_names_two_kinds_of_work_and_counts_the_rest() {
+        let t = turn(1, TurnState::Complete, 55);
+        let items =
+            [exec("x", 1), read("r", 1), read("r2", 1), edit("e", 1, "a/b.rs"), exec("y", 1)];
+        let fold = Fold::of(&t, &items);
+        assert_eq!(fold.line(), "Worked 55 s: edited b.rs, ran 2 commands, 2 more");
+        let fold = Fold::of(&t, &[exec("x", 1), read("r", 1), tool("m", 1, kind::MCP, None)]);
+        assert_eq!(fold.line(), "Worked 55 s: ran a command, read a file, 1 more");
+        let stopped = turn(1, TurnState::Interrupted, 12);
+        assert_eq!(
+            Fold::of(&stopped, &[tool("m", 1, "other", None)]).line(),
+            "Stopped after 12 s: 1 step"
+        );
+        let mut untimed = turn(1, TurnState::Complete, 0);
+        untimed.ended_ms = None;
+        assert_eq!(Fold::of(&untimed, &[]).line(), "Worked");
+    }
+
+    #[test]
+    fn a_recorded_session_builds_its_rows_with_every_settled_turn_folded() {
+        let state = fixtures::thread("tools");
+        let rows = build(Input { state: &state, unshown: &[], open: &HashSet::new() });
+        assert!(rows.iter().any(|r| matches!(r, Row::Fold { .. })), "{rows:?}");
+        assert!(!rows.iter().any(|r| matches!(r, Row::Tool { .. })), "every call is folded");
+        let keys: HashSet<u64> = rows.iter().map(Row::key).collect();
+        assert_eq!(keys.len(), rows.len(), "every row has its own key");
+    }
+}

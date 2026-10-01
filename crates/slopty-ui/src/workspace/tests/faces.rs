@@ -599,3 +599,77 @@ fn a_face_stays_through_a_dropped_link_with_its_draft(cx: &mut TestAppContext) {
         "followed again on the new link"
     );
 }
+
+/// What the workspace asked of the worker about threads.
+fn thread_requests(fake: &mut Fake) -> Vec<slopty_proto::thread::wire::ThreadRequest> {
+    fake.drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(req) => Some(req),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An agent tile whose terminal the worker's thread table names opens on its face on a Mac
+/// too, and on its thread view: the link brings the table and the thread's frames into it,
+/// the TUI picked lets the thread go, and a dropped link keeps what it showed.
+#[gpui::test]
+fn an_agent_with_a_thread_opens_on_its_thread_view(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::{TableFrame, ThreadFrame, ThreadRequest};
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let (_tile, session) = agent_tile(&view, cx, &mut studio);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    assert_eq!(thread_requests(&mut studio), [ThreadRequest::Table { have: None }]);
+    assert!(!face_shown(&view, cx, session), "the TUI until a thread is known");
+
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let thread = state.meta.id;
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
+    cx.run_until_parked();
+    assert!(face_shown(&view, cx, session), "face-first once the agent has a thread");
+    let follows = thread_requests(&mut studio);
+    assert!(
+        follows.iter().any(
+            |r| matches!(r, ThreadRequest::Follow { thread: t, have: None, .. } if *t == thread)
+        ),
+        "its thread view follows it: {follows:?}"
+    );
+    let face = view.read_with(cx, |v, _| v.thread_face(session).cloned()).expect("a thread view");
+    let snapshot =
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 40 }, state: Box::new(state) };
+    view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, snapshot, cx));
+    cx.run_until_parked();
+    assert!(!face.read_with(cx, |f, _| f.rows().is_empty()), "the thread is in its rows");
+
+    view.update_in(cx, |v, _w, cx| v.threads_unlinked(key, cx));
+    cx.run_until_parked();
+    assert!(!face.read_with(cx, |f, _| f.rows().is_empty()), "what it showed stays");
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let again = thread_requests(&mut studio);
+    assert!(
+        again
+            .iter()
+            .any(|r| matches!(r, ThreadRequest::Follow { have: Some(Cursor { seq: 40, .. }), .. })),
+        "caught up from where it stood: {again:?}"
+    );
+
+    drop(face);
+    view.update_in(cx, |v, _w, cx| v.show_face(session, false, cx));
+    cx.run_until_parked();
+    assert!(!face_shown(&view, cx, session));
+    assert!(view.read_with(cx, |v, _| v.thread_face(session).is_none()));
+    assert!(
+        thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }),
+        "the TUI picked lets the thread go"
+    );
+}

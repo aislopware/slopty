@@ -2496,9 +2496,19 @@ impl WorkspaceView {
                         && self.face_shown(*session)
                         && self.body_state(placed.tile, item).is_none()) =>
                 {
-                    let Some(face) = self.faces.views.get(session) else { return well() };
                     let width = placed.target.w;
                     let handed = Handed::Face { zoom: k, width };
+                    // The agent's thread, once known, is the face; the conversation face is
+                    // only for an agent no thread stands for yet. The tile's header already
+                    // says the title, the agent and its state, so the thread view draws none.
+                    if let Some(thread) = self.thread_face(*session) {
+                        self.hand_over(cx, thread, handed, move |v, cx| {
+                            v.set_layout(k, width, cx);
+                            v.set_header(false, cx);
+                        });
+                        return fixed(self.body_view(thread, placed, cx));
+                    }
+                    let Some(face) = self.faces.views.get(session) else { return well() };
                     self.hand_over(cx, face, handed, move |v, cx| v.set_layout(k, width, cx));
                     let body = self.body_view(face, placed, cx);
                     fixed(body)

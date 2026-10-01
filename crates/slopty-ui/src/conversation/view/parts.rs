@@ -1123,7 +1123,7 @@ pub(super) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
 /// quiet hairline, the used arc in the tone the share calls for (warn past 80 %, error past
 /// 95 %).
 #[must_use]
-pub(super) fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
+pub(in crate::conversation) fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
     let s = theme.surfaces;
     let (track, arc) = (hsla(s.border), hsla(context_tone(theme, used_pct)));
     #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]

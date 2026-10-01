@@ -17,6 +17,8 @@
 //! * [`question`] — an `AskUserQuestion` answered in the composer, one question at a time.
 //! * [`menu`] — the composer's slash command and `@` mention menus, as text.
 //! * [`view`] — the face itself: the list, the prompt rail, the task card, the composer.
+//! * [`lines`] — a diff's lines drawn, for the thread view and the review tile.
+//! * [`thread`] — the thread view over the agent-neutral model, for every agent.
 
 mod actions;
 pub mod approval;
@@ -26,10 +28,12 @@ pub mod figures;
 pub mod find;
 #[cfg(test)]
 pub(crate) mod fixtures;
+pub mod lines;
 pub mod menu;
 pub mod model;
 pub mod question;
 pub mod rows;
+pub mod thread;
 pub mod tools;
 pub mod view;
 

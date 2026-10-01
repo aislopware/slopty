@@ -1525,6 +1525,7 @@ mod shell_drag;
 mod soak;
 mod strip_marks;
 mod tab_strip;
+mod thread_face;
 mod tiles;
 mod toasts;
 mod touch;

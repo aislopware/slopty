@@ -310,3 +310,55 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   thread started from a shell is named at once, and renamed as that name changes. The bare
   `Claude Code` names nothing. The first prompt that is not a command then names it, and
   keeps it.
+
+- ✅ **A client mirrors each open thread, holds its intents in an outbox, and keeps both on
+  disk** (2026-10-02, `crates/slopty-client/src/threads.rs`; the unit tests beside it and
+  `a_thread_and_an_answer_outlive_a_dropped_link_and_a_relaunch` in
+  `crates/slopty-client/tests/threads.rs`, against the real worker).
+  - **The mirror runs the worker's reducer.** A snapshot replaces it; actions apply only when
+    they start at its cursor. A frame that does not, or a stream that went with a link, is
+    followed again from the cursor, with an unfollow first, since the worker ignores a follow
+    of a thread it already streams. Each item keeps a revision, so a view measures again only
+    the rows whose items moved.
+  - **An intent shows until the thread's own record does, not until the worker answers.** A
+    send is drawn as a bubble until the worker holds it as pending or the agent's message
+    carries its id; an answer flips its card until the request is no longer open; a stop reads
+    "Stopping" until no turn is active. Settling on the worker's answer alone would show the
+    old state for the moment between the answer and the record. A send the worker turned down
+    stays, with its words and why, until the person dismisses it.
+  - **Unanswered intents go again under their first id** after a reconnect and after a
+    relaunch, and the worker acts on an id once. Intents for a thread not open here settle by
+    its table row.
+  - **The cache is one directory per worker, the user's alone**: each thread's state with its
+    cursor and the outbox, in postcard, replaced whole, at most the 64 threads last written. A
+    cached thread draws in the view's first frame, read on the UI thread (0.5 ms for a 1.8 MB
+    snapshot of 20 turns, `docs/MEASUREMENTS.md`), and catches up from its cursor. Every
+    write runs off the UI thread, one batch after another, a thread two seconds after it
+    rests.
+  - **Expanded content is held by recency under 64 MiB**, and asked for once while it is on
+    its way.
+
+- ✅ **The thread view draws any agent's thread from the mirror, and an agent tile opens on
+  it** (2026-10-02, `crates/slopty-ui/src/conversation/thread/`; the tests in
+  `conversation/thread/tests.rs` and `an_agent_with_a_thread_opens_on_its_thread_view` in
+  `workspace/tests/faces.rs`).
+  - One reading column of 680 pt, prose at 15/1.6. A settled turn folds to its message, one
+    line ("Worked 55 s: ran a command, read a file, 2 more") and its answer; the live turn
+    never folds. The header says the title, the agent, the state word, the worker and, past
+    20 %, the context ring.
+  - The activity bar over the composer stacks the requests ("2 of 5", only a press answers
+    one), the plan, the files the last turn edited with the way to their review, the messages
+    waiting (taken back from here where the agent can queue) and the background work (stopped
+    from here where the agent can). ↵ sends into the turn, ⌘↵ queues.
+  - It stands beside the conversation face until that path goes: a tile whose terminal the
+    worker's thread table names opens on its face on every device and draws the thread view;
+    any other agent tile keeps the conversation face.
+
+- ✅ **The review tile reads the worker's review frames, and every keep, revert and comment is
+  an intent** (2026-10-02, `crates/slopty-ui/src/review/`; `review/tests.rs`). The scopes are
+  the ones the worker answers today: the last turn (the default), since reviewed, and every
+  turn; a branch, the unstaged changes and a task's span wait on the worker. Files go by
+  weight, with tests, fixtures, snapshots, locks and generated code listed after the rest.
+  "Mark reviewed" keeps every file shown, so "Since reviewed" is what changed after. Line
+  comments are anchored by their line's text, dropped when it changes, and go as one message
+  of `path L<n>: body` lines. A keep or revert the worker acted on asks for the review again.

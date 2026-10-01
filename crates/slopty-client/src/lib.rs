@@ -36,6 +36,9 @@
 //!   path order, and the rows a results list draws.
 //! * [`unsaved`] — [`unsaved::Store`]: file tiles' edits not yet saved, kept on this device so a
 //!   quit or a crash loses none of them.
+//! * [`threads`] — [`threads::Threads`]: one worker's agent threads as this client holds them (the
+//!   table, a mirror per open thread, the intents on their way), kept in step through link drops,
+//!   with their [`threads::Cache`] on this device.
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -60,6 +63,7 @@ pub mod screen;
 pub mod search;
 pub mod server;
 pub mod term;
+pub mod threads;
 pub mod tunnel;
 pub mod unsaved;
 pub mod update;

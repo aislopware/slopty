@@ -57,10 +57,26 @@ pub fn blocks(path: &str, patch: &Patch) -> Rc<[Block]> {
     patch.hunks.iter().map(|hunk| block(hunk, syntax)).collect()
 }
 
+/// The line numbers and colours of a thread's `patch` for a file at `path`.
+#[must_use]
+pub fn thread_blocks(path: &str, patch: &slopty_proto::thread::Patch) -> Rc<[Block]> {
+    let syntax = Syntax::for_path(path, "");
+    patch.hunks.iter().map(|h| block_of(h.old_start, h.new_start, &h.lines, syntax)).collect()
+}
+
 fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
+    block_of(hunk.old_start, hunk.new_start, &hunk.lines, syntax)
+}
+
+fn block_of(
+    old_start: u32,
+    new_start: u32,
+    hunk_lines: &[String],
+    syntax: Option<Syntax>,
+) -> Block {
     // Git's note about the last newline is a flag on the line before it, not a line.
-    let mut parsed: Vec<(Kind, &str, bool)> = Vec::with_capacity(hunk.lines.len());
-    for line in &hunk.lines {
+    let mut parsed: Vec<(Kind, &str, bool)> = Vec::with_capacity(hunk_lines.len());
+    for line in hunk_lines {
         let mut chars = line.chars();
         let kind = match chars.next() {
             Some('+') => Kind::Added,
@@ -89,7 +105,7 @@ fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
             highlight::spans(&side(Kind::Removed), syntax),
         )
     });
-    let (mut old_no, mut new_no) = (hunk.old_start, hunk.new_start);
+    let (mut old_no, mut new_no) = (old_start, new_start);
     let (mut old_at, mut new_at) = (0_usize, 0_usize);
     let mut lines = Vec::with_capacity(parsed.len());
     for (kind, text, no_newline) in parsed {
@@ -113,7 +129,37 @@ fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
         }
         lines.push(Line { kind, old, new, text: text.to_owned(), spans: coloured, no_newline });
     }
-    Block { new_start: hunk.new_start, lines }
+    Block { new_start, lines }
+}
+
+/// How a tab is drawn in a diff.
+const TAB_SPACES: &str = "    ";
+
+/// `text` with its tabs as spaces, and `spans` stretched to match.
+#[must_use]
+pub fn detab(text: &str, spans: Option<&[Span]>) -> (String, Option<Vec<Span>>) {
+    if !text.contains('\t') {
+        return (text.to_owned(), spans.map(<[Span]>::to_vec));
+    }
+    let out = text.replace('\t', TAB_SPACES);
+    let spans = spans.map(|spans| {
+        let mut at = 0_usize;
+        spans
+            .iter()
+            .map(|span| {
+                let end = at.saturating_add(span.len);
+                let tabs = text.get(at..end).map_or(0, |piece| piece.matches('\t').count());
+                at = end;
+                Span {
+                    len: span
+                        .len
+                        .saturating_add(tabs.saturating_mul(TAB_SPACES.len().saturating_sub(1))),
+                    ..*span
+                }
+            })
+            .collect()
+    });
+    (out, spans)
 }
 
 /// One row of a side-by-side diff: the old line on the left, the new on the right.
@@ -287,5 +333,19 @@ mod tests {
             "In `src/x.rs` lines 12\u{2013}13:\n```diff\n fn main() {\n-    old();\n+    new();\n```\n"
         );
         assert_eq!(quote("a.rs", &[&gone]), "In `a.rs` line 12:\n```diff\n-    old();\n```\n");
+    }
+
+    /// A tab widens to spaces, and the colours after it move with the text.
+    #[test]
+    fn tabs_widen_and_the_colours_follow() {
+        let spans = [
+            Span { len: 2, token: highlight::Token::Keyword, italic: false, bold: false },
+            Span { len: 3, token: highlight::Token::String, italic: false, bold: false },
+        ];
+        let (text, spans) = detab("\tx\"a\"", Some(&spans));
+        assert_eq!(text, "    x\"a\"");
+        let lens: Vec<usize> = spans.unwrap().iter().map(|s| s.len).collect();
+        assert_eq!(lens, [5, 3]);
+        assert_eq!(lens.iter().sum::<usize>(), text.len());
     }
 }

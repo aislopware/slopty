@@ -7,22 +7,34 @@
 //! unfollows it, and the worker hands any prompt it held for this client back to the TUI. The
 //! face keeps its draft and its scroll place while hidden. On a phone-width layout an agent's
 //! tile shows the face until the person picks the TUI.
+//!
+//! Beside that path runs the thread view ([`ThreadView`]) over the agent-neutral thread model:
+//! one [`ThreadHub`] per worker, fed by the link ([`WorkspaceView::threads_linked`],
+//! [`WorkspaceView::thread_table`], [`WorkspaceView::thread_frame`],
+//! [`WorkspaceView::thread_done`]), and a view for each shown agent tile whose terminal the
+//! worker's thread table names. Such a tile opens on its face on every device.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use gpui::{AppContext as _, Context, Entity, Focusable as _, Keystroke, Window};
+use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::conversation::{ConversationEvent, ConversationRequest, PermissionEvent};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
+use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::{IntentDone, TableFrame, ThreadFrame};
 
 use super::WorkspaceView;
 use super::actions::ToggleConversation;
 use crate::conversation::composer::{self, Step};
+use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent};
 use crate::conversation::{ConversationView, FaceEvent, menu};
 use crate::icons::Status;
+use crate::review::ReviewView;
 
 /// What the workspace keeps about faces.
 #[derive(Default)]
@@ -43,6 +55,30 @@ pub(super) struct Faces {
     /// with the link, but the face stays on its tile, draft and all, saying the worker is away,
     /// until a new link says again what runs there.
     pub held: HashSet<SessionId>,
+    /// The thread views and the hubs they read.
+    pub threads: ThreadFaces,
+}
+
+/// Each worker's threads, and the thread view of each agent tile that shows one.
+#[derive(Default)]
+pub(super) struct ThreadFaces {
+    /// Each worker's threads, made the first time its link comes up.
+    hubs: HashMap<WorkerKey, Entity<ThreadHub>>,
+    hearing: HashMap<WorkerKey, gpui::Subscription>,
+    /// The thread each agent terminal runs, as its worker's table says.
+    of_session: HashMap<SessionId, ThreadId>,
+    /// The thread view of each tile that shows one, kept while it shows.
+    views: HashMap<SessionId, Entity<ThreadView>>,
+    asks: HashMap<SessionId, gpui::Subscription>,
+    /// Where each worker's threads are kept: a directory per worker under it.
+    cache: Option<PathBuf>,
+    /// The review tile of each thread whose review was asked for, kept while it is open.
+    reviews: HashMap<ThreadId, Entity<ReviewView>>,
+    /// A thread view asked for its thread's review: made in the next sync, for the strip to
+    /// open ([`WorkspaceView::take_review`]).
+    review_asked: Option<(WorkerKey, ThreadId)>,
+    /// A review tile made and not yet opened.
+    review_made: Option<ThreadId>,
 }
 
 impl WorkspaceView {
@@ -54,7 +90,175 @@ impl WorkspaceView {
             return true;
         }
         let agent = self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None);
-        agent && self.faces.chosen.get(&session).copied().unwrap_or_else(|| self.layout.is_phone())
+        // A tile whose agent has a thread opens on its face on every device.
+        let first = self.layout.is_phone() || self.faces.threads.of_session.contains_key(&session);
+        agent && self.faces.chosen.get(&session).copied().unwrap_or(first)
+    }
+
+    /// The thread view `session`'s tile shows in place of the conversation face, once its
+    /// agent's thread is known.
+    #[must_use]
+    pub fn thread_face(&self, session: SessionId) -> Option<&Entity<ThreadView>> {
+        self.faces.threads.views.get(&session).filter(|_| self.face_shown(session))
+    }
+
+    /// The review tile a thread view asked for since this was last asked, for the strip to
+    /// open as a tile (`Handed::Review`).
+    pub fn take_review(&mut self) -> Option<(ThreadId, Entity<ReviewView>)> {
+        let thread = self.faces.threads.review_made.take()?;
+        self.faces.threads.reviews.get(&thread).map(|view| (thread, view.clone()))
+    }
+
+    /// The review tile of `thread`, while one is open.
+    #[must_use]
+    pub fn review_of(&self, thread: ThreadId) -> Option<&Entity<ReviewView>> {
+        self.faces.threads.reviews.get(&thread)
+    }
+
+    /// The strip closed `thread`'s review tile: the thread is no longer followed for it.
+    pub fn review_closed(&mut self, thread: ThreadId) {
+        self.faces.threads.reviews.remove(&thread);
+    }
+
+    /// Keep each worker's threads in `dir`, a directory per worker.
+    pub fn set_thread_cache(&mut self, dir: PathBuf) {
+        self.faces.threads.cache = Some(dir);
+    }
+
+    /// `key`'s threads, made the first time they are asked for.
+    fn thread_hub(&mut self, key: WorkerKey, cx: &mut Context<Self>) -> Entity<ThreadHub> {
+        if let Some(hub) = self.faces.threads.hubs.get(&key) {
+            return hub.clone();
+        }
+        let name = self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default();
+        let cache = self
+            .faces
+            .threads
+            .cache
+            .as_ref()
+            .map(|dir| slopty_client::threads::Cache::new(dir.join(key.to_string())));
+        let hub = cx.new(|_| ThreadHub::new(name, cache));
+        let hearing = cx.subscribe(&hub, move |this, _hub, event: &HubEvent, cx| match event {
+            HubEvent::Send(msgs) => {
+                for msg in msgs {
+                    this.send(key, msg.clone());
+                }
+            }
+            HubEvent::Table => this.threads_of_sessions(key, cx),
+            _ => {}
+        });
+        self.faces.threads.hearing.insert(key, hearing);
+        self.faces.threads.hubs.insert(key, hub.clone());
+        hub
+    }
+
+    /// The link to `key` is up: its threads catch up from where they stand.
+    pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let hub = self.thread_hub(key, cx);
+        hub.update(cx, ThreadHub::connected);
+    }
+
+    /// The link to `key` went: its thread views show what they last knew.
+    pub fn threads_unlinked(&self, key: WorkerKey, cx: &mut Context<Self>) {
+        if let Some(hub) = self.faces.threads.hubs.get(&key) {
+            hub.update(cx, ThreadHub::disconnected);
+        }
+    }
+
+    /// A frame of `key`'s thread table.
+    pub fn thread_table(&mut self, key: WorkerKey, frame: &TableFrame, cx: &mut Context<Self>) {
+        let hub = self.thread_hub(key, cx);
+        hub.update(cx, |hub, cx| hub.table(frame, cx));
+    }
+
+    /// A frame of one of `key`'s threads.
+    pub fn thread_frame(
+        &mut self,
+        key: WorkerKey,
+        thread: ThreadId,
+        frame: ThreadFrame,
+        cx: &mut Context<Self>,
+    ) {
+        let hub = self.thread_hub(key, cx);
+        hub.update(cx, |hub, cx| hub.frame(thread, frame, cx));
+    }
+
+    /// `key`'s answer to one of this client's intents.
+    pub fn thread_done(&self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
+        if let Some(hub) = self.faces.threads.hubs.get(&key) {
+            hub.update(cx, |hub, cx| hub.done(done, cx));
+        }
+    }
+
+    /// Which thread each of `key`'s terminals runs, from its table: a subagent's thread is
+    /// its parent's business, not a tile's.
+    fn threads_of_sessions(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
+        let Some(hub) = self.faces.threads.hubs.get(&key) else { return };
+        let rows = &hub.read(cx).threads().rows().rows;
+        let found: Vec<(SessionId, ThreadId)> = rows
+            .values()
+            .filter(|row| row.parent.is_none())
+            .filter_map(|row| Some((row.terminal?, row.id)))
+            .collect();
+        let sessions: HashSet<SessionId> = self
+            .workers
+            .get(&key)
+            .map(|w| w.sessions.keys().copied().collect())
+            .unwrap_or_default();
+        let of = &mut self.faces.threads.of_session;
+        of.retain(|session, _| !sessions.contains(session));
+        of.extend(found);
+        cx.notify();
+    }
+
+    /// Make the thread views the shown tiles want, and let go of those no tile shows: the
+    /// last view of a thread unfollows it.
+    fn sync_thread_faces(
+        &mut self,
+        wanted: &[SessionId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for session in wanted {
+            let Some(thread) = self.faces.threads.of_session.get(session).copied() else {
+                continue;
+            };
+            let current = self.faces.threads.views.get(session).map(|v| v.read(cx).thread());
+            if current == Some(thread) {
+                continue;
+            }
+            let Some(key) = self.worker_of_session(*session) else { continue };
+            let hub = self.thread_hub(key, cx);
+            let theme = self.theme.clone();
+            let view = cx.new(|cx| ThreadView::new(hub, thread, theme, window, cx));
+            let session = *session;
+            let asks =
+                cx.subscribe(&view, move |this, _view, event: &ThreadViewEvent, cx| match event {
+                    ThreadViewEvent::ShowTerminal => this.show_face(session, false, cx),
+                    ThreadViewEvent::Review { thread } => {
+                        if let Some(key) = this.worker_of_session(session) {
+                            this.faces.threads.review_asked = Some((key, *thread));
+                            cx.notify();
+                        }
+                    }
+                });
+            self.faces.threads.asks.insert(session, asks);
+            self.faces.threads.views.insert(session, view);
+        }
+        if let Some((key, thread)) = self.faces.threads.review_asked.take() {
+            if !self.faces.threads.reviews.contains_key(&thread) {
+                let hub = self.thread_hub(key, cx);
+                let theme = self.theme.clone();
+                let review = cx.new(|cx| ReviewView::new(hub, thread, theme, window, cx));
+                self.faces.threads.reviews.insert(thread, review);
+            }
+            self.faces.threads.review_made = Some(thread);
+            cx.notify();
+        }
+        let threads = &mut self.faces.threads;
+        threads.views.retain(|s, _| wanted.contains(s) && threads.of_session.contains_key(s));
+        let views = &threads.views;
+        threads.asks.retain(|s, _| views.contains_key(s));
     }
 
     /// Whether `session`'s tile shows its face with an approval open in it: the card then says
@@ -135,6 +339,7 @@ impl WorkspaceView {
                 self.make_face(*session, window, cx);
             }
         }
+        self.sync_thread_faces(&wanted, window, cx);
         // Unfollow what no longer shows; a link that changed lost its follow already.
         let followed: Vec<(SessionId, ClientId)> =
             self.faces.following.iter().map(|(s, c)| (*s, *c)).collect();
@@ -216,8 +421,13 @@ impl WorkspaceView {
         let focus: Vec<SessionId> = self.faces.focus.drain().collect();
         let mut gave = false;
         for session in focus {
-            if let Some(view) = self.faces.views.get(&session).filter(|_| wanted.contains(&session))
-            {
+            if !wanted.contains(&session) {
+                continue;
+            }
+            if let Some(view) = self.faces.threads.views.get(&session) {
+                view.clone().update(cx, |v, cx| v.focus(window, cx));
+                gave = true;
+            } else if let Some(view) = self.faces.views.get(&session) {
                 view.clone().update(cx, |v, cx| v.focus(window, cx));
                 gave = true;
             }

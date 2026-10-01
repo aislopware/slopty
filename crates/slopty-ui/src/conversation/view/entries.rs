@@ -1486,7 +1486,7 @@ impl ConversationView {
 }
 
 /// A fenced block's corner: its language and a copy, at the meta size.
-fn code_actions(
+pub(in crate::conversation) fn code_actions(
     theme: &slopty_theme::Theme,
     zoom: f32,
     block: &gpui_kit::base::text::CodeBlock,

@@ -1612,6 +1612,8 @@ impl WorkspaceView {
             // its conversation in its composer.
             if let Some(board) = self.board_view(session).filter(|_| self.board_shown(session)) {
                 board.clone().update(cx, |v, cx| v.focus(window, cx));
+            } else if let Some(thread) = self.thread_face(session).cloned() {
+                thread.update(cx, |v, cx| v.focus(window, cx));
             } else if let Some(face) =
                 self.faces.views.get(&session).filter(|_| self.face_shown(session))
             {

@@ -63,6 +63,7 @@ pub mod project;
 pub mod repo_groups;
 #[cfg(any(test, feature = "e2e"))]
 pub mod retained;
+pub mod review;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"

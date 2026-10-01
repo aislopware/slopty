@@ -29,7 +29,7 @@ use crate::conversation::diff::{self, Block, Kind, Line};
 use crate::conversation::model::Expanded;
 use crate::conversation::rows::{self, Level};
 use crate::conversation::tools;
-use crate::highlight::{self, Span};
+use crate::highlight;
 use crate::icons::IconName;
 
 /// Lines of a command's output a summary shows: its end, where a log says how it went.
@@ -97,30 +97,6 @@ pub(super) fn input_pairs(input: &str) -> Option<Vec<(String, String)>> {
             })
             .collect(),
     )
-}
-
-/// `text` with its tabs as spaces, and `spans` stretched to match.
-fn detab(text: &str, spans: Option<&[Span]>) -> (String, Option<Vec<Span>>) {
-    if !text.contains('\t') {
-        return (text.to_owned(), spans.map(<[Span]>::to_vec));
-    }
-    let out = text.replace('\t', TAB);
-    let spans = spans.map(|spans| {
-        let mut at = 0_usize;
-        spans
-            .iter()
-            .map(|span| {
-                let end = at.saturating_add(span.len);
-                let tabs = text.get(at..end).map_or(0, |piece| piece.matches('\t').count());
-                at = end;
-                Span {
-                    len: span.len.saturating_add(tabs.saturating_mul(TAB.len().saturating_sub(1))),
-                    ..*span
-                }
-            })
-            .collect()
-    });
-    (out, spans)
 }
 
 impl ConversationView {
@@ -936,7 +912,7 @@ impl ConversationView {
     /// A line's text in its grammar's colours (a context line muted).
     fn line_text(&self, line: &Line) -> AnyElement {
         let s = self.theme.surfaces;
-        let (text, spans) = detab(&line.text, line.spans.as_deref());
+        let (text, spans) = diff::detab(&line.text, line.spans.as_deref());
         let text = if text.is_empty() { " ".to_owned() } else { text };
         let context = line.kind == Kind::Context;
         let ink = match line.kind {
@@ -1168,19 +1144,5 @@ mod tests {
         );
         assert_eq!(input_pairs(r#"{"query": "rust"#), None);
         assert_eq!(input_pairs("[1, 2]"), None);
-    }
-
-    /// A tab widens to spaces, and the colours after it move with the text.
-    #[test]
-    fn tabs_widen_and_the_colours_follow() {
-        let spans = [
-            Span { len: 2, token: highlight::Token::Keyword, italic: false, bold: false },
-            Span { len: 3, token: highlight::Token::String, italic: false, bold: false },
-        ];
-        let (text, spans) = detab("\tx\"a\"", Some(&spans));
-        assert_eq!(text, "    x\"a\"");
-        let lens: Vec<usize> = spans.unwrap().iter().map(|s| s.len).collect();
-        assert_eq!(lens, [5, 3]);
-        assert_eq!(lens.iter().sum::<usize>(), text.len());
     }
 }

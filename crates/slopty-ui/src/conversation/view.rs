@@ -28,6 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
+pub(in crate::conversation) use entries::code_actions;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
@@ -37,6 +38,7 @@ use gpui::{
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 pub use parts::HeaderChips;
+pub(in crate::conversation) use parts::context_ring;
 pub use review::Scope;
 use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
