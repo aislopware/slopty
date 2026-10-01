@@ -19,10 +19,12 @@ mod tests {
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::transfer::{Dest, XferMsg};
 
-    const FILES: usize = 100;
+    /// Two windows of the client's 16 streams awaiting acknowledgement.
+    const FILES: usize = 32;
     const SIZE: usize = 4096;
-    /// One way; the round trip is twice it.
-    const DELAY: Duration = Duration::from_millis(10);
+    /// One way; the round trip is twice it. Long enough that the round trips a serial upload
+    /// pays dwarf what a loaded machine adds per file, so the bound holds on a busy runner.
+    const DELAY: Duration = Duration::from_millis(100);
     const WAIT: Duration = Duration::from_secs(60);
 
     /// Upload `files` files of `size` bytes over a link adding `delay` each way: the worker's
@@ -114,8 +116,10 @@ mod tests {
     }
 
     /// Waiting on each file's acknowledgement took a round trip per file: 2.16 s for 100 files
-    /// over 20 ms. The bound is half of that: a quiet machine takes about 0.3 s, and one with
-    /// every core taken 0.6 s.
+    /// over 20 ms. The bound is half a round trip per file. Pipelined, the upload takes a few
+    /// round trips whatever the file count, and the load only adds milliseconds a file: at a
+    /// 10 ms delay a runner with every core taken came within 25 % of the bound, so the delay
+    /// is long enough now for the round trips to decide it.
     #[tokio::test(flavor = "multi_thread")]
     async fn many_small_files_do_not_wait_a_round_trip_each() {
         let (took, _) = upload(FILES, SIZE, DELAY).await;
