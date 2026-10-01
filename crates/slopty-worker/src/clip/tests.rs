@@ -920,3 +920,57 @@ fn staged_files_go_on_as_file_urls() {
     assert_eq!(c.board().data(1, &url).unwrap(), b"file:///tmp/%C3%BC");
     assert_eq!(c.poll(Instant::now()), None, "the worker's own write");
 }
+
+/// A program's read gets what the worker holds as it already has it: a client's copy while that
+/// client watches, the worker's own once a poll read it while anyone does, never a secret and
+/// never more than asked for.
+#[test]
+fn a_program_reads_the_shared_text_only_while_it_is_shared() {
+    let c = clip();
+    let (a, b) = (next_link(), next_link());
+    c.attach(a, sink().0);
+    c.attach(b, sink().0);
+    let copy = client_offer(1, 0, vec![vec![inline(ClipFormat::Text, b"client copy")]]);
+    assert!(c.offered(a, copy, Instant::now()));
+    assert!(c.mirror(a));
+    assert_eq!(c.shared_text(1024), None, "nobody shares");
+    c.watch(b, true);
+    assert_eq!(c.shared_text(1024), None, "the copy is a's, and a does not share");
+    c.watch(a, true);
+    assert_eq!(c.shared_text(1024).as_deref(), Some("client copy"));
+    assert_eq!(c.shared_text(4), None, "past the bound");
+
+    c.board().copy(&[(&text(), b"worker copy")]);
+    assert!(c.poll(Instant::now()).is_some());
+    c.watch(a, false);
+    assert_eq!(c.shared_text(1024).as_deref(), Some("worker copy"), "b still shares");
+    c.watch(b, false);
+    assert_eq!(c.shared_text(1024), None);
+
+    c.watch(a, true);
+    let mut secret = client_offer(2, 0, vec![vec![inline(ClipFormat::Text, b"hunter2")]]);
+    secret.concealed = true;
+    let _mirrored = c.offered(a, secret, Instant::now());
+    assert_eq!(c.paste(a, PasteKind::Window), Paste::Ready);
+    assert_eq!(c.board().data(0, &text()).unwrap(), b"hunter2");
+    assert_eq!(c.shared_text(1024), None, "a secret is pasted, never read");
+}
+
+/// Text the pasteboard only promises is not fetched for a read: the read answers nothing at
+/// once, and the client is never asked.
+#[test]
+fn a_read_of_promised_text_never_waits_or_fetches() {
+    let c = Clipboard::waiting(board(), Peer::Worker(WorkerId::new()), Duration::from_secs(60));
+    let a = next_link();
+    let (to_a, sent) = sink();
+    c.attach(a, to_a);
+    c.watch(a, true);
+    let big = vec![b'x'; 100];
+    let offer = client_offer(1, 0, vec![vec![listed(ClipType::Format(ClipFormat::Text), &big)]]);
+    assert!(c.offered(a, offer, Instant::now()));
+    assert!(c.mirror(a));
+    let asked = Instant::now();
+    assert_eq!(c.shared_text(1024), None);
+    assert!(asked.elapsed() < Duration::from_secs(1));
+    assert!(sent.lock().is_empty(), "{:?}", sent.lock());
+}

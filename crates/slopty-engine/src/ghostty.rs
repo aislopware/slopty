@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
+pub use clipboard::ClipboardSource;
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIteration, RowIterator};
@@ -37,6 +38,7 @@ use crate::placeholder::{self, Runs};
 use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
 
 mod carried;
+mod clipboard;
 mod memory;
 mod read;
 mod redraw;
@@ -200,6 +202,8 @@ pub struct GhosttyEngine {
     reported: Rc<RefCell<Reported>>,
     /// The pointer shape the program asked for (`OSC 22`) as last reported.
     pointer: PointerShape,
+    /// What the program's clipboard reads are answered from, shared with libghostty's callback.
+    clipboard: clipboard::Shared,
     /// Nothing was written yet: a checkpoint written first brings its marks back (see
     /// [`carried`]).
     fresh: bool,
@@ -435,6 +439,8 @@ impl GhosttyEngine {
         install_render_hold(&mut term, &render, &hold)?;
         let marks = Rc::new(RefCell::new(Vec::new()));
         install_marks(&mut term, &marks)?;
+        let clipboard = Rc::new(RefCell::new(None));
+        clipboard::install(&mut term, &clipboard)?;
 
         let mut engine = Self {
             anchor: None,
@@ -491,6 +497,7 @@ impl GhosttyEngine {
             progress,
             reported,
             pointer: PointerShape::Text,
+            clipboard,
             fresh: true,
             restoring: false,
         };
@@ -2193,8 +2200,7 @@ fn install_callbacks(
     let for_clip = Rc::clone(events);
     term.on_clipboard_write(move |_, write| {
         // Only the system clipboard; selection/primary are X11 notions with no counterpart
-        // on the clients. Reads (OSC 52 `?`, OSC 5522) go to a read callback the engine does
-        // not install, so libghostty answers them with nothing.
+        // on the clients. Reads (OSC 52 `?`, OSC 5522) are answered by [`clipboard`].
         let text = (write.location() == ClipboardLocation::Standard)
             .then(|| write.contents().find(|c| c.mime.starts_with("text/plain")))
             .flatten()
@@ -4487,9 +4493,6 @@ mod tests {
         );
         // Primary and selection are ignored.
         e.write(b"\x1b]52;p;aGVsbG8=\x07\x1b]52;s;aGVsbG8=\x07");
-        assert_eq!(e.drain_events(), vec![]);
-        // A read request ("?") produces neither an event nor a reply to the program.
-        e.write(b"\x1b]52;c;?\x07");
         assert_eq!(e.drain_events(), vec![]);
     }
 

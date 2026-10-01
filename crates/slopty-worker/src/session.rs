@@ -162,6 +162,7 @@ enum Cmd {
     ResizeUnviewed { size: TermSize, reply: oneshot::Sender<u16> },
     Probe { reply: oneshot::Sender<Probe> },
     Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
+    ShareClipboard { reader: crate::clip::Reader },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
     Launch { line: String },
@@ -339,6 +340,7 @@ impl std::fmt::Debug for Cmd {
             Self::ResizeUnviewed { .. } => "ResizeUnviewed",
             Self::Probe { .. } => "Probe",
             Self::Memory { .. } => "Memory",
+            Self::ShareClipboard { .. } => "ShareClipboard",
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
             Self::Launch { .. } => "Launch",
@@ -435,6 +437,11 @@ impl SessionHandle {
         let (reply, rx) = oneshot::channel();
         self.send(Cmd::Memory { reply })?;
         rx.await.map_err(|_gone| WorkerError::SessionClosed)?
+    }
+
+    /// Answer the program's clipboard reads (OSC 52) from `reader` from now on.
+    pub fn share_clipboard(&self, reader: crate::clip::Reader) -> Result<(), WorkerError> {
+        self.send(Cmd::ShareClipboard { reader })
     }
 
     /// Read the terminal as text, on the actor's thread.
@@ -2070,6 +2077,9 @@ impl Actor {
             }
             Cmd::Memory { reply } => {
                 let _ignored = reply.send(self.engine.memory().map_err(WorkerError::from));
+            }
+            Cmd::ShareClipboard { reader } => {
+                self.engine.share_clipboard(Some(Box::new(move || reader())));
             }
             Cmd::Probe { reply } => {
                 // A child that already exited has no foreground process; asking would only

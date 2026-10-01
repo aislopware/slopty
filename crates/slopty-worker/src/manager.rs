@@ -125,6 +125,8 @@ struct Inner {
     /// Kept sessions ptyd did not hold when this worker connected: their shells were lost, and
     /// [`Worker::restore`] reopens them.
     lost: Mutex<HashMap<SessionId, Recipe>>,
+    /// What the sessions' programs read of the clipboard ([`Worker::share_clipboard`]).
+    clipboard: Mutex<Option<crate::clip::Reader>>,
 }
 
 /// A session being opened, from before ptyd starts it until it is in the table or the open
@@ -214,6 +216,7 @@ impl Worker {
                 unwatched: Mutex::new(Unwatched::default()),
                 keeper,
                 lost: Mutex::new(recipes),
+                clipboard: Mutex::new(None),
             }),
         };
         tokio::spawn(tap_loop(Arc::downgrade(&worker.inner), tap_rx));
@@ -568,7 +571,23 @@ impl Worker {
             .sessions
             .lock()
             .insert(id, Entry { handle: handle.clone(), command, exited, started_ms });
+        // Read after the insert: a reader shared meanwhile reaches the session one way or the
+        // other.
+        let reader = self.inner.clipboard.lock().clone();
+        if let Some(reader) = reader {
+            let _closed = handle.share_clipboard(reader);
+        }
         Ok(handle)
+    }
+
+    /// Answer every session's clipboard reads (OSC 52) from `reader`, those opened later too.
+    pub fn share_clipboard(&self, reader: &crate::clip::Reader) {
+        *self.inner.clipboard.lock() = Some(Arc::clone(reader));
+        let handles: Vec<SessionHandle> =
+            self.inner.sessions.lock().values().map(|e| e.handle.clone()).collect();
+        for handle in handles {
+            let _closed = handle.share_clipboard(Arc::clone(reader));
+        }
     }
 
     /// How many sessions the worker runs, exited ones included.

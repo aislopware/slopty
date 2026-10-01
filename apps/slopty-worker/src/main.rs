@@ -599,6 +599,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             tracing::info!(removed, "swept the partial files of abandoned uploads");
         }
     });
+    daemon.worker.share_clipboard(&daemon.clip.reader());
     tokio::spawn(clip::watch(daemon.clone()));
     tokio::spawn(ports::watch(daemon.clone(), port_hints));
     // Agents the hooks never report: the foreground process, the title, the transcript.

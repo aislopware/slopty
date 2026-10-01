@@ -47,6 +47,7 @@ use slopty_input::pasteboard::{
     clip_type, format_of, serve_main_run_loop, type_on_board,
 };
 use slopty_platform::pasteboard_access::Access as ReadAccess;
+use slopty_proto::terminal::MAX_OSC52_BYTES;
 use slopty_proto::transfer::{
     ClipEntry, ClipFormat, ClipMsg, ClipType, Hash, INLINE_CLIP_BYTES, MAX_CLIP_ITEMS, Offer, Peer,
     Rep, RepRef, Source, origin_bytes, parse_origin,
@@ -205,6 +206,10 @@ struct Shared {
     /// How long a promise waits for bytes to start or go on arriving ([`PROVIDE_WAIT`]).
     wait: Duration,
 }
+
+/// What a session's program reads of the clipboard ([`Clipboard::reader`]): the shared text
+/// now, or `None`. Never blocks.
+pub type Reader = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 /// A representation's key within one offer.
 type Key = (u16, ClipType);
@@ -552,6 +557,57 @@ impl<B: Board + Access> Clipboard<B> {
             self.clear();
         }
         self.tell_interest();
+    }
+
+    /// The text a program in a session may read of the clipboard (OSC 52), at most `max` bytes:
+    /// what the pasteboard holds as this worker already has it, while a client shares its
+    /// clipboard with the worker. A client's copy is shared only while that client watches; the
+    /// worker's own, while anyone does. Never a secret.
+    ///
+    /// Nothing of the pasteboard is read, not even its change count, which waits its turn
+    /// behind any other read of it, so this neither asks the person nor waits. Text only
+    /// promised is `None` until its bytes are here, and a copy made on the worker is known
+    /// from the poller's next look.
+    #[must_use]
+    pub fn shared_text(&self, max: usize) -> Option<String> {
+        let state = self.shared.state.lock();
+        let bytes = match state.holds {
+            Holds::Mirror { link, source } if state.watchers.contains(&link) => {
+                let inc = state.incoming.get(&link).filter(|i| i.offer.source() == source)?;
+                inc.offer.reps().filter(|(_, rep)| rep.kind.is(ClipFormat::Text)).find_map(
+                    |(n, rep)| {
+                        rep.inline
+                            .as_deref()
+                            .or_else(|| inc.fetched.get(&(n, rep.kind.clone())).map(Vec::as_slice))
+                    },
+                )?
+            }
+            Holds::Native if !state.watchers.is_empty() => {
+                let announced = state.announced.as_ref().filter(|a| Some(a.count) == state.seen)?;
+                let (_, bytes) = announced
+                    .read
+                    .iter()
+                    .filter(|((_, kind), _)| kind.is(ClipFormat::Text))
+                    .min_by_key(|((item, _), _)| *item)?;
+                bytes
+            }
+            Holds::Mirror { .. } | Holds::Native | Holds::Secret { .. } => return None,
+        };
+        let text = (bytes.len() <= max).then(|| std::str::from_utf8(bytes).ok()).flatten()?;
+        let text = text.to_owned();
+        drop(state);
+        Some(text)
+    }
+
+    /// [`Clipboard::shared_text`] for the sessions' programs, up to what one may copy
+    /// ([`MAX_OSC52_BYTES`]).
+    #[must_use]
+    pub fn reader(self: &Arc<Self>) -> Reader
+    where
+        B: Send + Sync + 'static,
+    {
+        let clip = Arc::downgrade(self);
+        Arc::new(move || clip.upgrade()?.shared_text(MAX_OSC52_BYTES))
     }
 
     /// How reading the pasteboard goes now, for the doctor.

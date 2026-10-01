@@ -547,7 +547,7 @@ pub enum TermEvent {
     Bell,
     /// The program wrote to the system clipboard (OSC 52 / OSC 1337 Copy). Text only, at
     /// most [`MAX_OSC52_BYTES`]; every attached client puts it on its own clipboard.
-    /// There is no read counterpart: an OSC 52 `?` is dropped on the worker, by design.
+    /// An OSC 52 `?` never travels: the worker answers it while a client shares its clipboard.
     ClipboardWrite {
         /// Contents.
         text: String,

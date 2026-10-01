@@ -28,7 +28,7 @@ pub mod osc133;
 pub mod placeholder;
 pub mod search;
 
-pub use ghostty::{Compression, GhosttyEngine, Memory};
+pub use ghostty::{ClipboardSource, Compression, GhosttyEngine, Memory};
 pub use graphics::ImageUpload;
 use slopty_proto::terminal::{ColorOverrides, PointerShape, Progress, TermSize};
 

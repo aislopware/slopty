@@ -2246,4 +2246,93 @@ done"#
         session.close();
         let _killed = child.kill().await;
     }
+
+    /// A program's OSC 52 read is answered from the clipboard the worker mirrors while a client
+    /// shares it, and empty before it shares, once it stops, and when the text is only
+    /// promised: the read never waits on the client, however long a promise would.
+    #[tokio::test]
+    async fn a_programs_clipboard_read_gets_the_text_only_while_it_is_shared() {
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        use slopty_core::WorkerId;
+        use slopty_input::pasteboard::Held;
+        use slopty_proto::transfer::{ClipEntry, ClipFormat, ClipType, Offer, Peer, Rep};
+        use slopty_worker::clip::{Clipboard, digest};
+
+        fn offer(generation: u64, text: &[u8], inline: bool) -> Offer {
+            let rep = Rep {
+                kind: ClipType::Format(ClipFormat::Text),
+                size: Some(text.len() as u64),
+                hash: Some(digest(text)),
+                inline: inline.then(|| text.to_vec()),
+            };
+            Offer {
+                origin: Peer::Client(ClientId::new()),
+                generation,
+                age_ms: 0,
+                concealed: false,
+                items: vec![ClipEntry { reps: vec![rep] }],
+            }
+        }
+
+        // Each read waits for its go file, so it is made after the clipboard is set for it,
+        // and prints what came back, still base64.
+        let script = r#"stty -echo -icanon
+for i in 1 2 3 4; do
+  while [ ! -e "$0/go$i" ]; do sleep 0.02; done
+  printf '\033]52;c;?\033\\'
+  IFS= read -r -d '\' a
+  b=${a#*;c;}
+  printf 'got%s[%s]\n' "$i" "${b%?}"
+done
+exec sleep 60"#;
+        let dir = tempfile::tempdir().unwrap();
+        let dir_arg = dir.path().to_str().unwrap();
+        let (session, mut child) = start(&["/bin/bash", "-c", script, dir_arg]);
+        let clip = Arc::new(Clipboard::waiting(
+            Held::default(),
+            Peer::Worker(WorkerId::new()),
+            Duration::from_secs(60),
+        ));
+        let fetches = Arc::new(parking_lot::Mutex::new(0_usize));
+        let counted = Arc::clone(&fetches);
+        let link = 1;
+        clip.attach(link, Arc::new(move |_| *counted.lock() += 1));
+        assert!(clip.offered(link, offer(1, b"client copy", true), Instant::now()));
+        assert!(clip.mirror(link));
+        session.share_clipboard(clip.reader()).unwrap();
+        // Handled in order: the reader is in place once the session answers this.
+        let _memory = session.memory().await.unwrap();
+        let (tx, mut rx) = viewer(256);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let go = |i: u32| std::fs::write(dir.path().join(format!("go{i}")), b"").unwrap();
+
+        go(1);
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("got1[")).await;
+        clip.watch(link, true);
+        go(2);
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("got2[")).await;
+        clip.watch(link, false);
+        go(3);
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("got3[")).await;
+        clip.watch(link, true);
+        assert!(clip.offered(link, offer(2, b"promised", false), Instant::now()));
+        assert!(clip.mirror(link));
+        let asked = Instant::now();
+        go(4);
+        let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("got4[")).await;
+        let waited = asked.elapsed();
+
+        let screen = text(&screen);
+        assert!(screen.contains("got1[]"), "not shared yet: {screen}");
+        // "client copy" in base64.
+        assert!(screen.contains("got2[Y2xpZW50IGNvcHk=]"), "shared: {screen}");
+        assert!(screen.contains("got3[]"), "sharing turned off: {screen}");
+        assert!(screen.contains("got4[]"), "only promised: {screen}");
+        assert!(waited < Duration::from_secs(5), "the promised read waited {waited:?}");
+        assert_eq!(*fetches.lock(), 0, "a read never asks the client");
+        session.close();
+        let _killed = child.kill().await;
+    }
 }

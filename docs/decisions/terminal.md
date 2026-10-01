@@ -328,7 +328,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `TermEvent::ClipboardReadRequest` / `TermRequest::ClipboardRead` pair (the client used to
   answer it with its clipboard, unprompted) is removed from the protocol so a future host
   cannot ask. Covered by `osc52_writes_to_the_system_clipboard_only` (standard, primary,
-  selection, `?`) and the `worker_term_clipboard_write` golden.
+  selection) and the `worker_term_clipboard_write` golden. Reads were since answered on the
+  worker, with no client asked (2026-10-02, "A program reads the clipboard over OSC 52 while it
+  is shared").
 
 - ✅ **A command block has a menu: copy the command, copy the output, run it again, select
   it — and the rows know where the command starts, protocol 28** (2026-09-12). Warp's
@@ -3103,3 +3105,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and `a_quiet_session_compresses_its_history` (a real shell's 20 000 lines); fork "Terminal vt
     formats compressed history without restoring it"; binding
     `memory_usage_grows_with_scrollback_and_compression_lowers_it`.
+
+- ✅ **A program reads the clipboard over OSC 52 while it is shared** (2026-10-02). A program
+  may read the clipboard exactly when a client shares its clipboard with the program's worker,
+  so the policy needs no prompt and no new setting. The worker answers on the spot from the
+  clipboard it already mirrors: on a Mac, its pasteboard sync; on Linux, the clipboard it holds.
+  When sharing is off, the read is denied, which OSC 52 answers with an empty value. Before this,
+  libghostty ignored a read, so a program that asked waited out its own timeout.
+  - **What is shared** (`Clipboard::shared_text`). A client's copy, mirrored onto the worker, is
+    readable only while that client watches the worker's clipboard. The worker's own copy is
+    readable while any client watches. A client's toggle tells the worker at once that it stopped
+    watching, so the next read is denied. A secret (concealed or transient) is never readable, on
+    either side. The text is capped at `MAX_OSC52_BYTES`, the bound a program's own copy has.
+  - **Never waits.** The read runs inside the engine's write on the session thread, so it takes
+    only what the worker holds in memory. That is a client's inline or already fetched text, or
+    what the poller read of the worker's own copy. It never reads the pasteboard, not even its
+    change count, which waits its turn behind any other read of it. Text the pasteboard only
+    promises answers empty rather than fetching it from the client, which could take
+    `PROVIDE_WAIT` (5 s). A copy made on the worker is readable once the poller sees it, within
+    50 ms while watched.
+  - **Wiring.** The engine answers reads from a source the session sets
+    (`GhosttyEngine::share_clipboard`). The worker hands every session, current and later, a reader
+    over its clipboard (`Worker::share_clipboard`, `Clipboard::reader`). The same callback answers
+    a Kitty clipboard read (OSC 5522) of `text/plain`, and a read of any other type is refused.
+  - **Kitty paste events.** Installing libghostty's read callback also turns on Kitty paste
+    events (mode 5522), which only `Terminal::paste` sends. The engine pastes through
+    `paste::encode`, so a program that sets the mode still gets an ordinary bracketed paste.
+    Kitty MIME paste, which comes next, takes this up.
+  - Tests: engine `a_read_with_nothing_shared_is_answered_empty`,
+    `a_read_is_answered_from_the_source_each_time`,
+    `only_the_standard_clipboard_within_bounds_is_read`, `a_kitty_read_gets_text_and_nothing_else`;
+    worker `a_program_reads_the_shared_text_only_while_it_is_shared`,
+    `a_read_of_promised_text_never_waits_or_fetches`, and
+    `a_programs_clipboard_read_gets_the_text_only_while_it_is_shared`. That last one runs a real
+    bash whose reads come before sharing, while shared, after sharing is turned off, and of
+    promised text, under a 60 s promise wait.
