@@ -29,6 +29,8 @@ pub mod actions {
         [
             /// Open `settings.toml` in the in-app editor.
             OpenSettings,
+            /// Open the settings on the Keyboard page: every command and its keys.
+            OpenKeyboardShortcuts,
         ]
     );
 }
@@ -195,6 +197,15 @@ pub const fn bell_alerts(settings: &Settings, window_active: bool) -> bool {
     settings.terminal.bell_alert && !window_active
 }
 
+/// Whether an agent needing the human should sound the alert and bounce the Dock.
+///
+/// As the settings say: by default only while the human is elsewhere (no window of ours
+/// active; in front, the tile, the inbox and the badge say it).
+#[must_use]
+pub const fn agent_alerts(settings: &Settings, window_active: bool) -> bool {
+    settings.terminal.agent_alert.sounds(window_active)
+}
+
 /// What the watcher compares between polls.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Stamp {
@@ -336,6 +347,17 @@ mod tests {
         assert_eq!(loaded.settings.font.mono_size, 20.0);
         assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
         assert_eq!(editable_text(&path), "[font]\nmono_size = 20\nkerning = true\n");
+    }
+
+    #[test]
+    fn an_agent_alerts_only_in_the_background_and_when_asked() {
+        let mut s = Settings::default();
+        assert!(agent_alerts(&s, false));
+        assert!(!agent_alerts(&s, true), "in front of the window the tile says it");
+        s.terminal.agent_alert = slopty_settings::AgentAlert::Never;
+        assert!(!agent_alerts(&s, false), "never: the banner and the inbox only");
+        s.terminal.agent_alert = slopty_settings::AgentAlert::Always;
+        assert!(agent_alerts(&s, true), "always: in front too");
     }
 
     #[test]

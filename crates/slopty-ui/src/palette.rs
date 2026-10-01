@@ -957,13 +957,15 @@ impl PaletteItem {
 
     /// What the right edge says, and the status whose tone it takes (`None`: muted).
     ///
-    /// A tile says its status word while it is not idle, so a scan down the right edge reads
-    /// what is working, done or waiting; otherwise how long it has run, once that is past a
-    /// minute ("now" on every fresh tile is noise). Anything else says its keys or readout.
+    /// A tile says its status word while something happens there, so a scan down the right
+    /// edge reads what needs you, failed, works or waits; a finish not yet seen is the leading
+    /// slot's accent dot, and rest is nothing. Otherwise how long it has run, once that is
+    /// past a minute ("now" on every fresh tile is noise). Anything else says its keys or
+    /// readout.
     #[must_use]
     pub fn trailing(&self) -> Option<(String, Option<Status>)> {
         if self.section == Section::Tiles
-            && let Some(status) = self.status.filter(|s| *s != Status::Idle)
+            && let Some(status) = self.status.filter(|s| !matches!(s, Status::Idle | Status::Done))
         {
             return Some((status.label().to_owned(), Some(status)));
         }
@@ -1365,6 +1367,10 @@ pub struct CommandPalette {
     sheet_below: f32,
     /// The last frame drew it as a phone's sheet.
     sheet: bool,
+    /// Opened by the pointer, so it fades in. What the keyboard opens, and a palette nobody
+    /// said was the pointer's, arrives in its first frame whole: frame one is the frame a
+    /// draw from scratch gives.
+    fades_in: bool,
     /// It was dismissed or chose, and draws its way out until its owner drops it.
     leaving: bool,
     /// The fill under the selected line.
@@ -1458,6 +1464,7 @@ impl CommandPalette {
             brief: false,
             sheet_below: 0.0,
             sheet: false,
+            fades_in: false,
             leaving: false,
             plate: Plate::default(),
             theme,
@@ -1472,6 +1479,18 @@ impl CommandPalette {
     pub fn set_brief(&mut self, brief: bool, cx: &App) {
         self.brief = brief;
         self.refresh(cx);
+    }
+
+    /// Whether it fades in as it arrives: opened by the pointer. Opened by a key it arrives
+    /// whole.
+    pub const fn set_fades_in(&mut self, fades_in: bool) {
+        self.fades_in = fades_in;
+    }
+
+    /// Whether it fades in as it arrives.
+    #[cfg(test)]
+    pub(crate) const fn fades_in(&self) -> bool {
+        self.fades_in
     }
 
     /// Show as a sheet from the top in a window narrower than `width`.
@@ -1912,7 +1931,12 @@ impl Render for CommandPalette {
         let (panel, scrim) = if self.leaving {
             (leave_panel(panel, sheet, cx), scrim.map(|scrim| leave_scrim(scrim, cx)))
         } else {
-            (enter_panel(panel, sheet, &theme, cx), scrim.map(|scrim| enter_scrim(scrim, cx)))
+            let panel = if self.fades_in || sheet {
+                enter_panel(panel, sheet, &theme, cx)
+            } else {
+                panel.into_any_element()
+            };
+            (panel, scrim.map(|scrim| enter_scrim(scrim, cx)))
         };
         let root = backdrop.id("palette-backdrop").children(scrim).child(panel);
         let root = if self.leaving {
@@ -2166,7 +2190,10 @@ mod tests {
     /// idle) did not match the same state drawn from scratch.
     #[gpui::test]
     fn a_long_list_fades_at_its_foot_in_its_first_frame(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_reduce_motion(true);
+        });
         let items: Vec<PaletteItem> = (0..300)
             .map(|i| PaletteItem::session(&format!("tile {i}"), SessionId::new()))
             .collect();
@@ -2490,8 +2517,10 @@ mod tests {
         assert_eq!(tile.trailing(), Some(("12m".to_owned(), None)));
         let working = tile.clone().with_status(Some(Status::Working));
         assert_eq!(working.trailing(), Some(("Working".to_owned(), Some(Status::Working))));
-        let idle = tile.with_status(Some(Status::Idle));
+        let idle = tile.clone().with_status(Some(Status::Idle));
         assert_eq!(idle.trailing(), Some(("12m".to_owned(), None)), "idle: the age");
+        let done = tile.with_status(Some(Status::Done));
+        assert_eq!(done.trailing(), Some(("12m".to_owned(), None)), "done: the dot, then the age");
         let fresh = PaletteItem::session("zsh", SessionId::new()).aged(minutes(0));
         assert_eq!(fresh.trailing(), None, "no age under a minute");
         let note = PaletteItem::item("Release", IconName::StickyNote, ItemId::new())

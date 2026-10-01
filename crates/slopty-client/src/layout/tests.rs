@@ -1643,6 +1643,7 @@ fn restore_cleans_up_whatever_it_is_given() {
         ],
         active: 0,
         navigator: Navigator { shown: false, width: f32::NAN, lens: NavLens::Workers },
+        ..Saved::default()
     };
     let r = Layout::restore(saved, LayoutConfig::default());
     assert_eq!(shape(&r), vec![vec![vec![t(1), t(2)], vec![t(3)]], vec![vec![t(4)]], vec![]]);
@@ -1767,4 +1768,30 @@ fn the_view_never_rests_past_the_last_column() {
     l.focus_column_left();
     l.remove(t(4));
     near(strip_right(&l), 1280.0);
+}
+
+/// A window's frame is kept to open it there again only when it can be: finite, and not a
+/// sliver narrower or shorter than [`WindowFrame::MIN`].
+#[test]
+fn a_window_frame_is_kept_only_when_it_can_be_opened_again() {
+    let frame = WindowFrame {
+        display: Some("37D8832A-2D66-02CA-B9F7-8F30A301B230".to_owned()),
+        x: 40.0,
+        y: 30.0,
+        width: 1280.0,
+        height: 800.0,
+        fullscreen: false,
+    };
+    assert!(frame.sane());
+    for bad in [
+        WindowFrame { x: f32::NAN, ..frame.clone() },
+        WindowFrame { width: f32::INFINITY, ..frame.clone() },
+        WindowFrame { height: WindowFrame::MIN - 1.0, ..frame.clone() },
+    ] {
+        assert!(!bad.sane(), "{bad:?}");
+    }
+    let saved = Saved { window: Some(frame.clone()), ..Saved::default() };
+    let json = serde_json::to_string(&saved).expect("serialises");
+    let back: Saved = serde_json::from_str(&json).expect("parses");
+    assert_eq!(back.window, Some(frame), "round-trips through layout.json");
 }

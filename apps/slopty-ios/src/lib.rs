@@ -159,7 +159,7 @@ fn run() {
     let handle = Box::leak(Box::new(runtime)).handle().clone();
     ffi::set_app_callback(Box::new(move |cx| {
         gpui_kit::init(cx);
-        if let Err(e) = slopty_app::open_workspace(cx, handle, WindowOptions::default()) {
+        if let Err(e) = slopty_app::open_workspace(cx, handle, |_| WindowOptions::default()) {
             tracing::error!(error = %e, "open workspace");
         }
     }));

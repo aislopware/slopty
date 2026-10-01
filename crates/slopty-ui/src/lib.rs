@@ -73,6 +73,7 @@ pub mod settings_editor;
 pub mod settings_form;
 pub mod shown;
 pub mod terminal;
+pub mod window_frame;
 #[expect(
     unreachable_pub,
     reason = "the streaming work owns `screen` and the tile code; narrowed once it lands"

@@ -247,7 +247,7 @@ fn taking_one_tile_back_leaves_the_other_offer(cx: &mut TestAppContext) {
 /// shows the tile empty or saying the worker is away. Every frame is the one drawn from scratch.
 #[gpui::test]
 fn a_link_in_doubt_sets_its_tiles_back_until_it_is_live(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let [(shell, tile), ..] = three_shells(&view, cx, &studio);
     let fresh = |cx: &mut VisualTestContext, step: &str| {

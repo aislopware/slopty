@@ -356,7 +356,7 @@ async fn a_workspace_of_columns_in_both_themes() {
         })
         .await
         .unwrap();
-    assert_eq!(dump.workspace, "Workspace 1", "a shell at home leaves the number");
+    assert_eq!(dump.workspace, "e2e-worker", "a shell at home leaves the worker's name");
     golden(drv, &dir, "workspace").await;
 
     // A desktop-sized window leaves the strip its room, so the navigator docks beside it.

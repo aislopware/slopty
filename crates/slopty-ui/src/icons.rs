@@ -54,6 +54,7 @@ gpui_kit::assets::icon_assets!(
         Circle,
         CircleAlert,
         CircleCheck,
+        CircleDashed,
         CircleDot,
         CirclePause,
         CircleX,
@@ -95,7 +96,6 @@ gpui_kit::assets::icon_assets!(
         ListFilter,
         ListTodo,
         ListTree,
-        Loader,
         LoaderCircle,
         Lock,
         Map,
@@ -137,6 +137,8 @@ gpui_kit::assets::icon_assets!(
         SquareTerminal,
         StickyNote,
         Terminal,
+        TextCursorInput,
+        TextSearch,
         Type,
         Undo2,
         UnfoldHorizontal,
@@ -197,14 +199,18 @@ pub fn icon(theme: &Theme, name: IconName, size: IconSize, color: Hsla) -> Svg {
 /// The one vocabulary for how a thing is doing, wherever it is shown: a tile's header, a
 /// navigator row, the palette, a toast. Each state has one icon and one tone, so a glance
 /// reads the same everywhere.
+///
+/// Colour goes only to what needs the person: *Needs you* in `warn`, *Failed* in `error`, and
+/// the accent dot of a finish not yet seen. Busy states recede into the muted tone, and so does
+/// a worker out of reach, so `warn` means "needs you" and nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
     /// Nothing to say: a shell at its prompt, an agent at rest.
     Idle,
     /// Busy on its own: an agent thinking or running a tool, a remote picture on its way.
     Working,
-    /// A shell's command running for a while, or an agent's turn paused on work in the
-    /// background: busy, but nothing to watch for. The neutral tone and the calm mark.
+    /// *Waiting*: a shell's command running for a while, or an agent's turn paused on work in
+    /// the background. Busy, but nothing to watch for: the muted tone and the calm ring.
     Running,
     /// Waiting on the human: a permission, a question, an elicitation.
     NeedsYou,
@@ -237,7 +243,7 @@ impl Status {
         match self {
             Self::Idle => IconName::Circle,
             Self::Working => IconName::LoaderCircle,
-            Self::Running => IconName::Loader,
+            Self::Running => IconName::CircleDashed,
             Self::NeedsYou => IconName::CircleAlert,
             Self::Done => IconName::CircleCheck,
             Self::Failed => IconName::CircleX,
@@ -250,11 +256,9 @@ impl Status {
     pub const fn tone(self, theme: &Theme) -> Rgb {
         let s = &theme.surfaces;
         match self {
-            Self::Idle => s.text_muted,
-            Self::Working => s.accent,
-            Self::Running => s.text_secondary,
-            Self::NeedsYou | Self::Away => s.warn,
-            Self::Done => s.success,
+            Self::Idle | Self::Working | Self::Running | Self::Away => s.text_muted,
+            Self::NeedsYou => s.warn,
+            Self::Done => s.accent,
             Self::Failed => s.error,
         }
     }
@@ -265,7 +269,7 @@ impl Status {
         match self {
             Self::Idle => "Idle",
             Self::Working => "Working",
-            Self::Running => "Running",
+            Self::Running => "Waiting",
             Self::NeedsYou => "Needs you",
             Self::Done => "Done",
             Self::Failed => "Failed",
@@ -298,13 +302,27 @@ pub fn status_mark(theme: &Theme, status: Option<Status>, k: f32) -> Stateful<Di
     }
 }
 
-/// `status`'s icon, `side` square, in `color`. [`Status::Working`]'s turns ([`spin_step`]);
-/// [`Status::Running`]'s steps once a second ([`calm_step`]).
+/// `status`'s icon, `side` square, in `color`.
+///
+/// [`Status::Working`]'s turns ([`spin_step`]); [`Status::Running`]'s steps once a second
+/// ([`calm_step`]); [`Status::Done`] is a dot, the navigator's unseen one at that size, centred
+/// where an icon would be.
 #[must_use]
 pub fn status_icon(theme: &Theme, status: Status, side: Pixels, color: Hsla) -> AnyElement {
     match status {
         Status::Working => Spinner { side, color, calm: false, inner: None }.into_any_element(),
         Status::Running => Spinner { side, color, calm: true, inner: None }.into_any_element(),
+        Status::Done => {
+            let dot = side * ((theme.spacing.xs + theme.spacing.xxs) / theme.typography.icon());
+            div()
+                .flex_none()
+                .size(side)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(div().size(dot).rounded_full().bg(color))
+                .into_any_element()
+        }
         _ => icon(theme, status.icon(), IconSize::Inline, color).size(side).into_any_element(),
     }
 }

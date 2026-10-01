@@ -199,7 +199,7 @@ impl WorkspaceView {
         self.open_session_on(worker, None, Vec::new(), None, cx);
     }
 
-    /// "Open a file": the palette, its field ready for a path on the focused tile's worker.
+    /// "Open file…": the palette, its field ready for a path on the focused tile's worker.
     pub fn open_file_palette(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
             return;
@@ -306,9 +306,12 @@ impl WorkspaceView {
         self.nav.open = false;
         let chords = self.hardware_keyboard;
         let phone_below = self.layout.config().phone_below;
+        // What the keyboard opens arrives whole; the pointer's open fades in.
+        let pointer = !window.last_input_was_keyboard();
         palette.update(cx, |p, _| {
             p.set_chords(chords);
             p.set_sheet_below(phone_below);
+            p.set_fades_in(pointer);
         });
         cx.subscribe(&palette, |this, palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {

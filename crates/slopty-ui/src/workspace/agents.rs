@@ -240,9 +240,15 @@ impl WorkspaceView {
             self.agents.remove(&session);
         } else {
             let attention = event.attention;
+            let asks = Status::of_agent(&event) == Some(Status::NeedsYou)
+                && self.agents.get(&session).and_then(Status::of_agent) != Some(Status::NeedsYou);
+            let word = asks.then(|| agent_status_word(&event).to_lowercase());
             self.agents.insert(session, event);
             if attention {
                 cx.emit(WorkspaceEvent::Attention(session));
+            }
+            if let (Some(word), Some(tile)) = (word, self.tile_of_session(session)) {
+                self.attention_toast(tile, Status::NeedsYou, &word, cx);
             }
         }
         self.update_awake(cx);
@@ -467,21 +473,56 @@ impl WorkspaceView {
         cx.emit(WorkspaceEvent::NeedsYou(self.needs_you_count()));
     }
 
-    /// ⌘⇧A: reveal and focus the next terminal whose agent is waiting on the human, cycling
-    /// from the focused tile.
+    /// What wants the person, on every worker, in the ladder's order: the agents that need
+    /// them, then the finishes not yet looked at that failed, then the rest of those.
+    pub(super) fn attention_ladder(&self) -> Vec<Waiting> {
+        let finished = |failed: bool| {
+            let mut out: Vec<Waiting> = self
+                .finished
+                .iter()
+                .filter(|(session, done)| {
+                    !self.snoozed(**session) && done.exit.is_some_and(|e| e != 0) == failed
+                })
+                .filter_map(|(session, _)| {
+                    let tile = self.tile_of_session(*session)?;
+                    Some(Waiting { worker: tile.worker, tile: Some(tile), session: *session })
+                })
+                .collect();
+            out.sort_by_key(|w| {
+                w.tile
+                    .and_then(|t| self.layout.position(t))
+                    .map(|p| (p.workspace, p.column, p.tile))
+            });
+            out
+        };
+        let mut ladder = self.needs_you();
+        ladder.extend(finished(true));
+        ladder.extend(finished(false));
+        ladder
+    }
+
+    /// ⌘⇧A: reveal and focus the next thing on the attention ladder, on whichever worker:
+    /// the agents that need the person first, then what failed, then what finished unseen,
+    /// cycling from the focused tile.
     pub fn next_attention(
         &mut self,
         _: &NextAttention,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let waiting = self.needs_you();
-        let Some(first) = waiting.first() else { return };
-        let next = self
-            .focused()
-            .and_then(|focused| waiting.iter().position(|w| w.tile == Some(focused)))
-            .and_then(|i| waiting.iter().cycle().nth(i.saturating_add(1)))
-            .unwrap_or(first);
+        let ladder = self.attention_ladder();
+        if ladder.is_empty() {
+            return;
+        }
+        // From the focused rung, the next; from a finish the last step looked at (and so took
+        // off the ladder), the one that took its place.
+        let at = match self.focused().and_then(|f| ladder.iter().position(|w| w.tile == Some(f))) {
+            Some(i) => i.saturating_add(1),
+            None => self.attention_at.unwrap_or(0),
+        };
+        let at = if at < ladder.len() { at } else { 0 };
+        self.attention_at = Some(at);
+        let Some(next) = ladder.get(at).copied() else { return };
         match next.tile {
             Some(_) => self.reveal_session(next.session, cx),
             None => self.show_untiled(next.worker, next.session, cx),
@@ -514,17 +555,25 @@ impl WorkspaceView {
 
     /// A shell command ended in `session`. Long enough, and not watched (on a tile other than
     /// the focused one, or with the app away), it earns a header badge and an inbox row, cleared
-    /// when the tile is focused.
+    /// when the tile is focused; off screen with the app in front, a word in the corner too.
     pub fn command_finished(&mut self, session: SessionId, done: Finished, cx: &mut Context<Self>) {
-        let watched = self.app_active
-            && self.tile_of_session(session).is_some_and(|t| self.focused() == Some(t));
+        let tile = self.tile_of_session(session);
+        let watched = self.app_active && tile.is_some_and(|t| self.focused() == Some(t));
         let slow = done.elapsed >= self.slow_command;
         tracing::info!(%session, watched, slow, elapsed = ?done.elapsed, "command finished");
         if watched || !slow {
             return;
         }
+        let (status, what) = match done.exit {
+            Some(exit) if exit != 0 => (Status::Failed, "failed"),
+            _ => (Status::Done, "finished"),
+        };
         self.log_finished(session, &done);
         self.finished.insert(session, done);
+        self.wake_snoozed(session);
+        if let Some(tile) = tile {
+            self.attention_toast(tile, status, what, cx);
+        }
         cx.notify();
     }
 
@@ -561,9 +610,11 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let k = chrome.k;
-        // The pill's tone is its status mark's; busy states (thinking, a tool) share the
-        // accent, and the label says which.
-        let status = Status::of_agent(agent).filter(|s| *s != Status::Idle)?;
+        // The pill's tone is its status mark's: busy states (thinking, a tool) recede into the
+        // muted tone, and the label says which. A finish is the leading slot's accent dot, and
+        // rest is nothing, so neither wears a pill.
+        let status =
+            Status::of_agent(agent).filter(|s| !matches!(s, Status::Idle | Status::Done))?;
         let (full, color) = (agent_status_text(agent), status.tone(theme));
         // The word alone: what is asked is the navigator's line and the pointer's, not a
         // second sentence in every header (a screen reader still hears it in full).

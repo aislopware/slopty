@@ -19,6 +19,7 @@ use gpui::{
     Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowHandle,
     WindowOptions, div, px, size,
 };
+use slopty_client::layout::WindowFrame;
 use slopty_core::ItemId;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
@@ -50,6 +51,9 @@ const SCREEN_SHARE: f32 = 0.9;
 #[derive(Default)]
 pub(super) struct PopOuts {
     windows: Vec<(ItemId, WindowHandle<PopOutView>)>,
+    /// Where each window stands, as it last moved: saved with the layout, so a relaunch puts
+    /// the tile back out there.
+    frames: Vec<(ItemId, WindowFrame)>,
     /// The tile whose window has the keyboard.
     active: Option<ItemId>,
 }
@@ -58,6 +62,7 @@ impl std::fmt::Debug for PopOuts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PopOuts")
             .field("items", &self.windows.iter().map(|(item, _)| *item).collect::<Vec<_>>())
+            .field("frames", &self.frames)
             .field("active", &self.active)
             .finish()
     }
@@ -79,11 +84,32 @@ impl PopOuts {
         self.windows.iter().find(|(held, _)| *held == item).map(|(_, handle)| (*handle).into())
     }
 
+    /// Where each window stands, by its tile's item.
+    pub(super) fn frames(&self) -> impl Iterator<Item = (ItemId, &WindowFrame)> {
+        self.frames.iter().map(|(item, frame)| (*item, frame))
+    }
+
+    /// `item`'s window stands at `frame` now; whether that moved it.
+    fn moved_to(&mut self, item: ItemId, frame: WindowFrame) -> bool {
+        match self.frames.iter_mut().find(|(held, _)| *held == item) {
+            Some((_, was)) if *was == frame => false,
+            Some((_, was)) => {
+                *was = frame;
+                true
+            }
+            None => {
+                self.frames.push((item, frame));
+                true
+            }
+        }
+    }
+
     /// `item` is no longer shown in a window of its own; its window, if it was.
     fn forget(&mut self, item: ItemId) -> Option<WindowHandle<PopOutView>> {
         if self.active == Some(item) {
             self.active = None;
         }
+        self.frames.retain(|(held, _)| *held != item);
         let at = self.windows.iter().position(|(held, _)| *held == item)?;
         Some(self.windows.remove(at).1)
     }
@@ -145,14 +171,28 @@ impl WorkspaceView {
             Size { width: f32::from(bounds.size.width), height: f32::from(bounds.size.height) }
         });
         let opened = opening_size(native, window.scale_factor(), screen);
-        let bounds = Bounds::centered(
-            display.map(|d| d.id()),
-            size(px(opened.width), px(opened.height)),
-            cx,
-        );
+        let display = display.map(|d| d.id());
+        let bounds = Bounds::centered(display, size(px(opened.width), px(opened.height)), cx);
+        self.pop_out_at(item, (WindowBounds::Windowed(bounds), display), cx);
+    }
+
+    /// Show `item`'s picture in a window of its own at `placed`: its bounds, on its display.
+    pub(super) fn pop_out_at(
+        &mut self,
+        item: ItemId,
+        (bounds, display_id): (WindowBounds, Option<gpui::DisplayId>),
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_pop_out(item) || self.popouts.holds(item) {
+            return;
+        }
+        let Some(view) = self.screens.get(&item).cloned() else { return };
+        let native = view.read(cx).native();
+        let opened = bounds.get_bounds().size;
         let title = self.item_by_id(item).map(|i| self.tile_title(&i)).unwrap_or_default();
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_bounds: Some(bounds),
+            display_id,
             titlebar: Some(TitlebarOptions {
                 title: Some(title.into()),
                 appears_transparent: false,
@@ -164,7 +204,7 @@ impl WorkspaceView {
         };
         let workspace = cx.entity();
         let theme = self.theme.clone();
-        let points_per_px = opened.width / native.0.max(1.0);
+        let points_per_px = f32::from(opened.width) / native.0.max(1.0);
         let opened = cx.open_window(options, |window, cx| {
             let workspace = workspace.clone();
             window.on_window_should_close(cx, {
@@ -182,6 +222,12 @@ impl WorkspaceView {
             Ok(handle) => {
                 self.popouts.windows.push((item, handle));
                 self.popouts.active = Some(item);
+                let frame =
+                    handle.update(cx, |_view, window, cx| crate::window_frame::of(window, cx));
+                if let Ok(Some(frame)) = frame {
+                    self.popouts.moved_to(item, frame);
+                }
+                self.layout_touched(cx);
                 cx.notify();
             }
             Err(e) => tracing::warn!(error = %e, "a tile's own window"),
@@ -193,13 +239,25 @@ impl WorkspaceView {
         let Some(handle) = self.popouts.forget(item) else { return };
         let _gone = handle.update(cx, |_view, window, _cx| window.remove_window());
         self.go_to(item, cx);
+        self.layout_touched(cx);
         cx.notify();
     }
 
     /// `item`'s window was closed: its picture goes back to its tile.
     fn popped_closed(&mut self, item: ItemId, cx: &mut Context<Self>) {
         if self.popouts.forget(item).is_some() {
+            self.layout_touched(cx);
             cx.notify();
+        }
+    }
+
+    /// `item`'s window moved or took another size: where it stands is saved.
+    fn popped_moved(&mut self, item: ItemId, frame: Option<WindowFrame>, cx: &Context<Self>) {
+        if let Some(frame) = frame
+            && self.popouts.holds(item)
+            && self.popouts.moved_to(item, frame)
+        {
+            self.layout_touched(cx);
         }
     }
 
@@ -352,8 +410,11 @@ impl PopOutView {
         }
     }
 
-    /// The window took a new size: once it holds it, the remote window is asked for it.
-    fn window_resized(&mut self, window: &Window, cx: &Context<Self>) {
+    /// The window moved or took a new size: where it stands is saved, and once it holds a
+    /// new size the remote window is asked for it.
+    fn window_resized(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let (item, frame) = (self.item, crate::window_frame::of(window, cx));
+        let _ws = self.workspace.update(cx, |ws, cx| ws.popped_moved(item, frame, cx));
         let viewport = window.viewport_size();
         let per_point = 1.0 / self.points_per_px.max(f32::EPSILON);
         let px = |points: f32| {
@@ -362,7 +423,6 @@ impl PopOutView {
             v
         };
         let pixels = (px(f32::from(viewport.width)), px(f32::from(viewport.height)));
-        let item = self.item;
         self.settle = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(RESIZE_SETTLE).await;
             let _gone = this.update(cx, |this, cx| {

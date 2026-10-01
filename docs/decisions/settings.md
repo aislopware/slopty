@@ -159,3 +159,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (keymap), `recording_takes_only_a_chord_the_app_can_own`,
   `a_folders_command_takes_a_key_alone` (the form), `the_menu_bar_follows_a_rebinding`,
   `a_broken_file_keeps_the_keys` (slopty-app).
+
+- ✅ **`[terminal] agent_alert`: an agent's alert sounds only from the background** (2026-10-01).
+  An agent that needs the human (a permission, a question, done) sounds the alert sound and
+  bounces the Dock icon only while no Slopty window is active, as Mail and Messages behave. In
+  front, the tile's badge, the inbox and the status bar already say it. The setting (default
+  on) turns it off altogether, beside `bell_alert` under Behaviour
+  (`slopty_app::settings::agent_alerts`). Test: `an_agent_alerts_only_in_the_background_and_when_asked`.
+  *Amended 2026-10-01 (GUI-first plan §3 item 8):* the switch is three ways, `"never"`,
+  `"hidden"` (the default, the rule above) and `"always"`, which sounds in front of the window
+  too for a person who works with Slopty behind a terminal of its own. A `true` or `false` left
+  in a file is an error, as any other value the field does not take (`AgentAlert::sounds`).
+
+- ✅ **`[clipboard] sync` and `[clipboard.workers]`: the clipboard is shared per worker**
+  (2026-10-01). `sync` (default on) shares this device's clipboard with every worker.
+  `[clipboard.workers]` maps a worker's name to on or off, and wins over `sync` for that
+  worker. The form shows `sync` under Input ▸ Clipboard; the map is an open table, edited in
+  the file. For a worker the clipboard is not shared with:
+  - The worker is told at once that its clipboard is no longer wanted (`Watch(false)`).
+  - Its offers are dropped, so its copies stay its own.
+  - Its fetch of this device's clipboard is answered `Unavailable`.
+  - A paste into its tiles carries nothing ahead of the keys, so ⌘V there pastes the
+    worker's own clipboard, and a shell pastes this device's text as typing.
+  The paste hooks read the set as they run, so a change holds for tiles opened before it.
+  Tests: `the_clipboard_is_shared_by_default_and_per_worker_by_name` (slopty-settings) and
+  `workspace::tests::remote::a_worker_the_clipboard_is_not_shared_with_neither_hears_nor_gives_it`.

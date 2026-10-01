@@ -397,6 +397,54 @@ fn the_worker_clipboard_is_watched_only_while_its_tile_has_the_keyboard(cx: &mut
     assert_eq!(view.read_with(cx, |v, _| v.watching()), [studio.key]);
 }
 
+/// With the clipboard not shared with a worker, by the settings' per-worker switch, the worker
+/// is told at once that its clipboard is no longer wanted, its copies land nowhere here, a fetch
+/// of this client's clipboard is refused, and a paste carries nothing of it. Shared again, it
+/// is wanted again and hears this clipboard.
+#[gpui::test]
+fn a_worker_the_clipboard_is_not_shared_with_neither_hears_nor_gives_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (mut studio, _calls, board) = connect_remote(&view, cx);
+    board.copy(&[(TEXT_UTI, b"copied here")]);
+    let shell = SessionId::new();
+    opens(&view, cx, &studio, shell, studio.me, 1);
+    let mine = offers(&studio.drain()).pop().expect("announced on focus");
+    let share = |cx: &mut VisualTestContext, on: bool| {
+        let mut sharing = slopty_settings::ClipboardSettings::default();
+        sharing.workers.insert("studio".to_owned(), on);
+        view.update_in(cx, |v, _window, cx| v.set_clipboard_sharing(sharing, cx));
+        cx.run_until_parked();
+    };
+
+    share(cx, false);
+    let sent = studio.drain();
+    assert_eq!(watches(&sent), [false], "no longer wanted: {sent:?}");
+    assert!(offers(&sent).is_empty());
+    let key = studio.key;
+    let hi = Rep { inline: Some(b"from the worker".to_vec()), ..listed(ClipFormat::Text, b"x") };
+    let theirs = worker_offer(3, vec![entry(vec![hi])]);
+    view.update_in(cx, |v, _window, cx| v.clip_message(key, ClipMsg::Offer(theirs), cx));
+    assert_eq!(board.data(TEXT_UTI).as_deref(), Some(&b"copied here"[..]), "theirs stays theirs");
+    let rep = mine.rep_ref(0, ClipType::Format(ClipFormat::Text));
+    let fetch = ClipMsg::Fetch { rep, max: None, urgent: true };
+    view.update_in(cx, |v, _window, cx| v.clip_message(key, fetch, cx));
+    let refused = |m: &ClientMsg| matches!(m, ClientMsg::Clip(ClipMsg::Unavailable { .. }));
+    let sent = studio.drain();
+    assert!(sent.iter().any(refused), "mine is not handed over: {sent:?}");
+    let hook = view.read_with(cx, |v, _| v.paste_hook(key)).expect("a remote tile");
+    let ahead = hook();
+    assert!(ahead.offer.is_none() && ahead.files.is_none(), "a paste carries none of it");
+    board.copy(&[(TEXT_UTI, b"copied again")]);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(offers(&studio.drain()).is_empty(), "nor does a new copy");
+
+    share(cx, true);
+    let sent = studio.drain();
+    assert_eq!(watches(&sent), [true], "wanted again");
+    assert_eq!(offers(&sent).len(), 1, "and it hears this clipboard: {sent:?}");
+}
+
 /// Where reading the clipboard asks the person first (iOS), a tile taking the keyboard reads
 /// nothing of it: the worker's clipboard still comes here, and this one goes to the worker only
 /// when a paste into its window reads it.
@@ -967,7 +1015,7 @@ fn a_drops_landing_goes_once_nothing_uploads_from_it(cx: &mut TestAppContext) {
 /// and so is the chip of a file dropped on the face.
 #[gpui::test]
 fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let (studio, _calls, _board) = connect_remote(&view, cx);
     let session = SessionId::new();
     let tile = opens(&view, cx, &studio, session, studio.me, 1);

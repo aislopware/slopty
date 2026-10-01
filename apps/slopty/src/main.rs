@@ -34,8 +34,15 @@ use actions::{Hide, HideOthers, Quit, ShowAll};
 
 /// The application menu. Items name the same actions the key bindings do, so the shortcuts
 /// shown next to them come from the keymap in effect whenever the menu is built.
+///
+/// The Edit menu names the text fields' own actions (gpui-kit's), which every field answers:
+/// the editors, the composer and the settings' search, and the terminal as its own. Cut, Copy,
+/// Paste and Select All also go down the responder chain as AppKit's selectors, so a web
+/// page's view answers them too. An item nothing focused answers is greyed, as macOS greys it.
 fn menus() -> Vec<Menu> {
-    use slopty_ui::terminal::{Copy, Find, FindNext, FindPrev, Paste};
+    use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+    use slopty_app::{Minimize, OpenHelp, ShowWindow, Zoom};
+    use slopty_ui::terminal::{Find, FindNext, FindPrev};
     use slopty_ui::workspace::{
         AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
         FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FontLarger, FontReset, FontSmaller,
@@ -67,8 +74,13 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Undo Close", UndoClose),
         ]),
         Menu::new("Edit").items([
+            MenuItem::os_action("Undo", Undo, OsAction::Undo),
+            MenuItem::os_action("Redo", Redo, OsAction::Redo),
+            MenuItem::separator(),
+            MenuItem::os_action("Cut", Cut, OsAction::Cut),
             MenuItem::os_action("Copy", Copy, OsAction::Copy),
             MenuItem::os_action("Paste", Paste, OsAction::Paste),
+            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
             MenuItem::separator(),
             MenuItem::action("Find…", Find),
             MenuItem::action("Find Next", FindNext),
@@ -104,9 +116,36 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Center Column", CenterColumn),
             MenuItem::action("Tabbed Column", ToggleTabbed),
             MenuItem::separator(),
-            MenuItem::action("Next Agent Needing You", NextAttention),
+            MenuItem::action("Next Thing Needing You", NextAttention),
+        ]),
+        // Named "Window", AppKit lists the open windows under these and adds its own tiling.
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", Minimize),
+            MenuItem::action("Zoom", Zoom),
+            MenuItem::separator(),
+            MenuItem::action("Slopty", ShowWindow),
+        ]),
+        // Named "Help", AppKit puts its search of the menus at the top.
+        Menu::new("Help").items([
+            MenuItem::action("Slopty Help", OpenHelp),
+            MenuItem::action("Keyboard Shortcuts", slopty_app::OpenKeyboardShortcuts),
         ]),
     ]
+}
+
+/// The main window's options at launch and whenever it opens again: 1280 × 800 in the middle
+/// of the main screen, unless the layout kept where it last stood.
+fn window_options(cx: &gpui::App) -> WindowOptions {
+    let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(gpui::TitlebarOptions {
+            title: Some("Slopty".into()),
+            appears_transparent: true,
+            traffic_light_position: Some(gpui::point(px(12.0), px(12.0))),
+        }),
+        ..Default::default()
+    }
 }
 
 fn main() -> Result<()> {
@@ -128,7 +167,10 @@ fn main() -> Result<()> {
     // window is covered and the direct path would be abandoned.
     let _activity = slopty_platform::Activity::latency_critical("Slopty remote session");
 
-    gpui_kit::application().with_assets(slopty_ui::icons::Assets).run(move |cx| {
+    let app = gpui_kit::application().with_assets(slopty_ui::icons::Assets);
+    // A click on the Dock icon brings the window back after it was closed.
+    app.on_reopen(slopty_app::show_main_window);
+    app.run(move |cx| {
         gpui_kit::init(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &Hide, cx| cx.hide());
@@ -139,17 +181,7 @@ fn main() -> Result<()> {
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("cmd-alt-h", HideOthers, None),
         ]);
-        let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(gpui::TitlebarOptions {
-                title: Some("Slopty".into()),
-                appears_transparent: true,
-                traffic_light_position: Some(gpui::point(px(12.0), px(12.0))),
-            }),
-            ..Default::default()
-        };
-        if let Err(e) = slopty_app::open_workspace(cx, handle, options) {
+        if let Err(e) = slopty_app::open_workspace(cx, handle, window_options) {
             tracing::error!(error = %e, "open window");
             cx.quit();
             return;

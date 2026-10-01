@@ -83,8 +83,9 @@ mod tests {
                     && d.item("terminal").is_some()
                     && d.focus.as_deref() == Some("terminal")
                     && d.terminals.iter().any(|t| t.rows.iter().any(|r| !r.is_empty()))
-                    // The shell starts in the stack's private home, so the number stays.
-                    && d.workspace == "Workspace 1"
+                    // The shell starts in the stack's private home, which names nothing, so
+                    // the workspace takes its worker's name.
+                    && d.workspace == "e2e-worker"
             })
             .await
             .unwrap();
@@ -121,7 +122,7 @@ mod tests {
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
         // A lone workspace is its name, not a tab to press.
         assert!(
-            dump.a11y_node("Heading", Some("Workspace 1, 1 tile")).is_some(),
+            dump.a11y_node("Heading", Some("e2e-worker, 1 tile")).is_some(),
             "{:#?}",
             dump.a11y
         );

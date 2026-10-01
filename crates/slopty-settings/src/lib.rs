@@ -74,6 +74,34 @@ pub enum Appearance {
     Dark,
 }
 
+/// When an agent that needs the person sounds the alert and bounces the Dock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentAlert {
+    /// Never: the banner, the inbox and the badge say it.
+    #[schemars(title = "Never")]
+    Never,
+    /// Only while no Slopty window is in front: in front, the tile says it.
+    #[default]
+    #[schemars(title = "When hidden")]
+    Hidden,
+    /// Always, in front of the window too.
+    #[schemars(title = "Always")]
+    Always,
+}
+
+impl AgentAlert {
+    /// Whether it sounds, with or without a Slopty window in front.
+    #[must_use]
+    pub const fn sounds(self, window_active: bool) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Hidden => !window_active,
+            Self::Always => true,
+        }
+    }
+}
+
 /// Whether the terminal cursor blinks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -220,7 +248,7 @@ pub struct ColorSettings {
 #[serde(default)]
 #[schemars(title = "Font")]
 pub struct Font {
-    /// `JetBrains Mono` ships with the app; any installed monospace works.
+    /// Any monospace; `JetBrains Mono` is built in.
     ///
     /// Monospace family for terminals. The bundled face is `JetBrains Mono`; any installed
     /// family works, with `SF Mono` and `Menlo` as fallbacks when it is missing.
@@ -304,7 +332,15 @@ pub struct TerminalSettings {
     /// off, it only flashes the tile.
     #[schemars(title = "Bell in the background")]
     pub bell_alert: bool,
-    /// Auto lets the shell or the editor choose.
+    /// When hidden sounds it only while Slopty is behind other windows.
+    ///
+    /// When an agent that needs you (an approval, a question, a finished turn) plays the
+    /// alert sound and bounces the Dock, as a Mac app's alert does: never (the banner and the
+    /// inbox say it), only while no Slopty window is in front (in front, the tile says it), or
+    /// always.
+    #[schemars(title = "Agent alert")]
+    pub agent_alert: AgentAlert,
+    /// Auto blinks when the shell or the editor asks.
     ///
     /// Whether the cursor blinks (ghostty's `cursor-style-blink`): the program's choice, or
     /// always, or never.
@@ -367,6 +403,7 @@ impl Default for TerminalSettings {
             minimum_contrast: 3.0,
             copy_on_select: false,
             bell_alert: true,
+            agent_alert: AgentAlert::Hidden,
             cursor_blink: CursorBlink::Program,
             cursor_style: CursorStyle::Program,
             paste_protection: true,
@@ -420,6 +457,38 @@ pub struct RemoteSettings {
 impl Default for RemoteSettings {
     fn default() -> Self {
         Self { fps: 120, max_bitrate_mbps: 30, muted: false, sharp_text: false }
+    }
+}
+
+/// `[clipboard]`: the clipboard shared with the workers.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(title = "Clipboard")]
+pub struct ClipboardSettings {
+    /// Copy on a worker, paste here, and the other way; off, each keeps its own.
+    ///
+    /// Shares the clipboard with the workers: what is copied on one is offered to this Mac and
+    /// to the others, and what is copied here is offered to the worker in front. Off, nothing
+    /// crosses either way; a terminal's own copy and paste still work.
+    #[schemars(title = "Share the clipboard with the workers")]
+    pub sync: bool,
+    /// Workers by name, each shared with or not whatever `sync` says: a Mac others use can
+    /// be kept out of it.
+    #[schemars(title = "By worker")]
+    pub workers: BTreeMap<String, bool>,
+}
+
+impl Default for ClipboardSettings {
+    fn default() -> Self {
+        Self { sync: true, workers: BTreeMap::new() }
+    }
+}
+
+impl ClipboardSettings {
+    /// Whether the clipboard is shared with the worker called `name`.
+    #[must_use]
+    pub fn shared_with(&self, name: &str) -> bool {
+        self.workers.get(name).copied().unwrap_or(self.sync)
     }
 }
 
@@ -728,6 +797,8 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     /// Remote window and display streams.
     pub remote: RemoteSettings,
+    /// The clipboard shared with the workers.
+    pub clipboard: ClipboardSettings,
     /// Terminal colours.
     pub colors: ColorSettings,
     /// The app's key bindings the file changes.
@@ -852,6 +923,9 @@ copy_on_select = {copy_on_select}
 # A bell while the app is in the background sounds the alert and bounces
 # the Dock; off, the tile only flashes.
 bell_alert = {bell_alert}
+# When an agent that needs you sounds the alert and bounces the Dock:
+# \"never\", \"hidden\" (only while no Slopty window is in front) or \"always\".
+agent_alert = {agent_alert}
 # \"program\" (the shell or editor decides), \"always\" or \"never\".
 cursor_blink = {cursor_blink}
 # \"program\" (the shell or editor decides), \"block\", \"bar\" or \"underline\".
@@ -886,6 +960,15 @@ muted = {muted}
 # Ask for colour at every pixel (4:4:4): crisper coloured text for about 1.6x the
 # bits. The worker sends it only while the link carries that rate, 4:2:0 below.
 sharp_text = {sharp_text}
+
+[clipboard]
+# Share the clipboard with the workers: copy on one, paste here or on another.
+# Off, nothing crosses either way; a terminal's own copy and paste still work.
+sync = {clipboard_sync}
+# Workers by name, each shared with or not whatever sync says.
+#
+# [clipboard.workers]
+# shared-mac = false
 
 [colors]
 # Terminal colours as \"#rrggbb\"; \"\" keeps the theme's own. They apply in
@@ -952,6 +1035,8 @@ server = \"\"
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
             copy_on_select = d.terminal.copy_on_select,
             bell_alert = d.terminal.bell_alert,
+            agent_alert = toml_string(agent_alert_name(d.terminal.agent_alert)),
+            clipboard_sync = d.clipboard.sync,
             cursor_blink = toml_string(cursor_blink_name(d.terminal.cursor_blink)),
             cursor_style = toml_string(cursor_style_name(d.terminal.cursor_style)),
             paste_protection = d.terminal.paste_protection,
@@ -1079,7 +1164,7 @@ impl Loaded {
 
 /// Tables whose keys the person names. `[keys]` names actions the keymap knows, not this
 /// crate, and the keymap says which it does not; a worker's labels and probes are anything.
-const OPEN_TABLES: [&str; 3] = ["keys", "worker.labels", "worker.probes"];
+const OPEN_TABLES: [&str; 4] = ["keys", "clipboard.workers", "worker.labels", "worker.probes"];
 
 /// Keys in `given` with no counterpart in `known`, recursively through tables, except the
 /// [`OPEN_TABLES`].
@@ -1137,6 +1222,14 @@ const fn option_as_alt_name(o: OptionAsAlt) -> &'static str {
         OptionAsAlt::True => "true",
         OptionAsAlt::Left => "left",
         OptionAsAlt::Right => "right",
+    }
+}
+
+const fn agent_alert_name(a: AgentAlert) -> &'static str {
+    match a {
+        AgentAlert::Never => "never",
+        AgentAlert::Hidden => "hidden",
+        AgentAlert::Always => "always",
     }
 }
 
@@ -1235,6 +1328,30 @@ mod tests {
 
         let back = toml::to_string(&loaded.settings).unwrap_or_default();
         assert_eq!(Settings::parse(&back).settings.keys, *keys, "written back as read:\n{back}");
+    }
+
+    /// The clipboard is shared with every worker unless `sync` says not; a worker named under
+    /// `[clipboard.workers]` is shared with or not whatever `sync` says. Both default to
+    /// sharing, and the agent's alert to sounding while Slopty is hidden.
+    #[test]
+    fn the_clipboard_is_shared_by_default_and_per_worker_by_name() {
+        let d = Settings::default();
+        assert!(d.clipboard.sync && d.clipboard.shared_with("studio"));
+        assert_eq!(d.terminal.agent_alert, AgentAlert::Hidden, "heard while Slopty is hidden");
+        let loaded = Settings::parse(
+            "[terminal]\nagent_alert = \"never\"\n[clipboard]\nsync = false\n[clipboard.workers]\nstudio = true\n",
+        );
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        let s = &loaded.settings;
+        assert_eq!(s.terminal.agent_alert, AgentAlert::Never);
+        let ways = [AgentAlert::Never, AgentAlert::Hidden, AgentAlert::Always];
+        let heard = ways.map(|a| (a.sounds(false), a.sounds(true)));
+        assert_eq!(heard, [(false, false), (true, false), (true, true)], "hidden, then in front");
+        assert!(Settings::parse("[terminal]\nagent_alert = true\n").error.is_some(), "no bool");
+        assert!(s.clipboard.shared_with("studio"), "named: shared");
+        assert!(!s.clipboard.shared_with("shared-mac"), "the rest follow sync");
+        let shared = Settings::parse("[clipboard.workers]\nshared-mac = false\n").settings;
+        assert!(!shared.clipboard.shared_with("shared-mac") && shared.clipboard.shared_with("x"));
     }
 
     #[test]

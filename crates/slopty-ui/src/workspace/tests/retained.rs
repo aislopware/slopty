@@ -30,7 +30,7 @@ fn next_frame(cx: &mut VisualTestContext) {
 /// A shell's output is drawn as it arrives: its echo, a line more, and a command that starts.
 #[gpui::test]
 fn a_shells_echo_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
     let _tile = opens(&view, cx, &fake, session, fake.me, 1);
@@ -57,7 +57,7 @@ fn a_shells_echo_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
 /// on, is the frame drawn from scratch at the same instant.
 #[gpui::test]
 fn the_strip_springs_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &fake);
     view.update(cx, |v, _| {
@@ -83,7 +83,7 @@ fn the_strip_springs_as_from_scratch(cx: &mut TestAppContext) {
 /// else is built again there, and nothing asks for it a second time in the same frame.
 #[gpui::test]
 fn a_frame_of_the_spring_builds_each_shell_once(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
     let terminals: Vec<Entity<TerminalView>> = shells
@@ -119,7 +119,7 @@ fn a_frame_of_the_spring_builds_each_shell_once(cx: &mut TestAppContext) {
 /// scratch.
 #[gpui::test]
 fn the_strip_scrolls_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [_, (_, middle), _] = three_shells(&view, cx, &fake);
     view.update(cx, |v, _| v.hold_clock(Some(Duration::ZERO)));
@@ -137,7 +137,7 @@ fn the_strip_scrolls_as_from_scratch(cx: &mut TestAppContext) {
 /// The pointer over a tile, over its header, and away: each hover is drawn as from scratch.
 #[gpui::test]
 fn a_tile_hovered_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(_, first), (_, second), _] = three_shells(&view, cx, &fake);
     view.update(cx, |v, _| v.hold_clock(Some(Duration::ZERO)));
@@ -166,7 +166,7 @@ fn a_tile_hovered_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
 /// its overlay follow in the frames drawn, not a frame later.
 #[gpui::test]
 fn a_remote_window_follows_a_resize_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let window = slopty_core::WindowId(7);
     let tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 1);
@@ -242,7 +242,7 @@ fn picture(w: usize, h: usize) -> core_video::pixel_buffer::CVPixelBuffer {
 /// says it finished are drawn as from scratch, and so is the bell that counts it.
 #[gpui::test]
 fn a_command_that_ends_beside_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let (slow, here) = (SessionId::new(), SessionId::new());
     let _slow = opens(&view, cx, &fake, slow, fake.me, 1);
@@ -269,7 +269,7 @@ fn a_command_that_ends_beside_is_drawn_as_from_scratch(cx: &mut TestAppContext) 
 /// its frame reached the display, is no news for the shell's view.
 #[gpui::test]
 fn the_strip_built_again_replays_a_shell_typed_into(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
     let [_, (typed, tile), _] = shells;
@@ -306,7 +306,7 @@ fn the_strip_built_again_replays_a_shell_typed_into(cx: &mut TestAppContext) {
 /// since none of them keeps where the pointer is, or reads it, to draw itself.
 #[gpui::test]
 fn a_pointer_moving_over_the_shells_builds_none_of_them(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
     let terminals: Vec<Entity<TerminalView>> = shells
@@ -338,7 +338,7 @@ fn a_pointer_moving_over_the_shells_builds_none_of_them(cx: &mut TestAppContext)
 /// frame it starts in: its title is worked out though no tile of it is drawn.
 #[gpui::test]
 fn an_undrawn_shells_command_retitles_its_row_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells: Vec<(SessionId, TileRef)> = (1..=6)
         .map(|version| {
@@ -363,7 +363,7 @@ fn an_undrawn_shells_command_retitles_its_row_as_from_scratch(cx: &mut TestAppCo
 /// is found while the window draws, and the frame it asks for draws it.
 #[gpui::test]
 fn a_page_that_cannot_open_says_so_as_from_scratch(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let url = "http://127.0.0.1:5173/";
     let tile = arrives(&view, cx, &fake, ItemKind::Browser { url: url.into() }, 1);
@@ -379,7 +379,7 @@ fn a_page_that_cannot_open_says_so_as_from_scratch(cx: &mut TestAppContext) {
 /// one drawn from scratch.
 #[gpui::test]
 fn a_drag_held_at_the_edge_scrolls_one_frame_at_a_time(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let tiles: Vec<TileRef> = (1..=6)
         .map(|version| opens(&view, cx, &fake, SessionId::new(), fake.me, version))
@@ -428,7 +428,7 @@ fn a_drag_held_at_the_edge_scrolls_one_frame_at_a_time(cx: &mut TestAppContext) 
 /// built again for it, the header reading only whether the edit is on disk.
 #[gpui::test]
 fn a_file_tiles_caret_blinks_without_building_the_strip(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let path = "/w/notes.md";
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
@@ -468,7 +468,7 @@ fn a_file_tiles_caret_blinks_without_building_the_strip(cx: &mut TestAppContext)
 fn the_keyboard_moving_on_its_own_builds_neither_the_workspace_nor_the_strip(
     cx: &mut TestAppContext,
 ) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(first, _), (second, two), (third, _)] = three_shells(&view, cx, &fake);
     let terminals: Vec<Entity<TerminalView>> = [first, second, third]
@@ -504,7 +504,7 @@ fn the_keyboard_moving_on_its_own_builds_neither_the_workspace_nor_the_strip(
 /// the one drawn from scratch.
 #[gpui::test]
 fn the_keyboard_moving_builds_only_the_shells_it_moves_between(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    let (view, cx) = still_workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let [(first, _), (second, two), (third, _)] = three_shells(&view, cx, &fake);
     let terminals: Vec<Entity<TerminalView>> = [first, second, third]

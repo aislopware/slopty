@@ -81,8 +81,8 @@ fn finished(command: &str, exit: u8) -> Finished {
 }
 
 /// A workspace nobody named is named by where its first shell is: the repository, else the
-/// directory; its number only where neither says anything (the home directory, no shell yet).
-/// A name given wins.
+/// directory. Where neither says anything (a shell at home), its first tile's worker, never a
+/// number; with nothing on it, it is new. A name given wins.
 #[gpui::test]
 fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
     use crate::workspace::tile::place_name;
@@ -93,10 +93,13 @@ fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
 
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "Workspace 1", "no shell yet");
+    assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "New workspace", "nothing yet");
+    let _home = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let name = view.read_with(cx, |v, _| v.workspace_name());
+    assert_eq!(name, "studio", "a shell at home leaves it its worker's");
     shell_in_repo(&view, cx, &studio, "/x/slopty/crates", "/x/slopty", "main");
     assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "slopty");
-    assert!(labels(&view, cx).iter().any(|l| l == "slopty, 1 tile"), "the bar says it");
+    assert!(labels(&view, cx).iter().any(|l| l == "slopty, 2 tiles"), "the bar says it");
     view.update(cx, |v, cx| {
         v.layout.set_workspace_name(0, Some("release".to_owned()));
         cx.notify();
@@ -529,8 +532,8 @@ fn the_inbox_reads_like_a_mailbox(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("inbox-unread").is_some() && cx.debug_bounds("inbox-all").is_some());
     let names = labels(&view, cx);
     assert!(
-        names.iter().any(|l| l == "cargo build · Done · 40 s · studio · oss/slopty"),
-        "two lines: the command, then its outcome, worker and directory: {names:#?}"
+        names.iter().any(|l| l == "cargo build · Done · 40 s · oss/slopty"),
+        "two lines: the command, then its outcome and directory, the lone worker unsaid: {names:#?}"
     );
     let (newest, older) = (
         cx.debug_bounds(leak(format!("inbox-finished-{lint}"))).expect("the lint's row"),

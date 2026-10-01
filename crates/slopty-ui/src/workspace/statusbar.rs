@@ -97,7 +97,7 @@ pub(super) struct Bar {
     hosts_open: bool,
     /// What the popover can do to each worker, as the app says.
     hosts: HashMap<WorkerKey, HostActions>,
-    /// The popover's way to add a worker, as the app says.
+    /// The way to add a worker, as the app says: the popover's, and the empty workspace's.
     add: Option<MenuRun>,
     /// Draws the bar again when the frame time's readout is due, while the stats show.
     tick: RefCell<Option<Task<()>>>,
@@ -150,7 +150,7 @@ impl AgentCounts {
     fn parts(self, theme: &Theme) -> impl Iterator<Item = (String, slopty_theme::Rgb)> {
         let s = theme.surfaces;
         [
-            (self.working, "working", s.accent_fill),
+            (self.working, "working", s.text_muted),
             (self.waiting, "waiting", s.text_muted),
             (self.blocked, "blocked", s.warn_fill),
         ]
@@ -241,6 +241,11 @@ impl WorkspaceView {
         self.bar.hosts = hosts;
         self.bar.add = add;
         cx.notify();
+    }
+
+    /// The app's way to add a worker, if it gave one.
+    pub(super) fn add_worker_run(&self) -> Option<MenuRun> {
+        self.bar.add.clone()
     }
 
     /// What the app lets this client do to `key`.
@@ -384,8 +389,9 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let safe = window.insets().effective();
 
-        // A state is a dot of its fill beside its words; no readout wears an icon. The
-        // server's word says what it costs: only the workers' own addresses reach them now.
+        // A state is a dot of its fill beside its words; no readout wears an icon. Out of reach
+        // is muted, since `warn` means "needs you" alone. The server's word says what it costs:
+        // only the workers' own addresses reach them now.
         let server = self.server_status.clone().map(|text| {
             let text = SharedString::from(sentence(&text));
             readout("server-status", text.clone())
@@ -394,7 +400,7 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(spacing.xs))
                 .text_color(hsla(s.text_secondary))
-                .child(state_dot(theme, s.warn_fill))
+                .child(state_dot(theme, s.text_muted))
                 .child(text)
                 .child(separator(theme))
                 .child(SERVER_DOWN_MEANS)
@@ -413,7 +419,7 @@ impl WorkspaceView {
         // shell runs is the first thing a remote tool says.
         let name = link.map(|w| {
             let away = (!w.status.is_up()).then(|| {
-                state_dot(theme, s.warn_fill).debug_selector(|| "status-worker-away".to_owned())
+                state_dot(theme, s.text_muted).debug_selector(|| "status-worker-away".to_owned())
             });
             readout("status-worker", SharedString::from(w.name.clone()))
                 .flex()
@@ -965,11 +971,9 @@ fn sentence(text: &str) -> String {
 const fn state_fill(theme: &Theme, status: Status) -> slopty_theme::Rgb {
     let s = &theme.surfaces;
     match status {
-        Status::Idle => s.text_muted,
-        Status::Working => s.accent_fill,
-        Status::Running => s.text_secondary,
-        Status::NeedsYou | Status::Away => s.warn_fill,
-        Status::Done => s.success_fill,
+        Status::Idle | Status::Working | Status::Running | Status::Away => s.text_muted,
+        Status::NeedsYou => s.warn_fill,
+        Status::Done => s.accent_fill,
         Status::Failed => s.error_fill,
     }
 }

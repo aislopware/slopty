@@ -213,20 +213,46 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
     assert!((command_x - tile_x).abs() < 0.5, "an empty slot keeps a command's title on it");
 }
 
-/// The empty workspace offers the three ways to begin with their keys, read from the bindings,
-/// and each does what its key does: a shell, an agent, the picker (at once, waiting on the
-/// worker). The workers are listed with how they are doing.
+/// The empty workspace asks what an agent should do and takes the keyboard to ask it: what is
+/// typed starts the agent with it as its first prompt, its tile titled by it, in the worker's
+/// latest place. A shell and a window are the quieter ways in, with their keys read from the
+/// bindings, and each does what its key does. The workers are listed with how they are doing.
 #[gpui::test]
-fn the_empty_workspace_begins_a_terminal_an_agent_or_a_window(cx: &mut TestAppContext) {
+fn the_empty_workspace_asks_what_an_agent_should_do(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    for label in ["New terminal", "New agent", "Add a window or display", "studio"] {
+    for label in ["New terminal", "Add a window or display", "studio", "On studio", "In ~"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
     }
-    assert_eq!(strip::begin_keys(), ["⌘T".to_owned(), "⇧⌘T".to_owned(), "⌘O".to_owned()]);
+    assert!(!tree.iter().any(|n| n.is("Button", Some("New agent"))), "the question is the way");
+    assert_eq!(strip::begin_keys(), ["⌘T".to_owned(), "⌘O".to_owned()]);
+
+    cx.simulate_input("Fix the login redirect");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let prompt = "Fix the login redirect".to_owned();
+    assert!(
+        matches!(
+            fake.drain().as_slice(),
+            [ClientMsg::OpenSession { spec: OpenSession { command, title, cwd: None, .. }, .. }]
+                if *command == [AGENT_COMMAND.to_owned(), prompt.clone()]
+                    && title.as_deref() == Some(prompt.as_str())
+        ),
+        "an agent, given the task and named by it"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            fake.drain().as_slice(),
+            [ClientMsg::OpenSession { spec: OpenSession { command, .. }, .. }]
+                if *command == [AGENT_COMMAND.to_owned()]
+        ),
+        "the field is clear again, and on nothing an agent starts bare"
+    );
 
     click(cx, "empty-terminal");
     assert!(
@@ -236,21 +262,52 @@ fn the_empty_workspace_begins_a_terminal_an_agent_or_a_window(cx: &mut TestAppCo
         ),
         "a shell"
     );
-    click(cx, "empty-agent");
-    assert!(
-        matches!(
-            fake.drain().as_slice(),
-            [ClientMsg::OpenSession { spec: OpenSession { command, .. }, .. }]
-                if command == &[AGENT_COMMAND.to_owned()]
-        ),
-        "an agent"
-    );
     click(cx, "empty-window");
     assert!(
         matches!(fake.drain().as_slice(), [ClientMsg::Screen(ScreenRequest::List)]),
         "the worker is asked for its windows"
     );
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
+}
+
+/// The question's chips choose where the agent starts: the directory chip steps through the
+/// places shells stand in on the worker, then its own default; the worker chip, with several
+/// workers, the next worker.
+#[gpui::test]
+fn the_questions_chips_choose_where_the_agent_starts(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let mut laptop = connect(&view, cx, 2, "laptop");
+    let shell = SessionId::new();
+    let _tile = opens(&view, cx, &studio, shell, studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.session_opened(key, summary(shell, Some("/Users/me/oss/slopty")), cx);
+        let last = v.layout.workspaces().len().saturating_sub(1);
+        v.go_to_workspace(last, cx);
+    });
+    cx.run_until_parked();
+    let target = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.ask_target());
+    let started = |cx: &mut VisualTestContext, fake: &mut Fake| {
+        click(cx, "ask-field");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        fake.drain().into_iter().find_map(|m| match m {
+            ClientMsg::OpenSession { spec, .. } => Some(spec.cwd),
+            _ => None,
+        })
+    };
+    if target(cx).is_some_and(|(on, _)| on != key) {
+        click(cx, "ask-worker");
+    }
+    let slopty = Some("/Users/me/oss/slopty".to_owned());
+    assert_eq!(target(cx), Some((key, slopty)), "the latest place first");
+    click(cx, "ask-place");
+    assert_eq!(target(cx), Some((key, None)), "then the worker's own default");
+    assert_eq!(started(cx, &mut studio), Some(None));
+    click(cx, "ask-worker");
+    assert_eq!(target(cx), Some((laptop.key, None)), "the next worker");
+    assert_eq!(started(cx, &mut laptop), Some(None), "on the laptop, at its own default");
 }
 
 fn listing(title: &str) -> ScreenEvent {

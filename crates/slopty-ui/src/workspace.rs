@@ -30,6 +30,7 @@
 mod about;
 pub mod actions;
 mod agents;
+mod ask;
 pub mod attention;
 mod browsers;
 mod commands;
@@ -47,6 +48,7 @@ mod popout;
 mod project_search;
 mod projects;
 pub mod remote;
+mod restore;
 mod rollup;
 mod statusbar;
 mod strip;
@@ -62,10 +64,16 @@ use std::time::{Duration, Instant};
 
 pub use actions::*;
 pub use agents::{agent_status_text, banner_title, program_banner};
+#[cfg(test)]
+pub(crate) use ask::ASK;
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window,
 };
+/// The inbox's keyboard verbs, bound by [`crate::keymap`].
+pub(crate) use inbox::triage as inbox_actions;
+/// The key context of the inbox's list.
+pub(crate) use inbox::triage::CTX as INBOX_CTX;
 pub use projects::worker_key;
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
@@ -80,7 +88,7 @@ use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
 pub use statusbar::HostActions;
 #[cfg(test)]
-pub(crate) use strip::{EMPTY_WORKSPACE, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
+pub(crate) use strip::{ADD_WORKER, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
     ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, NOTE, OPENING, PAUSED,
@@ -610,6 +618,10 @@ pub struct WorkspaceView {
     /// Who needs the human, worked out when the workspace changes, for everything drawn until
     /// the next change.
     drawn_waiting: Vec<agents::Waiting>,
+    /// Where ⌘⇧A's last step stood on the attention ladder.
+    attention_at: Option<usize>,
+    /// The empty workspace's question.
+    ask: ask::Ask,
     /// The tiles, the faces or the links changed since the faces were last brought in step
     /// with them: the next frame does it ([`Self::sync_faces`] makes a face with the window).
     faces_dirty: bool,
@@ -700,6 +712,8 @@ pub struct WorkspaceView {
     pending_focus_palette: bool,
     /// Which titlebar menu is open.
     menu: Option<titlebar::MenuKind>,
+    /// The bar's menu was opened by a key, so it arrives whole in its first frame.
+    menu_keyed: bool,
     /// The worker "+" chose for the next new tile, where there are several; the focused tile's
     /// worker otherwise.
     new_on: Option<WorkerKey>,
@@ -748,6 +762,8 @@ pub struct WorkspaceView {
     layout_path: Option<std::path::PathBuf>,
     /// What was last written there.
     layout_saved: Option<Saved>,
+    /// What the last run left beside its layout that this one puts back as it can.
+    restore: restore::Restore,
     save_pending: bool,
     /// Workers whose empty registry was given a shell this run.
     given_shell: std::collections::HashSet<WorkerKey>,
@@ -762,6 +778,11 @@ pub struct WorkspaceView {
     popouts: popout::PopOuts,
     /// Workers told this client wants their clipboard.
     watching: std::collections::HashSet<WorkerKey>,
+    /// Which workers the clipboard is shared with, as the settings say.
+    clip_sharing: slopty_settings::ClipboardSettings,
+    /// The workers it is not shared with, by key: read by the paste hooks as they run, so a
+    /// change holds for the views made before it.
+    clip_unshared: Rc<std::cell::RefCell<std::collections::HashSet<WorkerKey>>>,
     /// Agents' pull requests, programs waiting on file tiles, and the shell told it has the
     /// focus.
     handoff: handoffs::HandoffState,
@@ -859,6 +880,8 @@ impl WorkspaceView {
             file_focus: HashMap::new(),
             items_dirty: true,
             drawn_waiting: Vec::new(),
+            attention_at: None,
+            ask: ask::Ask::default(),
             faces_dirty: true,
             twins: HashMap::new(),
             derived: HashMap::new(),
@@ -914,6 +937,7 @@ impl WorkspaceView {
             key_bar_shown: false,
             pending_focus_palette: false,
             menu: None,
+            menu_keyed: false,
             new_on: None,
             tabs: titlebar::Tabs::default(),
             nav: navigator::NavState::default(),
@@ -931,7 +955,17 @@ impl WorkspaceView {
             park_pending: false,
             pending_focus: None,
             faces: faces::Faces::default(),
-            projects: projects::ProjectsState::default(),
+            projects: projects::ProjectsState {
+                looked: saved
+                    .iter()
+                    .flat_map(|s| &s.looked)
+                    .map(|l| {
+                        let looked = crate::project::recap::Looked { seq: l.seq, at_ms: l.at_ms };
+                        (l.project.clone(), looked)
+                    })
+                    .collect(),
+                ..projects::ProjectsState::default()
+            },
             pending_focus_note: None,
             next_open: std::cell::Cell::new(1),
             pending_focus_file: None,
@@ -939,6 +973,7 @@ impl WorkspaceView {
             pending_focus_picker: false,
             pending_focus_self: false,
             layout_path: None,
+            restore: restore::Restore::of(saved.as_ref()),
             layout_saved: saved,
             save_pending: false,
             given_shell: std::collections::HashSet::new(),
@@ -947,6 +982,8 @@ impl WorkspaceView {
             app_active: true,
             popouts: popout::PopOuts::default(),
             watching: std::collections::HashSet::new(),
+            clip_sharing: slopty_settings::ClipboardSettings::default(),
+            clip_unshared: Rc::default(),
             handoff: handoffs::HandoffState::default(),
             kept: None,
             empty_mark,
@@ -1245,7 +1282,7 @@ impl WorkspaceView {
             let write = this
                 .update(cx, |this, _cx| {
                     this.save_pending = false;
-                    let saved = this.layout.save();
+                    let saved = this.to_save();
                     if this.layout_saved.as_ref() == Some(&saved) {
                         return None;
                     }
@@ -1705,6 +1742,9 @@ impl gpui::Render for WorkspaceView {
         if self.nav.drawn.is_some() {
             self.ensure_navigator_filter(window, cx);
         }
+        let active = self.layout.active_workspace();
+        let bare = self.layout.workspaces().get(active).is_none_or(|w| w.columns().is_empty());
+        self.settle_ask(bare, window, cx);
         self.serve_browsers(cx);
         let strip = gpui::IntoElement::into_any_element(self.strip_host.clone());
         let menu = self.render_menu(window, cx);
@@ -1748,6 +1788,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::close_item))
             .on_action(cx.listener(Self::undo_close))
             .on_action(cx.listener(Self::next_attention))
+            .on_action(cx.listener(Self::toggle_inbox))
             .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::toggle_stats))
             .on_action(cx.listener(Self::type_clipboard))

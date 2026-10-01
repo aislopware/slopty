@@ -524,6 +524,13 @@ impl Default for Spacing {
     }
 }
 
+/// Line widths, in points.
+pub mod stroke {
+    /// A line that marks one thing among its peers: the focused tile's header, the shown tab
+    /// of the focused column.
+    pub const MARK: f32 = 2.0;
+}
+
 /// Opacities for tints and washes over a surface: one ladder, used everywhere, so the chrome
 /// reads as one surface rather than a collection of one-off transparencies.
 pub mod alpha {
@@ -1021,6 +1028,17 @@ pub enum Variant {
     Light,
 }
 
+/// The system's contrast setting (Increase Contrast on macOS and iOS), which the chrome
+/// follows.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum Contrast {
+    /// The standard look.
+    #[default]
+    Standard,
+    /// Increase Contrast is on: what is set back at a share of its colour shows whole.
+    Increased,
+}
+
 /// How the terminal behaves: settings that are neither colours nor type but ride with them,
 /// so one `set_theme` reaches every view when the file changes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -1173,6 +1191,8 @@ pub struct Theme {
     pub radii: Radii,
     /// The spacing scale.
     pub spacing: Spacing,
+    /// The system's contrast setting.
+    pub contrast: Contrast,
 }
 
 impl Default for Theme {
@@ -1198,6 +1218,7 @@ impl Theme {
             typography: Typography::default(),
             radii: Radii::default(),
             spacing: Spacing::default(),
+            contrast: Contrast::default(),
         }
     }
 
@@ -1223,6 +1244,16 @@ impl Theme {
         if self.terminal.bg.is_light() { Variant::Light } else { Variant::Dark }
     }
 
+    /// The share `alpha` of a colour that is set back, or the whole colour under Increase
+    /// Contrast.
+    #[must_use]
+    pub const fn set_back(&self, alpha: f32) -> f32 {
+        match self.contrast {
+            Contrast::Standard => alpha,
+            Contrast::Increased => 1.0,
+        }
+    }
+
     /// How lit an unlit dot of the mark is, over this theme's content.
     #[must_use]
     pub const fn brand_unlit(&self) -> f32 {
@@ -1236,6 +1267,15 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is set back shows at its share, and whole under Increase Contrast.
+    #[test]
+    fn increase_contrast_shows_what_is_set_back_whole() {
+        let mut theme = Theme::default();
+        assert!((theme.set_back(alpha::STRONG) - alpha::STRONG).abs() < f32::EPSILON);
+        theme.contrast = Contrast::Increased;
+        assert!((theme.set_back(alpha::STRONG) - 1.0).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn palette_cube_and_greys() {

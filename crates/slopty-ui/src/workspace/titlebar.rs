@@ -202,12 +202,20 @@ impl WorkspaceView {
     }
 
     /// Workspace `ix`'s name: the one given, else where its first shell is (the repository,
-    /// else the directory), else its number. A number says nothing a tab's place does not.
+    /// else the directory), else the worker its first tile is on. Never a number, nor a tile's
+    /// title, which follows every command run and every page loaded. One with nothing on it is
+    /// new.
     pub(super) fn workspace_name_at(&self, ix: usize) -> String {
-        let ws = self.layout.workspaces().get(ix);
-        ws.and_then(|ws| ws.name().map(str::to_owned))
-            .or_else(|| ws.and_then(|ws| self.workspace_place(ws)))
-            .unwrap_or_else(|| format!("Workspace {}", ix.saturating_add(1)))
+        let Some(ws) = self.layout.workspaces().get(ix) else { return NEW_WORKSPACE.to_owned() };
+        if let Some(name) = ws.name().map(str::to_owned).or_else(|| self.workspace_place(ws)) {
+            return name;
+        }
+        ws.columns()
+            .iter()
+            .flat_map(Column::tiles)
+            .map(Tile::tile)
+            .next()
+            .map_or_else(|| NEW_WORKSPACE.to_owned(), |first| self.worker_name(first.worker))
     }
 
     /// Where the first shell of `ws` that has said so is: its repository's name, else its
@@ -255,8 +263,24 @@ impl WorkspaceView {
             self.close_menu(window, cx);
         } else {
             self.menu = Some(which);
+            self.menu_keyed = window.last_input_was_keyboard();
+            // The inbox takes the keyboard, so its rows are worked by key at once.
+            if which == MenuKind::Inbox {
+                let focus = self.inbox_focus(cx);
+                window.focus(&focus, cx);
+            }
             cx.notify();
         }
+    }
+
+    /// ⌘⇧U: the bell's inbox, opened or closed by key.
+    pub(super) fn toggle_inbox(
+        &mut self,
+        _: &super::actions::ToggleInbox,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_menu(MenuKind::Inbox, window, cx);
     }
 
     /// Close the bar's menu and hand the keyboard back to the focused tile at once.
@@ -321,7 +345,7 @@ impl WorkspaceView {
         // Right: the inbox and "…". Who needs you is counted once, on the bell; its rows go to
         // them.
         let total = self.drawn_waiting.len();
-        let unread = total.saturating_add(self.finished.len());
+        let unread = total.saturating_add(self.unread_finishes());
         let bell = has_workers.then(|| {
             // Each fill with its own ink: the accent's is white, a state fill's near-black.
             let (fill, ink) =
@@ -1069,7 +1093,7 @@ impl WorkspaceView {
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .children(rows);
-        if !self.chrome_moves(cx) {
+        if self.menu_keyed || !self.chrome_moves(cx) {
             return panel.into_any_element();
         }
         let id = SharedString::from(format!("menu-in-{which:?}"));

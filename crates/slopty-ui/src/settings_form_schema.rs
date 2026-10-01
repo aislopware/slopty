@@ -92,9 +92,17 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     ),
     (Section::Terminal, "Cursor", &["terminal.cursor_style", "terminal.cursor_blink"]),
     (Section::Terminal, "Text", &["terminal.minimum_contrast", "terminal.bold_is_bright"]),
-    (Section::Terminal, "Behaviour", &["terminal.confirm_close", "terminal.bell_alert"]),
+    (
+        Section::Terminal,
+        "Behaviour",
+        &["terminal.confirm_close", "terminal.bell_alert", "terminal.agent_alert"],
+    ),
     (Section::Input, "Keys", &["terminal.option_as_alt", "terminal.natural_editing"]),
-    (Section::Input, "Clipboard", &["terminal.copy_on_select", "terminal.paste_protection"]),
+    (
+        Section::Input,
+        "Clipboard",
+        &["clipboard.sync", "terminal.copy_on_select", "terminal.paste_protection"],
+    ),
     (
         Section::Input,
         "Pointer",
@@ -117,6 +125,7 @@ fn home(table: &str) -> Section {
     match root {
         "theme" | "colors" => Section::Appearance,
         "remote" => Section::Streams,
+        "clipboard" => Section::Input,
         "client" | "worker" | "server" => Section::Network,
         _ => Section::Terminal,
     }
@@ -238,11 +247,12 @@ impl KeyRow {
 }
 
 /// The Keyboard page's groups, in order.
-pub const KEY_GROUPS: [&str; 9] = [
+pub const KEY_GROUPS: [&str; 10] = [
     "General",
     "Layout",
     "Terminal",
     "Conversation",
+    "Inbox",
     "Files",
     "Folders",
     "Project boards",
@@ -268,6 +278,7 @@ fn key_group(command: &Command) -> &'static str {
         Scope::File => "Files",
         Scope::Folder => "Folders",
         Scope::Project => "Project boards",
+        Scope::Inbox => "Inbox",
         Scope::Search => "Search in files",
         Scope::Page => "Pages",
     }

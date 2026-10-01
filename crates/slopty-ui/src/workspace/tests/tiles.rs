@@ -1043,13 +1043,13 @@ fn the_servers_word_says_what_it_costs(cx: &mut TestAppContext) {
     assert!(place.contains(&word.center()), "one path with the worker: {place:?} {word:?}");
 }
 
-/// The empty workspace's ways to begin say where they open.
+/// The empty workspace's quieter ways to begin say where they open.
 #[gpui::test]
 fn the_ways_to_begin_say_where_they_open(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let _studio = connect(&view, cx, 1, "studio");
     cx.run_until_parked();
-    for row in ["empty-terminal", "empty-agent", "empty-window"] {
+    for row in ["empty-terminal", "empty-window"] {
         let at = cx.debug_bounds(row).unwrap_or_else(|| panic!("{row}"));
         let target = cx
             .debug_bounds(Box::leak(format!("{row}-target").into_boxed_str()))

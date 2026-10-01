@@ -755,7 +755,18 @@ impl WorkspaceView {
             }
         }
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
-        let chrome = Chrome { k: frame.zoom, zooming };
+        // Which of several tiles has the keyboard wants saying; a lone tile's needs nothing, nor
+        // does the overview, which rings its workspace instead.
+        let (w, h) = self.layout.viewport();
+        let screen = Rect { x: 0.0, y: 0.0, w, h };
+        let focus_line = frame.overview <= 0.0
+            && frame
+                .tiles
+                .iter()
+                .filter(|p| !p.hidden && p.rect.intersects(&screen))
+                .nth(1)
+                .is_some();
+        let chrome = Chrome { k: frame.zoom, zooming, focus_line };
         drawn.zoom.set(frame.zoom);
         self.track_visibility(&frame, window, cx);
         let origin = drawn.viewport.get().origin;
@@ -1016,7 +1027,7 @@ impl WorkspaceView {
     /// press them on; then where shells already stand on the workers ([`Self::recent_places`]),
     /// each opening another shell there; then the workers, each marked only where its link is
     /// not up, each opening a shell on itself here. With no worker there is nothing to open,
-    /// and the page says where one comes from.
+    /// and the page says where one comes from and offers the app's way to add one.
     fn render_empty(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -1041,11 +1052,19 @@ impl WorkspaceView {
         };
         let column = div().w_full().max_w(px(EMPTY_W)).flex().flex_col();
         let column = if self.workers.is_empty() {
+            let add = self.add_worker_run().map(|run| {
+                div().w_full().pt(px(spacing.md)).child(
+                    self.begin_row("empty-add-worker", IconName::Plus, ADD_WORKER, "", true)
+                        .on_click(move |_ev, window, cx| run(window, cx)),
+                )
+            });
             column
                 .child(title(NO_WORKERS))
                 .child(kit::inset_x(div(), theme).text_color(muted).child(NO_WORKERS_NEXT))
+                .children(add)
         } else {
-            let [terminal, agent, window] = &begin_keys();
+            let [terminal, window] = &begin_keys();
+            // The question leads; a shell and a window are the quieter ways in under it.
             let begin = div()
                 .w_full()
                 .pt(px(spacing.sm))
@@ -1057,18 +1076,11 @@ impl WorkspaceView {
                         IconName::SquareTerminal,
                         NEW_TERMINAL,
                         terminal,
-                        true,
+                        false,
                     )
                     .on_click(cx.listener(|this, _ev, window, cx| {
                         this.new_terminal(&super::actions::NewTerminal, window, cx);
                     })),
-                )
-                .child(
-                    self.begin_row("empty-agent", IconName::Bot, NEW_AGENT, agent, false).on_click(
-                        cx.listener(|this, _ev, window, cx| {
-                            this.new_agent(&super::actions::NewAgent, window, cx);
-                        }),
-                    ),
                 )
                 .child(
                     self.begin_row("empty-window", IconName::AppWindow, ADD_WINDOW, window, false)
@@ -1148,7 +1160,7 @@ impl WorkspaceView {
             let recent =
                 (!places.is_empty()).then(|| section("empty-recent", RECENT).children(places));
             column
-                .child(title(EMPTY_WORKSPACE))
+                .children(self.render_ask(cx))
                 .child(begin)
                 .children(recent)
                 .child(section("empty-workers", "Workers").children(workers))
@@ -1373,23 +1385,22 @@ pub(super) fn overview_words(
     )
 }
 
-/// What the empty workspace says.
-pub(crate) const EMPTY_WORKSPACE: &str = "Empty workspace";
+/// What the empty workspace says with no worker to begin on.
 pub(crate) const NO_WORKERS: &str = "No workers yet";
-pub(crate) const NO_WORKERS_NEXT: &str = "Add a worker from the command palette.";
+pub(crate) const NO_WORKERS_NEXT: &str = "A worker runs your shells, agents and windows.";
+/// The empty workspace's way to a first worker, as the "…" menu words it.
+pub(crate) const ADD_WORKER: &str = "Add a worker";
 const NEW_TERMINAL: &str = "New terminal";
-const NEW_AGENT: &str = "New agent";
 const ADD_WINDOW: &str = "Add a window or display";
 /// The overview's place for a new workspace.
 pub(crate) const NEW_WORKSPACE: &str = "New workspace";
 
-/// The keys of the three ways to begin, read from the keymap in effect so a rebinding shows at
-/// once. The keymap words its chords as it is installed, so a frame only looks them up.
-pub(super) fn begin_keys() -> [String; 3] {
+/// The keys of the two quieter ways to begin, read from the keymap in effect so a rebinding
+/// shows at once. The keymap words its chords as it is installed, so a frame only looks them up.
+pub(super) fn begin_keys() -> [String; 2] {
     let keymap = crate::keymap::current();
     [
         keymap.label_of(&super::actions::NewTerminal).to_owned(),
-        keymap.label_of(&super::actions::NewAgent).to_owned(),
         keymap.label_of(&super::actions::AddWindow).to_owned(),
     ]
 }

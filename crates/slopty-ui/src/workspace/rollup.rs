@@ -126,7 +126,12 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
             .child(dot(theme, s.warn_fill, Status::NeedsYou.label())),
         Shown::Working => slot.child(
             div().id("rollup-working").role(Role::Image).aria_label(Status::Working.label()).child(
-                status_icon(theme, Status::Working, px(theme.typography.meta()), hsla(s.accent)),
+                status_icon(
+                    theme,
+                    Status::Working,
+                    px(theme.typography.meta()),
+                    hsla(s.text_muted),
+                ),
             ),
         ),
         Shown::Unseen => slot.child(dot(theme, s.accent_fill, "Unseen")),
@@ -136,7 +141,7 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
                     theme,
                     Status::Running,
                     px(theme.typography.meta()),
-                    hsla(s.text_secondary),
+                    hsla(s.text_muted),
                 ),
             ),
         ),

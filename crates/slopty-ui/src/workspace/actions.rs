@@ -42,8 +42,11 @@ actions!(
         CloseItem,
         /// Put back the tile closed last, while the offer stands.
         UndoClose,
-        /// Reveal the next terminal whose agent is waiting on the human.
+        /// Reveal the next thing on the attention ladder: an agent that needs the human, then
+        /// a finish not yet looked at, failed first.
         NextAttention,
+        /// Open the inbox, or close it.
+        ToggleInbox,
         /// Silence or resume the focused remote window's audio on this client.
         ToggleMute,
         /// Show or hide the stream stats overlay on every remote window.
@@ -241,7 +244,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("New agent", IconName::Bot, Box::new(NewAgent)),
         w("New note", IconName::StickyNote, Box::new(NewNote)),
         w("Add a window or display", IconName::AppWindow, Box::new(AddWindow)),
-        w("Open a file", IconName::FileText, Box::new(OpenFile)),
+        w("Open file…", IconName::FileText, Box::new(OpenFile)),
         w("Open folder…", IconName::FolderOpen, Box::new(OpenFolder)),
         w("Enclosing folder", IconName::ArrowUp, Box::new(crate::folder::OpenParent)),
         w("Save file", IconName::Save, Box::new(crate::file::SaveFile)),
@@ -257,7 +260,8 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Reload page", IconName::RotateCw, Box::new(ReloadPage)),
         w("Close tile", IconName::X, Box::new(CloseItem)),
         w("Undo close", IconName::Undo2, Box::new(UndoClose)),
-        w("Next agent that needs you", IconName::BellRing, Box::new(NextAttention)),
+        w("Next thing that needs you", IconName::BellRing, Box::new(NextAttention)),
+        w("Inbox", IconName::Bell, Box::new(ToggleInbox)),
         w("Mute sound", IconName::VolumeX, Box::new(ToggleMute)),
         w("Stream stats", IconName::Activity, Box::new(ToggleStats)),
         w(

@@ -95,7 +95,7 @@ fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     let tabs: Vec<String> =
-        tree.into_iter().filter_map(|n| n.label).filter(|l| l.starts_with("Workspace ")).collect();
+        tree.into_iter().filter(|n| n.role == "Tab").filter_map(|n| n.label).collect();
     assert!(tabs.iter().any(|l| l.ends_with(", 1 needs you")), "{tabs:#?}");
     assert!(tabs.iter().all(|l| !l.contains(['⌘', '⌥', '⌃'])), "no chords on tabs: {tabs:#?}");
 }

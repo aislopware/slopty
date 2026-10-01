@@ -45,6 +45,10 @@ pub fn painted(window: &Window) -> Vec<String> {
 /// say the window is in motion. Then only what both paint alike, what holds still, is judged:
 /// the frame shown must paint it too.
 pub fn stale(window: &mut Window, cx: &mut App, limit: usize) -> Option<String> {
+    // GPUI's fades run on the wall clock: a slow machine can paint one half way and draw the
+    // frames from scratch after it has landed, and no comparison then holds.
+    #[cfg(test)]
+    assert!(cx.reduce_motion(), "a frame is judged only under Reduce Motion");
     let shown = painted(window);
     let scratch = from_scratch(window, cx);
     if shown == scratch {
@@ -144,6 +148,7 @@ mod tests {
     /// can fail, and a frame from scratch after a frame from scratch never does.
     #[gpui::test]
     fn a_view_changed_untold_is_stale_until_told(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (bar, cx) = cx.add_window_view(|_, _| Bar(10.0));
         cx.run_until_parked();
         assert_eq!(cx.update(|window, cx| stale(window, cx, 4)), None, "drawn as it was");
@@ -189,6 +194,7 @@ mod tests {
     #[gpui::test]
     fn a_view_changed_untold_is_caught_beside_motion(cx: &mut TestAppContext) {
         use gpui::AppContext as _;
+        cx.update(|cx| cx.set_reduce_motion(true));
         let (both, cx) =
             cx.add_window_view(|_, cx| Both(cx.new(|_| Bar(10.0)), cx.new(|_| Spinner)));
         let bar = both.read_with(cx, |both, _| both.0.clone());

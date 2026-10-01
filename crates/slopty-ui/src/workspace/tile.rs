@@ -28,7 +28,7 @@ use super::{Field, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 use crate::draw::Draw;
 use crate::folder::FolderView;
 use crate::icons::{IconName, IconSize, Status};
@@ -146,6 +146,8 @@ pub const NOTE_TITLE_CHARS: usize = 40;
 pub(super) struct Chrome {
     pub k: f32,
     pub zooming: bool,
+    /// Two or more tiles are in view, so the focused one's header carries its line.
+    pub focus_line: bool,
 }
 
 /// What a body with nothing to show yet says, and when.
@@ -949,6 +951,7 @@ impl WorkspaceView {
         if shapes {
             return header.into_any_element();
         }
+        let header = header.when(focused && chrome.focus_line, |el| el.child(focus_line(theme, k)));
         // The face's approval card is the tile's statement while it shows: a pill over it would
         // say the same thing a few hundred points higher.
         let badge = agent
@@ -968,13 +971,14 @@ impl WorkspaceView {
                 self.finished_took(tile, session, f, chrome, cx)
             }
         });
-        // An agent the worker had to guess at: offer the hooks that would make it precise.
+        // An agent the worker had to guess at: offer the hooks that would make it precise. An
+        // offer, not a state: `warn` is for what needs the person.
         let hooks = agent
             .filter(|(_, a)| a.source != AgentSource::Hook && !self.hooks_offered(tile.worker))
             .map(|_| {
                 let worker = tile.worker;
                 let hint_theme = std::rc::Rc::new(theme.clone());
-                let pill = pill("hooks", id, HOOKS, s.warn, theme, chrome)
+                let pill = pill("hooks", id, HOOKS, s.text_secondary, theme, chrome)
                     .role(Role::Button)
                     .aria_label(INSTALL_HOOKS)
                     .aria_description(HOOKS_GIVE)
@@ -1449,6 +1453,9 @@ impl WorkspaceView {
                             cx.stop_propagation();
                         }),
                     )
+                    .when(shown && placed.focused && chrome.focus_line, |el| {
+                        el.relative().child(focus_line(theme, k))
+                    })
                     .child(slot)
                     .child(div().flex_auto().min_w_0().overflow_hidden().child(name))
                     .child(close),
@@ -2662,4 +2669,18 @@ fn pill(
         .hover(move |el| el.bg(hsla(raised)))
         .active(move |el| el.bg(hsla(pressed)))
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
+}
+
+/// The line along the top of the focused tile's header (or its column's shown tab) while
+/// several tiles are in view: the accent, set back, since only what needs the person spends
+/// the whole colour; Increase Contrast shows it whole.
+fn focus_line(theme: &Theme, k: f32) -> Div {
+    div()
+        .debug_selector(|| "focus-line".to_owned())
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(slopty_theme::stroke::MARK * k))
+        .bg(hsla_alpha(theme.surfaces.accent, theme.set_back(slopty_theme::alpha::STRONG)))
 }

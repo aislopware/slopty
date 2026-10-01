@@ -37,7 +37,7 @@ use crate::clipboard::{ClipFiles, ClipSync, provider, shell_paste, worker_file_p
 use crate::conversation::{Attach, ConversationView};
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::screen::{PasteAhead, ScreenView};
-use crate::terminal::ClipHook;
+use crate::terminal::{ClipHook, ClipPaste};
 
 /// How long a paste waits for a worker's clipboard bytes before it gives up. The pasting app's
 /// main thread waits with it, so this is as long as a paste may hang.
@@ -178,6 +178,33 @@ impl WorkspaceView {
         }
     }
 
+    /// Share the clipboard with the workers as `sharing` says: a worker it is not shared with
+    /// is told its clipboard is no longer watched at once, hears none of this one's, and is
+    /// given none of it on a paste.
+    pub fn set_clipboard_sharing(
+        &mut self,
+        sharing: slopty_settings::ClipboardSettings,
+        cx: &mut Context<Self>,
+    ) {
+        if self.clip_sharing != sharing {
+            self.clip_sharing = sharing;
+            self.clip_sharing_changed();
+            cx.notify();
+        }
+    }
+
+    /// The workers' names or the settings moved: which keys the clipboard is not shared with.
+    pub(super) fn clip_sharing_changed(&self) {
+        let sharing = &self.clip_sharing;
+        let off = self.workers.iter().filter(|(_, w)| !sharing.shared_with(&w.name));
+        *self.clip_unshared.borrow_mut() = off.map(|(key, _)| *key).collect();
+    }
+
+    /// Whether the clipboard is shared with `key`.
+    fn clip_shared(&self, key: WorkerKey) -> bool {
+        !self.clip_unshared.borrow().contains(&key)
+    }
+
     /// The workers whose clipboard this client watches now.
     #[must_use]
     pub fn watching(&self) -> Vec<WorkerKey> {
@@ -198,7 +225,7 @@ impl WorkspaceView {
             ItemKind::Terminal { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
         );
         let linked = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());
-        (remote && linked).then_some(tile.worker)
+        (remote && linked && self.clip_shared(tile.worker)).then_some(tile.worker)
     }
 
     /// Tell each worker whether its clipboard is wanted, and give the one that just became
@@ -240,7 +267,12 @@ impl WorkspaceView {
     pub(super) fn paste_hook(&self, key: WorkerKey) -> Option<crate::screen::PasteHook> {
         let me = self.me(key)?;
         let clip = Rc::clone(self.clip.as_ref()?);
+        let unshared = Rc::clone(&self.clip_unshared);
         Some(Rc::new(move || {
+            // Not shared: the chord pastes what the worker's own clipboard holds.
+            if unshared.borrow().contains(&key) {
+                return PasteAhead { offer: None, files: None };
+            }
             let mut clip = clip.borrow_mut();
             let offer = clip.paste_offer(key, me).map(|o| ClientMsg::Clip(ClipMsg::Offer(o)));
             PasteAhead { offer, files: clip.files() }
@@ -254,7 +286,15 @@ impl WorkspaceView {
     pub(super) fn clip_hook(&self, key: WorkerKey) -> Option<ClipHook> {
         let me = self.me(key)?;
         let clip = Rc::clone(self.clip.as_ref()?);
-        Some(Rc::new(move || shell_paste(&mut clip.borrow_mut(), key, me)))
+        let unshared = Rc::clone(&self.clip_unshared);
+        Some(Rc::new(move || {
+            // Not shared: a shell pastes this Mac's text and nothing goes to the worker's
+            // pasteboard.
+            if unshared.borrow().contains(&key) {
+                return ClipPaste::Text;
+            }
+            shell_paste(&mut clip.borrow_mut(), key, me)
+        }))
     }
 
     pub(super) fn remote(&self, key: WorkerKey) -> Option<Arc<dyn Remote>> {
@@ -398,6 +438,14 @@ impl WorkspaceView {
     /// relayed, is answered by fetching from that worker, off the main thread.
     pub fn clip_message(&self, key: WorkerKey, msg: ClipMsg, cx: &Context<Self>) {
         let Some(clip) = self.clip.clone() else { return };
+        // Not shared: the worker's copies stay its own, and none of this Mac's is handed over.
+        if !self.clip_shared(key) {
+            if let ClipMsg::Fetch { rep, .. } = msg {
+                let source = rep.source;
+                self.send(key, ClientMsg::Clip(ClipMsg::Unavailable { source }));
+            }
+            return;
+        }
         match msg {
             ClipMsg::Offer(offer) => {
                 let mut clip = clip.borrow_mut();

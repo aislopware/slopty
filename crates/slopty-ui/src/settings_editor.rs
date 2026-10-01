@@ -190,6 +190,20 @@ impl SettingsEditor {
         cx.notify();
     }
 
+    /// Show the form on `section`'s page.
+    pub fn show_section(
+        &mut self,
+        section: crate::settings_form::schema::Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode != Mode::Form {
+            self.show_form(window, cx);
+        }
+        self.form.update(cx, |form, cx| form.show(section, window, cx));
+        cx.notify();
+    }
+
     /// The app refused the text: show why, keep editing.
     pub fn set_error(&mut self, error: String, cx: &mut Context<Self>) {
         self.error = Some(error);

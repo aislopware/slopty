@@ -73,6 +73,8 @@ impl WorkspaceView {
     /// Show `session`'s face or its TUI.
     pub fn show_face(&mut self, session: SessionId, face: bool, cx: &mut Context<Self>) {
         self.faces.chosen.insert(session, face);
+        // The pick is saved with the layout, by its tile.
+        self.layout_touched(cx);
         if face {
             self.faces.focus.insert(session);
         } else {
@@ -111,6 +113,7 @@ impl WorkspaceView {
     /// its link new).
     /// Returns whether it gave a face the keyboard.
     pub(super) fn sync_faces(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.restore_faces();
         let tiled: HashSet<SessionId> = self
             .layout
             .tiles()

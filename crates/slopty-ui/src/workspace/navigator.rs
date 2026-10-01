@@ -385,25 +385,39 @@ pub(super) fn path_label(path: &LinkPath) -> (String, bool) {
     }
 }
 
-/// Where a tile's row stands among its worker's: what needs the human first, then what
-/// finished or has news not yet seen, then what is working, then the rest.
+/// Where a tile's row stands among its worker's, on the attention ladder: what needs the
+/// human, then what failed, then what finished or has news not yet seen, then what works,
+/// then what waits on work in the background, then the rest.
 pub(super) const fn attention(status: Option<Status>, unseen: bool) -> u8 {
     match status {
         Some(Status::NeedsYou) => 0,
-        _ if unseen => 1,
-        Some(Status::Done | Status::Failed) => 1,
-        Some(Status::Working) => 2,
-        Some(Status::Running) => 3,
-        Some(Status::Idle | Status::Away) | None => 4,
+        Some(Status::Failed) => 1,
+        _ if unseen => 2,
+        Some(Status::Done) => 2,
+        Some(Status::Working) => 3,
+        Some(Status::Running) => 4,
+        Some(Status::Idle | Status::Away) | None => 5,
     }
 }
 
 /// The state a tile's row names in a word at the end of its first line: what is happening
-/// or just happened there. At rest, or out of reach (its worker's header says so), nothing.
+/// there. At rest, or out of reach (its worker's header says so), nothing; a finish not yet
+/// seen is the accent dot, not a word.
 pub(super) const fn status_word(status: Option<Status>) -> Option<Status> {
     match status {
-        Some(s @ (Status::NeedsYou | Status::Working | Status::Done | Status::Failed)) => Some(s),
-        Some(Status::Running | Status::Idle | Status::Away) | None => None,
+        Some(s @ (Status::NeedsYou | Status::Failed | Status::Working | Status::Running)) => {
+            Some(s)
+        }
+        Some(Status::Done | Status::Idle | Status::Away) | None => None,
+    }
+}
+
+/// How strongly a tile's row is drawn: one at work recedes until it is hovered or selected,
+/// so what needs the person leads the list.
+pub(super) const fn row_strength(theme: &Theme, status: Option<Status>, selected: bool) -> f32 {
+    match status {
+        Some(Status::Working | Status::Running) if !selected => theme.set_back(alpha::STRONG),
+        _ => 1.0,
     }
 }
 
@@ -1118,11 +1132,14 @@ impl WorkspaceView {
                     }
                     _ => None,
                 };
-                let word = status_word(mark).map(|word| match (word, &item.kind) {
-                    (Status::NeedsYou, ItemKind::Terminal { session }) => self
-                        .agent_state(*session)
-                        .map_or_else(|| word.label().to_owned(), agent_status_word),
-                    _ => word.label().to_owned(),
+                let shell_runs = running.is_some();
+                let word = status_word(mark).filter(|_| !shell_runs).map(|word| {
+                    match (word, &item.kind) {
+                        (Status::NeedsYou, ItemKind::Terminal { session }) => self
+                            .agent_state(*session)
+                            .map_or_else(|| word.label().to_owned(), agent_status_word),
+                        _ => word.label().to_owned(),
+                    }
                 });
                 let row = NavTile {
                     tile,
@@ -1650,7 +1667,7 @@ impl WorkspaceView {
                     .collect::<Vec<_>>()
                     .join(", ");
                 let (glyph, ink) = match health {
-                    Some((Status::Away, _)) => (IconName::ServerOff, s.warn_fill),
+                    Some((Status::Away, _)) => (IconName::ServerOff, s.text_muted),
                     _ => (IconName::Server, s.text_secondary),
                 };
                 let badge = rollup_slot(theme, format!("nav-rail-rollup-{key}"), rollup, true)
@@ -1956,7 +1973,7 @@ impl WorkspaceView {
                 Some((Status::Away, _)) => lead_slot(
                     theme,
                     div().id("away").role(Role::Image).aria_label(Status::Away.label()).child(
-                        icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.warn_fill)),
+                        icon(theme, IconName::ServerOff, IconSize::Inline, hsla(s.text_muted)),
                     ),
                 ),
                 Some((mark, _)) => lead_slot(theme, status_mark(theme, Some(mark), 1.0)),
@@ -2179,10 +2196,15 @@ impl WorkspaceView {
         let ink = if selected { s.text } else { s.text_secondary };
         let id = t.tile.item.as_uuid();
         let (first, second) = line_heights(theme);
-        let lead = crate::palette::status_slot(theme, t.kind, None, hsla(s.text_muted), 1.0)
+        // A row at work recedes until the pointer is on it: its inks at a share, so its wash
+        // stays whole and nothing is drawn through a layer.
+        let strength = row_strength(theme, t.mark, selected);
+        let row_group = SharedString::from(format!("nav-tile-group-{id}"));
+        let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
+        let lead = crate::palette::status_slot(theme, t.kind, None, faded(s.text_muted), 1.0)
             .debug_selector(move || format!("nav-kind-{id}"));
-        // One mark at the line's end: the state while there is one (it says unseen too, as
-        // "Done" and "Failed" are), else the unseen dot, else the age.
+        // One mark at the line's end: the state while there is one, else the unseen dot, else
+        // the clock of a command that runs, else the age.
         let end = match status_word(t.mark).zip(t.word.clone()) {
             Some((state, word)) => {
                 let selector =
@@ -2192,7 +2214,10 @@ impl WorkspaceView {
                         .debug_selector(move || selector)
                         .flex_none()
                         .whitespace_nowrap()
-                        .text_color(hsla(state.tone(theme)))
+                        .text_color(faded(state.tone(theme)))
+                        .group_hover(row_group.clone(), move |st| {
+                            st.text_color(hsla(state.tone(theme)))
+                        })
                         .child(word)
                         .into_any_element(),
                 )
@@ -2212,17 +2237,20 @@ impl WorkspaceView {
                     .into_any_element()
             }),
         };
-        let line1 =
-            div()
-                .h(px(first))
-                .line_height(px(first))
-                .flex()
-                .items_center()
-                .gap(px(theme.spacing.xs))
-                .child(title(t.title.clone(), hsla(ink)).when(selected, |el| {
-                    el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-                }))
-                .children(end);
+        let line1 = div()
+            .h(px(first))
+            .line_height(px(first))
+            .flex()
+            .items_center()
+            .gap(px(theme.spacing.xs))
+            .child(
+                title(t.title.clone(), faded(ink))
+                    .group_hover(row_group.clone(), move |st| st.text_color(hsla(ink)))
+                    .when(selected, |el| {
+                        el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                    }),
+            )
+            .children(end);
         // The working tree's changes end the line whole; the words before them give way.
         let changes = t
             .changes
@@ -2248,6 +2276,8 @@ impl WorkspaceView {
             });
         let line2 = t.two_lines().then(|| {
             meta(div(), theme)
+                .text_color(faded(s.text_muted))
+                .group_hover(row_group.clone(), move |st| st.text_color(hsla(s.text_muted)))
                 .h(px(second))
                 .line_height(px(second))
                 .flex()
@@ -2279,6 +2309,7 @@ impl WorkspaceView {
             selected,
         )
         .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
+        .group(row_group)
         // The two lines sit in the middle of the row at either density, the kind beside the
         // first.
         .items_center()
@@ -2407,7 +2438,12 @@ fn heading(
             .flex_none()
             .role(Role::Image)
             .aria_label(Status::Working.label())
-            .child(status_icon(theme, Status::Working, px(theme.typography.meta()), hsla(s.accent)))
+            .child(status_icon(
+                theme,
+                Status::Working,
+                px(theme.typography.meta()),
+                hsla(s.text_muted),
+            ))
     });
     let count = working.map(|n| readout(theme, n.to_string()));
     crate::palette::section_heading(theme, selector.into(), text)
@@ -2575,8 +2611,46 @@ mod tests {
     fn a_row_names_a_state_that_is_happening() {
         assert_eq!(status_word(Some(Status::NeedsYou)), Some(Status::NeedsYou));
         assert_eq!(status_word(Some(Status::Failed)), Some(Status::Failed));
+        assert_eq!(status_word(Some(Status::Working)), Some(Status::Working));
+        assert_eq!(status_word(Some(Status::Running)), Some(Status::Running));
+        assert_eq!(status_word(Some(Status::Done)), None, "the unseen dot says it");
         assert_eq!(status_word(Some(Status::Idle)), None);
         assert_eq!(status_word(Some(Status::Away)), None);
         assert_eq!(status_word(None), None);
+    }
+
+    /// The ladder: needs you, failed, unseen, working, waiting, the rest.
+    #[test]
+    fn rows_climb_the_attention_ladder() {
+        let ranks = [
+            attention(Some(Status::NeedsYou), false),
+            attention(Some(Status::Failed), false),
+            attention(Some(Status::Done), true),
+            attention(None, true),
+            attention(Some(Status::Working), false),
+            attention(Some(Status::Running), false),
+            attention(Some(Status::Idle), false),
+            attention(Some(Status::Away), false),
+        ];
+        assert_eq!(ranks, [0, 1, 2, 2, 3, 4, 5, 5]);
+    }
+
+    /// A row at work recedes until it is selected; one that needs the person never does, and
+    /// Increase Contrast draws them all whole.
+    #[test]
+    fn working_rows_recede_and_a_row_that_needs_you_does_not() {
+        let mut theme = Theme::default();
+        assert!((row_strength(&theme, Some(Status::Working), false) - alpha::STRONG).abs() < 1e-6);
+        assert!((row_strength(&theme, Some(Status::Running), false) - alpha::STRONG).abs() < 1e-6);
+        for (status, selected) in [
+            (Some(Status::Working), true),
+            (Some(Status::NeedsYou), false),
+            (Some(Status::Failed), false),
+            (None, false),
+        ] {
+            assert!((row_strength(&theme, status, selected) - 1.0).abs() < 1e-6, "{status:?}");
+        }
+        theme.contrast = slopty_theme::Contrast::Increased;
+        assert!((row_strength(&theme, Some(Status::Working), false) - 1.0).abs() < 1e-6);
     }
 }

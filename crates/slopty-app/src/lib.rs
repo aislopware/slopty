@@ -27,6 +27,7 @@ mod server;
 pub mod settings;
 pub mod ssh;
 pub mod this_mac;
+pub mod window;
 pub mod workers;
 
 use std::rc::Rc;
@@ -34,14 +35,12 @@ use std::rc::Rc;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnimationExt as _, App, AppContext as _, Context, Entity, Focusable as _,
-    InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions,
-    div, px,
+    AnimationExt as _, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    MouseButton, ParentElement as _, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions, div, px,
 };
-use gpui_kit::component::Root;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
-pub use settings::actions::OpenSettings;
+pub use settings::actions::{OpenKeyboardShortcuts, OpenSettings};
 use slopty_client::LinkEvent;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
@@ -63,6 +62,8 @@ use slopty_ui::workspace::{
 };
 pub use ssh::actions::InstallOverSsh;
 pub use this_mac::actions::UseThisMac;
+pub use window::actions::{Minimize, OpenHelp, ShowWindow, Zoom};
+pub use window::{HELP_URL, show as show_main_window};
 pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
 use workers::{Hearing, Tick, WorkerSlot};
 
@@ -419,7 +420,15 @@ pub struct Workspace {
     settings: Settings,
     /// The window's appearance is dark (`theme.appearance = "system"` follows it).
     window_dark: bool,
+    /// The workspace view's events and changes, heard for as long as the app runs.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "held so they live; only the tests count them")
+    )]
     subscriptions: Vec<gpui::Subscription>,
+    /// The main window's watches (its appearance, its activation, where it stands), made again
+    /// with each window ([`window::open`]).
+    window_subscriptions: Vec<gpui::Subscription>,
     /// The system's Reduce Motion heard as it changes ([`watch_reduce_motion`]).
     motion_watch: Option<slopty_platform::motion::Watch>,
     /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
@@ -503,7 +512,12 @@ impl Workspace {
         let events = cx.subscribe(&view, |ws: &mut Self, _view, event, cx| match event {
             // The badge is the inbox's count, which `Self::look` follows.
             WorkspaceEvent::NeedsYou(_) => {}
-            WorkspaceEvent::Attention(_session) => alert(),
+            // As a Mac app's alert: heard only while the human is elsewhere.
+            WorkspaceEvent::Attention(_session) => {
+                if settings::agent_alerts(&ws.settings, cx.active_window().is_some()) {
+                    alert();
+                }
+            }
             // A bell while the human is elsewhere is an alert; in front of the window the
             // view's own flash is enough.
             WorkspaceEvent::Bell(_session) => {
@@ -544,6 +558,7 @@ impl Workspace {
             settings: Settings::default(),
             window_dark: true,
             subscriptions: vec![events, changes],
+            window_subscriptions: Vec::new(),
             motion_watch: None,
             resume_watch: None,
             adding: None,
@@ -796,7 +811,9 @@ impl Workspace {
             self.show_notice(text, cx);
         }
         let server = loaded.settings.client.server.clone();
+        let sharing = loaded.settings.clipboard.clone();
         self.settings = loaded.settings;
+        self.view.update(cx, |v, cx| v.set_clipboard_sharing(sharing, cx));
         self.rebuild_theme(cx);
         self.apply_keymap(keymap, cx);
         // The app's palette lines show their chords from the keymap just bound.
@@ -1809,7 +1826,7 @@ impl Workspace {
         };
         let (title, blurb, other) = match (flow, sheet) {
             (Some(_), _) => (this_mac::TITLE, this_mac::BLURB, back),
-            (None, Some(_)) => (ssh::HEADING, ssh::BLURB, back),
+            (None, Some(sheet)) => (sheet.heading(), sheet.blurb(), back),
             (None, None) => (title, blurb, other),
         };
         let welcome = self.welcome();
@@ -1913,29 +1930,58 @@ impl Workspace {
         // This Mac and a machine over SSH are more places to add, so they are rows to press as
         // the tailnet's are, in one frame, not links under the switch, where the likeliest first
         // step for a single Mac sat at the page's foot dressed as a way aside.
+        // The server panel's rows set up a server, here or over SSH; the worker panel's add
+        // this Mac as a worker, or set one up over SSH.
+        // This Mac as a worker is the likeliest first step with nothing set up yet, so it leads
+        // both panels. The server panel then offers to set up a server, here or over SSH; the
+        // worker panel, a worker over SSH.
+        let serving = adding.mode == Panel::Server;
         let this_mac_entry = (self.this_mac.is_some() && !in_flow).then(|| {
             this_mac_row(theme)
                 .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)))
         });
         let ssh_entry = (!in_flow).then(|| self.ssh_row(cx)).flatten();
-        let label = if ssh_entry.is_some() { SET_UP_LABEL } else { THIS_MAC_LABEL };
-        let use_this_mac = (this_mac_entry.is_some() || ssh_entry.is_some()).then(|| {
-            let frame = div()
-                .flex()
-                .flex_col()
-                .p(px(spacing.xxs))
-                .rounded(px(radii.md))
-                .bg(hsla(s.raised))
-                .children(this_mac_entry)
-                .children(ssh_entry);
-            div()
-                .id("add-worker-this-mac")
-                .flex()
-                .flex_col()
-                .gap(px(spacing.sm))
-                .child(panel_label(theme, "add-worker-this-mac-label", label))
-                .child(frame)
-        });
+        let serve_entry = (serving && !in_flow).then(|| self.serve_here_row(cx)).flatten();
+        let group =
+            |id: &'static str, label_id: &'static str, label: &'static str, rows: Vec<_>| {
+                (!rows.is_empty()).then(|| {
+                    let frame = div()
+                        .flex()
+                        .flex_col()
+                        .p(px(spacing.xxs))
+                        .rounded(px(radii.md))
+                        .bg(hsla(s.raised))
+                        .children(rows);
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_col()
+                        .gap(px(spacing.sm))
+                        .child(panel_label(theme, label_id, label))
+                        .child(frame)
+                })
+            };
+        let (use_this_mac, set_up_server) = if serving {
+            let server_rows = serve_entry.into_iter().chain(ssh_entry).collect();
+            (
+                group(
+                    "add-worker-this-mac",
+                    "add-worker-this-mac-label",
+                    THIS_MAC_LABEL,
+                    this_mac_entry.into_iter().collect(),
+                ),
+                group(
+                    "add-worker-server",
+                    "add-worker-server-label",
+                    SET_UP_SERVER_LABEL,
+                    server_rows,
+                ),
+            )
+        } else {
+            let label = if ssh_entry.is_some() { SET_UP_LABEL } else { THIS_MAC_LABEL };
+            let rows = this_mac_entry.into_iter().chain(ssh_entry).collect();
+            (group("add-worker-this-mac", "add-worker-this-mac-label", label, rows), None)
+        };
         let cancel = (!welcome).then(|| {
             button("cancel-add", "Cancel", ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)))
@@ -1986,6 +2032,7 @@ impl Workspace {
                 el.children(tailnet)
                     .children(unlisted)
                     .children(use_this_mac)
+                    .children(set_up_server)
                     .child(entry)
             })
             .child(aside);
@@ -2698,6 +2745,13 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &OpenKeyboardShortcuts, window, cx| {
+                this.open_settings(window, cx);
+                if let Some(editor) = &this.settings_editor {
+                    let keyboard = slopty_ui::settings_form::schema::Section::Keyboard;
+                    editor.update(cx, |e, cx| e.show_section(keyboard, window, cx));
+                }
+            }))
             .when(!welcome, |el| {
                 el.child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
                     .when_some(key_bar, |el, bar| {
@@ -2910,6 +2964,8 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
 const THIS_MAC_LABEL: &str = "On this Mac";
 /// The label over this Mac's row and the SSH row together.
 const SET_UP_LABEL: &str = "Set up a worker";
+/// The label over the server panel's rows: the server on this Mac, or over SSH.
+const SET_UP_SERVER_LABEL: &str = "Set up the server";
 
 /// This Mac as a row to press, drawn as a found worker's is: the Mac's glyph, what pressing
 /// does over what follows, and the chevron that says the press goes on to a checklist.
@@ -3107,8 +3163,9 @@ pub const fn self_test() -> bool {
 pub fn open_workspace(
     cx: &mut App,
     handle: tokio::runtime::Handle,
-    options: WindowOptions,
+    options: impl Fn(&App) -> WindowOptions + 'static,
 ) -> anyhow::Result<()> {
+    let options: window::MakeOptions = Rc::new(options);
     // VideoToolbox's first decoder session costs 150–400 ms; pay it before any worker is
     // dialed.
     slopty_client::warm_up_decoder();
@@ -3169,51 +3226,21 @@ pub fn open_workspace(
         ws.set_notifier(notifier);
         ws
     });
-    let root_view = workspace.clone();
     // What the file tiles hold unsaved is written as the app quits, before anything goes.
     let quitting = workspace.clone();
     cx.on_app_quit(move |cx| {
-        quitting.update(cx, |ws, cx| ws.view.update(cx, |v, cx| v.keep_unsaved_now(cx)));
+        quitting.update(cx, |ws, cx| {
+            ws.view.update(cx, |v, cx| {
+                v.keep_unsaved_now(cx);
+                // Where the windows stand changed a moment ago, maybe: written before the wait.
+                v.save_layout_now();
+            });
+        });
         async {}
     })
     .detach();
-    // Terminals and remote desktops stay at full rate while another app has the keyboard: a
-    // second display is watched while typing elsewhere.
-    // The self-test's window comes up in front but takes no keyboard: its keys arrive over the
-    // socket, and the machine's keyboard belongs to whoever is using it.
-    let options = WindowOptions {
-        inactive_frame_interval: None,
-        focus: options.focus && !self_test(),
-        ..options
-    };
-    let window = cx.open_window(options, move |window, cx| {
-        // The theme follows the window's appearance while `theme.appearance = "system"`.
-        let observed = root_view.clone();
-        let subscription = window.observe_window_appearance(move |window, cx| {
-            let dark = settings::is_dark(window.appearance());
-            observed.update(cx, |ws, cx| ws.set_window_dark(dark, cx));
-        });
-        let dark = settings::is_dark(window.appearance());
-        root_view.update(cx, |ws, cx| {
-            ws.subscriptions.push(subscription);
-            // A worker's clipboard is watched only while this app is frontmost, and this Mac's
-            // checklist is read again on the way back from System Settings.
-            let activation = cx.observe_window_activation(window, |ws, window, cx| {
-                let active = window.is_window_active();
-                ws.view.update(cx, |v, cx| v.set_app_active(active, cx));
-                ws.set_active(active);
-                if active {
-                    ws.this_mac_activated(window, cx);
-                }
-            });
-            ws.subscriptions.push(activation);
-            ws.window_dark = dark;
-            ws.apply_loaded(loaded, cx);
-        });
-        // The frame probe times every frame from the root down.
-        let framed = cx.new(|_| slopty_ui::frames::Framed::new(root_view));
-        cx.new(|cx| Root::new(framed, window, cx))
-    })?;
+    let window = window::open(&workspace, options(cx), Some(loaded), cx)?;
+    window::install(&workspace, options, cx);
     // GPUI's own animations hold still as the system asks, as Slopty's do, and follow the
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());
@@ -3233,12 +3260,11 @@ pub fn open_workspace(
             );
             cx.update(|cx| {
                 if !verdict {
-                    cx.activate(true);
+                    // The window comes back to show the tile, if it was closed.
+                    window::show(cx);
                 }
-                let _handled = window.update(cx, |_root, window, cx| {
-                    if !verdict {
-                        window.activate_window();
-                    }
+                let Some(window) = for_notifications.read(cx).window else { return };
+                let _handled = window.update(cx, |_root, _window, cx| {
                     for_notifications.update(cx, |ws, cx| ws.open_notification(&tap, cx));
                 });
             });
@@ -3256,17 +3282,12 @@ pub fn open_workspace(
     };
     window.update(cx, |_root, window, cx| {
         workspace.update(cx, |ws, cx| {
-            ws.window = Some(window.window_handle());
-            ws.view.update(cx, |_v, cx| WorkspaceView::accept_dropped_files(window, cx));
             for worker in known {
                 ws.add_worker(worker.worker_id, worker.name, true, cx);
             }
             ws.refresh_menu(cx);
             if ws.workers.is_empty() && ws.server.is_none() {
                 ws.show_add_worker(Panel::Server, window, cx);
-            } else {
-                let handle = ws.view.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
             }
         });
     })?;
@@ -3542,12 +3563,60 @@ mod tests {
             });
         }
         let root = ws.clone();
-        let (_root, cx) = cx.add_window_view(move |window, cx| Root::new(root, window, cx));
+        let (_root, cx) =
+            cx.add_window_view(move |window, cx| gpui_kit::component::Root::new(root, window, cx));
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
         });
         cx.run_until_parked();
         (ws, cx)
+    }
+
+    /// Closing the main window leaves the workspace running; asking for the window again (the
+    /// Dock icon, ⌘N, Window ▸ Slopty) opens a new one on the same workspace, where the last one
+    /// stood; with a window up, it only comes to the front.
+    #[gpui::test]
+    fn a_closed_window_opens_again_on_the_same_workspace(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(cx, &runtime, &dir);
+        let options: window::MakeOptions = Rc::new(|_| WindowOptions::default());
+        cx.update(|cx| {
+            window::open(&ws, options(cx), None, cx).expect("the window");
+            window::install(&ws, options, cx);
+        });
+        cx.run_until_parked();
+        let first = ws.read_with(cx, |ws, _| ws.window).expect("shown");
+        let frame = slopty_client::layout::WindowFrame {
+            display: None,
+            x: 50.0,
+            y: 60.0,
+            width: 900.0,
+            height: 700.0,
+            fullscreen: false,
+        };
+        ws.update(cx, |ws, cx| ws.view.update(cx, |v, cx| v.set_window_frame(Some(frame), cx)));
+        cx.update(|cx| first.update(cx, |_root, window, _cx| window.remove_window())).unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()), "closed");
+
+        cx.update(window::show);
+        cx.run_until_parked();
+        let windows = cx.update(|cx| cx.windows());
+        let second = ws.read_with(cx, |ws, _| ws.window).expect("shown again");
+        assert_eq!(windows, [second], "one window, the new one");
+        assert_ne!(second, first);
+        let size = cx
+            .update(|cx| second.update(cx, |_r, window, _cx| window.window_bounds().get_bounds()))
+            .expect("open")
+            .size;
+        #[expect(clippy::cast_possible_truncation, reason = "whole points")]
+        let size = (f32::from(size.width) as i32, f32::from(size.height) as i32);
+        assert_eq!(size, (900, 700), "where the last one stood");
+
+        cx.update(window::show);
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| cx.windows()), [second], "brought to the front, not opened");
     }
 
     /// A deployer for a test that only opens the SSH sheet: nothing is ever deployed.
@@ -3610,6 +3679,33 @@ mod tests {
         });
         assert!(!busy, "no longer waiting on the add");
         assert!(sheet && cx.debug_bounds("ssh-form").is_some(), "the sheet, drawn");
+    }
+
+    /// Both panels lead with this Mac as a worker, the likeliest first step; the server panel
+    /// then offers to set up a server, here or over SSH, and the worker panel a worker over SSH.
+    #[gpui::test]
+    fn the_server_panel_offers_this_mac_and_a_server_to_set_up(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.simulate_resize(size(px(900.0), px(800.0)));
+        let host = Rc::new(StandIn {
+            asked: std::cell::RefCell::default(),
+            doctor: std::cell::RefCell::new(None),
+            added: WorkerId::new(),
+        });
+        ws.update(cx, |ws, _cx| {
+            ws.deployer = Some(Rc::new(NoDeploys));
+            ws.this_mac = Some(host);
+        });
+        let shown = |cx: &mut VisualTestContext, panel: Panel| {
+            cx.update(|window, cx| ws.update(cx, |ws, cx| ws.show_add_worker(panel, window, cx)));
+            cx.run_until_parked();
+            ["serve-here", "serve-over-ssh", "use-this-mac", "install-over-ssh"]
+                .map(|row| cx.debug_bounds(row).is_some())
+        };
+        assert_eq!(shown(cx, Panel::Server), [true, true, true, false], "the server's rows");
+        assert_eq!(shown(cx, Panel::Worker), [false, false, true, true], "the worker's rows");
     }
 
     /// The shell with no window, no worker and no panel.

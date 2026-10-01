@@ -513,7 +513,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Rules that follow (as shipped): status tones are chrome tokens now — the terminal palette
   stays the terminal's; the chrome tones share its hues so nothing jars, and the light table
   has its own set. The agent badge uses the accent for both busy states (thinking and a tool;
-  the label says which), `warn` while blocked, `success` when done. Shadows go except on
+  the label says which), `warn` while blocked, `success` when done. (Amended 2026-10-01: busy
+  states recede into `text_muted` and a finish is the accent dot; see **Colour goes to what
+  needs the person** below.) Shadows go except on
   floating layers (picker, host switcher, search bar, "↓ latest" pill), and those use
   `shadow_sm`. Focus is one accent hairline: the focused item's frame, the search bar while it
   has the caret, the composer while it has the caret. Hover is a `HOVER` wash or a step up
@@ -1423,7 +1425,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Window picker.** ⌘O opens it at once with the sessions and a row that says the worker is
     being asked for its windows. The listing fills that same picker. It groups rows under
     Sessions, Displays and Windows and says `Nothing matches` when a filter empties it.
-  - **Empty workspace.** It shows a large muted grid icon, `Empty workspace`, and three rows
+  - **Empty workspace** (*amended 2026-10-01*: it asks for work instead, see "The empty
+    workspace asks what an agent should do" below). It shows a large muted grid icon, `Empty workspace`, and three rows
     with icons and key caps read from the bindings (only the first accented). Below them come
     the workers with their marks, each opening a shell. With no worker it says `No workers yet`
     and where one comes from.
@@ -2384,7 +2387,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A workspace is named by where it works.** Until someone names it, its name is its first
     shell's repository, else that shell's directory, else "Workspace N". The home directory
     says nothing, so it keeps the number. The e2e stack's shells start in its private home, so
-    its goldens keep "Workspace 1".
+    its goldens keep "Workspace 1". *Amended 2026-10-01:* the number is gone (see "Names come
+    from the task" below).
   - **The light panel is as far from the content as the dark one.** At `ink(0.035)` an
     unfocused header was 2.8 L* from the focused one's white; dark's is 3.5. At `ink(0.05)` it
     is 3.8, and the panel still clears the bars by 2.4 L* (dark 2.5). A contrast ratio could
@@ -3058,6 +3062,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     never trails the list. Under Reduce Motion it is on the row at once. The navigator, the
     palette, the picker and the inbox's Unread/All views use it; the inbox has no selected row,
     so its plate is the view's.
+  - **The navigator seats its plate in the row** (`Plate::seat`, 2026-10-01). At rest, the
+    plate is painted inside the selected row, before the row's content. Only the glide is
+    painted under the rows. A canvas under a list keeps the background under its viewport from
+    being one solid quad, so the list's scroll layer could never bake (tooling.md, "Scroll
+    layers are on for macOS and iOS: the navigator and the face composite"). Test: palette
+    `a_seated_row_holds_the_plate_at_rest_and_the_glide_is_painted_under`.
   - **A waiting agent is said once per place.** A tile's second line and a *Needs you* row take
     `agent_ask_text` ("Bash · touch refused.txt") rather than "Needs approval: …": the row's
     trailing word or the section's heading already says the state. The ask is muted; only a
@@ -3681,8 +3691,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the focused one, and the worker's clipboard is watched for it even though the workspace
     window is not frontmost. Closing the window, the command again, or the tile going away
     returns the picture to its tile.
-  - **Not done.** The system-shortcut tap arms only in the workspace window. The popped state
-    is not saved in the layout, so a relaunch opens every tile in the workspace. iPad is
+  - **Not done.** The system-shortcut tap arms only in the workspace window. A relaunch puts a
+    popped tile back in its window (below, "A relaunch opens the app as it was left"). iPad is
     skipped: a second window there is a second `UIWindowScene`, which the gpui iOS fork does
     not make, so the command is not offered on iOS.
   - Tests: `workspace::tests::popout::a_tile_pops_out_into_its_own_window_and_back` (the same
@@ -4361,13 +4371,195 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     failure, for what the shell beside the tile does with `cargo fmt`, after which the tile
     reloads by itself. Zed and Lapce ship it off. Folding stays off: without a syntax tree its
     ranges would be guessed from indentation, which reads worse than none in a small tile.
-  - **Next:** find and replace with regular expressions and `$1` captures (the `regex` crate),
-    ⌘D and ⌘⇧L (gpui-kit has no public way to add a selection, so a fork change), words from
-    the file completed through gpui-kit's completion provider, a symbol list from the
-    grammar's `entity.name.*` scopes (Sublime's `showInSymbolList` set), and trailing
-    whitespace trimmed on the lines an edit touched, with EditorConfig read by the worker.
+  - **Round two:** ⌘F's field gains match case, whole word and regular expression toggles
+    (⌘⌥C, ⌘⌥W, ⌘⌥R, and icons in the field), with the terminal's smart case while match case is
+    off. It counts `3/12`, and says "No matches" or "Not a valid pattern". ⌘⇧H opens a replace
+    field: ↩ replaces the current match and moves on, ⌘↩ replaces them all as one edit, so one
+    ⌘Z takes it back. `$1` and `${name}` expand only with the pattern toggle on; otherwise the
+    text goes in as typed (`file::find`, the `regex` crate). A search keeps at most 10 000
+    matches and a 4 MiB program. ⌘⇧O lists the names the grammar marks as defined: the text in
+    an `entity.name.*` scope, which is Sublime's `showInSymbolList` set, so a call is not
+    listed but a definition is. The list is read off the UI thread, holds at most 5 000
+    symbols, and narrows by every typed word in any case. The caret follows the chosen row, ↩
+    keeps it and Esc puts it back, as "go to line" does. The status bar adds the indentation and
+    any line end or BOM that is not the default: `Rust · Spaces: 4 · Ln 1, Col 1`.
+  - **⌘D and ⌘⇧L need a fork change.** gpui-kit adds a caret with the pointer only; its
+    selection set is private. `SelectNextOccurrence` and `SelectAllOccurrences` live in the
+    fork (aislopware/gpui-kit#2, with no open counterpart upstream). The first press with a
+    bare caret selects the word under it; each later press adds the next match of the newest
+    selection, wrapping. ⌘D and ⌘⇧L bind in `FileText > Input`, and the palette lists both.
+    A word the caret selected is then matched only where it stands whole, as Sublime Text and
+    VS Code match it, so `n` does not take the `n` in `len`; a selection made by hand matches
+    anywhere (aislopware/gpui-kit#5).
+  - **Words from the file are offered as one is typed** (`file::complete`). The candidates are
+    the file's other words that start with the typed ones, the nearest to the caret first, at
+    most 50, with the find bar's smart case. They come from the 1 MiB round the caret, read
+    off the UI thread, so a keystroke in a 16 MiB file costs what one in a 1 MiB file does.
+    gpui-kit's completion menu shows them, and ↩ takes one. Code only: in Markdown, or a file
+    with no grammar, the menu would open on every word of prose. A Return the menu took went
+    on to type a newline as well, because the menu called `cx.propagate()` before handling
+    the key. That is fixed in the fork (aislopware/gpui-kit#6, with a test that sends a Return
+    carrying its text).
+  - **EditorConfig is resolved on the worker, and the client acts on what it knows.** The
+    worker reads the `.editorconfig` files above the file with `ec4rs` (the EditorConfig core
+    tests pass with it, and Zed resolves with it), adds the specification's fallbacks, and
+    sends every property as an open key/value list on `FileRead::Text` and `Body::Text`. The
+    client acts on `indent_style`, `indent_size`, `tab_width`, `end_of_line`,
+    `insert_final_newline` and `trim_trailing_whitespace` and passes over the rest (`Rules`),
+    so a new key costs no wire change.
+    - The indentation set there wins over the guess from the text, which fills in only what
+      it leaves out.
+    - `end_of_line` sets the first line break of a file that has none yet. A file that
+      already breaks its lines keeps its own way, because converting it would change every
+      line on a save.
+    - `insert_final_newline` decides how a save ends the file.
+  - **A save trims the trailing whitespace off the lines the edit touched**, and no others, as
+    one edit in the editor, so the tile holds what went to disk and one ⌘Z puts it back. It is
+    on by default, since only the person's own lines change. Markdown is the exception (two
+    trailing spaces end a line there), and `trim_trailing_whitespace` overrides it either way.
+    ⌘S, "Done" and "Overwrite" trim; a save the tile makes on its own does not, as gpui-kit
+    edits only with a window.
   - Numbers in MEASUREMENTS.md, 2026-10-01, "the editor's helpers". Tests: `edit::tests`
     (indentation, line ends, comments, moved and copied lines, brackets, go to line),
-    `highlight::tests::a_grammar_says_how_it_writes_a_comment`, and `file::tests::editing` with
+    `find::tests`, `complete::tests`, `highlight::tests::a_grammar_says_how_it_writes_a_comment`
+    and `symbols_are_the_names_the_grammar_defines`, the worker's
+    `file::tests::a_text_read_carries_its_editorconfig`, and `file::tests::editing` with
     the real editor and the default keys. The goldens `editor`, `editor-dirty` and
     `editor-conflict` show one indent guide per level.
+
+- ✅ **The window comes back from the Dock and ⌘N, and the menu bar is a Mac app's** (2026-10-01).
+  - **Closing the window leaves the app running.** The `Workspace` entity outlives its window,
+    since the quit hook and the link tasks hold it, so a reopen is only a new window wired to
+    the same workspace (`slopty_app::window::open`, which replaces the old window's
+    observers). A click on the Dock icon (`Application::on_reopen`), ⌘N with no window, or
+    Window ▸ Slopty bring the window forward, or open it again where it stood. Inside the
+    workspace ⌘N stays "new shell", since its binding is the deeper one. A notification
+    clicked with no window opens it as well.
+  - **The menus are the standard ones.** Edit holds Undo, Redo, Cut, Copy, Paste and Select
+    All, then Find. The items name gpui-kit's text-field actions, which every field answers.
+    AppKit validates each item against the focused control (`is_action_available`), so what
+    the control cannot do is greyed. A shell answers Copy, Paste and Select All as its own ⌘C,
+    ⌘V and ⌘A, and has no use for Cut, Undo or Redo. Cut, Copy, Paste and Select All carry
+    their AppKit selectors, so a web page tile takes them too. Window holds Minimize (⌘M), Zoom
+    and the workspace window, and AppKit fills in its window list because the menu is named
+    "Window". Help opens the project's page and the settings' Keyboard page.
+  - Tests: `a_closed_window_opens_again_on_the_same_workspace` (slopty-app), and
+    `workspace::tests::menus::the_edit_menu_reaches_whichever_control_has_the_keyboard`.
+
+- ✅ **A relaunch opens the app as it was left** (2026-10-01). `layout.json` keeps three more
+  things beside the arrangement.
+  - **The window's frame**: position, size, full screen, and the display's UUID. It reopens on
+    that display, or on the main one when that display is gone, and is clamped into the
+    display's visible area, so it never opens off screen.
+  - **Each tile's face choice**: whether a Claude Code shell shows its conversation or its
+    TUI. It is applied once the tile's shell is back.
+  - **Each popped-out tile and its window's frame.** The window opens again, where it stood,
+    when the tile's stream first opens.
+  - A frame smaller than 200 points or with a non-finite field is dropped (`WindowFrame::sane`).
+    Pre-release, so an older `layout.json` without these fields fails to parse once and costs
+    only the arrangement. The layout is also written as the app quits, so a move made just
+    before ⌘Q is kept.
+  - Tests: `workspace::tests::relaunch` (faces and frame, and a popped tile back in its
+    window), `window_frame::tests::a_frame_opens_where_it_was_or_as_near_as_the_screen_allows`,
+    and `layout::tests::a_window_frame_is_kept_only_when_it_can_be_opened_again`.
+
+- ✅ **An empty workspace with no worker has a way to add one** (2026-10-01). It used to point
+  at the command palette in words. Now it says what a worker does and offers an "Add a worker"
+  row, the page's primary row, which runs the same panel as the "…" menu's (the status bar's
+  `MenuRun`, so an app that cannot add a worker shows no button). In the same review, the
+  settings hints that ran past their row were shortened ("Family", "Blink"), and "Open a file"
+  became "Open file…", because like "Open folder…" it asks for more first. Test:
+  `workspace::tests::no_workers::with_no_worker_the_empty_workspace_offers_to_add_one`.
+
+- ✅ **The focused tile carries a line while there is more than one** (2026-10-01). The
+  focused header was told only by its surface and its title's weight: 255 against 249 in the
+  light golden and 23 against 19 in dark, which read as faint once tiles sat side by side.
+  The focused header, or a tabbed column's shown tab, now carries a 2 pt line along its top
+  (`stroke::MARK`) in the accent at `alpha::STRONG`, as VS Code marks the active tab and Zed
+  its active pane. It shows only while two or more tiles are in view and never in the
+  overview, which rings its workspace instead. Under Increase Contrast it is the whole accent
+  (`Theme::set_back`). Dimming the other panes stays ruled out, for the reasons in "Focus"
+  above. Test: `workspace::tests::focus_line`.
+
+- ✅ **Colour goes to what needs the person: one vocabulary of five words** (2026-10-01, the
+  GUI-first brief, `.research/gui-first-2026-10-01/plan.md` §4.1). This amends the 2026-09-05
+  rule that the busy states wear the accent.
+  - **The words.** *Needs you* in `warn`, *Failed* in `error`, *Working* and *Waiting* in
+    `text_muted`, and a finish not yet seen as the accent dot with no word. Rest shows
+    nothing, only the kind's glyph. `Status::Running` reads "Waiting", and its calm mark is a
+    dashed ring that steps once a second; *Working* keeps its stepped ring on the shared clock.
+  - **Busy rows recede.** A navigator row at work is drawn at `alpha::STRONG` until it is
+    hovered or selected, with its title at the regular weight, so a row that needs the person
+    leads at full ink (`navigator::row_strength`). Increase Contrast draws it whole.
+  - **Away loses `warn`.** A worker or server out of reach is muted: the struck-through name
+    and the crossed-out server glyph say it, and `warn` means "needs you" alone.
+  - **The ladder orders every list:** needs you, failed, unseen, working, waiting, the rest
+    (`navigator::attention`).
+  - **Where it shows.** The tile header's slot and pill (a finish is the slot's dot, with no
+    pill), navigator rows, the palette's right edge, the inbox's marks, the status bar's
+    counts and the rollups.
+  - Tests: `navigator::tests::rows_climb_the_attention_ladder`,
+    `working_rows_recede_and_a_row_that_needs_you_does_not` and
+    `a_row_names_a_state_that_is_happening`, plus
+    `palette::tests::the_right_edge_says_status_age_or_keys_and_the_kind_is_context`.
+
+- ✅ **Attention is walked, triaged and said in the corner** (2026-10-01, the GUI-first brief,
+  `.research/gui-first-2026-10-01/plan.md` §3 items 8 and 9).
+  - **⌘⇧A walks the ladder.** "Next thing that needs you" goes to the agents that need the
+    person, then the failed finishes, then the ones that ended well, each in layout order,
+    and round again (`WorkspaceView::attention_ladder`). A finish it goes to is read, so it
+    leaves the ladder; the walk goes on from the rung it stood on rather than back to the top.
+  - **The inbox is worked by keyboard,** as Linear's and Superhuman's are: J/K or ↑/↓ select,
+    ↵ goes to the row's tile, E marks a finish done and goes to the next row, H snoozes it, U
+    marks a read one unread, ⌘↵ and ⌘⌫ allow or deny a held prompt, Esc closes. The bell's
+    focus moves to the list when it opens, under its own key context (`Inbox`, a palette
+    scope that takes bare keys). E, H and U say what they did in the corner with "Undo" for
+    ten seconds.
+  - **Snooze, honestly.** A snoozed finish leaves *Unread* and the bell's count, keeps its
+    tile's dot, and comes back when its session finishes again or after an hour. An agent
+    that needs the person cannot be snoozed: it stays where they see it until answered.
+  - **Off screen, the corner says it.** With the app in front, an agent that newly needs the
+    person, or a shell or agent that fails or finishes, while its tile is out of view gets a
+    notice naming it, with its status mark and "Go". One in view says it itself, and a newer
+    notice for the same tile replaces the older.
+  - **A notice under the pointer stays.** Hovering holds every notice; leaving gives it two
+    more seconds (`SAY_AFTER_HOVER`), as macOS banners and Linear's toasts do.
+  - Not yet: pushes chosen by presence (the server does not know where the person is), and a
+    child agent reporting through its parent (the workspace does not know the project tree).
+  - Tests: `workspace::tests::triage` and
+    `toasts::a_notice_under_the_pointer_stays_until_the_pointer_leaves`.
+
+- ✅ **The empty workspace asks what an agent should do** (2026-10-01, the GUI-first brief,
+  `.research/gui-first-2026-10-01/design.md` §10 #3). The heading "Empty workspace" restated
+  what the page shows, and three equal rows put a shell, an agent and a window on one footing.
+  The page now leads with a composer-shaped field asking "What should an agent do?", with the
+  worker and the directory it starts in as chips under it (`workspace/ask.rs`). ↵ starts the
+  agent there with what was typed as its first prompt, and the prompt's first line titles its
+  tile; ↵ on nothing starts it bare, as ⌘⇧T does. The directory chip steps through the places
+  shells stand in on that worker, then the worker's own default; the worker chip, with several
+  workers, steps to the next. The field takes the keyboard once as the page shows, while the
+  workspace holds it. "New terminal" and "Add a window or display" stay as the quieter rows
+  under it, and "New agent" goes, since the field is that way in. Sources: Geist "cap at one
+  primary CTA" and empty states that add something new rather than restate the title; Apple's
+  HIG on empty states guiding people to what they can do. Tests:
+  `workspace::tests::palette::the_empty_workspace_asks_what_an_agent_should_do` and
+  `the_questions_chips_choose_where_the_agent_starts`.
+
+- ✅ **Names come from the task, never a number** (2026-10-01, design.md §10 #4). A workspace
+  nobody named takes its first shell's repository, else that shell's directory. Where neither
+  says anything, as with a shell at home, it takes its first tile's worker. A tile's own title
+  was tried and dropped: it follows every command run and every page loaded, so the tab's name
+  churned, and the title bar drew a name a frame behind the tile (the e2e stale-frame check
+  caught it). With nothing on it, it is "New workspace". The e2e stack's first shell is at its private home, so its goldens now read
+  `e2e-worker` where they read "Workspace 1". An agent started from the empty workspace is
+  titled by its prompt from the first frame, before its face has read a word.
+  Not yet: an agent started from a shell is called "Claude Code" until its face reads the
+  first prompt; the thread model (Lane W) carries the title from the worker, which ends that.
+  Test: `workspace::tests::bars::a_workspace_is_named_by_where_its_first_shell_is`.
+
+- ✅ **What the keyboard opens arrives whole** (2026-10-01, plan.md §4.4). The palette and the
+  bar's menus, the inbox among them, opened by a key draw at full opacity in their first
+  frame, with no fade and no travel: the person asked for them and is already typing. Opened
+  by the pointer they keep the 120 ms fade, which helps the eye find where they came from.
+  Which it was is GPUI's own `Window::last_input_was_keyboard` at the moment of opening. The
+  inbox has its own key now, ⌘⇧U, and a palette row.

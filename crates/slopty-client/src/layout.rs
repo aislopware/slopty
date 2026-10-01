@@ -404,6 +404,78 @@ pub struct Saved {
     pub active: usize,
     /// The navigator beside the strip.
     pub navigator: Navigator,
+    /// Where the main window stood, to open it there again. The layout saves nothing of its
+    /// own here, nor in the two below: the UI keeps them beside the arrangement they frame.
+    pub window: Option<WindowFrame>,
+    /// The agents' tiles whose face or TUI the person picked, and which.
+    pub faces: Vec<SavedFace>,
+    /// The tiles shown in windows of their own, and where those stood.
+    pub popouts: Vec<SavedPopout>,
+    /// How far this device read each project's timeline, for the recap its board opens on.
+    pub looked: Vec<SavedLooked>,
+}
+
+/// Where a window stood: its rectangle in points on its display, the display named by its
+/// UUID (display ids do not outlive a reboot; a UUID names the same screen), and whether it
+/// filled the screen.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct WindowFrame {
+    /// The display it was on, by UUID; `None` where the platform names none.
+    pub display: Option<String>,
+    /// Left edge, from the display's.
+    pub x: f32,
+    /// Top edge, from the display's.
+    pub y: f32,
+    /// Width.
+    pub width: f32,
+    /// Height.
+    pub height: f32,
+    /// It was full screen; the rectangle is where it goes back to.
+    pub fullscreen: bool,
+}
+
+impl WindowFrame {
+    /// The smallest window worth opening again, in points: a frame narrower or shorter (one
+    /// dragged to a sliver, a value that is not a number) is not kept.
+    pub const MIN: f32 = 200.0;
+
+    /// Whether the frame can be opened again as it is.
+    #[must_use]
+    pub fn sane(&self) -> bool {
+        [self.x, self.y, self.width, self.height].iter().all(|v| v.is_finite())
+            && self.width >= Self::MIN
+            && self.height >= Self::MIN
+    }
+}
+
+/// A tile whose agent shows its face (`true`) or its TUI, as the person picked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SavedFace {
+    /// Which.
+    pub tile: TileRef,
+    /// The face rather than the TUI.
+    pub face: bool,
+}
+
+/// A tile shown in a window of its own.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct SavedPopout {
+    /// Which.
+    pub tile: TileRef,
+    /// Where its window stood.
+    pub frame: WindowFrame,
+}
+
+/// How far this device read a project's timeline: the last entry its board showed, and when
+/// it hid.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct SavedLooked {
+    /// The project.
+    pub project: slopty_proto::project::ProjectId,
+    /// The entry's `seq`.
+    pub seq: u64,
+    /// When the board hid, by this device's clock.
+    pub at_ms: slopty_core::WallMs,
 }
 
 /// The navigator beside the strip, as this device left it. The layout keeps it only to save
@@ -3233,6 +3305,10 @@ impl Layout {
                 .collect(),
             active: self.active,
             navigator: self.navigator,
+            window: None,
+            faces: Vec::new(),
+            popouts: Vec::new(),
+            looked: Vec::new(),
         }
     }
 

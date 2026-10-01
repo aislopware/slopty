@@ -530,7 +530,8 @@ fn a_lone_workspace_is_its_name_alone(cx: &mut TestAppContext) {
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    let heading = Some("Workspace 1, 4 tiles, 1 needs you");
+    // Its first shell is at home, which names nothing, so the workspace takes its worker's.
+    let heading = Some("studio, 4 tiles, 1 needs you");
     assert!(tree.iter().any(|n| n.is("Heading", heading)), "{tree:#?}");
     assert!(cx.debug_bounds("add").is_none(), "one \"+\", for a workspace");
     // The name is whole beside what the workspace holds: a lone name is not held to a tab's
@@ -539,7 +540,7 @@ fn a_lone_workspace_is_its_name_alone(cx: &mut TestAppContext) {
     let whole = cx.update(|window, _cx| {
         let mut style = window.text_style();
         style.font_weight = gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT);
-        let text = "Workspace 1";
+        let text = "studio";
         let run = style.to_run(text.len());
         let size = px(Theme::default().typography.ui_size);
         window.text_system().shape_line(text.into(), size, &[run], None).width

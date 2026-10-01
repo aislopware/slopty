@@ -638,6 +638,12 @@ impl SettingsForm {
         }
     }
 
+    /// Show `section`'s page, the search cleared: the Help menu's "Keyboard Shortcuts" opens
+    /// the Keyboard page this way.
+    pub fn show(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
+        self.select(section, window, cx);
+    }
+
     fn select(&mut self, section: Section, window: &mut Window, cx: &mut Context<Self>) {
         if !self.query.is_empty() {
             self.search.update(cx, |state, cx| state.set_value("", window, cx));

@@ -28,7 +28,7 @@ use slopty_settings::KeySettings;
 
 use self::chord::Chord;
 pub use self::chord::ChordError;
-use crate::workspace::actions as ws;
+use crate::workspace::{actions as ws, inbox_actions as ib};
 
 mod chord;
 
@@ -53,15 +53,18 @@ pub enum Scope {
     Search,
     /// A project's board.
     Project,
+    /// The inbox, while it is up.
+    Inbox,
 }
 
 impl Scope {
     /// Every scope, in the order the Keyboard page lists them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::App,
         Self::Workspace,
         Self::Terminal,
         Self::Conversation,
+        Self::Inbox,
         Self::Project,
         Self::File,
         Self::Folder,
@@ -82,15 +85,16 @@ impl Scope {
             Self::Folder => "folder",
             Self::Search => "search",
             Self::Project => "project",
+            Self::Inbox => "inbox",
         }
     }
 
-    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows and a board's hold no
-    /// text, so bare keys walk them. Elsewhere a key alone is typed into the terminal or a field,
-    /// and a chord carries ⌘ or ⌃ (or is an F key).
+    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows, a board's and the
+    /// inbox's hold no text, so bare keys walk them. Elsewhere a key alone is typed into the
+    /// terminal or a field, and a chord carries ⌘ or ⌃ (or is an F key).
     #[must_use]
     pub const fn takes_bare_keys(self) -> bool {
-        matches!(self, Self::Folder | Self::Project)
+        matches!(self, Self::Folder | Self::Project | Self::Inbox)
     }
 
     fn named(name: &str) -> Option<Self> {
@@ -218,13 +222,15 @@ const FILE_SYMBOLS: Option<&str> = Some(crate::file::SYMBOLS_CTX);
 /// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
 const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
 /// Contexts with no text field in them, where a key alone cannot be wanted for typing.
-const TEXTLESS: [Option<&str>; 3] = [FILE_PAGES, FOLDER, BOARD];
+const TEXTLESS: [Option<&str>; 4] = [FILE_PAGES, FOLDER, BOARD, INBOX];
 /// A conversation face, and its composer, where the keyboard sits in a face.
 const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
 /// A project's board: its rows hold no text, so bare keys walk them.
 const BOARD: Option<&str> = Some(crate::project::CTX);
+/// The inbox's list, as a board's: bare keys work its rows.
+const INBOX: Option<&str> = Some(crate::workspace::INBOX_CTX);
 /// Search in files, its fields holding the keyboard.
 const SEARCH: Option<&str> = Some(crate::search::CTX);
 /// A tile's window of its own: its picture takes every chord but the one that puts it back.
@@ -251,7 +257,7 @@ const APP: &[Option<&str>] = &[None];
 #[must_use]
 #[expect(clippy::too_many_lines, reason = "the one table of every default chord")]
 pub fn defaults() -> Vec<Command> {
-    use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
+    use Scope::{Conversation, File, Folder, Inbox, Page, Project, Search, Terminal, Workspace};
 
     use crate::conversation::{CycleDensity, Interrupt};
     use crate::terminal as t;
@@ -280,6 +286,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "close_tile", ws::CloseItem, &["cmd-w"], W),
         c(Workspace, "undo_close", ws::UndoClose, &["cmd-z"], W),
         c(Workspace, "next_attention", ws::NextAttention, &["cmd-shift-a"], W),
+        c(Workspace, "toggle_inbox", ws::ToggleInbox, &["cmd-shift-u"], W),
         c(Workspace, "toggle_mute", ws::ToggleMute, &["cmd-shift-m"], W),
         c(Workspace, "toggle_stats", ws::ToggleStats, &["cmd-shift-i"], W),
         c(Workspace, "type_clipboard", ws::TypeClipboard, &[], W),
@@ -485,6 +492,17 @@ pub fn defaults() -> Vec<Command> {
         c(Folder, "select_last", crate::folder::SelectLast, &["end"], &[FOLDER]),
         c(Folder, "open", crate::folder::OpenSelected, &["enter"], &[FOLDER]),
         c(Folder, "open_parent", crate::folder::OpenParent, &["backspace", "cmd-up"], &[FOLDER]),
+        // The inbox, worked as Linear's is: the arrows or J/K walk it, ↩ goes, E is done, H
+        // snoozes, U is unread again, ⌘↵ and ⌘⌫ answer a held prompt.
+        c(Inbox, "select_next", ib::SelectNext, &["down", "j"], &[INBOX]),
+        c(Inbox, "select_previous", ib::SelectPrevious, &["up", "k"], &[INBOX]),
+        c(Inbox, "open", ib::Open, &["enter"], &[INBOX]),
+        c(Inbox, "mark_done", ib::MarkDone, &["e"], &[INBOX]),
+        c(Inbox, "snooze", ib::Snooze, &["h"], &[INBOX]),
+        c(Inbox, "mark_unread", ib::MarkUnread, &["u"], &[INBOX]),
+        c(Inbox, "allow", ib::Allow, &["cmd-enter"], &[INBOX]),
+        c(Inbox, "deny", ib::Deny, &["cmd-backspace"], &[INBOX]),
+        c(Inbox, "close", ib::Close, &["escape"], &[INBOX]),
         // A board: the arrows walk its rows, ↩ opens one's agent, the digits pick a lens.
         c(Project, "select_previous", crate::project::SelectPrevious, &["up", "k"], &[BOARD]),
         c(Project, "select_next", crate::project::SelectNext, &["down", "j"], &[BOARD]),

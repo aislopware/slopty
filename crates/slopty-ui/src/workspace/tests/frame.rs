@@ -169,7 +169,7 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
         names.iter().any(|l| l == "Claude Code, Has a question"),
         "the waiting tile's row, in the state's own word: {names:#?}"
     );
-    assert!(names.iter().any(|l| l == "Workspace 1, 2 tiles, 1 needs you"), "{names:#?}");
+    assert!(names.iter().any(|l| l == "laptop, 2 tiles, 1 needs you"), "{names:#?}");
 
     click(cx, leak(format!("nav-worker-{}", laptop.key)));
     assert!(top(cx, "nav-needs-you") < top(cx, "nav-workers"), "folded away, it leads");

@@ -12,8 +12,11 @@
 //!
 //! An agent that waits on a yes or no held for this client ([`approvals`]) gets "Deny" and
 //! "Allow" at the end of its row's second line, which answer it where it is.
+//!
+//! The keyboard works the list while it is up ([`triage`]).
 
 pub(super) mod approvals;
+pub(crate) mod triage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -93,24 +96,33 @@ pub(super) struct Inbox {
     turns: HashMap<SessionId, WallMs>,
     /// The sessions whose unread finish is an agent's turn rather than a command.
     agent_turns: HashSet<SessionId>,
+    /// The keyboard's place in the list: the selected row's id.
+    selected: Option<String>,
+    /// The finishes snoozed, until when ([`triage`]).
+    snoozed: HashMap<SessionId, Instant>,
+    /// Where the keyboard sits while the inbox is up.
+    focus: Option<gpui::FocusHandle>,
 }
 
 /// One of the inbox's rows, before it is drawn.
-struct Row {
+pub(super) struct Row {
     id: String,
     status: Status,
     /// The first line: the command or the agent's words.
     what: String,
-    /// A status word the section heading does not already say, in the status's tone, leading
-    /// the second line: "Exit 1". A command that ended well and an agent that waits say
-    /// nothing: *Finished* and *Needs you* over them already do, and the mark leads the row.
+    /// A status word the section heading does not already say, leading the second line:
+    /// "Exit 1". A command that ended well and an agent that waits say nothing: *Finished* and
+    /// *Needs you* over them already do, and the mark leads the row in the status's hue.
     word: Option<String>,
-    /// The second line's words before the directory: how long it took, the tile, the worker.
-    meta: String,
-    cwd: Option<String>,
+    /// The second line's facts, the most telling first: how long it took or the tile, the
+    /// worker where there are several, the directory. The line shows as many as two
+    /// separators allow; the row's accessible name says them all.
+    facts: Vec<String>,
     age: Option<Duration>,
     /// Still unread: bright, and the mark-read button swaps in under the pointer.
     unread: bool,
+    /// The history's number of the finish it shows; `None` for an agent that waits.
+    logged: Option<u64>,
     go: Go,
     /// The prompt "Deny" and "Allow" answer: its session and ask.
     approval: Option<(SessionId, u64)>,
@@ -118,7 +130,7 @@ struct Row {
 
 /// Where a row goes when clicked.
 #[derive(Clone, Copy)]
-enum Go {
+pub(super) enum Go {
     Waiting(super::agents::Waiting),
     Session(SessionId),
 }
@@ -131,10 +143,30 @@ pub(super) fn wall_ms() -> u64 {
 }
 
 impl WorkspaceView {
-    /// What the bell counts: agents waiting and commands finished unwatched.
+    /// What the bell counts: agents waiting and commands finished unwatched, but not those
+    /// snoozed.
     #[must_use]
     pub fn inbox_count(&self) -> usize {
-        self.needs_you_count().saturating_add(self.finished.len())
+        self.needs_you_count().saturating_add(self.unread_finishes())
+    }
+
+    /// The finishes unread and not snoozed.
+    pub(super) fn unread_finishes(&self) -> usize {
+        self.finished.keys().filter(|s| !self.snoozed(**s)).count()
+    }
+
+    /// The finish the history keeps as `seq`.
+    fn logged_finish(&self, seq: u64) -> Option<Finished> {
+        self.inbox.log.iter().find(|l| l.seq == seq).map(|l| l.done.clone())
+    }
+
+    /// The list's two sections: the agents waiting, then the finishes, only the unread ones
+    /// unless `all`.
+    fn inbox_rows(&self, all: bool) -> (Vec<Row>, Vec<Row>) {
+        let now_ms = wall_ms();
+        let waiting =
+            self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms)).collect();
+        (waiting, self.finished_rows(all))
     }
 
     /// Keep a command that finished unwatched in the history, as it was when it ended.
@@ -196,6 +228,10 @@ impl WorkspaceView {
         let finished = &self.finished;
         self.inbox.agent_turns.retain(|s| finished.contains_key(s));
         self.inbox.agent_turns.insert(session);
+        self.wake_snoozed(session);
+        if let Some(tile) = self.tile_of_session(session) {
+            self.attention_toast(tile, Status::Done, "finished", cx);
+        }
         cx.notify();
     }
 
@@ -236,7 +272,9 @@ impl WorkspaceView {
             .rev()
             .filter_map(|logged| {
                 let latest = seen.insert(logged.session);
-                let unread = latest && self.finished.contains_key(&logged.session);
+                let unread = latest
+                    && self.finished.contains_key(&logged.session)
+                    && !self.snoozed(logged.session);
                 (all || unread).then(|| self.finished_row(logged, unread, now))
             })
             .collect()
@@ -250,11 +288,7 @@ impl WorkspaceView {
         };
         let command = done.command.lines().next().unwrap_or_default().trim();
         let what = if command.is_empty() { "Command".to_owned() } else { command.to_owned() };
-        let worker = logged
-            .worker
-            .and_then(|k| self.workers.get(&k))
-            .map(|w| w.name.as_str())
-            .unwrap_or_default();
+        let worker = logged.worker.and_then(|k| self.inbox_worker(k));
         // An unread row is its session's one; the history may hold several of a session.
         let id = if unread {
             format!("inbox-finished-{}", logged.session)
@@ -266,16 +300,25 @@ impl WorkspaceView {
             status,
             what,
             word,
-            meta: join(&[&kit::duration(done.elapsed), worker]),
-            cwd: logged
-                .cwd
-                .as_deref()
-                .map(|cwd| super::tile::cwd_tail(cwd, logged.worker.and_then(|w| self.home_of(w)))),
+            facts: facts([
+                Some(kit::duration(done.elapsed)),
+                worker,
+                logged.cwd.as_deref().map(|cwd| {
+                    super::tile::cwd_tail(cwd, logged.worker.and_then(|w| self.home_of(w)))
+                }),
+            ]),
             age: Some(now.saturating_duration_since(logged.at)),
             unread,
+            logged: Some(logged.seq),
             go: Go::Session(logged.session),
             approval: None,
         }
+    }
+
+    /// A worker's name for a row's facts: only where there are several to tell apart.
+    fn inbox_worker(&self, key: WorkerKey) -> Option<String> {
+        let several = self.workers.len() > 1;
+        several.then(|| self.workers.get(&key).map(|w| w.name.clone())).flatten()
     }
 
     /// An agent waiting on the human: what it asks first (what the tool does where the hook
@@ -291,7 +334,7 @@ impl WorkspaceView {
             .filter(|w| !w.is_empty())
             .unwrap_or_else(|| Status::NeedsYou.label().to_owned());
         let title = waiting.tile.and_then(|t| Some(self.tile_title(self.item(t)?)));
-        let worker = self.workers.get(&waiting.worker).map(|w| w.name.as_str()).unwrap_or_default();
+        let worker = self.inbox_worker(waiting.worker);
         let age = agent
             .map(|a| a.since_ms)
             .filter(|since| !since.is_zero())
@@ -301,36 +344,44 @@ impl WorkspaceView {
             status: Status::NeedsYou,
             what,
             word: None,
-            meta: join(&[title.as_deref().unwrap_or_default(), worker]),
-            cwd: self.session_tail(session),
+            facts: facts([title, worker, self.session_tail(session)]),
             age,
             unread: true,
+            logged: None,
             go: Go::Waiting(waiting),
             approval: self.approval(session).map(|prompt| (session, prompt.ask)),
         }
     }
 
-    /// The popover's panel, dropping the base unit from the bell as it fades in.
+    /// The popover's panel, dropping the base unit from the bell as it fades in; opened by a
+    /// key, whole in its first frame.
     pub(super) fn render_inbox(&self, cx: &Context<Self>) -> gpui::AnyElement {
         let panel = self.inbox_panel(cx);
+        if self.menu_keyed {
+            return panel.into_any_element();
+        }
         kit::slide_fade(panel, "inbox-fade", -self.theme.spacing.xs, kit::Pace::Fade, cx)
     }
 
     fn inbox_panel(&self, cx: &Context<Self>) -> gpui::Stateful<Div> {
         let theme = &self.theme;
-        let all = self.inbox.all;
-        let now_ms = wall_ms();
-        let waiting: Vec<Row> =
-            self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms)).collect();
-        let finished = self.finished_rows(all);
+        let (waiting, finished) = self.inbox_rows(self.inbox.all);
+        let selected = self.inbox.selected.clone();
+        let is_selected = |row: &Row| selected.as_deref() == Some(row.id.as_str());
         let mut list: Vec<gpui::AnyElement> = Vec::new();
         if !waiting.is_empty() {
             list.push(section(theme, "inbox-needs-you", "Needs you").into_any_element());
-            list.extend(waiting.into_iter().map(|row| self.inbox_row(row, cx)));
+            list.extend(waiting.into_iter().map(|row| {
+                let on = is_selected(&row);
+                self.inbox_row(row, on, cx)
+            }));
         }
         if !finished.is_empty() {
             list.push(section(theme, "inbox-finished", "Finished").into_any_element());
-            list.extend(finished.into_iter().map(|row| self.inbox_row(row, cx)));
+            list.extend(finished.into_iter().map(|row| {
+                let on = is_selected(&row);
+                self.inbox_row(row, on, cx)
+            }));
         }
         let empty = list.is_empty().then(|| {
             // Unread emptied by reading is a quiet line; an inbox that has never held anything
@@ -357,6 +408,17 @@ impl WorkspaceView {
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .key_context(triage::CTX)
+            .when_some(self.inbox.focus.as_ref(), gpui::InteractiveElement::track_focus)
+            .on_action(cx.listener(Self::inbox_next))
+            .on_action(cx.listener(Self::inbox_previous))
+            .on_action(cx.listener(Self::inbox_open))
+            .on_action(cx.listener(Self::inbox_done))
+            .on_action(cx.listener(Self::inbox_snooze))
+            .on_action(cx.listener(Self::inbox_unread))
+            .on_action(cx.listener(Self::inbox_allow))
+            .on_action(cx.listener(Self::inbox_deny))
+            .on_action(cx.listener(Self::inbox_close))
             .child(self.inbox_head(cx))
             .child(
                 div()
@@ -448,21 +510,17 @@ impl WorkspaceView {
     /// One two-line row on the navigator's rhythm: the status mark beside the first line,
     /// the words with the age at the right edge (the mark-read button in its place under the
     /// pointer), then the meta line. Clicked, it goes there and the inbox closes.
-    fn inbox_row(&self, row: Row, cx: &Context<Self>) -> gpui::AnyElement {
+    fn inbox_row(&self, row: Row, selected: bool, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let (first_h, second_h) = super::navigator::line_heights(theme);
         let group = SharedString::from(row.id.clone());
         let said = row.word.clone().unwrap_or_else(|| row.status.label().to_owned());
-        let label = SharedString::from(join(&[
-            &row.what,
-            &said,
-            &row.meta,
-            row.cwd.as_deref().unwrap_or_default(),
-        ]));
+        let mut said_all = vec![row.what.as_str(), said.as_str()];
+        said_all.extend(row.facts.iter().map(String::as_str));
+        let label = SharedString::from(join(&said_all));
         let ink = if row.unread { s.text } else { s.text_secondary };
-        let tone = if row.unread { row.status.tone(theme) } else { s.text_muted };
         let mark = status_mark(theme, Some(row.status), 1.0)
             .when(!row.unread, |el| el.opacity(alpha::STRONG));
         let unread_session = match row.go {
@@ -527,14 +585,13 @@ impl WorkspaceView {
             .children(age)
             .children(mark_read);
         let word = row.word.map(|word| {
-            div()
-                .debug_selector(move || word_id)
-                .flex_none()
-                .text_color(hsla(tone))
-                .child(SharedString::from(word))
+            div().debug_selector(move || word_id).flex_none().child(SharedString::from(word))
         });
         let answers = row.approval.map(|(session, ask)| self.approval_buttons(session, ask, cx));
-        let place = join(&[&row.meta, row.cwd.as_deref().unwrap_or_default()]);
+        // Two separators at most: the word, if any, takes one.
+        let room = if word.is_some() { 2 } else { 3 };
+        let shown: Vec<&str> = row.facts.iter().take(room).map(String::as_str).collect();
+        let place = join(&shown);
         let separated = word.is_some() && !place.is_empty();
         let second = meta(div(), theme)
             .h(px(second_h))
@@ -569,7 +626,9 @@ impl WorkspaceView {
             .items_center()
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)))
+            // The keyboard's row sits on the selection's fill, a step over the pointer's.
+            .when(selected, |el| el.bg(hsla(s.overlay)))
+            .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.raised))))
             .child(
                 div()
                     .flex_1()
@@ -583,10 +642,7 @@ impl WorkspaceView {
         tab_stop(el, s.accent)
             .on_click(cx.listener(move |this, _ev, _w, cx| {
                 this.menu = None;
-                match go {
-                    Go::Waiting(waiting) => this.go_to_waiting(waiting, cx),
-                    Go::Session(session) => this.reveal_session(session, cx),
-                }
+                this.go_row(go, cx);
             }))
             .into_any_element()
     }
@@ -633,6 +689,12 @@ impl WorkspaceView {
         );
         div().flex_none().flex().items_center().gap(px(theme.spacing.xxs)).child(deny).child(allow)
     }
+}
+
+/// A row's facts, the missing and the empty left out, and the home directory, which alone says
+/// nothing (as the navigator's rows leave it out).
+fn facts<const N: usize>(parts: [Option<String>; N]) -> Vec<String> {
+    parts.into_iter().flatten().filter(|p| !p.is_empty() && p != "~").collect()
 }
 
 /// Parts of a line joined by a middle dot, the empty ones left out.
@@ -683,6 +745,14 @@ mod tests {
     fn a_line_joins_what_it_has() {
         assert_eq!(join(&["Done · 3.2 s", "studio"]), "Done · 3.2 s · studio");
         assert_eq!(join(&["", "studio", ""]), "studio");
+    }
+
+    /// A row's facts leave out what is missing, empty or only the home directory.
+    #[test]
+    fn a_rows_facts_leave_out_what_says_nothing() {
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(facts([some("6 s"), None, some("~"), some("")]), ["6 s"]);
+        assert_eq!(facts([some("api"), some("studio"), some("oss/slopty")]).len(), 3);
     }
 
     /// The inbox's words and the status words down its right edge are chrome, so sentence

@@ -30,6 +30,8 @@ impl WorkspaceView {
                 self.workers.insert(key, Worker::new(name));
             }
         }
+        // The settings share the clipboard by the worker's name.
+        self.clip_sharing_changed();
         cx.notify();
     }
 
@@ -52,6 +54,8 @@ impl WorkspaceView {
         let w = self.workers.entry(key).or_insert_with(|| Worker::new(name.clone()));
         w.name = name;
         w.status = WorkerStatus::Connected;
+        self.clip_sharing_changed();
+        let Some(w) = self.workers.get_mut(&key) else { return };
         w.link = Some(link);
         w.links = w.links.saturating_add(1);
         // The worker hands pages and files only to a client that said it takes them.
@@ -962,6 +966,7 @@ impl WorkspaceView {
                 } else {
                     self.screens.insert(id, view);
                     self.stream_changed(id, cx);
+                    self.restore_popout(id, cx);
                 }
             }
             ScreenEvent::Closed { stream, reason } => {

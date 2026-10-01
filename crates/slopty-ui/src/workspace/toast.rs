@@ -1,9 +1,10 @@
 //! The notices in the strip's bottom-right corner: another client's pointing, a closed tile to
 //! take back, a word to this client. Each is one line, marked with what it is about when it is
 //! about something, with at most one action; they stay [`SAY_FOR`] and no more than [`SHOWN`]
-//! are up at once. They stack over every other layer, dialogs included. A notice rises 4 pt
-//! into place as it fades in, and fades where it stands when its time is up; under Reduce
-//! Motion it comes and goes at once.
+//! are up at once. One whose time comes while the pointer is over the stack stays until the
+//! pointer leaves, then [`SAY_AFTER_HOVER`] more, so a notice being read is never taken away. They
+//! stack over every other layer, dialogs included. A notice rises 4 pt into place as it fades in,
+//! and fades where it stands when its time is up; under Reduce Motion it comes and goes at once.
 
 use std::time::Duration;
 
@@ -26,6 +27,9 @@ use crate::icons::{IconName, IconSize};
 /// How long a pointing or a word stays up.
 pub(super) const SAY_FOR: Duration = Duration::from_secs(6);
 
+/// How long a notice whose time came under the pointer stays once the pointer leaves.
+pub(super) const SAY_AFTER_HOVER: Duration = Duration::from_secs(2);
+
 /// How many notices are up at once: a third pushes the oldest out.
 pub(super) const SHOWN: usize = 2;
 
@@ -38,6 +42,8 @@ pub(super) struct Toast {
     /// The last notice's number: it tells a stale dismiss timer from a live notice.
     seq: u64,
     shown: Vec<Shown>,
+    /// The pointer is over the stack: no notice leaves meanwhile.
+    hovered: bool,
 }
 
 /// One notice up.
@@ -46,6 +52,8 @@ struct Shown {
     what: ToastKind,
     /// Its time is up and it is fading out: no longer counted as up.
     leaving: bool,
+    /// Its time came while the pointer was over the stack: it goes once the pointer leaves.
+    held: bool,
 }
 
 /// What a toast is.
@@ -68,6 +76,18 @@ pub(super) enum ToastKind {
     Said(String),
     /// A page a program in a shell asked to open, held back: "Open" opens it.
     Offered(Box<super::handoffs::Offer>),
+    /// What an inbox verb did by key: "Undo" puts it back.
+    Triaged(super::inbox::triage::Undo),
+    /// A tile off screen needs the person, failed or finished while the app is in front: "Go"
+    /// goes to it.
+    Attention {
+        /// Which.
+        tile: TileRef,
+        /// Its state, whose mark leads the line.
+        status: crate::icons::Status,
+        /// What happened there, led by the tile's name.
+        line: String,
+    },
 }
 
 impl WorkspaceView {
@@ -88,14 +108,22 @@ impl WorkspaceView {
         let seq = toast.seq;
         // One on its way out gives its place at once to the one coming in.
         toast.shown.retain(|shown| !shown.leaving);
-        toast.shown.push(Shown { seq, what, leaving: false });
+        toast.shown.push(Shown { seq, what, leaving: false, held: false });
         let over = toast.shown.len().saturating_sub(SHOWN);
         toast.shown.drain(..over);
         cx.notify();
+        Self::arm_toast(seq, during, cx);
+    }
+
+    /// Take notice `seq` down `during` from now, unless the pointer is over the stack then.
+    fn arm_toast(seq: u64, during: Duration, cx: &Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(during).await;
             let fades = this
                 .update(cx, |this, cx| {
+                    if this.hold_toast(seq) {
+                        return false;
+                    }
                     let fades = this.chrome_moves(cx);
                     let went = if fades {
                         this.leave_toast(seq)
@@ -118,6 +146,37 @@ impl WorkspaceView {
             }
         })
         .detach();
+    }
+
+    /// Whether notice `seq` stays because the pointer is over the stack; it is marked to go
+    /// once the pointer leaves.
+    fn hold_toast(&mut self, seq: u64) -> bool {
+        let Some(toast) = self.toast.as_mut() else { return false };
+        if !toast.hovered {
+            return false;
+        }
+        if let Some(shown) = toast.shown.iter_mut().find(|s| s.seq == seq) {
+            shown.held = true;
+        }
+        true
+    }
+
+    /// The pointer came over the notices or left them: leaving, each held one gets
+    /// [`SAY_AFTER_HOVER`] more.
+    pub(super) fn toast_hovered(&mut self, hovered: bool, cx: &Context<Self>) {
+        let Some(toast) = self.toast.as_mut() else { return };
+        toast.hovered = hovered;
+        if hovered {
+            return;
+        }
+        let held: Vec<u64> = toast
+            .shown
+            .iter_mut()
+            .filter_map(|s| std::mem::take(&mut s.held).then_some(s.seq))
+            .collect();
+        for seq in held {
+            Self::arm_toast(seq, SAY_AFTER_HOVER, cx);
+        }
     }
 
     /// Start notice `seq` fading out; `true` when it was up.
@@ -155,6 +214,8 @@ impl WorkspaceView {
             ToastKind::Closed { title, .. } => format!("Closed {title}"),
             ToastKind::Said(text) => text.clone(),
             ToastKind::Offered(offer) => offer.line(),
+            ToastKind::Attention { line, .. } => line.clone(),
+            ToastKind::Triaged(undo) => undo.line().to_owned(),
         })
     }
 
@@ -210,6 +271,7 @@ impl WorkspaceView {
             tab_stop(el, s.accent)
         };
         let mut body = None;
+        let mut mark = None;
         let (part, icon, actions) = match &shown.what {
             ToastKind::Pointed { tile, .. } => {
                 let tile = *tile;
@@ -249,6 +311,25 @@ impl WorkspaceView {
                 body = Some(self.offer_body(offer));
                 ("offered", Some(IconName::Globe), vec![open, dismiss])
             }
+            ToastKind::Triaged(undo) => {
+                let (undo, seq) = (undo.clone(), shown.seq);
+                let back =
+                    action("toast-undo", "Undo").on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.drop_toasts(|shown| shown.seq == seq);
+                        this.undo_triage(undo.clone(), cx);
+                    }));
+                ("triaged", None, vec![back])
+            }
+            ToastKind::Attention { tile, status, .. } => {
+                let tile = *tile;
+                let go =
+                    action("toast-go", "Go").on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.dismiss_attention(tile);
+                        this.focus_tile(tile, cx);
+                    }));
+                mark = Some(crate::icons::status_mark(theme, Some(*status), 1.0));
+                ("attention", None, vec![go])
+            }
         };
         let line = SharedString::from(line);
         let notice = crate::kit::elevate(div(), theme)
@@ -256,6 +337,10 @@ impl WorkspaceView {
             .debug_selector(move || part.to_owned())
             .role(Role::Status)
             .aria_label(line.clone())
+            // Each notice hears the pointer: it occludes what is under it, the stack included.
+            .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
+                this.toast_hovered(*hovered, cx);
+            }))
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
@@ -272,6 +357,7 @@ impl WorkspaceView {
             .children(icon.map(|icon| {
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))
             }))
+            .children(mark)
             .child(body.unwrap_or_else(|| {
                 div()
                     .flex_1()
@@ -308,6 +394,32 @@ impl WorkspaceView {
     /// Take down the held-back pages `which` picks.
     pub(super) fn drop_offers(&mut self, which: impl Fn(&super::handoffs::Offer) -> bool) {
         self.drop_toasts(|shown| matches!(&shown.what, ToastKind::Offered(offer) if which(offer)));
+    }
+
+    /// A word about `tile` that needs, failed or finished, when the app is in front and the
+    /// tile is off screen: in view it says it itself, and away the system's note does. It
+    /// replaces the one about the same tile; the stack holds two at most.
+    pub(super) fn attention_toast(
+        &mut self,
+        tile: TileRef,
+        status: crate::icons::Status,
+        what: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.app_active || self.drawn.on_screen.borrow().contains(&tile.item) {
+            return;
+        }
+        let Some(title) = self.item(tile).map(|i| self.tile_title(i)) else { return };
+        self.dismiss_attention(tile);
+        let line = format!("{title} {what}");
+        self.show_toast(ToastKind::Attention { tile, status, line }, cx);
+    }
+
+    /// The word about `tile` has been followed, or a newer one replaces it.
+    fn dismiss_attention(&mut self, tile: TileRef) {
+        self.drop_toasts(
+            |shown| matches!(shown.what, ToastKind::Attention { tile: t, .. } if t == tile),
+        );
     }
 
     /// A pointing at `tile` has been followed.
