@@ -1,5 +1,6 @@
-//! The remote host: a [`Runner`] runs each step's script there. [`Ssh`] is the system `ssh`,
-//! one connection per step; a test drives a runner of its own.
+//! The machine a deploy runs on: a [`Runner`] runs each step's script there. [`Ssh`] is the
+//! system `ssh`, one connection per step; [`Local`] is this machine itself; a test drives a
+//! runner of its own.
 
 use std::io;
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use std::process::{ExitStatus, Stdio};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::process::Command;
 
-use crate::Event;
+use crate::{Event, Target};
 
 /// Work a runner does, awaited by the deploy.
 pub type Pending<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -55,6 +56,12 @@ pub trait Runner: Send + Sync + std::fmt::Debug {
     ///
     /// When it cannot be started or waited for.
     fn run<'a>(&'a self, job: Job<'a>, on: &'a mut OnEvent<'_>) -> Pending<'a, io::Result<Ran>>;
+
+    /// The scripts run on this machine: the binaries install from where they are, with no
+    /// upload, and no `ssh` stands between, so there is no address it came from.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 /// Where a watched script's output goes.
@@ -92,18 +99,19 @@ impl Ssh {
 
     /// For a window with nobody at a terminal: `ssh` never asks (a password, a new host key)
     /// and gives up on a host that does not answer, and a watched script's output comes back
-    /// as lines. `user` and `port` are `-l` and `-p`.
+    /// as lines. The target's user and port are `-l` and `-p`.
     #[must_use]
-    pub fn unattended(target: String, user: Option<&str>, port: Option<u16>) -> Self {
+    pub fn unattended(target: &Target) -> Self {
         let mut options = Vec::new();
-        if let Some(user) = user {
-            options.extend(["-l".to_owned(), user.to_owned()]);
+        if let Some(user) = &target.user {
+            options.extend(["-l".to_owned(), user.clone()]);
         }
-        if let Some(port) = port {
+        if let Some(port) = target.port {
             options.extend(["-p".to_owned(), port.to_string()]);
         }
         options.extend(["-o", "BatchMode=yes", "-o", "ConnectTimeout=15"].map(str::to_owned));
-        Self { program: PathBuf::from("ssh"), options, target, echo: Echo::Lines }
+        let program = PathBuf::from("ssh");
+        Self { program, options, target: target.host.clone(), echo: Echo::Lines }
     }
 
     /// `script` run by `sh` there, whatever the login shell (the scripts hold no `'`).
@@ -113,41 +121,82 @@ impl Ssh {
         ssh.kill_on_drop(true);
         ssh
     }
+}
 
-    async fn go(&self, job: Job<'_>, on: &mut OnEvent<'_>) -> io::Result<Ran> {
-        let mut command = self.command(job.script);
-        let shown = job.watch && self.echo == Echo::Terminal;
-        let (out, err) = if shown {
-            (Stdio::inherit(), Stdio::inherit())
-        } else if job.input.is_some() {
-            (Stdio::null(), Stdio::piped())
-        } else {
-            (Stdio::piped(), Stdio::piped())
-        };
-        let stdin = if job.input.is_some() { Stdio::piped() } else { Stdio::null() };
-        let mut child = command.stdin(stdin).stdout(out).stderr(err).spawn()?;
-        if let Some((file, total)) = job.input {
-            let stdin = child.stdin.take();
-            let stderr = child.stderr.take();
-            let (fed, stderr) = tokio::join!(feed(file, total, stdin, on), read_all(stderr));
-            let status = child.wait().await?;
-            if status.success() {
-                fed?;
-            }
-            return Ok(Ran { status, stdout: String::new(), stderr: stderr? });
-        }
-        if job.watch && !shown {
-            lines(child.stdout.take(), child.stderr.take(), on).await?;
-            let status = child.wait().await?;
-            return Ok(Ran { status, stdout: String::new(), stderr: String::new() });
-        }
-        let output = child.wait_with_output().await?;
-        Ok(Ran {
-            status: output.status,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+/// This machine: each script runs under `sh` in `home`, as one would after `ssh` here, its
+/// watched output coming back as lines.
+#[derive(Clone, Debug)]
+pub struct Local {
+    /// Where the scripts start.
+    pub home: PathBuf,
+}
+
+impl Local {
+    /// This user's home.
+    #[must_use]
+    pub fn here() -> Self {
+        Self { home: slopty_platform::dirs::home() }
     }
+}
+
+impl Runner for Local {
+    fn target(&self) -> &'static str {
+        "this machine"
+    }
+
+    fn program(&self) -> String {
+        "sh".to_owned()
+    }
+
+    fn run<'a>(&'a self, job: Job<'a>, on: &'a mut OnEvent<'_>) -> Pending<'a, io::Result<Ran>> {
+        let mut sh = Command::new("sh");
+        sh.arg("-c").arg(job.script).current_dir(&self.home).kill_on_drop(true);
+        Box::pin(go(sh, Echo::Lines, job, on))
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+}
+
+/// Run `command` for `job`: its input fed, its output kept, or shown as `echo` says.
+async fn go(
+    mut command: Command,
+    echo: Echo,
+    job: Job<'_>,
+    on: &mut OnEvent<'_>,
+) -> io::Result<Ran> {
+    let shown = job.watch && echo == Echo::Terminal;
+    let (out, err) = if shown {
+        (Stdio::inherit(), Stdio::inherit())
+    } else if job.input.is_some() {
+        (Stdio::null(), Stdio::piped())
+    } else {
+        (Stdio::piped(), Stdio::piped())
+    };
+    let stdin = if job.input.is_some() { Stdio::piped() } else { Stdio::null() };
+    let mut child = command.stdin(stdin).stdout(out).stderr(err).spawn()?;
+    if let Some((file, total)) = job.input {
+        let stdin = child.stdin.take();
+        let stderr = child.stderr.take();
+        let (fed, stderr) = tokio::join!(feed(file, total, stdin, on), read_all(stderr));
+        let status = child.wait().await?;
+        if status.success() {
+            fed?;
+        }
+        return Ok(Ran { status, stdout: String::new(), stderr: stderr? });
+    }
+    if job.watch && !shown {
+        lines(child.stdout.take(), child.stderr.take(), on).await?;
+        let status = child.wait().await?;
+        return Ok(Ran { status, stdout: String::new(), stderr: String::new() });
+    }
+    let output = child.wait_with_output().await?;
+    Ok(Ran {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
 }
 
 impl Runner for Ssh {
@@ -160,7 +209,7 @@ impl Runner for Ssh {
     }
 
     fn run<'a>(&'a self, job: Job<'a>, on: &'a mut OnEvent<'_>) -> Pending<'a, io::Result<Ran>> {
-        Box::pin(self.go(job, on))
+        Box::pin(go(self.command(job.script), self.echo, job, on))
     }
 }
 

@@ -715,7 +715,7 @@ fn deploy(sh: &Shell, home: &Utf8Path, name: &str, bins: &Utf8Path) -> Result<Du
     let xtask = std::env::current_exe().context("this binary")?;
     let mut deploy = Command::new(bins.join("slopty"));
     deploy
-        .args(["worker", "deploy", "vm", "--bin-dir"])
+        .args(["worker", "deploy", "vm", "--no-server", "--bin-dir"])
         .arg(bins)
         .arg("--ssh")
         .arg(&xtask)

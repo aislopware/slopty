@@ -6,21 +6,26 @@
 //! `ControlMaster` and Tailscale SSH apply as they do to a typed `ssh`. The steps ([`Step`]):
 //!
 //! 1. `uname -sm` there names its OS and CPU, and each binary to upload is read for its own
-//!    ([`Platform::of_binary`]): a build for another machine is refused before anything moves.
+//!    ([`Platform::of_binary`]): a build for another machine is refused before anything moves. The
+//!    same step reads the address `ssh` came from there (`$SSH_CONNECTION`), which is how the far
+//!    side reaches a server that runs on the deploying machine.
 //! 2. `slopty-ptyd`, `slopty-worker` and `slopty` go to [`STAGE`] under the remote home, each
 //!    written beside its name and moved over it once whole.
 //! 3. The uploaded `slopty worker install` runs there, which installs the services the way a local
-//!    install does, waits for the new worker to answer as itself, and with `--update` puts the
-//!    previous worker back when it does not.
+//!    install does, saves the server to register with ([`Plan::server`]), waits for the new worker
+//!    to answer as itself, and with `--update` puts the previous worker back when it does not.
 //! 4. `slopty worker doctor --json` there says what it can do; a Mac still needs a person at the
 //!    desk for Screen Recording and Accessibility.
 //!
-//! Every remote step goes through a [`Runner`], so a test drives the plan with no machine.
+//! Every step goes through a [`Runner`], so a test drives the plan with no machine. [`Local`]
+//! runs the same plan on this machine with no `ssh` and no upload: it installs the binaries
+//! where they are, which is how the app updates its own Mac's worker without Remote Login.
 
 #![forbid(unsafe_code)]
 
 mod platform;
 mod ssh;
+mod target;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -29,7 +34,8 @@ use std::process::ExitStatus;
 pub use platform::{Arch, Os, Platform, Unsupported};
 use slopty_platform::service::WORKER_BINARIES;
 use slopty_proto::ctl::Health;
-pub use ssh::{Echo, Job, OnEvent, Pending, Ran, Runner, Ssh};
+pub use ssh::{Echo, Job, Local, OnEvent, Pending, Ran, Runner, Ssh};
+pub use target::{REMEMBERED, Remembered, Server, Target};
 
 /// Where the binaries land on the remote host, relative to its home (where `ssh` starts).
 pub const STAGE: &str = ".slopty/deploy";
@@ -42,9 +48,13 @@ pub const TAIL: usize = 8;
 pub struct Plan {
     /// The directory holding the binaries built for the target ([`WORKER_BINARIES`]).
     pub source: PathBuf,
-    /// Replace the worker installed there, keeping its port and address; the previous one is
-    /// put back if the new one does not come up. Without it a machine with a worker is refused.
+    /// Bring the machine to this build: replace the worker installed there, keeping its port
+    /// and address and putting it back if the new one does not come up, or install one where
+    /// there is none. Without it a machine with a worker is refused.
     pub update: bool,
+    /// The server the worker registers with, so every client of it lists the machine; as it
+    /// was there before when `None`.
+    pub server: Option<Server>,
 }
 
 /// A step of a deploy, in the order they run.
@@ -88,6 +98,10 @@ pub struct Deployed {
     pub platform: Platform,
     /// The worker's own account of itself.
     pub health: Health,
+    /// The server address the install saved for it to register with: [`Plan::server`] as the
+    /// machine reaches it. `None` when the plan named none, or named this machine at loopback
+    /// and the machine did not say where it was reached from.
+    pub server: Option<String>,
 }
 
 /// Why a deploy stopped. Each reads as the CLI has always said it; [`DeployError::failure`] is what
@@ -185,6 +199,12 @@ pub enum DeployError {
         /// Its last lines, when they came back as lines rather than to a terminal.
         tail: Vec<String>,
     },
+    /// A directory to install from in place that a script cannot name as it is.
+    #[error("{} holds a character the install cannot pass to sh", path.display())]
+    Path {
+        /// The directory.
+        path: PathBuf,
+    },
     /// The doctor there answered with something other than a health report.
     #[error("the worker's doctor said {said:?}: {error}")]
     Doctor {
@@ -244,6 +264,11 @@ impl DeployError {
                 title: format!("No worker runs on {target}"),
                 hint: Some("Workers run on macOS and Linux, on arm64 or x86_64.".to_owned()),
                 lines: vec![source.to_string()],
+            },
+            Self::Path { path } => Failure {
+                title: "Slopty is in a folder the install cannot name".to_owned(),
+                hint: Some("Move Slopty to a folder whose name has no quotes, $ or \\.".to_owned()),
+                lines: vec![path.display().to_string()],
             },
             Self::Read { path, source } | Self::Open { path, source } => Failure {
                 title: "Could not read the worker to send".to_owned(),
@@ -336,9 +361,13 @@ pub async fn deploy(
         return Err(DeployError::NotATarget(target));
     }
     on(Event::Step(Step::Reach));
-    let uname = output(runner, "uname -sm", on).await?;
-    let platform = Platform::from_uname(&uname)
+    let local = runner.is_local();
+    let reach = if local { "uname -sm" } else { REACH };
+    let reached = output(runner, reach, on).await?;
+    let mut said = reached.lines();
+    let platform = Platform::from_uname(said.next().unwrap_or_default())
         .map_err(|source| DeployError::Machine { target: target.clone(), source })?;
+    let client = said.next().filter(|_| !local);
     on(Event::Machine(platform));
     let mut total = 0_u64;
     for name in WORKER_BINARIES {
@@ -353,21 +382,45 @@ pub async fn deploy(
             std::fs::metadata(&path).map_err(|source| DeployError::Read { path, source })?.len();
         total = total.saturating_add(len);
     }
-    let mut before = 0_u64;
-    for name in WORKER_BINARIES {
-        on(Event::Step(Step::Upload { name }));
-        before = before.saturating_add(
-            upload(runner, &plan.source.join(name), name, (before, total), on).await?,
-        );
-    }
+    let bin = if local {
+        in_place(&plan.source)?
+    } else {
+        let mut before = 0_u64;
+        for name in WORKER_BINARIES {
+            on(Event::Step(Step::Upload { name }));
+            before = before.saturating_add(
+                upload(runner, &plan.source.join(name), name, (before, total), on).await?,
+            );
+        }
+        STAGE.to_owned()
+    };
     let mode = if plan.update { "--update" } else { "--fresh" };
+    let server = plan.server.as_ref().and_then(|server| {
+        let seen = server.seen_from(client);
+        if seen.is_none() {
+            tracing::warn!(?server, ?client, "no address the worker there reaches the server at");
+        }
+        seen
+    });
+    let register = server.as_ref().map(|s| format!(" --server {s}")).unwrap_or_default();
     on(Event::Step(Step::Install));
-    install(runner, &format!("{STAGE}/slopty worker install --bin-dir {STAGE} {mode}"), on).await?;
+    let script = format!("{bin}/slopty{register} worker install --bin-dir {bin} {mode}");
+    install(runner, &script, on).await?;
     on(Event::Step(Step::Check));
-    let doctor = output(runner, &format!("{STAGE}/slopty --json worker doctor"), on).await?;
+    let doctor = output(runner, &format!("{bin}/slopty --json worker doctor"), on).await?;
     let health: Health = serde_json::from_str(&doctor)
         .map_err(|error| DeployError::Doctor { said: doctor, error })?;
-    Ok(Deployed { platform, health })
+    Ok(Deployed { platform, health, server })
+}
+
+/// The first step there: its OS and CPU, then the address `ssh` came from (empty when the
+/// login is not `sshd`'s).
+const REACH: &str = r#"uname -sm && echo "${SSH_CONNECTION%% *}""#;
+
+/// `dir` as a word of a script, double-quoted: it runs in place, so it may hold spaces.
+fn in_place(dir: &Path) -> Result<String, DeployError> {
+    let text = dir.to_str().filter(|t| !t.contains(['"', '$', '`', '\\', '\'', '\n']));
+    text.map(|t| format!("\"{t}\"")).ok_or_else(|| DeployError::Path { path: dir.to_path_buf() })
 }
 
 /// The runner's own failure to run a script.

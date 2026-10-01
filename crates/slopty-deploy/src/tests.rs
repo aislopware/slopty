@@ -148,7 +148,7 @@ fn binaries(head: impl Fn(&str) -> Vec<u8>) -> tempfile::TempDir {
 }
 
 fn plan(source: &tempfile::TempDir, update: bool) -> Plan {
-    Plan { source: source.path().to_path_buf(), update }
+    Plan { source: source.path().to_path_buf(), update, server: None }
 }
 
 /// Runs `deploy`, keeping what it said.
@@ -174,7 +174,10 @@ async fn a_deploy_uploads_the_matching_binaries_installs_and_reads_the_doctor() 
         assert!(!host.staged(&format!("{name}.part")).exists());
     }
     let scripts = host.scripts();
-    assert_eq!(scripts.first().map(String::as_str), Some("studio sh -c 'uname -sm'"));
+    assert_eq!(
+        scripts.first().map(String::as_str),
+        Some(format!("studio sh -c '{REACH}'").as_str())
+    );
     assert!(
         scripts.contains(&format!(
             "studio sh -c '{STAGE}/slopty worker install --bin-dir {STAGE} --fresh'"
@@ -183,6 +186,7 @@ async fn a_deploy_uploads_the_matching_binaries_installs_and_reads_the_doctor() 
     );
     assert_eq!(deployed.platform, Platform { os: Os::MacOs, arch: Arch::Arm64 });
     assert_eq!(deployed.health, health());
+    assert_eq!(deployed.server, None, "no server named, none saved");
     let total: u64 = WORKER_BINARIES.iter().map(|n| mac_arm64(n).len() as u64).sum();
     assert_eq!(events.last(), Some(&Event::Step(Step::Check)));
     assert!(events.contains(&Event::Sent { sent: total, total }), "every byte: {events:?}");
@@ -261,17 +265,26 @@ type Answer = fn(&str) -> (i32, &'static str, &'static str);
 struct Scripted {
     answer: Answer,
     ran: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+    local: bool,
 }
 
 impl Scripted {
     fn new(answer: Answer) -> Self {
-        Self { answer, ran: std::sync::Arc::default() }
+        Self { answer, ran: std::sync::Arc::default(), local: false }
+    }
+
+    fn ran(&self) -> Vec<String> {
+        self.ran.lock().clone()
     }
 }
 
 impl Runner for Scripted {
     fn target(&self) -> &'static str {
         "mini"
+    }
+
+    fn is_local(&self) -> bool {
+        self.local
     }
 
     fn program(&self) -> String {
@@ -304,8 +317,8 @@ impl Runner for Scripted {
 }
 
 fn mini(script: &str) -> (i32, &'static str, &'static str) {
-    if script == "uname -sm" {
-        (0, "Darwin arm64\n", "")
+    if script.starts_with("uname -sm") {
+        (0, "Darwin arm64\n100.64.0.2\n", "")
     } else if script.contains("worker install") {
         (0, "installing\nup\n", "")
     } else if script.contains("worker doctor") {
@@ -433,4 +446,174 @@ async fn a_failed_install_keeps_its_last_lines() {
     let failure = failed.failure();
     assert_eq!(failure.lines.len(), TAIL);
     assert_eq!(failure.lines.first().map(String::as_str), Some("3"));
+}
+
+/// The doctor's report as JSON, for a scripted machine that answers it.
+static HEALTH: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| serde_json::to_string(&health()).unwrap());
+
+/// A machine that reaches this one from 100.64.0.2 and installs and answers as it should.
+fn healthy(script: &str) -> (i32, &'static str, &'static str) {
+    if script.contains("worker doctor") { (0, HEALTH.as_str(), "") } else { mini(script) }
+}
+
+/// A healthy machine whose login is not `sshd`'s, so it says no address it was reached from.
+fn no_client(script: &str) -> (i32, &'static str, &'static str) {
+    if script == REACH { (0, "Darwin arm64\n\n", "") } else { healthy(script) }
+}
+
+/// The install script a run ran.
+fn install_script(ran: &[String]) -> String {
+    ran.iter().find(|s| s.contains("worker install")).cloned().unwrap_or_default()
+}
+
+/// The install saves the server the worker registers with, as the far side reaches it: a
+/// named server as it is, and one this machine runs at loopback at the address `ssh` came
+/// from there. One the far side cannot be told of installs a worker on its own, and says so.
+#[tokio::test]
+async fn the_worker_registers_with_the_server_as_the_machine_reaches_it() {
+    let source = binaries(mac_arm64);
+    let with = |host: &str| Plan {
+        server: Some(Server { host: host.to_owned(), port: 45560 }),
+        ..plan(&source, true)
+    };
+    let runner = Scripted::new(healthy);
+    let (done, _) = run(&runner, &with("studio.tail1234.ts.net")).await;
+    assert_eq!(done.unwrap().server.as_deref(), Some("studio.tail1234.ts.net:45560"));
+    assert_eq!(
+        install_script(&runner.ran()),
+        format!(
+            "{STAGE}/slopty --server studio.tail1234.ts.net:45560 worker install --bin-dir \
+             {STAGE} --update"
+        )
+    );
+
+    let runner = Scripted::new(healthy);
+    let (done, _) = run(&runner, &with("127.0.0.1")).await;
+    assert_eq!(done.unwrap().server.as_deref(), Some("100.64.0.2:45560"), "where ssh came from");
+    assert!(install_script(&runner.ran()).contains(" --server 100.64.0.2:45560 "));
+
+    for unreachable in ["localhost", "studio;reboot"] {
+        let runner = Scripted::new(no_client);
+        let (done, _) = run(&runner, &with(unreachable)).await;
+        assert_eq!(done.unwrap().server, None, "{unreachable}");
+        assert!(!install_script(&runner.ran()).contains("--server"), "{unreachable}");
+    }
+}
+
+#[test]
+fn a_server_is_named_as_the_far_side_dials_it() {
+    let at = |host: &str| Server { host: host.to_owned(), port: 45560 };
+    assert_eq!(at("studio").seen_from(Some("10.0.0.2")).as_deref(), Some("studio:45560"));
+    assert_eq!(
+        at("::1").seen_from(Some("fd7a:115c:a1e0::2")).as_deref(),
+        Some("[fd7a:115c:a1e0::2]:45560")
+    );
+    assert_eq!(at("[::1]").seen_from(None), None, "loopback, and nothing said where from");
+    assert_eq!(
+        at("127.0.0.1").seen_from(Some("127.0.0.1")).as_deref(),
+        None,
+        "the far side is this machine"
+    );
+    assert_eq!(at("$(id)").seen_from(None), None, "nothing a shell would run");
+}
+
+/// A target names this machine when it is loopback or one of its own addresses, with the
+/// config's user and port, and the fields read as `ssh` takes them.
+#[tokio::test]
+async fn a_target_reads_as_ssh_takes_it() {
+    for here in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+        assert!(Target::host(here).is_this_machine().await, "{here}");
+    }
+    // The address this machine would send from: one of its own, when it has a route at all.
+    let own = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    if own.connect("192.0.2.1:9").is_ok() {
+        let ip = own.local_addr().unwrap().ip();
+        assert!(Target::host(&ip.to_string()).is_this_machine().await, "this machine's {ip}");
+    }
+    assert!(!Target::host("192.0.2.1").is_this_machine().await, "TEST-NET-1 is nobody's own");
+    assert!(!Target::host("no-such-host.invalid").is_this_machine().await);
+    let with_port = Target { port: Some(2222), ..Target::host("127.0.0.1") };
+    assert!(!with_port.is_this_machine().await, "a port of its own is an ssh to make");
+    assert_eq!(
+        Target::read(" me@mini ", "", ""),
+        Ok(Target { host: "mini".to_owned(), user: Some("me".to_owned()), port: None })
+    );
+    Target::read("-oProxyCommand=x", "", "").unwrap_err();
+    Target::read("mini", "", "0").unwrap_err();
+}
+
+/// Each worker's target is kept under the data dir, read back by a later open, and a file
+/// that is not one reads as none kept.
+#[test]
+fn targets_are_remembered_per_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut kept = Remembered::open_in(dir.path());
+    assert_eq!(kept.get("w1"), None);
+    let mini = Target { user: Some("me".to_owned()), port: Some(2222), ..Target::host("mini") };
+    kept.remember("w1", mini.clone()).unwrap();
+    kept.remember("w2", Target::host("studio")).unwrap();
+    let again = Remembered::open_in(dir.path());
+    assert_eq!(again.get("w1"), Some(&mini));
+    assert_eq!(again.get("w2"), Some(&Target::host("studio")));
+    std::fs::write(dir.path().join(REMEMBERED), b"{not json").unwrap();
+    assert_eq!(Remembered::open_in(dir.path()).get("w1"), None);
+}
+
+/// On this machine nothing is uploaded: the install and the doctor run the binaries where they
+/// are, quoted, and a directory a script cannot name is refused before anything runs.
+#[tokio::test]
+async fn a_local_deploy_installs_in_place() {
+    let source = binaries(mac_arm64);
+    let runner = Scripted { local: true, ..Scripted::new(healthy) };
+    let plan = Plan {
+        server: Some(Server { host: "127.0.0.1".to_owned(), port: 45560 }),
+        ..plan(&source, true)
+    };
+    let (done, events) = run(&runner, &plan).await;
+    let deployed = done.unwrap();
+    assert_eq!(deployed.server.as_deref(), None, "loopback stays this machine's own");
+    let bin = format!("\"{}\"", source.path().display());
+    assert_eq!(
+        runner.ran(),
+        [
+            "uname -sm".to_owned(),
+            format!("{bin}/slopty worker install --bin-dir {bin} --update"),
+            format!("{bin}/slopty --json worker doctor"),
+        ]
+    );
+    assert!(!events.iter().any(|e| matches!(e, Event::Step(Step::Upload { .. }))), "{events:?}");
+
+    let odd = tempfile::Builder::new().prefix("a$b").tempdir().unwrap();
+    for name in WORKER_BINARIES {
+        std::fs::write(odd.path().join(name), mac_arm64(name)).unwrap();
+    }
+    let runner = Scripted { local: true, ..Scripted::new(healthy) };
+    let (done, _) = run(&runner, &Plan { source: odd.path().to_path_buf(), ..plan }).await;
+    assert!(matches!(done, Err(DeployError::Path { .. })), "{done:?}");
+    assert_eq!(runner.ran(), ["uname -sm"], "nothing installed");
+}
+
+/// [`Local`] runs each script under `sh` in its home and hands a watched one's lines back.
+#[tokio::test]
+async fn the_local_runner_runs_in_its_home() {
+    let home = tempfile::tempdir().unwrap();
+    let local = Local { home: home.path().to_path_buf() };
+    let mut events = Vec::new();
+    let mut on = |e| events.push(e);
+    let job = Job { script: "pwd -P", input: None, watch: false };
+    let ran = local.run(job, &mut on).await.unwrap();
+    assert!(ran.status.success());
+    let resolved = home.path().canonicalize().unwrap();
+    assert_eq!(ran.stdout.trim(), resolved.to_str().unwrap());
+    let job = Job { script: "echo one; echo two >&2; exit 3", input: None, watch: true };
+    let ran = local.run(job, &mut on).await.unwrap();
+    assert_eq!(ran.status.code(), Some(3));
+    let mut lines: Vec<String> = events
+        .into_iter()
+        .filter_map(|e| if let Event::Line(l) = e { Some(l) } else { None })
+        .collect();
+    lines.sort();
+    assert_eq!(lines, ["one", "two"]);
+    assert!(local.is_local());
 }

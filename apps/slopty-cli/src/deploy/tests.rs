@@ -27,8 +27,8 @@ fn health() -> Health {
     }
 }
 
-/// The CLI's options reach the plan: its `ssh`, its target and `--update`, and a whole deploy
-/// through a fake `ssh` answers with the doctor's report.
+/// The CLI's options reach the plan: its `ssh`, its target, `--update` and the server to
+/// register with, and a whole deploy through a fake `ssh` answers with the doctor's report.
 #[tokio::test]
 async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     let dir = tempfile::tempdir().unwrap();
@@ -54,16 +54,41 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     for name in WORKER_BINARIES {
         std::fs::write(source.path().join(name), mac_arm64).unwrap();
     }
-    let opts = DeployOpts { target: "studio".to_owned(), update: true, bin_dir: None, ssh };
-    let deployed = deploy(&opts, source.path()).await.unwrap();
+    let opts = DeployOpts {
+        target: "studio".to_owned(),
+        update: true,
+        bin_dir: None,
+        ssh,
+        no_server: false,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let deployed = deploy(&opts, Some("hub.tail1234.ts.net"), data.path(), source.path());
+    let deployed = deployed.await.unwrap();
     let scripts = std::fs::read_to_string(&log).unwrap();
-    assert!(scripts.starts_with("studio sh -c 'uname -sm'\n"), "{scripts}");
+    assert!(scripts.starts_with("studio sh -c 'uname -sm"), "{scripts}");
+    assert!(
+        scripts.contains(" --server hub.tail1234.ts.net:45560 worker install --bin-dir"),
+        "{scripts}"
+    );
     assert!(scripts.contains(" --update'\n"), "{scripts}");
     assert_eq!(deployed.platform, Platform { os: Os::MacOs, arch: Arch::Arm64 });
+    assert_eq!(deployed.server.as_deref(), Some("hub.tail1234.ts.net:45560"));
 
     let said = report("studio", &deployed);
     assert!(said.contains("is up on studio (macOS arm64)"), "{said}");
     assert!(said.contains("allow Screen & System Audio Recording for"), "{said}");
     assert!(!said.contains("Accessibility"), "granted already: {said}");
+    assert!(said.contains("registers with the server at hub.tail1234.ts.net:45560"), "{said}");
+    assert!(said.contains("lists studio.tail1234.ts.net"), "{said}");
+
+    let alone = DeployOpts { no_server: true, ..opts };
+    let deployed = deploy(&alone, Some("hub.tail1234.ts.net"), data.path(), source.path());
+    let deployed = deployed.await.unwrap();
+    let scripts = std::fs::read_to_string(&log).unwrap();
+    let last = scripts.lines().rfind(|l| l.contains("worker install")).unwrap_or_default();
+    assert!(!last.contains("--server"), "--no-server registers it nowhere: {last}");
+    assert_eq!(deployed.server, None);
+    let said = report("studio", &deployed);
+    assert!(said.contains("no server to register with"), "{said}");
     assert!(said.contains("slopty add studio.tail1234.ts.net"), "{said}");
 }

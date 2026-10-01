@@ -544,9 +544,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The install runs on the target, in Rust.** The uploaded `slopty worker install
     --bin-dir ~/.slopty/deploy` installs the services with the same
     `slopty_platform::service::install_worker` a local install uses. A deploy passes
-    `--fresh`, which refuses a machine that already has a worker. `--update` requires one,
-    keeps its port and bind address, and first copies its binaries to
-    `<data dir>/bin.previous`.
+    `--fresh`, which refuses a machine that already has a worker. `--update` keeps the port
+    and bind address of the worker there and first copies its binaries to
+    `<data dir>/bin.previous`; on a machine with none it installs one (2026-10-01, below).
   - **Health means the new worker answers as itself.** Every install now waits for the
     control socket to answer both status and doctor. The doctor must show this build's
     version, the `slopty-worker` just installed, and an uptime no longer than the install
@@ -720,3 +720,47 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Pending.** No deploy to a real machine was run from the app: the tests never reach a
     host. The empty workspace's line ("Add a worker from the command palette", `strip.rs`)
     could become a button that opens the panel.
+
+- ✅ **A worker installed from elsewhere registers with the server, and its Update reaches the
+  machine as the install did** (2026-10-01, readiness audit items 3 and 16). Before this, the
+  remote install ran with no `--server`, so the worker ran on its own: the server's directory
+  never listed it, and other clients, the phone and projects never saw it. The add panel's SSH
+  install always ran `--fresh`, which the CLI refuses on a machine that already has a worker, so
+  a machine with an older worker could not be fixed from the panel. A tile's Update dropped the
+  SSH user and port, and for this Mac's own worker (added at `127.0.0.1`) it went over SSH to
+  localhost, which needs Remote Login.
+  - **The server goes with the install.** `Plan::server` is the server as the deploying
+    machine dials it. The install runs `slopty --server <addr> worker install …`, which saves
+    `[worker] server` before the daemon starts. A server at loopback is the deploying machine
+    itself, so the far side gets the address `ssh` came from there: the first step now runs
+    `uname -sm && echo "${SSH_CONNECTION%% *}"`, as `xtask vm deploy` already did for
+    `[worker] allow`. When that is unknown (a login that is not `sshd`'s), or the address holds
+    anything but host characters, the install names no server and `Deployed::server` says so.
+    The app passes the server it is linked to. The CLI passes `--server`, `$SLOPTY_SERVER` or
+    `[client] server`, else the first server that answers on the tailnet, as every verb finds
+    it; `--no-server` registers it nowhere, which a throwaway machine (the VM lane) wants.
+  - **`--update` brings a machine to this build.** It replaces the worker there, keeping its
+    port and address and putting it back if the new one fails, and installs one where there is
+    none. The panel's install and a tile's Update both pass it, so the panel turns a machine
+    with an older worker into this build's and adds it. `--fresh` still refuses a machine with a
+    worker, for the CLI's own default. Reinstalling a machine on the same build restarts both
+    daemons, so its sessions end, as any update's do: `install_worker` stops ptyd with the
+    worker. Keeping ptyd across an update needs to know that the running ptyd is the new
+    binary, which neither the file nor `Health` says yet.
+  - **The SSH target is kept per worker.** `slopty_deploy::Target` (moved from the app, with
+    the fields' reading) is written to `<data dir>/deployed.json` under the id of the worker
+    the install added (`Remembered`). Update reads it, else the host the worker was dialled at.
+  - **This Mac's own worker is updated with no `ssh`.** `Target::is_this_machine` holds for a
+    loopback host, or one that resolves to an address only this machine can bind (its tailnet
+    name or LAN address), with the config's user and port. Then the app runs the same plan
+    through `slopty_deploy::Local`: `sh` in the home, no upload, and the binaries installed
+    where they are (`Contents/MacOS` in place), so the TCC grants of a signed bundle carry over.
+  - Tests: `slopty-deploy` `the_worker_registers_with_the_server_as_the_machine_reaches_it`,
+    `a_server_is_named_as_the_far_side_dials_it`, `a_target_reads_as_ssh_takes_it` (this
+    machine's own address, TEST-NET, an unresolvable name), `targets_are_remembered_per_worker`,
+    `a_local_deploy_installs_in_place` and `the_local_runner_runs_in_its_home`. CLI
+    `deploy::tests::the_options_reach_the_plan_and_the_report_says_what_is_next` (the server in
+    the install script, `--no-server`, both reports) and
+    `service::tests::an_update_keeps_the_previous_worker_and_its_port` (`--update` on an empty
+    machine). App `ssh::tests`: the sheet keeps the target of the worker it added, and Update
+    deploys through the kept user and port.

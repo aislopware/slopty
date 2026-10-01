@@ -2,7 +2,11 @@
 //!
 //! "Install on a machine over SSH" on the add panel, and "Update" on the tiles of a worker on a
 //! different build, run [`slopty_deploy`] against the person's own `ssh` (their config, their
-//! agent), each step drawn as a line (`slopty_ui::add_worker`).
+//! agent), each step drawn as a line (`slopty_ui::add_worker`). Both bring the machine to this
+//! build (an install where there is none, else an update that puts the old worker back if the
+//! new one fails), and both register it with the server this app uses, so every client of it
+//! lists the machine. The SSH target an install used is kept per worker, so its "Update" reaches
+//! it the same way; this Mac's own worker is updated in place, with no `ssh`.
 //!
 //! Everything that touches a machine goes through a [`Deployer`]: [`native`] on the Mac, a
 //! stand-in under test, so no test reaches a host. A run is a GPUI task that owns the deploy;
@@ -20,7 +24,8 @@ use gpui::{
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_core::WorkerId;
-use slopty_deploy::{Deployed, Event, Failure, Step};
+pub use slopty_deploy::Target;
+use slopty_deploy::{Deployed, Event, Failure, Server, Step};
 use slopty_proto::ctl::{Health, Tailscale};
 use slopty_ui::add_worker::{self, Bar, Install, Mark, StepLine, Updates};
 use slopty_ui::colors::hsla;
@@ -61,62 +66,22 @@ pub const BLURB: &str = "Slopty copies its worker to a Mac or Linux machine you 
 /// The foot of the form: whose `ssh` it is.
 pub const USES: &str = "Uses your ssh config and agent.";
 
-/// The machine, as the sheet's fields or a dialled worker name it.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Target {
-    /// The host, as `ssh` takes it: a config alias, a name, an address.
-    pub host: String,
-    /// `-l`, when not the config's.
-    pub user: Option<String>,
-    /// `-p`, when not the config's.
-    pub port: Option<u16>,
-}
-
-impl Target {
-    /// The fields as typed; `user@host` in the host field fills the user.
-    ///
-    /// # Errors
-    ///
-    /// The field to fix and why, as the sheet says it.
-    pub fn read(host: &str, user: &str, port: &str) -> Result<Self, String> {
-        let (mut host, mut user) = (host.trim(), user.trim());
-        if let Some((named, at)) = host.split_once('@')
-            && user.is_empty()
-        {
-            (user, host) = (named, at);
-        }
-        if host.is_empty() {
-            return Err("Type the machine's name or address.".to_owned());
-        }
-        if host.starts_with('-') || host.contains(char::is_whitespace) || user.starts_with('-') {
-            return Err(format!("{host} is not a host name."));
-        }
-        let port = match port.trim() {
-            "" => None,
-            port => Some(
-                port.parse::<u16>()
-                    .ok()
-                    .filter(|p| *p > 0)
-                    .ok_or_else(|| "The port is a number from 1 to 65535.".to_owned())?,
-            ),
-        };
-        let user = (!user.is_empty()).then(|| user.to_owned());
-        Ok(Self { host: host.to_owned(), user, port })
-    }
-}
-
 /// What the flows do to other machines.
 pub trait Deployer: std::fmt::Debug {
-    /// Put the worker on `to` (replace it there, with `update`), each event sent to `events`
+    /// Bring `to` to this build's worker, registered with `server`, each event sent to `events`
     /// as it happens. Dropping what it returns stops it.
     fn deploy(
         &self,
         to: &Target,
-        update: bool,
+        server: Option<Server>,
         events: mpsc::UnboundedSender<Event>,
     ) -> Pending<Result<Deployed, Failure>>;
     /// Add the worker at `address` to this app's workers.
     fn add(&self, address: &str) -> Pending<Result<net::Added, String>>;
+    /// Keep `to` as the way to reach `worker`'s machine.
+    fn remember(&self, worker: WorkerId, to: &Target);
+    /// The way `worker`'s machine was reached, when it was installed from here.
+    fn target_of(&self, worker: WorkerId) -> Option<Target>;
 }
 
 /// Where a run is.
@@ -447,7 +412,7 @@ impl Workspace {
         self.ssh_runs = self.ssh_runs.wrapping_add(1);
         let id = self.ssh_runs;
         let (tx, events) = mpsc::unbounded_channel();
-        let deploy = deployer.deploy(&target, false, tx);
+        let deploy = deployer.deploy(&target, self.register_with(), tx);
         let progress = Progress::new(target.host.clone(), false);
         let task = cx.spawn(async move |this, cx| {
             let apply = |ws: &mut Self, event: Event, cx: &mut Context<Self>| {
@@ -477,6 +442,7 @@ impl Workspace {
             for address in addresses(&target, &deployed.health) {
                 match deployer.add(&address).await {
                     Ok(added) => {
+                        deployer.remember(added.id, &target);
                         let _gone =
                             this.update(cx, |ws, cx| ws.ssh_added(id, added, &deployed, cx));
                         return;
@@ -534,8 +500,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Replace the worker at `host` (a tile's "Update"): deploy with `--update`, then dial it
-    /// again at once. The pill follows each step; the link coming up ends it.
+    /// The server a worker installed from here registers with: the one this app is linked to.
+    fn register_with(&self) -> Option<Server> {
+        self.server_address().map(|a| Server { host: a.host().to_owned(), port: a.port() })
+    }
+
+    /// Replace the worker at `host` (a tile's "Update"): deploy with `--update`, through the SSH
+    /// target it was installed with or else the host it was dialled at, then dial it again at
+    /// once. The pill follows each step; the link coming up ends it.
     pub(crate) fn update_worker(&mut self, host: &str, cx: &mut Context<Self>) {
         let Some(deployer) = self.deployer.clone() else { return };
         if self.updates.get(host).is_some_and(|run| run.task.is_some()) {
@@ -550,9 +522,9 @@ impl Workspace {
             return;
         };
         let worker = worker.id;
-        let target = Target { host: host.to_owned(), user: None, port: None };
+        let target = deployer.target_of(worker).unwrap_or_else(|| Target::host(host));
         let (tx, events) = mpsc::unbounded_channel();
-        let deploy = deployer.deploy(&target, true, tx);
+        let deploy = deployer.deploy(&target, self.register_with(), tx);
         let owned = host.to_owned();
         let task = cx.spawn(async move |this, cx| {
             let host = owned.clone();
@@ -760,7 +732,8 @@ pub fn native(runtime: &tokio::runtime::Handle) -> Option<Rc<dyn Deployer>> {
     if crate::self_test() {
         return None;
     }
-    Some(Rc::new(mac::Native { runtime: runtime.clone() }))
+    let data = slopty_platform::dirs::data_dir();
+    Some(Rc::new(mac::Native { runtime: runtime.clone(), data }))
 }
 
 /// No `ssh` to run here.
@@ -773,17 +746,22 @@ pub const fn native(_runtime: &tokio::runtime::Handle) -> Option<Rc<dyn Deployer
 mod mac {
     //! Deploys from this Mac.
 
-    use slopty_deploy::{Deployed, Event, Failure, Plan, Ssh};
+    use std::path::PathBuf;
+
+    use slopty_core::WorkerId;
+    use slopty_deploy::{Deployed, Event, Failure, Local, Plan, Remembered, Runner, Server, Ssh};
     use tokio::sync::mpsc;
 
     use super::{Deployer, Target};
     use crate::net;
     use crate::this_mac::Pending;
 
-    /// This Mac's networking runtime, where the deploys run.
+    /// This Mac's networking runtime, where the deploys run, and the data directory the SSH
+    /// targets are kept in.
     #[derive(Debug)]
     pub(super) struct Native {
         pub runtime: tokio::runtime::Handle,
+        pub data: PathBuf,
     }
 
     /// A runtime task stopped when its handle is dropped: dropping the deploy kills its `ssh`.
@@ -806,7 +784,7 @@ mod mac {
         fn deploy(
             &self,
             to: &Target,
-            update: bool,
+            server: Option<Server>,
             events: mpsc::UnboundedSender<Event>,
         ) -> Pending<Result<Deployed, Failure>> {
             let to = to.clone();
@@ -816,11 +794,17 @@ mod mac {
                     hint: None,
                     lines: vec![e.to_string()],
                 })?;
-                let ssh = Ssh::unattended(to.host.clone(), to.user.as_deref(), to.port);
+                // This Mac's own worker needs no Remote Login: the plan runs here, in place.
+                let runner: Box<dyn Runner> = if to.is_this_machine().await {
+                    Box::new(Local::here())
+                } else {
+                    Box::new(Ssh::unattended(&to))
+                };
                 let mut on = |event| {
                     let _gone = events.send(event);
                 };
-                slopty_deploy::deploy(&ssh, &Plan { source, update }, &mut on).await.map_err(|e| {
+                let plan = Plan { source, update: true, server };
+                slopty_deploy::deploy(runner.as_ref(), &plan, &mut on).await.map_err(|e| {
                     tracing::warn!(host = %to.host, error = %e, "deploy");
                     e.failure()
                 })
@@ -839,6 +823,17 @@ mod mac {
                 net::add_worker(&address).await.map_err(|e| format!("{e:#}"))
             });
             Aborting(task).pending(Err("adding it stopped".to_owned()))
+        }
+
+        fn remember(&self, worker: WorkerId, to: &Target) {
+            let mut kept = Remembered::open_in(&self.data);
+            if let Err(e) = kept.remember(&worker.to_string(), to.clone()) {
+                tracing::warn!(%worker, error = %e, "keep the worker's ssh target");
+            }
+        }
+
+        fn target_of(&self, worker: WorkerId) -> Option<Target> {
+            Remembered::open_in(&self.data).get(&worker.to_string()).cloned()
         }
     }
 }

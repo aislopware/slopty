@@ -7415,12 +7415,14 @@ name = "slopty-deploy"
 version = "0.1.0"
 dependencies = [
  "parking_lot",
+ "serde",
  "serde_json",
  "slopty-platform",
  "slopty-proto",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

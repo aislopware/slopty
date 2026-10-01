@@ -66,7 +66,7 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         }
         WorkerCmd::Deploy(opts) => {
             let source = service::binaries_source(opts.bin_dir())?;
-            let deployed = deploy::deploy(&opts, &source).await?;
+            let deployed = deploy::deploy(&opts, server, data_dir, &source).await?;
             print!("{}", deploy::report(opts.target(), &deployed));
             return Ok(());
         }

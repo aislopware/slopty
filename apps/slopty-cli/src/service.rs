@@ -44,8 +44,9 @@ pub struct InstallOpts {
     /// `RUST_LOG` for both daemons.
     #[arg(long, default_value = "info")]
     log: String,
-    /// Replace the worker installed here: its port and address carry over, and if the new one
-    /// does not come up the previous one is put back (`worker deploy --update` runs this).
+    /// Bring this machine to this build: the worker installed here is replaced, its port and
+    /// address carrying over and the previous one put back if the new one does not come up;
+    /// with none installed, one is (`worker deploy --update` and the app run this).
     #[arg(long, conflicts_with = "fresh")]
     update: bool,
     /// Refuse when a worker is installed here already (`worker deploy` runs this).
@@ -94,12 +95,12 @@ async fn install_in(
     if opts.fresh && installed {
         bail!("a worker is installed here already; pass --update to replace it");
     }
-    if opts.update && !installed {
-        bail!("no worker is installed here to update");
-    }
     let mut worker = opts.worker();
-    let previous =
-        if opts.update { Some(keep_previous(session, data_dir, &mut worker)?) } else { None };
+    let previous = if opts.update && installed {
+        Some(keep_previous(session, data_dir, &mut worker)?)
+    } else {
+        None
+    };
     if let Some(server) = server {
         save_worker_server(data_dir, server)?;
     }
@@ -344,7 +345,7 @@ async fn install_server(opts: &ServerInstallOpts, data_dir: &Path) -> Result<()>
         .await
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                anyhow!("{e}; build it (cargo build -p slopty-server) or pass --bin-dir")
+                anyhow!("{e}; build it (cargo build -p slopty-serverd) or pass --bin-dir")
             } else {
                 e.into()
             }
@@ -576,20 +577,19 @@ mod tests {
         }
     }
 
-    /// `--fresh` leaves an installed worker alone, `--update` needs one, and an update keeps
-    /// the previous binaries and the port the worker ran on.
+    /// `--update` installs where nothing is, `--fresh` then leaves the installed worker alone,
+    /// and an update keeps the previous binaries and the port the worker ran on.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_update_keeps_the_previous_worker_and_its_port() {
         let stage = Stage::new();
         let old = stage.binaries("old");
         stage.answer_as_installed();
-        let update = Stage::opts(&old, true, false);
-        let refused = stage.install(&update).await.unwrap_err();
-        assert!(refused.to_string().contains("no worker is installed"), "{refused:#}");
-        let first = InstallOpts { port: Some(45551), ..Stage::opts(&old, false, true) };
+        let first = InstallOpts { port: Some(45551), ..Stage::opts(&old, true, false) };
         stage.install(&first).await.unwrap();
-        assert_eq!(stage.bootstraps(), 2, "ptyd and the worker");
-        let again = stage.install(&first).await.unwrap_err();
+        assert_eq!(stage.bootstraps(), 2, "ptyd and the worker, installed fresh");
+        assert!(!stage.data().join("bin.previous").exists(), "nothing to keep");
+        let fresh = Stage::opts(&old, false, true);
+        let again = stage.install(&fresh).await.unwrap_err();
         assert!(again.to_string().contains("pass --update"), "{again:#}");
 
         let new = stage.binaries("new");

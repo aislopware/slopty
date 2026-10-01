@@ -24,10 +24,12 @@ impl Drop for Dropped {
     }
 }
 
-/// A deployer the test plays: what it was asked, the deploy's events and its ending.
+/// A deployer the test plays: what it was asked, the deploy's events and its ending, and the
+/// targets it was told to keep.
 #[derive(Debug, Default)]
 struct StandIn {
     asked: RefCell<Vec<String>>,
+    kept: RefCell<HashMap<WorkerId, Target>>,
     events: RefCell<Option<mpsc::UnboundedSender<Event>>>,
     finish: RefCell<Option<oneshot::Sender<Result<Deployed, Failure>>>>,
     dropped: Arc<AtomicBool>,
@@ -64,11 +66,12 @@ impl Deployer for StandIn {
     fn deploy(
         &self,
         to: &Target,
-        update: bool,
+        server: Option<Server>,
         events: mpsc::UnboundedSender<Event>,
     ) -> Pending<Result<Deployed, Failure>> {
         let Target { host, user, port } = to;
-        self.asked.borrow_mut().push(format!("deploy {host} {user:?} {port:?} update={update}"));
+        let server = server.map(|s| format!("{}:{}", s.host, s.port));
+        self.asked.borrow_mut().push(format!("deploy {host} {user:?} {port:?} server={server:?}"));
         *self.events.borrow_mut() = Some(events);
         let (tx, rx) = oneshot::channel();
         *self.finish.borrow_mut() = Some(tx);
@@ -86,6 +89,14 @@ impl Deployer for StandIn {
             .then(|| net::Added { id: self.worker, name: "mini".to_owned() })
             .ok_or_else(|| format!("nothing answered at {address}"));
         Box::pin(std::future::ready(added))
+    }
+
+    fn remember(&self, worker: WorkerId, to: &Target) {
+        self.kept.borrow_mut().insert(worker, to.clone());
+    }
+
+    fn target_of(&self, worker: WorkerId) -> Option<Target> {
+        self.kept.borrow().get(&worker).cloned()
     }
 }
 
@@ -112,6 +123,7 @@ fn deployed() -> Deployed {
             sessions: 0,
             uptime_secs: 1,
         },
+        server: None,
     }
 }
 
@@ -231,7 +243,7 @@ fn the_sheet_installs_step_by_step_then_adds_the_worker(cx: &mut TestAppContext)
 
     type_host(&ws, cx, "me@mini");
     click(cx, "ssh-install");
-    assert_eq!(deployer.asked(), ["deploy mini Some(\"me\") None update=false"]);
+    assert_eq!(deployer.asked(), ["deploy mini Some(\"me\") None server=None"]);
     assert!(cx.debug_bounds("install-steps").is_some(), "the steps");
     assert!(cx.debug_bounds("ssh-form").is_none(), "in the form's place");
     assert!(cx.debug_bounds("install-bar").is_some(), "a busy bar while it connects");
@@ -261,6 +273,8 @@ fn the_sheet_installs_step_by_step_then_adds_the_worker(cx: &mut TestAppContext)
         (ws.adding.is_some(), ws.workers.iter().any(|w| w.id == deployer.worker && w.added))
     });
     assert!(!adding && added, "the page gave way to the new worker");
+    let kept = deployer.target_of(deployer.worker);
+    assert_eq!(kept.and_then(|t| t.user).as_deref(), Some("me"), "how it was reached, kept");
 }
 
 /// Cancel stops the run (its deploy is dropped, which kills `ssh`) and brings the form back;
@@ -308,7 +322,8 @@ fn a_run_can_be_cancelled_and_a_failure_says_why(cx: &mut TestAppContext) {
 }
 
 /// A tile of a worker on a different build offers "Update" beside "Copy command": it deploys
-/// with `--update` to the host it was dialled at, the pill follows each step with its bar, and
+/// with `--update` through the SSH target it was installed with, the pill follows each step
+/// with its bar, and
 /// once the deploy ends the worker is dialled again at once rather than after the long wait.
 /// Answering as another build still, the update says so and offers another try; the link
 /// coming up ends it.
@@ -401,8 +416,15 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
         Box::leak(format!("{part}-{}", item_id.as_uuid()).into_boxed_str())
     };
     assert!(cx.debug_bounds(selector("copy-command")).is_some(), "the command stays, second");
+    let installed =
+        Target { user: Some("admin".to_owned()), port: Some(2222), ..Target::host("mini") };
+    deployer.remember(id, &installed);
     click(cx, selector("update-worker"));
-    assert_eq!(deployer.asked(), ["deploy mini None None update=true"]);
+    assert_eq!(
+        deployer.asked(),
+        ["deploy mini Some(\"admin\") Some(2222) server=None"],
+        "through the user and port it was installed with"
+    );
 
     deployer.say(
         cx,
