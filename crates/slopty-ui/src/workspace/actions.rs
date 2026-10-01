@@ -258,7 +258,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Close tile", IconName::X, Box::new(CloseItem)),
         w("Undo close", IconName::Undo2, Box::new(UndoClose)),
         w("Next agent that needs you", IconName::BellRing, Box::new(NextAttention)),
-        w("Mute", IconName::VolumeX, Box::new(ToggleMute)),
+        w("Mute sound", IconName::VolumeX, Box::new(ToggleMute)),
         w("Stream stats", IconName::Activity, Box::new(ToggleStats)),
         w(
             crate::screen::TRACKPAD_MODE,

@@ -83,7 +83,7 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Actual Text Size", FontReset),
             MenuItem::separator(),
             MenuItem::action("Stream Stats", ToggleStats),
-            MenuItem::action("Mute Window", ToggleMute),
+            MenuItem::action("Mute Sound", ToggleMute),
         ]),
         Menu::new("Layout").items([
             MenuItem::action("Focus Column Left", FocusColumnLeft),

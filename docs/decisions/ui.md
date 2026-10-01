@@ -3560,7 +3560,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     is read once a second, and a change is the header's only news.
   - **Mute is an icon toggle.** One name, "Mute", pressed while muted, `VolumeX` or `Volume2`,
     beside the trackpad toggle. The muted state is a choice, not a warning, so no `warn`. The
-    palette says "Mute".
+    palette says "Mute sound" and the View menu "Mute Sound" (2026-10-01; "Mute Window" until
+    the sound became the worker's, one for all of its tiles).
   - **A queued message wears the prompt's bubble, set back** (`raised` at `alpha::STRONG`, the
     text secondary) with "Queued" or "Sending" under it, not a dashed outline. A queued one's
     hint says it sends when Claude finishes the step.

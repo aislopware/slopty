@@ -647,7 +647,7 @@ callback fills each device I/O buffer straight from a jitter buffer (`slopty-cod
 prefills after a start, a mute or a dry run, and converges by dropping or repeating one 5 ms
 slice with a crossfade, which also absorbs clock drift;
 iOS puts the app in the `Playback` session category so it plays past the ring switch.
-Mute is the worker's sound on this client (the pill, ⌘⇧M, View ▸ Mute Window), so every tile
+Mute is the worker's sound on this client (the pill, ⌘⇧M, View ▸ Mute Sound), so every tile
 of the worker says it at once: packets still arrive and decode, only playback stops, so unmuting
 is instant and other clients hear nothing different. A new tile brings the settings' preference
 only until a choice is made on the connection.
