@@ -16,7 +16,7 @@ use gpui::{
     TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px,
     relative, size,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{self, Input, InputEvent, InputState};
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
@@ -3868,6 +3868,17 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::scroll_to_top))
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::select_all))
+            // The Edit menu names the text fields' actions, which every field answers; the grid
+            // answers them as its own.
+            .on_action(cx.listener(|this, _: &input::Copy, window, cx| {
+                this.copy(&Copy, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &input::Paste, window, cx| {
+                this.paste_clipboard(&Paste, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &input::SelectAll, window, cx| {
+                this.select_all(&SelectAll, window, cx);
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
