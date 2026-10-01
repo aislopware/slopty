@@ -708,9 +708,11 @@ mod tests {
     use super::QuicSink;
 
     /// The client's end of a sound: how many datagrams came.
+    #[cfg(target_os = "macos")]
     #[derive(Default)]
     struct Heard(std::sync::atomic::AtomicUsize);
 
+    #[cfg(target_os = "macos")]
     impl slopty_worker::DatagramSink for Heard {
         fn send(&self, datagrams: &[bytes::Bytes]) -> Result<(), slopty_worker::screen::Refused> {
             self.0.fetch_add(datagrams.len(), std::sync::atomic::Ordering::Relaxed);
@@ -2323,8 +2325,10 @@ mod console {
 }
 
 /// A drop from the client carried through a stream's task: the drag helper is a channel, the
-/// input sink answers where the point is, and the client is what the task tells.
+/// input sink answers where the point is, and the client is what the task tells. Over the
+/// Apple-only [`fake`] platform, as the other stream tests are.
 #[cfg(test)]
+#[cfg(target_vendor = "apple")]
 mod dragging {
     use std::sync::Arc;
     use std::time::Duration;
