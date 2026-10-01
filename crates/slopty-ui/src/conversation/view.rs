@@ -740,7 +740,11 @@ impl ConversationView {
         let was = self.working();
         let status_changed =
             self.agent.as_ref().map(|a| &a.status) != agent.as_ref().map(|a| &a.status);
+        let mode_changed = self.agent.as_ref().map(|a| &a.mode) != agent.as_ref().map(|a| &a.mode);
         self.agent = agent;
+        if mode_changed && !status_changed {
+            cx.notify();
+        }
         if status_changed {
             // A settled prompt's line stays until the agent moves on.
             if self.approvals.last().is_some()

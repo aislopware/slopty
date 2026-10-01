@@ -124,8 +124,13 @@ pub(crate) struct Batch {
     pub number: u64,
     /// The words the agent reads.
     pub context: String,
-    /// How many reports it holds.
+    /// How many tasks' reports it holds; the server's own words beside them are not counted.
     pub reports: u16,
+}
+
+/// How many of `items` are tasks' reports, not the server's own words.
+fn reports_in(items: &[Item]) -> u16 {
+    u16::try_from(items.iter().filter(|i| i.task.is_some()).count()).unwrap_or(u16::MAX)
 }
 
 /// Every node's reports.
@@ -185,7 +190,7 @@ impl Deliveries {
             }
             self.next_batch = self.next_batch.wrapping_add(1);
             let batch = self.next_batch;
-            let reports = u16::try_from(items.len()).unwrap_or(u16::MAX);
+            let reports = reports_in(&items);
             queue.outstanding = Some(Outstanding { batch, term, items });
             out.push(Batch { node: node.clone(), term, number: batch, context, reports });
         }
@@ -203,8 +208,8 @@ impl Deliveries {
         any
     }
 
-    /// `term` handed batch `batch` to its agent: the node it was for and how many reports it
-    /// held, unless it was replaced since.
+    /// `term` handed batch `batch` to its agent: the node it was for and how many tasks'
+    /// reports it held ([`Batch::reports`]), unless it was replaced since.
     pub(crate) fn acked(&mut self, term: TermRef, batch: u64) -> Option<(Node, u16)> {
         let (node, queue) = self.queues.iter_mut().find(|(_, q)| {
             q.outstanding.as_ref().is_some_and(|o| o.term == term && o.batch == batch)
@@ -214,7 +219,7 @@ impl Deliveries {
         // Held back only while the batch was out.
         queue.fresh = true;
         self.prune();
-        Some((node, u16::try_from(done.items.len()).unwrap_or(u16::MAX)))
+        Some((node, reports_in(&done.items)))
     }
 
     /// The batches outstanding on terminals of `worker`, to send again after it registers.
@@ -228,7 +233,7 @@ impl Deliveries {
                     term: o.term,
                     number: o.batch,
                     context: context(&node.0, o.items.clone()).0,
-                    reports: u16::try_from(o.items.len()).unwrap_or(u16::MAX),
+                    reports: reports_in(&o.items),
                 })
             })
             .collect()

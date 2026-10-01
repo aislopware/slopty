@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use slopty_core::WallMs;
+use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, HeardMode};
 use slopty_proto::conversation::{
     Answer, Body, Change, Choice, Clipped, CommandSource, ConversationEvent, Entry,
     PermissionEvent, PermissionPrompt, Prompt, Question, QuestionDetail, Settled, SlashCommand,
@@ -444,4 +445,43 @@ fn the_mode_chip_takes_the_freshest_word(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(mode(&view, cx), "plan", "the hook's word outlives its prompt");
     assert!(cx.debug_bounds("composer-mode").is_some(), "the composer is back");
+}
+
+/// The mode the worker heard the agent switch to (Shift-Tab in the TUI) is the chip's word
+/// once it is fresher than the last prompt's; one heard before that prompt gives way to it.
+#[gpui::test]
+fn the_mode_chip_follows_the_live_mode(cx: &mut TestAppContext) {
+    let (view, cx) = face(cx, "tools");
+    let mode = |view: &Entity<ConversationView>, cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| v.permission_mode())
+    };
+    let sent = mode(&view, cx);
+    let started = view
+        .read_with(cx, |v, _| {
+            v.model().thread(&ThreadId::Main).and_then(|t| t.last_turn()).map(|t| t.started_ms)
+        })
+        .expect("a turn");
+    let session = view.read_with(cx, |v, _| v.session());
+    let agent = |name: &str, heard_ms: WallMs| AgentEvent {
+        session,
+        kind: AgentKind::ClaudeCode,
+        status: AgentStatus::Idle,
+        agent_session: None,
+        detail: None,
+        attention: false,
+        source: AgentSource::Hook,
+        since_ms: WallMs::ZERO,
+        mode: Some(HeardMode { name: name.to_owned(), heard_ms }),
+    };
+
+    let stale = agent("bypassPermissions", WallMs::ZERO);
+    view.update(cx, |v, cx| v.set_agent(Some(stale), cx));
+    cx.run_until_parked();
+    assert_eq!(mode(&view, cx), sent, "a switch before the prompt gives way");
+
+    let switched = agent("acceptEdits", WallMs::from_millis(started.as_millis().saturating_add(1)));
+    view.update(cx, |v, cx| v.set_agent(Some(switched), cx));
+    cx.run_until_parked();
+    assert_eq!(mode(&view, cx), "acceptEdits", "the live mode, heard since");
+    assert!(cx.debug_bounds("composer-mode").is_some(), "the chip is drawn");
 }

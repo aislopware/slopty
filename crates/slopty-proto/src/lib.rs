@@ -116,8 +116,8 @@ pub enum ClientMsg {
         item: slopty_core::ItemId,
     },
     /// The files this client's file tiles show, the whole set each time it changes: the worker
-    /// looks at each one every so often and answers with `WorkerMsg::File` again when one has
-    /// changed on disk. Empty when the last file tile goes.
+    /// follows each one on the kernel's events and answers with `WorkerMsg::File` again when one
+    /// has changed on disk. Empty when the last file tile goes.
     WatchFiles {
         /// Absolute paths on the worker.
         paths: Vec<String>,
@@ -152,6 +152,14 @@ pub enum ClientMsg {
     /// Which handoffs this client takes: sent right after the hello, ahead of anything the
     /// worker could hand it, and again when that changes (the app's last window closed).
     HandoffCaps(handoff::HandoffCaps),
+    /// The folders this client's folder tiles show, the whole set each time it changes: the
+    /// worker follows each one on the kernel's events and lists it again, as
+    /// `WorkerMsg::Folder`, when an entry is added, removed or renamed. Empty when the last folder
+    /// tile goes.
+    WatchFolders {
+        /// Directories on the worker, as `ListFolder` names them.
+        paths: Vec<String>,
+    },
 }
 
 impl ClientMsg {
@@ -178,6 +186,7 @@ impl ClientMsg {
             Self::Search(_) => "Search",
             Self::Handoff(_) => "Handoff",
             Self::HandoffCaps(_) => "HandoffCaps",
+            Self::WatchFolders { .. } => "WatchFolders",
         }
     }
 }

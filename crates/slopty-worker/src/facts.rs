@@ -544,7 +544,10 @@ mod tests {
     #[tokio::test]
     async fn a_long_output_is_cut_at_the_cap() {
         let line = "head -c 1000000 /dev/zero | tr '\\0' a";
-        let Fact::Text(out) = probe(&here(), line, PROBE_WAIT).await else { panic!("text") };
+        // The cap is under test, not the clock: a probe runs at utility priority, which a loaded
+        // machine starves past `PROBE_WAIT`.
+        let answer = probe(&here(), line, Duration::from_secs(120)).await;
+        let Fact::Text(out) = answer else { panic!("a text, not {answer:?}") };
         assert_eq!(out.len(), PROBE_OUTPUT_MAX);
         assert!(out.bytes().all(|b| b == b'a'));
     }

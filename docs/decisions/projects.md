@@ -163,7 +163,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
     read as `probes.<name>`.
 - The server adds what it knows itself, over anything a worker sent under the same name: name,
   worker, os, os_version, arch, cpus, memory_mb, encoders, displays, capture and input, load,
-  online and live_agents. Facts travel beside `WorkerInfo`, not in it, so the directory's wire
+  online, live_agents and repos. Facts travel beside `WorkerInfo`, not in it, so the directory's wire
   shape is unchanged. `list_workers` and `WorkerFacts` show them all.
 
 **Placement rules are CEL.** ✅ 2026-09-30
@@ -469,7 +469,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   with the reports as the reason, so a finishing agent reads them before it ends its turn. The
   batch stays kept until the hook says it printed it (`CtlRequest::ReportsHanded`, with the
   token again). Only then does the worker drop it and send the `Delivered` report that acks
-  it, and the server marks a `Delivered` moment. A hook that dies in between leaves the batch
+  it, and the server marks a `Delivered` moment for the tasks' reports it held. A hook that dies in between leaves the batch
   for the next one. Keeping, handing over and dropping run one at a time per worker, so a
   batch kept meanwhile is never dropped in its place. A batch not acked is sent again when the worker registers again,
   folded into the next one, or put back when the terminal closes.
@@ -478,6 +478,45 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - Why hooks, not typing: the TUI is the source of truth and nothing types into it behind the
   person's back. Hooks are Claude Code's own door for context, and they reach an agent the
   moment it next thinks, at no cost while it is idle.
+
+**The timeline shows reports delivered, not an orchestrator's role.** ✅ 2026-10-01
+- The server's own words to an orchestrator, its role once it is named, go in a batch like a
+  report's. Their `Delivered` moment landed wherever the agent's first hook happened to fall:
+  before a client's snapshot or after it, so the `project-timeline` golden held 13 entries or
+  14. A wait in the harness only hid it.
+- The role is standing context, not an event: a batch of the server's words alone marks no
+  moment, and `Delivered { reports }` counts only the tasks' reports in a batch
+  (`deliver::reports_in`). A report delivered is still marked when it happens, so the timeline
+  says what reached whom and nothing that depends on when an agent started.
+- `a_report_reaches_the_orchestrator_through_its_worker` holds the moments to exactly the one
+  report delivered.
+
+**A repository is the same on every machine that has a clone.** ✅ 2026-10-01
+- A path names a clone, not a repository: `/w/slopty` on the studio and `/home/c/slopty` on a
+  Linux worker are one repository. A summary carries the repository's identity beside its
+  path (`SessionSummary::repo_id`, `RepoId { origin, root }`):
+  - `origin` is the origin remote's URL, else the first remote's, normalized to `host/path`:
+    the host lowercased, with no scheme, user, port, `.git` or slashes around the path. HTTPS,
+    SSH and scp-like spellings of one remote are one string. A clone of a local path has none.
+    It is read from the config file every worktree shares (through `commondir`), with no git.
+  - `root` is the first commit of `HEAD`'s first-parent chain, which every clone shares however
+    far each has come. It is one `git rev-list --first-parent --max-parents=0 HEAD`. A shallow
+    clone and a repository with no commit have none.
+  - Two identities are one repository when either key matches (`RepoId::same`).
+- The worker identifies a repository the first time a summary asks, in the background, and
+  keeps it while a session is in it (`repo::Identities`). The sessions in it are sent again
+  once it is known. One found without a first commit is asked again after 30 s.
+- The server adds `repos` to each worker's facts: every key of every repository a shell there
+  is in, mapped to the clone's path. `"github.com/o/r" in repos` places a task beside a clone,
+  and `repos["github.com/o/r"]` says where. An orchestrator's role names its repository by that
+  key and lists the workers with a clone and their paths.
+- The navigator's "By repository" lens is to group by the same keys, so one repository cloned
+  on two workers is one group (the UI's part, not yet built).
+- Tests: `an_origin_is_the_same_however_it_was_spelled`,
+  `the_origin_is_read_from_the_config_worktrees_share`, `clones_share_their_first_commit`
+  (real git), `a_repository_is_identified_once_and_its_sessions_told`,
+  `a_repository_is_a_fact_of_every_worker_with_a_clone` and
+  `the_orchestrator_is_told_where_its_repository_is_cloned`.
 
 **An idle agent is woken through its inbox, and the hooks still decide.** ✅ 2026-09-30
 - Claude Code takes messages from other processes on a socket it names in each session's
@@ -572,8 +611,8 @@ MonoCode)
   the same order on every run. Three runs rendered byte-identical goldens.
 
 Not built in Phase 1:
-- worktrees and mirrors, so a task's `cwd` must already exist on the placed worker;
-- mirror presence as a fact;
+- worktrees and mirrors, so a task's `cwd` must already exist on the placed worker (`repos`
+  says where a clone is);
 - the verifier run and the merge queue;
 - the known gaps under "An agent never has more than the person gave it".
 

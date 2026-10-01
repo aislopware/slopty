@@ -15,6 +15,13 @@
 //! Any text file up to `FILE_BYTES` (16 MiB) is edited whole: a large one comes from the worker
 //! on a bulk stream and goes back on one, which the link does out of sight. A file past the cap
 //! says so and offers to open it in a terminal instead, in `$EDITOR` or `$PAGER`.
+//!
+//! A picture or a PDF is shown instead (`preview`): the worker knows one by its first bytes
+//! and sends it whole, and the platform decodes it at the size the tile draws it.
+
+pub mod decode;
+pub mod pdf_text;
+mod preview;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,6 +35,10 @@ use gpui::{
 use gpui_kit::component::input::{
     Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
     RangeDecorationStyle, Rope, RopeExt as _,
+};
+pub use preview::{
+    CopyText, FirstPage, LastPage, NextPage, NextScreen, PAGES_CTX, PreviousPage, PreviousScreen,
+    ScrollDown, ScrollUp, SelectAllText, palette_items as pages_palette_items,
 };
 use slopty_client::layout::WorkerKey;
 use slopty_client::unsaved::Unsaved;
@@ -58,6 +69,8 @@ pub use actions::{FinishEdit, SaveFile};
 
 /// The key context of a file tile; ⌘S is bound in it.
 pub const CTX: &str = "FileEditor";
+/// The tile's key context while it shows a PDF's pages: its own and the pages' ([`PAGES_CTX`]).
+const PAGES_KEY_CONTEXT: &str = "FileEditor FilePages";
 
 /// What a file tile's bar says when the disk changed under an edit.
 pub(crate) const CHANGED_ON_DISK: &str = "Changed on disk";
@@ -369,6 +382,8 @@ pub struct FileView {
     edit: u64,
     /// The grammar the path (or first line) names; none for a file the bundle cannot colour.
     syntax: Option<Syntax>,
+    /// The picture or PDF the file is, while it is one.
+    preview: Option<preview::Preview>,
     /// The editor's events, and its every change marking this view dirty: the tile draws
     /// this view from GPUI's view cache, which a change inside the editor would not otherwise
     /// invalidate.
@@ -436,6 +451,7 @@ impl FileView {
             restoring: None,
             edit: 0,
             syntax: None,
+            preview: None,
             _editor_events: [events, redraw],
         }
     }
@@ -613,11 +629,18 @@ impl FileView {
             FileRead::Text { text, modified_ms, final_newline, .. } => {
                 let incoming = Version::of(text, *final_newline, *modified_ms);
                 self.read_only = None;
+                self.preview = None;
                 self.take_version(incoming, cx);
             }
             // The link hands on the text it announces, never the announcement.
             FileRead::Streamed { .. } => return,
-            FileRead::Binary { .. } | FileRead::Missing { .. } | FileRead::TooLarge { .. } => {
+            FileRead::Binary { .. }
+            | FileRead::Missing { .. }
+            | FileRead::TooLarge { .. }
+            | FileRead::Media { .. } => {
+                if let FileRead::Media { media_type, bytes, .. } = &read {
+                    self.show_media(media_type, bytes, cx);
+                }
                 self.read_only = match &read {
                     FileRead::TooLarge { size } => Some(too_large_reason(*size)),
                     _ => None,
@@ -1174,6 +1197,10 @@ impl FileView {
                 parts.join(", ")
             }
             Some(FileRead::Binary { size }) => format!("binary, {}", size_label(*size)),
+            Some(FileRead::Media { media_type, bytes, .. }) => self.preview.as_ref().map_or_else(
+                || format!("{media_type}, {}", size_label(bytes.len() as u64)),
+                preview::Preview::summary,
+            ),
             Some(FileRead::Missing { error }) => format!("missing: {error}"),
             Some(FileRead::TooLarge { size }) => format!("too large, {}", size_label(*size)),
         }
@@ -1536,6 +1563,7 @@ impl Render for FileView {
             Some(FileRead::Missing { error }) if self.base.is_none() => {
                 self.notice(IconName::FileText, CANNOT_READ, Some(error.clone()), None)
             }
+            Some(FileRead::Media { .. }) if self.base.is_none() => self.render_preview(cx),
             Some(_) => div()
                 .flex_1()
                 .min_h_0()
@@ -1554,7 +1582,7 @@ impl Render for FileView {
         div()
             .id(SharedString::from(format!("file-{id}")))
             .debug_selector(move || format!("file-{id}"))
-            .key_context(CTX)
+            .key_context(if self.shows_pages() { PAGES_KEY_CONTEXT } else { CTX })
             .track_focus(&self.focus_handle)
             .role(Role::Document)
             .aria_label(SharedString::from(format!("File {}", self.path)))
@@ -1564,6 +1592,7 @@ impl Render for FileView {
                 el.on_action(cx.listener(|this, _: &FinishEdit, _window, cx| this.finish_edit(cx)))
             })
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find(window, cx)))
+            .when(self.shows_pages(), |el| Self::page_keys(el, cx))
             .relative()
             .size_full()
             .flex()

@@ -81,6 +81,7 @@ mod tests {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         }
     }
 
@@ -91,6 +92,7 @@ mod tests {
             status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         }
     }
 
@@ -425,6 +427,7 @@ mod tests {
             attention: true,
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         };
         let pushed = FromServer::Event(HubEvent {
             seq: 1,

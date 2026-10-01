@@ -1,12 +1,13 @@
 //! The files a client reads, writes and watches, answered on tasks of their own: a read, a
 //! quick-open walk or a look at the watched files touches the disk, and none of it may hold up a
-//! terminal's echo on the same connection. A text too big for the control stream goes on a
-//! bulk stream after its announcement (`slopty_worker::file::announce`). The watched files are
+//! terminal's echo on the same connection. A text or picture too big for the control stream goes
+//! on a bulk stream after its announcement (`slopty_worker::file::announce`). The watched files are
 //! followed on the kernel's events (`slopty_worker::fswatch`).
 
 use slopty_core::{ClientId, WallMs};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FileRead, WriteResult};
+use slopty_proto::folder::Listing;
 use slopty_proto::transfer::{BulkHeader, Purpose};
 use slopty_worker::file::Rewrite;
 use tokio::sync::{mpsc, watch};
@@ -41,6 +42,7 @@ pub async fn send_file(
         FileRead::Binary { .. } => "binary",
         FileRead::Missing { .. } => "missing",
         FileRead::TooLarge { .. } => "too large",
+        FileRead::Media { .. } => "media",
     };
     tracing::info!(%client, %path, kind, "read file");
     let modified_ms = match &read {
@@ -50,24 +52,24 @@ pub async fn send_file(
     if out.send(WorkerMsg::File { path: path.clone(), read }).await.is_err() {
         return false;
     }
-    if let Some((xfer, text)) = stream {
+    if let Some((xfer, body)) = stream {
         let header = BulkHeader {
             xfer,
-            purpose: Purpose::FileText,
+            purpose: Purpose::FileBody,
             name: String::new(),
-            size: text.len() as u64,
+            size: body.len() as u64,
             mtime_ms: modified_ms,
             mode: 0,
             offset: 0,
         };
         let sent = async {
             let mut send = slopty_net::streams::open_bulk(conn, header).await?;
-            send.write_all(text.as_bytes()).await.map_err(|e| NetError::stream(&e))?;
+            send.write_all(&body).await.map_err(|e| NetError::stream(&e))?;
             send.finish().map_err(|e| NetError::stream(&e))
         };
         // The client's link says the read broke; the connection's own end is its loop's to see.
         if let Err(e) = sent.await {
-            tracing::info!(%client, %path, error = %e, "file text not sent");
+            tracing::info!(%client, %path, error = %e, "file body not sent");
         }
     }
     true
@@ -169,6 +171,32 @@ pub async fn watch(
     while let Some(paths) = changes.next().await {
         for path in paths {
             if !send_file(client, &conn, &out, path).await {
+                return;
+            }
+        }
+    }
+}
+
+/// Watch the folders behind a client's folder tiles: each list `lists` holds replaces the last,
+/// and a folder whose entries change on disk is listed and sent again as `WorkerMsg::Folder`.
+/// Ends with the connection.
+pub async fn watch_folders(
+    client: ClientId,
+    out: mpsc::Sender<WorkerMsg>,
+    lists: watch::Receiver<Vec<String>>,
+) {
+    let span = tracing::debug_span!("watch folders", %client);
+    let mut changes = span.in_scope(|| {
+        slopty_worker::fswatch::follow_folders(lists, slopty_worker::fswatch::Limits::default())
+    });
+    while let Some(paths) = changes.next().await {
+        for path in paths {
+            let dir = std::path::PathBuf::from(&path);
+            let listing = tokio::task::spawn_blocking(move || slopty_worker::listing::folder(&dir))
+                .await
+                .unwrap_or_else(|_| Listing::Missing { error: "list failed".to_owned() });
+            tracing::debug!(%client, %path, "folder changed");
+            if out.send(WorkerMsg::Folder { path, listing }).await.is_err() {
                 return;
             }
         }

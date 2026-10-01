@@ -511,12 +511,14 @@ impl ConversationView {
     }
 
     /// The permission mode the agent is in, from the freshest word on it: the mode a prompt
-    /// was sent in (the transcript) or the one the agent's hook reported with a permission
-    /// prompt since.
+    /// was sent in (the transcript), the one the agent's hook reported with a permission
+    /// prompt since, or the one the worker last heard it switch to (Shift-Tab in the TUI).
     pub(super) fn permission_mode(&self) -> String {
         let turn = self.model.thread(&ThreadId::Main).and_then(|t| t.last_turn());
         let sent = turn.and_then(|t| Some((t.started_ms, t.mode.clone()?)));
-        [sent, self.heard_mode.clone()]
+        let live = self.agent.as_ref().and_then(|a| a.mode.as_ref());
+        let live = live.map(|m| (m.heard_ms, m.name.clone()));
+        [sent, self.heard_mode.clone(), live]
             .into_iter()
             .flatten()
             .max_by_key(|(at, _)| *at)

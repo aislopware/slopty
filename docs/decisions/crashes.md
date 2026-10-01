@@ -44,8 +44,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `debug = "line-tables-only"`, whose debug info names a function without its module (`fire`,
     `{closure#0}`). For each address, the outermost frame takes its name from the executable's
     own `LC_SYMTAB`, read in place in `__LINKEDIT` and demangled (`slopty_crash::probe::fire`).
-    Inlined frames keep the short names, with their file and line. Shipped builds have whole
-    paths on inlined frames too (below, "Shipped builds carry their dSYMs").
+    Inlined frames keep the short names, with their file and line. A shipped build's report,
+    resolved against its dSYM, has whole paths on inlined frames too (below, "Shipped builds
+    have limited debug info").
   - **macOS's reports.** `reports` also parses `~/Library/Logs/DiagnosticReports/<process>-*.ips`
     of Slopty's processes (`bug_type` 309). Native crashes inside VideoToolbox, AppKit or the
     Objective-C runtime show up there with every thread. An `.ips` with the same pid and process
@@ -98,8 +99,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `symbolize/gimli/macho.rs` `search_object_map`: when the exact name is absent, take the
     object symbol named `<name>.llvm.<digits>`. It is a candidate for a vendored patch and an
     upstream pull request. The panic report's `location` does not depend on it.
-    A shipped build reads its dSYM, not the debug map, and has no such gap: `probe::panic`
-    resolves to its line there.
+    A shipped build is resolved against its dSYM, not the debug map, and has no such gap:
+    `probe::panic` resolves to its line there.
   - **`slopty crashes`** lists the latest reports (`--last`, `--all-frames`, `--json`), each with
     its first frames, its file and any `.ips` beside it. It resolves the CLI's own pending
     records first.
@@ -146,17 +147,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `MXMetricManager` still sees what this cannot: a hang the system measured from outside,
     and CPU exceptions.
 
-- ✅ **Shipped builds carry their dSYMs, with limited debug info** (2026-10-01). The `dist`
-  profile builds with `debug = "limited"`, and cargo packs each binary's debug info into
-  `<bin>.dSYM` and strips the binary. `cargo xtask bundle` builds `dist` and copies each dSYM
-  into `Contents/MacOS` beside its binary, signed as a bundle before the binaries (which leaves
-  the DWARF file as it is; `codesign --verify --strict` passes). The worker's release tarball
-  carries `slopty-worker.dSYM` and `slopty-ptyd.dSYM` the same way.
-  - **Why beside the binary.** The reports are resolved on the user's machine by the process's
-    own build (entry above), through `backtrace`. It looks for a `*.dSYM` in the executable's
-    own directory whose DWARF file has the executable's UUID, and otherwise only the object
-    files an unstripped binary's debug map names: no Spotlight lookup, no `DBGFileServer`. Nothing leaves the machine, so there is no symbol
-    server to resolve against later either.
+- ✅ **Shipped builds have limited debug info** (2026-10-01). The `dist` profile builds with
+  `debug = "limited"`, and cargo packs each binary's debug info into `<bin>.dSYM` and strips the
+  binary. Where the dSYMs go is the next entry.
   - **Why `limited`.** With `line-tables-only` the debug info has no linkage names, so an
     inlined frame is named by its bare name (`install`, `{closure#0}`, `call_once<…>`), and under
     fat LTO a crashing address resolves to about six inlined frames besides its own. With
@@ -171,20 +164,51 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Without its dSYM** a shipped binary still names every frame: the strip (`strip -S`) keeps
     the local symbol table, which the reporter reads for the outermost frame of each address.
     Such a report has no file, no line and no inlined frames.
-  - **The cost of shipping the dSYMs at all** is the download: with `limited`, 61 MB compressed
-    beside the app's 17 MB, and 29 MB beside the worker's 6 MB. Accepted for now: a crash report
-    that names its frames is what makes a user's crash fixable, and nothing else can resolve
-    them later. Revisit if the download size starts to matter; the alternative is a dSYM fetched
-    on the first crash.
   - **The VM live lane** runs test binaries without this checkout's object files, where their
-    debug info lives (`split-debuginfo = "unpacked"`). `cargo xtask vm live` now makes a dSYM
-    of each archived test binary with `dsymutil` and puts it beside the binary in the guest, so a
+    debug info lives (`split-debuginfo = "unpacked"`). `cargo xtask vm live` makes a dSYM of
+    each archived test binary with `dsymutil` and puts it beside the binary in the guest, so a
     report there has files and lines as here.
-  - **Pending.** A worker installed from outside a bundle, or deployed to another Mac, is copied
-    into `<data dir>/bin` binary by binary (`slopty-platform` `copy_binaries`, `slopty worker
-    deploy`), and its dSYMs stay behind. Notarization with a Developer ID has not been tried with
-    the dSYMs in the bundle.
   - Tests: `tests/crash.rs`
     `a_shipped_build_resolves_through_its_dsym_and_names_frames_without_it` strips a copy of
     the test binary as the `dist` profile does, panics it alone and then with a dSYM beside it,
-    and checks the frames are named without it and resolved to their lines with it.
+    and checks the frames are named, with their offsets, image and build UUID, without it, and
+    resolved to their lines with it.
+
+- ✅ **The dSYMs ship apart from the app** (2026-10-01). The bundle and the worker tarball ship
+  lean. A release publishes the dSYMs as an artifact of their own, `<UUID>/<bin>.dSYM`, one
+  directory per binary's Mach-O UUID. `cargo xtask symbolicate <report>` resolves a report
+  taken in the field against them. Earlier the same day each dSYM shipped beside its binary in
+  `Contents/MacOS`, where `backtrace` finds it on the user's machine; this replaces that.
+  - **Why apart.** In the bundle the dSYMs weighed nearly four times the app: zipped, the bundle
+    is 177.7 MB with them and 36.6 MB without, so 80 % of every download was debug info, paid
+    by every user for the few reports that come back. The field loses nothing that cannot be had
+    back. A report keeps each frame's address, image and offset, the build's UUID, and the names
+    from the symbol table the strip leaves. What it lacks (file, line, inlined frames) is a
+    function of the build, so the dSYM of the same UUID gives it back exactly.
+  - **How a report is resolved.** `cargo xtask symbolicate <report.json> [--dsyms <dir or
+    .tar.gz>]…` reads the report's build UUID and searches the given directories or release
+    archives, then `target/dist`, `target/release` and `target/bundle`, for a `*.dSYM` whose
+    DWARF file has that UUID. For each group of frames at one address in the executable it takes
+    the address's offset in the image plus the dSYM's `__TEXT` address (less one for a return
+    address, so a call's line is named, not the next one's), and `atos -i` gives the inlined
+    chain with each frame's whole path, file and line. Frames in other images stay as the
+    report has them. `--json` prints the resolved report.
+  - **Building the artifact.** `cargo xtask dsyms --from target/dist --out <dir> <bin>…` checks
+    each dSYM's UUID against its binary's and copies it (following cargo's symlink) to
+    `<UUID>/<bin>.dSYM`. `cargo xtask bundle` puts the app's under `target/bundle/dSYMs`, beside
+    the bundle, and the release job publishes the worker's as
+    `slopty-worker-<tag>-aarch64-apple-darwin-dSYMs.tar.gz`.
+  - **What it settles.** A worker installed outside a bundle, or deployed to another Mac binary by
+    binary (`slopty-platform` `copy_binaries`), used to leave its dSYMs behind. Nothing ships them
+    now, so every copy of a binary is complete. Notarization no longer meets a dSYM in the
+    bundle. A build on this Mac still resolves its own reports in place: `target/dist` keeps the
+    dSYM beside the binary, where `backtrace` looks.
+  - **Not covered.** macOS's own `.ips` reports of native crashes are read by `slopty crashes` as
+    they are; `symbolicate` takes Slopty's JSON reports. MEASUREMENTS 2026-10-01, "dSYMs apart
+    from the bundle".
+  - Tests: `xtask` `symbolicate::tests::a_dsym_found_by_uuid_resolves_inlined_frames` makes a
+    dSYM of its own test binary, finds it by UUID and resolves an address inside an
+    always-inlined function to its chain (the inlined function, then its caller by whole path,
+    each with its file). End to end: a `dist` worker from the lean bundle, crashed in the field
+    with no dSYM, resolved by `cargo xtask symbolicate` against the collected dSYMs and their
+    archive (MEASUREMENTS).

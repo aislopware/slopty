@@ -134,6 +134,7 @@ fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
         agent: None,
         progress: None,
         restored: None,
+        repo_id: None,
     }
 }
 
@@ -1255,6 +1256,7 @@ fn an_agent_waiting_on_the_human_is_counted_and_reached(cx: &mut TestAppContext)
                 attention: true,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
+                mode: None,
             },
             cx,
         );
@@ -1284,6 +1286,7 @@ fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
             status,
             source,
             since_ms: WallMs::ZERO,
+            mode: None,
         }),
         ..summary(session, None)
     };
@@ -1341,6 +1344,7 @@ fn blocked(session: SessionId) -> AgentEvent {
         attention: true,
         source: AgentSource::Hook,
         since_ms: WallMs::ZERO,
+        mode: None,
     }
 }
 

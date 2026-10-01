@@ -1028,9 +1028,13 @@ fn e2e(sh: &Shell, home: &Utf8Path, macos: Macos, keep: bool) -> Result<()> {
     watch_signals()?;
     reap_orphans(home)?;
     let plan = Plan::new(sh, macos, keep)?;
+    let live = crate::e2e::LIVE;
     step(
         "build slopty-e2e vm",
-        &cmd!(sh, "cargo nextest run -p slopty-e2e --test vm --run-ignored only --no-run"),
+        &cmd!(
+            sh,
+            "cargo nextest run -p slopty-e2e --test vm --features {live} --run-ignored only --no-run"
+        ),
     )?;
     let packages = ["slopty-input".to_owned()];
     let archive = archive(&plan.dir, &packages, &["inject".to_owned()])?;
@@ -1041,7 +1045,10 @@ fn e2e(sh: &Shell, home: &Utf8Path, macos: Macos, keep: bool) -> Result<()> {
         [sh.push_env("SLOPTY_VM_WORKER", &worker), sh.push_env("SLOPTY_VM_MACOS", macos.major())];
     step(
         "slopty-e2e vm: this Mac reaches the guest's worker",
-        &cmd!(sh, "cargo nextest run -p slopty-e2e --test vm --run-ignored only --no-capture"),
+        &cmd!(
+            sh,
+            "cargo nextest run -p slopty-e2e --test vm --features {live} --run-ignored only --no-capture"
+        ),
     )?;
     let filter = [
         "-E".to_owned(),
@@ -1060,6 +1067,9 @@ fn archive(dir: &Utf8Path, packages: &[String], tests: &[String]) -> Result<Utf8
     }
     for test in tests {
         archiving.args(["--test", test]);
+    }
+    if packages.iter().any(|p| p == crate::e2e::LIVE_PACKAGE) {
+        archiving.args(["--features", crate::e2e::LIVE]);
     }
     let started = Instant::now();
     println!("▶ archive the tests of {}", packages.join(", "));
@@ -1104,6 +1114,9 @@ fn test_binaries(
     }
     for test in tests {
         listing.args(["--test", test]);
+    }
+    if packages.iter().any(|p| p == crate::e2e::LIVE_PACKAGE) {
+        listing.args(["--features", crate::e2e::LIVE]);
     }
     let out =
         listing.current_dir(root).stderr(Stdio::inherit()).output().context("nextest list")?;

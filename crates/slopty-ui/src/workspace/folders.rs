@@ -180,6 +180,8 @@ impl WorkspaceView {
 
     /// Views for folder items that have none, each item's path given to its view, and the
     /// listings the views want asked of their linked workers; the views whose items are gone go.
+    /// Each linked worker follows the set of its folder tiles' directories and lists one again
+    /// when its entries change.
     pub(super) fn reconcile_folders(&mut self, cx: &mut Context<Self>) {
         let folders: Vec<(WorkerKey, ItemId, String)> = self
             .items()
@@ -189,6 +191,19 @@ impl WorkspaceView {
             })
             .collect();
         self.folders.retain(|id, _| folders.iter().any(|(_, f, _)| f == id));
+        for (key, w) in &mut self.workers {
+            if w.link.is_none() {
+                continue;
+            }
+            let mut paths: Vec<String> =
+                folders.iter().filter(|(k, ..)| k == key).map(|(.., p)| p.clone()).collect();
+            paths.sort_unstable();
+            paths.dedup();
+            if paths != w.watched_folders {
+                w.watched_folders.clone_from(&paths);
+                w.send(ClientMsg::WatchFolders { paths });
+            }
+        }
         for (key, id, path) in folders {
             let Some(w) = self.workers.get(&key) else { continue };
             if w.link.is_none() {

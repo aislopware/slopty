@@ -290,22 +290,33 @@ impl FolderView {
     }
 
     /// The worker listed `asked`. An answer for a path the tile has moved from is dropped.
+    ///
+    /// The same folder listed again (its entries changed on disk, or it was asked again) keeps
+    /// the selected entry, or the row where it was when it went, and leaves the scroll where
+    /// the person put it; a new folder starts at its first row, or at the one just come up
+    /// from.
     pub fn set_listing(&mut self, asked: &str, listing: Listing, cx: &mut Context<Self>) {
         if asked != self.path {
             return;
         }
         let kept = self.selected().map(|e| e.name.clone());
         let same_dir = self.listed.as_deref() == Some(asked);
-        let wanted = self.came_from.take().or(if same_dir { kept } else { None });
+        let came_from = self.came_from.take();
+        let reveal = !same_dir || came_from.is_some();
+        let wanted = came_from.or(if same_dir { kept } else { None });
+        let was = self.selected.filter(|_| same_dir);
         self.selected = match &listing {
             Listing::Listed { entries, .. } if !entries.is_empty() => Some(
-                wanted.and_then(|name| entries.iter().position(|e| e.name == name)).unwrap_or(0),
+                wanted
+                    .and_then(|name| entries.iter().position(|e| e.name == name))
+                    .or_else(|| was.map(|ix| ix.min(entries.len().saturating_sub(1))))
+                    .unwrap_or(0),
             ),
             _ => None,
         };
         self.listing = Some(listing);
         self.listed = Some(asked.to_owned());
-        if let Some(ix) = self.selected {
+        if let Some(ix) = self.selected.filter(|_| reveal) {
             self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
         }
         cx.notify();

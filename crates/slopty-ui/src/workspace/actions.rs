@@ -62,6 +62,8 @@ actions!(
         ToggleSystemKeys,
         /// Show or hide the navigator: the workers, what runs on them, and what needs you.
         ToggleNavigator,
+        /// Group the navigator's tiles by repository across the workers, or back by worker.
+        ToggleNavigatorLens,
         /// Move the keyboard focus to the next control, from anywhere, a terminal included.
         FocusNext,
         /// Move the keyboard focus to the previous control.
@@ -352,6 +354,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Clear the screen and history", IconName::Eraser, Box::new(ClearScreen)),
     ];
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));
+    items.extend(crate::file::pages_palette_items(&workspace));
     // Only a debug build's page is open to Web Inspector, and only the Mac has one of its own.
     if cfg!(all(debug_assertions, target_os = "macos")) {
         items.push(w("Inspect page", IconName::Wrench, Box::new(InspectPage)));

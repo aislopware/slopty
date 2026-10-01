@@ -1,29 +1,32 @@
 //! A file tile's file on this machine: read, sent and saved.
 //!
-//! [`read()`] takes a text file whole, up to [`FILE_BYTES`], or says why not; [`announce`] says
-//! how that read goes on the wire; [`write()`] is the tile's save, which replaces the file whole
-//! (`slopty_platform::fs::replace`).
+//! [`read()`] takes a text file whole, up to [`FILE_BYTES`], or a picture or PDF whole
+//! ([`media`]), or says why not; [`announce`] says how that read goes on the wire; [`write()`]
+//! is the tile's save, which replaces the file whole (`slopty_platform::fs::replace`).
 //!
 //! [`mention`] is the other way the conversation face reaches the disk: the paths an `@` in its
 //! composer picks from.
 
+pub mod media;
 pub mod mention;
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use bytes::Bytes;
 use slopty_core::{WallMs, XferId};
-use slopty_proto::file::{FILE_BYTES, FileRead, INLINE_FILE_BYTES, WriteResult};
+use slopty_proto::file::{Body, FILE_BYTES, FileRead, INLINE_FILE_BYTES, MEDIA_BYTES, WriteResult};
 
 use crate::listing::modified_ms;
 
-/// Read `path` for a tile: the whole file, as text.
+/// Read `path` for a tile: a text whole, or a picture or PDF whole, as its bytes.
 ///
-/// A file past [`FILE_BYTES`] is `TooLarge` and is not read. A NUL byte or invalid UTF-8 makes
-/// it `Binary`; anything the OS refuses (missing, a directory, not permitted) is `Missing` with
-/// the OS's word. The final newline is left off the text and reported, so a save can put it
-/// back.
+/// A picture or PDF is known by its first bytes ([`media::sniff`]) and read up to
+/// [`MEDIA_BYTES`]; past that it is `Binary`, since nothing of it could be shown. Any other file
+/// past [`FILE_BYTES`] is `TooLarge` and is not read. A NUL byte or invalid UTF-8 makes it
+/// `Binary`; anything the OS refuses (missing, a directory, not permitted) is `Missing` with the
+/// OS's word. The final newline is left off the text and reported, so a save can put it back.
 #[must_use]
 pub fn read(path: &Path) -> FileRead {
     let path = expand_home(path);
@@ -35,22 +38,39 @@ pub fn read(path: &Path) -> FileRead {
     if !meta.is_file() {
         return FileRead::Missing { error: kind_word(&meta) };
     }
-    if meta.len() > FILE_BYTES {
-        return FileRead::TooLarge { size: meta.len() };
-    }
     let mut file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(e) => return FileRead::Missing { error: os_word(&e) },
     };
     let modified_ms = modified_ms(&meta);
-    let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    let mut bytes = Vec::new();
+    if let Err(e) = (&mut file).take(media::HEAD as u64).read_to_end(&mut bytes) {
+        return FileRead::Missing { error: os_word(&e) };
+    }
+    let media_type = media::sniff(&bytes);
+    let cap = if media_type.is_some() { MEDIA_BYTES } else { FILE_BYTES };
+    let past = |size: u64| {
+        if media_type.is_some() { FileRead::Binary { size } } else { FileRead::TooLarge { size } }
+    };
+    if meta.len() > cap {
+        return past(meta.len());
+    }
+    bytes.reserve(usize::try_from(meta.len()).unwrap_or(0).saturating_sub(bytes.len()));
     // One byte past the cap tells a file that grew since it was looked at.
-    if let Err(e) = (&mut file).take(FILE_BYTES.saturating_add(1)).read_to_end(&mut bytes) {
+    let rest = cap.saturating_add(1).saturating_sub(bytes.len() as u64);
+    if let Err(e) = (&mut file).take(rest).read_to_end(&mut bytes) {
         return FileRead::Missing { error: os_word(&e) };
     }
     let size = bytes.len() as u64;
-    if size > FILE_BYTES {
-        return FileRead::TooLarge { size };
+    if size > cap {
+        return past(size);
+    }
+    if let Some(media_type) = media_type {
+        return FileRead::Media {
+            media_type: media_type.to_owned(),
+            bytes: Bytes::from(bytes),
+            modified_ms,
+        };
     }
     if bytes.contains(&0) {
         return FileRead::Binary { size };
@@ -65,19 +85,27 @@ pub fn read(path: &Path) -> FileRead {
     FileRead::Text { text, size, modified_ms, final_newline }
 }
 
-/// A read as it goes on the control stream, and the text to follow it on a bulk stream.
+/// A read as it goes on the control stream, and the bytes to follow it on a bulk stream.
 ///
-/// A text past [`INLINE_FILE_BYTES`] is announced as [`FileRead::Streamed`] under a new
-/// transfer, and its text is handed back to be sent under the same one. Anything else goes
-/// inline as it is.
+/// A text or media read past [`INLINE_FILE_BYTES`] is announced as [`FileRead::Streamed`] under
+/// a new transfer, and its bytes are handed back to be sent under the same one. Anything else
+/// goes inline as it is.
 #[must_use]
-pub fn announce(read: FileRead) -> (FileRead, Option<(XferId, String)>) {
+pub fn announce(read: FileRead) -> (FileRead, Option<(XferId, Bytes)>) {
     match read {
         FileRead::Text { text, size, modified_ms, final_newline }
             if text.len() > INLINE_FILE_BYTES =>
         {
             let xfer = XferId::new();
-            (FileRead::Streamed { xfer, size, modified_ms, final_newline }, Some((xfer, text)))
+            let body = Body::Text { final_newline };
+            let text = Bytes::from(text.into_bytes());
+            (FileRead::Streamed { xfer, size, modified_ms, body }, Some((xfer, text)))
+        }
+        FileRead::Media { media_type, bytes, modified_ms } if bytes.len() > INLINE_FILE_BYTES => {
+            let xfer = XferId::new();
+            let size = bytes.len() as u64;
+            let body = Body::Media { media_type };
+            (FileRead::Streamed { xfer, size, modified_ms, body }, Some((xfer, bytes)))
         }
         other => (other, None),
     }
@@ -306,12 +334,66 @@ mod tests {
                 xfer,
                 size: INLINE_FILE_BYTES as u64 + 2,
                 modified_ms: WallMs::from_millis(7),
-                final_newline: true
+                body: Body::Text { final_newline: true },
+            }
+        );
+        let media = |len: usize| FileRead::Media {
+            media_type: "image/png".to_owned(),
+            bytes: Bytes::from(vec![7; len]),
+            modified_ms: WallMs::from_millis(9),
+        };
+        let small = media(INLINE_FILE_BYTES);
+        assert_eq!(announce(small.clone()), (small, None), "a small picture rides inline");
+        let (announced, stream) = announce(media(INLINE_FILE_BYTES + 1));
+        let Some((xfer, bytes)) = stream else { panic!("a large picture streams") };
+        assert_eq!(bytes.len(), INLINE_FILE_BYTES + 1);
+        assert_eq!(
+            announced,
+            FileRead::Streamed {
+                xfer,
+                size: INLINE_FILE_BYTES as u64 + 1,
+                modified_ms: WallMs::from_millis(9),
+                body: Body::Media { media_type: "image/png".to_owned() },
             }
         );
         for other in [FileRead::Binary { size: 1 << 20 }, FileRead::TooLarge { size: 1 << 30 }] {
             assert_eq!(announce(other.clone()), (other, None));
         }
+    }
+
+    /// A picture or PDF is read whole as its bytes, by its content whatever its name, past the
+    /// text cap up to the media cap; past that it is binary, not read.
+    #[test]
+    fn a_picture_or_pdf_is_read_as_media_up_to_its_own_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        let shot = dir.path().join("shot");
+        std::fs::write(&shot, &png).unwrap();
+        match read(&shot) {
+            FileRead::Media { media_type, bytes, modified_ms } => {
+                assert_eq!(media_type, "image/png", "known without an extension");
+                assert_eq!(bytes.as_ref(), png.as_slice(), "the file's own bytes");
+                assert!(!modified_ms.is_zero());
+            }
+            other => panic!("{other:?}"),
+        }
+        let pdf = dir.path().join("big.pdf");
+        let mut body = b"%PDF-1.7\n".to_vec();
+        body.resize(usize::try_from(FILE_BYTES).unwrap() + 10, b' ');
+        std::fs::write(&pdf, &body).unwrap();
+        assert!(
+            matches!(read(&pdf), FileRead::Media { media_type, bytes, .. }
+                if media_type == "application/pdf" && bytes.len() == body.len()),
+            "past the text cap a PDF is still shown"
+        );
+        let huge = dir.path().join("huge.png");
+        let file = std::fs::File::create(&huge).unwrap();
+        std::io::Write::write_all(&mut &file, &png).unwrap();
+        file.set_len(MEDIA_BYTES + 1).unwrap();
+        assert_eq!(read(&huge), FileRead::Binary { size: MEDIA_BYTES + 1 });
+        let text = dir.path().join("notes.png");
+        std::fs::write(&text, "not a picture\n").unwrap();
+        assert!(matches!(read(&text), FileRead::Text { .. }), "a name alone makes no picture");
     }
 
     fn saved(result: &WriteResult) -> WallMs {

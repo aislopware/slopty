@@ -138,7 +138,7 @@ const SWEEP: Duration = Duration::from_secs(2);
 /// The share of the track the busy bar's segment covers.
 const SEGMENT: f32 = 0.3;
 
-/// The steps, one line each, in one framed list as the add panel's rows are.
+/// The steps, one line each, in one list a tone step off the page, as the add panel's rows are.
 #[must_use]
 pub fn steps(theme: &Theme, install: &Install) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
@@ -152,8 +152,7 @@ pub fn steps(theme: &Theme, install: &Install) -> gpui::Stateful<Div> {
         .flex_col()
         .p(px(theme.spacing.xxs))
         .rounded(px(theme.radii.md))
-        .border_1()
-        .border_color(hsla(s.border))
+        .bg(hsla(s.raised))
         .children(lines)
 }
 

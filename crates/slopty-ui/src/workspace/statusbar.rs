@@ -491,10 +491,11 @@ impl WorkspaceView {
         let link_readout = link.filter(|w| w.status.is_up()).and_then(|w| {
             let path = w.relay.path().map(path_label);
             let relayed = w.relay.notice(clock);
+            let rtt = self.shown_rtt(w);
             let shown = self.bar.hovered
                 || relayed.is_some()
-                || w.rtt.is_some_and(|rtt| rtt >= RTT_SHOWN_FROM);
-            shown.then(|| self.render_link(path, relayed, w.rtt))
+                || rtt.is_some_and(|rtt| rtt >= RTT_SHOWN_FROM);
+            shown.then(|| self.render_link(path, relayed, rtt))
         });
         // The link says something only when it is not up: a word in its tone, the mark being
         // on the left.
@@ -815,7 +816,7 @@ impl WorkspaceView {
                 }))
                 .child(
                     tabular(div().text_color(hsla(s.text_muted)))
-                        .children(w.rtt.map(|rtt| SharedString::from(rtt_label(rtt)))),
+                        .children(self.shown_rtt(w).map(|rtt| SharedString::from(rtt_label(rtt)))),
                 ),
         };
         let actions = self.bar.hosts.get(&key).cloned().unwrap_or_default();
@@ -860,11 +861,13 @@ impl WorkspaceView {
             .children(forget);
         let label = SharedString::from(match health {
             Some((_, word)) => format!("{}, {word}", w.name),
-            None => [Some(w.name.clone()), path.map(|(text, _)| text), w.rtt.map(rtt_label)]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(", "),
+            None => {
+                [Some(w.name.clone()), path.map(|(text, _)| text), self.shown_rtt(w).map(rtt_label)]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
         });
         let el = div()
             .id(ElementId::Name(format!("hosts-row-{key}").into()))

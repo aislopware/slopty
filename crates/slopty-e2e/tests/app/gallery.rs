@@ -229,6 +229,104 @@ async fn a_file_too_large_to_edit_says_where_to_read_it() {
     stack.shutdown().await;
 }
 
+/// A picture opened as a file shows fitted in its tile, decoded by the platform, and says what
+/// it is to a screen reader.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_picture_shows_fitted_in_its_tile() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    // A wide picture in soft bands, larger than the tile, with no extension to go by.
+    let picture = image::RgbImage::from_fn(1600, 900, |x, y| {
+        let band = |v: u32, of: u32| u8::try_from(60 + v * 150 / of).unwrap_or(u8::MAX);
+        image::Rgb([band(x, 1600), band(y, 900), band(1600 - x, 1600)])
+    });
+    let file = project.join("screenshot");
+    picture.save_with_format(&file, image::ImageFormat::Png).unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.ok(&Command::OpenFile { path: file.display().to_string(), line: None }).await.unwrap();
+    let dump = drv
+        .wait_for("the picture, decoded", STEP, |d| {
+            labels(d, "Image").iter().any(|l| l.starts_with("image/png, 1600 × 900"))
+        })
+        .await
+        .unwrap();
+    assert!(dump.a11y_node("Status", None).is_none_or(|n| n.label.as_deref() != Some("Reading…")));
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "file-picture").await;
+    stack.shutdown().await;
+}
+
+/// A PDF opened as a file shows its pages, each as wide as the tile, drawn by the platform.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_pdf_shows_its_pages() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let text = (0..40_u32).fold(String::new(), |mut text, line| {
+        let y = 720_u32.saturating_sub(line.saturating_mul(16));
+        text.push_str("BT /F1 11 Tf 72 ");
+        text.push_str(&y.to_string());
+        text.push_str(" Td (Line ");
+        text.push_str(&line.to_string());
+        text.push_str(" of the report, set in Helvetica.) Tj ET ");
+        text
+    });
+    let heading =
+        "BT /F1 24 Tf 72 760 Td (Quarterly report) Tj ET q 0.2 0.5 0.3 rg 72 744 468 3 re f Q";
+    let file = project.join("report.pdf");
+    std::fs::write(&file, pdf(&[&format!("{heading} {text}"), &text])).unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.ok(&Command::OpenFile { path: file.display().to_string(), line: None }).await.unwrap();
+    drv.wait_for("the first page", STEP, |d| labels(d, "Image").iter().any(|l| l == "Page 1 of 2"))
+        .await
+        .unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    golden(drv, &dir, "file-pdf").await;
+    stack.shutdown().await;
+}
+
+/// A PDF of letter pages, one content stream each, with Helvetica as `F1`.
+#[expect(clippy::arithmetic_side_effects, reason = "a fixture's small object numbers and offsets")]
+fn pdf(pages: &[&str]) -> Vec<u8> {
+    let kids: Vec<String> = (0..pages.len()).map(|n| format!("{} 0 R", 3 + 2 * n)).collect();
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()),
+    ];
+    for (n, content) in pages.iter().enumerate() {
+        objects.push(format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 \
+             << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /Contents {} 0 R >>",
+            4 + 2 * n
+        ));
+        objects.push(format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len() + 1));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (n, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", n + 1).as_bytes());
+    }
+    let xref = out.len();
+    let count = objects.len() + 1;
+    out.extend_from_slice(format!("xref\n0 {count}\n0000000000 65535 f \n").as_bytes());
+    for at in offsets {
+        out.extend_from_slice(format!("{at:010} 00000 n \n").as_bytes());
+    }
+    let trailer = format!("trailer\n<< /Size {count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+    out.extend_from_slice(trailer.as_bytes());
+    out
+}
+
 /// Three columns with the shell focused, the overview, the palette and the settings, then
 /// the same workspace dark.
 #[tokio::test]

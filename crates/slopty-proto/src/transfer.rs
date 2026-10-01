@@ -350,9 +350,10 @@ pub enum Purpose {
         /// Which.
         rep: RepRef,
     },
-    /// Worker → client: the text of a file read too big to inline, announced on the control
-    /// stream by [`crate::file::FileRead::Streamed`] with the same transfer.
-    FileText,
+    /// Worker → client: the bytes of a file read too big to inline (a text, or a picture or
+    /// document), announced on the control stream by [`crate::file::FileRead::Streamed`] with
+    /// the same transfer.
+    FileBody,
     /// Client → worker: a file tile's save too big to inline, the whole new text; answered as
     /// [`crate::ClientMsg::WriteFile`] is, with `WorkerMsg::Written`.
     Save {

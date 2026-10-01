@@ -76,6 +76,7 @@ gpui_kit::assets::icon_assets!(
         Flag,
         FoldHorizontal,
         Folder,
+        FolderGit2,
         FolderOpen,
         FolderSearch,
         GitBranch,

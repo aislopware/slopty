@@ -1704,6 +1704,7 @@ pub(crate) mod tests {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         }
     }
 
@@ -2021,6 +2022,7 @@ pub(crate) mod tests {
                 attention: false,
                 source,
                 since_ms: WallMs::ZERO,
+                mode: None,
             })
         };
         let agent = |status, source| {
@@ -2029,6 +2031,7 @@ pub(crate) mod tests {
                 status,
                 source,
                 since_ms: WallMs::ZERO,
+                mode: None,
             })
         };
         let listed = async || {
@@ -2098,6 +2101,7 @@ pub(crate) mod tests {
             attention: false,
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         })
     }
 

@@ -368,6 +368,8 @@ struct Worker {
     hooks_offered: bool,
     /// The paths the worker was last asked to watch for its file tiles, sorted.
     watched: Vec<String>,
+    /// The directories the worker was last asked to watch for its folder tiles, sorted.
+    watched_folders: Vec<String>,
     /// A `List` is in flight to name restored window items.
     titles_requested: bool,
     /// A `List` is in flight for the picker.
@@ -410,6 +412,7 @@ impl Worker {
             load: None,
             hooks_offered: false,
             watched: Vec::new(),
+            watched_folders: Vec::new(),
             titles_requested: false,
             picker_wanted: false,
             display_wanted: false,
@@ -565,6 +568,10 @@ pub struct WorkspaceView {
     /// The layout's clock held at a time, for tests that compare two frames drawn at one instant.
     #[cfg(test)]
     held_clock: Option<Duration>,
+    /// The round trip the readouts (the navigator, the bar, the palette) show for every linked
+    /// worker in place of its link's, pinned by the e2e harness so a golden never carries the
+    /// machine's live timing. The predictors and the dump keep the link's own.
+    pinned_rtt: Option<Duration>,
     /// Whether moves animate. Off under the self-test, where a frame is a step.
     animate: bool,
     workers: BTreeMap<WorkerKey, Worker>,
@@ -822,6 +829,7 @@ impl WorkspaceView {
             epoch: Instant::now(),
             #[cfg(test)]
             held_clock: None,
+            pinned_rtt: None,
             animate: true,
             workers: BTreeMap::new(),
             terminals: HashMap::new(),
@@ -1384,6 +1392,7 @@ impl WorkspaceView {
             ("workers", self.workers.len()),
             ("workers.sessions", per_worker(|w| w.sessions.len())),
             ("workers.watched", per_worker(|w| w.watched.len())),
+            ("workers.watched_folders", per_worker(|w| w.watched_folders.len())),
             ("workers.pending_opens", per_worker(|w| w.pending_opens.len())),
             ("workers.queued", per_worker(|w| w.queued.len())),
             ("terminals", self.terminals.len()),
@@ -1752,6 +1761,7 @@ impl gpui::Render for WorkspaceView {
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(Self::toggle_navigator))
+            .on_action(cx.listener(Self::toggle_navigator_lens))
             .child(Self::measure_width(cx))
             .child(self.render_frame(strip, window, cx))
             .children(menu)

@@ -535,13 +535,17 @@ impl ProjectView {
         div().child(track.children(segments))
     }
 
-    /// The tasks whose agents wait on the person, over the lens: never below a fold.
+    /// The tasks whose agents wait on the person, over the lens: never below a fold. The board
+    /// leads with its own *Needs you* lane, so there the band holds only the orchestrator,
+    /// which has no card.
     fn needs_you(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
         let mut nodes: Vec<Node> = Vec::new();
         if self.agent(board, None).is_some_and(|a| a.status == Status::NeedsYou) {
             nodes.push(None);
         }
-        nodes.extend(board.needs_you().into_iter().map(Some));
+        if self.lens != Lens::Board {
+            nodes.extend(board.needs_you().into_iter().map(Some));
+        }
         if nodes.is_empty() {
             return None;
         }
@@ -937,7 +941,7 @@ impl ProjectView {
         let status = self.node_status(board, node);
         let meta = self.node_meta(board, node, Some(card));
         // A parent standing in a lane for a descendant says whose it is.
-        let why = (own != lane).then(|| format!("{} below", lane.title().to_lowercase()));
+        let why = (own != lane).then(|| format!("{} in a subtask", lane.title()));
         let key = format!("project-card-{}", card.id);
         let arrive = ElementId::Name(format!("{key}-in").into());
         let selector = key.clone();

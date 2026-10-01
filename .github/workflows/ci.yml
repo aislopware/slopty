@@ -46,25 +46,33 @@ jobs:
           components: rustfmt
       # sccache holds the compiled units; this keeps only the registry, git checkouts and the
       # installed tools, so the two do not store every unit twice in the repository's cache
-      # quota. Kept on failure too: a red test is no reason to download it all again.
+      # quota. One entry serves every lane, saved by the tools lane on main: its `cargo metadata`
+      # fetches every package and it installs the most tools. The toolchains are left out of the
+      # key, since none of this depends on them. A key per lane saved 5 × 270 MB on each lockfile
+      # change and filled the 10 GB quota the compile cache lives in (MEASUREMENTS 2026-10-01).
+      # Saved on failure too: a red lane is no reason to download it all again.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.lane }}
+          shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.lane == 'tools' }}
       - uses: cargo-bins/cargo-binstall@main
       # libghostty-vt-sys builds its library with zig in every lane that compiles.
       - if: matrix.lane != 'tools'
         run: brew install zig
       - run: cargo xtask setup --lane ${{ matrix.lane }}
       - run: cargo xtask gate --ci --lane ${{ matrix.lane }}
-      # What a slow run is read from afterwards: each test's time, and how much of the build the
-      # compile cache served.
+      # What a slow run is read from afterwards: each test's time, each unit of the build's, and
+      # how much of the build the compile cache served.
       - if: always() && matrix.lane == 'tests'
         uses: actions/upload-artifact@v4
         with:
-          name: junit
-          path: target/**/nextest/ci/junit.xml
+          name: timings
+          path: |
+            target/**/nextest/ci/junit.xml
+            target/**/cargo-timings/cargo-timing.html
           if-no-files-found: ignore
       - if: always() && matrix.lane != 'tools'
         run: $SCCACHE_PATH --show-stats
@@ -89,20 +97,24 @@ jobs:
         with:
           toolchain: 1.98.1
           targets: aarch64-apple-darwin
-      # sccache holds the compiled units; this keeps only the registry and git checkouts, so the
-      # two do not store every unit twice in the repository's cache quota.
+      # The gate's one entry of registry, git checkouts and tools; a release saves none of its own.
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: gate
+          add-rust-environment-hash-key: false
           cache-targets: false
+          save-if: false
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall --no-confirm git-cliff@2.14.1
       - run: brew install zig
       - run: cargo build --profile dist -p slopty-workerd -p slopty-ptyd
-      # Each binary's dSYM goes beside it, where crash reports resolve their frames from it. Cargo
-      # leaves `<bin>.dSYM` as a link into `deps`, so `-h` stores what it points at.
+      # The binaries ship lean; their dSYMs are an artifact of their own, each under its binary's
+      # UUID, which `cargo xtask symbolicate --dsyms <archive>` reads a report against.
       - run: |
           mkdir -p dist
-          tar -C target/dist -h -czf dist/slopty-worker-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz slopty-worker slopty-worker.dSYM slopty-ptyd slopty-ptyd.dSYM
+          tar -C target/dist -czf dist/slopty-worker-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz slopty-worker slopty-ptyd
+          cargo xtask dsyms --from target/dist --out target/dsyms slopty-worker slopty-ptyd
+          tar -C target/dsyms -czf dist/slopty-worker-${{ github.ref_name }}-aarch64-apple-darwin-dSYMs.tar.gz .
           git cliff --latest --strip all > dist/notes.md
       - uses: softprops/action-gh-release@v2
         with:

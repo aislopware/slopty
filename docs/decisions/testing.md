@@ -710,3 +710,36 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     The stub records each variable's name with a digest of its value (never the value), and the
     test fails on any variable of its own that reached the agent unchanged. Before the scrub it
     listed everything beyond the kept set, API keys and every `CARGO_*` variable among them.
+- ✅ **A soak's extra worker thread was the blocking pool, kept warm by an idle tick**
+  (2026-10-01, MEASUREMENTS "the worker's blocking pool after a soak"). Two soaks in eleven
+  failed with the worker holding one thread more after the load than before (18 → 19).
+  It was no leak. By name and stack the worker held 10 tokio workers, the main thread, its
+  daemon thread, one or two system dispatch threads, and 3 to 5 idle threads of tokio's
+  blocking pool. No thread was busy, and no session's thread outlived its session. The pool
+  grows to the most blocking tasks run at once, and tokio ends an idle thread after 10 s. But
+  the agents tick (`apps/slopty-worker/src/agents.rs`, every 750 ms) sent an empty task to
+  the pool even with no agent working. An lldb breakpoint on `spawn_blocking` in an idle worker
+  caught 32 calls in 8 s, all from `keep_awake`. Each call woke one idle thread, so none
+  reached the keep-alive and the pool kept its high-water mark for good. A load that ran one
+  more blocking task at once than the fill had raised the mark by one, which the baseline, 12 s
+  after the fill, did not have.
+  - **The fix is in the worker.** `agents::sample` goes to the blocking pool only when a turn is
+    paused, since only a paused turn's commands have their processor time read. Otherwise it
+    maps the agents in place. An idle worker now hands the pool nothing, and the pool empties
+    10 s after its last task. Test: `only_a_paused_turn_takes_the_blocking_pool` (a
+    current-thread runtime starts a thread only for the pool: none for no agent or a working
+    one, one for a paused turn; it fails when every tick takes the pool).
+  - **The soak's check stays strict, and it now names what grew.** No allowance was added,
+    since after the fix nothing is left to allow for. At the baseline and at the end the soak
+    reads each daemon's threads by name (`PROC_PIDLISTTHREADS`, then `PROC_PIDTHREADINFO`), with
+    a session's `session-<uuid>` counted as `session-*` and a thread without a name as
+    `(unnamed)`. A failure reads, for example, `worker: 19 threads after the load, 18 before
+    (+1 tokio-rt-worker)`, and `summary.json` keeps both lists. The worker's tokio workers are a
+    fixed number, so a grown `tokio-rt-worker` count after the settle means blocking work is
+    still arriving. Tests: `a_process_s_threads_read_by_name` and
+    `a_thread_named_for_a_session_counts_under_its_stem` (`xtask`).
+  - *Not settled here.* The system's dispatch threads (`(unnamed)`) are the kernel's to start
+    and end. They held level from baseline to end in every soak here, but a run that caught one
+    in between would fail and name it. In three soaks in a row the server held one thread more
+    after the load (11 → 12). That is the server's to look at, and the named check will say
+    which thread.

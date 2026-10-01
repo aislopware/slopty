@@ -1936,6 +1936,7 @@ mod tests {
                         agent: None,
                         progress: None,
                         restored: None,
+                        repo_id: None,
                     },
                 )]),
                 Verb::WaitFor { .. } => {

@@ -102,7 +102,7 @@ async fn take(
                     let _sent = out.send(WorkerMsg::Written { path, result }).await;
                 }
             }
-            Purpose::Download | Purpose::FileText => {
+            Purpose::Download | Purpose::FileBody => {
                 tracing::debug!(%client, "a download or a file's text sent up; refused");
                 rx.stop();
             }

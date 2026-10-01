@@ -685,6 +685,7 @@ fn stop_is_offered_while_the_model_streams(cx: &mut TestAppContext) {
         attention: false,
         source: slopty_proto::agent::AgentSource::Hook,
         since_ms: WallMs::ZERO,
+        mode: None,
     };
     view.update(cx, |v, cx| v.set_agent(Some(idle), cx));
     cx.run_until_parked();

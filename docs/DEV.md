@@ -50,8 +50,10 @@ zed itself so it is never behind zed while longbridge lags.
   `target/logs/linux/<container>/`.
 - `cargo xtask run worker|app` to launch; `cargo xtask ios sim [--sim ipad]|device` for the phone/tablet;
   `cargo xtask bundle` builds a signed `Slopty.app` (app + daemons + CLI, the `dist` profile,
-  each binary's dSYM beside it for crash reports) under `target/bundle` with the icon rendered
+  lean) under `target/bundle`, its dSYMs beside it in `dSYMs/<UUID>/`, with the icon rendered
   from `assets/icon.svg` (`cargo xtask icon` previews it);
+  `cargo xtask symbolicate <report.json> [--dsyms <dir or .tar.gz>]` resolves a crash report
+  from a shipped build to files, lines and inlined frames against the dSYMs of its UUID;
   `cargo xtask ime [id]` switches the macOS input source for input-method tests.
 - `cargo xtask sign` gives the dev daemons a Developer ID signature under their LaunchAgent
   identifiers, so one approval of Screen Recording and Accessibility survives every later build

@@ -10,29 +10,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Set by `cargo xtask` once every binary in [`PACKAGES`] is built into the profile directory
-/// the tests run from.
+/// Set by `cargo xtask` once every binary in [`NAMES`] is built into the profile directory the
+/// tests run from.
 pub const FRESH: &str = "SLOPTY_BINS_FRESH";
 
-/// The packages whose binaries a test may spawn. `cargo xtask` builds the same list (`--bins`).
-///
-/// `workspace-hack` spawns nothing: without it the build resolves features without the tests'
-/// dev-dependencies and builds some 150 crates a second time, differently.
-pub const PACKAGES: [&str; 6] = [
-    "slopty-ptyd",
-    "slopty-workerd",
-    "slopty-serverd",
-    "slopty-cli",
-    "slopty-testkit",
-    "workspace-hack",
-];
+/// The binaries a test may spawn. `cargo xtask` builds the same list (`--bin`).
+pub const NAMES: [&str; 5] =
+    ["slopty-ptyd", "slopty-worker", "slopty-server", "slopty", "slopty-stub-claude"];
 
 /// The binary `name` from this build, beside `anchor`: a binary of the calling test's own
 /// package, as `env!("CARGO_BIN_EXE_<bin>")` names it.
 ///
 /// # Panics
 ///
-/// When [`FRESH`] is unset and the build of [`PACKAGES`] fails.
+/// When [`FRESH`] is unset and the build of [`NAMES`] fails.
 #[must_use]
 pub fn bin(anchor: &str, name: &str) -> PathBuf {
     let anchor = Path::new(anchor);
@@ -47,9 +38,11 @@ fn build(anchor: &Path) {
     let release = anchor.parent().is_some_and(|dir| dir.ends_with("release"));
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut build = std::process::Command::new(cargo);
-    build.arg("build").arg("--bins");
-    for package in PACKAGES {
-        build.args(["-p", package]);
+    // The whole workspace, so features resolve across every member (`workspace-hack` among
+    // them) and not only the calling test's package, where cargo would otherwise start.
+    build.args(["build", "--workspace"]);
+    for name in NAMES {
+        build.args(["--bin", name]);
     }
     if release {
         build.arg("--release");
@@ -58,6 +51,6 @@ fn build(anchor: &Path) {
     assert!(
         status.as_ref().is_ok_and(std::process::ExitStatus::success),
         "build the binaries tests spawn ({}): {status:?}",
-        PACKAGES.join(", ")
+        NAMES.join(", ")
     );
 }

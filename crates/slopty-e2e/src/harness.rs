@@ -366,6 +366,12 @@ fn zsh_env(root: &Path) -> Result<(&'static str, PathBuf)> {
 fn scrubbed(program: impl AsRef<std::ffi::OsStr>, home: &Path) -> Command {
     let mut command = Command::new(program);
     slopty_testkit::env::scrub(command.as_std_mut(), home);
+    // The home the scrub made, by its real path (`/private/var`, not the `/var` link): a shell
+    // started with no `PWD` to inherit shortens its directory to `~` only when `HOME` is spelled
+    // as `getcwd` spells it. The root keeps the short spelling, for its sockets' sake.
+    if let Ok(real) = std::fs::canonicalize(home) {
+        command.env("HOME", real);
+    }
     command
 }
 
@@ -2028,6 +2034,8 @@ impl ProjectStack {
         std::os::unix::fs::symlink(stub_claude().await?, programs.join("claude"))?;
         let home = root.join("home");
         std::fs::create_dir_all(&home)?;
+        // By its real path, as `scrubbed` gives it: the shell's prompt then says `~`.
+        let home = std::fs::canonicalize(&home)?;
         std::fs::create_dir_all(root.join("repo"))?;
         let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", programs.display());
         let (home, path) = (home.to_string_lossy().into_owned(), path);

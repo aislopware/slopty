@@ -260,7 +260,7 @@ impl WorkspaceView {
     ) {
         let mut seeded = false;
         for summary in sessions {
-            let Some(SessionAgent { kind, status, source, since_ms }) = summary.agent.clone()
+            let Some(SessionAgent { kind, status, source, since_ms, mode }) = summary.agent.clone()
             else {
                 continue;
             };
@@ -282,6 +282,7 @@ impl WorkspaceView {
                     attention: false,
                     source,
                     since_ms,
+                    mode,
                 },
             );
             seeded = true;
@@ -674,6 +675,7 @@ mod tests {
             attention: false,
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         }
     }
 

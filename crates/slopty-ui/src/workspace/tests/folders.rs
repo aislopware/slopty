@@ -431,3 +431,56 @@ fn a_folder_says_where_it_is_once_on_the_rows_edge(cx: &mut TestAppContext) {
         "crumb's words at {words:?}, the rows' icons at {icon:?}"
     );
 }
+
+/// The directories the workspace last asked `fake` to follow.
+fn followed(fake: &mut Fake) -> Option<Vec<String>> {
+    fake.drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::WatchFolders { paths } => Some(paths),
+            _ => None,
+        })
+        .next_back()
+}
+
+/// A folder tile's directory is followed by its worker, and a listing the worker sends
+/// unasked (its entries changed on disk) shows at once. The selected entry stays selected, and
+/// when it is the one that went, the selection stays at its row. The last tile gone, nothing is
+/// followed.
+#[gpui::test]
+fn a_folder_tile_follows_its_directory_and_keeps_its_place(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let tile = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/proj".into() }, 1);
+    assert_eq!(followed(&mut studio), Some(vec!["/w/proj".to_owned()]), "followed");
+    let files = |names: &[&str]| {
+        listed("/w/proj", names.iter().map(|n| entry(n, FileKind::File)).collect())
+    };
+    answer(&view, cx, &studio, "/w/proj", &files(&["a.rs", "b.rs", "c.rs"]));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    assert_eq!(selected(&view, cx, tile), "b.rs");
+
+    answer(&view, cx, &studio, "/w/proj", &files(&["a.rs", "aa.rs", "b.rs", "c.rs"]));
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("ListBoxOption", Some("aa.rs"))), "{nodes:#?}");
+    assert_eq!(selected(&view, cx, tile), "b.rs", "the selection follows its entry");
+
+    answer(&view, cx, &studio, "/w/proj", &files(&["a.rs", "aa.rs", "c.rs"]));
+    assert_eq!(selected(&view, cx, tile), "c.rs", "the entry went: the row where it was");
+    answer(&view, cx, &studio, "/w/proj", &files(&["a.rs"]));
+    assert_eq!(selected(&view, cx, tile), "a.rs", "clamped to the last row");
+    assert_eq!(followed(&mut studio), None, "the same set is not sent again");
+
+    view.update_in(cx, |v, _w, cx| {
+        let by = ClientId::new();
+        v.apply_sync(
+            studio.key,
+            ItemSync::Delta { version: 2, by, op: ItemOp::Remove(tile.item) },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(followed(&mut studio), Some(Vec::new()), "nothing followed once the tile goes");
+}

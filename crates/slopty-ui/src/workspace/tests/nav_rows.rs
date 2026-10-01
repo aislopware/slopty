@@ -4,8 +4,10 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::Modifiers;
+use slopty_client::layout::NavLens;
 use slopty_core::WallMs;
 
+use super::super::actions::ToggleNavigatorLens;
 use super::*;
 
 fn leak(selector: String) -> &'static str {
@@ -576,4 +578,77 @@ fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
         (v.layout().active_workspace(), v.layout().workspaces().len().saturating_sub(1))
     });
     assert_eq!(active, last, "the empty workspace kept last");
+}
+
+/// A shell whose directory is in `repo` on `branch`, as its worker reports it.
+fn in_repo(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+    version: u64,
+    (repo, cwd, branch): (&str, &str, &str),
+) -> TileRef {
+    let session = SessionId::new();
+    let tile = opens_in(view, cx, fake, session, fake.me, version, Some(cwd));
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        let reported = SessionSummary {
+            repo: Some(repo.to_owned()),
+            branch: Some(branch.to_owned()),
+            ..summary(session, Some(cwd))
+        };
+        v.session_opened(key, reported, cx);
+    });
+    cx.run_until_parked();
+    tile
+}
+
+/// The palette's line groups the navigator by repository: a repository's shells from every
+/// worker under one header, each row naming its worker, its directory below the repository
+/// and its branch; the shells in none last. Two repositories of one name say where each is.
+/// The lens is kept with the layout, and the palette's line then goes back by worker.
+#[gpui::test]
+fn the_repository_lens_groups_across_workers(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let here = in_repo(&view, cx, &studio, 1, ("/w/oss/slopty", "/w/oss/slopty/crates", "main"));
+    let there = in_repo(&view, cx, &laptop, 1, ("/w/oss/slopty", "/w/oss/slopty", "stripes"));
+    let fork = in_repo(&view, cx, &laptop, 2, ("/w/forks/slopty", "/w/forks/slopty", "main"));
+    let loose = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/w/notes"));
+    let lens = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.layout.navigator().lens);
+    assert_eq!(lens(cx), NavLens::Workers, "by worker until asked");
+    let line = view.read_with(cx, |v, _| v.lens_line().label);
+    assert_eq!(line, navigator::BY_REPOSITORY);
+
+    view.update_in(cx, |v, w, cx| v.toggle_navigator_lens(&ToggleNavigatorLens, w, cx));
+    cx.run_until_parked();
+    assert_eq!(lens(cx), NavLens::Repositories);
+    assert!(!shown(cx, leak(format!("nav-worker-{}", studio.key))), "no worker headers");
+    let order = view.read_with(cx, |v, _| v.navigator_tiles());
+    assert_eq!(order.last(), Some(&loose), "the shell in no repository comes last: {order:?}");
+    let group = |t: TileRef| order.iter().position(|o| *o == t).expect("listed");
+    assert_eq!(group(here).abs_diff(group(there)), 1, "one checkout path, one group");
+    assert!(shown(cx, "nav-repo-/w/oss/slopty") && shown(cx, "nav-repo-/w/forks/slopty"));
+    assert!(shown(cx, "nav-repo-none"));
+    let metas = view.read_with(cx, |v, _| v.navigator_metas());
+    let meta = |tile: TileRef| {
+        metas.iter().find(|(t, _)| *t == tile).map(|(_, m)| m.clone()).expect("a row")
+    };
+    assert_eq!(meta(here), "studio · crates · main", "worker, directory below, branch");
+    assert_eq!(meta(there), "laptop · stripes", "at the repository's root");
+    assert_eq!(meta(fork), "laptop · main");
+    let labels = view.read_with(cx, |v, _| v.navigator_repo_labels());
+    assert!(labels.contains(&"slopty, in w/oss".to_owned()), "{labels:?}");
+    assert!(labels.contains(&"slopty, in w/forks".to_owned()), "{labels:?}");
+
+    click(cx, "nav-repo-/w/oss/slopty");
+    let order = view.read_with(cx, |v, _| v.navigator_tiles());
+    assert!(!order.contains(&here) && !order.contains(&there), "folded");
+    assert!(order.contains(&fork));
+
+    let line = view.read_with(cx, |v, _| v.lens_line().label);
+    assert_eq!(line, navigator::BY_WORKER);
+    let saved = view.read_with(cx, |v, _| v.layout.save().navigator.lens);
+    assert_eq!(saved, NavLens::Repositories, "kept with the layout");
 }

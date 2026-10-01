@@ -293,6 +293,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
     });
     let (watch_files, watched) = watch::channel(Vec::new());
     tasks.spawn(crate::files::watch(hello.client, conn.clone(), out.clone(), watched));
+    let (watch_folders, folders) = watch::channel(Vec::new());
+    tasks.spawn(crate::files::watch_folders(hello.client, out.clone(), folders));
     let (told, mut told_rx) = mpsc::unbounded_channel();
     daemon.clip.attach(link, clip_sink(out.clone(), hello.client));
     let (saves, saved) = mpsc::unbounded_channel();
@@ -328,6 +330,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         done,
         told,
         watch_files,
+        watch_folders,
         downloads: HashMap::new(),
         held: None,
         link,
@@ -874,6 +877,8 @@ struct Peer<'d> {
     told: mpsc::UnboundedSender<Told>,
     /// The files behind this client's file tiles, for the task that watches them.
     watch_files: watch::Sender<Vec<String>>,
+    /// The directories behind this client's folder tiles, for the task that watches them.
+    watch_folders: watch::Sender<Vec<String>>,
     /// Files going down, by transfer.
     downloads: HashMap<XferId, JoinHandle<()>>,
     /// Window and shell input waiting for a paste's clipboard.
@@ -1026,6 +1031,9 @@ impl Peer<'_> {
             }
             ClientMsg::WatchFiles { paths } => {
                 self.watch_files.send_replace(paths);
+            }
+            ClientMsg::WatchFolders { paths } => {
+                self.watch_folders.send_replace(paths);
             }
             ClientMsg::WriteFile { path, text, base_modified_ms } => {
                 let save =
@@ -1613,6 +1621,7 @@ mod tests {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         }
     }
 

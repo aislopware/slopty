@@ -292,6 +292,7 @@ fn a_tile_that_needs_you_says_so_once_in_its_header(cx: &mut TestAppContext) {
                 attention: false,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
+                mode: None,
             },
             cx,
         );
@@ -334,6 +335,7 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
                 attention: false,
                 source: AgentSource::Transcript,
                 since_ms: WallMs::ZERO,
+                mode: None,
             },
             cx,
         );
@@ -398,6 +400,7 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
                 attention: false,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
+                mode: None,
             },
             cx,
         );
@@ -682,6 +685,7 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
                 attention: false,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
+                mode: None,
             },
             cx,
         );

@@ -111,9 +111,13 @@ fn e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
         sh.push_env("DOCKER_CONTEXT", CONTEXT),
     ];
     // `--no-capture` runs one test at a time: the echo measurement has the worker to itself.
+    let live = crate::e2e::LIVE;
     let tested = step(
         "slopty-e2e linux",
-        &cmd!(sh, "cargo nextest run -p slopty-e2e --test linux --run-ignored only --no-capture"),
+        &cmd!(
+            sh,
+            "cargo nextest run -p slopty-e2e --test linux --features {live} --run-ignored only --no-capture"
+        ),
     );
     let logs = stack.logs.clone();
     drop(stack);

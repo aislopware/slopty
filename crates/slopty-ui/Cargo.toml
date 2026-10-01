@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# A file tile's picture or PDF, shared with its link without a copy (`file::decode`).
+bytes.workspace = true
 core-foundation.workspace = true
 core-video.workspace = true
 gpui.workspace = true
@@ -21,6 +23,35 @@ gpui-kit.workspace = true
 # The formats the model reads, for fitting a pasted picture (`terminal::attachment`); GPUI
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
+# A file tile's picture or PDF, decoded or drawn at the size the tile shows it (`file::decode`).
+objc2-core-foundation = { workspace = true, features = [ "CFData" ] }
+objc2-core-graphics = { workspace = true, features = [
+    "CGAffineTransform",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGPDFDocument",
+    "CGPDFPage",
+] }
+objc2-image-io = { workspace = true, features = [
+    "CGImageProperties",
+    "CGImageSource",
+    "objc2-core-graphics",
+] }
+# A PDF's text, selected and copied from a file tile (`file::pdf_text`).
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = [
+    "NSArray",
+    "NSData",
+    "NSGeometry",
+    "NSString",
+] }
+objc2-pdf-kit = { workspace = true, features = [
+    "PDFDocument",
+    "PDFPage",
+    "PDFSelection",
+    "objc2-core-foundation",
+] }
 # What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
 parking_lot.workspace = true
 rustc-hash.workspace = true

@@ -42,6 +42,7 @@ mod orchestrate {
                 status,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
+                mode: None,
             })
         }
 
@@ -71,6 +72,7 @@ mod orchestrate {
                 status,
                 source,
                 since_ms: WallMs::ZERO,
+                mode: None,
             })
         }
 
@@ -91,6 +93,7 @@ mod orchestrate {
             attention: true,
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         })
     }
 

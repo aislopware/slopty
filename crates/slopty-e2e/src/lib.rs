@@ -79,6 +79,13 @@ pub fn granted(grants: &str, grant: &str) -> bool {
 /// reads 0% on every machine. A cancel still stops a held upload.
 pub const HOLD_UPLOADS_ENV: &str = "SLOPTY_HOLD_UPLOADS";
 
+/// The round trip the app under test shows in its readouts, whatever its link measures.
+///
+/// A local link's, under the figure a readout names (the navigator, the status bar, the
+/// palette), so a golden never depends on how busy the machine was. The dump's `rtt_us` stays
+/// the live one.
+pub const SHOWN_RTT: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// A pointer button, as the driver names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]

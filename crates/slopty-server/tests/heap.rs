@@ -107,6 +107,7 @@ mod tests {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         }
     }
 
@@ -120,6 +121,7 @@ mod tests {
             attention: false,
             source: AgentSource::Hook,
             since_ms: WallMs::now(),
+            mode: None,
         })
     }
 

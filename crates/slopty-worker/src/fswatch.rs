@@ -16,6 +16,14 @@
 //! syscalls of one save are one report. A file whose directory is on a volume that cannot tell
 //! this machine of another one's writes (SMB, NFS, FUSE), or that could not be watched at all,
 //! is also looked at every [`Limits::poll`].
+//!
+//! A folder tile's directory is followed the same way ([`follow_folders`]): a watch on the
+//! directory itself hears an entry added, removed or renamed, and the one on its parent hears
+//! the directory go and come back. It is reported when its own stamp moved, which such a change
+//! always does. A write inside one of its files moves no stamp of the folder's, but changes the
+//! size its listing shows: inotify's directory watch hears it, and on macOS an `FSEvents` stream
+//! over the followed folders does (`kqueue::Queue::follow_contents`), since a kqueue watch on a
+//! directory does not. Such a folder is reported after [`CONTENT_HOLD`], at that rate at most.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
@@ -53,6 +61,11 @@ pub const QUIET: Duration = Duration::from_millis(2);
 /// Also the shortest time between two reports of one file, and the longest a file just emptied
 /// waits for the writes that usually follow a truncate.
 pub const HOLD: Duration = Duration::from_millis(50);
+/// How long a folder whose entries only changed inside waits to be listed again.
+///
+/// Also the shortest time between two such listings: sizes can lag this much, where a listing
+/// of 2 000 entries every [`HOLD`] while a log grows would be traffic for nothing.
+pub const CONTENT_HOLD: Duration = Duration::from_millis(250);
 
 /// What one client's following may cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,12 +132,32 @@ impl Changes {
 /// until `lists`' sender or the [`Changes`] is dropped.
 #[must_use]
 pub fn follow(lists: watch::Receiver<Vec<String>>, limits: Limits) -> Changes {
+    spawn(lists, limits, Kind::File)
+}
+
+/// Follow the directories `lists` names, as [`follow`] does files: a directory is reported when
+/// an entry in it is added, removed or renamed, and when it goes or comes back.
+#[must_use]
+pub fn follow_folders(lists: watch::Receiver<Vec<String>>, limits: Limits) -> Changes {
+    spawn(lists, limits, Kind::Folder)
+}
+
+fn spawn(lists: watch::Receiver<Vec<String>>, limits: Limits, kind: Kind) -> Changes {
     let ready = Arc::new(Mutex::new(BTreeSet::new()));
     let (ring, bell) = mpsc::channel(1);
     let (told, status) = watch::channel(Status::default());
     let task = Follower { lists, ready: Arc::clone(&ready), ring, told };
-    tokio::spawn(tracing::Instrument::in_current_span(task.run(limits)));
+    tokio::spawn(tracing::Instrument::in_current_span(task.run(limits, kind)));
     Changes { ready, bell, status }
+}
+
+/// What a follower's paths are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Files: a change of content moves one.
+    File,
+    /// Directories: a change of entries moves one.
+    Folder,
 }
 
 /// The follower task's ends.
@@ -136,8 +169,8 @@ struct Follower {
 }
 
 impl Follower {
-    async fn run(mut self, limits: Limits) {
-        let mut state = State::new(limits);
+    async fn run(mut self, limits: Limits, kind: Kind) {
+        let mut state = State::new(limits, kind);
         let reactor = match state
             .queue
             .as_ref()
@@ -258,8 +291,9 @@ async fn sleep_until(due: Option<Instant>) {
 #[derive(Debug)]
 enum Hit {
     /// Something in a watched directory changed: the entry named, or any. `done` when the
-    /// change is whole (a writer closed the entry, or it was renamed in).
-    Dir { id: WatchId, name: Option<OsString>, done: bool },
+    /// change is whole (a writer closed the entry, or it was renamed in); `content` when it was
+    /// inside the entry, not which entries there are.
+    Dir { id: WatchId, name: Option<OsString>, done: bool, content: bool },
     /// A watched directory is gone or moved; what it anchored must be found again.
     DirGone(WatchId),
     /// A watched file changed.
@@ -292,8 +326,9 @@ struct Followed {
     path: PathBuf,
     /// The file as last seen: at the list that brought it, or at its last report.
     seen: Option<Stamp>,
-    /// The directories watched for it, with the entry in each that leads to it.
-    anchors: Vec<(WatchId, OsString)>,
+    /// The directories watched for it, with the entry in each that leads to it; `None` for a
+    /// followed directory's own watch, where any entry is a change.
+    anchors: Vec<(WatchId, Option<OsString>)>,
     /// The file's own watch, since a write to a file does not touch its directory here.
     #[cfg(target_vendor = "apple")]
     node: Option<Node>,
@@ -314,10 +349,18 @@ struct Touch {
     done: bool,
     /// A [`HOLD`] after its last report: a file that keeps changing is sent at that rate.
     not_before: Option<Instant>,
+    /// A followed folder whose entries only changed inside: it is due after [`CONTENT_HOLD`],
+    /// and reported though its own stamp did not move.
+    content: bool,
 }
 
 impl Touch {
     fn due(self) -> Instant {
+        if self.content {
+            let paced = self.not_before.map(|at| later(at, CONTENT_HOLD.saturating_sub(HOLD)));
+            let due = later(self.first, CONTENT_HOLD);
+            return paced.map_or(due, |at| due.max(at));
+        }
         let hold = later(self.first, HOLD);
         let due = if self.held {
             hold
@@ -346,10 +389,11 @@ struct Stamp {
     ctime: (i64, i64),
 }
 
-/// The file at `path`, following symlinks; `None` when there is none or it is a directory.
-fn stamp(path: &Path) -> Option<Stamp> {
+/// What is at `path` as `kind` follows it, symlinks followed: a file for a file, a directory for
+/// a folder; `None` when there is no such thing.
+fn stamp(path: &Path, kind: Kind) -> Option<Stamp> {
     let meta = std::fs::metadata(path).ok()?;
-    if meta.is_dir() {
+    if meta.is_dir() != (kind == Kind::Folder) {
         return None;
     }
     Some(Stamp {
@@ -366,6 +410,7 @@ fn stamp(path: &Path) -> Option<Stamp> {
 struct State {
     queue: Option<Queue>,
     limits: Limits,
+    kind: Kind,
     files: HashMap<String, Followed>,
     dirs: HashMap<WatchId, Dir>,
     by_key: HashMap<(u64, u64), WatchId>,
@@ -373,7 +418,7 @@ struct State {
 }
 
 impl State {
-    fn new(limits: Limits) -> Self {
+    fn new(limits: Limits, kind: Kind) -> Self {
         let queue = match Queue::open() {
             Ok(queue) => Some(queue),
             Err(e) => {
@@ -384,6 +429,7 @@ impl State {
         Self {
             queue,
             limits,
+            kind,
             files: HashMap::new(),
             dirs: HashMap::new(),
             by_key: HashMap::new(),
@@ -432,10 +478,11 @@ impl State {
             // Watched before it is stamped, so a write between the two is an event.
             self.resolve(&key);
             if let Some(file) = self.files.get_mut(&key) {
-                file.seen = stamp(&file.path);
+                file.seen = stamp(&file.path, self.kind);
             }
         }
         self.release();
+        self.follow_contents();
     }
 
     /// Read what the kernel has said, and mark the paths it touches.
@@ -445,18 +492,29 @@ impl State {
         queue.drain(&mut hits);
         for hit in hits {
             match hit {
-                Hit::Dir { id, name, done } => {
-                    let touched: Vec<String> = self
-                        .files
-                        .iter()
-                        .filter(|(_, f)| {
-                            f.anchors.iter().any(|(at, child)| {
-                                *at == id && name.as_deref().is_none_or(|n| n == child.as_os_str())
-                            })
-                        })
-                        .map(|(k, _)| k.clone())
-                        .collect();
+                Hit::Dir { id, name, done, content } => {
+                    let mut inside = Vec::new();
+                    let mut touched = Vec::new();
+                    for (key, file) in &self.files {
+                        for (at, child) in &file.anchors {
+                            if *at != id {
+                                continue;
+                            }
+                            match child {
+                                // The followed folder's own watch.
+                                None if content => inside.push(key.clone()),
+                                None => touched.push(key.clone()),
+                                Some(child) => {
+                                    if name.as_deref().is_none_or(|n| n == child.as_os_str()) {
+                                        touched.push(key.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    inside.retain(|key| !touched.contains(key));
                     self.touch(touched, now, done);
+                    self.touch_content(inside, now);
                 }
                 Hit::DirGone(id) => {
                     self.drop_dir(id);
@@ -498,8 +556,33 @@ impl State {
                     t.last = now;
                     t.held = false;
                     t.done = done;
+                    t.content = false;
                 })
-                .or_insert(Touch { first: now, last: now, held: false, done, not_before });
+                .or_insert(Touch {
+                    first: now,
+                    last: now,
+                    held: false,
+                    done,
+                    not_before,
+                    content: false,
+                });
+        }
+    }
+
+    /// Mark followed folders whose entries changed inside; one already due for a change of its
+    /// entries stays due as that.
+    fn touch_content(&mut self, keys: Vec<String>, now: Instant) {
+        for key in keys {
+            let not_before =
+                self.files.get(&key).and_then(|f| f.reported).map(|at| later(at, HOLD));
+            self.touched.entry(key).or_insert(Touch {
+                first: now,
+                last: now,
+                held: false,
+                done: false,
+                not_before,
+                content: true,
+            });
         }
     }
 
@@ -533,8 +616,9 @@ impl State {
         for (key, touch) in due {
             self.resolve(&key);
             let Some(file) = self.files.get_mut(&key) else { continue };
-            let now_stamp = stamp(&file.path);
-            if now_stamp == file.seen {
+            let now_stamp = stamp(&file.path, self.kind);
+            let inside = touch.is_some_and(|t| t.content);
+            if now_stamp == file.seen && !inside {
                 continue;
             }
             let emptied =
@@ -549,7 +633,26 @@ impl State {
             moved.push(key);
         }
         self.release();
+        self.follow_contents();
         moved
+    }
+
+    /// Have the backend follow the contents of each followed folder that has its own watch.
+    fn follow_contents(&mut self) {
+        if self.kind != Kind::Folder {
+            return;
+        }
+        let folders: Vec<(PathBuf, WatchId)> = self
+            .files
+            .values()
+            .filter_map(|f| {
+                let own = f.anchors.iter().find(|(_, child)| child.is_none())?;
+                Some((f.path.clone(), own.0))
+            })
+            .collect();
+        if let Some(queue) = self.queue.as_mut() {
+            queue.follow_contents(folders);
+        }
     }
 
     /// Watch what `key`'s path needs now, dropping what it no longer does.
@@ -558,7 +661,9 @@ impl State {
         let path = file.path.clone();
         let mut polled = self.queue.is_none();
         let mut anchors = Vec::new();
-        for (dir, child) in anchor_dirs(&path) {
+        let own = (self.kind == Kind::Folder && path.is_dir()).then(|| (path.clone(), None));
+        let around = anchor_dirs(&path).into_iter().map(|(dir, child)| (dir, Some(child)));
+        for (dir, child) in own.into_iter().chain(around) {
             match self.dir(&dir) {
                 Ok((id, remote)) => {
                     polled |= remote;
@@ -821,7 +926,14 @@ mod tests {
     #[test]
     fn a_touch_is_due_after_quiet_at_the_hold_or_when_whole() {
         let t0 = Instant::now();
-        let quiet = Touch { first: t0, last: t0, held: false, done: false, not_before: None };
+        let quiet = Touch {
+            first: t0,
+            last: t0,
+            held: false,
+            done: false,
+            not_before: None,
+            content: false,
+        };
         assert_eq!(quiet.due(), later(t0, QUIET));
         let steady = Touch { last: later(t0, HOLD), ..quiet };
         assert_eq!(steady.due(), later(t0, HOLD));
@@ -831,5 +943,9 @@ mod tests {
         assert_eq!(done.due(), t0);
         let soon_after_a_report = Touch { not_before: Some(later(t0, HOLD)), ..done };
         assert_eq!(soon_after_a_report.due(), later(t0, HOLD));
+        let inside = Touch { content: true, ..quiet };
+        assert_eq!(inside.due(), later(t0, CONTENT_HOLD), "a size waits");
+        let inside_again = Touch { not_before: Some(later(t0, HOLD * 2)), ..inside };
+        assert_eq!(inside_again.due(), later(t0, HOLD + CONTENT_HOLD), "paced from the report");
     }
 }

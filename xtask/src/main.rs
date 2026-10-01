@@ -28,6 +28,7 @@ mod runner;
 mod setup;
 mod sign;
 mod soak;
+mod symbolicate;
 mod tailnet;
 mod tools;
 mod upstream;
@@ -200,6 +201,12 @@ enum Cmd {
     Bundle(bundle::BundleOpts),
     /// macOS: codesign the dev daemons so their TCC grants survive the next `cargo build`.
     Sign(sign::SignOpts),
+    /// Resolve a crash report from a shipped build: finds the dSYM with the report's build UUID
+    /// (`target/dist`, `target/release`, `target/bundle`, or `--dsyms`) and gives every frame
+    /// its file, line and inlined frames.
+    Symbolicate(symbolicate::SymbolicateOpts),
+    /// File each binary's dSYM under its UUID, as a release publishes them.
+    Dsyms(symbolicate::DsymsOpts),
     /// Build `assets/icon.svg` into the Icon Composer document, compile it, and render the
     /// system's pictures of it (every size, every appearance) under a directory, for a look.
     Icon {
@@ -313,6 +320,8 @@ fn main() -> Result<()> {
         Cmd::Run { cmd } => run::run(&sh, &cmd),
         Cmd::Bundle(opts) => bundle::run(&sh, &opts).map(|_app| ()),
         Cmd::Sign(opts) => sign::run(&sh, &opts),
+        Cmd::Symbolicate(opts) => symbolicate::run(&sh, &opts),
+        Cmd::Dsyms(opts) => symbolicate::dsyms(&sh, &opts),
         Cmd::Icon { out } => icon::run(&sh, &out),
         Cmd::Ios { cmd } => ios::run(&sh, &cmd),
         Cmd::Linux { cmd } => linux::run(&sh, cmd.unwrap_or(linux::LinuxCmd::Build)),

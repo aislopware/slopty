@@ -66,6 +66,7 @@ impl WorkspaceView {
         w.awaiting_snapshot = true;
         w.titles_requested = false;
         w.watched.clear();
+        w.watched_folders.clear();
         w.pending_opens.clear();
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
@@ -222,6 +223,19 @@ impl WorkspaceView {
         self.layout_touched(cx);
         self.after_focus_moved(cx);
         cx.notify();
+    }
+
+    /// Show `rtt` in the readouts for every worker with a round trip, in place of its link's
+    /// (`None` shows the link's again). The e2e harness pins it, so what a golden shows never
+    /// depends on how busy the machine was; the predictors and the dump keep the live figure.
+    pub fn pin_rtt_readout(&mut self, rtt: Option<std::time::Duration>, cx: &mut Context<Self>) {
+        self.pinned_rtt = rtt;
+        cx.notify();
+    }
+
+    /// The round trip the readouts show for `w`: its link's, or the pinned one once it has one.
+    pub(super) fn shown_rtt(&self, w: &Worker) -> Option<std::time::Duration> {
+        w.rtt.map(|live| self.pinned_rtt.unwrap_or(live))
     }
 
     /// Link RTT of `key`, fanned out to its terminals' predictors and its windows' overlays.

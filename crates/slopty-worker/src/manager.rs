@@ -113,6 +113,8 @@ struct Inner {
     agents: Arc<dyn Agents>,
     /// Each repository's changes against `HEAD`, which every summary in it carries.
     changes: crate::changes::Changes,
+    /// Which repository each one is on any machine, which every summary in it carries.
+    repo_ids: crate::repo::Identities,
     /// Since when each exited session has had no viewer.
     unwatched: Mutex<Unwatched>,
     /// The sessions kept on disk, to reopen after their shell is lost.
@@ -189,6 +191,7 @@ impl Worker {
         let (port_hints, port_hints_rx) = mpsc::unbounded_channel();
         let (moves, moves_rx) = mpsc::unbounded_channel();
         let changes = crate::changes::Changes::start(crate::changes::git_counter(), moves.clone());
+        let repo_ids = crate::repo::Identities::new(crate::repo::git_identify(), moves.clone());
         let worker = Self {
             inner: Arc::new(Inner {
                 ptyd: tokio::sync::Mutex::new(client),
@@ -203,6 +206,7 @@ impl Worker {
                 moves,
                 agents,
                 changes,
+                repo_ids,
                 unwatched: Mutex::new(Unwatched::default()),
                 keeper,
                 lost: Mutex::new(recipes),
@@ -574,6 +578,7 @@ impl Worker {
                 .unwrap_or_else(|| command.first().cloned().unwrap_or_else(|| "shell".to_owned())),
             cwd: snap.cwd,
             changes: snap.repo.as_deref().and_then(|repo| self.inner.changes.get(repo)),
+            repo_id: snap.repo.as_deref().and_then(|repo| self.inner.repo_ids.get(id, repo)),
             repo: snap.repo,
             branch: snap.branch,
             started_ms,
@@ -639,6 +644,7 @@ impl Worker {
     pub async fn close(&self, id: SessionId) -> Result<(), WorkerError> {
         let entry = self.inner.sessions.lock().remove(&id).ok_or(WorkerError::NoSuchSession)?;
         self.inner.changes.forget(id);
+        self.inner.repo_ids.forget(id);
         self.inner.keeper.forget(id);
         entry.handle.close();
         match self.inner.ptyd.lock().await.close(id).await {

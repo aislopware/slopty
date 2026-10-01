@@ -22,11 +22,55 @@ harness = [
     "dep:slopty-shape",
     "dep:slopty-testkit",
 ]
+# The live test targets below: `cargo xtask e2e` (and `vm e2e`, `linux e2e`) builds them, and
+# host clippy lints them. Every test in them is `#[ignore]`d, so `cargo gate` would build and
+# link them only to list nothing; without the feature it builds none of them.
+live = [ "harness" ]
 
 # It runs a tokio client, which the `harness` feature brings.
 [[bin]]
 name = "slopty-glass"
 required-features = [ "harness" ]
+
+[[test]]
+name = "app"
+required-features = [ "live" ]
+
+[[test]]
+name = "ios"
+required-features = [ "live" ]
+
+[[test]]
+name = "ios_uikit"
+required-features = [ "live" ]
+
+[[test]]
+name = "linux"
+required-features = [ "live" ]
+
+[[test]]
+name = "pair"
+required-features = [ "live" ]
+
+[[test]]
+name = "server"
+required-features = [ "live" ]
+
+[[test]]
+name = "smooth"
+required-features = [ "live" ]
+
+[[test]]
+name = "through_server"
+required-features = [ "live" ]
+
+[[test]]
+name = "vm"
+required-features = [ "live" ]
+
+[[test]]
+name = "workers"
+required-features = [ "live" ]
 
 [dependencies]
 serde.workspace = true

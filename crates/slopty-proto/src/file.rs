@@ -1,12 +1,15 @@
 //! A file read for a file tile: the worker reads it whole and says what it found; and how the
 //! tile's save ended.
 //!
-//! A text that fits [`INLINE_FILE_BYTES`] rides the control stream in [`FileRead::Text`]. A
-//! larger one is announced there as [`FileRead::Streamed`] and its bytes follow on a bulk stream
-//! ([`crate::transfer::Purpose::FileText`]) named by the same transfer, so the control stream
-//! never carries more than a clipboard's worth of text. A save goes back the same two ways:
+//! A text is edited ([`FileRead::Text`]); a picture or a PDF is shown ([`FileRead::Media`]), its
+//! bytes as the file has them, so the client's platform decodes it at the size it draws. Either
+//! one that fits [`INLINE_FILE_BYTES`] rides the control stream. A larger one is announced there
+//! as [`FileRead::Streamed`] and its bytes follow on a bulk stream
+//! ([`crate::transfer::Purpose::FileBody`]) named by the same transfer, so the control stream
+//! never carries more than a clipboard's worth. A save goes back the same two ways:
 //! [`crate::ClientMsg::WriteFile`] inline, or a bulk stream ([`crate::transfer::Purpose::Save`]).
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use slopty_core::{WallMs, XferId};
 
@@ -14,7 +17,14 @@ use slopty_core::{WallMs, XferId};
 /// save of more is refused.
 pub const FILE_BYTES: u64 = 16 << 20;
 
-/// A text at most this big goes inline on the control stream, where it queues ahead of input
+/// Bytes a file tile shows at most as a picture or a document.
+///
+/// A picture or document past this is [`FileRead::Binary`]. Above [`FILE_BYTES`], since a
+/// scanned PDF or a camera's raw picture is larger than any text worth editing, and bounded,
+/// since the client holds it whole to draw it.
+pub const MEDIA_BYTES: u64 = 128 << 20;
+
+/// A read at most this big goes inline on the control stream, where it queues ahead of input
 /// and acks; anything bigger goes on a bulk stream. The clipboard's inline limit, for the
 /// same reason.
 pub const INLINE_FILE_BYTES: usize = crate::transfer::INLINE_CLIP_BYTES;
@@ -33,7 +43,7 @@ pub enum FileRead {
         /// The file ends with a newline, which `text` leaves off; a save puts it back.
         final_newline: bool,
     },
-    /// Not text (a NUL byte, or not UTF-8).
+    /// Not text (a NUL byte, or not UTF-8), and not a picture or document the tile shows.
     Binary {
         /// Size on disk, bytes.
         size: u64,
@@ -48,19 +58,45 @@ pub enum FileRead {
         /// Size on disk, bytes.
         size: u64,
     },
-    /// A text file larger than [`INLINE_FILE_BYTES`]: `text` of [`FileRead::Text`] follows on
-    /// the bulk stream of transfer `xfer`. A client's link joins the two and hands its owner the
-    /// [`FileRead::Text`] they make; a later read of the same path supersedes one still on
-    /// its way.
+    /// A text or media file larger than [`INLINE_FILE_BYTES`]: its bytes follow on the bulk
+    /// stream of transfer `xfer`. A client's link joins the two and hands its owner the
+    /// [`FileRead::Text`] or [`FileRead::Media`] they make; a later read of the same path
+    /// supersedes one still on its way.
     Streamed {
-        /// The bulk stream the text arrives on.
+        /// The bulk stream the bytes arrive on.
         xfer: XferId,
         /// Size on disk, bytes.
         size: u64,
         /// Last modification.
         modified_ms: WallMs,
+        /// What the bytes are.
+        body: Body,
+    },
+    /// A file the tile shows rather than edits, whole: a picture or a document, known by its
+    /// first bytes, not its name.
+    Media {
+        /// What it is, as a media type: `image/png`, `image/heic`, `application/pdf`. The client
+        /// shows what its platform can draw and says so of the rest.
+        media_type: String,
+        /// The file's bytes, as on disk.
+        bytes: Bytes,
+        /// Last modification.
+        modified_ms: WallMs,
+    },
+}
+
+/// What a [`FileRead::Streamed`]'s bytes make once they are all here.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Body {
+    /// A [`FileRead::Text`]: UTF-8, without the final newline.
+    Text {
         /// The file ends with a newline, which the streamed text leaves off.
         final_newline: bool,
+    },
+    /// A [`FileRead::Media`] of this media type.
+    Media {
+        /// As the `media_type` of [`FileRead::Media`].
+        media_type: String,
     },
 }
 

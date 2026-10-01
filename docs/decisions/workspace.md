@@ -392,7 +392,8 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - **Two ways down, two ways up.** A text of 64 KiB or less (`INLINE_FILE_BYTES`, the
     clipboard's inline limit) still rides the control stream in `FileRead::Text`. A larger one
     is announced there as `FileRead::Streamed { xfer, … }`, and its text follows on a bulk
-    stream (`Purpose::FileText`) under the same transfer, at the bulk priority uploads and
+    stream (`Purpose::FileText`, since 2026-10-01 `Purpose::FileBody`, which also carries a
+    picture or a PDF) under the same transfer, at the bulk priority uploads and
     clipboard fetches use. The control stream also carries keystrokes, and a frame of a few
     megabytes on it would hold every key behind it. A save goes up the same way: over 64 KiB,
     the client's link turns `ClientMsg::WriteFile` into a bulk stream (`Purpose::Save { path,
@@ -628,7 +629,8 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     descriptor, and a launchd daemon starts at a soft limit of 256 for all of them. When
     kqueue or inotify itself fails (inotify's `max_user_instances`, or `ENOSPC` past
     `max_user_watches` for one directory), the paths it would have covered are polled.
-  - **Not done yet.** Folder tiles still refresh only on focus. Following them needs a wire
+  - **Not done yet.** Folder tiles still refresh only on focus (done 2026-10-01: "Folder
+    tiles follow their directory" below). Following them needs a wire
     message, which is the other half of gap #4. A dangling symlink's target that appears later
     is seen only on the next change in the link's own directory.
   - Numbers in MEASUREMENTS.md, 2026-09-30, "file tiles on kernel events". Tests: worker
@@ -640,3 +642,121 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `past_the_watch_limit_a_file_is_polled`, `an_unwatchable_directory_is_polled` (macOS),
     `the_follower_ends_with_its_list`, and the measurement
     `edit_to_report_against_fsevents_and_bare_kqueue`.
+
+- ✅ **A file tile shows a picture or a PDF** (2026-10-01). Opening a screenshot, a photo or a
+  PDF an agent wrote gave one line, "Binary file", so the tile could not stand in for Quick
+  Look on the remote Mac. Now the worker sniffs a file's first 32 bytes
+  (`slopty_worker::file::media`: PNG, JPEG, GIF, WebP, HEIC/HEIF/AVIF by their `ftyp` brand,
+  TIFF, JPEG XL, BMP, ICO, PSD and PDF) and sends such a file as its bytes,
+  `FileRead::Media { media_type, bytes, modified_ms }`, up to 128 MiB (`MEDIA_BYTES`; past it,
+  still "Binary"). A text past 16 MiB stays `TooLarge`, since a scanned PDF or a camera's raw
+  file is larger than any text worth editing.
+  - **One stream for either body.** Past 64 KiB the bytes follow on the bulk stream the large
+    text already used, renamed `Purpose::FileBody`, and the announcement says what they are
+    (`FileRead::Streamed { body: Body::Text { final_newline } | Body::Media { media_type } }`).
+    The link's join (`slopty_client::link::files::Join`) hands the tile a `Text` or a `Media`
+    once both halves are there, so the tile never sees a stream. A picture announced as text
+    that is not UTF-8 arrives as a missing file with the reason, as before.
+  - **The platform decodes, at the size drawn.** `slopty-ui::file::decode` asks ImageIO for a
+    thumbnail of the longest side the tile covers in device pixels
+    (`CGImageSourceCreateThumbnailAtIndex`, with the EXIF orientation applied), so a 12 MP
+    photo in a 600-point tile decodes 1 200 pixels, not 12 million. The bytes are handed to
+    ImageIO without a copy (a `CGDataProvider` whose release callback owns the `Bytes`). A
+    picture is fitted inside the tile at its own resolution at most: a Retina screenshot
+    (144 dpi) shows at its real size in points, not doubled. It decodes again only when the
+    tile grows past the decode or shrinks to less than half of it. An animated GIF, APNG,
+    WebP or HEIC sequence keeps its frames and delays (up to 256 MiB of frames), and GPUI's
+    `img` plays them unless Reduce Motion is on. The pixels are drawn into premultiplied BGRA
+    and unpremultiplied, since GPUI's `RenderImage` takes straight alpha; an opaque picture
+    skips the pass, which was 12 ms of a 12 MP decode.
+  - **A PDF is pages, drawn lazily.** CoreGraphics opens it (`CGPDFDocument`, an empty password
+    tried on an encrypted one) and each page is a row of a virtualized `list`, its height from
+    its crop box and rotation, so scrolling a 500-page manual lays out 500 rows and draws the
+    few in view. A page is drawn at the tile's width in device pixels on a background thread,
+    one at a time in order, on white, and the twelve seen last stay drawn. Text is not
+    selectable, and the keyboard does not scroll the pages yet.
+  - **Why not the `image` crate or pdfium.** ImageIO and CoreGraphics are on every Mac and
+    iPhone, decode HEIC and PDF (which no pure-Rust decoder does well), use the hardware JPEG
+    and HEIC decoders, and add no dependency but `objc2-image-io`. A static library's `#[link]`
+    records nothing in its objects, so the iOS app's link line is now rustc's own
+    `native-static-libs` list (`xtask ios`) rather than a framework list kept by hand, which is
+    what left ImageIO out of the first simulator build.
+  - Numbers in MEASUREMENTS.md, 2026-10-01, "file tile pictures and PDFs". Tests: worker
+    `each_signature_names_its_type_and_text_names_none`,
+    `a_picture_or_pdf_is_read_as_media_up_to_its_own_cap`, e2e
+    `a_picture_and_a_pdf_come_down_as_media`; client
+    `a_streamed_picture_is_media_and_a_streamed_text_must_be_text`; ui `file::decode`
+    (`a_picture_decodes_to_the_size_asked_with_its_colours`,
+    `an_animation_keeps_its_frames_and_delays`, `a_pdf_page_is_drawn_at_the_width_asked`,
+    `nothing_and_garbage_are_unreadable`,
+    `unpremultiplying_restores_straight_colour_and_leaves_opaque_and_clear_alone`),
+    `file::preview` (fitting and when a decode serves), `file::tests`
+    (`a_picture_is_decoded_at_the_size_it_is_drawn`,
+    `a_pdf_shows_its_pages_drawn_at_the_tiles_width`,
+    `a_picture_the_platform_cannot_read_says_so`); xtask
+    `the_link_line_is_the_frameworks_rustc_lists_and_other_diagnostics_are_shown`; app goldens
+    `file-picture` and `file-pdf`.
+
+- ✅ **Folder tiles follow their directory** (2026-10-01, the rest of gap audit #4). A folder
+  tile listed its directory when it opened and again only on focus, so a file an agent wrote
+  did not show until the tile was clicked. The client now sends each linked worker the set of
+  directories its folder tiles show (`ClientMsg::WatchFolders { paths }`, the whole set each
+  time it changes, from `workspace::folders::reconcile_folders`), and the worker lists one
+  again, as `WorkerMsg::Folder`, when an entry in it is made, removed or renamed.
+  - **The same follower as file tiles.** `fswatch::follow_folders` is `fswatch`'s kqueue or
+    inotify follower with a folder's own directory watched, and any event in it, not only one
+    naming a file, counting as a change. The parent is watched too, so a folder deleted and
+    made again is followed. A write inside a file of the folder changes no entry and sends
+    nothing, though on macOS it also leaves a size in the listing stale until the next
+    change. The `QUIET` and `HOLD` pacing is the file tiles', so an `npm install` into a
+    folder shown is a listing every 50 ms at most.
+  - **The tile keeps its place.** A new listing of the same directory keeps the selection on
+    the same name, or on the same row when that entry went, and does not scroll
+    (`FolderView::set_listing`).
+  - Numbers in MEASUREMENTS.md, 2026-10-01, "folder tiles on kernel events". Tests: worker
+    `tests/fswatch.rs` `each_change_of_a_folders_entries_is_one_report`,
+    `a_write_inside_a_file_of_the_folder_is_no_report`,
+    `a_folder_deleted_and_made_again_is_followed` and the measurement
+    `folder_change_to_report`; e2e `a_followed_folder_is_listed_again_when_its_entries_change`;
+    ui `a_folder_tile_follows_its_directory_and_keeps_its_place`; proto golden
+    `client_watch_folders`; app scenario
+    `a_folder_tile_browses_the_worker_and_opens_a_file_beside_it`, which now writes a file
+    and waits for its row.
+
+- ✅ **Quick open answers from an index of the worktree** (2026-10-01). Each keystroke of the
+  palette's file search walked the directory again, up to 20 000 entries and 8 levels, and
+  kept a path only when it held the query as a substring. In a large repository that was a
+  walk per key that still missed every file past the first 20 000, and `vwpane` found nothing
+  where `view/pane.rs` was meant.
+  - **One index per worktree, shared.** A query under a directory inside a git worktree
+    (the nearest directory up holding `.git`) is answered from `find::Index`: every path of
+    the worktree, sorted, from one parallel walk (`ignore`'s, honouring `.gitignore`,
+    `.ignore` and the repository's excludes; hidden entries skipped), up to 2 million paths.
+    The worker keeps the eight worktrees asked about last, dropping one idle for 15 minutes,
+    in one static every client's query shares. A query under a subfolder is the run of
+    sorted paths under it. Outside a worktree (a home directory) the bounded walk stays.
+  - **Kept fresh by events, caught up when asked.** On macOS one `FSEvents` stream covers
+    the worktree however deep, which is what `FSEvents` is for; the file tiles chose kqueue
+    for its 0.1 ms against 11 ms, but a kqueue watch is a descriptor a directory. The stream
+    only notes which directories changed; the next query lists those again, and a new
+    directory is walked whole. Its 11 ms never shows, since a person does not type that fast
+    after a save. A changed `.gitignore`, or events the system dropped, walk the tree again;
+    a build churning an ignored `target/` costs nothing, since a directory the index does not
+    hold is not noted. Elsewhere the index looks at its directories' modification times, at
+    most every 500 ms, before a query.
+  - **Fuzzy, fzf's scoring.** `nucleo-matcher` (Helix's port of fzf's algorithm) in its path
+    mode, smart case: each word typed must match, its letters in order, with bonuses at the
+    start of a name or a word in it; ties go to the shorter path. A list past 32 768 paths is
+    scored across the cores (`std::thread::scope`, one matcher a thread). A query typed on
+    from the last one (same directory, the tree unchanged, no `!^$'\` typed) scores only the
+    last one's matches, so each keystroke costs less than the one before.
+  - Numbers in MEASUREMENTS.md, 2026-10-01, "quick open's worktree index". Tests: worker
+    `find` (`the_best_match_leads_and_a_name_beats_a_scatter`,
+    `typing_on_narrows_and_a_special_character_or_a_deletion_does_not`,
+    `split_across_threads_the_ranking_is_the_one_thread_ranking`,
+    `outside_a_worktree_a_bounded_walk_answers_and_ignored_paths_are_skipped`) and
+    `find::index` (`a_worktree_is_walked_once_and_asked_from_any_folder_in_it`,
+    `the_index_follows_the_tree`, `typing_on_scores_the_last_matches_and_a_change_starts_again`,
+    `without_events_the_times_of_the_folders_say_what_changed`,
+    `the_worker_keeps_one_index_a_worktree_and_lets_the_oldest_go`) and the measurement
+    `quick_open_costs`.

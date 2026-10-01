@@ -767,8 +767,8 @@ impl SettingsForm {
             .flex_col()
             .gap(px(spacing.xxs))
             .p(px(spacing.sm))
-            .border_r_1()
-            .border_color(hsla(s.border_subtle))
+            // A tone step from the page, not a rule: the sidebar of the window's own frame.
+            .bg(hsla(s.panel))
             .child(self.search_field(cx))
             .child(
                 div()

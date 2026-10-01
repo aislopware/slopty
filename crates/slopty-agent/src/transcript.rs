@@ -92,6 +92,8 @@ pub struct Read {
     /// What the newest record says the agent is doing ([`progress`]); `None` when nothing in
     /// this read moved the turn on.
     pub progress: Option<Progress>,
+    /// The permission mode the newest prompt in this read was sent in ([`prompt_mode`]).
+    pub mode: Option<String>,
 }
 
 /// What one [`Tail::read_lines`] found.
@@ -127,7 +129,11 @@ impl Tail {
     /// When the file exists but cannot be read.
     pub fn read(&mut self, path: &Path) -> std::io::Result<Read> {
         let lines = self.read_lines(path)?;
-        Ok(Read { restarted: lines.restarted, progress: progress(&lines.text) })
+        Ok(Read {
+            restarted: lines.restarted,
+            progress: progress(&lines.text),
+            mode: prompt_mode(&lines.text),
+        })
     }
 
     /// The complete lines appended since the last read, as text; an unterminated last line waits
@@ -162,6 +168,25 @@ impl Tail {
         let complete = std::mem::replace(&mut self.partial, rest);
         Ok(Lines { restarted, text: String::from_utf8_lossy(&complete).into_owned() })
     }
+}
+
+/// The permission mode the newest main-thread prompt of `jsonl` was sent in.
+///
+/// Claude Code notes it on each prompt's record (`permissionMode`), so a mode the person
+/// switched to in the TUI shows with their next prompt.
+#[must_use]
+pub fn prompt_mode(jsonl: &str) -> Option<String> {
+    jsonl.lines().rev().find_map(|line| {
+        // Only a record that could hold it is parsed.
+        if !line.contains("\"permissionMode\"") {
+            return None;
+        }
+        let record: Value = serde_json::from_str(line).ok()?;
+        if is_subagent(&record) || record.get("type").and_then(Value::as_str) != Some("user") {
+            return None;
+        }
+        record.get("permissionMode")?.as_str().filter(|m| !m.is_empty()).map(str::to_owned)
+    })
 }
 
 /// What the newest record of `jsonl` says the agent is doing, or `None` when none of the
@@ -348,6 +373,25 @@ mod tests {
         assert_eq!(last_assistant_line_in(cut, true).as_deref(), Some("Running the tests now."));
         assert_eq!(last_assistant_line_in("garbage\n", true), None);
         assert_eq!(last_assistant_line_in("", false), None);
+    }
+
+    /// The mode is the newest main-thread prompt's; a subagent's, a record of another kind or
+    /// a line cut in half says nothing of it.
+    #[test]
+    fn the_newest_prompt_names_the_mode() {
+        let jsonl = concat!(
+            r#"{"type":"user","permissionMode":"default","message":{"role":"user","content":"a"}}"#,
+            "\n",
+            r#"{"type":"user","permissionMode":"plan","message":{"role":"user","content":"b"}}"#,
+            "\n",
+            r#"{"type":"user","isSidechain":true,"permissionMode":"bypassPermissions","message":{}}"#,
+            "\n",
+            r#"{"type":"assistant","permissionMode":"acceptEdits","message":{}}"#,
+            "\n",
+            r#"{"type":"user","permissionMode":"dontAsk","mess"#,
+        );
+        assert_eq!(prompt_mode(jsonl).as_deref(), Some("plan"));
+        assert_eq!(prompt_mode(TAIL), None, "no prompt named one");
     }
 
     #[test]

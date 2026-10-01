@@ -11628,60 +11628,6 @@ What it says:
   row cache, and only its glyph pass keys: 58 of 60 stretches move, the medians are within
   the runs' spread of each other in both text systems.
 
-## 2026-10-01 — the fill's dials after the port fix, and a reset by peer
-
-Mac Studio M1 Max, macOS 27.0, other sessions building beside it (load average 26 to 38). It
-reruns the fill that found the dial with no answer ("A finding the fill brought out", fixed in
-"A dual-stack port no IPv4 socket holds") and records a second failure it turned up
-(decisions/transport.md, "A resent Initial is not a stateless reset").
-
-The soak, terminals only (`--stream-lanes 0`, so nothing captures the screen), counts the CLI
-calls that could not reach the server at the first try. A cycle makes seven calls, so a run is
-about 11 800 calls, where the fill that found the bug made 11 870 and saw 1 to 2:
-
-| soak | cycles (warm-up + fill + load) | calls that got no answer |
-| --- | --- | --- |
-| 1 | 2 + 1 536 + 152 | **0** |
-| 2 | 2 + 1 536 + 149 | **0** |
-| 3 | 2 + 1 536 + 123 | **0** |
-| 4, with noq-proto patch 17 | 2 + 1 536 + 146 | **0** |
-
-Soak 3 failed its own check on the worker's thread count (18 before the load, 19 after),
-which is not the transport's. None of the four leaked, and each server's slope was 0 KiB/min.
-
-The in-process rig (`fresh_endpoints_dial_a_loopback_server`, 100 000 fresh endpoints dialing
-a server that pushes to every link every 2 ms) got no answer 0 times. It failed one dial in
-100 000 another way, with `stream: reset by peer` at the client's first stream, while two
-soaks ran beside it. Three rigs at once with 32 dialers each load the machine enough to show
-it. "Before" ran with a tracing probe that kept each thread's last 40 noq events and printed
-them at every stateless reset (a one-off, not kept, which slowed the dials); "after" ran once
-with the same probe and once without:
-
-| noq-proto | dials, 3 × 200 000 at once | reset by peer | no answer | run |
-| --- | --- | --- | --- | --- |
-| before patch 17, probe | 600 000 | **7** (2, 2, 3) | 0 | 522 s |
-| after, probe | 600 000 | **0** | 0 | 465 s |
-| after, no probe | 600 000 | **0** | 0 | 424 s |
-
-The server sent no stateless reset to any of the seven client ports. Each failing client had
-read the server's first flight (a 182-byte Initial, its Handshake packet and a 973-byte 1-RTT
-packet), then 10 µs later a 173-byte Initial that the server had resent unpadded, and took it
-for a reset. The stateless resets the probe saw otherwise, 41 to 57 a run before and after
-alike, all went to links that had closed.
-
-On the simulated network (`crates/slopty-net/tests/sim.rs`), a dial over a path that delivers
-every datagram twice failed with the same `stream: reset by peer` for 25 of seeds 1 to 300
-before the patch (seed 7 the first) and for 0 of seeds 1 to 1 000 after it. That is one seed in
-12, the share of shuffles that write the reset token last among the server's transport
-parameters. Each doubled dial took 10 ms of simulated time.
-
-```sh
-cargo xtask soak --stream-lanes 0 --out target/deep/soak/<name>   # summary.json: calls_unreached
-for i in 1 2 3; do ROUNDS=200000 TASKS=32 cargo test -p slopty-net --release --test dual_stack_port -- --ignored --nocapture & done; wait
-cargo test -p slopty-net --test sim a_path_that_delivers_every_datagram_twice_still_connects
-cargo test --manifest-path vendor/noq-proto/Cargo.toml --target-dir target/noq-proto --lib packet_crypto
-```
-
 ## 2026-10-01 — debug info for shipped builds: `limited` against `line-tables-only`
 
 Mac Studio M1 Max (10 cores), macOS 27.0, rustc 1.98.1. The `dist` profile (fat LTO, one codegen
@@ -11751,6 +11697,352 @@ What it says:
 - **Build time barely moves.** The clean builds' CPU time is within the noise of a loaded
   machine (the app's came out lower with `limited`). A rebuild after one file, which is fat
   LTO's link of the whole binary, costs 3 % more CPU in the app and 7 % in the worker.
-- Decided: `debug = "limited"` for `dist` (`docs/decisions/crashes.md`, "Shipped builds carry
-  their dSYMs, with limited debug info").
+- Decided: `debug = "limited"` for `dist` (`docs/decisions/crashes.md`, "Shipped builds have
+  limited debug info").
 
+## 2026-10-01 — dSYMs apart from the bundle
+
+Mac Studio M1 Max, macOS 27.0, rustc 1.98.1, the `dist` profile with `debug = "limited"`. One
+`cargo xtask bundle`, whose five binaries are signed into `Slopty.app` and whose dSYMs land beside
+it in `dSYMs/<UUID>/<bin>.dSYM`. The "in the bundle" column puts the same five dSYMs into
+`Contents/MacOS`, as the bundle shipped them before.
+
+```sh
+cargo xtask bundle --out target/bundle-lean
+ditto -c -k --keepParent Slopty.app app.zip          # the download
+tar -C dSYMs -czf dsyms.tar.gz .                      # the release artifact
+du -skL Slopty.app dSYMs
+```
+
+| | lean bundle | dSYMs, their own artifact | bundle with the dSYMs in it |
+|---|---|---|---|
+| on disk | 83 MiB | 595 MiB | 678 MiB |
+| compressed (zip, or tar + gzip for the dSYMs) | 36.6 MB | 141.0 MB | 177.7 MB |
+
+Per binary, gzip of the binary against tar + gzip of its dSYM: `slopty-app` 17.3 MB and 62.4 MB,
+`slopty-worker` 6.4 and 29.0, `slopty-server` 4.9 and 22.4, `slopty` 4.9 and 22.0, `slopty-ptyd`
+1.2 and 5.4.
+
+A field crash, end to end. The lean bundle's app and worker are crashed in place, with no dSYM
+anywhere near them (`SLOPTY_CRASH_TEST=panic` for the app, `segv` for the worker, then one more
+worker run to resolve its record), and the reports are resolved against the artifact alone:
+
+```sh
+M=target/bundle-lean/Slopty.app/Contents/MacOS; export SLOPTY_DATA_DIR=/tmp/fdata2
+SLOPTY_CRASH_TEST=panic $M/slopty-app; SLOPTY_CRASH_TEST=segv $M/slopty-worker
+$M/slopty-worker --port 0 --ctl-socket /tmp/fdata2/w.sock --ptyd-socket /tmp/fdata2/p.sock
+cargo xtask symbolicate /tmp/fdata2/crashes/<report>.json --dsyms dsyms.tar.gz
+```
+
+| frame of the worker's `SIGSEGV` | in the field | after `symbolicate` |
+|---|---|---|
+| 0 | `slopty_crash::probe::segv` | `slopty_crash::probe::segv` (probe.rs:96) |
+| 1 | `slopty_crash::probe::fire` | `slopty_crash::probe::fire` (probe.rs:77) |
+| 2 (inlined) | — | `slopty_crash::install` (lib.rs:135) |
+| 3 | `slopty_worker::main` | `slopty_worker::main` (main.rs:384) |
+| 4 (inlined) | — | `<fn() -> … as core::ops::function::FnOnce<()>>::call_once` (function.rs:250) |
+| 5 | `std::sys::backtrace::__rust_begin_short_backtrace::<…>` | the same (backtrace.rs:166) |
+
+The app's panic resolves the same way, `slopty_crash::probe::panic` to probe.rs:85 included (the
+`.llvm.` gap of a debug map does not reach a dSYM). Each report kept its image, offsets and the
+build's UUID; `symbolicate` took 1.8–2.0 s including unpacking the 141 MB archive.
+
+What it says:
+
+- **In the bundle the dSYMs were 80 % of the download**: 177.7 MB against 36.6 MB lean, 4.9 times
+  the size, for every user, to serve the few reports that come back.
+- **Apart, nothing is lost.** The field report names every outermost frame from the symbol table,
+  and the dSYM of its UUID brings back the files, the lines and the inlined frames exactly as a
+  dSYM beside the binary did.
+- Decided: the dSYMs ship apart (`docs/decisions/crashes.md`, "The dSYMs ship apart from the
+  app").
+
+## 2026-10-01 — the tests lane on a hosted runner, minute by minute
+
+CI run 36778678106 on 369d9e83, `gate (tests)` on `macos-26` (3 cores, 7 GB): 36:40 from
+21:21:18 to 21:57:58. The phases come from the job log's timestamps and each `quiet_step`'s own
+time, the compile cache's share from `sccache --show-stats` at the end of the job, and the tests
+from the `junit.xml` artifact.
+
+```sh
+gh api repos/{owner}/{repo}/actions/jobs/110103610895/logs    # phases, sccache stats
+gh run download 36778678106 -n junit                           # per-test times
+```
+
+| phase | time |
+|---|---|
+| setup: checkout, toolchain, rust-cache restore, `brew install zig` (52 s), `cargo xtask setup` (69 s, most of it compiling xtask) | 2:56 |
+| `nextest build` | 26:16 |
+| `spawned binaries` | 3:11 |
+| `nextest` (3 098 tests, 215 s) beside the doctests (42 s) | 3:44 |
+| artifact upload, sccache stats, cache save | 0:29 |
+
+The build, as the compile cache saw it:
+
+| sccache | count |
+|---|---|
+| compile requests | 958 |
+| hits (Rust) | 641, 0.18 s each to read |
+| misses (Rust) | 19, 53.1 s each to compile |
+| not cacheable: `crate-type` (test harnesses, binaries, proc macros, build scripts) | 266 |
+| not cacheable: other (`-` probes, missing input) | 20 |
+
+What it says:
+
+- **Not cache misses.** 97 % of what sccache can cache it served; every dependency was a hit.
+  The 19 misses are the workspace libraries downstream of the commit's changes, 17 core-minutes
+  that any build of that commit pays.
+- **The build is the units sccache cannot cache.** A runner has 79 core-minutes in 26:16; after
+  the misses and the hits, some 60 are left, and they go to what sccache never stores: 125 test
+  harnesses (every library's unit tests and each `tests/*.rs`, each compiled and linked into its
+  own binary), 13 binaries, 42 proc macros and 67 build scripts, one of which builds libghostty
+  with zig. Built the same way here (`CARGO_INCREMENTAL=0 cargo test --workspace --no-run
+  --timings`), those take 2 144 s (test harnesses), 416 (proc macros), 286 (binaries) and 300
+  (build scripts, compile and run) of unit time: the test harnesses are two thirds of it. This
+  Mac was under heavy load from other sessions, so these are proportions, not times. The next
+  run's `timings` artifact (`cargo-timing.html` from the gate's `--timings`) gives the
+  runner's own per-unit times.
+- **The spawned binaries built a dozen workspace crates twice.** `cargo build --bins -p …`
+  resolves features without the dev-dependencies the test build saw (`slopty-tailnet/fake`,
+  `slopty-codec/experiments`, `slopty-client/headless`), so `slopty-tailnet` and everything above
+  it compiled a second time, differently: 191 s here after `workspace-hack` joined the list, 354 s
+  before. `cargo build --workspace --tests --bin …` resolves them as the test build did. Here,
+  after `cargo nextest run --workspace --no-run --cargo-message-format json`, it takes 0.8 s,
+  and its `--message-format json` lists 826 artifacts, all fresh: 825 the test build's own
+  (same package, target, features and files, the four daemons among them), and the stand-in
+  `claude`, which no test build links.
+- **The run is the tests.** Their times add up to 581 s over three threads, 194 s of the 215;
+  the longest is the icon test (68 s, started first by its priority).
+
+Three follow-ups, measured on this Mac (M1 Max, load average 40–90 from other sessions, so CPU
+time, user + sys of cargo and everything under it, is the comparable number):
+
+- **`slopty-e2e`'s live targets leave the test build.** Every test in its ten integration
+  targets (`app`, `ios`, `ios_uikit`, `linux`, `pair`, `server`, `smooth`, `through_server`,
+  `vm`, `workers`) is `#[ignore]`d, and CI ran none of them; they now need the crate's `live`
+  feature, which `cargo xtask e2e`, `vm e2e`, `linux e2e` and host clippy pass. A rebuild of
+  `slopty-e2e`'s tests after its library changed, as every commit below it causes, five rounds
+  each:
+
+  | `cargo nextest run -p slopty-e2e --no-run` | units | built | CPU | wall |
+  |---|---|---|---|---|
+  | with `--features slopty-e2e/live` (as before) | 250 | 16 | 96.5–97.1 + 4.6–4.7 s | 20.5–43.1 s |
+  | without (the gate now) | 238 | 4 | 8.5–8.6 + 1.0 s | 6.6–13.4 s |
+
+  Twelve units fewer (the ten test binaries and the two helper binaries only they needed) and
+  about 92 s of CPU per build: some half a minute of the runner's three cores.
+  `cargo nextest list -p slopty-e2e` now lists the library and the two helpers' harnesses, and
+  with `live` all thirteen; `cargo xtask e2e app -E 'test(the_settings_form_edits_the_file)'`
+  built the `app` target with it and passed (3.96 s); clippy with `--all-targets --features
+  slopty-e2e/live` checks all thirteen targets and reports nothing in `slopty-e2e`.
+
+- **One integration binary per crate would save little.** Touching every `tests/*.rs` of a crate
+  and rebuilding its test binaries, then touching only the smallest (two rounds each; its cost
+  is what one more binary adds: compile, the dependencies' generics again, and the link):
+
+  | crate | binaries | all of them, CPU | the smallest alone, CPU |
+  |---|---|---|---|
+  | `slopty-net` | 8 | 48.8–71.3 s | 4.4–4.5 s (`wrong_build`) |
+  | `slopty-worker` | 7 | 32.3–32.9 s | 1.5 s (`load`) |
+  | `slopty-proto` | 5 | 29.6–31.9 s | 5.8–6.0 s (`codec_props`) |
+  | `slopty-client` | 5 | 21.7–21.8 s | 3.6 s (`wrong_build`) |
+  | `slopty-cli` | 5 | 30.4–30.8 s | 1.4–1.5 s (`crash`) |
+
+  Merging a crate's N binaries into one saves about N − 1 of those: 1.5–6 s each. The workspace
+  has 74 integration binaries in 23 crates outside `slopty-e2e`, so 51 fewer links and 1.5–5
+  CPU-minutes, a minute or so of a runner's build. The larger share of the test harnesses is
+  each library compiled a second time for its unit tests, which merging does not touch.
+
+- **The Actions cache.** `gh api repos/{owner}/{repo}/actions/caches` on 2026-10-01: 10.54 GB in
+  4 379 entries, over the 10 GB quota. sccache 2.88 GB in 4 351 objects; rust-cache 7.66 GB in 28
+  entries, 270 MB each (registry, git checkouts and `~/.cargo/bin`), one per lane and lockfile:
+  a lockfile change saved five more. A restore took 22–23 s of a lane; a cold `cargo fetch` of
+  the host's packages took 38 s here. One shared entry saved by the tools lane on main keeps the
+  restore at about 270 MB for every lockfile, leaving the quota to sccache.
+
+## 2026-10-01 — the fill's dials after the port fix, and a reset by peer
+
+Mac Studio M1 Max, macOS 27.0, other sessions building beside it (load average 26 to 38). It
+reruns the fill that found the dial with no answer ("A finding the fill brought out", fixed in
+"A dual-stack port no IPv4 socket holds") and records a second failure it turned up
+(decisions/transport.md, "A resent Initial is not a stateless reset").
+
+The soak, terminals only (`--stream-lanes 0`, so nothing captures the screen), counts the CLI
+calls that could not reach the server at the first try. A cycle makes seven calls, so a run is
+about 11 800 calls, where the fill that found the bug made 11 870 and saw 1 to 2:
+
+| soak | cycles (warm-up + fill + load) | calls that got no answer |
+| --- | --- | --- |
+| 1 | 2 + 1 536 + 152 | **0** |
+| 2 | 2 + 1 536 + 149 | **0** |
+| 3 | 2 + 1 536 + 123 | **0** |
+| 4, with noq-proto patch 17 | 2 + 1 536 + 146 | **0** |
+
+Soak 3 failed its own check on the worker's thread count (18 before the load, 19 after),
+which is not the transport's. None of the four leaked, and each server's slope was 0 KiB/min.
+
+The in-process rig (`fresh_endpoints_dial_a_loopback_server`, 100 000 fresh endpoints dialing
+a server that pushes to every link every 2 ms) got no answer 0 times. It failed one dial in
+100 000 another way, with `stream: reset by peer` at the client's first stream, while two
+soaks ran beside it. Three rigs at once with 32 dialers each load the machine enough to show
+it. "Before" ran with a tracing probe that kept each thread's last 40 noq events and printed
+them at every stateless reset (a one-off, not kept, which slowed the dials); "after" ran once
+with the same probe and once without:
+
+| noq-proto | dials, 3 × 200 000 at once | reset by peer | no answer | run |
+| --- | --- | --- | --- | --- |
+| before patch 17, probe | 600 000 | **7** (2, 2, 3) | 0 | 522 s |
+| after, probe | 600 000 | **0** | 0 | 465 s |
+| after, no probe | 600 000 | **0** | 0 | 424 s |
+
+The server sent no stateless reset to any of the seven client ports. Each failing client had
+read the server's first flight (a 182-byte Initial, its Handshake packet and a 973-byte 1-RTT
+packet), then 10 µs later a 173-byte Initial that the server had resent unpadded, and took it
+for a reset. The stateless resets the probe saw otherwise, 41 to 57 a run before and after
+alike, all went to links that had closed.
+
+On the simulated network (`crates/slopty-net/tests/sim.rs`), a dial over a path that delivers
+every datagram twice failed with the same `stream: reset by peer` for 25 of seeds 1 to 300
+before the patch (seed 7 the first) and for 0 of seeds 1 to 1 000 after it. That is one seed in
+12, the share of shuffles that write the reset token last among the server's transport
+parameters. Each doubled dial took 10 ms of simulated time.
+
+```sh
+cargo xtask soak --stream-lanes 0 --out target/deep/soak/<name>   # summary.json: calls_unreached
+for i in 1 2 3; do ROUNDS=200000 TASKS=32 cargo test -p slopty-net --release --test dual_stack_port -- --ignored --nocapture & done; wait
+cargo test -p slopty-net --test sim a_path_that_delivers_every_datagram_twice_still_connects
+cargo test --manifest-path vendor/noq-proto/Cargo.toml --target-dir target/noq-proto --lib packet_crypto
+```
+
+## 2026-10-01 — file tile pictures and PDFs: decode and draw costs
+
+Mac Studio (M1 Max, 10 cores), macOS 26, the test profile (optimised, with debug info). Other
+sessions were building, with a load average of 28 to 33; an earlier run at 40 to 45 took up to
+twice as long, so the figures are loaded, not idle. Each is the median of five. "Decoded to" is
+the size ImageIO is asked for (`CGImageSourceCreateThumbnailAtIndex`), the pixels a tile covers;
+the last row of each picture decodes every pixel. The cost includes the draw into BGRA and, for
+a picture with alpha, the unpremultiply pass. The pictures are made by the test: a noisy
+gradient saved as a JPEG at quality 90, the same converted to HEIC by `sips`, and a two-colour
+PNG the size of a Retina screenshot.
+
+| picture | bytes | decoded to | ms |
+| --- | --- | --- | --- |
+| JPEG 4032 × 3024 | 2 797 880 | 400 × 300 | 24.5 |
+| | | 1 600 × 1 200 | 39.8 |
+| | | 4 032 × 3 024 | 52.9 |
+| HEIC 4032 × 3024 | 2 166 644 | 400 × 300 | 135.4 |
+| | | 1 600 × 1 200 | 100.0 |
+| | | 4 032 × 3 024 | 182.2 |
+| PNG 2880 × 1800 | 104 973 | 400 × 250 | 28.1 |
+| | | 1 600 × 1 000 | 45.5 |
+| | | 2 880 × 1 800 | 56.3 |
+
+A tile of 800 points on a 2× screen decodes a 12 MP JPEG at 1 600 pixels for about three
+quarters of the full cost, and holds 7.7 MB of pixels instead of 48.8 MB. HEIC was slower at 400
+than at 1 600 in every run, which is not explained yet. A 12 MP picture drawn whole spent about 20 ms
+painting and 12 ms unpremultiplying in a probe before an opaque picture skipped the second
+pass. Every decode runs off the UI thread.
+
+| PDF, 20 pages of text, US letter, 81 283 bytes | ms |
+| --- | --- |
+| open (`CGPDFDocument`) | 0.02 |
+| one page drawn 800 pixels wide | 0.4 |
+| 1 600 pixels (an 800-point tile on 2×) | 0.7 |
+| 3 200 pixels | 3.0 |
+
+```sh
+cargo nextest run -p slopty-ui decode_and_draw_costs --run-ignored only --no-capture
+```
+
+## 2026-10-01 — folder tiles on kernel events
+
+Same machine, release build, load average about 20. A round changes a folder's entries five
+ways, at least 100 ms apart (the follower's `HOLD`). Each row is 200 samples, in µs, from the
+change to the path coming out of `Changes::next` (`fswatch::follow_folders`, kqueue).
+
+| change | p50 | p95 | p99 | max |
+| --- | --- | --- | --- | --- |
+| a file made | 3 835 | 9 489 | 23 032 | 35 493 |
+| a file renamed | 3 856 | 9 487 | 17 936 | 42 408 |
+| a file deleted | 3 880 | 11 129 | 23 385 | 98 589 |
+| a folder made | 3 805 | 8 945 | 30 193 | 45 011 |
+| a folder deleted | 3 822 | 9 689 | 17 755 | 47 106 |
+
+Through the worker over a loopback link (a file made → the client's `WorkerMsg::Folder`),
+20 rounds: p50 4.24 ms, p90 4.39 ms, max 13.95 ms. In the app (`cargo xtask e2e app`, the
+folder scenario), a file written → its row in the tile's dump: 15.8 to 19.7 ms in five of seven
+runs and 125 to 131 ms in two, the dump being polled. Before, a folder tile listed again only
+when it took the focus, however long that was.
+
+```sh
+cargo nextest run -p slopty-worker --release --test fswatch folder_change_to_report --run-ignored only --no-capture
+cargo nextest run -p slopty-worker --test e2e a_followed_folder_is_listed_again --no-capture
+cargo xtask e2e app --filter 'test(/a_folder_tile_browses/)'
+```
+
+## 2026-10-01 — quick open's worktree index
+
+Same machine, release build, load average 30 to 42 from other sessions. A worktree is indexed
+on its first query (`find::Index`), then each keystroke is a match over memory. "First
+keystroke" is 10 rounds of six queries that do not follow each other (`view`, `item 4`,
+`mod12 item`, `srcmodvie`, `main`, `rs`), each scoring the whole tree; "typed on" is
+`srcmodvi` typed a letter at a time, 10 times, each query after the first scoring only the
+last one's matches. "Before" is the walk each keystroke made until now, bounded at 20 000
+entries and 8 levels, with the new ranking. "A file made" is a file written into the worktree
+→ the first query that returns it, polled every 5 ms, through the `FSEvents` stream.
+
+| worktree | paths | first walk | first keystroke p50 / p99 | typed on p50 / p99 | before p50 / p99 | a file made p50 / p99 |
+| --- | --- | --- | --- | --- | --- | --- |
+| this repository | 7 910 | 41 ms | 0.67 / 5.19 ms | 2.98 / 4.97 ms | 40.6 / 43.3 ms | 14.0 / 19.1 ms |
+| synthetic, 4 000 folders × 50 files | 204 160 | 166 ms | 4.15 / 15.3 ms | 8.88 / 15.0 ms | 39.0 / 42.3 ms | 25.5 / 27.2 ms |
+
+The synthetic tree is the worst case for narrowing: every path holds `src`, `module` and
+`view`, so `srcmodvi` typed on keeps all 204 160 as candidates and only adds the cost of
+keeping them. In the repository, typed on is slower than a first keystroke because its short
+prefixes (`sr`, `src`) match nearly everything, where the first-keystroke set includes words
+that match little. Before, the walk also stopped at 20 000 entries, so in the synthetic tree
+it could never find 90 % of the files. A first run, before the tree's own creation had drained
+from fseventsd, saw keystrokes at p99 363 ms while the index relisted the directories those
+late events named; the measurement now waits 10 s after making the tree. That first run
+also scored on one thread, at 40.7 ms p50 for a keystroke; the two changes (the wait and
+scoring across the cores) were not measured apart.
+
+```sh
+cargo nextest run -p slopty-worker --release quick_open_costs --run-ignored only --no-capture
+SLOPTY_FIND_TREE=$PWD cargo nextest run -p slopty-worker --release quick_open_costs --run-ignored only --no-capture
+```
+
+## 2026-10-01 — the worker's blocking pool after a soak
+
+Mac Studio M1 Max, macOS 27.0, other sessions building beside it. It explains a soak failing
+with `worker: 19 threads after the load, 18 before` (decisions/testing.md, "A soak's extra
+worker thread was the blocking pool, kept warm by an idle tick"). Each run is `cargo xtask
+soak --stream-lanes 0`. Beside it a one-off probe (Python over libproc, not kept) read the
+worker's threads by name four times a second, and `sample <pid> 1` took their stacks at the
+fill, the baseline and the end.
+
+Before the fix the worker's threads were, by name and stack: 10 tokio workers, the main thread,
+`slopty-worker` (the daemon thread), 1 to 3 unnamed system dispatch threads, a
+`session-<uuid>` thread per live session, and 3 to 5 idle threads of tokio's blocking pool
+(also named `tokio-rt-worker`, parked in the pool's `wait_timeout`). The pool grew during the
+fill, 3 → 4 at 46 s and → 5 at 68 s, and never shrank, through 60 s of load, the 12 s settle
+and `leaks`. In an idle worker an lldb breakpoint on `spawn_blocking` caught 32 calls in 8 s,
+every one from `agents::keep_awake` on the 750 ms agents tick, with no agent working.
+
+| soaks | worker threads baseline → end | failed the thread check |
+| --- | --- | --- |
+| before the fix, 11 | 17 to 19 → 15 to 19 | 2 (18 → 19 both times) |
+| after the fix, 2 | 14 → 14, 13 → 13 | 0 |
+
+After the fix the pool empties about 10 s after its last task (tokio's keep-alive): the
+`tokio-rt-worker` count fell to 10 at 12 s (after the warm-up), at 209 s and 182 s (after the
+fill) and at the end, so the baseline and the end both hold 10 tokio workers, the main thread,
+the daemon thread and 1 or 2 dispatch threads. Three of the pre-fix soaks were also the ones
+with lldb attached, and in those the server held one thread more after the load (11 → 12).
+The server is not changed here.
+
+```sh
+cargo test -p slopty-workerd --bin slopty-worker only_a_paused_turn_takes_the_blocking_pool
+cargo test -p xtask --bin xtask soak::
+cargo xtask soak --stream-lanes 0   # summary.json: daemons.<name>.thread_names
+```

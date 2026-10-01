@@ -189,6 +189,7 @@ mod tests {
             attention: true,
             source: AgentSource::Hook,
             since_ms: slopty_core::WallMs::ZERO,
+            mode: None,
         }
     }
 

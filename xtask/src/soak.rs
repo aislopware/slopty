@@ -41,6 +41,7 @@
 //! with the hardened runtime. So the daemons are copied under `target/deep/soak/bin` and signed
 //! there ad hoc, without the runtime and with `get-task-allow`, which the build tree never sees.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
@@ -726,6 +727,99 @@ struct Sample {
     threads: u32,
 }
 
+/// Each daemon's threads by name, with how many carry each.
+fn named_threads(stack: &Stack) -> BTreeMap<&'static str, BTreeMap<String, u32>> {
+    stack
+        .pids()
+        .into_iter()
+        .filter_map(|(daemon, pid)| Some((daemon, thread_names(pid)?)))
+        .collect()
+}
+
+/// The names that `after` holds more of than `before`, as `+1 tokio-rt-worker`.
+///
+/// The worker's tokio workers are a fixed number, so more `tokio-rt-worker` threads once the
+/// daemons have settled for longer than tokio's 10 s keep-alive means its blocking pool is still
+/// being handed work.
+fn grown(before: &BTreeMap<String, u32>, after: &BTreeMap<String, u32>) -> String {
+    after
+        .iter()
+        .filter_map(|(name, &n)| {
+            let more = n.saturating_sub(before.get(name).copied().unwrap_or(0));
+            (more > 0).then(|| format!("+{more} {name}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `pid`'s threads by name, with how many carry each. A name that ends in a UUID (a session's
+/// thread) is counted under its stem, and a thread without a name as `(unnamed)`: the system's
+/// dispatch threads, which the kernel starts and ends as work comes.
+#[cfg(target_vendor = "apple")]
+fn thread_names(pid: i32) -> Option<BTreeMap<String, u32>> {
+    /// `PROC_PIDLISTTHREADS` (`<sys/proc_info.h>`): the process's thread handles, as `u64`s.
+    const PROC_PIDLISTTHREADS: libc::c_int = 6;
+    let mut handles = vec![0_u64; 4096];
+    let bytes = libc::c_int::try_from(size_of_val(handles.as_slice())).ok()?;
+    // SAFETY: `proc_pidinfo` (libproc.h) writes at most `buffersize` bytes into `buffer`, which
+    // is the `handles` allocation of exactly that many bytes, and returns how many it wrote.
+    let written = unsafe {
+        libc::proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, handles.as_mut_ptr().cast(), bytes)
+    };
+    let listed = usize::try_from(written).ok().filter(|&n| n > 0)?.checked_div(size_of::<u64>())?;
+    let mut names = BTreeMap::new();
+    for &handle in handles.get(..listed)? {
+        let mut info = std::mem::MaybeUninit::<libc::proc_threadinfo>::zeroed();
+        let size = libc::c_int::try_from(size_of::<libc::proc_threadinfo>()).ok()?;
+        // SAFETY: for `PROC_PIDTHREADINFO` `proc_pidinfo` writes one `proc_threadinfo` for the
+        // thread handle `arg` into a buffer of that size, which `info` is.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTHREADINFO,
+                handle,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if got != size {
+            // The thread ended between the listing and this read.
+            continue;
+        }
+        // SAFETY: zeroed is a valid `proc_threadinfo` (integers and a byte array), and the call
+        // filled it.
+        let info = unsafe { info.assume_init() };
+        let bytes: Vec<u8> =
+            info.pth_name.iter().map(|&c| c.to_ne_bytes()[0]).take_while(|&b| b != 0).collect();
+        let name = String::from_utf8_lossy(&bytes).into_owned();
+        let count = names.entry(stem(&name)).or_insert(0_u32);
+        *count = count.saturating_add(1);
+    }
+    Some(names)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn thread_names(_pid: i32) -> Option<BTreeMap<String, u32>> {
+    None
+}
+
+/// `name` with a trailing UUID replaced by `*`, and `(unnamed)` for no name.
+fn stem(name: &str) -> String {
+    if name.is_empty() {
+        return "(unnamed)".to_owned();
+    }
+    match name.len().checked_sub(36).and_then(|at| name.split_at_checked(at)) {
+        Some((head, uuid))
+            if uuid.len() == 36
+                && uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+                && uuid.matches('-').count() == 4 =>
+        {
+            format!("{head}*")
+        }
+        _ => name.to_owned(),
+    }
+}
+
 fn sample(stack: &Stack, started: Instant, phase: &'static str) -> Vec<Sample> {
     let at = started.elapsed().as_secs_f64();
     stack
@@ -881,6 +975,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     let fill_took = fill_started.elapsed();
     settle(stack, &mut samples, started, interval, "filled");
     let baseline = sample(stack, started, "baseline");
+    let named_before = named_threads(stack);
     samples.extend(baseline.iter().copied());
     if aborted.is_none() {
         println!("▶ load for {} s beside {lanes} stream lanes", opts.seconds);
@@ -910,6 +1005,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
     println!("▶ settle for {SETTLE:?}, then leaks");
     settle(stack, &mut samples, started, interval, "settle");
     let end = sample(stack, started, "end");
+    let named_after = named_threads(stack);
     samples.extend(end.iter().copied());
 
     let mut failures = Vec::new();
@@ -968,9 +1064,14 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
                 after.fds, before.fds
             ));
         }
+        let named = (named_before.get(name), named_after.get(name));
         if after.threads > before.threads {
+            let grew = match named {
+                (Some(before), Some(after)) => format!(" ({})", grown(before, after)),
+                _ => String::new(),
+            };
             failures.push(format!(
-                "{name}: {} threads after the load, {} before",
+                "{name}: {} threads after the load, {} before{grew}",
                 after.threads, before.threads
             ));
         }
@@ -1000,6 +1101,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
                 "peak_budget": peak_budget,
                 "fds": [before.fds, after.fds],
                 "threads": [before.threads, after.threads],
+                "thread_names": [named.0, named.1],
                 "leaks_clean": clean,
                 "leaks": verdict,
             }),
@@ -1042,6 +1144,38 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This process's threads, read by name: one started here under its own name is there.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_process_s_threads_read_by_name() {
+        // A thread names itself as it starts, so it answers once its name is set.
+        let (ready, started) = std::sync::mpsc::channel::<()>();
+        let (hold, held) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("soak-names-probe".to_owned())
+            .spawn(move || {
+                let _sent = ready.send(());
+                held.recv()
+            })
+            .unwrap();
+        started.recv().unwrap();
+        let pid = i32::try_from(std::process::id()).unwrap();
+        let names = thread_names(pid).unwrap();
+        drop(hold);
+        let _ended = thread.join();
+        assert_eq!(names.get("soak-names-probe"), Some(&1), "{names:?}");
+    }
+
+    #[test]
+    fn a_thread_named_for_a_session_counts_under_its_stem() {
+        assert_eq!(stem("session-01a0f413-4c57-7409-b598-8612456179f6"), "session-*");
+        assert_eq!(stem("tokio-rt-worker"), "tokio-rt-worker");
+        assert_eq!(stem(""), "(unnamed)");
+        let before = BTreeMap::from([("tokio-rt-worker".to_owned(), 14), ("main".to_owned(), 1)]);
+        let after = BTreeMap::from([("tokio-rt-worker".to_owned(), 15), ("main".to_owned(), 1)]);
+        assert_eq!(grown(&before, &after), "+1 tokio-rt-worker");
+    }
 
     #[test]
     fn the_slope_is_the_least_squares_fit() {

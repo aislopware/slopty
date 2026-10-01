@@ -211,6 +211,7 @@ fn summary(id: SessionId) -> SessionSummary {
         agent: None,
         progress: None,
         restored: None,
+        repo_id: None,
     }
 }
 
@@ -231,6 +232,7 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
                 attention: true,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
+                mode: None,
             },
             cx,
         );
@@ -369,6 +371,7 @@ fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut T
                 attention: true,
                 source: AgentSource::Hook,
                 since_ms: WallMs::ZERO,
+                mode: None,
             },
             cx,
         );

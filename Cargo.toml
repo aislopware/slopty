@@ -250,6 +250,9 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
     "CGError",
     "libc",
 ] }
+objc2-image-io = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+objc2-core-services = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+objc2-pdf-kit = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSColor",
@@ -362,6 +365,9 @@ tempfile = "3.27.0"
 # (`slopty-worker/tests/fswatch.rs`; docs/decisions/workspace.md).
 notify = { version = "8.2.0", default-features = false, features = [ "macos_fsevent" ] }
 ignore = "0.4.33"
+# Quick open's fuzzy match over a worktree's paths (`slopty_worker::find`): Helix's matcher,
+# fzf's scoring with a path mode.
+nucleo-matcher = "0.3.1"
 # Project-wide text search on the worker (`slopty_worker::search`): ripgrep's own searcher,
 # matcher and regex adapter, walked with `ignore` above (docs/decisions/search.md).
 grep-matcher = "0.1.9"
@@ -605,7 +611,8 @@ overflow-checks = true
 # Shipping builds. `limited` debug info keeps each function's whole path, so an inlined frame in
 # a user's crash report is `slopty_crash::install`, not `install`; it costs the dSYM 41-48 % and
 # the binary nothing (MEASUREMENTS 2026-10-01, "debug info for shipped builds"). Cargo packs it
-# into `<bin>.dSYM` and strips the binary; `cargo xtask bundle` ships each dSYM beside its binary.
+# into `<bin>.dSYM` and strips the binary; the dSYMs ship apart, keyed by UUID, for
+# `cargo xtask symbolicate` (docs/decisions/crashes.md).
 [profile.dist]
 inherits = "release"
 debug = "limited"

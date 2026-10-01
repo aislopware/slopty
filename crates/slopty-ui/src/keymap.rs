@@ -200,6 +200,8 @@ const FILE_INPUT: Option<&str> = Some("FileEditor > Input");
 const FILE: Option<&str> = Some(crate::file::CTX);
 /// A file tile's find bar: the terminal's find keys, in the bar's own context.
 const FILE_SEARCH: Option<&str> = Some("FileSearch");
+/// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
+const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
 /// A conversation face, and its composer, where the keyboard sits in a face.
 const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
@@ -268,6 +270,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "toggle_own_window", ws::ToggleOwnWindow, &["ctrl-cmd-n"], &[CTX, POP_OUT]),
         c(Workspace, "toggle_system_keys", ws::ToggleSystemKeys, &[], W),
         c(Workspace, "toggle_navigator", ws::ToggleNavigator, &["cmd-b"], W),
+        c(Workspace, "toggle_navigator_lens", ws::ToggleNavigatorLens, &[], W),
         c(Workspace, "find", t::Find, &["cmd-f"], W),
         // Tab is the shell's; ⌃Tab enters the control ring from a terminal, then Tab walks it.
         c(Workspace, "focus_next", ws::FocusNext, &["ctrl-tab"], &[RING]),
@@ -389,6 +392,23 @@ pub fn defaults() -> Vec<Command> {
         c(File, "close_find", t::CloseFind, &["escape"], &[FILE_SEARCH]),
         c(File, "find_next", t::FindNext, &["cmd-g"], &[FILE_SEARCH]),
         c(File, "find_previous", t::FindPrev, &["cmd-shift-g"], &[FILE_SEARCH]),
+        // A PDF's pages, as Preview reads them.
+        c(File, "scroll_down", crate::file::ScrollDown, &["down"], &[FILE_PAGES]),
+        c(File, "scroll_up", crate::file::ScrollUp, &["up"], &[FILE_PAGES]),
+        c(File, "next_screen", crate::file::NextScreen, &["pagedown", "space"], &[FILE_PAGES]),
+        c(
+            File,
+            "previous_screen",
+            crate::file::PreviousScreen,
+            &["pageup", "shift-space"],
+            &[FILE_PAGES],
+        ),
+        c(File, "next_page", crate::file::NextPage, &["right"], &[FILE_PAGES]),
+        c(File, "previous_page", crate::file::PreviousPage, &["left"], &[FILE_PAGES]),
+        c(File, "first_page", crate::file::FirstPage, &["home"], &[FILE_PAGES]),
+        c(File, "last_page", crate::file::LastPage, &["end"], &[FILE_PAGES]),
+        c(File, "copy", crate::file::CopyText, &["cmd-c"], &[FILE_PAGES]),
+        c(File, "select_all", crate::file::SelectAllText, &["cmd-a"], &[FILE_PAGES]),
         // A folder tile: the arrows walk its rows, ↩ opens one, ⌫ and ⌘↑ go up.
         c(Folder, "select_previous", crate::folder::SelectPrevious, &["up"], &[FOLDER]),
         c(Folder, "select_next", crate::folder::SelectNext, &["down"], &[FOLDER]),

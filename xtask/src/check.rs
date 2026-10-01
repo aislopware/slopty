@@ -45,9 +45,18 @@ pub fn run(sh: &Shell, crates: &[String]) -> Result<()> {
     let (p, b) = (&packages, &built);
     let host = TRIPLES[0];
     quiet_step("cargo fmt", cmd!(sh, "cargo +nightly fmt {p...} -- --check"))?;
+    // The live `slopty-e2e` targets, which no test build takes, are linted here.
+    let live: &[&str] = if names().any(|c| c == crate::e2e::LIVE_PACKAGE) {
+        &["--features", crate::e2e::LIVE]
+    } else {
+        &[]
+    };
     quiet_step(
         &format!("clippy {host}"),
-        cmd!(sh, "cargo clippy --keep-going {b...} --all-targets --target {host} -- -D warnings"),
+        cmd!(
+            sh,
+            "cargo clippy --keep-going {b...} --all-targets {live...} --target {host} -- -D warnings"
+        ),
     )?;
     let apple: Vec<&str> = names().filter(|c| !HOST_ONLY_CRATES.contains(c)).collect();
     if !apple.is_empty() {

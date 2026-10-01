@@ -48,7 +48,7 @@ impl WorkspaceView {
             let health = super::navigator::worker_health(&w.status);
             let detail = match health {
                 Some((_, word)) => palette::sentence_case(word),
-                None => super::navigator::slow_rtt(w.rtt).unwrap_or_default(),
+                None => super::navigator::slow_rtt(self.shown_rtt(w)).unwrap_or_default(),
             };
             PaletteItem::worker(&w.name, &detail, *key).with_status(health.map(|(mark, _)| mark))
         })
@@ -120,6 +120,7 @@ impl WorkspaceView {
             );
         }
         items.extend(super::actions::palette_items());
+        items.push(self.lens_line());
         // What the focused remote tile can do beyond its header, only while one has the focus.
         items.extend(self.screen_lines(cx));
         items.extend(self.palette_extra.iter().cloned());

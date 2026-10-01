@@ -366,30 +366,34 @@ fn tools_lane(on_tree: impl Fn() -> Result<Shell> + Sync, checkout: &Shell) -> R
 /// `slopty_testkit::bins::FRESH`: set once every binary a test spawns is built.
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
-/// `slopty_testkit::bins::PACKAGES`, each after its `-p`.
-const SPAWNED_PACKAGES: [&str; 12] = [
-    "-p",
+/// `slopty_testkit::bins::NAMES`, each after its `--bin`.
+const SPAWNED_BINS: [&str; 10] = [
+    "--bin",
     "slopty-ptyd",
-    "-p",
-    "slopty-workerd",
-    "-p",
-    "slopty-serverd",
-    "-p",
-    "slopty-cli",
-    "-p",
-    "slopty-testkit",
-    "-p",
-    "workspace-hack",
+    "--bin",
+    "slopty-worker",
+    "--bin",
+    "slopty-server",
+    "--bin",
+    "slopty",
+    "--bin",
+    "slopty-stub-claude",
 ];
 
 /// The gate's tests: build every test binary, then run nextest's `profile` (on `only`'s
 /// packages when given) and the doctests side by side. Cargo holds the target dir's lock only
 /// while it builds, and the build is done, so neither waits for the other.
 fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) -> Result<()> {
-    quiet_step("nextest build", cmd!(sh, "cargo nextest run --workspace --no-run"))?;
+    // On a runner, `--timings` leaves `cargo-timing.html` in the target dir for CI to keep: what
+    // each unit of the build cost. Here it would pile up a report per gate.
+    let timings: &[&str] = if profile == NEXTEST_CI_PROFILE { &["--timings"] } else { &[] };
+    quiet_step("nextest build", cmd!(sh, "cargo nextest run --workspace --no-run {timings...}"))?;
     // Every binary a test spawns, so no test shells out to cargo and waits on its locks while
-    // another build on the machine holds them.
-    quiet_step("spawned binaries", cmd!(sh, "cargo build --bins {SPAWNED_PACKAGES...}"))?;
+    // another build on the machine holds them. With the workspace's tests selected, all built
+    // just now, cargo resolves features with every member's dev-dependencies as that build did
+    // (`slopty-tailnet/fake`, `slopty-codec/experiments`), so each crate is the unit the tests
+    // already have. Without them a dozen workspace crates compiled a second time, differently.
+    quiet_step("spawned binaries", cmd!(sh, "cargo build --workspace --tests {SPAWNED_BINS...}"))?;
     let _fresh = sh.push_env(BINS_FRESH, "1");
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
@@ -635,14 +639,16 @@ pub fn lint_linux(sh: &Shell) -> Result<()> {
     crate::tools::lint_linux(sh, &LINUX_CRATES)
 }
 
-/// Clippy on the host with every target (tests, benches, examples) in one pass.
+/// Clippy on the host with every target (tests, benches, examples) in one pass, the live
+/// `slopty-e2e` targets the tests lane leaves out among them.
 pub fn lint_host(sh: &Shell) -> Result<()> {
     let host = TRIPLES[0];
+    let live = crate::e2e::LIVE;
     quiet_step(
         &format!("clippy {host}"),
         cmd!(
             sh,
-            "cargo clippy --keep-going --workspace --all-targets --target {host} -- -D warnings"
+            "cargo clippy --keep-going --workspace --all-targets --features {live} --target {host} -- -D warnings"
         ),
     )
 }
@@ -763,18 +769,18 @@ fn commits(sh: &Shell) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BINS_FRESH, SPAWNED_PACKAGES, one_gpui};
+    use super::{BINS_FRESH, SPAWNED_BINS, one_gpui};
 
     /// The gate builds what the tests look for, under the variable they read.
     #[test]
     fn the_spawned_binaries_match_the_testkit() {
         let testkit = include_str!("../../crates/slopty-testkit/src/bins.rs");
         assert!(testkit.contains(&format!("pub const FRESH: &str = \"{BINS_FRESH}\";")));
-        let packages: Vec<&str> = SPAWNED_PACKAGES.iter().copied().filter(|a| *a != "-p").collect();
-        let count = format!("PACKAGES: [&str; {}]", packages.len());
-        assert!(testkit.contains(&count), "bins::PACKAGES is not {} long", packages.len());
-        for p in packages {
-            assert!(testkit.contains(&format!("\"{p}\",")), "{p} is not in bins::PACKAGES");
+        let names: Vec<&str> = SPAWNED_BINS.iter().copied().filter(|a| *a != "--bin").collect();
+        let count = format!("NAMES: [&str; {}]", names.len());
+        assert!(testkit.contains(&count), "bins::NAMES is not {} long", names.len());
+        for name in names {
+            assert!(testkit.contains(&format!("\"{name}\"")), "{name} is not in bins::NAMES");
         }
     }
 

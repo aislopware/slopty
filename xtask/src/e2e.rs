@@ -20,6 +20,13 @@ use xshell::{Shell, cmd};
 
 use crate::tools::step;
 
+/// The feature that builds `slopty-e2e`'s live test targets, which every build that runs or
+/// lints them names (`crates/slopty-e2e/Cargo.toml`).
+pub const LIVE: &str = "slopty-e2e/live";
+
+/// The package whose test targets need [`LIVE`].
+pub const LIVE_PACKAGE: &str = "slopty-e2e";
+
 /// Which live tests to run.
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Case {
@@ -300,7 +307,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             "build daemons and app",
             &cmd!(
                 sh,
-                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e"
+                "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e --features {LIVE}"
             ),
         )?;
         std::fs::create_dir_all(&reuse)?;
@@ -400,9 +407,10 @@ fn build_suite(sh: &Shell, suite: &Suite, binaries: &std::path::Path) -> Result<
     let (package, test) = (suite.package, suite.test);
     println!("▶ build {package} {test}");
     let started = std::time::Instant::now();
+    let live: &[&str] = if package == LIVE_PACKAGE { &["--features", LIVE] } else { &[] };
     let listed = cmd!(
         sh,
-        "cargo nextest list -p {package} --test {test} --list-type binaries-only --message-format json"
+        "cargo nextest list -p {package} --test {test} {live...} --list-type binaries-only --message-format json"
     )
     .read();
     let ok = listed.is_ok();

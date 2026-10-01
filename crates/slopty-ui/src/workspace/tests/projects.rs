@@ -317,6 +317,10 @@ fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
         body.right() - right <= px(Theme::default().spacing.inset()),
         "no lane-wide gap at the right: {lanes:?} in {body:?}"
     );
+    assert!(
+        cx.debug_bounds("project-needs-project-node-2").is_none(),
+        "the board's own lane says what needs you, not the band over it too"
+    );
 
     b.update(cx, |b, cx| b.show(Lens::Timeline, cx));
     let said = labels(&view, cx);

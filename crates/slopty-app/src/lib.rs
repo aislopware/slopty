@@ -184,10 +184,26 @@ fn spread_width<'a>(labels: impl IntoIterator<Item = &'a str>, spacing: Spacing)
     3.0_f32.mul_add(spacing.md - spacing.xs, key_row_width(labels, spacing))
 }
 
+/// How far a row of `labels`' caps scrolls in `width`: none where it spreads out, else what
+/// its one line runs past the edge. Known from the caps' fixed widths before any layout.
+fn key_row_overflow<'a>(
+    labels: impl IntoIterator<Item = &'a str> + Clone,
+    width: f32,
+    spacing: Spacing,
+) -> f32 {
+    if spread_width(labels.clone(), spacing) > width {
+        (key_row_width(labels, spacing) - width).max(0.0)
+    } else {
+        0.0
+    }
+}
+
 /// Which ends of the key row fade, as `(leading, trailing)`: the leading one once the row is
 /// scrolled off its start, the trailing one while keys remain past the edge. `scrolled` is how
-/// far the row is scrolled in and `max` how far it can be (zero when it fits).
+/// far the row is scrolled in and `max` how far it can be (zero when it fits); an offset
+/// kept from a wider row counts as the end, where layout clamps it.
 fn key_bar_fades(scrolled: f32, max: f32) -> (bool, bool) {
+    let scrolled = scrolled.clamp(0.0, max);
     (scrolled > AT_END, scrolled < max - AT_END)
 }
 /// The key bar over a remote window: ⌘ joins ⌃ (an IDE lives on chords), the shell
@@ -416,10 +432,8 @@ pub struct Workspace {
     /// this size at the window's top left. A UIKit window cannot be resized from inside the
     /// app, and the layout only needs the size it is given to be the size it lays out in.
     split_view: Option<gpui::Size<gpui::Pixels>>,
-    /// Where the key row is scrolled to, and how far it can go (from its last layout).
+    /// Where the key row is scrolled to.
     key_bar_scroll: ScrollHandle,
-    /// The key row's fades as last drawn, `(leading, trailing)` ([`key_bar_fades`]).
-    key_bar_fades: (bool, bool),
     /// What "Use this Mac as a worker" does to this machine; `None` where it is not offered.
     this_mac: Option<Rc<dyn this_mac::Host>>,
     /// Runs of it so far, so an answer for one left behind is dropped.
@@ -535,7 +549,6 @@ impl Workspace {
             pending_focus_editor: false,
             split_view: None,
             key_bar_scroll: ScrollHandle::new(),
-            key_bar_fades: (false, false),
             this_mac,
             this_mac_runs: 0,
             deployer,
@@ -1856,8 +1869,7 @@ impl Workspace {
                 .flex_col()
                 .p(px(spacing.xxs))
                 .rounded(px(radii.md))
-                .border_1()
-                .border_color(hsla(s.border))
+                .bg(hsla(s.raised))
                 .children(this_mac_entry)
                 .children(ssh_entry);
             div()
@@ -1993,11 +2005,11 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// What the tailnet answered: each server and worker a row to press, in one framed list
-    /// under a label. While it looks, or when nothing answered, one quiet line says so and what
-    /// to do, with no frame and no label (the line names the tailnet itself): a frame is drawn
-    /// only round what can be chosen, and a framed status with a magnifier read as a search
-    /// field to type in.
+    /// What the tailnet answered: each server and worker a row to press, in one list a tone step
+    /// off the page, under a label. While it looks, or when nothing answered, one quiet line
+    /// says so and what to do, with no step and no label (the line names the tailnet itself):
+    /// only what can be chosen stands on a step, and a status on one with a magnifier read as
+    /// a search field to type in.
     fn tailnet_list(&self, search: &Search, mode: Panel, cx: &Context<Self>) -> gpui::AnyElement {
         use slopty_ui::icons::{IconName, IconSize, Status, icon, status_icon};
         let theme = &self.theme;
@@ -2044,16 +2056,15 @@ impl Workspace {
             .flex_col()
             .p(px(spacing.xxs))
             .rounded(px(theme.radii.md))
-            .border_1()
-            .border_color(hsla(s.border))
+            .bg(hsla(s.raised))
             .children(rows);
         let label = panel_label(theme, "add-worker-tailnet-label", "On your tailnet");
         section.child(label).child(frame).into_any_element()
     }
 
     /// This Mac's checklist: a line for each thing the worker needs, marked as its `doctor`
-    /// reads it, the missing ones with the button that fixes them, in one framed list as the
-    /// tailnet's rows are; under it, the add under way or why it failed.
+    /// reads it, the missing ones with the button that fixes them, in one list a tone step off
+    /// the page as the tailnet's rows are; under it, the add under way or why it failed.
     fn this_mac_checklist(&self, flow: &this_mac::Flow, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
@@ -2071,8 +2082,7 @@ impl Workspace {
             .flex_col()
             .p(px(spacing.xxs))
             .rounded(px(theme.radii.md))
-            .border_1()
-            .border_color(hsla(s.border))
+            .bg(hsla(s.raised))
             .children(lines);
         let status = match (&flow.error, flow.adding) {
             (Some(why), _) => Some((why.clone(), s.error)),
@@ -2159,27 +2169,17 @@ impl Workspace {
     /// The bar is the body's own surface under a hairline, so it reads as the tile's input row
     /// and its caps as plates on it, with no hairline of their own. Its row scrolls where it
     /// overflows, and an end with keys past it fades out.
-    fn key_bar(
-        &mut self,
-        target: &KeyTarget,
-        window: &mut Window,
-        cx: &Context<Self>,
-    ) -> gpui::AnyElement {
+    fn key_bar(&self, target: &KeyTarget, window: &Window, cx: &Context<Self>) -> gpui::AnyElement {
         let safe = window.insets().effective();
         let width = f32::from(self.frame_size(window).width - safe.left - safe.right);
-        let row = match target {
+        let (row, overflow) = match target {
             KeyTarget::Terminal(terminal) => self.terminal_key_bar(terminal, width, cx),
             KeyTarget::Screen(screen) => self.screen_key_bar(screen, width, cx),
         };
-        // The offset is the one this frame scrolled to; the extent is the last layout's, so a
-        // bar just shown, turned or resized is looked at again once it is laid out.
-        let (leading, trailing) = self.measured_fades();
-        self.key_bar_fades = (leading, trailing);
-        cx.on_next_frame(window, |this, _window, cx| {
-            if this.measured_fades() != this.key_bar_fades {
-                cx.notify();
-            }
-        });
+        // The extent comes from the caps, not the last layout, so a bar just shown, turned or
+        // resized fades right on its first frame.
+        let scrolled = -f32::from(self.key_bar_scroll.offset().x);
+        let (leading, trailing) = key_bar_fades(scrolled, overflow);
         let (surface, depth) = (self.theme.content(), px(self.theme.spacing.lg));
         div()
             .relative()
@@ -2209,24 +2209,20 @@ impl Workspace {
         self.split_view.unwrap_or_else(|| window.viewport_size())
     }
 
-    /// [`key_bar_fades`] for the key row as it is scrolled now.
-    fn measured_fades(&self) -> (bool, bool) {
-        let scrolled = -f32::from(self.key_bar_scroll.offset().x);
-        key_bar_fades(scrolled, f32::from(self.key_bar_scroll.max_offset().x))
-    }
-
-    /// The key bar's row with `keys` in it. Where they all fit in `width` (an iPad), one leading
-    /// run of their groups a step apart, the word keys trailing ([`key_group`]); where they do
-    /// not (a phone), one line in the order given that scrolls sideways.
+    /// The key bar's row with `keys` in it, and how far it scrolls ([`key_row_overflow`]).
+    /// Where they all fit in `width` (an iPad), one leading run of their groups a step apart,
+    /// the word keys trailing ([`key_group`]); where they do not (a phone), one line in the
+    /// order given that scrolls sideways.
     fn key_row_of(
         &self,
         keys: Vec<(&'static str, gpui::AnyElement)>,
         width: f32,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> (gpui::Stateful<gpui::Div>, f32) {
         let spacing = self.theme.spacing;
         let row = self.key_row();
-        if spread_width(keys.iter().map(|(label, _)| *label), spacing) > width {
-            return row.children(keys.into_iter().map(|(_, key)| key));
+        let overflow = key_row_overflow(keys.iter().map(|(label, _)| *label), width, spacing);
+        if overflow > 0.0 {
+            return (row.children(keys.into_iter().map(|(_, key)| key)), overflow);
         }
         let (mut lead, mut arrows, mut symbols, mut words) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -2242,7 +2238,8 @@ impl Workspace {
             div().flex().flex_none().items_center().gap(px(spacing.xs)).children(keys)
         };
         let run = [lead, arrows, symbols].into_iter().filter(|g| !g.is_empty()).map(group);
-        row.debug_selector(|| "key-bar-spread".to_owned())
+        let spread = row
+            .debug_selector(|| "key-bar-spread".to_owned())
             .child(
                 div()
                     .flex()
@@ -2253,7 +2250,8 @@ impl Workspace {
                     .children(run),
             )
             .child(div().flex_1())
-            .child(group(words).debug_selector(|| "key-bar-trail".to_owned()))
+            .child(group(words).debug_selector(|| "key-bar-trail".to_owned()));
+        (spread, 0.0)
     }
 
     /// The key bar's row, before its keys: one line that scrolls sideways.
@@ -2347,7 +2345,7 @@ impl Workspace {
         screen: &Entity<ScreenView>,
         width: f32,
         cx: &Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> (gpui::AnyElement, f32) {
         let view = screen.read(cx);
         let (control, command) = (view.sticky(Sticky::Control), view.sticky(Sticky::Command));
         let mut keys: Vec<(&'static str, gpui::AnyElement)> = Vec::new();
@@ -2390,7 +2388,8 @@ impl Workspace {
         #[cfg(target_os = "ios")]
         let paste = paste.children(self.paste_key_spot());
         keys.push(("Paste", paste.into_any_element()));
-        self.key_row_of(keys, width).into_any_element()
+        let (row, overflow) = self.key_row_of(keys, width);
+        (row.into_any_element(), overflow)
     }
 
     fn terminal_key_bar(
@@ -2398,7 +2397,7 @@ impl Workspace {
         terminal: &Entity<TerminalView>,
         width: f32,
         cx: &Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> (gpui::AnyElement, f32) {
         let accent = self.theme.surfaces.accent;
         let view = terminal.read(cx);
         let (armed, armed_command) = (view.sticky_control(), view.sticky_command());
@@ -2474,7 +2473,8 @@ impl Workspace {
             });
         });
         keys.push(("Find", find.into_any_element()));
-        self.key_row_of(keys, width).into_any_element()
+        let (row, overflow) = self.key_row_of(keys, width);
+        (row.into_any_element(), overflow)
     }
 }
 
@@ -2810,8 +2810,8 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
         .aria_label(SharedString::from(format!("{verb} {}", offer.name)))
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
-        .hover(move |el| el.bg(hsla(s.raised)))
-        .active(move |el| el.bg(hsla(s.overlay)))
+        // On the list's `raised` step: the pointer washes a row one step up.
+        .hover(move |el| el.bg(hsla(s.overlay)))
         .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
         .child(
             div()
@@ -2873,8 +2873,8 @@ fn entry_row(
         .aria_label(title)
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
-        .hover(move |el| el.bg(hsla(s.raised)))
-        .active(move |el| el.bg(hsla(s.overlay)))
+        // On the list's `raised` step: the pointer washes a row one step up.
+        .hover(move |el| el.bg(hsla(s.overlay)))
         .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
         .child(
             div()
@@ -3352,6 +3352,20 @@ mod tests {
         assert_eq!(key_bar_fades(0.0, 180.0), (false, true), "at the start, more to come");
         assert_eq!(key_bar_fades(90.0, 180.0), (true, true), "keys past both ends");
         assert_eq!(key_bar_fades(179.8, 180.0), (true, false), "at the end");
+        assert_eq!(key_bar_fades(300.0, 180.0), (true, false), "kept from a wider row");
+    }
+
+    /// A phone's row knows it runs past the edge before it is laid out, so its first frame
+    /// already fades the trailing end; an iPad's spreads out and never scrolls.
+    #[test]
+    fn the_key_row_knows_its_overflow_before_layout() {
+        let spacing = Theme::default().spacing;
+        let terminal = || BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
+        let phone = key_row_overflow(terminal(), 402.0, spacing);
+        let line = key_row_width(terminal(), spacing);
+        assert!((phone - (line - 402.0)).abs() < f32::EPSILON, "{phone} of {line}");
+        assert_eq!(key_bar_fades(0.0, phone), (false, true));
+        assert!(key_row_overflow(terminal(), 744.0, spacing).abs() < f32::EPSILON, "an iPad");
     }
 
     /// The caps keep their widths: the terminal's row runs past a 402 pt phone, so it scrolls,
@@ -3397,7 +3411,7 @@ mod tests {
                     (label, cap.child(label).into_any_element())
                 })
                 .collect();
-            div().size_full().child(ws.key_row_of(keys, width))
+            div().size_full().child(ws.key_row_of(keys, width).0)
         }
     }
 

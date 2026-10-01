@@ -643,3 +643,100 @@ fn a_kept_edit_over_a_moved_disk_is_a_conflict(cx: &mut TestAppContext) {
     let same = restored(cx, kept("same", Some(1_000), false), text_read("same", true, 3_000));
     assert_eq!(same, ("same".to_owned(), false, None), "the disk has it: clean");
 }
+
+fn media(media_type: &str, bytes: Vec<u8>) -> FileRead {
+    FileRead::Media {
+        media_type: media_type.to_owned(),
+        bytes: bytes::Bytes::from(bytes),
+        modified_ms: WallMs::from_millis(5),
+    }
+}
+
+/// The accessibility tree's nodes of `role`, by label.
+fn labels(cx: &mut VisualTestContext, role: &str) -> Vec<String> {
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    cx.run_until_parked();
+    cx.update(|window, _cx| crate::a11y::tree(window))
+        .into_iter()
+        .filter(|n| n.role == role)
+        .filter_map(|n| n.label)
+        .collect()
+}
+
+/// Draw frames until the tile's decodes and draws settle: a measure in one frame asks for a
+/// decode, which lands for the next.
+fn settle(cx: &mut VisualTestContext) {
+    for _ in 0..4 {
+        cx.update(|window, _cx| window.refresh());
+        cx.run_until_parked();
+    }
+}
+
+/// The body's size in points (the window less the tile's padding) and pixels per point.
+fn body(view: &Entity<FileView>, cx: &mut VisualTestContext) -> (f32, f32, f32) {
+    let pad = view.read_with(cx, |v, _| v.pad * v.zoom);
+    cx.update(|window, _cx| {
+        let size = window.viewport_size();
+        let s = window.scale_factor();
+        (2.0_f32.mul_add(-pad, f32::from(size.width)), f32::from(size.height), s)
+    })
+}
+
+/// A picture shows fitted to the tile and is decoded to the pixels it covers: a small one at
+/// its own size, never enlarged, a wide one scaled down to the tile's width.
+#[gpui::test]
+fn a_picture_is_decoded_at_the_size_it_is_drawn(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/shot.png");
+    let small = decode::tests::png(&decode::tests::halves(300, 200));
+    let size = small.len() as u64;
+    arrives(&view, cx, media("image/png", small));
+    settle(cx);
+    assert_eq!(view.read_with(cx, |v, _| v.preview_drawn()), [(0, 300, 200)], "its own size");
+    let said = format!("image/png, 300 × 200, {}", size_label(size));
+    assert_eq!(labels(cx, "Image"), std::slice::from_ref(&said), "the picture says what it is");
+    assert_eq!(view.read_with(cx, FileView::summary), said);
+    assert!(!view.read_with(cx, |v, _| v.shows_text()), "no editor");
+
+    let (width, _height, scale) = body(&view, cx);
+    let wide = decode::tests::png(&decode::tests::halves(6000, 300));
+    arrives(&view, cx, media("image/png", wide));
+    settle(cx);
+    let drawn = view.read_with(cx, |v, _| v.preview_drawn());
+    let [(0, w, h)] = drawn.as_slice() else { panic!("{drawn:?}") };
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a test's pixels")]
+    let expected = (width * scale).ceil() as u32;
+    assert!(w.abs_diff(expected) <= 2, "decoded {w} for {expected} pixels of tile");
+    assert_eq!(u64::from(*h), u64::from(*w) * 300 / 6000, "its shape kept");
+}
+
+/// A PDF is its pages, each as wide as the tile; the ones in view are drawn at that width.
+#[gpui::test]
+fn a_pdf_shows_its_pages_drawn_at_the_tiles_width(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/report.pdf");
+    let page = ((612, 792), 0, "0 0 0 rg 72 72 200 200 re f");
+    let doc = decode::tests::pdf(&[page, page, page]);
+    arrives(&view, cx, media("application/pdf", doc));
+    settle(cx);
+    let pages = labels(cx, "Image");
+    assert!(pages.first().is_some_and(|p| p == "Page 1 of 3"), "{pages:?}");
+    assert!(view.read_with(cx, FileView::summary).starts_with("PDF, 3 pages, "));
+    let (width, _height, scale) = body(&view, cx);
+    let drawn = view.read_with(cx, |v, _| v.preview_drawn());
+    let Some((0, w, h)) = drawn.first().copied() else {
+        panic!("the first page is drawn: {drawn:?}")
+    };
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a test's pixels")]
+    let expected = (width * scale).ceil() as u32;
+    assert!(w.abs_diff(expected) <= 2, "page drawn {w} wide for {expected}");
+    assert_eq!(u64::from(h), u64::from(w) * 792 / 612, "a letter page's shape");
+}
+
+/// What the platform cannot read says so, in the tile's notice.
+#[gpui::test]
+fn a_picture_the_platform_cannot_read_says_so(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/broken.png");
+    arrives(&view, cx, media("image/png", b"\x89PNG\r\n\x1a\nbroken".to_vec()));
+    settle(cx);
+    assert_eq!(labels(cx, "Status"), ["Cannot show this file: This device cannot read it"]);
+    assert!(view.read_with(cx, |v, _| v.preview_drawn()).is_empty());
+}

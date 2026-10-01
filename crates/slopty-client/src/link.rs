@@ -219,9 +219,9 @@ impl WorkerLink {
                             let pump = Pump { session, events, echoes, taken };
                             pump_session(pump, rx, copies).await;
                         }
-                        Ok(Uni::Bulk { header, mut rx }) if header.purpose == Purpose::FileText => {
-                            let text = files::read_text(&header, &mut rx).await;
-                            let take = |join: &mut files::Join| join.on_text(header.xfer, text);
+                        Ok(Uni::Bulk { header, mut rx }) if header.purpose == Purpose::FileBody => {
+                            let body = files::read_body(&header, &mut rx).await;
+                            let take = |join: &mut files::Join| join.on_body(header.xfer, body);
                             hand_on_file(&files, &events, take).await;
                         }
                         Ok(Uni::Bulk { header, rx }) => {
@@ -808,7 +808,7 @@ async fn receive_bulk(
             tracing::debug!(xfer = %header.xfer, "a worker does not upload or save; stopping it");
             rx.stop();
         }
-        Purpose::FileText => {
+        Purpose::FileBody => {
             tracing::debug!(xfer = %header.xfer, "a file's text off the file join; stopping it");
             rx.stop();
         }

@@ -334,6 +334,7 @@ mod tests {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         };
         (worker.parse().unwrap(), summary)
     }

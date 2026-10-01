@@ -4504,6 +4504,117 @@ mod tests {
         );
     }
 
+    /// A picture or PDF comes down as its own bytes, known by its content, through the real
+    /// client link: one past the inline limit on a bulk stream, a small one inline, each the
+    /// file's bytes exactly.
+    #[tokio::test]
+    async fn a_picture_and_a_pdf_come_down_as_media() {
+        use slopty_proto::file::{FileRead, INLINE_FILE_BYTES};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend((0..INLINE_FILE_BYTES * 3).map(|i| u8::try_from(i % 251).unwrap()));
+        let pdf = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj << >> endobj\n".to_vec();
+        for (name, bytes, media_type) in
+            [("shot", &png, "image/png"), ("report.txt", &pdf, "application/pdf")]
+        {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let path = path.to_string_lossy().into_owned();
+            link.send(ClientMsg::ReadFile { path: path.clone() }).await.unwrap();
+            match next_file_event(&mut events, &path).await {
+                WorkerMsg::File {
+                    read: FileRead::Media { media_type: kind, bytes: got, .. },
+                    ..
+                } => {
+                    assert_eq!(kind, media_type, "{name}: by its bytes, not its name");
+                    assert!(got.as_ref() == bytes.as_slice(), "{name}: the file's bytes exactly");
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+    }
+
+    /// A folder tile's directory is followed: an entry made, renamed or deleted there reaches
+    /// the client as a new listing, unasked. Prints change → listing on loopback
+    /// (MEASUREMENTS.md, "folder tiles on kernel events").
+    #[tokio::test]
+    async fn a_followed_folder_is_listed_again_when_its_entries_change() {
+        use slopty_proto::folder::Listing;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let folder = dir.path().join("proj");
+        std::fs::create_dir_all(&folder).unwrap();
+        let name = folder.to_string_lossy().into_owned();
+        link.send(ClientMsg::WatchFolders { paths: vec![name.clone()] }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut took = Vec::new();
+        for round in 0..20 {
+            // Past the follower's `HOLD` since the last listing, which paces a busy folder.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let file = folder.join(format!("f{round}.txt"));
+            let at = std::time::Instant::now();
+            std::fs::write(&file, "x").unwrap();
+            let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+            loop {
+                let event =
+                    tokio::time::timeout_at(deadline, events.recv()).await.unwrap().unwrap();
+                if let LinkEvent::Control(WorkerMsg::Folder { path, listing }) = event
+                    && path == name
+                {
+                    let Listing::Listed { entries, .. } = listing else { panic!("{listing:?}") };
+                    if entries.iter().any(|e| e.name == format!("f{round}.txt")) {
+                        took.push(at.elapsed());
+                        break;
+                    }
+                }
+            }
+        }
+        took.sort_unstable();
+        println!(
+            "folder change → listing at the client: p50 {:?}, p90 {:?}, max {:?}",
+            took[took.len() / 2],
+            took[took.len() * 9 / 10],
+            took[took.len() - 1]
+        );
+        assert!(
+            took[took.len() / 2] < Duration::from_millis(200),
+            "events, not a refresh on focus"
+        );
+
+        std::fs::remove_file(folder.join("f0.txt")).unwrap();
+        loop {
+            let event = tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap();
+            if let LinkEvent::Control(WorkerMsg::Folder {
+                path,
+                listing: Listing::Listed { entries, .. },
+            }) = event
+                && path == name
+                && !entries.iter().any(|e| e.name == "f0.txt")
+            {
+                break;
+            }
+        }
+        link.send(ClientMsg::WatchFolders { paths: Vec::new() }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(folder.join("unwatched.txt"), "x").unwrap();
+        let quiet = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                if let Some(LinkEvent::Control(WorkerMsg::Folder { .. })) = events.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(quiet.is_err(), "no listing once nothing is followed");
+    }
+
     /// One request on the worker's control socket, and its reply.
     async fn ctl(
         sock: &std::path::Path,
@@ -4627,6 +4738,7 @@ mod tests {
                 status: AgentStatus::Working,
                 source: AgentSource::Hook,
                 since_ms,
+                mode: None,
             }
         );
         let close = ClientMsg::Term { session, req: TermRequest::Close };

@@ -74,6 +74,7 @@ mod tests {
                 agent: Some(blocked()),
                 progress: None,
                 restored: None,
+                repo_id: None,
             }],
             session_key: [7; 32],
         }
@@ -85,6 +86,7 @@ mod tests {
             status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() }),
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         }
     }
 

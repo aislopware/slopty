@@ -1,6 +1,8 @@
 //! File tiles following the disk (`slopty_worker::fswatch`), on the real file system: every
 //! kind of save reaches the follower once, a burst is one report, a directory deleted and made
-//! again or a symlink's target is followed, and what the kernel cannot watch is polled.
+//! again or a symlink's target is followed, and what the kernel cannot watch is polled. Folder
+//! tiles the same way: each change of a folder's entries is one report, a write inside a file
+//! none, and a folder deleted and made again is followed.
 //!
 //! The measurement beside them, edit → report against `FSEvents` and a bare kqueue:
 //!
@@ -16,7 +18,9 @@ mod follow {
     use std::time::{Duration, Instant};
 
     use slopty_testkit::stats::Spread;
-    use slopty_worker::fswatch::{Changes, HOLD, Limits, Status, follow};
+    use slopty_worker::fswatch::{
+        CONTENT_HOLD, Changes, HOLD, Limits, Status, follow, follow_folders,
+    };
     use tokio::sync::watch;
 
     /// Longer than any report takes on a loaded machine, short of a stuck test.
@@ -290,6 +294,128 @@ mod follow {
         let (lists, mut changes) = following(&[&path], Limits::default()).await;
         drop(lists);
         assert_eq!(tokio::time::timeout(WITHIN, changes.next()).await, Ok(None));
+    }
+
+    /// Follow the folders `paths`, once the follower has taken them.
+    async fn following_folders(paths: &[&Path]) -> (watch::Sender<Vec<String>>, Changes) {
+        let (lists, rx) = watch::channel(Vec::new());
+        let changes = follow_folders(rx, Limits::default());
+        let mut status = changes.status();
+        lists.send_replace(paths.iter().map(|p| key(p)).collect());
+        status.wait_for(|s| s.lists >= 1).await.unwrap();
+        (lists, changes)
+    }
+
+    /// The ways a folder's entries change under its tile, in the order a round does them.
+    const ENTRY_KINDS: [&str; 5] =
+        ["file made", "file renamed", "file deleted", "dir made", "dir deleted"];
+
+    fn change_entries(kind: &str, dir: &Path, round: usize) {
+        let (file, moved, sub) = (dir.join("new.txt"), dir.join("moved.txt"), dir.join("sub"));
+        match kind {
+            "file made" => std::fs::write(&file, format!("{round}\n")).unwrap(),
+            "file renamed" => std::fs::rename(&file, &moved).unwrap(),
+            "file deleted" => std::fs::remove_file(&moved).unwrap(),
+            "dir made" => std::fs::create_dir_all(&sub).unwrap(),
+            _ => std::fs::remove_dir(&sub).unwrap(),
+        }
+    }
+
+    /// `rounds` of every change of entries, each reported once: change → report, per kind.
+    async fn folder_rounds(rounds: usize) -> Vec<(&'static str, Vec<Duration>)> {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_lists, mut changes) = following_folders(&[&dir]).await;
+        assert!(status(&changes).events, "no kernel events");
+        assert!(status(&changes).polled.is_empty(), "a local folder is polled");
+        let mut taken: Vec<(&str, Vec<Duration>)> =
+            ENTRY_KINDS.iter().map(|k| (*k, Vec::new())).collect();
+        for round in 0..rounds {
+            for (kind, samples) in &mut taken {
+                let at = Instant::now();
+                change_entries(kind, &dir, round);
+                let got = next(&mut changes, WITHIN).await;
+                samples.push(at.elapsed());
+                assert_eq!(got, Some(vec![key(&dir)]), "{kind} in round {round}");
+                assert!(quiet(&mut changes, HOLD * 2).await, "{kind} reported twice");
+            }
+        }
+        taken
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_change_of_a_folders_entries_is_one_report() {
+        for (kind, samples) in folder_rounds(3).await {
+            let spread = Spread::of_durations(&samples).unwrap().per(1_000);
+            println!("{kind}: change → report µs {spread}");
+            assert!(spread.p50 < 100_000, "{kind}: p50 {} µs", spread.p50);
+        }
+    }
+
+    /// A write inside one of a folder's files changes the size its listing shows: the folder is
+    /// reported, after [`CONTENT_HOLD`], and a file that keeps growing reports it at that rate
+    /// at most. So is an entry made inside one of its subfolders, whose count the listing shows
+    /// (macOS; on Linux the subfolder's own entries are not watched).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_inside_a_file_of_the_folder_is_reported_for_its_size() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("logs");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let file = dir.join("log.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let (_lists, mut changes) = following_folders(&[&dir]).await;
+        let at = Instant::now();
+        write_in_place(&file, "two, longer\n");
+        assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "the size moved");
+        let took = at.elapsed();
+        assert!(took >= CONTENT_HOLD, "paced, not at once: {took:?}");
+        assert!(quiet(&mut changes, CONTENT_HOLD * 2).await, "one write, one report");
+
+        let started = Instant::now();
+        let mut reports = 0_u32;
+        while started.elapsed() < CONTENT_HOLD * 4 {
+            let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+            f.write_all(b"a line\n").unwrap();
+            drop(f);
+            if next(&mut changes, Duration::from_millis(10)).await.is_some() {
+                reports += 1;
+            }
+        }
+        assert!((1..=5).contains(&reports), "a growing log is paced: {reports} reports");
+        while next(&mut changes, CONTENT_HOLD * 2).await.is_some() {}
+
+        if cfg!(target_os = "macos") {
+            std::fs::write(dir.join("sub/new.txt"), "x").unwrap();
+            let got = next(&mut changes, WITHIN).await;
+            assert_eq!(got, Some(vec![key(&dir)]), "a subfolder's count moved");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_folder_deleted_and_made_again_is_followed() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("build");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_lists, mut changes) = following_folders(&[&dir]).await;
+        std::fs::remove_dir(&dir).unwrap();
+        assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "gone");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "back");
+        std::fs::write(dir.join("out.o"), "x").unwrap();
+        assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "watched anew");
+    }
+
+    /// Folder tiles' change → report (MEASUREMENTS.md, "folder tiles on kernel events").
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "measurement, run by hand"]
+    async fn folder_change_to_report() {
+        println!("| change | p50 µs | p95 µs | p99 µs | max µs |");
+        println!("| --- | --- | --- | --- | --- |");
+        for (kind, samples) in folder_rounds(200).await {
+            let s = Spread::of_durations(&samples).unwrap().per(1_000);
+            println!("| {kind} | {} | {} | {} | {} |", s.p50, s.p95, s.p99, s.max);
+        }
     }
 
     /// The numbers behind the choice (MEASUREMENTS.md, "file tiles on kernel events").

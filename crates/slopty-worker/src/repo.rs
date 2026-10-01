@@ -5,8 +5,21 @@
 //! answer: a walk up the directory tree for a `.git` entry, no `git` subprocess and no libgit,
 //! so it costs a handful of `stat` calls per `cd` and cannot hang on a lock or an index. The
 //! branch is the same kind of answer: `HEAD` read as a file, never `git branch`.
+//!
+//! Which repository it is *across machines* ([`RepoId`]) is asked once per repository and kept
+//! ([`Identities`]): the origin is the config file read, the first commit one `git rev-list` in
+//! the background.
 
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use slopty_core::SessionId;
+use slopty_proto::terminal::RepoId;
+use tokio::sync::mpsc;
 
 /// The repository root containing `cwd`, if any.
 ///
@@ -49,13 +62,238 @@ pub fn root_of_str(cwd: &str) -> Option<String> {
 /// in there: each worktree has its own.
 #[must_use]
 fn head_of(root: &Path) -> Option<PathBuf> {
+    Some(git_dir(root)?.join("HEAD"))
+}
+
+/// The git directory of the repository rooted at `root`: `.git` itself, or where a worktree's
+/// or a submodule's `.git` file links (`gitdir:`, relative to `root` or absolute).
+fn git_dir(root: &Path) -> Option<PathBuf> {
     let dot_git = root.join(".git");
     if std::fs::metadata(&dot_git).ok()?.is_dir() {
-        return Some(dot_git.join("HEAD"));
+        return Some(dot_git);
     }
     let link = std::fs::read_to_string(&dot_git).ok()?;
     let gitdir = link.lines().next()?.strip_prefix("gitdir:")?.trim();
-    (!gitdir.is_empty()).then(|| root.join(gitdir).join("HEAD"))
+    (!gitdir.is_empty()).then(|| root.join(gitdir))
+}
+
+/// The git directory every worktree of `root`'s repository shares, where its config lives:
+/// a worktree's own git directory names it in `commondir`; any other is its own.
+fn common_dir(root: &Path) -> Option<PathBuf> {
+    let own = git_dir(root)?;
+    match std::fs::read_to_string(own.join("commondir")) {
+        Ok(common) if !common.trim().is_empty() => Some(own.join(common.trim())),
+        _ => Some(own),
+    }
+}
+
+/// The normalized ([`normalize_origin`]) fetch URL of the repository rooted at `root`: its
+/// `origin` remote's, else the first remote's the config names. A config file read, no git.
+#[must_use]
+pub fn origin_of(root: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(common_dir(root)?.join("config")).ok()?;
+    let urls = remote_urls(&config);
+    let url = urls.iter().find(|(name, _)| name == "origin").or_else(|| urls.first())?;
+    normalize_origin(&url.1)
+}
+
+/// Each `[remote "name"]` section's `url`, in the order the config gives them.
+fn remote_urls(config: &str) -> Vec<(String, String)> {
+    let mut urls = Vec::new();
+    let mut remote: Option<String> = None;
+    for line in config.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[') {
+            let header = header.split(']').next().unwrap_or_default().trim();
+            remote = header.split_once(char::is_whitespace).and_then(|(section, name)| {
+                let name = name.trim().strip_prefix('"')?.strip_suffix('"')?;
+                section.eq_ignore_ascii_case("remote").then(|| name.to_owned())
+            });
+            continue;
+        }
+        let Some(name) = &remote else { continue };
+        let Some((key, value)) = line.split_once('=') else { continue };
+        if key.trim().eq_ignore_ascii_case("url") {
+            let value = value.trim();
+            let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+            urls.push((name.clone(), value.to_owned()));
+        }
+    }
+    urls
+}
+
+/// A remote URL as the same string on every machine that cloned it, however it was spelled.
+///
+/// It is `host/path`, the host lowercased, with no scheme, user, port, `.git` or slashes around the
+/// path. `https://github.com/o/r.git`, `ssh://git@github.com:22/o/r` and `git@github.com:o/r`
+/// are all `github.com/o/r`. `None` for a clone of a local path (`/w/r`, `file:///w/r`,
+/// `../r`), which names nothing another machine can see.
+#[must_use]
+pub fn normalize_origin(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (authority, path) = match url.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("file") => return None,
+        Some((_, rest)) => rest.split_once('/')?,
+        // `[user@]host:path`, git's scp-like form; a colon after a slash is in a local path.
+        None => url.split_once(':').filter(|(authority, _)| !authority.contains('/'))?,
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    };
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_end_matches('/');
+    (!host.is_empty() && !path.is_empty()).then(|| format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
+/// Whether the repository rooted at `root` is a shallow clone, whose oldest commit is where
+/// the clone stopped, not where the history began.
+fn is_shallow(root: &Path) -> bool {
+    common_dir(root).is_some_and(|common| common.join("shallow").exists())
+}
+
+/// Which repository the one rooted at `root` is, on any machine.
+///
+/// That is its origin, and the commit its history began with. The first commit is the root of
+/// `HEAD`'s first-parent chain, one every clone shares however far each has come since; a shallow
+/// clone and a repository with no commit yet have none.
+pub async fn identify(root: PathBuf) -> RepoId {
+    let local = {
+        let root = root.clone();
+        tokio::task::spawn_blocking(move || (origin_of(&root), is_shallow(&root)))
+    };
+    let (origin, shallow) = local.await.unwrap_or((None, true));
+    let first = if shallow { None } else { first_commit(&root).await };
+    RepoId { origin, root: first }
+}
+
+async fn first_commit(root: &Path) -> Option<String> {
+    let git = crate::changes::git()?;
+    let args = ["rev-list", "--first-parent", "--max-parents=0", "HEAD"];
+    let out = crate::changes::run_git(git, root, &args).await?;
+    let first = out.lines().next()?.trim();
+    let hash = matches!(first.len(), 40 | 64) && first.bytes().all(|b| b.is_ascii_hexdigit());
+    hash.then(|| first.to_ascii_lowercase())
+}
+
+/// One identification under way.
+pub type Identifying = Pin<Box<dyn Future<Output = RepoId> + Send>>;
+
+/// Identifies a repository; [`identify`] in the daemon, a stand-in in tests.
+pub type Identify = Arc<dyn Fn(PathBuf) -> Identifying + Send + Sync>;
+
+/// The daemon's [`Identify`]: [`identify`].
+#[must_use]
+pub fn git_identify() -> Identify {
+    Arc::new(|root| -> Identifying { Box::pin(identify(root)) })
+}
+
+/// Every repository a session has been in, identified once.
+///
+/// A repository is identified the
+/// first time a summary asks, in the background; the sessions in it are sent on `moves` when
+/// the answer is in, so their summaries go out again. One found without its first commit is
+/// asked again ([`AGAIN`]). Forgotten once no session is left that was in it, so a checkout
+/// replaced by another clone is identified afresh. Cheap to clone.
+#[derive(Clone)]
+pub struct Identities {
+    known: Arc<Mutex<HashMap<String, Known>>>,
+    identify: Identify,
+    moves: mpsc::UnboundedSender<SessionId>,
+}
+
+impl std::fmt::Debug for Identities {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let known = self.known.lock().len();
+        f.debug_struct("Identities").field("known", &known).finish_non_exhaustive()
+    }
+}
+
+/// How soon a repository identified without a first commit (none made yet, a shallow clone)
+/// is asked again, when a summary in it goes out.
+pub const AGAIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Default)]
+struct Known {
+    /// `None` until identified, and after when nothing identifies it.
+    id: Option<RepoId>,
+    /// When the last identification began; `None` before the first.
+    began: Option<tokio::time::Instant>,
+    done: bool,
+    sessions: HashSet<SessionId>,
+}
+
+impl Known {
+    /// Whether an ask now starts identifying: the first ask, or one [`AGAIN`] after an answer
+    /// that lacked the first commit.
+    fn due(&self) -> bool {
+        match self.began {
+            None => true,
+            Some(began) => {
+                self.done
+                    && self.id.as_ref().is_none_or(|id| id.root.is_none())
+                    && began.elapsed() >= AGAIN
+            }
+        }
+    }
+}
+
+impl Identities {
+    /// Identify with `identify`; a session asked about a repository identified since is sent
+    /// on `moves`.
+    #[must_use]
+    pub fn new(identify: Identify, moves: mpsc::UnboundedSender<SessionId>) -> Self {
+        Self { known: Arc::default(), identify, moves }
+    }
+
+    /// Which repository `repo` (a [`root_of`] answer) is, as far as known, for `session`
+    /// in it. The first ask starts identifying it, and must be inside a Tokio runtime.
+    #[must_use]
+    pub fn get(&self, session: SessionId, repo: &str) -> Option<RepoId> {
+        let mut known = self.known.lock();
+        let entry = known.entry(repo.to_owned()).or_default();
+        entry.sessions.insert(session);
+        let id = entry.id.clone();
+        let due = entry.due();
+        if due {
+            entry.began = Some(tokio::time::Instant::now());
+            entry.done = false;
+        }
+        drop(known);
+        if due {
+            let this = self.clone();
+            let repo = repo.to_owned();
+            tokio::spawn(async move {
+                let id = (this.identify)(PathBuf::from(&repo)).await;
+                tracing::debug!(%repo, ?id, "identified the repository");
+                this.settle(&repo, id);
+            });
+        }
+        id
+    }
+
+    fn settle(&self, repo: &str, id: RepoId) {
+        let mut known = self.known.lock();
+        let Some(entry) = known.get_mut(repo) else { return };
+        let found = (id.origin.is_some() || id.root.is_some()).then_some(id);
+        let moved = entry.id != found;
+        entry.id = found;
+        entry.done = true;
+        let announce: Vec<SessionId> =
+            if moved { entry.sessions.iter().copied().collect() } else { Vec::new() };
+        drop(known);
+        for session in announce {
+            let _sent = self.moves.send(session);
+        }
+    }
+
+    /// `session` is gone; a repository no session is left in is forgotten once identified.
+    pub fn forget(&self, session: SessionId) {
+        self.known.lock().retain(|_, entry| {
+            entry.sessions.remove(&session);
+            !entry.done || !entry.sessions.is_empty()
+        });
+    }
 }
 
 /// `branch_at` of `head_of`: what the repository rooted at `root` has checked out.
@@ -264,6 +502,158 @@ mod tests {
             walk.as_nanos(),
             head.as_nanos()
         );
+    }
+
+    /// Every spelling of one remote is one string; a clone of a local path is none.
+    #[test]
+    fn an_origin_is_the_same_however_it_was_spelled() {
+        for url in [
+            "https://github.com/aislopware/slopty.git",
+            "https://user@GitHub.com/aislopware/slopty/",
+            "ssh://git@github.com:22/aislopware/slopty.git",
+            "git@github.com:aislopware/slopty.git",
+            "github.com:aislopware/slopty",
+            "  git://github.com/aislopware/slopty  ",
+        ] {
+            assert_eq!(
+                normalize_origin(url).as_deref(),
+                Some("github.com/aislopware/slopty"),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            normalize_origin("ssh://studio/~/w/slopty").as_deref(),
+            Some("studio/~/w/slopty")
+        );
+        for local in ["/w/slopty", "../slopty", "file:///w/slopty", "./a:b/c", "https://host", ""] {
+            assert_eq!(normalize_origin(local), None, "{local}");
+        }
+    }
+
+    /// The origin remote wins over one listed before it; with none named `origin` the first
+    /// remote speaks; a worktree reads the config it shares through `commondir`.
+    #[test]
+    fn the_origin_is_read_from_the_config_worktrees_share() {
+        let tmp = tempfile::tempdir().expect("temp");
+        let main = tmp.path().join("project");
+        checkout(&main, "ref: refs/heads/main\n");
+        let config = "[core]\n\tbare = false\n[remote \"fork\"]\n\turl = git@github.com:me/slopty.git\n\
+                      [remote \"origin\"]\n\tURL = \"https://github.com/aislopware/slopty.git\"\n\
+                      \tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n";
+        fs::write(main.join(".git/config"), config).expect("write");
+        let gitdir = main.join(".git/worktrees/feature");
+        fs::create_dir_all(&gitdir).expect("mkdir");
+        fs::write(gitdir.join("commondir"), "../..\n").expect("write");
+        let tree = tmp.path().join("feature");
+        fs::create_dir_all(&tree).expect("mkdir");
+        fs::write(tree.join(".git"), format!("gitdir: {}\n", gitdir.display())).expect("write");
+
+        let origin = Some("github.com/aislopware/slopty".to_owned());
+        assert_eq!(origin_of(&main), origin);
+        assert_eq!(origin_of(&tree), origin, "the worktree's is its repository's");
+
+        fs::write(
+            main.join(".git/config"),
+            "[remote \"fork\"]\n\turl = git@github.com:me/slopty\n",
+        )
+        .expect("write");
+        assert_eq!(origin_of(&main).as_deref(), Some("github.com/me/slopty"), "the first remote");
+        fs::write(main.join(".git/config"), "[remote \"origin\"]\n\turl = /w/slopty\n")
+            .expect("write");
+        assert_eq!(origin_of(&main), None, "a local clone's origin names nothing");
+        assert_eq!(origin_of(tmp.path()), None, "no repository");
+    }
+
+    /// A real repository and a clone of it (a local one, so no origin) share the commit their
+    /// history began with, however far each has come; a shallow clone and a repository with no
+    /// commit say none.
+    #[tokio::test]
+    async fn clones_share_their_first_commit() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let run = |dir: &Path, args: &[&str]| {
+            let status = std::process::Command::new(git)
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "protocol.file.allow=always",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("git runs");
+            assert!(status.success(), "git {args:?}");
+        };
+        let first = tmp.path().join("first");
+        fs::create_dir_all(&first).expect("mkdir");
+        run(&first, &["init", "-q"]);
+        assert_eq!(identify(first.clone()).await, RepoId::default(), "no commit yet");
+        for n in ["one", "two"] {
+            run(&first, &["commit", "-q", "--allow-empty", "-m", n]);
+        }
+        let other = tmp.path().join("other");
+        run(tmp.path(), &["clone", "-q", "first", "other"]);
+        run(&other, &["commit", "-q", "--allow-empty", "-m", "moved on"]);
+        run(&first, &["remote", "add", "origin", "git@github.com:aislopware/slopty.git"]);
+
+        let (a, b) = (identify(first.clone()).await, identify(other.clone()).await);
+        assert!(a.root.as_ref().is_some_and(|r| r.len() == 40), "a full hash: {a:?}");
+        assert_eq!(a.root, b.root);
+        assert_eq!(a.origin.as_deref(), Some("github.com/aislopware/slopty"));
+        assert_eq!(b.origin, None, "cloned from a local path");
+        assert!(a.same(&b), "one repository");
+
+        let url = format!("file://{}", first.display());
+        run(tmp.path(), &["clone", "-q", "--depth", "1", &url, "shallow"]);
+        assert_eq!(
+            identify(tmp.path().join("shallow")).await.root,
+            None,
+            "where the clone stopped"
+        );
+    }
+
+    /// A repository is identified once however many sessions ask; each session that asked is
+    /// told when the answer is in, and a forgotten one is not.
+    #[tokio::test]
+    async fn a_repository_is_identified_once_and_its_sessions_told() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (gate_tx, gate_rx) = tokio::sync::watch::channel(false);
+        let identify: Identify = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_root| -> Identifying {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut gate = gate_rx.clone();
+                Box::pin(async move {
+                    let _open = gate.wait_for(|open| *open).await;
+                    RepoId { origin: Some("github.com/o/r".to_owned()), root: None }
+                })
+            })
+        };
+        let (moves, mut moved) = mpsc::unbounded_channel();
+        let ids = Identities::new(identify, moves);
+        let (a, b, gone) = (SessionId::new(), SessionId::new(), SessionId::new());
+        assert_eq!(ids.get(a, "/w/r"), None, "not yet");
+        assert_eq!(ids.get(b, "/w/r"), None);
+        assert_eq!(ids.get(gone, "/w/r"), None);
+        ids.forget(gone);
+        gate_tx.send_replace(true);
+
+        let mut told = vec![moved.recv().await.expect("told"), moved.recv().await.expect("told")];
+        told.sort();
+        let mut want = vec![a, b];
+        want.sort();
+        assert_eq!(told, want);
+        let id = ids.get(a, "/w/r").expect("identified");
+        assert_eq!(id.origin.as_deref(), Some("github.com/o/r"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1, "once");
     }
 
     #[test]

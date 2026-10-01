@@ -258,9 +258,11 @@ mod crash {
     }
 
     /// A shipped build: this test binary with its debug info stripped (`strip -S`, as the dist
-    /// profile's `strip = "debuginfo"` does), alone in a directory and then with its dSYM
-    /// beside it, as a bundle ships it. Alone, the report still names every frame from the
-    /// symbol table, without file or line; with the dSYM, the frames have them again.
+    /// profile's `strip = "debuginfo"` does), alone in a directory as a user runs it, and then
+    /// with its dSYM beside it as a `dist` build in `target/dist` has one. Alone, the report
+    /// still names every frame from the symbol table and keeps each frame's offset and the
+    /// build's UUID, which `cargo xtask symbolicate` resolves; with the dSYM, the frames have
+    /// their files and lines on the spot.
     #[test]
     fn a_shipped_build_resolves_through_its_dsym_and_names_frames_without_it() {
         let exe = std::env::current_exe().unwrap();
@@ -289,6 +291,8 @@ mod crash {
         let bare = run("without its debug info");
         let child = find(&bare, "crash::crash::child");
         assert_eq!((&child.file, child.line), (&None, None), "no line table left: {child:?}");
+        assert!(child.offset.is_some() && child.image.is_some(), "where to look it up: {child:?}");
+        assert!(bare.build.uuid.is_some(), "and in which build: {:?}", bare.build);
         find(&bare, "slopty_crash::install");
 
         let dsym = shipped.path().join("crash.dSYM");

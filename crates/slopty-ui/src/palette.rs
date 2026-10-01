@@ -365,6 +365,15 @@ fn foot_key(theme: &Theme, key: &'static str, what: &'static str) -> gpui::Div {
         .child(what)
 }
 
+/// The fade over the list's foot while there is more below. With no legend under it (glass),
+/// it meets the sheet's rounded foot and follows its corners, where a square band cut them off.
+fn more_fade(theme: &Theme, legend: bool) -> gpui::Div {
+    let inner = theme.radii.lg - 1.0;
+    crate::kit::edge_fade(Edge::Bottom, theme.surfaces.elevated, px(theme.spacing.lg))
+        .debug_selector(|| "palette-more".to_owned())
+        .when(!legend, |el| el.rounded_b(px(inner)))
+}
+
 /// The palette's foot: a quiet band across the sheet's bottom, what ↩ does with the selected
 /// line on its right (where the eye ends), the other keys on its left. Its caps are plates
 /// with no ring, and it needs no hairline: the band is a step off the sheet.
@@ -1737,7 +1746,6 @@ fn leaving(pace: Pace) -> gpui::Animation {
 impl Render for CommandPalette {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme.clone();
-        let s = theme.surfaces;
         let chosen = self.selected(self.matched.len());
         if std::mem::take(&mut self.reveal)
             && let Some(line) = self.lines.iter().position(|l| *l == Line::Match(chosen))
@@ -1798,10 +1806,7 @@ impl Render for CommandPalette {
                 }
             });
         });
-        let fade = self.more_below.then(|| {
-            crate::kit::edge_fade(Edge::Bottom, s.elevated, px(theme.spacing.lg))
-                .debug_selector(|| "palette-more".to_owned())
-        });
+        let fade = self.more_below.then(|| more_fade(&theme, self.chords));
         // Glass has no Esc: the field ends in Cancel, as iOS search does.
         let cancel = (!self.chords).then(|| {
             crate::kit::button(&theme, "palette-cancel", "Cancel", crate::kit::ButtonKind::Link)
@@ -1996,6 +2001,20 @@ mod tests {
     /// A row's box `y` down a list.
     fn line(y: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(0.0), px(y)), size(px(320.0), px(32.0)))
+    }
+
+    /// On glass the fade over the list's foot keeps the sheet's rounded corners; over the
+    /// legend's band it is square, the band being what meets the corners.
+    #[test]
+    fn the_fade_follows_the_sheets_corners_where_it_meets_them() {
+        let theme = Theme::default();
+        let inner = px(theme.radii.lg - 1.0);
+        let mut glass = more_fade(&theme, false);
+        let corners = glass.style().corner_radii.clone();
+        assert_eq!(corners.bottom_left, Some(inner.into()));
+        assert_eq!(corners.bottom_right, Some(inner.into()));
+        let mut desk = more_fade(&theme, true);
+        assert_eq!(desk.style().corner_radii.bottom_left, None, "the legend meets them");
     }
 
     /// `ms` past `t0`.

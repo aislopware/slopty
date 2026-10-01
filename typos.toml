@@ -23,6 +23,10 @@ kend = "kend"     # the End key
 WRONLY = "WRONLY" # the POSIX open(2) flag
 ue = "ue"         # ue(v), the H.26x unsigned exp-Golomb code (`slopty_codec::conformance`)
 
+[default.extend-identifiers]
+# the `image` crate's `Delay::from_numer_denom_ms`
+from_numer_denom_ms = "from_numer_denom_ms"
+
 [files]
 extend-exclude = [
     "**/*.snap",

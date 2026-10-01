@@ -414,6 +414,20 @@ pub struct Navigator {
     pub shown: bool,
     /// Its width, in points, from [`Navigator::MIN_WIDTH`] to [`Navigator::MAX_WIDTH`].
     pub width: f32,
+    /// How it groups the tiles.
+    pub lens: NavLens,
+}
+
+/// How the navigator groups the tiles: under the worker each runs on, or under the repository
+/// its directory is in, whichever worker that checkout is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum NavLens {
+    /// Under each worker: the default, since what runs where is the first thing to know
+    /// across many hosts.
+    #[default]
+    Workers,
+    /// Under each repository, across every worker.
+    Repositories,
 }
 
 impl Navigator {
@@ -437,7 +451,7 @@ impl Navigator {
 
 impl Default for Navigator {
     fn default() -> Self {
-        Self { shown: true, width: Self::DEFAULT_WIDTH }
+        Self { shown: true, width: Self::DEFAULT_WIDTH, lens: NavLens::Workers }
     }
 }
 
@@ -1951,8 +1965,7 @@ impl Layout {
 
     /// Keep the navigator's state with the layout; its width is clamped.
     pub const fn set_navigator(&mut self, navigator: Navigator) {
-        self.navigator =
-            Navigator { shown: navigator.shown, width: Navigator::clamp_width(navigator.width) };
+        self.navigator = Navigator { width: Navigator::clamp_width(navigator.width), ..navigator };
     }
 
     /// The workspace area, in points.

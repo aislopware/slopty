@@ -261,6 +261,10 @@ mod golden {
                 attention: true,
                 source: AgentSource::Hook,
                 since_ms: WallMs::from_millis(1_790_000_060_000),
+                mode: Some(slopty_proto::agent::HeardMode {
+                    name: "plan".to_owned(),
+                    heard_ms: WallMs::from_millis(1_790_000_050_000),
+                }),
             }),
         );
         // The same session attributed without hooks: the pill is the same, the source is not.
@@ -275,6 +279,7 @@ mod golden {
                 attention: false,
                 source: AgentSource::Process,
                 since_ms: WallMs::from_millis(1_790_000_060_000),
+                mode: None,
             }),
         );
         snap("client_install_hooks", &ClientMsg::InstallHooks);
@@ -306,6 +311,7 @@ mod golden {
                 attention: false,
                 source: AgentSource::Hook,
                 since_ms: WallMs::from_millis(1_790_000_060_000),
+                mode: None,
             }),
         );
         snap(
@@ -463,6 +469,10 @@ mod golden {
             cwd: Some("/w/slopty/crates/ui".to_owned()),
             repo: Some("/w/slopty".to_owned()),
             branch: Some("main".to_owned()),
+            repo_id: Some(slopty_proto::terminal::RepoId {
+                origin: Some("github.com/aislopware/slopty".to_owned()),
+                root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+            }),
             changes: Some(slopty_proto::terminal::RepoChanges { files: 3, added: 12, removed: 4 }),
             started_ms: WallMs::from_millis(1_790_000_000_000),
             cols: 80,
@@ -475,6 +485,10 @@ mod golden {
                 status: slopty_proto::agent::AgentStatus::Working,
                 source: slopty_proto::agent::AgentSource::Hook,
                 since_ms: WallMs::from_millis(1_790_000_060_000),
+                mode: Some(slopty_proto::agent::HeardMode {
+                    name: "acceptEdits".to_owned(),
+                    heard_ms: WallMs::from_millis(1_790_000_050_000),
+                }),
             }),
             progress: Some(slopty_proto::terminal::Progress {
                 state: slopty_proto::terminal::ProgressState::Set,
@@ -652,6 +666,10 @@ mod golden {
             },
         );
         snap(
+            "client_watch_folders",
+            &ClientMsg::WatchFolders { paths: vec!["/w/slopty/src".to_owned(), "~/".to_owned()] },
+        );
+        snap(
             "worker_found_files",
             &WorkerMsg::FoundFiles {
                 root: "~".to_owned(),
@@ -679,7 +697,32 @@ mod golden {
                     xfer: XferId::from_uuid(Uuid::from_u128(0x0f11e)),
                     size: 1_400_000,
                     modified_ms: WallMs::from_millis(1_788_000_000_000),
-                    final_newline: true,
+                    body: slopty_proto::file::Body::Text { final_newline: true },
+                },
+            },
+        );
+        snap(
+            "worker_file_media",
+            &WorkerMsg::File {
+                path: "/w/shots/dot.png".to_owned(),
+                read: slopty_proto::file::FileRead::Media {
+                    media_type: "image/png".to_owned(),
+                    bytes: bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n"),
+                    modified_ms: WallMs::from_millis(1_788_000_000_000),
+                },
+            },
+        );
+        snap(
+            "worker_file_streamed_media",
+            &WorkerMsg::File {
+                path: "/w/docs/report.pdf".to_owned(),
+                read: slopty_proto::file::FileRead::Streamed {
+                    xfer: XferId::from_uuid(Uuid::from_u128(0x0f11f)),
+                    size: 2_400_000,
+                    modified_ms: WallMs::from_millis(1_788_000_000_000),
+                    body: slopty_proto::file::Body::Media {
+                        media_type: "application/pdf".to_owned(),
+                    },
                 },
             },
         );
@@ -691,10 +734,10 @@ mod golden {
             },
         );
         snap(
-            "uni_bulk_file_text",
+            "uni_bulk_file_body",
             &UniHead::Bulk(BulkHeader {
                 xfer: XferId::from_uuid(Uuid::from_u128(0x0f11e)),
-                purpose: Purpose::FileText,
+                purpose: Purpose::FileBody,
                 name: String::new(),
                 size: 1_399_999,
                 mtime_ms: WallMs::from_millis(1_788_000_000_000),
@@ -1637,6 +1680,7 @@ mod golden {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         };
         snap("server_session_changed", &ToServer::SessionChanged(summary.clone()));
         snap("server_terminals", &FromServer::Terminals(vec![(worker, summary)]));
@@ -1831,6 +1875,7 @@ mod orchestration {
                     attention: true,
                     source: AgentSource::Hook,
                     since_ms: WallMs::from_millis(1_789_999_990_000),
+                    mode: None,
                 },
             },
         };
@@ -2820,6 +2865,7 @@ mod ctl {
                     agent: None,
                     progress: None,
                     restored: None,
+                    repo_id: None,
                 }],
             },
         );

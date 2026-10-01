@@ -22,6 +22,7 @@ use slopty_proto::project::{
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
+use slopty_proto::terminal::SessionSummary;
 
 use super::{
     Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, digest, error, keep_start, keyed, known_term,
@@ -470,12 +471,68 @@ fn facts_of(entry: &Entry, agents_here: u16) -> Facts {
         ("load", Fact::Float(f64::from(info.load))),
         ("online", Fact::Bool(info.liveness == Liveness::Online)),
         ("live_agents", Fact::Int(i64::from(agents_here))),
+        ("repos", repos_of(&entry.sessions)),
     ];
     // What the server knows of a worker is its word over the worker's own.
     for (name, fact) in known {
         facts.insert(name.to_owned(), fact);
     }
     facts
+}
+
+/// Which repository a project's orchestrator works in, by the key every clone of it shares,
+/// and where each worker has one (its name, the path), in name order.
+#[derive(Debug, Default)]
+struct Clones {
+    key: Option<String>,
+    on: Vec<(String, String)>,
+}
+
+/// [`Clones`] of the repository `project`'s orchestrator's terminal is in: keyed by its origin
+/// when it has one, else its first commit.
+fn clones_of(state: &State, project: &Project) -> Clones {
+    let Some(term) = project.orchestrator else { return Clones::default() };
+    let here = state.workers.get(&term.worker).and_then(|e| {
+        e.sessions.iter().find(|s| s.id == term.session).and_then(|s| s.repo_id.clone())
+    });
+    let Some(id) = here else { return Clones::default() };
+    let Some(key) = id.origin.clone().or_else(|| id.root.clone()) else {
+        return Clones::default();
+    };
+    let mut on: Vec<(String, String)> = state
+        .workers
+        .values()
+        .filter_map(|e| {
+            let Fact::Map(repos) = repos_of(&e.sessions) else { return None };
+            let path = id.keys().find_map(|k| match repos.get(k) {
+                Some(Fact::Text(path)) => Some(path.clone()),
+                _ => None,
+            })?;
+            Some((e.info.name.clone(), path))
+        })
+        .collect();
+    on.sort();
+    Clones { key: Some(key), on }
+}
+
+/// The repositories a worker has a shell in, by each key of their identity
+/// ([`RepoId`](slopty_proto::terminal::RepoId): the
+/// normalized origin, the first commit), to where the clone is. One repository cloned on two
+/// workers has the same keys on both, so `"github.com/o/r" in repos` places a task beside
+/// a clone of it and `repos["github.com/o/r"]` says where; with several clones on one worker
+/// the first path in order is named.
+fn repos_of(sessions: &[SessionSummary]) -> Fact {
+    let mut repos: BTreeMap<String, &str> = BTreeMap::new();
+    for session in sessions {
+        let (Some(id), Some(path)) = (&session.repo_id, &session.repo) else { continue };
+        for key in id.keys() {
+            let at = repos.entry(key.to_owned()).or_insert(path);
+            if path.as_str() < *at {
+                *at = path;
+            }
+        }
+    }
+    Fact::Map(repos.into_iter().map(|(key, path)| (key, Fact::Text(path.to_owned()))).collect())
 }
 
 /// A rules text from a project's metadata (`agent_rules`, `orchestrator_rules`).
@@ -535,7 +592,7 @@ fn agent_role(project: &Project, task: &Task) -> String {
 }
 
 /// What a project's orchestrator is told once it is named, through its hooks.
-fn orchestrator_role(project: &Project) -> String {
+fn orchestrator_role(project: &Project, clones: &Clones) -> String {
     let mut lines = vec![
         format!(
             "You orchestrate the Slopty project {} (\"{}\", {}, work lands on {}), through the \
@@ -553,6 +610,16 @@ fn orchestrator_role(project: &Project) -> String {
          the person's."
             .to_owned(),
     ];
+    if let Some(key) = &clones.key {
+        let on = clones.on.iter().map(|(name, path)| format!("{} ({})", plain(name), plain(path)));
+        lines.push(format!(
+            "- Its repository is {key} on every worker: clones of it are on {}. Place a task \
+             beside one with the rule `\"{key}\" in repos` and start it in \
+             `repos[\"{key}\"]`, the clone's path there; a worker without one needs a clone made \
+             first.",
+            on.collect::<Vec<_>>().join(", ")
+        ));
+    }
     lines.extend(rules(project, "orchestrator_rules"));
     lines.join("\n")
 }
@@ -823,7 +890,8 @@ impl Hub {
         if let Some(project) = named
             && let Ok(record) = state.projects.project(&project)
         {
-            let role = orchestrator_role(record);
+            let clones = clones_of(state, record);
+            let role = orchestrator_role(record, &clones);
             let words = Report {
                 kind: ReportKind::NeedsInput,
                 note: role,
@@ -1465,11 +1533,15 @@ impl Hub {
         }
     }
 
-    /// The worker holding `term` handed batch `batch` to its agent.
+    /// The worker holding `term` handed batch `batch` to its agent. The timeline shows reports
+    /// delivered; a batch of the server's own words alone (an orchestrator's role) is standing
+    /// context, not an event: when an agent reads it follows only from when it starts.
     pub(super) fn delivered(&self, state: &mut State, term: TermRef, batch: u64) {
         let Some(((project, node), reports)) = state.deliveries.acked(term, batch) else { return };
-        let updates = state.projects.delivered(&project, node, term, reports, WallMs::now());
-        self.projects_moved(state, updates);
+        if reports > 0 {
+            let updates = state.projects.delivered(&project, node, term, reports, WallMs::now());
+            self.projects_moved(state, updates);
+        }
         // What did not fit that batch may go now.
         self.inner.deliver.notify_one();
     }
@@ -1548,6 +1620,76 @@ mod tests {
 
     fn words(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_owned).collect()
+    }
+
+    /// A shell in a clone at `repo`, identified by `origin` and `root`.
+    fn shell_in(repo: &str, origin: Option<&str>, root: Option<&str>) -> SessionSummary {
+        SessionSummary {
+            id: SessionId::new(),
+            title: "zsh".to_owned(),
+            cwd: Some(repo.to_owned()),
+            repo: Some(repo.to_owned()),
+            branch: None,
+            repo_id: Some(slopty_proto::terminal::RepoId {
+                origin: origin.map(str::to_owned),
+                root: root.map(str::to_owned),
+            }),
+            changes: None,
+            started_ms: WallMs::ZERO,
+            cols: 80,
+            rows: 24,
+            state: slopty_proto::terminal::SessionState::Running,
+            viewers: 0,
+            command: Vec::new(),
+            agent: None,
+            progress: None,
+            restored: None,
+        }
+    }
+
+    /// One repository cloned on two workers is found on both by either key, and a rule
+    /// places a task beside a clone of it; a worker with none has an empty `repos`.
+    #[test]
+    fn a_repository_is_a_fact_of_every_worker_with_a_clone() {
+        let (origin, root) =
+            ("github.com/aislopware/slopty", "c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e");
+        let studio = [
+            shell_in("/w/slopty-wt/board", Some(origin), Some(root)),
+            shell_in("/w/slopty", Some(origin), Some(root)),
+            shell_in("/w/notes", None, None),
+        ];
+        let linux = [shell_in("/home/c/slopty", None, Some(root))];
+        let Fact::Map(on_studio) = repos_of(&studio) else { panic!("a map") };
+        assert_eq!(
+            on_studio.get(origin),
+            Some(&Fact::Text("/w/slopty".to_owned())),
+            "the first clone"
+        );
+        assert_eq!(on_studio.get(root), on_studio.get(origin));
+        assert_eq!(on_studio.len(), 2, "a shell in no known repository adds nothing");
+
+        let candidate = |name: &str, sessions: &[SessionSummary]| Candidate {
+            worker: WorkerId::new(),
+            name: name.to_owned(),
+            online: true,
+            facts: Facts::from([("repos".to_owned(), repos_of(sessions))]),
+            live: 0,
+            fleet_live: 0,
+        };
+        let fleet =
+            [candidate("studio", &studio), candidate("linux", &linux), candidate("bare", &[])];
+        let fits = |rule: &str| {
+            let placement = Placement { require: vec![rule.to_owned()], ..Placement::default() };
+            let ranking = Ranking { comprehensions: 2, ..Ranking::default() };
+            let ranked = placement::rank(&placement, &fleet, &BTreeMap::new(), ranking).unwrap();
+            let mut fit: Vec<String> =
+                ranked.into_iter().filter(|s| s.fits).map(|s| s.name).collect();
+            fit.sort();
+            fit
+        };
+        assert_eq!(fits(&format!("{root:?} in repos")), ["linux", "studio"]);
+        assert_eq!(fits(&format!("{origin:?} in repos")), ["studio"]);
+        assert_eq!(fits(&format!("repos[{origin:?}] == \"/w/slopty\"")), ["studio"]);
     }
 
     #[test]

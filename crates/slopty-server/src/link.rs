@@ -320,6 +320,7 @@ mod tests {
             status,
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         };
         ToServer::Agent(agent.quiet_event(session))
     }

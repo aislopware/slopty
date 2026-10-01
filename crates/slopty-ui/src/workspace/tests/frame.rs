@@ -637,6 +637,38 @@ fn a_slow_round_trip_shows_on_the_right_edge_and_holds_still(cx: &mut TestAppCon
     assert_eq!(moved.top() - row.top(), rtt.top() - header.top(), "on the row's line");
 }
 
+/// A pinned round trip is what every readout shows, whatever the link measures, and only for
+/// a worker that has one; the link's own figure stays for the predictors and the dump.
+#[gpui::test]
+fn a_pinned_round_trip_is_what_the_readouts_show(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let _mine = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let far = point(px(VIEWPORT.0 - 10.0), px(VIEWPORT.1 / 2.0));
+    cx.simulate_mouse_move(far, None, Modifiers::default());
+    let slow = Duration::from_millis(57);
+    view.update_in(cx, |v, _w, cx| {
+        v.pin_rtt_readout(Some(Duration::from_millis(1)), cx);
+        v.set_rtt(studio.key, Some(slow), cx);
+    });
+    cx.run_until_parked();
+    let readout = |cx: &mut VisualTestContext, key: WorkerKey| {
+        cx.debug_bounds(leak(format!("nav-rtt-{key}"))).is_some()
+    };
+    assert!(!readout(cx, studio.key), "the pinned figure is quiet, not the link's 57 ms");
+    assert_eq!(view.read_with(cx, |v, _| v.rtt(studio.key)), Some(slow), "the link's own");
+    let shown = view.read_with(cx, |v, _| v.workers.get(&laptop.key).and_then(|w| v.shown_rtt(w)));
+    assert_eq!(shown, None, "no figure for a worker that has none");
+
+    view.update_in(cx, |v, _w, cx| v.pin_rtt_readout(Some(Duration::from_millis(31)), cx));
+    cx.run_until_parked();
+    assert!(readout(cx, studio.key), "a pinned slow figure shows");
+    view.update_in(cx, |v, _w, cx| v.pin_rtt_readout(None, cx));
+    cx.run_until_parked();
+    assert!(readout(cx, studio.key), "unpinned, the link's own");
+}
+
 fn theme() -> Theme {
     Theme::default()
 }

@@ -63,6 +63,11 @@ pub(crate) fn serve(
         if std::env::var_os("SLOPTY_E2E_MOTION").is_none() {
             cx.update(|cx| cx.set_reduce_motion(true));
         }
+        // The readouts show a local link's round trip, not the one a busy machine measured, so
+        // a golden never carries live timing. The dump and the predictors keep the link's own.
+        workspace.update(cx, |ws, cx| {
+            ws.view.update(cx, |view, cx| view.pin_rtt_readout(Some(slopty_e2e::SHOWN_RTT), cx));
+        });
         #[cfg(target_os = "macos")]
         let dragged = park_drags(&workspace, cx);
         while let Some((command, reply)) = rx.recv().await {

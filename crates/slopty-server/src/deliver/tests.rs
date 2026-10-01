@@ -142,7 +142,7 @@ fn a_batch_fits_a_hook_s_context_and_the_rest_follow() {
         delivered += batch.reports;
         assert_eq!(d.acked(to, batch.number), Some((orchestrator(), batch.reports)));
     }
-    assert_eq!(delivered, 51, "every report reaches the agent");
+    assert_eq!(delivered, 50, "every task's report reaches the agent, counted as one");
     assert_eq!(d.len(), 0);
 }
 

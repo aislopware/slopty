@@ -136,6 +136,7 @@ fn opened(lease: &Lease, (id, verb): &(RequestId, Verb)) -> TermRef {
         attention: false,
         source: AgentSource::Hook,
         since_ms: WallMs::ZERO,
+        mode: None,
     };
     let with_agent =
         SessionSummary { agent: Some(SessionAgent::from(&started)), ..summary(session) };
@@ -550,6 +551,7 @@ fn agent(session: SessionId, status: AgentStatus) -> ToServer {
         attention: true,
         source: AgentSource::Hook,
         since_ms: WallMs::ZERO,
+        mode: None,
     })
 }
 
@@ -696,6 +698,7 @@ fn announce(lease: &Lease, session: SessionId, agent: bool) {
         attention: false,
         source: AgentSource::Hook,
         since_ms: WallMs::ZERO,
+        mode: None,
     };
     let agent = agent.then(|| SessionAgent::from(&running));
     lease.handle(ToServer::SessionChanged(SessionSummary { agent, ..summary(session) }));
@@ -1047,11 +1050,11 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     let timeline = status(&hub).await.timeline;
     let kinds: Vec<&Moment> = timeline.iter().map(|e| &e.what).collect();
     assert!(kinds.iter().any(|m| matches!(m, Moment::Reported { .. })), "{kinds:?}");
-    assert_eq!(
-        kinds.iter().filter(|m| matches!(m, Moment::Delivered { reports: 1, .. })).count(),
-        2,
-        "{kinds:?}"
-    );
+    // The orchestrator's role is standing context, not a report: when it is read follows
+    // only from when the agent starts, so it is not an event on the timeline.
+    let delivered: Vec<&Moment> =
+        kinds.iter().copied().filter(|m| matches!(m, Moment::Delivered { .. })).collect();
+    assert_eq!(delivered, [&Moment::Delivered { term: orchestrator, reports: 1 }], "{kinds:?}");
     delivering.abort();
 }
 
@@ -1488,4 +1491,46 @@ async fn a_task_s_agent_splits_work_only_under_its_own_task() {
         )
         .await;
     refused(&made, ErrorCode::Forbidden);
+}
+
+/// The orchestrator is told which repository it works in, by the key every clone shares, and
+/// where each worker has one: a clone on another machine under another path is the same
+/// repository.
+#[tokio::test]
+async fn the_orchestrator_is_told_where_its_repository_is_cloned() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let in_clone = |session: SessionId, path: &str, origin: Option<&str>| SessionSummary {
+        repo: Some(path.to_owned()),
+        repo_id: Some(slopty_proto::terminal::RepoId {
+            origin: origin.map(str::to_owned),
+            root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+        }),
+        ..summary(session)
+    };
+    let orchestrator = SessionId::new();
+    let origin = Some("github.com/aislopware/slopty");
+    let (studio, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    lease.handle(ToServer::SessionChanged(in_clone(orchestrator, "/w/slopty", origin)));
+    let linux = vec![in_clone(SessionId::new(), "/home/c/slopty", None)];
+    let (_linux, _linux_lease, _linux_rx) = worker_on(&hub, "linux", Os::Linux, linux);
+    let (_bare, _bare_lease, _bare_rx) = worker_on(&hub, "bare", Os::Linux, Vec::new());
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+
+    let context = loop {
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+            Ok(Some(FromServer::Deliver { context, .. })) => break context,
+            Ok(Some(_)) => {}
+            other => panic!("no batch: {other:?}"),
+        }
+    };
+    assert!(
+        context.contains(
+            "Its repository is github.com/aislopware/slopty on every worker: clones of it are on \
+             linux (/home/c/slopty), studio (/w/slopty)."
+        ),
+        "{context}"
+    );
+    assert!(context.contains(r#"`"github.com/aislopware/slopty" in repos`"#), "{context}");
+    delivering.abort();
 }

@@ -25,6 +25,14 @@
 //! warn tone. A row flies the camera to what it names. Workspaces are the title bar's tabs, not a
 //! section here.
 //!
+//! The palette's "Group the navigator by repository" swaps the workers for the repositories
+//! the shells are in, whichever worker holds each checkout: a header per repository path (its
+//! directory's name, and where it is when another listed has that name), its tiles from every
+//! worker in order of attention, each second line naming the worker, the directory below the
+//! repository and the branch. A file or folder joins the deepest repository of its worker's
+//! shells that holds it; the rest sit under *No repository*, last. The lens is kept with the
+//! layout, and the same palette line goes back by worker.
+//!
 //! On a window wide enough it docks beside the rest of the frame, 248 pt by default, dragged
 //! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
 //! at 248; ⌘B shows or hides it, and both are kept with the device's layout. Hidden there, a
@@ -41,7 +49,7 @@
 //! tile whose row is out of view scrolls into it.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::mem::{Discriminant, discriminant};
 use std::time::{Duration, SystemTime};
 
@@ -54,7 +62,7 @@ use gpui::{
     Subscription, Task, Window, canvas, div, list, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
-use slopty_client::layout::{Navigator, TileRef, WorkerKey};
+use slopty_client::layout::{NavLens, Navigator, TileRef, WorkerKey};
 use slopty_core::WallMs;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::items::{Item, ItemKind};
@@ -63,7 +71,7 @@ use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
-use super::actions::ToggleNavigator;
+use super::actions::{ToggleNavigator, ToggleNavigatorLens};
 use super::agents::{Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::tile::kind_icon;
@@ -74,7 +82,7 @@ use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon, status_mark};
 use crate::kit::{self, meta, tabular};
-use crate::palette::Plate;
+use crate::palette::{PaletteItem, Plate};
 
 /// The two lines' height, as a multiple of their type size: tighter than a paragraph's, so
 /// the pair reads as one row.
@@ -92,6 +100,15 @@ pub(super) const NO_TILES: &str = "No tiles";
 
 /// What a shell reopened after its shell was lost says on its row.
 pub(super) const RESTORED: &str = "Restored";
+
+/// The palette's name for [`ToggleNavigatorLens`] while the navigator groups by worker.
+pub(super) const BY_REPOSITORY: &str = "Group the navigator by repository";
+
+/// The palette's name for [`ToggleNavigatorLens`] while it groups by repository.
+pub(super) const BY_WORKER: &str = "Group the navigator by worker";
+
+/// The group, under the repository lens, of the tiles in no repository.
+pub(super) const NO_REPOSITORY: &str = "No repository";
 
 /// How many rows *Working* lists before "Show N more".
 const WORKING_SHOWN: usize = 4;
@@ -144,6 +161,9 @@ pub(super) struct NavState {
     pub open: bool,
     /// Workers whose tiles are folded away.
     pub folded: HashSet<WorkerKey>,
+    /// Repositories whose tiles are folded away, under the repository lens, by path (the
+    /// empty path for the tiles in none).
+    pub folded_repos: HashSet<String>,
     /// The handle is being dragged: where the pointer and the width were when it was pressed.
     pub resize: Option<(f32, f32)>,
     /// How it sat in the last frame drawn, and whether it showed.
@@ -583,6 +603,9 @@ struct NavTile {
     progress: Option<Progress>,
     /// It was reopened after its shell was lost.
     restored: bool,
+    /// The repository it is in: its shell's, or for a file or a folder the deepest of its
+    /// worker's shells' repositories that holds it.
+    repo: Option<String>,
 }
 
 impl NavTile {
@@ -652,6 +675,30 @@ struct NavHeader {
     gap: bool,
 }
 
+/// A repository's header, under the repository lens.
+#[derive(Clone)]
+struct NavRepo {
+    /// Its path, the same on every worker that has a checkout there; empty for the tiles in
+    /// no repository.
+    path: String,
+    name: String,
+    /// Where it is, when another repository listed has the same name.
+    parent: Option<String>,
+    rollup: Rollup,
+    folded: bool,
+    /// It follows another repository's rows, and stands a step off them.
+    gap: bool,
+}
+
+/// One group of the list: a worker's or a repository's header, then its tiles unless folded.
+struct NavBlock {
+    head: NavRow,
+    folded: bool,
+    /// The worker whose empty block says so, where its tiles would be.
+    vacant: Option<WorkerKey>,
+    tiles: Vec<NavTile>,
+}
+
 /// An agent in *Needs you* or *Working*: what it is, what it says, where, and since when.
 #[derive(Clone)]
 struct NavAgent {
@@ -691,6 +738,7 @@ enum NavRow {
     /// "New workspace", the last of *Workspaces*.
     NewSpace,
     Worker(NavHeader),
+    Repo(NavRepo),
     Tile(NavTile),
     /// An open worker with no tile, in one quiet line where its tiles would be.
     Vacant(WorkerKey),
@@ -705,6 +753,7 @@ impl NavRow {
         let (lines, gap) = match self {
             Self::Tile(t) => (!t.two_lines(), false),
             Self::Worker(h) => (h.warning.is_some(), h.gap),
+            Self::Repo(r) => (false, r.gap),
             Self::Heading { .. }
             | Self::Agent(_)
             | Self::More(_)
@@ -736,6 +785,37 @@ impl WorkspaceView {
             Mode::Overlay | Mode::Drawer => self.nav.open = !self.nav.open,
         }
         cx.notify();
+    }
+
+    /// Group the navigator by repository, or back by worker (kept with the layout).
+    pub fn toggle_navigator_lens(
+        &mut self,
+        _: &ToggleNavigatorLens,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let nav = self.layout.navigator();
+        let lens = match nav.lens {
+            NavLens::Workers => NavLens::Repositories,
+            NavLens::Repositories => NavLens::Workers,
+        };
+        self.layout.set_navigator(Navigator { lens, ..nav });
+        self.layout_touched(cx);
+        cx.notify();
+    }
+
+    /// The palette's line for the lens the navigator is not in.
+    pub(super) fn lens_line(&self) -> PaletteItem {
+        let (label, glyph) = match self.layout.navigator().lens {
+            NavLens::Workers => (BY_REPOSITORY, IconName::FolderGit2),
+            NavLens::Repositories => (BY_WORKER, IconName::Server),
+        };
+        PaletteItem::new(
+            label,
+            glyph,
+            Box::new(ToggleNavigatorLens),
+            &super::actions::key_bindings(),
+        )
     }
 
     /// How the navigator sits in `window`.
@@ -894,39 +974,12 @@ impl WorkspaceView {
     pub(super) fn tile_meta(&self, item: &Item, now: SystemTime) -> (String, Option<Duration>) {
         match &item.kind {
             ItemKind::Terminal { session } => {
-                let summary = self.summary(*session);
-                let state = self.agent_state(*session).filter(|a| a.status != AgentStatus::None);
-                // A followed conversation says more than the hooks: the call the agent is on
-                // where the hooks name none, and the gist of its last answer once it stopped.
-                let face = state.and_then(|_| self.face_summary(*session));
-                let marked_working = self.agent_mark(*session) == Some(Status::Working);
-                let resting = state.filter(|a| at_rest(a) && !marked_working);
-                let agent = match (state, face) {
-                    (Some(a), _) if needs_human(a) => agent_ask_line(a),
-                    // The hook lags a face mid-turn: the call, or nothing yet, never "Idle"
-                    // under a row that says it works.
-                    (Some(a), face) if marked_working && at_rest(a) => face,
-                    (Some(a), Some(face))
-                        if matches!(a.status, AgentStatus::Working) && a.detail.is_none() =>
-                    {
-                        Some(face)
-                    }
-                    (Some(a), face) if at_rest(a) => {
-                        face.or_else(|| a.detail.clone()).as_deref().and_then(rest_words)
-                    }
-                    (a, _) => a.map(agent_status_text),
-                };
-                let command = state.is_none().then(|| self.last_command(*session)).flatten();
-                let doing = agent.or(command);
-                let branch = summary.and_then(|s| s.branch.as_deref());
+                let (doing, since) = self.shell_doing(*session);
+                let branch = self.summary(*session).and_then(|s| s.branch.as_deref());
                 let place = self
                     .session_tail(*session)
                     .filter(|p| p != "~" || doing.is_some() || branch.is_some());
                 let meta = meta_line([doing.as_deref(), place.as_deref(), branch]);
-                let since = resting.map_or_else(
-                    || summary.map_or(0, |s| s.started_ms.as_millis()),
-                    |a| a.since_ms.as_millis(),
-                );
                 (meta, age_at(since, now))
             }
             // The header's place; a page named by its address says nothing more.
@@ -938,6 +991,65 @@ impl WorkspaceView {
                 (note_meta(text, self.note_progress_of(item.id, text)), None)
             }
         }
+    }
+
+    /// What a shell's second line says it is doing (its agent's words, else its command) and
+    /// when its age runs from (Unix milliseconds): an agent at rest counts from its last turn,
+    /// anything else from its spawn.
+    fn shell_doing(&self, session: slopty_core::SessionId) -> (Option<String>, u64) {
+        let summary = self.summary(session);
+        let state = self.agent_state(session).filter(|a| a.status != AgentStatus::None);
+        // A followed conversation says more than the hooks: the call the agent is on
+        // where the hooks name none, and the gist of its last answer once it stopped.
+        let face = state.and_then(|_| self.face_summary(session));
+        let marked_working = self.agent_mark(session) == Some(Status::Working);
+        let resting = state.filter(|a| at_rest(a) && !marked_working);
+        let agent = match (state, face) {
+            (Some(a), _) if needs_human(a) => agent_ask_line(a),
+            // The hook lags a face mid-turn: the call, or nothing yet, never "Idle"
+            // under a row that says it works.
+            (Some(a), face) if marked_working && at_rest(a) => face,
+            (Some(a), Some(face))
+                if matches!(a.status, AgentStatus::Working) && a.detail.is_none() =>
+            {
+                Some(face)
+            }
+            (Some(a), face) if at_rest(a) => {
+                face.or_else(|| a.detail.clone()).as_deref().and_then(rest_words)
+            }
+            (a, _) => a.map(agent_status_text),
+        };
+        let command = state.is_none().then(|| self.last_command(session)).flatten();
+        let since = resting.map_or_else(
+            || summary.map_or(0, |s| s.started_ms.as_millis()),
+            |a| a.since_ms.as_millis(),
+        );
+        (agent.or(command), since)
+    }
+
+    /// [`Self::tile_meta`] under the repository lens, where the header names the repository
+    /// and not the worker: the worker's name, then for a shell its directory below the
+    /// repository (nothing at its root) and its branch.
+    fn tile_meta_by_repo(
+        &self,
+        tile: TileRef,
+        item: &Item,
+        now: SystemTime,
+    ) -> (String, Option<Duration>) {
+        let worker = self.worker_name(tile.worker);
+        let ItemKind::Terminal { session } = item.kind else {
+            let (meta, age) = self.tile_meta(item, now);
+            return (meta_line([Some(worker.as_str()), Some(meta.as_str())]), age);
+        };
+        let (doing, since) = self.shell_doing(session);
+        let summary = self.summary(session);
+        let branch = summary.and_then(|s| s.branch.as_deref());
+        let place = match summary.and_then(|s| Some((s.repo.as_deref()?, s.cwd.as_deref()?))) {
+            Some((repo, cwd)) => within(repo, cwd),
+            None => self.session_tail(session).filter(|p| p != "~"),
+        };
+        let meta = meta_line([doing.as_deref(), Some(worker.as_str()), place.as_deref(), branch]);
+        (meta, age_at(since, now))
     }
 
     /// The command a shell runs now, else the last one it ran, else the one that finished
@@ -957,10 +1069,12 @@ impl WorkspaceView {
         let order = self.reading_order();
         let now = SystemTime::now();
         let clock = cx.background_executor().now();
+        let by_repo = self.layout.navigator().lens == NavLens::Repositories;
         let mut out = Vec::new();
         for (key, w) in &self.workers {
             let key = *key;
             let named = matches(&query, &[&w.name]);
+            let roots: Vec<&str> = w.sessions.values().filter_map(|s| s.repo.as_deref()).collect();
             let mut rollup = Rollup::default();
             let mut tiles: Vec<(u8, NavTile)> = Vec::new();
             for &tile in order.iter().filter(|t| t.worker == key) {
@@ -968,8 +1082,22 @@ impl WorkspaceView {
                 let (mark, unseen) = self.tile_marks(tile, item);
                 rollup.add(mark, unseen);
                 let title = self.tile_title(item);
-                let (meta, age) = self.tile_meta(item, now);
-                if !named && !matches(&query, &[&title, &meta]) {
+                let (meta, age) = if by_repo {
+                    self.tile_meta_by_repo(tile, item, now)
+                } else {
+                    self.tile_meta(item, now)
+                };
+                let repo = match &item.kind {
+                    ItemKind::Terminal { session } => {
+                        w.sessions.get(session).and_then(|s| s.repo.clone())
+                    }
+                    ItemKind::File { path } | ItemKind::Folder { path } => {
+                        repo_of(path, roots.iter().copied()).map(str::to_owned)
+                    }
+                    _ => None,
+                };
+                let repo_named = repo.as_deref().map_or("", repo_name);
+                if !named && !matches(&query, &[&title, &meta, repo_named]) {
                     continue;
                 }
                 let kind = kind_icon(item, self.runs_agent(item));
@@ -1006,6 +1134,7 @@ impl WorkspaceView {
                     changes,
                     progress,
                     restored,
+                    repo,
                 };
                 tiles.push((attention(mark, unseen), row));
             }
@@ -1016,7 +1145,7 @@ impl WorkspaceView {
             tiles.sort_by_key(|(class, _)| *class);
             let tiles = tiles.into_iter().map(|(_, t)| t).collect();
             let health = worker_health(&w.status);
-            let rtt = health.is_none().then(|| slow_rtt(w.rtt)).flatten();
+            let rtt = health.is_none().then(|| slow_rtt(self.shown_rtt(w))).flatten();
             // Like the round trip, the path is named here only when it is worth a look: a DERP
             // relay that has held, never one a direct path is still being found beside.
             let relay = w
@@ -1175,7 +1304,9 @@ impl WorkspaceView {
             .id("nav-filter-field")
             .flex_1()
             .min_w_0()
-            .h(px(theme.density.row))
+            // A touch row is nearly the title bar's height; the field keeps a step clear of
+            // its edges, as it does on the Mac.
+            .h(px(theme.density.row.min(spacing.xs.mul_add(-2.0, titlebar_height(theme)))))
             .px(px(spacing.sm))
             .flex()
             .items_center()
@@ -1208,10 +1339,40 @@ impl WorkspaceView {
     fn nav_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
         let query = self.nav.filter.query.trim().to_lowercase();
         let listing = self.nav_listing(cx);
-        let listed: HashSet<TileRef> = listing
+        let (blocks, heading) = match self.layout.navigator().lens {
+            NavLens::Workers => {
+                let blocks = listing
+                    .into_iter()
+                    .map(|NavWorker { header, tiles }| NavBlock {
+                        folded: header.folded,
+                        // A worker listed under a filter matched by its name; with no tiles it
+                        // has nothing else to say, and "No tiles" there would read as the
+                        // filter's answer.
+                        vacant: (tiles.is_empty() && query.is_empty()).then_some(header.key),
+                        head: NavRow::Worker(header),
+                        tiles,
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    blocks,
+                    NavRow::Heading { selector: "nav-workers", text: "Workers", working: None },
+                )
+            }
+            NavLens::Repositories => {
+                let folded = |path: &str| query.is_empty() && self.nav.folded_repos.contains(path);
+                let tiles = listing.into_iter().flat_map(|w| w.tiles);
+                let heading = NavRow::Heading {
+                    selector: "nav-repositories",
+                    text: "Repositories",
+                    working: None,
+                };
+                (repo_blocks(tiles, folded), heading)
+            }
+        };
+        let listed: HashSet<TileRef> = blocks
             .iter()
-            .filter(|w| !w.header.folded)
-            .flat_map(|w| w.tiles.iter().map(|t| t.tile))
+            .filter(|b| !b.folded)
+            .flat_map(|b| b.tiles.iter().map(|t| t.tile))
             .collect();
         let seen = |at: &Waiting| {
             at.tile.is_some_and(|tile| listed.contains(&tile) && self.nav.list.in_view(tile))
@@ -1250,24 +1411,26 @@ impl WorkspaceView {
                 rows.push(NavRow::More(count.saturating_sub(shown)));
             }
         }
-        if !listing.is_empty() && !rows.is_empty() {
-            rows.push(NavRow::Heading { selector: "nav-workers", text: "Workers", working: None });
+        if !blocks.is_empty() && !rows.is_empty() {
+            rows.push(heading);
         }
-        for worker in listing {
-            let NavWorker { mut header, tiles } = worker;
-            // A worker after another's rows stands a step off them; under a heading, or first,
+        for NavBlock { mut head, folded, vacant, tiles } in blocks {
+            // A block after another's rows stands a step off them; under a heading, or first,
             // it needs none.
-            header.gap = matches!(rows.last(), Some(NavRow::Worker(_) | NavRow::Tile(_)));
-            let (key, folded) = (header.key, header.folded);
-            rows.push(NavRow::Worker(header));
+            let gap = matches!(
+                rows.last(),
+                Some(NavRow::Worker(_) | NavRow::Repo(_) | NavRow::Tile(_) | NavRow::Vacant(_))
+            );
+            match &mut head {
+                NavRow::Worker(header) => header.gap = gap,
+                NavRow::Repo(repo) => repo.gap = gap,
+                _ => {}
+            }
+            rows.push(head);
             if folded {
                 continue;
             }
-            // A worker listed under a filter matched by its name; with no tiles it has nothing
-            // else to say, and "No tiles" there would read as the filter's answer.
-            if tiles.is_empty() && query.is_empty() {
-                rows.push(NavRow::Vacant(key));
-            }
+            rows.extend(vacant.map(NavRow::Vacant));
             rows.extend(tiles.into_iter().map(NavRow::Tile));
         }
         if rows.is_empty() {
@@ -1325,7 +1488,11 @@ impl WorkspaceView {
     /// Row `ix` of the list, drawn only while it is in view or measured. The list lays a row
     /// out at its own size; the wrapper gives it the list's width, less its margins.
     fn nav_row(&self, ix: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let gap = matches!(self.nav.list.rows.borrow().get(ix), Some(NavRow::Worker(h)) if h.gap);
+        let gap = match self.nav.list.rows.borrow().get(ix) {
+            Some(NavRow::Worker(h)) => h.gap,
+            Some(NavRow::Repo(r)) => r.gap,
+            _ => false,
+        };
         div()
             .w_full()
             .flex()
@@ -1347,6 +1514,7 @@ impl WorkspaceView {
             Some(NavRow::Space(space)) => self.space_row(space, cx),
             Some(NavRow::NewSpace) => self.new_space_row(cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
+            Some(NavRow::Repo(repo)) => self.repo_header(repo, cx),
             Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected.get(), cx),
             Some(NavRow::Vacant(key)) => {
                 let key = *key;
@@ -1891,6 +2059,90 @@ impl WorkspaceView {
         .into_any_element()
     }
 
+    /// A repository's header under the repository lens: its name in the strong weight after a
+    /// repository glyph, where it is when another listed has its name, what its tiles add up to
+    /// while it is folded, and the chevron under the pointer. A click folds it.
+    fn repo_header(&self, repo: &NavRepo, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let path = repo.path.clone();
+        let key = if path.is_empty() { "none".to_owned() } else { path.clone() };
+        let folded = repo.folded;
+        let label = SharedString::from(format!(
+            "{}{}{}",
+            repo.name,
+            repo.parent.as_ref().map(|p| format!(", in {p}")).unwrap_or_default(),
+            if folded { ", folded" } else { "" }
+        ));
+        let glyph = if path.is_empty() { IconName::Folder } else { IconName::FolderGit2 };
+        let lead = lead_slot(theme, icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)));
+        let name_key = key.clone();
+        let name = div()
+            .debug_selector(move || format!("nav-repo-name-{name_key}"))
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+            .text_color(hsla(s.text))
+            .child(SharedString::from(repo.name.clone()));
+        let group = SharedString::from(format!("nav-repo-group-{key}"));
+        let rollup = folded.then_some(repo.rollup).filter(|r| r.shown().is_some());
+        let rollup_key = key.clone();
+        let rest = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(theme.spacing.xs))
+            .group_hover(group.clone(), gpui::Styled::invisible)
+            .children(
+                rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{rollup_key}"), r, false)),
+            )
+            .children(repo.parent.clone().map(|parent| readout(theme, parent)));
+        let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
+        let hover = div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .justify_end()
+            .invisible()
+            .group_hover(group.clone(), gpui::Styled::visible)
+            .child(lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted))));
+        let trailing = div()
+            .relative()
+            .flex_none()
+            .min_w(px(header_actions_width(theme)))
+            .h(px(theme.typography.icon_large()))
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(rest)
+            .child(hover);
+        row(
+            theme,
+            kit::Row::One,
+            ElementId::Name(format!("nav-repo-{key}").into()),
+            format!("nav-repo-{key}"),
+            label,
+            false,
+        )
+        .group(group)
+        .child(lead)
+        .child(name)
+        .child(trailing)
+        .on_click(cx.listener(move |this, _ev, _w, cx| {
+            if !this.nav.folded_repos.remove(&path) {
+                this.nav.folded_repos.insert(path.clone());
+            }
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
     /// A tile's row: its kind, its title and at the end of that line its state in a word (or
     /// the unseen dot, or its age), then the muted second line.
     fn tile_row(
@@ -2049,6 +2301,80 @@ impl WorkspaceView {
     }
 }
 
+/// The repository lens's blocks: a repository's tiles from every worker under one header, in
+/// order of attention (each worker's own order kept within a class), the repositories by name
+/// and the tiles in none last. Two repositories of one name say where each is.
+fn repo_blocks(
+    tiles: impl Iterator<Item = NavTile>,
+    folded: impl Fn(&str) -> bool,
+) -> Vec<NavBlock> {
+    let mut groups: BTreeMap<(bool, String, String), Vec<NavTile>> = BTreeMap::new();
+    for tile in tiles {
+        let path = tile.repo.clone().unwrap_or_default();
+        let name =
+            if path.is_empty() { NO_REPOSITORY.to_owned() } else { repo_name(&path).to_owned() };
+        groups.entry((path.is_empty(), name.to_lowercase(), path)).or_default().push(tile);
+    }
+    let mut seen = HashSet::new();
+    let mut shared = HashSet::new();
+    for (_, name, _) in groups.keys() {
+        if !seen.insert(name.clone()) {
+            shared.insert(name.clone());
+        }
+    }
+    groups
+        .into_iter()
+        .map(|((_, key, path), mut tiles)| {
+            tiles.sort_by_key(|t| attention(t.mark, t.unseen));
+            let mut rollup = Rollup::default();
+            for t in &tiles {
+                rollup.add(t.mark, t.unseen);
+            }
+            let name = if path.is_empty() {
+                NO_REPOSITORY.to_owned()
+            } else {
+                repo_name(&path).to_owned()
+            };
+            let parent =
+                (shared.contains(&key) && !path.is_empty()).then(|| repo_parent(&path)).flatten();
+            let folded = folded(&path);
+            let head = NavRow::Repo(NavRepo { path, name, parent, rollup, folded, gap: false });
+            NavBlock { head, folded, vacant: None, tiles }
+        })
+        .collect()
+}
+
+/// The deepest of `roots` that holds `path`, on a directory boundary.
+fn repo_of<'a>(path: &str, roots: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    roots.into_iter().filter(|root| within_or_at(root, path)).max_by_key(|root| root.len())
+}
+
+/// Whether `path` is `root` or below it.
+fn within_or_at(root: &str, path: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    path.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// `cwd` below `repo`, relative to it: `None` at the repository's root or outside it.
+fn within(repo: &str, cwd: &str) -> Option<String> {
+    let rest = cwd.strip_prefix(repo.trim_end_matches('/'))?;
+    let rest = rest.strip_prefix('/')?.trim_end_matches('/');
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
+/// A repository's name: its directory's.
+fn repo_name(path: &str) -> &str {
+    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
+}
+
+/// Where a repository is: its parent directory's last two components.
+fn repo_parent(path: &str) -> Option<String> {
+    let trimmed = path.trim_end_matches('/');
+    let (parent, _) = trimmed.rsplit_once('/')?;
+    let parts: Vec<&str> = parent.rsplit('/').take(2).filter(|p| !p.is_empty()).collect();
+    (!parts.is_empty()).then(|| parts.into_iter().rev().collect::<Vec<_>>().join("/"))
+}
+
 /// A section's heading, as every list in the frame heads its sections: the quiet label, and
 /// for *Working* the working mark and how many are at work.
 fn heading(
@@ -2101,6 +2427,27 @@ impl WorkspaceView {
     /// The state's word at the end of each tile row's first line, by title.
     pub(super) fn navigator_words(&self, cx: &gpui::App) -> Vec<(String, Option<String>)> {
         self.nav_listing(cx).into_iter().flat_map(|w| w.tiles).map(|t| (t.title, t.word)).collect()
+    }
+
+    /// Each tile row's second line, by tile, in the list's order.
+    pub(super) fn navigator_metas(&self) -> Vec<(TileRef, String)> {
+        let meta = |r: &NavRow| match r {
+            NavRow::Tile(t) => Some((t.tile, t.meta.clone())),
+            _ => None,
+        };
+        self.nav.list.rows.borrow().iter().filter_map(meta).collect()
+    }
+
+    /// What each repository's header is named to assistive technology, in the list's order.
+    pub(super) fn navigator_repo_labels(&self) -> Vec<String> {
+        let label = |r: &NavRow| match r {
+            NavRow::Repo(repo) => Some(match &repo.parent {
+                Some(parent) => format!("{}, in {parent}", repo.name),
+                None => repo.name.clone(),
+            }),
+            _ => None,
+        };
+        self.nav.list.rows.borrow().iter().filter_map(label).collect()
     }
 
     /// The tiles the navigator's list holds, in its order, whether or not they are in view.

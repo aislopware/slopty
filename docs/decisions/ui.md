@@ -4229,3 +4229,75 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `background_work_sits_over_the_composer`, and the theme's hairline ladder
     (`the_surfaces_climb_bars_panel_content` and the derived-surfaces sweep, now through
     `Hairline::over`).
+
+- ✅ **The navigator groups by worker, or by repository on request** (2026-10-01). Slopty
+  reaches many hosts first, so the navigator lists each worker's tiles under it by default.
+  The palette's "Group the navigator by repository" swaps the workers for repositories, and
+  the same line reads "Group the navigator by worker" to go back. It is a palette line and
+  not a button, because keybindings and modes live in the palette. The choice is kept with
+  the device's layout (`layout::Navigator::lens`), beside the navigator's width and whether
+  it is docked: those are per-device state the app writes, where the settings file is what
+  the person writes.
+  - A group is a repository path as the worker reports it (`SessionSummary::repo`). A shell
+    joins the group of its repository. A file or folder joins the deepest repository of its
+    worker's shells that holds it. Tiles in none go under *No repository*, last. The groups
+    run by name, and each group's tiles run in order of attention across workers, each
+    worker's own order kept within a class.
+  - The header names the repository's directory. When two groups share a name (a fork, a
+    second clone), each also says where it is, from the last two parts of its parent path.
+  - Each row's second line names its worker, then the directory below the repository (none at
+    its root), then the branch. The worker's name is what tells two checkouts at one path on
+    two machines apart, under one header.
+  - Not done, because it needs the wire: one repository cloned at different paths on
+    different workers shows as two groups. Folding them into one needs an identity the worker
+    would report, such as the origin URL or the root commit.
+  - A group folds like a worker, for this run only. The *Needs you* and *Working* sections
+    are the same in both lenses.
+  - Test: `the_repository_lens_groups_across_workers`.
+
+- ✅ **Polish against the MonoCode bar, round four** (2026-10-01, a review of the goldens).
+  - **The board says what needs you once.** On the board lens, the *Needs you* lane leads
+    the lanes and holds the question, so the band over the lenses keeps only the
+    orchestrator, which has no card. Before, the band and the lane both listed the waiting
+    task (`project-lanes`). A parent card that stands in a lane for a descendant says "Needs
+    you in a subtask", where it said "needs you below".
+  - **Settings' sidebar is a tone step.** It sits on `panel` with no rule beside it, as the
+    window's own sidebar does, and the page stays on the sheet (`settings-*`).
+  - **The palette on glass keeps its corners.** With no legend under it, the fade over the
+    list's foot follows the sheet's rounded corners. Before, a square band cut them off
+    (`ios-pad-palette`, `ios-phone-palette`).
+  - **The navigator's filter clears the title bar on touch.** A touch row (44 pt) filled the
+    48 pt bar almost edge to edge. The field is now the bar less a step at the top and at the
+    bottom (40 pt), as on the Mac (`ios-*-navigator`).
+  - **The e2e shells start at `~` again.** The harness gives the daemons their home by its
+    real path (`/private/var`), so it is spelled as `getcwd` spells it. Once the scrubbed
+    environment stopped passing `PWD` on, a shell had named its home by its full path in
+    every golden. The scratch root keeps the short `/var` spelling: resolved, it pushed the
+    worker's socket paths past the 104-byte limit.
+  - The iOS goldens are accepted again, now that the simulator build links ImageIO. Besides
+    the navigator's filter and the palette's corners, each one takes the neutral theme's
+    darker hairlines, which landed while the simulator could not be built. Not
+    `ios-phone-terminal`: its shell now draws the unfocused (hollow) cursor with the soft
+    keyboard up, where the golden has the focused block, and that is for the terminal lane
+    to settle.
+  - **A phone's key bar fades on its first frame.** The trailing fade over the key row read
+    how far the row scrolls from its last layout, so a bar just shown drew one frame with no
+    fade (the retained oracle caught it on the iPhone). The caps have fixed widths, so the
+    row's overflow is known before layout (`key_row_overflow`), and the fades read it with
+    this frame's offset.
+  - **Onboarding lists are tone steps.** The tailnet's answers, the "Set up a worker" rows and
+    this Mac's checklist (and an install's steps) sit on `raised`, with no hairline frame, and
+    a row under the pointer steps up once to `overlay`, as a board card does (`first-run`,
+    `add-worker`, `this-mac`). The terminal's prompt-row bands are the terminal lane's.
+  - **No golden carries the machine's live round trip.** Under load the loopback round trip
+    ran 30 to 70 ms, so "50 ms" showed in the navigator and the bar of whichever goldens were
+    taken then. The readouts now read a figure the view can pin
+    (`WorkspaceView::pin_rtt_readout`), as the workspace clock can be held. The app's e2e
+    server pins `slopty_e2e::SHOWN_RTT`, a local link's 1 ms, from its first frame. The dump's
+    `rtt_us`, the predictors and a remote window's hold keep the live figure, so the latency
+    measurements still see the real link. Left for the screen lane: the stream overlay's
+    "RTT" figure reads the live one.
+  - Tests: `the_board_says_each_thing_once_and_fills_its_tile` (no band row on the board),
+    `a_pinned_round_trip_is_what_the_readouts_show`,
+    `the_fade_follows_the_sheets_corners_where_it_meets_them`,
+    `the_key_row_knows_its_overflow_before_layout`.

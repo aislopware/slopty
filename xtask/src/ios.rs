@@ -151,12 +151,9 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let out = root.join("target").join("ios").join(sdk.dir());
     sh.create_dir(&out)?;
     let link_object = out.join("link.o");
-    {
+    let links = {
         let _env = sh.push_env("IPHONEOS_DEPLOYMENT_TARGET", IOS_VERSION);
-        step(
-            &format!("cargo build slopty-ios ({triple}, {profile})"),
-            &cmd!(sh, "cargo build -p slopty-ios --target {triple} {cargo_flags...}"),
-        )?;
+        let links = build_static_lib(sh, &format!("{triple}, {profile}"), triple, &cargo_flags)?;
         // Xcode links a target only when it has an object file of its own, and every line of
         // the app is in the static library: an empty crate compiled to an object is that file.
         step(
@@ -167,7 +164,8 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
             )
             .stdin(""),
         )?;
-    }
+        links
+    };
     let lib = root.join("target").join(triple).join(profile).join("libslopty_ios.a");
     if !lib.exists() {
         bail!("static library missing: {lib}");
@@ -175,7 +173,7 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
 
     // Xcode compiles the Icon Composer document (`wrapper.icon`) with the target's resources.
     crate::icon::Art::load(sh)?.write_document(sh, &out)?;
-    sh.write_file(out.join("project.yml"), project_spec(sdk, &lib, &link_object))?;
+    sh.write_file(out.join("project.yml"), project_spec(sdk, &lib, &link_object, &links))?;
     step(
         "xcodegen generate",
         &cmd!(sh, "xcodegen generate --quiet --spec {out}/project.yml --project {out}"),
@@ -213,10 +211,73 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     Ok(app)
 }
 
+/// Build `slopty-ios`'s static library; returns the linker flags for the system libraries and
+/// frameworks its crates link.
+///
+/// A static library keeps no record of those (a `#[link]` puts no load command in its objects),
+/// so the app's link line is rustc's own list (`--print native-static-libs`) rather than one kept
+/// by hand, and a crate that starts calling a new framework links it here without an edit.
+fn build_static_lib(
+    sh: &Shell,
+    what: &str,
+    triple: &str,
+    cargo_flags: &[&str],
+) -> Result<Vec<String>> {
+    let title = format!("cargo build slopty-ios ({what})");
+    println!("▶ {title}");
+    let started = std::time::Instant::now();
+    let output = cmd!(
+        sh,
+        "cargo rustc -p slopty-ios --lib --target {triple} {cargo_flags...} --message-format json-diagnostic-rendered-ansi -- --print native-static-libs"
+    )
+    .ignore_status()
+    .output()
+    .with_context(|| format!("step failed to start: {title}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (links, rendered) = native_static_libs(&stdout);
+    eprint!("{rendered}{}", String::from_utf8_lossy(&output.stderr));
+    let ok = output.status.success();
+    println!("  {} {title} ({:.1?})", if ok { "✓" } else { "✘" }, started.elapsed());
+    if !ok {
+        bail!("step failed: {title}");
+    }
+    links.with_context(|| format!("{title}: rustc printed no native-static-libs"))
+}
+
+/// From cargo's JSON messages: the flags rustc's `native-static-libs` note lists, and every other
+/// diagnostic as rustc rendered it.
+fn native_static_libs(messages: &str) -> (Option<Vec<String>>, String) {
+    let mut links = None;
+    let mut rendered = String::new();
+    for line in messages.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-message") {
+            continue;
+        }
+        let Some(diagnostic) = message.get("message") else { continue };
+        let text =
+            diagnostic.get("message").and_then(serde_json::Value::as_str).unwrap_or_default();
+        if let Some(flags) = text.strip_prefix("native-static-libs:") {
+            links = Some(flags.split_whitespace().map(str::to_owned).collect());
+        } else if text.starts_with("link against the following native artifacts") {
+            // The note's preamble, which the list above answers.
+        } else if let Some(shown) = diagnostic.get("rendered").and_then(serde_json::Value::as_str) {
+            rendered.push_str(shown);
+        }
+    }
+    (links, rendered)
+}
+
 /// The `XcodeGen` spec: one application target wrapping the static library, linked beside
-/// `link_object` (see [`build`]).
-fn project_spec(sdk: Sdk, lib: &Utf8Path, link_object: &Utf8Path) -> String {
+/// `link_object` (see [`build`]) with `links`, the system libraries and frameworks it needs.
+fn project_spec(sdk: Sdk, lib: &Utf8Path, link_object: &Utf8Path, links: &[String]) -> String {
     let lib_dir = lib.parent().map_or(".", Utf8Path::as_str);
+    let mut link_flags = String::new();
+    for flag in links {
+        link_flags.push_str("          - \"");
+        link_flags.push_str(flag);
+        link_flags.push_str("\"\n");
+    }
     let signing = match sdk {
         Sdk::Simulator => "    CODE_SIGNING_ALLOWED: NO\n",
         Sdk::Device => "",
@@ -282,27 +343,9 @@ settings:
           - "{lib_dir}"
         OTHER_LDFLAGS:
           - "-Wl,-force_load,{lib}"
-          - "-lc++"
-    dependencies:
+{link_flags}    dependencies:
       - framework: {link_object}
         embed: false
-      - sdk: AVFoundation.framework
-      - sdk: AudioToolbox.framework
-      - sdk: CoreFoundation.framework
-      - sdk: CoreGraphics.framework
-      - sdk: CoreMedia.framework
-      - sdk: CoreText.framework
-      - sdk: CoreVideo.framework
-      - sdk: Foundation.framework
-      - sdk: GameController.framework
-      - sdk: IOSurface.framework
-      - sdk: Metal.framework
-      - sdk: Network.framework
-      - sdk: QuartzCore.framework
-      - sdk: Security.framework
-      - sdk: SystemConfiguration.framework
-      - sdk: UIKit.framework
-      - sdk: VideoToolbox.framework
 "#,
         icon = crate::icon::NAME,
     )
@@ -454,7 +497,30 @@ fn first_device(sh: &Shell) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::newest_runtime;
+    use super::{native_static_libs, newest_runtime};
+
+    #[test]
+    fn the_link_line_is_the_frameworks_rustc_lists_and_other_diagnostics_are_shown() {
+        let message = |level: &str, text: &str| {
+            serde_json::json!({
+                "reason": "compiler-message",
+                "message": { "level": level, "message": text, "rendered": format!("{level}: {text}\n") },
+            })
+            .to_string()
+        };
+        let messages = [
+            serde_json::json!({ "reason": "compiler-artifact" }).to_string(),
+            message("warning", "unused import"),
+            message("note", "link against the following native artifacts when linking against this static library"),
+            message("note", "native-static-libs: -framework ImageIO -lSystem -lc"),
+            "not json".to_owned(),
+        ]
+        .join("\n");
+        let (links, rendered) = native_static_libs(&messages);
+        assert_eq!(links.unwrap(), ["-framework", "ImageIO", "-lSystem", "-lc"]);
+        assert_eq!(rendered, "warning: unused import\n");
+        assert_eq!(native_static_libs(&message("warning", "x")).0, None, "no list, no link line");
+    }
 
     #[test]
     fn the_newest_available_ios_runtime_at_or_above_the_floor_is_picked() {

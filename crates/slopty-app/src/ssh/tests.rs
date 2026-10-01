@@ -390,6 +390,7 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         };
         v.session_opened(key, summary, cx);
         v.apply_sync(key, ItemSync::Delta { version: 1, by: me, op: ItemOp::Add(item) }, cx);

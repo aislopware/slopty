@@ -1925,3 +1925,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `claude_codes_own_list_restores_what_the_hooks_had_said`, and
     `claude_codes_session_list_reads_as_a_status` on the recorded `agents.json`. The xtask
     background capture records it with `pid`, `startedAt` and `name` fixed.
+
+- ✅ **The mode chip follows the mode the agent is in now** (2026-10-01). Shift-Tab in the TUI
+  moves the permission mode, and fires no hook of its own. The chip used to show the mode the
+  last prompt was sent in, so a switch showed only with the next prompt, and a switch while a
+  turn ran not at all until then.
+  - The agent's status carries the mode it last said (`AgentEvent::mode`, `SessionAgent::mode`:
+    `HeardMode { name, heard_ms }`). A hooked agent says it in every hook's `permission_mode`;
+    an unhooked one in the `permissionMode` of the newest prompt in its transcript
+    (`transcript::prompt_mode`). The name passes through as Claude Code spells it, so a mode a
+    newer Claude Code adds shows as named.
+  - A hook that changes only the mode is an event of its own, quietly (`AgentTable::apply`), so
+    a switch reaches every client with the next hook: the tool call, the answer or the turn's
+    end that follows it.
+  - The chip takes the freshest of three words, by time: the prompt's mode, a permission
+    prompt's, and this one.
+  - Nothing is typed into the TUI to learn or change it; the chip stays read-only.
+  - Tests: `a_mode_change_alone_is_an_event_that_carries_it`,
+    `a_transcripts_mode_moves_only_an_unhooked_agent`, `the_newest_prompt_names_the_mode` and
+    `the_mode_chip_follows_the_live_mode`.

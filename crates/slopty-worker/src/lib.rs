@@ -19,6 +19,8 @@ pub mod conversation;
 pub mod facts;
 pub mod file;
 pub mod find;
+#[cfg(target_os = "macos")]
+mod fsevents;
 pub mod fswatch;
 pub mod handoff;
 pub mod items;

@@ -738,10 +738,12 @@ sent at −1: above files, below video.
     on iPad every drop comes through a `UIDropInteraction`. Each drop lands in a temporary
     directory of its own and then reaches the tile under it as an ordinary file drop. A file
     that failed is named in a notice, and what it wrote is deleted.
-- **File tiles.** `ReadFile` answers a text file whole, up to 16 MiB (`FILE_BYTES`; past
-  `INLINE_FILE_BYTES` the text follows on a bulk stream, `FileRead::Streamed`),
-  `WatchFiles` looks at each watched file's size and modification time every second and sends
-  a changed one again, and `WriteFile { path, text, base_modified_ms }` saves an edit
+- **File tiles.** `ReadFile` answers a text file whole, up to 16 MiB (`FILE_BYTES`), and a
+  picture or PDF (its first bytes sniffed, `slopty_worker::file::media`) as its bytes, up to
+  128 MiB (`MEDIA_BYTES`, `FileRead::Media`). Past `INLINE_FILE_BYTES` either follows on a bulk
+  stream (`FileRead::Streamed` with its `Body`, `Purpose::FileBody`). `WatchFiles` follows each
+  watched file on kqueue or inotify (`slopty_worker::fswatch`) and sends a changed one again,
+  `WatchFolders` does the same for folder tiles' listings (`files::watch_folders`), and `WriteFile { path, text, base_modified_ms }` saves an edit
   (`slopty_worker::file::write`). The save writes a temporary file beside the target, fsyncs
   it and renames it over, keeping the mode and writing through a symbolic link. A file whose
   modification time is newer than `base_modified_ms` is a `Conflict` and stays as it was. A
@@ -916,8 +918,7 @@ of the derived title until it is cleared, and what the palette's "Go to" line sa
 worker: the item names the absolute path and lives in the shared document, the text does
 not. Each client asks `ClientMsg::ReadFile` when the tile appears (`workspace
 reconcile_notes_and_files`, which also sends the set of paths as `ClientMsg::WatchFiles`: the
-worker looks at each one's size and modification time every second and re-sends a changed
-file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the whole
+worker follows each one on the kernel's events and re-sends a changed file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the whole
 text up to 16 MiB, `FileRead::Text | Streamed | Binary | Missing | TooLarge`) into gpui-kit's code
 editor (`EditorState`, line numbers, no folding or wrap) in the theme's mono font, or one line
 saying why not. Colour comes from the grammar the path names (`slopty-ui::highlight`: syntect's
@@ -977,6 +978,15 @@ worker in place: `ClientMsg::ListFolder` → `WorkerMsg::Folder` (`slopty_worker
 folders first, cut at 2 000 with the whole count), rows walked by ↑/↓/↩/⌫, a folder opened moves
 the item (`ItemOp::SetFolder`), a file opens as a file tile beside it, rows drag out and drops go
 up into it; a path of unknown kind is asked as a folder first (`WorkspaceView::open_path_on`).
+Each linked worker is sent the set of directories its folder tiles show
+(`ClientMsg::WatchFolders`, `workspace::folders::reconcile_folders`), and it lists one again
+unasked when an entry is made, removed or renamed (`fswatch::follow_folders`); the tile keeps
+its selection on the same name (`FolderView::set_listing`).
+A file tile whose read is `FileRead::Media` shows it instead of the editor
+(`slopty-ui::file::preview`): a picture decoded by ImageIO at the pixels it is drawn at, its
+frames animated unless Reduce Motion is on, and a PDF as a virtualized list of pages that
+CoreGraphics draws at the tile's width on a background thread, the pages near the view kept
+(`file::decode`).
 
 **Search in files** (⌥⌘F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
 files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search(SearchEvent::Hits)`
@@ -1033,7 +1043,10 @@ spelled from the root or home with a slash at the end (`~/proj/`) is instead a "
 in …" and a "New agent in …" line (`palette::path_items`), the worker expanding `~`; and a word is
 also asked of the worker's files under that directory (`ClientMsg::FindFiles` →
 `WorkerMsg::FoundFiles`, protocol 36) whose hits are `Open <path>`
-lines after the commands; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
+lines after the commands. The worker answers from an index of the whole worktree the directory
+is in (`slopty_worker::find::Index`, one parallel walk honouring the ignore files, kept fresh by
+an `FSEvents` stream on macOS and by directory times elsewhere) and ranks with
+`nucleo-matcher`, fuzzily, across the cores; outside a worktree a bounded walk answers; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
 to every action. The palette remembers where the keyboard was (`window.focused`), puts it
 back when it closes and dispatches the choice on the next frame from there, so a terminal's
 own actions (find, the prompts) reach the terminal that had the focus.

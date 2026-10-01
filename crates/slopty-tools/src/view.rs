@@ -1411,6 +1411,7 @@ mod tests {
             agent: None,
             progress: None,
             restored: None,
+            repo_id: None,
         }
     }
 
@@ -1443,6 +1444,7 @@ mod tests {
                 status,
                 source,
                 since_ms: WallMs::ZERO,
+                mode: None,
             });
             summary
         };
@@ -1535,6 +1537,7 @@ mod tests {
             status: AgentStatus::Blocked(BlockReason::Question),
             source: AgentSource::Hook,
             since_ms: WallMs::ZERO,
+            mode: None,
         };
         let json = serde_json::to_value(agent(Some(&blocked))).unwrap();
         assert_eq!(
@@ -1653,6 +1656,7 @@ mod tests {
                             attention: true,
                             source: AgentSource::Hook,
                             since_ms: WallMs::ZERO,
+                            mode: None,
                         },
                     },
                 },

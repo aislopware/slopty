@@ -184,7 +184,9 @@ pub async fn count(root: PathBuf) -> Option<RepoChanges> {
     Some(changes)
 }
 
-async fn run_git(git: &Path, root: &Path, args: &[&str]) -> Option<String> {
+/// `git -C root args…` without optional locks, its stdout when it succeeds within
+/// [`GIT_TIMEOUT`].
+pub(crate) async fn run_git(git: &Path, root: &Path, args: &[&str]) -> Option<String> {
     let mut command = tokio::process::Command::new(git);
     command
         .arg("-C")

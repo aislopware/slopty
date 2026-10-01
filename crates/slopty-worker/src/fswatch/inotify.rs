@@ -35,6 +35,13 @@ const GONE: ReadFlags =
     ReadFlags::DELETE_SELF.union(ReadFlags::MOVE_SELF).union(ReadFlags::IGNORED);
 /// Events after which an entry's change is whole: its writer closed it, or it was renamed in.
 const DONE: ReadFlags = ReadFlags::CLOSE_WRITE.union(ReadFlags::MOVED_TO);
+/// Events that change what is in an entry, not which entries there are.
+const CONTENT: ReadFlags = ReadFlags::MODIFY.union(ReadFlags::CLOSE_WRITE).union(ReadFlags::ATTRIB);
+/// Events that change which entries there are.
+const ENTRIES: ReadFlags = ReadFlags::CREATE
+    .union(ReadFlags::DELETE)
+    .union(ReadFlags::MOVED_FROM)
+    .union(ReadFlags::MOVED_TO);
 /// Room for many events per read; one takes 16 bytes and its name up to `NAME_MAX` + 1.
 const BUFFER: usize = 16 * 1024;
 
@@ -70,6 +77,10 @@ impl Queue {
         let _gone = inotify::remove_watch(&*self.fd, id);
     }
 
+    /// Nothing to do: a directory's watch already hears each write to its entries.
+    #[expect(clippy::unused_self, reason = "the kqueue backend's counterpart does work")]
+    pub(super) fn follow_contents(&self, _folders: Vec<(std::path::PathBuf, WatchId)>) {}
+
     /// Take every event waiting, without blocking.
     pub(super) fn drain(&self, hits: &mut Vec<Hit>) {
         let mut buffer = [MaybeUninit::<u8>::uninit(); BUFFER];
@@ -84,7 +95,8 @@ impl Queue {
                 let name =
                     event.file_name().map(|n| OsStr::from_bytes(n.to_bytes()).to_os_string());
                 let done = flags.intersects(DONE);
-                hits.push(Hit::Dir { id: event.wd(), name, done });
+                let content = flags.intersects(CONTENT) && !flags.intersects(ENTRIES);
+                hits.push(Hit::Dir { id: event.wd(), name, done, content });
             }
         }
     }

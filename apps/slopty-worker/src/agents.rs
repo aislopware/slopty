@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use slopty_agent::detect::Program;
-use slopty_agent::transcript::{Progress, Tail};
+use slopty_agent::transcript::{self, Tail};
 use slopty_agent::{Discovery, Observation};
 use slopty_core::SessionId;
 use slopty_proto::WorkerMsg;
@@ -141,23 +141,7 @@ async fn keep_awake(daemon: &Daemon, quiet: &mut slopty_worker::wake::Quiet) {
             })
             .collect()
     };
-    let now_wall = slopty_core::WallMs::now();
-    let sampled = tokio::task::spawn_blocking(move || {
-        working
-            .into_iter()
-            .map(|(event, pid)| {
-                let paused = matches!(event.status, AgentStatus::Waiting { .. }).then(|| {
-                    let cpu = pid
-                        .and_then(|pid| u32::try_from(pid).ok())
-                        .map_or(0, slopty_worker::ports::descendants_cpu);
-                    (now_wall.since(event.since_ms), cpu)
-                });
-                (event.session, paused)
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    .unwrap_or_default();
+    let sampled = sample(working, slopty_core::WallMs::now()).await;
     let signs: Vec<slopty_worker::wake::Signs> = sampled
         .into_iter()
         .filter_map(|(session, paused)| {
@@ -167,6 +151,35 @@ async fn keep_awake(daemon: &Daemon, quiet: &mut slopty_worker::wake::Quiet) {
         .collect();
     let at_work = quiet.working(&signs, std::time::Instant::now());
     daemon.wake.lock().agents(at_work);
+}
+
+/// Each working agent's session, and for a paused turn how long it has waited and the processor
+/// time of the commands it left running.
+///
+/// Only a paused turn's commands are read, on the blocking pool. With none, nothing goes there:
+/// this runs every tick, and a trip each time kept every idle pool thread from reaching tokio's
+/// keep-alive, so the pool held the most threads the worker ever needed at once.
+async fn sample(
+    working: Vec<(AgentEvent, Option<i32>)>,
+    now: slopty_core::WallMs,
+) -> Vec<(SessionId, Option<(Duration, u64)>)> {
+    let paused =
+        working.iter().any(|(event, _pid)| matches!(event.status, AgentStatus::Waiting { .. }));
+    let read = move || {
+        working
+            .into_iter()
+            .map(|(event, pid)| {
+                let paused = matches!(event.status, AgentStatus::Waiting { .. }).then(|| {
+                    let cpu = pid
+                        .and_then(|pid| u32::try_from(pid).ok())
+                        .map_or(0, slopty_worker::ports::descendants_cpu);
+                    (now.since(event.since_ms), cpu)
+                });
+                (event.session, paused)
+            })
+            .collect::<Vec<_>>()
+    };
+    if paused { tokio::task::spawn_blocking(read).await.unwrap_or_default() } else { read() }
 }
 
 /// Put back what only the hooks had said of the agents already running when the daemon
@@ -270,34 +283,41 @@ async fn follow(daemon: &Daemon, tails: &mut HashMap<SessionId, Tail>) {
         return;
     }
     let Ok(read) = tokio::task::spawn_blocking(move || read_tails(reads)).await else { return };
-    let mut progress = Vec::new();
+    let mut said = Vec::new();
     for (session, tail, read) in read {
         tails.insert(session, tail);
         match read {
-            Ok(Some(p)) => progress.push((session, p)),
-            Ok(None) => {}
+            Ok(read) if read.progress.is_some() || read.mode.is_some() => {
+                said.push((session, read));
+            }
+            Ok(_) => {}
             Err(e) => tracing::debug!(%session, error = %e, "agent transcript read"),
         }
     }
-    if progress.is_empty() {
+    if said.is_empty() {
         return;
     }
     let mut agents = daemon.agents.lock();
-    let events =
-        progress.iter().filter_map(|(session, p)| agents.observe_progress(*session, p)).collect();
+    let mut events = Vec::new();
+    for (session, read) in &said {
+        // The mode first, so a status event that follows carries it too.
+        let moded = read.mode.as_deref().and_then(|mode| agents.hear_mode(*session, mode));
+        let progressed = read.progress.as_ref().and_then(|p| agents.observe_progress(*session, p));
+        events.extend(progressed.or(moded));
+    }
     broadcast(daemon, &agents, events);
     drop(agents);
 }
 
-/// Read each transcript from where its tail left off: the tails back, beside what the newest
-/// record says the turn is doing. Blocking.
+/// Read each transcript from where its tail left off: the tails back, beside what the new
+/// records say. Blocking.
 fn read_tails(
     reads: Vec<(SessionId, PathBuf, Tail)>,
-) -> Vec<(SessionId, Tail, std::io::Result<Option<Progress>>)> {
+) -> Vec<(SessionId, Tail, std::io::Result<transcript::Read>)> {
     reads
         .into_iter()
         .map(|(session, path, mut tail)| {
-            let read = tail.read(&path).map(|read| read.progress);
+            let read = tail.read(&path);
             (session, tail, read)
         })
         .collect()
@@ -328,6 +348,49 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    /// An agent of `status`, with no process known.
+    fn at(status: AgentStatus) -> (AgentEvent, Option<i32>) {
+        let event = AgentEvent {
+            session: SessionId::new(),
+            kind: slopty_proto::agent::AgentKind::ClaudeCode,
+            status,
+            agent_session: None,
+            detail: None,
+            attention: false,
+            source: slopty_proto::agent::AgentSource::Transcript,
+            since_ms: slopty_core::WallMs::ZERO,
+            mode: None,
+        };
+        (event, None)
+    }
+
+    /// A tick with no paused turn starts no blocking-pool thread, and one with a paused turn
+    /// reads its commands there. A runtime of one thread starts a thread only for the pool.
+    #[test]
+    fn only_a_paused_turn_takes_the_blocking_pool() {
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .on_thread_start({
+                let started = std::sync::Arc::clone(&started);
+                move || {
+                    started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .build()
+            .unwrap();
+        let now = slopty_core::WallMs::now();
+        let quiet = runtime.block_on(sample(Vec::new(), now));
+        let busy = runtime.block_on(sample(vec![at(AgentStatus::Working)], now));
+        assert!(quiet.is_empty());
+        assert_eq!(busy.first().map(|(_session, paused)| *paused), Some(None));
+        assert_eq!(started.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let waiting = AgentStatus::Waiting { tasks: 1, crons: 0 };
+        let paused = runtime.block_on(sample(vec![at(waiting)], now));
+        assert!(paused.first().is_some_and(|(_session, paused)| paused.is_some()));
+        assert_eq!(started.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
 
     /// What a tick's transcript reads cost for `AGENTS` agents with nothing new to say: one
     /// trip to the blocking pool per agent, one after the other (the path this replaced),

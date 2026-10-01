@@ -92,6 +92,22 @@ pub struct SessionAgent {
     /// reads how long the turn has run, and since the worker's table carries it, a client that
     /// reconnects reads the same. Zero with no agent.
     pub since_ms: WallMs,
+    /// The permission mode it runs in, as it last said ([`HeardMode`]).
+    pub mode: Option<HeardMode>,
+}
+
+/// The permission mode an agent runs in, as it last said.
+///
+/// Every hook Claude Code runs carries it (`permission_mode`), and its transcript notes it with
+/// each prompt (`permissionMode`), so a change the person makes in the TUI (Shift-Tab) is heard
+/// with the agent's next hook. Nothing is typed or asked to learn it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct HeardMode {
+    /// Claude Code's own name for it (`default`, `plan`, `acceptEdits`, `dontAsk`,
+    /// `bypassPermissions`, …); one a newer Claude Code adds passes through as named.
+    pub name: String,
+    /// When it was heard, by the worker's clock.
+    pub heard_ms: WallMs,
 }
 
 impl SessionAgent {
@@ -108,6 +124,7 @@ impl SessionAgent {
             attention: false,
             source: self.source,
             since_ms: self.since_ms,
+            mode: self.mode.clone(),
         }
     }
 }
@@ -134,6 +151,9 @@ pub struct AgentEvent {
     /// reads how long the turn has run, and since the worker's table carries it, a client that
     /// reconnects reads the same. Zero with no agent.
     pub since_ms: WallMs,
+    /// The permission mode it runs in, as it last said ([`HeardMode`]). An event goes out when
+    /// only this changed.
+    pub mode: Option<HeardMode>,
 }
 
 impl From<&AgentEvent> for SessionAgent {
@@ -143,6 +163,7 @@ impl From<&AgentEvent> for SessionAgent {
             status: event.status.clone(),
             source: event.source,
             since_ms: event.since_ms,
+            mode: event.mode.clone(),
         }
     }
 }

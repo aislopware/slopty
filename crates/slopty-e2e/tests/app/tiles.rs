@@ -494,7 +494,8 @@ fn folder_at(d: &Dump) -> Option<String> {
 
 /// "Open folder…" in the palette opens a folder tile at the shell's directory, with the
 /// keyboard: its folders first, a hidden entry listed too. ↩ on a folder browses into it in
-/// place, and ↩ on a file there opens a file tile right of the folder with the file's text.
+/// place; a file written there shows in the tile unasked; and ↩ on a file there opens a file
+/// tile right of the folder with the file's text.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
@@ -560,6 +561,19 @@ async fn a_folder_tile_browses_the_worker_and_opens_a_file_beside_it() {
         .await
         .unwrap();
     assert!(dump.focused.starts_with("folder:"), "the keyboard stays: {}", dump.focused);
+
+    // A file written there, as an agent would, shows in the tile unasked; the selection stays
+    // on the entry it was on.
+    let written = std::time::Instant::now();
+    std::fs::write(project.join("src/lib.rs"), "pub fn run() {}\n").unwrap();
+    drv.wait_for("lib.rs listed without a refresh", STEP, |d| {
+        folder_rows(d) == ["lib.rs", "main.rs"]
+    })
+    .await
+    .unwrap();
+    let took = written.elapsed();
+    println!("a file written → its folder tile's row: {took:?} (dumps polled)");
+    assert!(took < Duration::from_secs(2), "followed, not refreshed on focus: {took:?}");
 
     drv.keys("enter").await.unwrap();
     let dump = drv

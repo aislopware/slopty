@@ -115,6 +115,9 @@ pub struct SessionSummary {
     /// digits when `HEAD` is detached. Read again when the directory changes and when a
     /// command ends, so a checkout shows by the next prompt.
     pub branch: Option<String>,
+    /// Which repository [`Self::repo`] is, the same on every machine that has a clone of it
+    /// ([`RepoId`]): what a client groups clones on several workers by.
+    pub repo_id: Option<RepoId>,
     /// What [`Self::repo`]'s working tree has changed against `HEAD`, counted by the worker
     /// in the background after the same moments the branch is read; `None` outside a
     /// repository, before the first count, or when git could not say.
@@ -141,6 +144,39 @@ pub struct SessionSummary {
     pub progress: Option<Progress>,
     /// The session was reopened after its shell was lost, as [`TermEvent::Restored`] says it.
     pub restored: Option<Restored>,
+}
+
+/// Which repository a checkout is, the same on every machine that has a clone of it.
+///
+/// Two ways to know, since neither always answers: the address it was cloned from, as a forge
+/// names it, and its first commit, which every clone, mirror and worktree of it shares whatever
+/// its remotes. A client merges two checkouts when either matches; placement matches workers
+/// on the same ([`crate::project`]'s `repos` fact).
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub struct RepoId {
+    /// Its `origin` remote (else its first), normalized to `host/path`: the host lowercased,
+    /// no scheme, user, port, trailing slash or `.git` (`github.com/aislopware/slopty` for
+    /// `git@github.com:aislopware/slopty.git` and `https://github.com/aislopware/slopty`).
+    /// `None` with no remote, or one on this machine's own disk, which names nothing elsewhere.
+    pub origin: Option<String>,
+    /// Its first commit (the oldest root reachable from `HEAD`), in full hex. `None` before the
+    /// worker has read it, or in a repository with no commit yet.
+    pub root: Option<String>,
+}
+
+impl RepoId {
+    /// Whether `self` and `other` name one repository: the same origin or the same first
+    /// commit.
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        let both = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
+        both(&self.origin, &other.origin) || both(&self.root, &other.root)
+    }
+
+    /// The keys it is known by, the origin first: what the `repos` placement fact lists.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.origin.iter().chain(&self.root).map(String::as_str)
+    }
 }
 
 /// A working tree's changes against `HEAD`: what `git diff --numstat HEAD` counts, plus the

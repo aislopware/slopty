@@ -667,8 +667,11 @@ pub struct Tracker {
     since_ms: WallMs,
     /// The command line of the agent process this tracker follows, when the platform said.
     argv: Vec<String>,
-    /// The permission mode the hooks last reported.
+    /// The permission mode the agent last said it runs in: a hook's `permission_mode`, or
+    /// the transcript's `permissionMode` beside a prompt.
     permission_mode: Option<String>,
+    /// When [`Self::permission_mode`] was last heard to change, by the worker's clock.
+    mode_ms: WallMs,
     /// What in `argv` loosens the agent's permissions ([`loosening::loosening`]), once judged.
     loosened: Option<Vec<String>>,
 }
@@ -716,6 +719,7 @@ impl Default for Tracker {
             since_ms: WallMs::ZERO,
             argv: Vec::new(),
             permission_mode: None,
+            mode_ms: WallMs::ZERO,
             loosened: None,
         }
     }
@@ -746,6 +750,10 @@ impl Tracker {
             attention: false,
             source: self.source,
             since_ms: self.since_ms,
+            mode: self
+                .permission_mode
+                .clone()
+                .map(|name| slopty_proto::agent::HeardMode { name, heard_ms: self.mode_ms }),
         }
     }
 
@@ -775,13 +783,30 @@ impl Tracker {
         if hook.transcript_path.is_some() {
             self.transcript_path.clone_from(&hook.transcript_path);
         }
-        if hook.permission_mode.is_some() {
-            self.permission_mode.clone_from(&hook.permission_mode);
-        }
+        let mode_moved = self.hear_mode(hook.permission_mode.as_deref());
         if self.cwd.is_none() {
             self.cwd = hook.cwd.as_ref().map(PathBuf::from);
         }
         self.ledger(hook);
+        // A change of mode alone (Shift-Tab in the TUI, heard with the next hook) is news too,
+        // quietly.
+        self.apply_status(session, hook).or_else(|| mode_moved.then(|| self.event(session)))
+    }
+
+    /// The permission mode the agent says it runs in now, when it says one: whether that is
+    /// a change.
+    fn hear_mode(&mut self, mode: Option<&str>) -> bool {
+        let Some(mode) = mode.filter(|m| !m.is_empty()) else { return false };
+        if self.permission_mode.as_deref() == Some(mode) {
+            return false;
+        }
+        self.permission_mode = Some(mode.to_owned());
+        self.mode_ms = WallMs::now();
+        true
+    }
+
+    /// What `hook` does to the status, once the tracker took in what it says of the agent.
+    fn apply_status(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
         let (status, detail) = self.next(hook)?;
         if !self.blocks.is_empty() && !matches!(status, AgentStatus::Blocked(_)) {
             // A call beside the blocked one started or finished; the human is still needed.
@@ -1343,6 +1368,16 @@ impl AgentTable {
         progress: &Progress,
     ) -> Option<AgentEvent> {
         self.sessions.get_mut(&session)?.observe_progress(session, progress)
+    }
+
+    /// The permission mode `session`'s transcript noted beside its latest prompt, for an agent
+    /// no hook speaks for: an event when that is a change.
+    pub fn hear_mode(&mut self, session: SessionId, mode: &str) -> Option<AgentEvent> {
+        let tracker = self.sessions.get_mut(&session)?;
+        if tracker.hooked || !tracker.hear_mode(Some(mode)) {
+            return None;
+        }
+        Some(tracker.event(session))
     }
 
     /// Every unhooked agent's transcript lookup: where to look, and what is being read now
@@ -2661,6 +2696,50 @@ mod tests {
         let edits =
             r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"acceptEdits"}"#;
         assert_eq!(heard(edits), mode("acceptEdits"));
+    }
+
+    /// Shift-Tab in the TUI changes the mode without changing the turn: the next hook that
+    /// names another mode is an event of its own, carrying the mode and when it was heard, and
+    /// the same mode again is not.
+    #[test]
+    fn a_mode_change_alone_is_an_event_that_carries_it() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        let prompt = |mode: &str| {
+            hook(&format!(
+                r#"{{"session_id":"a","hook_event_name":"UserPromptSubmit","permission_mode":"{mode}"}}"#
+            ))
+        };
+        let mode_of = |event: &AgentEvent| event.mode.as_ref().map(|m| m.name.clone());
+        let working = table.apply(sid, &prompt("default")).expect("the turn starts");
+        assert_eq!(working.status, AgentStatus::Working);
+        assert_eq!(mode_of(&working).as_deref(), Some("default"));
+
+        let before = WallMs::now();
+        let planning = table.apply(sid, &prompt("plan")).expect("the mode alone moved");
+        assert_eq!(planning.status, AgentStatus::Working, "the turn did not change");
+        assert_eq!(mode_of(&planning).as_deref(), Some("plan"));
+        assert!(planning.mode.as_ref().is_some_and(|m| m.heard_ms >= before));
+        assert_eq!(table.apply(sid, &prompt("plan")), None, "nothing new");
+
+        let kept = table.snapshot().into_iter().find(|e| e.session == sid).expect("an agent");
+        assert_eq!(mode_of(&kept).as_deref(), Some("plan"), "and it is kept");
+    }
+
+    /// An agent no hook speaks for says its mode through the transcript's prompts; a hooked
+    /// one's hooks outrank that.
+    #[test]
+    fn a_transcripts_mode_moves_only_an_unhooked_agent() {
+        let (sid, mut table) = (SessionId::new(), AgentTable::default());
+        table.observe(sid, &claude("")).expect("a new agent");
+        let heard = table.hear_mode(sid, "acceptEdits").expect("a new mode");
+        assert_eq!(heard.mode.map(|m| m.name).as_deref(), Some("acceptEdits"));
+        assert_eq!(table.hear_mode(sid, "acceptEdits"), None, "the same again");
+
+        table.apply(
+            sid,
+            &hook(r#"{"session_id":"a","hook_event_name":"Stop","permission_mode":"plan"}"#),
+        );
+        assert_eq!(table.hear_mode(sid, "default"), None, "the hooks speak for it now");
     }
 
     /// What loosens the agent in the foreground is reported when its command line first says
