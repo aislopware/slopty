@@ -1,0 +1,304 @@
+use proptest::prelude::*;
+use uuid::Uuid;
+
+use super::wire::TableFrame;
+use super::*;
+
+fn meta() -> ThreadMeta {
+    ThreadMeta {
+        id: ThreadId::from_uuid(Uuid::from_u128(1)),
+        agent: AgentId::named(AgentId::CLAUDE_CODE),
+        agent_version: "2.1.286".to_owned(),
+        native: "s1".to_owned(),
+        cwd: "/work".to_owned(),
+        title: "Fix the build".to_owned(),
+        terminal: None,
+        parent: None,
+        origin: ThreadMeta::PERSON.to_owned(),
+        forked_from: None,
+        drive: Drive::named(Drive::OBSERVED),
+        caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
+        facts: BTreeMap::new(),
+        created_ms: WallMs::from_millis(1),
+    }
+}
+
+fn turn(n: u32) -> Turn {
+    Turn {
+        id: TurnId(n),
+        input: Some(ItemId(format!("u{n}"))),
+        state: TurnState::Active,
+        started_ms: WallMs::from_millis(u64::from(n)),
+        ended_ms: None,
+        usage: Usage::default(),
+        models: Vec::new(),
+        changed: Changed { added: n, removed: 1 },
+        before: None,
+        after: None,
+    }
+}
+
+fn text(id: &str, turn: u32, words: &str) -> Item {
+    Item {
+        id: ItemId(id.to_owned()),
+        turn: TurnId(turn),
+        at_ms: WallMs::ZERO,
+        body: ItemBody::Text(Clipped::whole(words)),
+    }
+}
+
+fn tool(id: &str, state: ToolState) -> Item {
+    Item {
+        id: ItemId(id.to_owned()),
+        turn: TurnId(1),
+        at_ms: WallMs::ZERO,
+        body: ItemBody::Tool(Box::new(ToolCall {
+            name: "Bash".to_owned(),
+            kind: kind::EXEC.to_owned(),
+            title: "Run cargo test".to_owned(),
+            input: Clipped::default(),
+            state,
+            output: None,
+            images: Vec::new(),
+            detail: None,
+            child: None,
+            ended_ms: None,
+        })),
+    }
+}
+
+fn request(id: &str) -> Request {
+    Request {
+        id: AskId(id.to_owned()),
+        item: None,
+        kind: Request::APPROVAL.to_owned(),
+        title: "Run cargo test?".to_owned(),
+        text: None,
+        options: vec![Choice {
+            id: "allow".to_owned(),
+            label: "Allow".to_owned(),
+            effect: Effect::Allow,
+            scope: None,
+            stops: false,
+        }],
+        questions: Vec::new(),
+        proposed: None,
+        schema_json: None,
+        url: None,
+        state: RequestState::Open,
+        opened_ms: WallMs::ZERO,
+        until_ms: None,
+    }
+}
+
+fn run(actions: &[Action]) -> ThreadState {
+    let mut state = ThreadState::new(meta());
+    for action in actions {
+        state.apply(action);
+    }
+    state
+}
+
+fn state_of(state: &ThreadState, id: &str) -> ToolState {
+    match &state.item(&ItemId(id.to_owned())).map(|i| &i.body) {
+        Some(ItemBody::Tool(call)) => call.state.clone(),
+        other => panic!("no call {id}: {other:?}"),
+    }
+}
+
+/// Text grows by appends, counted as if it had come whole.
+#[test]
+fn appends_grow_an_item_as_if_it_came_whole() {
+    let state = run(&[
+        Action::TurnStarted(turn(1)),
+        Action::ItemStarted(text("a", 1, "")),
+        Action::Append {
+            item: ItemId("a".to_owned()),
+            part: PartKey::Body,
+            text: "one\ntw".to_owned(),
+        },
+        Action::Append {
+            item: ItemId("a".to_owned()),
+            part: PartKey::Body,
+            text: "o\n".to_owned(),
+        },
+        Action::Append {
+            item: ItemId("nowhere".to_owned()),
+            part: PartKey::Body,
+            text: "x".to_owned(),
+        },
+    ]);
+    assert_eq!(state.items, [text("a", 1, "one\ntwo\n")], "{state:?}");
+    assert_eq!(state.row(WallMs::ZERO).last_line.as_deref(), Some("two"));
+}
+
+/// A call moves forward through its states; an update never takes it back from a final one,
+/// and its completion is authoritative.
+#[test]
+fn a_tool_call_moves_forward_only() {
+    let mut state = run(&[
+        Action::TurnStarted(turn(1)),
+        Action::ItemStarted(tool("t", ToolState::Streaming)),
+        Action::ItemUpdated(tool("t", ToolState::Pending { ask: AskId("r".to_owned()) })),
+        Action::ItemUpdated(tool("t", ToolState::Running)),
+        Action::ItemUpdated(tool("t", ToolState::Streaming)),
+    ]);
+    assert_eq!(state_of(&state, "t"), ToolState::Running, "never back to streaming");
+    state.apply(&Action::ItemUpdated(tool("t", ToolState::Rejected)));
+    state.apply(&Action::ItemUpdated(tool("t", ToolState::Running)));
+    assert_eq!(state_of(&state, "t"), ToolState::Rejected, "a final state holds");
+    state.apply(&Action::ItemCompleted(tool("t", ToolState::Completed)));
+    assert_eq!(state_of(&state, "t"), ToolState::Completed, "completion is authoritative");
+    assert!(!ToolState::Completed.may_become(&ToolState::Failed));
+    assert!(ToolState::Streaming.may_become(&ToolState::Completed));
+}
+
+/// Requests open and settle; the row carries only the open ones; settled ones are kept up to a
+/// bound, oldest dropped first.
+#[test]
+fn requests_settle_and_the_settled_are_bounded() {
+    let mut state = run(&[Action::RequestOpened(Box::new(request("r0")))]);
+    assert_eq!(state.row(WallMs::ZERO).requests.len(), 1);
+    let by = Answerer { client: None, name: "terminal".to_owned() };
+    let answered = RequestState::Answered { by, choice: "allow".to_owned() };
+    state.apply(&Action::RequestResolved { id: AskId("r0".to_owned()), state: answered.clone() });
+    assert!(state.row(WallMs::ZERO).requests.is_empty(), "no open request");
+    assert_eq!(state.requests.first().map(|r| &r.state), Some(&answered), "who answered");
+    let extra = RESOLVED_KEPT.saturating_add(3);
+    for n in 1..=extra {
+        let id = AskId(format!("r{n}"));
+        state.apply(&Action::RequestOpened(Box::new(request(&id.0))));
+        state.apply(&Action::RequestResolved { id, state: RequestState::Withdrawn });
+    }
+    state.apply(&Action::RequestOpened(Box::new(request("open"))));
+    assert_eq!(state.requests.len(), RESOLVED_KEPT.saturating_add(1));
+    assert_eq!(state.requests.first().map(|r| r.id.0.as_str()), Some("r4"), "oldest dropped");
+    assert_eq!(state.open_requests().count(), 1);
+}
+
+/// A rewind drops the turns after it, and their items; snapshots land on their turn's edge.
+#[test]
+fn truncation_and_snapshots() {
+    let mut state = run(&[
+        Action::ItemStarted(text("pre", 0, "resumed")),
+        Action::TurnStarted(turn(1)),
+        Action::ItemStarted(text("a", 1, "one")),
+        Action::TurnStarted(turn(2)),
+        Action::ItemStarted(text("b", 2, "two")),
+        Action::Snapshot { turn: TurnId(2), edge: Edge::Before, tree: TreeRef("t2".to_owned()) },
+    ]);
+    assert_eq!(
+        state.turn(TurnId(2)).and_then(|t| t.before.clone()),
+        Some(TreeRef("t2".to_owned()))
+    );
+    state.apply(&Action::Truncated { after: Some(TurnId(1)) });
+    let ids: Vec<&str> = state.items.iter().map(|i| i.id.0.as_str()).collect();
+    assert_eq!(ids, ["pre", "a"]);
+    assert_eq!(state.turns.len(), 1);
+    state.apply(&Action::Truncated { after: None });
+    assert!(state.items.is_empty() && state.turns.is_empty());
+}
+
+/// A snapshot of the last turns, then pages back, give the whole thread again.
+#[test]
+fn a_window_and_its_pages_rebuild_the_thread() {
+    let mut actions = vec![Action::ItemStarted(text("pre", 0, "resumed"))];
+    for n in 1..=5 {
+        actions.push(Action::TurnStarted(turn(n)));
+        actions.push(Action::ItemStarted(text(&format!("i{n}"), n, "words")));
+    }
+    let whole = run(&actions);
+    let mut client = whole.window(2);
+    assert!(client.older);
+    assert_eq!(client.turns.iter().map(|t| t.id.0).collect::<Vec<_>>(), [4, 5]);
+    while client.older {
+        let first = client.turns.first().map_or(TurnId(u32::MAX), |t| t.id);
+        let page = whole.page(first, 2);
+        client.prepend(&page);
+    }
+    assert_eq!(client, whole);
+}
+
+/// The table mirrors snapshots and deltas.
+#[test]
+fn the_table_takes_snapshots_and_deltas() {
+    let row = run(&[]).row(WallMs::from_millis(5));
+    let mut other = row.clone();
+    other.id = ThreadId::from_uuid(Uuid::from_u128(2));
+    let mut table = TableState::default();
+    let cursor = Cursor { epoch: 1, seq: 1 };
+    table.apply(&TableFrame::Snapshot { cursor, rows: vec![row.clone()] });
+    let next = Cursor { epoch: 1, seq: 2 };
+    table.apply(&TableFrame::Delta {
+        cursor: next,
+        rows: vec![other.clone()],
+        removed: vec![row.id],
+    });
+    assert_eq!(table.cursor, next);
+    assert_eq!(table.rows.into_values().collect::<Vec<_>>(), [other]);
+}
+
+/// Appends split one text at chosen char boundaries.
+fn chunked(id: &str, words: &str, cuts: &[usize]) -> Vec<Action> {
+    let chars: Vec<char> = words.chars().collect();
+    let mut points: Vec<usize> =
+        cuts.iter().map(|c| c.checked_rem(chars.len().saturating_add(1)).unwrap_or(0)).collect();
+    points.push(0);
+    points.push(chars.len());
+    points.sort_unstable();
+    points.dedup();
+    points
+        .windows(2)
+        .map(|w| Action::Append {
+            item: ItemId(id.to_owned()),
+            part: PartKey::Body,
+            text: chars.get(w[0]..w[1]).map(|s| s.iter().collect()).unwrap_or_default(),
+        })
+        .collect()
+}
+
+proptest! {
+    /// However a text is cut into appends, the state is the one its whole would give.
+    #[test]
+    fn any_chunking_gives_the_same_state(
+        words in "[a-z\n é]{0,40}",
+        cuts in proptest::collection::vec(0_usize..64, 0..8),
+    ) {
+        let mut actions = vec![Action::TurnStarted(turn(1)), Action::ItemStarted(text("a", 1, ""))];
+        actions.extend(chunked("a", &words, &cuts));
+        let streamed = run(&actions);
+        let whole = run(&[Action::TurnStarted(turn(1)), Action::ItemStarted(text("a", 1, &words))]);
+        prop_assert_eq!(streamed, whole);
+    }
+
+    /// A state carried across the wire mid-stream and carried on gives the same state as one
+    /// that never stopped: a follower that joins from a snapshot ends where the worker does.
+    #[test]
+    fn a_snapshot_mid_stream_carries_on_the_same(
+        words in "[a-z\n]{1,30}",
+        cuts in proptest::collection::vec(0_usize..32, 0..6),
+        at in 0_usize..12,
+    ) {
+        let mut actions = vec![
+            Action::TurnStarted(turn(1)),
+            Action::ItemStarted(text("a", 1, "")),
+            Action::RequestOpened(Box::new(request("r"))),
+        ];
+        actions.extend(chunked("a", &words, &cuts));
+        actions.push(Action::RequestResolved { id: AskId("r".to_owned()), state: RequestState::Released });
+        actions.push(Action::TurnEnded {
+            turn: TurnId(1), state: TurnState::Complete, usage: Usage::default(),
+            ended_ms: WallMs::from_millis(9),
+        });
+        let split = at.min(actions.len());
+        let (head, tail) = actions.split_at(split);
+        let snapshot = run(head);
+        let bytes = crate::codec::encode_body(&snapshot).map_err(|e| TestCaseError::fail(e.to_string()))?;
+        let mut follower: ThreadState =
+            crate::codec::decode_body(&bytes).map_err(|e| TestCaseError::fail(e.to_string()))?;
+        for action in tail {
+            follower.apply(action);
+        }
+        prop_assert_eq!(follower, run(&actions));
+    }
+}

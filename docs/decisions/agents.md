@@ -68,3 +68,55 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     review tile). M2: Codex, pi and the fleet overview. M3: projects the person directs from
     the board. M4: takeover and reach (git panel, moving an agent between hosts, best-of-N,
     generic ACP). The ranked list is `plan.md` §3.
+
+- ✅ **The thread model: Codex's primitives with AHP's synchronisation, in Slopty's own types**
+  (2026-10-01, `crates/slopty-proto/src/thread.rs`; the research is `plan.md` §2.2 and
+  `protocols.md` §6.5, §7.2).
+  - **Shape.** A thread (`ThreadId`, a UUIDv7 the worker mints) holds turns (`TurnId`, counted
+    from 1, with `TurnId::BEFORE` for what precedes the first) and items (`ItemId`, the agent's
+    own id where it is stable). Beside them it holds its open requests, the pending messages,
+    the plan, background tasks, meters and the composer's commands. A subagent is a thread of
+    its own, linked both ways: `ThreadMeta::parent` names the call, and `ToolCall::child` names
+    the thread.
+  - **Open where agents differ, closed where they share structure.** The agent (`AgentId`), its
+    capabilities (`Cap`), its drive (`Drive`), a tool call's kind, a request's kind, a notice's
+    kind, an origin, a wait's kind and the token kinds in `Usage` are all open strings, with the
+    known values as constants. A new agent therefore brings its own values with no wire change.
+    Three things are closed enums, because every adapter maps onto them and the UI ranks or
+    places by them: `Phase` (the attention ladder's input), `ToolState` and `PartKey`.
+    `ToolDetail` is keyed by kind (edit, write, read, search, exec, fetch, web search, agent,
+    question, plan, tasks, mcp), never by one agent's tool names. An unknown kind has no detail,
+    and an unknown native record is an `ItemBody::Extra`, kept and never dropped.
+  - **One mutation, one reducer.** `Action` is the only way a thread changes.
+    `ThreadState::apply` is pure and is the same code on the worker and on every client:
+    - an action about a turn or item the state does not hold (one paged out) changes nothing;
+    - `ItemCompleted` is authoritative;
+    - `ItemUpdated` never moves a tool call back from a final state, and never back to
+      streaming (`ToolState::may_become`);
+    - `Append` counts lines and characters as if the text had come whole, so any chunking
+      gives the same state. This is a property test, beside one that carries a state through
+      the codec mid-stream and goes on.
+  - **Requests carry the agent's own options.** Each `Choice` has the agent's id and label,
+    an `Effect` (allow, deny or answer, so a client can tell yes from no without knowing the
+    agent), the agent's scope words and whether it also stops the turn. Slopty never invents
+    one. A settled request records who answered it (`Answerer`). The state keeps the open
+    requests plus at most `RESOLVED_KEPT` (32) settled ones, so a client that comes back
+    still sees who answered.
+  - **Integers on the wire.** Cost is in millionths of a dollar and a rate window in
+    hundredths of a percent, so the whole state is `Eq` and a golden or a property test
+    compares it exactly.
+  - **The wire.** `thread::wire` holds:
+    - `ThreadRequest`: `Table`, `Follow { have, turns, max_latency_ms }`, `Page`, `Expand`,
+      `Start`, `Intent`, `Approvals`;
+    - `Intent`, each naming the capability it needs (`Intent::needs`);
+    - `IntentDone` with an `Outcome`;
+    - `ThreadFrame`: `Snapshot`, then `Actions { epoch, first }`, plus `Page` and `Expanded`;
+    - `TableFrame` with `ThreadRow`, which carries the open requests as cards.
+
+    The goldens are `tests/golden_thread.rs`. `ThreadState::window` and `page` cut a snapshot
+    and its pages, and a property test shows that a window plus its pages rebuild the thread.
+  - **Landed beside the old path, not over it.** `conversation.rs` and `agent.rs` stay until
+    the UI lanes switch over. Until then the new types ride no `ClientMsg`, `WorkerMsg` or
+    `UniHead` variant. The switch-over adds `ClientMsg::Thread`, `WorkerMsg::ThreadTable` and
+    `WorkerMsg::IntentDone`, and `UniHead::Thread`, and deletes the old types in the same
+    change.

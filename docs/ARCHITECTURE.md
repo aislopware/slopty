@@ -1105,6 +1105,19 @@ device's layout is its own.
 
 ## 5. Agents
 
+**The thread model (being built; decisions, `agents.md`).** Every agent is to speak one
+agent-neutral model, `slopty_proto::thread`. A thread's turns and items, its open requests,
+pending messages, plan, background tasks and meters are changed only by `Action`s.
+`ThreadState::apply`, the one pure reducer, runs on the worker, which keeps the thread's log,
+and on each client, which mirrors it. A followed thread streams a snapshot of its last turns
+and then actions numbered by a `Cursor { epoch, seq }`, so a client that comes back gets only
+what it missed. Every worker also keeps one small thread table (`ThreadRow`s, `TableFrame`) for
+the lists that follow nothing. Sends, answers and every other intent carry a client-made
+`IntentId` that the worker acts on once. Each agent's adapter maps its native session onto the
+model on the worker. What an agent is, what it can do (`Cap`), how it is reached (`Drive`) and
+what its tools are stay open strings. The model lands beside today's Claude path, described
+below, which it replaces once the clients switch over.
+
 Claude Code only, for now, and always through its own TUI, which stays the source of truth.
 Slopty reads the agent's state and points the human at the terminal that needs them. It is
 also gaining a conversation face over that TUI, toggled per tile (decisions, "Claude Code gets

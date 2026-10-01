@@ -56,6 +56,7 @@ pub mod search;
 pub mod server;
 pub mod tailnet;
 pub mod terminal;
+pub mod thread;
 pub mod transfer;
 pub mod wire;
 
