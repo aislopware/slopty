@@ -563,6 +563,13 @@ pub const BRAND: Rgb = Rgb::hex(0x004a_c06c);
 /// WCAG AA for body text: the least contrast chrome text has on any surface it lands on.
 const AA: f32 = 4.5;
 
+/// WCAG AAA for body text: the least contrast chrome text has under Increase Contrast.
+const AAA: f32 = 7.0;
+
+/// WCAG's least contrast for what is seen but not read (1.4.11): a dividing hairline reaches
+/// it under Increase Contrast, and the quieter one stays a [`LEVEL`] under it.
+const NON_TEXT: f32 = 3.0;
+
 /// How far apart two text levels stay: each reads at least a quarter again the contrast of the
 /// level under it, on the surface where both read worst. Past it, muted and secondary text
 /// would be two names for one grey.
@@ -777,6 +784,30 @@ fn lift(fg: Rgb, surfaces: &[Rgb], pole: Rgb, least: f32) -> Rgb {
     fg.mix(pole, hi)
 }
 
+/// `line` laid on only as much thicker as it takes to read `least` over every one of
+/// `surfaces`: the ink whole when even that is not enough.
+fn thicken(line: Hairline, surfaces: &[Rgb], least: f32) -> Hairline {
+    let reads = |share: f32| {
+        let line = Hairline::of(line.ink, share);
+        surfaces.iter().map(|&bg| line.over(bg).contrast(bg)).fold(f32::INFINITY, f32::min) >= least
+    };
+    let from = line.opacity();
+    if reads(from) {
+        return line;
+    }
+    // Contrast grows with the share: bisect for the least share that reads.
+    let (mut lo, mut hi) = (from, 1.0_f32);
+    for _ in 0..14 {
+        let mid = f32::midpoint(lo, hi);
+        if reads(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Hairline::of(line.ink, hi)
+}
+
 impl Surfaces {
     /// The chrome for `content`, the terminal's background: dark tones on a dark one, light on
     /// a light one.
@@ -791,8 +822,14 @@ impl Surfaces {
     /// gets chrome that clears AA with three distinct text levels. A mid grey between them
     /// cannot: no text colour reads 4.5:1 on both it and a step above it. There the tones
     /// go as far as black or white do.
+    ///
+    /// Under [`Contrast::Increased`] every text tone, muted text included, clears AAA (7:1)
+    /// instead, and the hairlines are laid on thicker until the dividing one reads 3:1 on every
+    /// surface it crosses (WCAG's least for what is seen and not read), the quieter one a
+    /// level under it. The fills stay: a fill is seen by its hue, and the focus ring takes
+    /// the lifted accent.
     #[must_use]
-    pub fn derive(content: Rgb) -> Self {
+    pub fn derive(content: Rgb, contrast: Contrast) -> Self {
         let t = if content.is_light() { LIGHT_TONES } else { DARK_TONES };
         let at = |step: Step| {
             let toward = match step.toward {
@@ -802,15 +839,24 @@ impl Surfaces {
             };
             content.mix(toward, step.share)
         };
-        // A hairline is the ink laid over the surface, so over the content it is the step.
-        let hairline = |step: Step| Hairline::of(t.text, step.share);
         let (canvas, panel, elevated) = (at(t.canvas), at(t.panel), at(t.elevated));
         let (raised, overlay) = (at(t.raised), at(t.overlay));
         let under = [canvas, panel, content, elevated, raised, overlay];
-        let text_muted = lift(t.text_muted, &under, t.pole, AA);
+        // A hairline is the ink laid over the surface, so over the content it is the step. It
+        // is never drawn across a selected fill, so `overlay` is not among what it crosses.
+        let crossed = [canvas, panel, content, elevated, raised];
+        let hairline = |step: Step, least: f32| match contrast {
+            Contrast::Standard => Hairline::of(t.text, step.share),
+            Contrast::Increased => thicken(Hairline::of(t.text, step.share), &crossed, least),
+        };
+        let floor = match contrast {
+            Contrast::Standard => AA,
+            Contrast::Increased => AAA,
+        };
+        let text_muted = lift(t.text_muted, &under, t.pole, floor);
         let text_secondary =
-            lift(t.text_secondary, &under, t.pole, AA.max(worst(text_muted, &under) * LEVEL));
-        let text = lift(t.text, &under, t.pole, AA.max(worst(text_secondary, &under) * LEVEL));
+            lift(t.text_secondary, &under, t.pole, floor.max(worst(text_muted, &under) * LEVEL));
+        let text = lift(t.text, &under, t.pole, floor.max(worst(text_secondary, &under) * LEVEL));
         Self {
             canvas,
             panel,
@@ -818,15 +864,15 @@ impl Surfaces {
             raised,
             overlay,
             band: at(t.band),
-            border: hairline(t.border),
-            border_subtle: hairline(t.border_subtle),
+            border: hairline(t.border, NON_TEXT),
+            border_subtle: hairline(t.border_subtle, NON_TEXT / LEVEL),
             text,
             text_secondary,
             text_muted,
-            accent: lift(t.accent, &under, t.pole, AA),
-            success: lift(t.success, &under, t.pole, AA),
-            warn: lift(t.warn, &under, t.pole, AA),
-            error: lift(t.error, &under, t.pole, AA),
+            accent: lift(t.accent, &under, t.pole, floor),
+            success: lift(t.success, &under, t.pole, floor),
+            warn: lift(t.warn, &under, t.pole, floor),
+            error: lift(t.error, &under, t.pole, floor),
             accent_fill: t.accent_fill,
             success_fill: t.success_fill,
             warn_fill: t.warn_fill,
@@ -1212,7 +1258,7 @@ impl Theme {
         Self {
             terminal,
             behaviour: Behaviour::default(),
-            surfaces: Surfaces::derive(terminal.bg),
+            surfaces: Surfaces::derive(terminal.bg, Contrast::Standard),
             elevation: Elevation::of(terminal.bg),
             density: Density::default(),
             typography: Typography::default(),
@@ -1222,10 +1268,10 @@ impl Theme {
         }
     }
 
-    /// Derive the chrome again from the terminal's background, after something changed it
-    /// (a `[colors]` background in the settings).
+    /// Derive the chrome again from the terminal's background and the contrast, after
+    /// something changed them (a `[colors]` background in the settings, Increase Contrast).
     pub fn derive_chrome(&mut self) {
-        self.surfaces = Surfaces::derive(self.terminal.bg);
+        self.surfaces = Surfaces::derive(self.terminal.bg, self.contrast);
         self.elevation = Elevation::of(self.terminal.bg);
     }
 
@@ -1314,7 +1360,7 @@ mod tests {
         assert_eq!(Theme::default().variant(), Variant::Dark);
         let light = Theme::new(Variant::Light);
         assert_eq!(light.variant(), Variant::Light);
-        assert_eq!(light.surfaces, Surfaces::derive(TerminalPalette::LIGHT.bg));
+        assert_eq!(light.surfaces, Surfaces::derive(TerminalPalette::LIGHT.bg, Contrast::Standard));
         assert_eq!(light.elevation, Elevation::LIGHT);
         assert_eq!(light.typography, Typography::default());
         assert_ne!(light.terminal.palette(0), light.terminal.bg, "ANSI black is visible on white");
@@ -1597,7 +1643,7 @@ mod tests {
     fn chrome_text_clears_wcag_aa() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            let s = Surfaces::derive(content);
+            let s = Surfaces::derive(content, Contrast::Standard);
             let under = under_text(&s, content);
             for (ink, fg) in inks(&s) {
                 for (surface, bg) in under {
@@ -1619,6 +1665,52 @@ mod tests {
         }
     }
 
+    /// Under Increase Contrast every chrome text tone, muted text included, reads at least
+    /// 7:1 on every surface it can land on, or as far as black or white go there; the dividing
+    /// hairline reads 3:1 on every surface it crosses and the quiet one stays under it; and
+    /// nothing reads weaker than in the standard look.
+    #[test]
+    fn increase_contrast_raises_text_and_hairlines() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let (plain, more) = (
+                Surfaces::derive(content, Contrast::Standard),
+                Surfaces::derive(content, Contrast::Increased),
+            );
+            let surfaces = under_text(&more, content).map(|(_, c)| c);
+            let pole = if content.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
+            for ((ink, fg), (_, was)) in inks(&more).into_iter().zip(inks(&plain)) {
+                let reads = worst(fg, &surfaces);
+                assert!(
+                    reads >= AAA || fg == pole,
+                    "{name}: {ink} reads {reads:.2} under increased contrast"
+                );
+                assert!(reads >= worst(was, &surfaces), "{name}: {ink} reads weaker");
+            }
+            let crossed = &surfaces[..5];
+            let line = |l: Hairline| {
+                crossed.iter().map(|&bg| l.over(bg).contrast(bg)).fold(f32::INFINITY, f32::min)
+            };
+            assert!(line(more.border) >= NON_TEXT, "{name}: border {:.2}", line(more.border));
+            assert!(
+                line(more.border_subtle) < line(more.border),
+                "{name}: the quiet one is quieter"
+            );
+            assert!(line(more.border_subtle) > line(plain.border_subtle), "{name}: raised");
+            assert_eq!(more.accent_fill, plain.accent_fill, "{name}: the fills stay");
+        }
+    }
+
+    /// The theme's own contrast decides the chrome it derives.
+    #[test]
+    fn the_chrome_follows_the_theme_s_contrast() {
+        let mut theme = Theme::new(Variant::Light);
+        theme.contrast = Contrast::Increased;
+        theme.derive_chrome();
+        assert_eq!(theme.surfaces, Surfaces::derive(theme.content(), Contrast::Increased));
+        assert_ne!(theme.surfaces, Theme::new(Variant::Light).surfaces);
+    }
+
     /// The default themes keep the tones they were designed with: the lift is a guard for
     /// other backgrounds, not a second design. At most one step of rounding moves.
     #[test]
@@ -1626,7 +1718,7 @@ mod tests {
         for (content, tones) in
             [(TerminalPalette::DARK.bg, DARK_TONES), (TerminalPalette::LIGHT.bg, LIGHT_TONES)]
         {
-            let s = Surfaces::derive(content);
+            let s = Surfaces::derive(content, Contrast::Standard);
             for (name, derived, designed) in [
                 ("text", s.text, tones.text),
                 ("text_secondary", s.text_secondary, tones.text_secondary),
@@ -1652,7 +1744,7 @@ mod tests {
     #[test]
     fn a_mid_grey_background_cannot_clear_aa() {
         let content = Rgb::hex(0x77_7777);
-        let s = Surfaces::derive(content);
+        let s = Surfaces::derive(content, Contrast::Standard);
         let surfaces = under_text(&s, content).map(|(_, c)| c);
         assert!(worst(s.text, &surfaces) < AA, "{:?}", s.text);
         assert_eq!(s.text, DARK_TONES.pole, "as far as it goes");
@@ -1667,7 +1759,7 @@ mod tests {
     fn the_ladder_is_monotonic() {
         for (name, bg) in BACKGROUNDS {
             let content = Rgb::hex(bg);
-            let s = Surfaces::derive(content);
+            let s = Surfaces::derive(content, Contrast::Standard);
             let l = Rgb::luminance;
             let c_rgb = content;
             let c = l(content);
@@ -1711,7 +1803,7 @@ mod tests {
         theme.terminal.bg = Rgb::hex(0xfd_f6e3);
         assert_eq!(theme.variant(), Variant::Light, "the variant is the background's");
         theme.derive_chrome();
-        assert_eq!(theme.surfaces, Surfaces::derive(theme.content()));
+        assert_eq!(theme.surfaces, Surfaces::derive(theme.content(), theme.contrast));
         assert_eq!(theme.elevation, Elevation::LIGHT);
         let canvas = theme.surfaces.canvas;
         assert!(canvas.r > canvas.b, "the cream survives in the bars: {canvas:?}");

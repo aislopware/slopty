@@ -14,7 +14,7 @@ use slopty_settings::{
     Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Settings,
     SettingsError, bounds,
 };
-use slopty_theme::{Density, Rgb, TerminalPalette, Theme, Variant};
+use slopty_theme::{Contrast, Density, Rgb, TerminalPalette, Theme, Variant};
 
 /// GPUI actions.
 pub mod actions {
@@ -81,9 +81,10 @@ pub const fn density(touch: bool) -> Density {
     if touch { Density::TOUCH } else { Density::COMPACT }
 }
 
-/// The theme `settings` asks for, given whether the window is dark (used by `system`).
+/// The theme `settings` asks for, given whether the window is dark (used by `system`) and the
+/// system's contrast setting, which the chrome is derived for.
 #[must_use]
-pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
+pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> Theme {
     let variant = match settings.theme.appearance {
         Appearance::Dark => Variant::Dark,
         Appearance::System if window_dark => Variant::Dark,
@@ -105,6 +106,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool) -> Theme {
     theme.typography.ligatures = settings.font.ligatures;
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
     colour_the_terminal(&mut theme.terminal, &settings.colors);
+    theme.contrast = contrast;
     theme.derive_chrome();
     theme.density = density(crate::TOUCH);
     theme.behaviour.copy_on_select = settings.terminal.copy_on_select;
@@ -254,21 +256,21 @@ mod tests {
     fn family_leads_the_fallback_list() {
         let mut s = Settings::default();
         "Fira Code".clone_into(&mut s.font.mono_family);
-        let t = theme_for(&s, true);
+        let t = theme_for(&s, true, Contrast::Standard);
         assert_eq!(t.typography.mono_families, ["Fira Code", "JetBrains Mono", "SF Mono", "Menlo"]);
-        let t = theme_for(&Settings::default(), true);
+        let t = theme_for(&Settings::default(), true, Contrast::Standard);
         assert_eq!(t.typography.mono_families, ["JetBrains Mono", "SF Mono", "Menlo"]);
     }
 
     #[test]
     fn appearance_resolution() {
         let mut s = Settings::default();
-        assert_eq!(theme_for(&s, true).variant(), Variant::Dark);
-        assert_eq!(theme_for(&s, false).variant(), Variant::Light);
+        assert_eq!(theme_for(&s, true, Contrast::Standard).variant(), Variant::Dark);
+        assert_eq!(theme_for(&s, false, Contrast::Standard).variant(), Variant::Light);
         s.theme.appearance = Appearance::Dark;
-        assert_eq!(theme_for(&s, false).variant(), Variant::Dark);
+        assert_eq!(theme_for(&s, false, Contrast::Standard).variant(), Variant::Dark);
         s.theme.appearance = Appearance::Light;
-        assert_eq!(theme_for(&s, true).variant(), Variant::Light);
+        assert_eq!(theme_for(&s, true, Contrast::Standard).variant(), Variant::Light);
     }
 
     #[test]
@@ -276,25 +278,29 @@ mod tests {
         let mut s = Settings::default();
         s.font.mono_size = 400.0;
         s.font.ui_size = f32::NAN;
-        let t = theme_for(&s, true);
+        let t = theme_for(&s, true, Contrast::Standard);
         assert_eq!(t.typography.mono_size, 13.0);
         assert_eq!(t.typography.ui_size, 13.0);
         s.font.mono_size = 16.0;
-        assert_eq!(theme_for(&s, true).typography.mono_size, 16.0);
+        assert_eq!(theme_for(&s, true, Contrast::Standard).typography.mono_size, 16.0);
         s.font.mono_line_height = 1.2;
-        assert_eq!(theme_for(&s, true).typography.mono_line_height, 1.2);
+        assert_eq!(theme_for(&s, true, Contrast::Standard).typography.mono_line_height, 1.2);
         s.font.mono_line_height = 3.0;
-        assert_eq!(theme_for(&s, true).typography.mono_line_height, 1.0, "a typo: the font's");
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).typography.mono_line_height,
+            1.0,
+            "a typo: the font's"
+        );
     }
 
     #[test]
     fn custom_colours_lay_over_the_theme() {
         let mut s = Settings::default();
-        let dark = theme_for(&s, true).terminal;
+        let dark = theme_for(&s, true, Contrast::Standard).terminal;
         s.colors.foreground = Color(Some([0xc0, 0xca, 0xf5]));
         s.colors.cursor = Color(Some([0xff, 0xff, 0xff]));
         s.colors.ansi = vec![Color(None), Color(Some([0xf7, 0x76, 0x8e]))];
-        let t = theme_for(&s, true).terminal;
+        let t = theme_for(&s, true, Contrast::Standard).terminal;
         assert_eq!((t.fg, t.bg), (Rgb::hex(0x00c0_caf5), dark.bg), "set and unset");
         assert_eq!(
             (t.cursor, t.cursor_text),
@@ -307,11 +313,11 @@ mod tests {
         );
         s.colors.cursor_text = Color(Some([1, 2, 3]));
         assert_eq!(
-            theme_for(&s, true).terminal.cursor_text,
+            theme_for(&s, true, Contrast::Standard).terminal.cursor_text,
             Rgb { r: 1, g: 2, b: 3 },
             "set: as said"
         );
-        let light = theme_for(&s, false).terminal;
+        let light = theme_for(&s, false, Contrast::Standard).terminal;
         assert_eq!(light.fg, Rgb::hex(0x00c0_caf5), "both appearances");
     }
 
@@ -321,11 +327,30 @@ mod tests {
     fn a_custom_background_carries_the_chrome() {
         let mut s = Settings::default();
         s.colors.background = Color(Some([0x28, 0x2a, 0x36]));
-        let t = theme_for(&s, true);
-        assert_eq!(t.surfaces, slopty_theme::Surfaces::derive(Rgb::hex(0x0028_2a36)));
-        assert_ne!(t.surfaces, theme_for(&Settings::default(), true).surfaces);
+        let t = theme_for(&s, true, Contrast::Standard);
+        assert_eq!(
+            t.surfaces,
+            slopty_theme::Surfaces::derive(Rgb::hex(0x0028_2a36), Contrast::Standard)
+        );
+        assert_ne!(t.surfaces, theme_for(&Settings::default(), true, Contrast::Standard).surfaces);
         s.colors.background = Color(Some([0xfd, 0xf6, 0xe3]));
-        assert_eq!(theme_for(&s, true).variant(), Variant::Light, "the background decides");
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).variant(),
+            Variant::Light,
+            "the background decides"
+        );
+    }
+
+    /// The system's Increase Contrast reaches the chrome, a `[colors]` background's included:
+    /// the contrast is set before the chrome is derived from the background.
+    #[test]
+    fn increase_contrast_derives_the_chrome_for_it() {
+        let mut s = Settings::default();
+        s.colors.background = Color(Some([0x28, 0x2a, 0x36]));
+        let t = theme_for(&s, true, Contrast::Increased);
+        assert_eq!(t.contrast, Contrast::Increased);
+        let derived = slopty_theme::Surfaces::derive(Rgb::hex(0x0028_2a36), Contrast::Increased);
+        assert_eq!(t.surfaces, derived);
     }
 
     /// The editor opens on the file, or the commented defaults; a text that does not parse
@@ -372,62 +397,83 @@ mod tests {
     #[test]
     fn terminal_settings_ride_on_the_theme() {
         let mut s = Settings::default();
-        let t = theme_for(&s, true);
+        let t = theme_for(&s, true, Contrast::Standard);
         assert_eq!(t.terminal.minimum_contrast, 300, "on by default");
         assert!(!t.behaviour.copy_on_select);
         s.terminal.minimum_contrast = 4.5;
         s.terminal.copy_on_select = true;
-        let t = theme_for(&s, true);
+        let t = theme_for(&s, true, Contrast::Standard);
         assert_eq!(t.terminal.minimum_contrast, 450);
         assert!(t.behaviour.copy_on_select);
         assert!(t.behaviour.paste_protection);
         s.terminal.paste_protection = false;
-        assert!(!theme_for(&s, true).behaviour.paste_protection);
+        assert!(!theme_for(&s, true, Contrast::Standard).behaviour.paste_protection);
         assert!(t.behaviour.confirm_close);
         s.terminal.confirm_close = false;
-        assert!(!theme_for(&s, true).behaviour.confirm_close);
+        assert!(!theme_for(&s, true, Contrast::Standard).behaviour.confirm_close);
         assert!(t.behaviour.natural_editing);
         s.terminal.natural_editing = false;
-        assert!(!theme_for(&s, true).behaviour.natural_editing);
+        assert!(!theme_for(&s, true, Contrast::Standard).behaviour.natural_editing);
         assert!(t.behaviour.hide_pointer_while_typing && !t.terminal.bold_is_bright);
         s.terminal.hide_pointer_while_typing = false;
         s.terminal.bold_is_bright = true;
-        let t = theme_for(&s, true);
+        let t = theme_for(&s, true, Contrast::Standard);
         assert!(!t.behaviour.hide_pointer_while_typing && t.terminal.bold_is_bright);
         assert!(t.typography.ligatures);
         s.font.ligatures = false;
-        assert!(!theme_for(&s, true).typography.ligatures);
+        assert!(!theme_for(&s, true, Contrast::Standard).typography.ligatures);
         assert_eq!(t.behaviour.scroll_multiplier, 100);
         s.terminal.scroll_multiplier = 2.5;
-        assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 250);
+        assert_eq!(theme_for(&s, true, Contrast::Standard).behaviour.scroll_multiplier, 250);
         s.terminal.scroll_multiplier = 0.0;
-        assert_eq!(theme_for(&s, true).behaviour.scroll_multiplier, 100, "a typo: one for one");
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).behaviour.scroll_multiplier,
+            100,
+            "a typo: one for one"
+        );
         s.terminal.cursor_style = CursorStyle::Bar;
-        assert_eq!(theme_for(&s, true).behaviour.cursor_style, slopty_theme::CursorStyle::Bar);
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).behaviour.cursor_style,
+            slopty_theme::CursorStyle::Bar
+        );
         s.terminal.cursor_blink = CursorBlink::Never;
-        assert_eq!(theme_for(&s, true).behaviour.cursor_blink, slopty_theme::CursorBlink::Never);
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).behaviour.cursor_blink,
+            slopty_theme::CursorBlink::Never
+        );
         s.terminal.option_as_alt = OptionAsAlt::Left;
-        assert_eq!(theme_for(&s, true).behaviour.option_as_alt, slopty_theme::OptionAsAlt::Left);
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).behaviour.option_as_alt,
+            slopty_theme::OptionAsAlt::Left
+        );
         s.terminal.minimum_contrast = 0.0;
-        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 300, "a typo: the default");
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).terminal.minimum_contrast,
+            300,
+            "a typo: the default"
+        );
         s.terminal.minimum_contrast = f32::INFINITY;
-        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 300);
+        assert_eq!(theme_for(&s, true, Contrast::Standard).terminal.minimum_contrast, 300);
         s.terminal.minimum_contrast = 1.0;
-        assert_eq!(theme_for(&s, true).terminal.minimum_contrast, 100, "1.0 turns it off");
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).terminal.minimum_contrast,
+            100,
+            "1.0 turns it off"
+        );
     }
 
     #[test]
     fn remote_settings_ride_on_the_theme() {
         let mut s = Settings::default();
-        let stream = theme_for(&s, true).behaviour.stream;
+        let stream = theme_for(&s, true, Contrast::Standard).behaviour.stream;
         assert_eq!((stream.fps, stream.max_bitrate_bps), (120, 30_000_000));
         s.remote.fps = 30;
         s.remote.max_bitrate_mbps = 8;
-        let stream = theme_for(&s, true).behaviour.stream;
+        let stream = theme_for(&s, true, Contrast::Standard).behaviour.stream;
         assert_eq!((stream.fps, stream.max_bitrate_bps), (30, 8_000_000));
         s.remote.fps = 0;
         s.remote.max_bitrate_mbps = 500;
-        let stream = theme_for(&s, true).behaviour.stream;
+        let stream = theme_for(&s, true, Contrast::Standard).behaviour.stream;
         assert_eq!(
             (stream.fps, stream.max_bitrate_bps),
             (120, 30_000_000),
@@ -435,10 +481,10 @@ mod tests {
         );
         assert!(!stream.muted);
         s.remote.muted = true;
-        assert!(theme_for(&s, true).behaviour.stream.muted);
+        assert!(theme_for(&s, true, Contrast::Standard).behaviour.stream.muted);
         assert!(!stream.sharp_text);
         s.remote.sharp_text = true;
-        let stream = theme_for(&s, true).behaviour.stream;
+        let stream = theme_for(&s, true, Contrast::Standard).behaviour.stream;
         assert_eq!(
             slopty_ui::screen::quality_of(stream, 1.0, 60).chroma,
             slopty_proto::screen::Chroma::Full,
@@ -484,7 +530,13 @@ mod tests {
     fn a_finger_gets_the_touch_density() {
         assert_eq!(density(true), Density::TOUCH);
         assert_eq!(density(false), Density::COMPACT);
-        assert_eq!(theme_for(&Settings::default(), true).density, density(crate::TOUCH));
-        assert_eq!(theme_for(&Settings::default(), false).density, density(crate::TOUCH));
+        assert_eq!(
+            theme_for(&Settings::default(), true, Contrast::Standard).density,
+            density(crate::TOUCH)
+        );
+        assert_eq!(
+            theme_for(&Settings::default(), false, Contrast::Standard).density,
+            density(crate::TOUCH)
+        );
     }
 }

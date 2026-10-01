@@ -4585,3 +4585,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     files.
   - Tests: `attention::tests::nothing_notifies_while_the_person_is_at_another_device` and
     `an_agent_that_ended_unseen_is_listed_to_review`.
+
+- ✅ **Increase Contrast derives its own chrome** (2026-10-02, GUI-first plan, accessibility).
+  The system's Increase Contrast (iOS: Darker System Colors) sets `Theme::contrast` before
+  `derive_chrome`, so a `[colors]` background gets the contrasted chrome too, and the app
+  follows the setting as it changes (`watch_increase_contrast`; a self-test keeps the
+  standard chrome so its frames compare).
+  - **Text.** Every chrome text tone, muted text and the accent included, clears WCAG AAA
+    (7:1) on every surface it lands on, where the standard look clears AA (4.5:1); the three
+    levels keep their quarter-again steps. On a mid background past the supported range the
+    tones go as far as black or white take them, as they do in the standard look.
+  - **Hairlines.** The dividing hairline is laid on until it reads 3:1 on every surface it
+    crosses, WCAG's least for what is seen and not read; the quiet one stays a level under
+    it. Both are derived, not picked, so a custom background moves them with it.
+  - **Focus rings** take the accent, which is now 7:1, and keep their `alpha::STRONG` share,
+    which `Theme::set_back` already draws whole where a view asks it. The fills stay as they
+    are: a fill is seen by its hue.
+  - Tests: `slopty_theme::tests::increase_contrast_raises_text_and_hairlines`,
+    `the_chrome_follows_the_theme_s_contrast`, and in the app
+    `settings::tests::increase_contrast_derives_the_chrome_for_it`.

@@ -431,6 +431,10 @@ pub struct Workspace {
     window_subscriptions: Vec<gpui::Subscription>,
     /// The system's Reduce Motion heard as it changes ([`watch_reduce_motion`]).
     motion_watch: Option<slopty_platform::motion::Watch>,
+    /// The system's contrast setting, which the chrome is derived for.
+    contrast: slopty_theme::Contrast,
+    /// The system's Increase Contrast heard as it changes ([`watch_increase_contrast`]).
+    contrast_watch: Option<slopty_platform::motion::Watch>,
     /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
     resume_watch: Option<slopty_platform::resume::Watch>,
     adding: Option<Adding>,
@@ -560,6 +564,8 @@ impl Workspace {
             subscriptions: vec![events, changes],
             window_subscriptions: Vec::new(),
             motion_watch: None,
+            contrast: slopty_theme::Contrast::Standard,
+            contrast_watch: None,
             resume_watch: None,
             adding: None,
             runtime,
@@ -835,6 +841,15 @@ impl Workspace {
         self.refresh_menu(cx);
     }
 
+    /// The system's Increase Contrast was turned on or off.
+    fn set_contrast(&mut self, contrast: slopty_theme::Contrast, cx: &mut Context<Self>) {
+        if self.contrast != contrast {
+            tracing::info!(?contrast, "contrast");
+            self.contrast = contrast;
+            self.rebuild_theme(cx);
+        }
+    }
+
     /// The window turned dark or light.
     fn set_window_dark(&mut self, dark: bool, cx: &mut Context<Self>) {
         if self.window_dark != dark {
@@ -845,7 +860,7 @@ impl Workspace {
 
     /// Derive the theme from the settings and the window, and push it everywhere.
     fn rebuild_theme(&mut self, cx: &mut Context<Self>) {
-        let theme = settings::theme_for(&self.settings, self.window_dark);
+        let theme = settings::theme_for(&self.settings, self.window_dark, self.contrast);
         if theme == self.theme {
             return;
         }
@@ -3263,6 +3278,10 @@ pub fn open_workspace(
     // setting as the system says it changed ([`Workspace::set_reduce_motion`]).
     cx.set_reduce_motion(slopty_platform::reduce_motion());
     watch_reduce_motion(&workspace, cx);
+    // A self-test draws the standard chrome whatever this Mac's setting, so its frames compare.
+    if !self_test() {
+        watch_increase_contrast(&workspace, cx);
+    }
     watch_resumes(&workspace, &slopty_platform::resume::System, cx);
     hangs::watch(cx);
     watch_settings(workspace.clone(), cx);
@@ -3370,6 +3389,31 @@ fn watch_reduce_motion(workspace: &Entity<Workspace>, cx: &mut App) {
     cx.spawn(async move |cx| {
         while let Some(on) = rx.recv().await {
             if workspace.update(cx, |ws, cx| ws.set_reduce_motion(on, cx)).is_err() {
+                return;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Derive the chrome for the system's contrast setting, and again each time it changes.
+fn watch_increase_contrast(workspace: &Entity<Workspace>, cx: &mut App) {
+    let contrast = |on: bool| {
+        if on { slopty_theme::Contrast::Increased } else { slopty_theme::Contrast::Standard }
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let watch = slopty_platform::motion::watch_increase_contrast(move |on| {
+        let _closed = tx.send(on);
+    });
+    let now = contrast(slopty_platform::motion::increase_contrast());
+    workspace.update(cx, |ws, cx| {
+        ws.contrast_watch = Some(watch);
+        ws.set_contrast(now, cx);
+    });
+    let workspace = workspace.downgrade();
+    cx.spawn(async move |cx| {
+        while let Some(on) = rx.recv().await {
+            if workspace.update(cx, |ws, cx| ws.set_contrast(contrast(on), cx)).is_err() {
                 return;
             }
         }
