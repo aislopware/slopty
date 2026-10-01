@@ -221,12 +221,17 @@ pub enum ThreadFrame {
         /// The state.
         state: Box<ThreadState>,
     },
-    /// Actions, in order: the first is number `first` of `epoch`, the next `first + 1`.
+    /// Actions, in order, that take a client holding `first` of `epoch` to `next`.
+    ///
+    /// There may be fewer than `next - first`: the worker merges appends to the same part that
+    /// come together, which leaves the state as their run one by one would.
     Actions {
         /// The log's epoch.
         epoch: u64,
-        /// The first one's number.
+        /// The cursor's `seq` they apply to.
         first: u64,
+        /// Its `seq` after them.
+        next: u64,
         /// The actions.
         actions: Vec<Action>,
     },

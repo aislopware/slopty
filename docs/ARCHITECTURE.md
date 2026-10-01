@@ -1115,8 +1115,13 @@ what it missed. Every worker also keeps one small thread table (`ThreadRow`s, `T
 the lists that follow nothing. Sends, answers and every other intent carry a client-made
 `IntentId` that the worker acts on once. Each agent's adapter maps its native session onto the
 model on the worker. What an agent is, what it can do (`Cap`), how it is reached (`Drive`) and
-what its tools are stay open strings. The model lands beside today's Claude path, described
-below, which it replaces once the clients switch over.
+what its tools are stay open strings. On the worker, `slopty_worker::thread::Host` holds every
+thread. Each thread has a log under `threads/<id>/` (a snapshot plus a tail of framed actions,
+compacted at turn ends), the last few thousand actions are kept in memory for followers coming
+back, and per-thread intent outcomes are deduplicated by id. A `Follower` turns a cursor into
+frames, gathering batches within the client's latency budget and merging runs of appends. The
+model lands beside today's Claude path, described below, which it replaces once the clients
+switch over.
 
 Claude Code only, for now, and always through its own TUI, which stays the source of truth.
 Slopty reads the agent's state and points the human at the terminal that needs them. It is

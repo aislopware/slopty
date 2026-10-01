@@ -34,6 +34,7 @@ pub mod restore;
 pub mod screen;
 pub mod search;
 pub mod session;
+pub mod thread;
 pub mod wake;
 pub mod xfer;
 

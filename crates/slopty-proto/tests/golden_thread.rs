@@ -509,7 +509,7 @@ mod golden_thread {
                 tree: TreeRef("9f2e".to_owned()),
             },
         ];
-        snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, actions });
+        snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
     }
 
     /// Every typed tool detail, and the user message's parts.

@@ -120,3 +120,41 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `UniHead` variant. The switch-over adds `ClientMsg::Thread`, `WorkerMsg::ThreadTable` and
     `WorkerMsg::IntentDone`, and `UniHead::Thread`, and deletes the old types in the same
     change.
+
+- ✅ **The thread host keeps a log per thread, and a follower resumes from its cursor**
+  (2026-10-01, `crates/slopty-worker/src/thread/`; tests in `crates/slopty-worker/tests/threads.rs`).
+  - **The log.** `<data dir>/threads/<id>/` holds two files:
+    - `snapshot`: the state and its cursor;
+    - `tail`: a head naming the cursor it continues from, then each action framed as the
+      wire frames it.
+
+    The last 4096 actions (at most 4 MiB) are also kept in memory, which is what a returning
+    follower is sent. A turn's end writes a new snapshot and starts the tail file over, once the
+    tail file holds 1024 actions. The in-memory tail survives that, so compaction costs no
+    follower a snapshot.
+  - **A cache, so nothing is synced.** The agent's own session is the record, so the log is
+    never fsynced. A torn last action is cut off on reading. A tail whose head does not match
+    the snapshot is dropped: it is either from another epoch or the tail a compaction was about
+    to replace. `Log::reset` rebuilds the log from the native session under the next epoch.
+    A new log's first epoch is random, so a log lost and made again never meets an old cursor
+    by chance.
+  - **Follow.** A cursor of the same epoch inside the kept tail gets only the actions after it.
+    Anything else gets a snapshot of the last turns, and older turns come by page. The host
+    takes a follower's catch-up and subscribes it to the thread's feed under one lock, so
+    nothing is missed or sent twice.
+  - **Coalescing.** A follower holds batches for its `max_latency_ms`, and sends early once
+    4 KiB of text or 512 actions have gathered. Runs of appends to one part are merged.
+    `ThreadFrame::Actions` therefore carries `first` and `next`, and may hold fewer actions
+    than `next - first`: the reducer gives the same state either way, which W0's chunking
+    property proves. With no budget, each batch goes alone. A follower that lags the feed,
+    or meets a batch that does not follow on, catches up from its cursor, by the tail or by a
+    snapshot.
+  - **The table** is in memory and rebuilt from the logs at start, under a new random epoch,
+    so a client's cursor from an earlier run gets every row. It sends a delta while it still
+    remembers every removal since the cursor (the last 1024 of them). A row that differs only
+    in `updated_ms` changes nothing.
+  - **Intents.** Each thread keeps the outcome of its last 512 intent ids. They are appended to
+    `intents` beside the log and rewritten when that file reaches twice as many. A repeated id
+    therefore gets the first outcome, across a worker restart too. Intents that start a
+    thread are kept in `threads/starts`. A check, its action and its record happen under one
+    lock.
