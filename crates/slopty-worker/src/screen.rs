@@ -84,6 +84,7 @@ use tokio::task::JoinHandle;
 
 use crate::platform::{Native, Platform};
 
+pub mod drag;
 mod engines;
 pub mod sized;
 mod stripes;
@@ -4449,6 +4450,12 @@ impl<P: Platform> Pipeline<P> {
             self.gestures = *remote;
         }
         Ok(self.injector.inject(input)?)
+    }
+
+    /// Take a step of a drag from the client through the injector's drag mode, in order with
+    /// the stream's other input (`drag`).
+    pub fn drag(&mut self, step: slopty_input::DragStep) {
+        self.injector.drag(step);
     }
 
     /// Give the streamed window's application keyboard focus on the worker.

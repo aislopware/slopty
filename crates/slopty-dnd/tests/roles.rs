@@ -19,8 +19,12 @@ mod harness;
 mod roles {
     use std::time::{Duration, Instant};
 
-    use slopty_dnd::nudge::{self, Nudge};
     use slopty_dnd::watch::DragWatch;
+    use slopty_input::DragStep;
+    use slopty_input::nudge::{self, Nudge};
+    use slopty_proto::codec;
+    use slopty_proto::dnd::{FromHelper, Given, SourceItem, ToHelper};
+    use slopty_proto::drag::{DragId, DragOp};
 
     use crate::harness::{App, Hand, Numbers, at_arg, centre, file, live, ms, pace};
 
@@ -338,5 +342,205 @@ mod roles {
         assert_eq!(size, "2048", "whole");
         assert!(app.any("ended op=1"), "the app saw a copy");
         assert!(std::path::Path::new(&whole).exists(), "the file was not moved");
+    }
+
+    /// The worker's helper over its pipes, as the daemon speaks to it: what it said, each
+    /// stamped when it was read.
+    struct Wire {
+        child: std::process::Child,
+        said: std::sync::mpsc::Receiver<(Instant, FromHelper)>,
+    }
+
+    impl Wire {
+        fn start() -> Self {
+            use std::io::Read as _;
+            let mut child =
+                std::process::Command::new(crate::harness::bin("slopty-dnd-wire-helper"))
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("the helper starts");
+            let mut stdout = child.stdout.take().expect("its stdout");
+            let (tx, said) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                loop {
+                    let mut prefix = [0_u8; codec::PREFIX_BYTES];
+                    if stdout.read_exact(&mut prefix).is_err() {
+                        break;
+                    }
+                    let mut body = vec![0_u8; u32::from_le_bytes(prefix) as usize];
+                    if stdout.read_exact(&mut body).is_err() {
+                        break;
+                    }
+                    let msg: FromHelper = codec::decode_body(&body).expect("a helper message");
+                    if tx.send((Instant::now(), msg)).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self { child, said }
+        }
+
+        fn send(&mut self, msg: &ToHelper) {
+            use std::io::Write as _;
+            let frame = codec::encode(msg).expect("encoded");
+            let stdin = self.child.stdin.as_mut().expect("its stdin");
+            stdin.write_all(&frame).and_then(|()| stdin.flush()).expect("sent");
+        }
+
+        /// What it has said and not yet been asked about.
+        fn drain(&self) -> Vec<(Instant, FromHelper)> {
+            std::iter::from_fn(|| self.said.try_recv().ok()).collect()
+        }
+
+        /// The first thing it says within `within` that `wanted` takes.
+        fn wait(
+            &self,
+            within: Duration,
+            wanted: impl Fn(&FromHelper) -> bool,
+        ) -> Option<(Instant, FromHelper)> {
+            let until = Instant::now().checked_add(within)?;
+            while let Some(left) = until.checked_duration_since(Instant::now()) {
+                let (at, msg) = self.said.recv_timeout(left).ok()?;
+                if wanted(&msg) {
+                    return Some((at, msg));
+                }
+            }
+            None
+        }
+    }
+
+    impl Drop for Wire {
+        fn drop(&mut self) {
+            drop(self.child.stdin.take());
+            let _waited = self.child.wait();
+        }
+    }
+
+    /// The drop as the worker carries it, end to end on a real desktop: the worker's helper
+    /// (`slopty-worker dnd`) told over its pipes, the injector's drag mode pressing into the
+    /// helper's source and carrying the drag onto the test's target, and the release once the
+    /// file and the text are there. The target takes both at the point, the helper reads the
+    /// target's copy off the cursor and says the drop ended as one. Prints how long the source
+    /// takes to show at the point, how far the badge trails the drag crossing onto the target,
+    /// and how long the target waits after the release (MEASUREMENTS.md, "the drop in,
+    /// carried").
+    #[test]
+    #[ignore = "live: moves the real pointer; cargo xtask vm live -p slopty-dnd --test roles"]
+    fn the_workers_helper_lands_a_drop_at_the_point() {
+        if !live() {
+            return;
+        }
+        let (_keep, whole) = file();
+        let mut wire = Wire::start();
+        let mut target = App::target(TARGET, "copy", &[]);
+        let mut hand = Hand::new(Numbers::Injector);
+        let (mut badge_ms, mut land_ms, mut end_ms) = (Vec::new(), Vec::new(), Vec::new());
+        let mut ready_ms = Vec::new();
+        for round in 0..10 {
+            let drag = DragId::new();
+            let (answer, mapped) = tokio::sync::oneshot::channel();
+            let (sx, sy) = SOURCE_AT;
+            #[expect(clippy::cast_possible_truncation, reason = "points on a display")]
+            hand.injector.drag_step(DragStep::Enter { x: sx as f32, y: sy as f32, answer });
+            let (x, y) = mapped.blocking_recv().expect("answered").expect("a point");
+            let text = "public.utf8-plain-text".to_owned();
+            let items = vec![
+                SourceItem {
+                    file: Some(whole.clone()),
+                    is_file: true,
+                    types: vec![],
+                    given: vec![],
+                },
+                SourceItem {
+                    file: None,
+                    is_file: false,
+                    types: vec![text.clone()],
+                    given: vec![Given {
+                        uti: text,
+                        bytes: format!("dropped words {round}").into_bytes(),
+                    }],
+                },
+            ];
+            let asked = Instant::now();
+            wire.send(&ToHelper::SourceAt { drag, x, y, items });
+            // The first waits for the helper to come up, as a worker's first drag does.
+            let ready = wire.wait(
+                Duration::from_secs(40),
+                |m| matches!(m, FromHelper::Ready { drag: d } if *d == drag),
+            );
+            let (ready_at, _) = ready.expect("the source is at the point");
+            ready_ms.push(ready_at.saturating_duration_since(asked).as_secs_f64() * 1000.0);
+            #[expect(clippy::cast_possible_truncation, reason = "points on a display")]
+            hand.injector.drag_step(DragStep::Press { x: sx as f32, y: sy as f32 });
+            let began =
+                wire.wait(Duration::from_secs(2), |m| matches!(m, FromHelper::Began { .. }));
+            assert!(began.is_some(), "the press began the helper's session");
+            let mark = target.mark();
+            let (tx, ty) = centre(TARGET);
+            let (left, top, width, height) = TARGET;
+            let mut crossed = None;
+            for step in 1..=24_u32 {
+                let (px, py) = crate::harness::lerp(SOURCE_AT, (tx, ty), f64::from(step) / 24.0);
+                #[expect(clippy::cast_possible_truncation, reason = "points on a display")]
+                hand.injector.drag_step(DragStep::Move { x: px as f32, y: py as f32 });
+                let inside =
+                    (left..left + width).contains(&px) && (top..top + height).contains(&py);
+                if inside && crossed.is_none() {
+                    crossed = Some(Instant::now());
+                }
+                pace(ms(8));
+            }
+            let crossed = crossed.expect("the glide ends over the target");
+            pace(ms(50));
+            let said = wire.drain();
+            let ops: Vec<(f64, DragOp)> = said
+                .iter()
+                .filter_map(|(at, m)| match m {
+                    FromHelper::Operation { drag: d, op } if *d == drag => {
+                        let after = at.saturating_duration_since(crossed).as_secs_f64();
+                        let before = crossed.saturating_duration_since(*at).as_secs_f64();
+                        Some(((after - before) * 1000.0, *op))
+                    }
+                    _ => None,
+                })
+                .collect();
+            eprintln!("round {round}: operations ms from crossing onto the target {ops:?}");
+            let copy = ops.iter().rev().take_while(|(_, op)| *op == DragOp::Copy).last();
+            let (badge_ms_now, _) = copy.copied().expect("the target's copy, read off the cursor");
+            badge_ms.push(badge_ms_now);
+            pace(ms(100));
+            hand.injector.drag_step(DragStep::Release);
+            let released = Instant::now();
+            let words = format!("dropped words {round}");
+            let performed = target
+                .wait(Duration::from_secs(5), |l| l.starts_with("perform") && l.contains(&words));
+            land_ms.push(released.elapsed().as_secs_f64() * 1000.0);
+            assert!(performed, "the target took the drop");
+            let ended = wire.wait(
+                Duration::from_secs(5),
+                |m| matches!(m, FromHelper::Ended { drag: d, .. } if *d == drag),
+            );
+            let (ended_at, ended) = ended.expect("the helper's session ended");
+            end_ms.push(ended_at.saturating_duration_since(released).as_secs_f64() * 1000.0);
+            assert!(
+                matches!(ended, FromHelper::Ended { op: DragOp::Copy, .. }),
+                "a copy: {ended:?}"
+            );
+            let perform = target.since(mark, "perform").pop().unwrap_or_default();
+            assert!(perform.contains(&format!("file://{whole}")), "the file's URL: {perform}");
+            assert!(perform.contains(&format!("dropped words {round}")), "the text: {perform}");
+            wire.send(&ToHelper::Stop { drag });
+            pace(ms(200));
+        }
+        target.show();
+        let line = |v: &[f64]| v.iter().map(|m| format!("{m:.1}")).collect::<Vec<_>>().join(" ");
+        eprintln!(
+            "MEASURE dnd carried: source at the point ms [{}]; badge after crossing onto the target ms [{}]; release → target's perform ms [{}]; release → helper's end ms [{}]",
+            line(&ready_ms),
+            line(&badge_ms),
+            line(&land_ms),
+            line(&end_ms)
+        );
     }
 }

@@ -11033,6 +11033,41 @@ ms of the moves.
   and one promise. The promise's file arrived whole in the catcher's folder, and the app saw a
   copy.
 
+## 2026-10-01 — the drop in, carried: the helper's source, the badge, the release
+
+macOS 26 in a tart guest (4 cores, 8 GB, `--no-graphics`), ten drops in one run:
+
+```sh
+cargo xtask vm live -p slopty-dnd --test roles -- the_workers_helper_lands_a_drop_at_the_point
+```
+
+The worker's drag helper (`slopty_dnd::helper`, the test's `slopty-dnd-wire-helper`) is spoken to
+over its pipes as the daemon speaks to it. The injector's drag mode (`DragStep`) maps the entry,
+presses into the helper's source and carries the drag onto the test's drop target in 24 moves 8
+ms apart, and lets go 100 ms after the last move, with the file whole and the text given. Each
+time is on the test's clock, at the moment it read the message or the line. The log is under
+`target/vm/<guest>/nextest.log`.
+
+| | 1st | 2nd–10th |
+| --- | ---: | --- |
+| `SourceAt` → `Ready` (the window server shows the source at the point) | 112.1 ms | 4.8–10.1 ms |
+| the drag crosses onto the target → the copy cursor's `Operation` | 42.2 ms | 50.0–84.7 ms (one drag never left copy) |
+| release → the target's `performDragOperation:` | 8.5 ms | 4.5–7.0 ms, and 374.0 ms once |
+| release → the helper's `Ended` (a copy every time) | 11.7 ms | 7.3–10.4 ms, and 396.0 ms once |
+
+- The first `Ready` includes the helper starting: AppKit, the window server's connection and
+  AppKit's cursors read once. Later ones are the wait for the window list to show the source's
+  window at the point. A press sent at once on `Ready` before that wait missed the window and
+  began no session (the run before this one).
+- Over the guest's desktop the drag already shows copy, since Finder's desktop takes files. On
+  crossing onto the target the cursor goes to the arrow 4–37 ms after the crossing and to copy
+  50–85 ms after it. The helper reads the cursor every 8 ms, so the rest is the drag manager's
+  own lag. That is 25–60 ms over the plan's `RTT + 25 ms` for the badge before the network is
+  counted, and the client's badge flickers to none in between.
+- A drop with its files whole reaches the target 5 ms after the release (median), so the drop
+  lands RTT/2 plus about 5 ms after the client's drop. One release in ten took 374 ms; the
+  guest's other work is the likely cause, not yet shown.
+
 ## 2026-09-30 — file tiles on kernel events: kqueue against FSEvents, and the follower's report
 
 Mac Studio (M1 Max, 10 cores), macOS 26, release build. Other sessions were building, with a
@@ -12277,4 +12312,35 @@ cargo test -p xtask --bin xtask soak::
 cargo xtask soak                      # 1 200 s; summary.json: daemons.<name>.slope_*
 cargo xtask soak --stacks --seconds 720   # then malloc_history <pid> -callTree -invert
 footprint <worker pid>                # Malloc Small, IOSurface
+```
+
+## 2026-10-01 — frame costs on gpui-fast 4afc87b, and the navigator's rows on their own
+
+gpui-fast moved from `ed16b231` to `4afc87b`: longbridge main `92a9b0f` (bounded scroll-layer
+rebuilds, the zed `0bdc70c` sync) and zed `f8c2cc84`, which shares the Apple dispatcher and Metal
+renderer with iOS. The grid's frame costs, rerun as in "the grid's rows under keys" (release,
+mac-studio, one run at a load average of about 20), p50 / p95 in µs:
+
+| case | bare, afresh | bare, keyed | sprites, afresh | sprites, keyed |
+| --- | --- | --- | --- | --- |
+| unchanged | 208 / 297 | 24 / 25 | 746 / 782 | 139 / 145 |
+| cursor blinking | 210 / 1 367 | 27 / 28 | 749 / 811 | 150 / 159 |
+| a key echoed at the prompt | 217 / 1 946 | 31 / 39 | 749 / 826 | 149 / 183 |
+| a line of output a frame | 300 / 1 699 | 120 / 155 | 832 / 914 | 425 / 483 |
+| `yes`, a screen of one line a frame | 178 / 637 | 158 / 192 | 174 / 208 | 172 / 204 |
+| a screen of new text a frame | 2 196 / 4 117 | 2 271 / 56 095 | 2 718 / 4 550 | 2 845 / 4 859 |
+| scrolling the scrollback a line a frame | 283 / 339 | 104 / 289 | 835 / 935 | 409 / 484 |
+
+Every median is within the spread of the two runs on `132dbc1`, so the sync costs a frame nothing.
+The long p95 tails in the bare columns came with the load: the run started a minute after a load
+average of 128.
+
+The navigator's rows are a view of their own (`Region::NavigatorRows`), so a wheel over the list
+builds that view and not the panel with its filter field, whose input writes its own state each
+time it is built. 120 notes scrolled 12 points a frame, 600 frames after 20: p50 0.341 ms, p95
+0.419 ms, 600 views built (one a frame, the rows'). Scroll layers are compiled out on Apple, so
+none composited.
+
+```sh
+cargo test -p slopty-ui --release --lib -- --ignored --nocapture terminal_frames_cost measure_the_navigator_scrolling
 ```

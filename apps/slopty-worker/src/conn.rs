@@ -1290,7 +1290,7 @@ impl Peer<'_> {
             XferMsg::Begin { xfer, dest: Some(dest), files, bytes } => {
                 let in_session = match &dest {
                     Dest::SessionCwd(session) => Some(*session),
-                    Dest::Staging | Dest::Path(_) | Dest::Attachment => None,
+                    Dest::Staging | Dest::Path(_) | Dest::Attachment | Dest::Drag(_) => None,
                 };
                 let (daemon, client) = (self.daemon.clone(), self.client);
                 let begin = move |cwd: Option<String>| {
@@ -1343,6 +1343,14 @@ impl Peer<'_> {
                 if let Some(earlier) = self.downloads.insert(xfer, tokio::spawn(task)) {
                     earlier.abort();
                 }
+            }
+            // The client could not read a file of a drag's upload: the drop cannot land whole.
+            XferMsg::Failed { xfer, name, error }
+                if let Some(drag) = self.daemon.transfers.drag_of(xfer) =>
+            {
+                let file = name.unwrap_or_else(|| "a file".to_owned());
+                let heard = slopty_worker::screen::drag::Heard::Failed(format!("{file}: {error}"));
+                self.daemon.dnd.drags().tell(drag, heard);
             }
             other @ (XferMsg::Begin { dest: None, .. }
             | XferMsg::Offset { .. }
@@ -2007,7 +2015,7 @@ mod lossy {
         tokio::spawn(async move { while told.recv().await.is_some() {} });
         let serving = tokio::spawn(async move {
             let claim = crate::screens::fake::unsourced();
-            serve(&mut stream, ClientId::new(), &mut commanded, &out, None, &claim).await;
+            serve(&mut stream, ClientId::new(), &mut commanded, &out, None, &claim, None).await;
             stream.close().await;
         });
 

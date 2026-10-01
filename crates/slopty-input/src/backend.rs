@@ -340,6 +340,12 @@ pub trait Backend {
     fn caps_claims(&self) -> SharedCaps {
         std::sync::Arc::clone(&WORKER_CAPS)
     }
+    /// How long a drag rests over a spring-loaded folder before it springs, in seconds: what a
+    /// resting drag's nudges are timed by ([`crate::nudge`]). A stand-in answers the system's
+    /// default.
+    fn spring_delay_s(&mut self) -> f64 {
+        crate::nudge::DEFAULT_SPRING_DELAY_S
+    }
 }
 
 /// The worker's Caps Lock claim ([`crate::CapsClaims`]).
@@ -360,6 +366,10 @@ thread_local! {
 }
 
 impl Backend for System {
+    fn spring_delay_s(&mut self) -> f64 {
+        crate::nudge::spring_delay_s()
+    }
+
     fn owner_pid(&self, target: CaptureTarget) -> Option<i32> {
         match target {
             CaptureTarget::Window(id) => slopty_capture::window_owner_pid(id),

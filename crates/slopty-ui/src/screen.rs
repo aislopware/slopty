@@ -45,6 +45,7 @@ use slopty_client::pacing::{PacingStats, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
+use slopty_proto::drag::DragInput;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
     CaptureTarget, Chroma, CursorShape, Quality, RateVerdict, ScreenInput, ScreenRequest,
@@ -56,6 +57,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use crate::colors::hsla;
 use crate::{keys, kit};
 
+mod drop;
 mod glass;
 mod health;
 mod keyboard;
@@ -455,6 +457,8 @@ pub struct ScreenView {
     readout: Option<Readout>,
     readout_gen: u64,
     readout_timer: Option<Task<()>>,
+    /// A drag from this device over the tile (`drop`).
+    drop: Option<drop::Dropping>,
     _pump: Task<()>,
 }
 
@@ -1010,6 +1014,7 @@ impl ScreenView {
             readout: None,
             readout_gen: 0,
             readout_timer: None,
+            drop: None,
             _pump: pump,
         }
     }
@@ -2692,13 +2697,11 @@ async fn flush(
 /// Queue `msg` behind what already waits: a move replaces a move of the same stream waiting
 /// last; past [`OUTBOX_DEPTH`] waiting, input is dropped unless it lets go of something.
 fn hold(waiting: &mut VecDeque<ClientMsg>, msg: ClientMsg) {
-    if let ClientMsg::Screen(ScreenRequest::Input { stream, input: to @ ScreenInput::Move { .. } }) =
-        &msg
-        && let Some(ClientMsg::Screen(ScreenRequest::Input {
-            stream: behind,
-            input: last @ ScreenInput::Move { .. },
-        })) = waiting.back_mut()
+    if let ClientMsg::Screen(ScreenRequest::Input { stream, input: to }) = &msg
+        && let Some(ClientMsg::Screen(ScreenRequest::Input { stream: behind, input: last })) =
+            waiting.back_mut()
         && behind == stream
+        && same_move(last, to)
     {
         *last = to.clone();
         return;
@@ -2710,14 +2713,33 @@ fn hold(waiting: &mut VecDeque<ClientMsg>, msg: ClientMsg) {
     waiting.push_back(msg);
 }
 
+/// Whether `next` is a move that may take the place of `last`: a pointer move after a pointer
+/// move, or a drag's after the same drag's.
+fn same_move(last: &ScreenInput, next: &ScreenInput) -> bool {
+    match (last, next) {
+        (ScreenInput::Move { .. }, ScreenInput::Move { .. }) => true,
+        (
+            ScreenInput::Drag(DragInput::Move { drag: a, .. }),
+            ScreenInput::Drag(DragInput::Move { drag: b, .. }),
+        ) => a == b,
+        _ => false,
+    }
+}
+
 /// Whether `msg` may not be dropped: anything but input, and input that ends something — a key
-/// or button release, a scroll gesture's or momentum's end — or that a letter would be missing
-/// without: text, Caps Lock's state, the input source the keys are read under and its release.
+/// or button release, a scroll gesture's or momentum's end, a drag's every step but its moves —
+/// or that a letter would be missing without: text, Caps Lock's state, the input source the
+/// keys are read under and its release.
 const fn must_arrive(msg: &ClientMsg) -> bool {
     let ClientMsg::Screen(ScreenRequest::Input { input, .. }) = msg else { return true };
     matches!(
         input,
-        ScreenInput::Key { action: KeyAction::Release, .. }
+        ScreenInput::Drag(
+            DragInput::Enter { .. }
+                | DragInput::Leave { .. }
+                | DragInput::Drop { .. }
+                | DragInput::Catch { .. }
+        ) | ScreenInput::Key { action: KeyAction::Release, .. }
             | ScreenInput::Text { .. }
             | ScreenInput::Lock { .. }
             | ScreenInput::KeyboardSource { .. }
@@ -3003,7 +3025,9 @@ impl Render for ScreenView {
             }))
             .child(picture)
             .child(record_bounds)
-            .children(self.cursor_overlay(drawn))
+            // The system's drag is the pointer while one is over the tile.
+            .children(self.cursor_overlay(drawn.filter(|_| self.drop.is_none())))
+            .children(self.drop_ring())
             .children(console)
             .children(readout)
             .children(hud)

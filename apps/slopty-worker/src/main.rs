@@ -12,6 +12,7 @@ mod agents;
 mod clip;
 mod conn;
 mod ctl;
+pub mod dnd;
 mod files;
 pub mod follow;
 mod handoff;
@@ -156,6 +157,8 @@ pub struct Daemon {
     pub clip: Arc<slopty_worker::clip::Clipboard<Board>>,
     /// Uploads in flight.
     pub transfers: Arc<slopty_worker::xfer::Transfers>,
+    /// The drag from a client crossing the worker, and the helper that carries it.
+    pub dnd: Arc<dnd::Dnd>,
     /// When each session's listening ports are scanned, and what they were.
     pub ports: Arc<parking_lot::Mutex<slopty_worker::ports::Trigger>>,
     /// When the daemon came up (for `doctor`).
@@ -380,7 +383,11 @@ fn watch_caps(
 /// The displays made for clients, as the worker holds them.
 type Displays = Option<slopty_worker::screen::sized::Displays<slopty_worker::screen::sized::Cg>>;
 
-fn main() -> Result<()> {
+fn main() -> Result<std::process::ExitCode> {
+    #[cfg(target_os = "macos")]
+    if let Some(code) = dnd::helper_main() {
+        return Ok(code);
+    }
     slopty_crash::install(slopty_crash::Process::Worker, &slopty_platform::dirs::data_dir());
     // The connections' loops and noq's drivers carry every keystroke and echo: they run at the
     // class of work a person waits on, as the session threads do.
@@ -390,7 +397,7 @@ fn main() -> Result<()> {
         .on_thread_start(slopty_platform::user_interactive_thread)
         .build()
         .context("start the runtime")?;
-    serve(runtime)
+    serve(runtime).map(|()| std::process::ExitCode::SUCCESS)
 }
 
 /// macOS: the main thread serves the run loop the displays made for clients live on
@@ -530,6 +537,9 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     let session_key = slopty_agent::vouch::SessionKey::load_or_make(&data_dir)
         .with_context(|| format!("the session key in {}", data_dir.display()))?;
     worker.set_session_key(session_key);
+    let transfers = Arc::new(slopty_worker::xfer::Transfers::new(
+        args.drop_dir.clone().unwrap_or_else(slopty_worker::xfer::Transfers::default_drop_root),
+    ));
     let daemon = Daemon {
         worker,
         listener,
@@ -542,9 +552,8 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             board(args.pasteboard.as_deref()),
             slopty_proto::transfer::Peer::Worker(id),
         )),
-        transfers: Arc::new(slopty_worker::xfer::Transfers::new(
-            args.drop_dir.clone().unwrap_or_else(slopty_worker::xfer::Transfers::default_drop_root),
-        )),
+        transfers: Arc::clone(&transfers),
+        dnd: Arc::new(dnd::Dnd::new(transfers)),
         ports: Arc::default(),
         started_at: std::time::Instant::now(),
         listen,

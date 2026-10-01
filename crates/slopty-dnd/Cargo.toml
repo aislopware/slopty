@@ -32,8 +32,18 @@ objc2-app-kit = { workspace = true, features = [
     "block2",
 ] }
 objc2-core-graphics.workspace = true
-# The drag source reads the system cursor as the worker does.
+# The drag source reads the system cursor as the worker does, and the window list says when its
+# window shows (`helper`).
 slopty-capture.workspace = true
+slopty-core.workspace = true
+# The helper's messages from and to the worker (`helper`), what a drop does (`operation`).
+slopty-proto.workspace = true
+# The helper's table of what each item gives, filled by its reader thread while a target waits on
+# the main thread (`helper`).
+parking_lot.workspace = true
+# The worker's messages reach the main thread on its queue (`helper`).
+dispatch2.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -42,10 +52,10 @@ tempfile.workspace = true
 # The spikes post through the worker's own injector and event builder, and read the pointer
 # and pictures through the worker's capture.
 slopty-input.workspace = true
-slopty-proto.workspace = true
-slopty-core.workspace = true
 # A spike that cannot run says so, and fails instead in the lane's guest.
 slopty-testkit.workspace = true
+# The injector's drag mode answers where a drag's point is on a channel (`tests/roles.rs`).
+tokio.workspace = true
 objc2-core-foundation.workspace = true
 
 # The drop target the spikes drag onto: the test's own application, and the only one they
@@ -71,6 +81,14 @@ bench = false
 [[bin]]
 name = "slopty-dnd-helper"
 path = "tests/support/helper.rs"
+test = false
+doc = false
+bench = false
+
+# The worker's drag helper as the daemon runs it, spoken to over its pipes (`tests/roles.rs`).
+[[bin]]
+name = "slopty-dnd-wire-helper"
+path = "tests/support/wire_helper.rs"
 test = false
 doc = false
 bench = false

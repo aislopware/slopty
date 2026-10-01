@@ -46,16 +46,15 @@ mod macos {
         msg_send,
     };
     use objc2_app_kit::{
-        NSColor, NSCursor, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
+        NSColor, NSDragOperation, NSDraggingContext, NSDraggingItem, NSDraggingSession,
         NSDraggingSource, NSEvent, NSFilePromiseProvider, NSFilePromiseProviderDelegate, NSImage,
-        NSImageRep, NSPasteboardWriting, NSRectFill, NSResponder, NSView,
+        NSPasteboardWriting, NSRectFill, NSResponder, NSView,
     };
-    use objc2_core_graphics::{CGDataProvider, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
     use objc2_foundation::{
         NSArray, NSError, NSObject, NSOperationQueue, NSPoint, NSRect, NSRunLoop,
         NSRunLoopCommonModes, NSSize, NSString, NSTimer, NSURL,
     };
-    use slopty_capture::{AlphaAt, Layout, bgra_premultiplied};
+    use slopty_dnd::operation::{Class, Cursors};
 
     use crate::child::{self, Args, say};
 
@@ -322,109 +321,31 @@ mod macos {
         )
     }
 
-    /// Width, height and premultiplied BGRA pixels.
-    type Pixels = (u16, u16, Vec<u8>);
-
-    /// AppKit's cursors by name, read at one scale.
-    type References = Vec<(&'static str, Pixels)>;
-
-    /// A cursor's picture as `read_cursor` reads the system's: premultiplied BGRA at `scale`
-    /// pixels a point, the scale of the display the window server draws the cursor on.
-    fn pixels(cursor: &NSCursor, scale: u8) -> Option<Pixels> {
-        let image = cursor.image();
-        let points = image.size();
-        #[expect(clippy::cast_possible_truncation, reason = "a cursor is a few hundred pixels")]
-        let wanted = (points.width * f64::from(scale)).round() as isize;
-        let reps = image.representations();
-        let rep: Retained<NSImageRep> = reps
-            .iter()
-            .filter(|rep| rep.pixelsWide() >= wanted)
-            .min_by_key(|rep| rep.pixelsWide())
-            .or_else(|| reps.iter().max_by_key(|rep| rep.pixelsWide()))?;
-        // SAFETY: a null proposed rect asks for the whole image at the representation's own
-        // pixel size; no context and no hints is the documented way to read its pixels.
-        let cg =
-            unsafe { rep.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
-        let some = Some(&*cg);
-        let (alpha, premultiplied, opaque) = match CGImage::alpha_info(some) {
-            CGImageAlphaInfo::PremultipliedLast => (AlphaAt::Last, true, false),
-            CGImageAlphaInfo::PremultipliedFirst => (AlphaAt::First, true, false),
-            CGImageAlphaInfo::Last => (AlphaAt::Last, false, false),
-            CGImageAlphaInfo::First => (AlphaAt::First, false, false),
-            CGImageAlphaInfo::NoneSkipLast => (AlphaAt::Last, true, true),
-            CGImageAlphaInfo::NoneSkipFirst => (AlphaAt::First, true, true),
-            _ => return None,
-        };
-        let layout = Layout {
-            width: u16::try_from(CGImage::width(some)).ok()?,
-            height: u16::try_from(CGImage::height(some)).ok()?,
-            bytes_per_row: CGImage::bytes_per_row(some),
-            little_endian: CGImage::byte_order_info(some) == CGImageByteOrderInfo::Order32Little,
-            alpha,
-            premultiplied,
-            opaque,
-        };
-        let provider = CGImage::data_provider(some)?;
-        let data = CGDataProvider::data(Some(&provider))?.to_vec();
-        Some((layout.width, layout.height, bgra_premultiplied(&layout, &data)?))
-    }
-
-    /// How many pixels of two pictures of one size differ by more than a quarter in any byte.
-    fn differing(a: &[u8], b: &[u8]) -> usize {
-        a.as_chunks::<4>()
-            .0
-            .iter()
-            .zip(b.as_chunks::<4>().0)
-            .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 64))
-            .count()
-    }
-
-    /// AppKit's arrow, copy, link, not-allowed and closed-hand cursors at `scale`.
-    fn references(scale: u8) -> References {
-        let references: References = [
-            ("arrow", NSCursor::arrowCursor()),
-            ("copy", NSCursor::dragCopyCursor()),
-            ("link", NSCursor::dragLinkCursor()),
-            ("notallowed", NSCursor::operationNotAllowedCursor()),
-            ("closedhand", NSCursor::closedHandCursor()),
-        ]
-        .into_iter()
-        .filter_map(|(name, cursor)| Some((name, pixels(&cursor, scale)?)))
-        .collect();
-        say(&format!(
-            "references at {scale}x {}",
-            references
-                .iter()
-                .map(|(name, (w, h, _))| format!("{name}={w}x{h}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        ));
-        references
-    }
-
     /// Say the system cursor's class each time it changes: the reference of its size with the
     /// fewest differing pixels, or `other`. The references are read at the scale of the picture
     /// the window server hands back, and again when that scale changes.
     fn watch_cursor() -> Retained<NSTimer> {
-        let at_scale: RefCell<Option<(u8, References)>> = RefCell::new(None);
+        let at_scale: RefCell<Option<Cursors>> = RefCell::new(None);
         let watch = RefCell::new(slopty_capture::CursorWatch::new());
         let last = RefCell::new(String::new());
         let tick = RcBlock::new(move |_timer| {
             let Some(shape) = watch.borrow_mut().poll() else { return };
             let mut at_scale = at_scale.borrow_mut();
-            if at_scale.as_ref().is_none_or(|(scale, _)| *scale != shape.scale) {
-                *at_scale = Some((shape.scale, references(shape.scale)));
+            if at_scale.as_ref().is_none_or(|c| c.scale() != shape.scale) {
+                *at_scale = Some(Cursors::at(shape.scale));
             }
-            let Some((_, references)) = at_scale.as_ref() else { return };
-            let best = references
-                .iter()
-                .filter(|(_, (w, h, _))| (*w, *h) == (shape.w, shape.h))
-                .map(|(name, (_, _, bgra))| (*name, differing(bgra, &shape.bgra)))
-                .min_by_key(|(_, diff)| *diff);
-            let class = match best {
-                Some((name, diff)) if diff <= 8 => format!("{name} diff={diff}"),
-                Some((name, diff)) => format!("other nearest={name} diff={diff}"),
-                None => "other nearest=none".to_owned(),
+            let Some(cursors) = at_scale.as_ref() else { return };
+            let name = |class: Class| match class {
+                Class::Arrow => "arrow",
+                Class::Copy => "copy",
+                Class::Link => "link",
+                Class::NotAllowed => "notallowed",
+                Class::ClosedHand => "closedhand",
+                Class::Other => "other",
+            };
+            let class = match cursors.class(&shape) {
+                (Class::Other, diff) => format!("other diff={diff:?}"),
+                (class, diff) => format!("{} diff={}", name(class), diff.unwrap_or(0)),
             };
             let line = format!("cursor class={class} size={}x{}", shape.w, shape.h);
             if *last.borrow() != line {

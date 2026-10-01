@@ -46,6 +46,11 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# The drag helper the daemon runs as `slopty-worker dnd`: a drop from a client carried as a real
+# drag session at its point (`dnd`).
+[target.'cfg(target_os = "macos")'.dependencies]
+slopty-dnd.workspace = true
+
 [dev-dependencies]
 slopty-codec.workspace = true
 serde_json.workspace = true

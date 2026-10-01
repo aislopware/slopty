@@ -1031,6 +1031,7 @@ dependencies = [
  "slopty-grid",
  "thiserror",
  "url",
+ "uuid",
  "zerocopy",
 ]
 

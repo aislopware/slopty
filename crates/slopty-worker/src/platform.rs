@@ -62,7 +62,7 @@ pub mod headless {
         AudioEncoder, CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder,
     };
     use slopty_core::WindowId;
-    use slopty_input::{InputError, InputSink, PointerWatch};
+    use slopty_input::{DragStep, InputError, InputSink, PointerWatch};
     use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, ScreenInput, WindowInfo};
 
     use super::Platform;
@@ -320,6 +320,10 @@ pub mod headless {
 
         fn pointer(&self) -> PointerWatch {
             self.pointer.clone()
+        }
+
+        fn drag(&mut self, step: DragStep) {
+            step.refuse(InputError::Unsupported);
         }
     }
 

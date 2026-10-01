@@ -24,7 +24,9 @@
 //! they are built as the trackpad's are, from a blank event and the fields AppKit reads
 //! ([`backend`]). A press, its drags and its release carry one event number, as AppKit follows
 //! a drag by it. A drag session a worker feeds for a drop goes through the HID tap for its
-//! life, since the drag manager follows the real pointer ([`Injector::enter_drag`]).
+//! life, since the drag manager follows the real pointer ([`Injector::enter_drag`]), and a drag
+//! resting there is nudged so spring-loaded targets spring ([`nudge`]). The stream's task
+//! carries such a drag as [`DragStep`]s ([`InputSink::drag`]).
 //!
 //! [`InputSink`] is the worker's input seam, compiled on every target; [`CgEvents`] is the
 //! macOS implementation (`docs/decisions/topology.md`): the stream's [`Injector`] on an
@@ -45,6 +47,7 @@ pub mod backend;
 mod injector;
 #[cfg(target_os = "macos")]
 pub mod keymap;
+pub mod nudge;
 pub mod pasteboard;
 mod pointer;
 pub mod sources;
@@ -59,8 +62,8 @@ use std::time::Instant;
 pub use backend::{Backend, Event, Gesture, Post, Recorder, Route, System};
 #[cfg(target_os = "macos")]
 pub use injector::{
-    CapsClaims, CapsKept, DRAG_START, Injector, NUDGE_EVERY, SharedCaps, can_post, flags_for,
-    keep_caps, request_post, to_point,
+    CapsClaims, CapsKept, DRAG_START, Injector, SharedCaps, can_post, flags_for, keep_caps,
+    request_post, to_point,
 };
 #[cfg(target_os = "macos")]
 pub use pasteboard::MacBoard;
@@ -122,4 +125,57 @@ pub trait InputSink: Send + Sized + 'static {
     fn release_all(&mut self);
     /// Where this sink's input puts the worker's pointer, readable from any thread.
     fn pointer(&self) -> PointerWatch;
+    /// Carry a drag session for a drop from the client one step on, in the input's order. A
+    /// step that fails is logged; [`DragStep::Enter`] answers whether it could.
+    fn drag(&mut self, step: DragStep);
+}
+
+/// One step of a drag session a stream's task carries on the worker, for a drop from the client.
+///
+/// See `docs/decisions/audio.md`, "Drag and drop lands at the point, both ways". Points are in
+/// the stream's pixels. The drag manager follows the real pointer, so from [`Self::Enter`] until
+/// [`Self::Release`] or [`Self::Cancel`] every pointer event of the stream goes through the HID
+/// tap, and a drag resting in one place is nudged on its own so spring-loaded targets spring
+/// ([`nudge`]).
+#[derive(Debug)]
+pub enum DragStep {
+    /// Begin feeding a drag through the HID tap, raising a window stream's window, and answer
+    /// where `(x, y)` is on the worker's screens, in global points: where the drag helper puts
+    /// its source window for [`Self::Press`].
+    Enter {
+        /// Where, in stream pixels.
+        x: f32,
+        /// Where.
+        y: f32,
+        /// The point in global points, or why there is none (the window is gone).
+        answer: tokio::sync::oneshot::Sender<Result<(f64, f64), InputError>>,
+    },
+    /// Press at `(x, y)` and drag a little: the view under the press, the helper's source,
+    /// begins its session from it.
+    Press {
+        /// Where, in stream pixels.
+        x: f32,
+        /// Where.
+        y: f32,
+    },
+    /// Carry the drag to `(x, y)`.
+    Move {
+        /// Where, in stream pixels.
+        x: f32,
+        /// Where.
+        y: f32,
+    },
+    /// Let go where the drag rests: the drop. The stream's own route is back after it.
+    Release,
+    /// End the drag with nothing dropped. The stream's own route is back after it.
+    Cancel,
+}
+
+impl DragStep {
+    /// Answer a step that cannot be taken here.
+    pub fn refuse(self, why: InputError) {
+        if let Self::Enter { answer, .. } = self {
+            let _gone = answer.send(Err(why));
+        }
+    }
 }

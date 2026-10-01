@@ -427,6 +427,12 @@ mod mac {
             }
         }
 
+        /// `board` itself: a drag's, say, as `NSDraggingInfo` hands it over.
+        #[must_use]
+        pub fn of(board: Retained<NSPasteboard>) -> Self {
+            Self { board, providers: std::cell::RefCell::default() }
+        }
+
         /// The pasteboard called `name`, made on first use and shared by every process that
         /// names it. A test's own: nothing else on the machine reads or writes it.
         #[must_use]

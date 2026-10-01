@@ -797,8 +797,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `feedback` carry copies and drive `AudioCopies`.
 
 - ⏸ **Drag and drop lands at the point, both ways: a real drag session on the worker, fed by the
-  client's own** (2026-09-30, ruling and plan; the spikes and the helper's roles are built,
-  nothing is wired. Builds on `.research/design-dragdrop-clipboard.md` §2–§4 and §8, whose
+  client's own** (2026-09-30, ruling and plan; 2026-10-01, P1 and P2 built: a drop from a Mac
+  client lands at the point in a streamed app, and the drag out waits for P3. Builds on `.research/design-dragdrop-clipboard.md` §2–§4 and §8, whose
   clipboard stage shipped as **Clipboard v2**; that study's claims are rechecked below against
   primary sources retrieved 2026-09-30). Each phase below turns ✅ in this entry as it lands,
   with its tests and numbers.
@@ -1141,11 +1141,80 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         back after each rest of the spring delay (read from `com.apple.springing.delay`) and
         300 ms springs it every time, about 1.5 s after the pointer rests.
         `which_nudge_periods_spring_a_target` keeps the table.
-    - *P1 — wire.* `slopty-proto` alone, landing before anything that uses it, after the wire
-      lane's change to `ScreenInput`.
-    - *P2 — drop in on macOS.* The worker's `DragIn`, the injector's drag mode, the helper's
-      source role, `Dest::Drag`; the client's `RemoteDrop`, the gpui-fast hook, the badge, the
-      ring, the landing.
+    - ✅ *P1 — wire* (2026-10-01). `slopty_proto::drag` (`DragId`, `DragOp`, `DragOps`,
+      `DragItem`, `FileMeta`, `DragInput`, `DragEvent`), `ScreenInput::Drag`,
+      `ScreenEvent::Drag`, `Source::Drag`, `Dest::Drag` and the helper's `slopty_proto::dnd`,
+      each with its golden (`tests/golden_drag.rs`, 25). The helper's goldens are a local pipe's,
+      so the wire fingerprint leaves them out beside the control socket's.
+    - ✅ *P2 — drop in on macOS* (2026-10-01). As built, with the rulings below: the worker's
+      `DropIn` and the `Drags` hub (`slopty_worker::screen::drag`), carried in the stream's task
+      (`apps/slopty-worker/src/dnd.rs`, `screens.rs`); the injector's drag mode
+      (`slopty_input::DragStep`); the helper (`slopty_dnd::helper`, run as `slopty-worker dnd`)
+      with its cursor badge (`slopty_dnd::operation`); `Dest::Drag`; on the client the
+      pasteboard read and the hover (`slopty_client::dnd`), the window's one drop view
+      (`slopty_platform::file_drop`), the routing and the landing (`slopty-ui`
+      `workspace/remote/drop_in.rs`), and the tile's half with its ring (`screen/drop.rs`).
+      Tests: `the_release_waits_for_every_file`, `enter_maps_then_places_the_source_then_presses_and_drags`,
+      `moves_coalesce_and_a_still_hover_posts_nothing`, `leave_cancels_the_upload_and_the_session`,
+      `a_promised_file_is_named_at_the_drop_and_may_land_before_it`, `a_drop_that_cannot_land_says_why`,
+      `one_drag_crosses_a_worker_at_a_time` and `a_drags_files_land_in_its_own_landing`
+      (`slopty-worker`); `a_drop_is_carried_from_entry_to_end_and_a_second_waits_its_turn` and
+      `a_drags_end_is_never_coalesced_away` (the daemon); `a_drag_s_steps_enter_press_carry_and_let_go`,
+      `a_resting_drag_is_nudged_two_points_out_and_back` and
+      `a_resting_drag_on_its_thread_is_nudged_with_no_input` (`slopty-input`);
+      `cursor_shapes_map_to_operations` and `a_target_gets_what_is_here_and_waits_for_what_is_coming`
+      (`slopty-dnd`); `every_item_reads_as_the_worker_will_carry_it`, `the_badge_is_the_workers_last_answer`,
+      `a_refused_drop_slides_back_and_sends_nothing` and `the_end_says_how_the_drop_landed`
+      (`slopty-client`); the same badge and refusal headless in `slopty-ui`, with
+      `a_held_drop_rings_and_ends_with_the_workers_word`,
+      `a_full_queue_coalesces_a_drags_moves_and_keeps_its_steps` and
+      `a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis`; live in a guest,
+      `the_workers_helper_lands_a_drop_at_the_point` (MEASUREMENTS, "the drop in, carried"):
+      a drop with its files whole reaches the target 5 ms after the release (median of ten),
+      so it lands RTT/2 and about 5 ms after the client's drop. The badge turns copy 50–85 ms
+      after the drag crosses onto a target, which misses the plan's `RTT + 25 ms` before the
+      network is counted; the helper reads every 8 ms, so the rest is the drag manager's. The
+      app e2e with a recording worker (`--dnd-record`) is not built yet.
+      - *No gpui-fast hook.* The window's one drop view, a subview of GPUI's, registers for file
+        URLs, promises and every format the clipboard carries, and AppKit gives a drag to the
+        deepest view registered for its types. It asks the workspace what each point is over:
+        a remote body is the worker's drag, and anywhere else it forwards `draggingEntered:`,
+        `draggingUpdated:`, `draggingExited:`, `performDragOperation:` and
+        `concludeDragOperation:` to GPUI's window, so local tiles and GPUI's own drags (a move
+        within its window) behave as they did. On the Mac a remote tile no longer takes GPUI's
+        file drop, and `Dest::Staging` stays for the iPad's drops and for pastes until P4.
+      - *Items, not `ClipEntry`.* The drag's items are `DragItem { file, promised, reps }`, so
+        the clipboard's entry is untouched until P5. A file goes up as the drag's own upload
+        into `~/.slopty/drop/<drag>/` from the entry. A representation past
+        `INLINE_CLIP_BYTES` goes up at once as a bulk `Purpose::Rep` with `Source::Drag`, which
+        the worker hands the drag and never the pasteboard. `DragId` is a v7 UUID in
+        `slopty-proto`.
+      - *The helper speaks over its pipes*, not a Unix socket: framed `slopty_proto::dnd` on
+        stdin and stdout, nothing to bind or name, and it ends when the daemon does. It starts
+        with the first drag and again after one that died, whose drag hears it went. It reads
+        AppKit's cursors at its start, beside the window server's connection, and again only
+        for a cursor of another scale.
+      - *The worker's drag lives in the stream's task*, not `conn.rs`, since the stream owns the
+        injector the drag goes through. `DropIn` decides everything from what it hears and says
+        what to do, so each rule is a test with no window server. `Drags` holds the one drag a
+        worker carries and routes what the transfers, the bulk streams and the helper hear to
+        it, keeping what comes before the stream claims the drag. A second drag meanwhile is
+        answered with its end and the reason ("another drag is crossing this worker"), which
+        the tile says at once, rather than an operation of none that says nothing.
+      - *A file's URL is named before the file is there*: the helper's source declares each
+        named file at the path it will land at, so a target reading on hover never blocks the
+        helper. The landing names the path it took, and the release waits until every file
+        and representation is in. A promised file is called in at the client's
+        `performDragOperation:` (the one moment macOS 27 allows), the ring shows meanwhile, and
+        the drop goes once they are written, naming them; one that lands before its name waits
+        for it.
+      - *The injector owns the nudge* (`slopty_input::nudge`, moved from `slopty-dnd`): two
+        points out and back after each rest of the spring delay and 300 ms, from the input
+        thread, which wakes for it with no input coming.
+      - *Order.* A drag's moves coalesce in the client's outbox and on the worker; its entry,
+        drop, leave and catch must arrive. The stream tells every step of a drag, and only an
+        operation replaces the same drag's operation still waiting. A stream that closes, or a
+        client that goes, mid-drag counts as its leave.
     - *P3 — drag out on macOS.* Drag-pasteboard watch, HID follow, catcher,
       `OutBegan`/`OutCaught`, the client's hand-over and its in-tile icons.
     - *P4 — iPad and iPhone.* The drop proposal, a drop held for its upload, the edge chip.

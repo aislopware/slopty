@@ -7,8 +7,9 @@
 
 use std::path::Path;
 
-/// The goldens of the worker's local control socket, which no link carries.
-const NOT_ON_THE_WIRE: &str = "golden__ctl__";
+/// The goldens of the worker's local sockets, its control socket's and its drag helper's,
+/// which no link carries.
+const NOT_ON_THE_WIRE: [&str; 2] = ["golden__ctl__", "golden_drag__dnd__"];
 
 /// FNV-1a, 64 bits: a fixed function of the bytes, the same on every host and toolchain.
 struct Fnv(u64);
@@ -35,7 +36,7 @@ pub(crate) fn body(snapshot: &str) -> &str {
 /// Whether the snapshot file `name` pins the wire.
 pub(crate) fn on_the_wire(name: &str) -> bool {
     let snap = Path::new(name).extension().is_some_and(|ext| ext == "snap");
-    snap && !name.starts_with(NOT_ON_THE_WIRE)
+    snap && !NOT_ON_THE_WIRE.iter().any(|local| name.starts_with(local))
 }
 
 /// The fingerprint of `snapshots`, each a file name and its text; their order does not count.

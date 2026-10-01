@@ -20,6 +20,8 @@
 //!   trip rather than QUIC's probe timeout.
 //! * **The worker's control socket** — local only, between the worker and the CLI, the hook relay
 //!   and the app on the same Mac: one line of JSON each way ([`ctl`]).
+//! * **The drag helper's pipes** — local only, between the worker and the drag helper it starts
+//!   (`slopty-worker dnd`), framed by [`codec`] ([`dnd`]).
 //!
 //! Encoded bytes of representative messages are pinned as insta goldens under `tests/snapshots`;
 //! a changed golden is a wire change.
@@ -36,6 +38,8 @@ pub mod codec;
 pub mod conversation;
 pub mod ctl;
 pub mod datagram;
+pub mod dnd;
+pub mod drag;
 pub mod file;
 pub mod folder;
 pub mod handoff;

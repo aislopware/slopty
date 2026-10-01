@@ -12,7 +12,9 @@
 //!   once the client's pointer has left the tile, taking files as references, promises into a
 //!   folder and data whole.
 //! - [`watch`]: seeing a drag begin, by the drag pasteboard's change count.
-//! - [`nudge`]: keeping a resting drag moving, so spring-loaded targets spring.
+//! - [`operation`]: what the target under a drag would do, read off the system cursor.
+//!
+//! [`helper`] is the process that runs them, talking to the worker over its stdin and stdout.
 //!
 //! The live tests that settle the platform's behaviour (`tests/spikes.rs`, P0) and prove these
 //! roles (`tests/roles.rs`) run only in a macOS guest (`cargo xtask vm live -p slopty-dnd`), with
@@ -20,12 +22,14 @@
 
 #![warn(unreachable_pub)]
 
-pub mod nudge;
-
 #[cfg(target_os = "macos")]
 pub mod catcher;
 #[cfg(target_os = "macos")]
+pub mod helper;
+#[cfg(target_os = "macos")]
 pub mod items;
+#[cfg(target_os = "macos")]
+pub mod operation;
 #[cfg(target_os = "macos")]
 pub mod source;
 #[cfg(target_os = "macos")]

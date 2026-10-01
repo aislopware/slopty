@@ -25,6 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
+use slopty_proto::drag::DragId;
 use slopty_proto::transfer::{Dest, Hash, MAX_FILES, MODE_BITS, partial_of, relative_path};
 use tokio::sync::{Notify, watch};
 
@@ -92,6 +93,8 @@ pub struct Finished {
     pub paths: Vec<PathBuf>,
     /// The transfer was for a streamed window: the paths go on the pasteboard.
     pub staging: bool,
+    /// The drag whose drop the files are, for an upload into its landing.
+    pub drag: Option<DragId>,
 }
 
 #[derive(Debug)]
@@ -101,6 +104,7 @@ struct Transfer {
     /// Where they go when it is: `<drop>/<xfer>/`.
     fallback: PathBuf,
     staging: bool,
+    drag: Option<DragId>,
     files: u32,
     /// Each top-level entry and the directory it landed in, in first-sight order.
     roots: Vec<(String, PathBuf)>,
@@ -278,11 +282,17 @@ impl Transfers {
             Dest::Staging => (None, true),
             Dest::Attachment => (None, false),
             Dest::Path(p) => (Some(crate::file::expand_home(Path::new(p))), false),
+            Dest::Drag(drag) => (Some(self.drag_dir(*drag)), false),
+        };
+        let drag = match dest {
+            Dest::Drag(drag) => Some(*drag),
+            Dest::SessionCwd(_) | Dest::Staging | Dest::Attachment | Dest::Path(_) => None,
         };
         let transfer = Transfer {
             base: base.unwrap_or_else(|| fallback.clone()),
             fallback,
             staging,
+            drag,
             files,
             roots: Vec::new(),
             landed: HashMap::new(),
@@ -299,6 +309,18 @@ impl Transfers {
             }
         }
         self.begun.notify_waiters();
+    }
+
+    /// Where the files of a drop from the client's drag `drag` land: `drop_root/<drag>/`.
+    #[must_use]
+    pub fn drag_dir(&self, drag: DragId) -> PathBuf {
+        self.drop_root.join(drag.to_string())
+    }
+
+    /// The drag `xfer` uploads the drop of, while it is in flight.
+    #[must_use]
+    pub fn drag_of(&self, xfer: XferId) -> Option<DragId> {
+        self.inner.lock().get(&xfer)?.drag
     }
 
     /// Wait up to `wait` for `xfer` to begin; `false` when it did not.
@@ -355,7 +377,7 @@ impl Transfers {
         let t = self.inner.lock().remove(&xfer)?;
         self.unrecord(xfer);
         let paths = t.roots.iter().map(|(top, root)| root.join(top)).collect();
-        Some(Finished { paths, staging: t.staging })
+        Some(Finished { paths, staging: t.staging, drag: t.drag })
     }
 
     /// Remove the partial files of unfinished transfers that nothing wrote to for `stale`, and
@@ -825,6 +847,29 @@ mod tests {
         assert!(*cancelled.borrow_and_update());
         t.begin(xfer, &Dest::Staging, None, 1);
         assert!(!*cancelled.borrow_and_update(), "a retry re-arms it");
+    }
+
+    /// A drag's files land in its own landing, where the worker's drag named them before they
+    /// came, and the finish says whose drop they are; other transfers belong to no drag.
+    #[test]
+    fn a_drags_files_land_in_its_own_landing() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = transfers(dir.path());
+        let (xfer, drag) = (XferId::new(), DragId::new());
+        t.begin(xfer, &Dest::Drag(drag), None, 1);
+        assert_eq!(t.drag_of(xfer), Some(drag));
+        let target = t.target(xfer, "shot.png").unwrap();
+        assert_eq!(target, t.drag_dir(drag).join("shot.png"));
+        assert_eq!(t.drag_dir(drag), dir.path().join("drop").join(drag.to_string()));
+        let mut rx = Receiving::open(&target, 0, 3).unwrap();
+        rx.write(b"png").unwrap();
+        let landed = rx.finish(0o644, WallMs::ZERO).unwrap();
+        let finished = t.landed(xfer, "shot.png", landed).unwrap();
+        assert_eq!(finished, Finished { paths: vec![target], staging: false, drag: Some(drag) });
+        assert_eq!(t.drag_of(xfer), None, "done and forgotten");
+        let staged = XferId::new();
+        t.begin(staged, &Dest::Staging, None, 1);
+        assert_eq!(t.drag_of(staged), None);
     }
 
     #[tokio::test]

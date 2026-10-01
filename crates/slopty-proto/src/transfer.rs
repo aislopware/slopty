@@ -11,6 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WallMs, WorkerId, XferId};
 
+use crate::drag::DragId;
+
 /// Clipboard bytes at most this big ride inline: an [`Offer`]'s inline representations
 /// together, or one [`ClipMsg::Data`]. Anything bigger is fetched over a bulk stream.
 pub const INLINE_CLIP_BYTES: usize = 64 * 1024;
@@ -212,6 +214,9 @@ pub enum Source {
         /// Which of its changes.
         generation: u64,
     },
+    /// A drag's items ([`crate::drag::DragItem::reps`]): a representation too big for the
+    /// drag's inline budget, which the client sends up as the drag enters.
+    Drag(DragId),
 }
 
 /// Representation `kind` of item `item` of `source`.
@@ -336,6 +341,10 @@ pub enum Dest {
     /// A fresh `~/.slopty/drop/<xfer>/`, with nothing put on the pasteboard: a file attached
     /// to an agent's prompt, whose path the conversation's composer types.
     Attachment,
+    /// `~/.slopty/drop/<drag>/`, with nothing put on the pasteboard: the files of a drag over a
+    /// streamed window or display, sent from the moment it enters, so they are whole by the
+    /// drop it lands them in.
+    Drag(DragId),
 }
 
 /// What a bulk stream's bytes are for.

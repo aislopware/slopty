@@ -6,9 +6,9 @@
 //! pace: one-point moves never reach the target at all, and moves every 650 ms or less never
 //! spring it, however long they go on. A two-point move out and back each time the drag has
 //! rested longer than the spring delay springs it at the second move. So while no move has come
-//! for [`rest_us`] of the spring delay, the worker posts the drag [`STEP`] points to the right,
-//! then back where the pointer rests, and so on, until the next real move or the end of the
-//! drag.
+//! for [`rest_us`] of the spring delay, the injector posts the drag [`STEP`] points to the
+//! right, then back where the pointer rests, and so on, until the next real move or the end of
+//! the drag ([`crate::Injector::nudge`]).
 
 /// How far a nudge moves the drag, in points: the least the drag manager passes on.
 pub const STEP: f64 = 2.0;

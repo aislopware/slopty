@@ -46,6 +46,7 @@ slopty-vdisplay = { path = "crates/slopty-vdisplay" }
 slopty-e2e = { path = "crates/slopty-e2e", default-features = false }
 slopty-testkit = { path = "crates/slopty-testkit" }
 slopty-crash = { path = "crates/slopty-crash" }
+slopty-dnd = { path = "crates/slopty-dnd" }
 
 # core
 anyhow = "1.0.104"

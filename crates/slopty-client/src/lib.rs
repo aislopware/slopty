@@ -46,6 +46,8 @@
 
 pub mod clip;
 pub mod directory;
+#[cfg(target_vendor = "apple")]
+pub mod dnd;
 pub mod handoff;
 pub mod items;
 pub mod layout;

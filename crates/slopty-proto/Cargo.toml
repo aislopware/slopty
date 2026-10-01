@@ -21,9 +21,10 @@ slopty-core.workspace = true
 slopty-grid.workspace = true
 thiserror.workspace = true
 url.workspace = true
+# A drag's id, a UUID as the core's ids are (`drag`).
+uuid.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 proptest.workspace = true
-uuid.workspace = true

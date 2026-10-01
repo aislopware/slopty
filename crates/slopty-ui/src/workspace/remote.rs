@@ -16,9 +16,14 @@ use slopty_client::xfer::paste_paths;
 use slopty_core::{SessionId, XferId};
 use slopty_platform::pasteboard::Pasteboard;
 use slopty_proto::ClientMsg;
+use slopty_proto::drag::DragId;
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
 use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
+
+mod drop_in;
+
+pub use drop_in::DropIn;
 
 use super::actions::{ListPorts, SaveCopy};
 use super::{KeyTarget, WorkspaceView};
@@ -55,6 +60,8 @@ pub struct Upload {
     pub scratch: Option<PathBuf>,
     /// The face whose composer the files are attached to, and the attachment's chip there.
     pub attach: Option<(WeakEntity<ConversationView>, u64)>,
+    /// The drag from this device whose drop the files are, into its landing on the worker.
+    pub drag: Option<DragId>,
 }
 
 impl Upload {
@@ -70,6 +77,7 @@ impl Upload {
             paste: None,
             scratch: None,
             attach: None,
+            drag: None,
         }
     }
 
@@ -85,6 +93,7 @@ impl Upload {
             paste: None,
             scratch: None,
             attach: None,
+            drag: None,
         }
     }
 
@@ -93,6 +102,13 @@ impl Upload {
     #[must_use]
     pub fn to_face(tile: TileRef, face: WeakEntity<ConversationView>, id: u64) -> Self {
         Self { attach: Some((face, id)), ..Self::to_staging(tile) }
+    }
+
+    /// Nothing sent yet, into the landing on the worker of `drag`, a drag over `tile`, which
+    /// drops them at its point there.
+    #[must_use]
+    pub fn to_drag(tile: TileRef, drag: DragId) -> Self {
+        Self { drag: Some(drag), ..Self::to_staging(tile) }
     }
 
     /// Nothing sent yet, into `dir`, a folder tile's directory.
@@ -235,7 +251,7 @@ impl WorkspaceView {
         Some(Rc::new(move || shell_paste(&mut clip.borrow_mut(), key, me)))
     }
 
-    fn remote(&self, key: WorkerKey) -> Option<Arc<dyn Remote>> {
+    pub(super) fn remote(&self, key: WorkerKey) -> Option<Arc<dyn Remote>> {
         self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone())
     }
 
@@ -519,7 +535,7 @@ impl WorkspaceView {
 
     /// Send `paths` to `tile`'s worker as `upload` says: to its shell's directory when it names
     /// a shell, else to staging. Whether it started; when it did not, it has ended.
-    fn upload(
+    pub(super) fn upload(
         &mut self,
         tile: TileRef,
         paths: &[PathBuf],
@@ -540,6 +556,7 @@ impl WorkspaceView {
             }
         };
         let dest = match (&upload.session, &upload.dir) {
+            _ if let Some(drag) = upload.drag => Dest::Drag(drag),
             (Some(session), _) => Dest::SessionCwd(*session),
             (None, Some(dir)) => Dest::Path(dir.clone()),
             (None, None) if upload.attach.is_some() => Dest::Attachment,
@@ -553,10 +570,12 @@ impl WorkspaceView {
         true
     }
 
-    /// Take drops of files that apps promise rather than name (Mail, Photos) and, on iPad,
-    /// every drop: the platform lands them in a temporary directory, and they go to the tile
-    /// under the drop as a file drop of their paths, which uploads them. A file that did not
-    /// arrive is named in a notice. Once, with the app's window.
+    /// Take every drag over the window (`drop_in`): over a remote window or display, the
+    /// worker drops it at the point there; elsewhere GPUI's own handling takes it. Files apps
+    /// promise rather than name (Mail, Photos) and, on iPad, every drop land in a temporary
+    /// directory first, and go to the tile under the drop as a file drop of their paths, which
+    /// uploads them. A file that did not arrive is named in a notice. Once, with the app's
+    /// window.
     pub fn accept_dropped_files(window: &Window, cx: &Context<Self>) {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
@@ -564,42 +583,9 @@ impl WorkspaceView {
             Ok(RawWindowHandle::UiKit(handle)) => handle.ui_view,
             _ => return,
         };
-        let (handle, view, app) = (window.window_handle(), cx.entity().downgrade(), cx.to_async());
-        let sink = Rc::new(move |dropped: slopty_platform::file_drop::Dropped| {
-            let mut app = app.clone();
-            let landing = dropped.landing.clone();
-            let delivered = handle.update(&mut app, |_root, window, cx| {
-                #[expect(clippy::cast_possible_truncation, reason = "points in a window")]
-                let position = gpui::point(gpui::px(dropped.x as f32), gpui::px(dropped.y as f32));
-                // The tile the drop lands on takes the landing with the paths.
-                let _gone = view.update(cx, |v, _cx| v.drop_landing.clone_from(&dropped.landing));
-                if !dropped.paths.is_empty() {
-                    let paths = gpui::ExternalPaths(dropped.paths.iter().cloned().collect());
-                    for event in [
-                        gpui::FileDropEvent::Entered { position, paths },
-                        gpui::FileDropEvent::Pending { position },
-                        gpui::FileDropEvent::Submit { position },
-                    ] {
-                        let _handled =
-                            window.dispatch_event(gpui::PlatformInput::FileDrop(event), cx);
-                    }
-                }
-                // No tile took it (a drop on the bars, or between tiles): nothing uploads it.
-                let _gone =
-                    view.update(cx, |v, cx| Self::discard_landing(v.drop_landing.take(), cx));
-                if !dropped.failed.is_empty() {
-                    let text = format!("Not sent: {}", dropped.failed.join("; "));
-                    let _gone = view.update(cx, |v, cx| v.show_notice(text, cx));
-                }
-            });
-            if let Err(e) = delivered {
-                tracing::warn!(error = %e, "a drop for a window that is gone");
-                if let Some(landing) = &landing {
-                    slopty_platform::file_drop::discard(landing);
-                }
-            }
-        });
-        slopty_platform::file_drop::install(host, sink);
+        let sink =
+            drop_in::Sink::new(window.window_handle(), cx.entity().downgrade(), cx.to_async());
+        slopty_platform::file_drop::install(host, Rc::new(sink));
         // Drops in and drags out are the same window's two directions; iPad takes both.
         #[cfg(target_os = "ios")]
         Self::offer_drags(window, cx);
@@ -655,7 +641,7 @@ impl WorkspaceView {
                         let _gone = face.update(cx, |v, cx| v.attachment_landed(id, &paths, cx));
                     }
                     None if upload.dir.is_some() => self.refresh_folder(upload.tile.item, cx),
-                    None if upload.paste.is_some() => {}
+                    None if upload.paste.is_some() || upload.drag.is_some() => {}
                     None => {
                         let what = if paths.len() == 1 { "file" } else { "files" };
                         self.show_notice(

@@ -67,6 +67,7 @@ pub fn bin(name: &str) -> String {
         .unwrap_or_else(|_| match name {
             "slopty-drop-target" => env!("CARGO_BIN_EXE_slopty-drop-target").to_owned(),
             "slopty-dnd-helper" => env!("CARGO_BIN_EXE_slopty-dnd-helper").to_owned(),
+            "slopty-dnd-wire-helper" => env!("CARGO_BIN_EXE_slopty-dnd-wire-helper").to_owned(),
             _ => env!("CARGO_BIN_EXE_slopty-drag-source").to_owned(),
         })
 }

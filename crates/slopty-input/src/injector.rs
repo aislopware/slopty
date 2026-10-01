@@ -12,7 +12,8 @@ use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
 use slopty_proto::screen::{CaptureTarget, ScreenInput, ScrollPhase};
 
 use crate::backend::{Backend, Event, Gesture, Post, Route, System};
-use crate::{InputError, PointerWatch, keymap, text};
+use crate::nudge::{self, Nudge};
+use crate::{DragStep, InputError, PointerWatch, keymap, text};
 
 /// How long bounds stay valid before a pointer event reads them itself. The stream's geometry
 /// probe hands fresh ones over every 100 ms while the stream takes input
@@ -39,16 +40,6 @@ const BUTTONS: [MouseButton; 5] = [
 /// How far [`Injector::press_at`]'s first drag goes from its press, in points: a drag the view
 /// under the press sees (`mouseDragged:`), which begins a drag session from that press.
 pub const DRAG_START: f64 = 2.0;
-
-/// How often a drag resting in one place is moved ([`Injector::nudge`]).
-///
-/// A drag held still over a spring-loaded target highlights it and never springs it, and one
-/// moved by a point each way every 100 ms springs it (`docs/decisions/audio.md`, "Drag and drop
-/// lands at the point", P0 (8b)).
-pub const NUDGE_EVERY: Duration = Duration::from_millis(100);
-
-/// How far a nudge moves a resting drag, and back, in points.
-const NUDGE: f64 = 1.0;
 
 /// A gesture whose client stamps step by more than this, or back, starts its timeline again
 /// ([`Timeline`]): whatever it was, it is not the next report of the same fingers.
@@ -161,10 +152,21 @@ struct Drag {
     /// Where the worker's real pointer was as a window stream's drag began: where it goes back
     /// to after. A display stream's input moves the real pointer anyway, and leaves it.
     home: Option<CGPoint>,
-    /// When the last drag event went: a nudge is owed [`NUDGE_EVERY`] after it.
-    moved_at: Option<Instant>,
-    /// The last nudge left the drag a point off where it rests; the next brings it back.
-    off: bool,
+    /// Where the pressed drag rests and when it was last posted, so a rest is nudged; `None`
+    /// until the press.
+    nudge: Option<Nudge>,
+    /// How long a rest is before a nudge, from the worker's spring delay as the drag began
+    /// ([`nudge::rest_us`]).
+    rest_us: u64,
+    /// What the nudges' microseconds count from.
+    epoch: Instant,
+}
+
+impl Drag {
+    /// Microseconds from the drag's epoch to `now`.
+    fn us(&self, now: Instant) -> u64 {
+        u64::try_from(now.saturating_duration_since(self.epoch).as_micros()).unwrap_or(u64::MAX)
+    }
 }
 
 /// The gestures under way on the target: what [`Injector::release_all`] closes, so a stream that
@@ -442,13 +444,7 @@ impl<B: Backend> Injector<B> {
     pub fn inject(&mut self, input: &ScreenInput) -> Result<(), InputError> {
         tracing::trace!(target = ?self.target, ?input, "inject");
         match input {
-            ScreenInput::Move { x, y } => {
-                let at = self.point(*x, *y)?;
-                let kind = self.move_type();
-                let (_press, cg_button, number) =
-                    button_event(self.held_button().unwrap_or(MouseButton::Left), true);
-                self.post_mouse(kind, at, cg_button, number, 0)
-            }
+            ScreenInput::Move { x, y } => self.move_to(*x, *y),
             ScreenInput::Button { button, down, clicks, x, y, mods } => {
                 let at = self.point(*x, *y)?;
                 if *down {
@@ -542,8 +538,54 @@ impl<B: Backend> Injector<B> {
             ScreenInput::Media { key, down } => {
                 self.post(Some(Route::Hid), Event::Media { key: *key, down: *down })
             }
-            // The stream's task selects the input source (`crate::sources`); nothing to post.
-            ScreenInput::KeyboardSource { .. } | ScreenInput::KeyboardReleased => Ok(()),
+            // The stream's task selects the input source (`crate::sources`) and carries a drag
+            // as `DragStep`s, between the helper and here; nothing to post.
+            ScreenInput::KeyboardSource { .. }
+            | ScreenInput::KeyboardReleased
+            | ScreenInput::Drag(_) => Ok(()),
+        }
+    }
+
+    /// The pointer to the stream pixel `(x, y)`: a move, or a drag of what is held, a drag
+    /// session's included, which rests there from now on.
+    fn move_to(&mut self, x: f32, y: f32) -> Result<(), InputError> {
+        let at = self.point(x, y)?;
+        let kind = self.move_type();
+        let (_press, cg_button, number) =
+            button_event(self.held_button().unwrap_or(MouseButton::Left), true);
+        self.post_mouse(kind, at, cg_button, number, 0)?;
+        if let Some(drag) = &mut self.drag {
+            let now = drag.us(Instant::now());
+            if let Some(nudge) = &mut drag.nudge {
+                nudge.moved((at.x, at.y), now);
+            }
+        }
+        Ok(())
+    }
+
+    /// Carry a drag session one step on ([`DragStep`]).
+    pub fn drag_step(&mut self, step: DragStep) {
+        let done = match step {
+            DragStep::Enter { x, y, answer } => {
+                self.enter_drag();
+                let at = self.point(x, y).map(|at| (at.x, at.y));
+                if at.is_err() {
+                    self.leave_drag();
+                }
+                let _gone = answer.send(at);
+                Ok(())
+            }
+            DragStep::Press { x, y } => self.press_at(x, y).map(drop),
+            DragStep::Move { x, y } if self.drag.is_some() => self.move_to(x, y),
+            DragStep::Move { .. } => Ok(()),
+            DragStep::Release => {
+                self.leave_drag();
+                Ok(())
+            }
+            DragStep::Cancel => self.cancel_drag(),
+        };
+        if let Err(e) = done {
+            tracing::debug!(target = ?self.target, error = %e, "drag step");
         }
     }
 
@@ -672,7 +714,8 @@ impl<B: Backend> Injector<B> {
             }
         };
         self.placed.follow_real();
-        self.drag = Some(Drag { home, moved_at: None, off: false });
+        let rest_us = nudge::rest_us(self.backend.spring_delay_s());
+        self.drag = Some(Drag { home, nudge: None, rest_us, epoch: Instant::now() });
     }
 
     /// Whether a drag is being fed through the HID tap ([`Self::enter_drag`]).
@@ -707,7 +750,12 @@ impl<B: Backend> Injector<B> {
             .and_then(|()| {
                 let start = self.within(CGPoint { x: at.x + DRAG_START, y: at.y });
                 self.at = Some(start);
-                self.post_mouse(CGEventType::LeftMouseDragged, start, CGMouseButton::Left, 0, 0)
+                self.post_mouse(CGEventType::LeftMouseDragged, start, CGMouseButton::Left, 0, 0)?;
+                if let Some(drag) = &mut self.drag {
+                    let now = drag.us(Instant::now());
+                    drag.nudge = Some(Nudge::new((start.x, start.y), now, drag.rest_us));
+                }
+                Ok(())
             })
             .and_then(|()| self.press_number().ok_or(InputError::Create));
         if pressed.is_err() {
@@ -716,24 +764,35 @@ impl<B: Backend> Injector<B> {
         pressed
     }
 
-    /// Keep a drag resting in one place moving, as a spring-loaded target needs: one drag a
-    /// point off where it rests, and on the next call one back, each only once
-    /// [`NUDGE_EVERY`] has passed since the last drag event of any kind at `now`. The caller
-    /// calls it on that period; a drag that moves on its own is left alone, and the release
-    /// lands where the drag rests, never on the point off it. Whether a nudge went.
+    /// When the pressed drag, resting where it is, is next due a nudge ([`Self::nudge`]);
+    /// `None` outside a pressed drag.
+    #[must_use]
+    pub fn next_nudge(&self) -> Option<Instant> {
+        let drag = self.drag.as_ref()?;
+        let nudge = drag.nudge.as_ref().filter(|_| self.held & MouseButton::Left.bit() != 0)?;
+        drag.epoch.checked_add(Duration::from_micros(nudge.due_us()))
+    }
+
+    /// Keep a drag resting in one place moving, as a spring-loaded target needs
+    /// ([`nudge`]): once it has rested [`nudge::rest_us`] since it was last posted, a drag
+    /// [`nudge::STEP`] points to the right of where it rests, and a rest later one back there.
+    /// A drag that moves on its own is left alone, and the release lands where the drag rests,
+    /// never on the point off it. Whether a nudge went at `now`.
     ///
     /// # Errors
     ///
     /// The system would not take the event.
     pub fn nudge(&mut self, now: Instant) -> Result<bool, InputError> {
-        let (Some(drag), Some(at)) = (self.drag, self.at) else { return Ok(false) };
-        let due = drag.moved_at.is_none_or(|at| now.saturating_duration_since(at) >= NUDGE_EVERY);
-        if self.held & MouseButton::Left.bit() == 0 || !due {
+        if self.held & MouseButton::Left.bit() == 0 {
             return Ok(false);
         }
-        let to = if drag.off { at } else { self.within(CGPoint { x: at.x + NUDGE, y: at.y }) };
+        let Some(drag) = &mut self.drag else { return Ok(false) };
+        let now = drag.us(now);
+        let Some((x, y)) = drag.nudge.as_mut().and_then(|nudge| nudge.nudge(now)) else {
+            return Ok(false);
+        };
+        let to = self.within(CGPoint { x, y });
         self.post_mouse(CGEventType::LeftMouseDragged, to, CGMouseButton::Left, 0, 0)?;
-        self.drag = Some(Drag { moved_at: Some(now), off: !drag.off, ..drag });
         Ok(true)
     }
 
@@ -914,16 +973,6 @@ impl<B: Backend> Injector<B> {
         // price of a menu.
         let route = (button == CGMouseButton::Right).then_some(Route::Hid);
         let press = self.press(kind, number);
-        let dragged = matches!(
-            kind,
-            CGEventType::LeftMouseDragged
-                | CGEventType::RightMouseDragged
-                | CGEventType::OtherMouseDragged
-        );
-        if dragged && let Some(drag) = &mut self.drag {
-            drag.moved_at = Some(Instant::now());
-            drag.off = false;
-        }
         self.post(route, Event::Mouse { kind, at, button, number, clicks, press })
     }
 
@@ -2139,27 +2188,35 @@ mod tests {
         assert!(second > first, "{first} then {second}");
     }
 
-    /// A drag resting still is nudged a point off and back, once per period from the last drag
-    /// event of any kind; a moving drag is not; the drop lands where the drag rests, not a
-    /// point off it. Outside a drag, or with the button up, a nudge posts nothing.
+    /// A drag resting still is nudged two points out and back, a rest (the spring delay and its
+    /// margin) after it was last posted, a nudge included; a real move starts the rest again
+    /// from where it went; the drop lands where the drag rests, not two points off it. Outside a
+    /// drag, or with the button up, there is no nudge to wait for and none is posted.
     #[test]
-    fn a_resting_drag_is_nudged_a_point_each_way() {
+    fn a_resting_drag_is_nudged_two_points_out_and_back() {
+        let rest = Duration::from_micros(nudge::rest_us(nudge::DEFAULT_SPRING_DELAY_S));
         let mut inj = display();
-        let t0 = Instant::now();
-        let later = |ms| t0.checked_add(Duration::from_millis(ms)).unwrap();
-        assert!(!inj.nudge(later(500)).unwrap(), "not in a drag");
+        assert_eq!(inj.next_nudge(), None, "not in a drag");
+        assert!(!inj.nudge(Instant::now()).unwrap());
         let number = inj.press_at(10.0, 10.0).unwrap();
-        let rest = pt(112.0, 60.0);
-        assert!(!inj.nudge(t0).unwrap(), "the press's own drag just went");
-        assert!(inj.nudge(later(200)).unwrap());
-        assert!(!inj.nudge(later(250)).unwrap(), "within the period");
-        assert!(inj.nudge(later(300)).unwrap());
-        assert!(inj.nudge(later(400)).unwrap());
+        let due = inj.next_nudge().expect("a pressed drag rests");
+        let early = due.checked_sub(Duration::from_millis(1)).unwrap();
+        assert!(!inj.nudge(early).unwrap(), "not rested yet");
+        assert!(inj.nudge(due).unwrap(), "out");
+        let back = inj.next_nudge().unwrap();
+        assert_eq!(back.saturating_duration_since(due), rest, "a whole rest after the nudge");
+        assert!(inj.nudge(back).unwrap(), "and back");
+        // The drag's clock counts whole microseconds, so the rest may start up to one before.
+        let before = Instant::now().checked_sub(Duration::from_micros(1)).unwrap();
         inj.inject(&ScreenInput::Move { x: 20.0, y: 10.0 }).unwrap();
-        let moved = Instant::now();
-        assert!(!inj.nudge(moved).unwrap(), "a moving drag needs none");
-        let after = moved.checked_add(NUDGE_EVERY).unwrap();
-        assert!(inj.nudge(after).unwrap(), "off from where the move left it");
+        let moved = inj.next_nudge().unwrap();
+        let after = Instant::now().checked_add(rest).unwrap();
+        assert!(
+            before.checked_add(rest).unwrap() <= moved && moved <= after,
+            "the move started the rest again, from when it went"
+        );
+        assert!(!inj.nudge(Instant::now()).unwrap());
+        assert!(inj.nudge(moved).unwrap(), "out from where the move left it");
         inj.inject(&ScreenInput::Button {
             button: MouseButton::Left,
             down: false,
@@ -2169,21 +2226,60 @@ mod tests {
             mods: Mods::empty(),
         })
         .unwrap();
-        assert!(!inj.nudge(after.checked_add(NUDGE_EVERY).unwrap()).unwrap(), "let go");
+        assert_eq!(inj.next_nudge(), None, "let go");
+        assert!(!inj.nudge(moved.checked_add(rest).unwrap()).unwrap());
         let drags: Vec<(CGEventType, CGPoint, i64)> =
             mice(inj.backend()).into_iter().skip(2).map(|m| (m.0, m.1, m.2)).collect();
         let dragged = CGEventType::LeftMouseDragged;
         assert_eq!(
             drags,
             [
-                (dragged, pt(113.0, 60.0), number),
-                (dragged, rest, number),
-                (dragged, pt(113.0, 60.0), number),
+                (dragged, pt(114.0, 60.0), number),
+                (dragged, pt(112.0, 60.0), number),
                 (dragged, pt(120.0, 60.0), number),
-                (dragged, pt(121.0, 60.0), number),
+                (dragged, pt(122.0, 60.0), number),
                 (CGEventType::LeftMouseUp, pt(120.0, 60.0), number),
             ]
         );
+    }
+
+    /// A drag carried as steps: entering answers the point in global points with the window
+    /// raised, the press and its drags share one number through the HID tap, a step's move is a
+    /// drag, and the release puts the stream's own route back. A move before any drag posts
+    /// nothing; an entry at a window that is gone answers so and leaves no drag.
+    #[test]
+    fn a_drag_s_steps_enter_press_carry_and_let_go() {
+        let mut inj = window();
+        inj.drag_step(DragStep::Move { x: 1.0, y: 1.0 });
+        assert!(inj.backend().posts.is_empty(), "no drag, nothing carried");
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        inj.drag_step(DragStep::Enter { x: 20.0, y: 40.0, answer });
+        assert_eq!(answered.blocking_recv().unwrap().unwrap(), (110.0, 70.0));
+        assert_eq!(inj.backend().activations, [PID]);
+        inj.drag_step(DragStep::Press { x: 20.0, y: 40.0 });
+        inj.drag_step(DragStep::Move { x: 60.0, y: 40.0 });
+        let number = inj.press_number().unwrap();
+        inj.drag_step(DragStep::Release);
+        assert!(!inj.dragging());
+        let hid = Route::Hid;
+        assert_eq!(
+            mice(inj.backend()),
+            [
+                (CGEventType::LeftMouseDown, pt(110.0, 70.0), number, hid),
+                (CGEventType::LeftMouseDragged, pt(112.0, 70.0), number, hid),
+                (CGEventType::LeftMouseDragged, pt(130.0, 70.0), number, hid),
+                (CGEventType::LeftMouseUp, pt(130.0, 70.0), number, hid),
+            ]
+        );
+        let mut gone = Injector::with_backend(
+            CaptureTarget::Window(WindowId(9)),
+            1.0,
+            Recorder { owner: Some(PID), ..Recorder::default() },
+        );
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        gone.drag_step(DragStep::Enter { x: 0.0, y: 0.0, answer });
+        assert!(matches!(answered.blocking_recv().unwrap(), Err(InputError::NoBounds)));
+        assert!(!gone.dragging());
     }
 
     /// Cancelling a drag posts Escape through the HID tap, press and release, before letting

@@ -1,0 +1,9 @@
+---
+source: crates/slopty-proto/tests/golden_drag.rs
+expression: hex(&bytes)
+---
+3f 00 00 00 04 04 03 0e 03 10 00 00 00 00 00 00
+00 00 00 00 00 00 00 00 d7 a6 00 40 2f 44 00 00
+50 41 02 02 01 0d 49 4d 47 5f 30 30 34 32 2e 6a
+70 65 67 80 80 c0 01 00 a4 03 80 d0 95 ff bc 31
+00 04 00

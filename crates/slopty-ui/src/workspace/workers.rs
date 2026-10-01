@@ -909,6 +909,15 @@ impl WorkspaceView {
                     }
                 }
             }
+            ScreenEvent::Drag { stream, event } => {
+                for id in self.streams_of(key, stream, cx) {
+                    let Some(view) = self.screens.get(&id).cloned() else { continue };
+                    if let Some((drag, outcome)) = view.update(cx, |v, cx| v.drag_heard(&event, cx))
+                    {
+                        self.drag_ended(TileRef { worker: key, item: id }, drag, outcome, cx);
+                    }
+                }
+            }
         }
         cx.notify();
     }

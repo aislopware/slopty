@@ -9,8 +9,11 @@ use slopty_core::{ClientId, WallMs, XferId};
 use slopty_net::streams::{self, RawRecv, Uni};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FILE_BYTES, WriteResult};
-use slopty_proto::transfer::{BulkHeader, Hash, INLINE_CLIP_BYTES, Purpose, RepRef, XferMsg};
+use slopty_proto::transfer::{
+    BulkHeader, Hash, INLINE_CLIP_BYTES, Purpose, RepRef, Source, XferMsg,
+};
 use slopty_worker::clip::MAX_REP_BYTES;
+use slopty_worker::screen::drag::Heard;
 use slopty_worker::xfer::{Landed, Receiving, Transfers, XferError, outgoing};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
@@ -84,6 +87,12 @@ async fn take(
                 let bytes = read_rep(&daemon, &header, &rep, &mut rx).await;
                 if bytes.is_none() {
                     tracing::debug!(%client, item = rep.item, size = header.size, "clipboard stream refused or cut");
+                }
+                // A drag's data goes to the drag, never near the pasteboard.
+                if let Source::Drag(drag) = rep.source {
+                    let RepRef { item, kind, .. } = rep;
+                    daemon.dnd.drags().tell(drag, Heard::Data { item, kind, bytes });
+                    return;
                 }
                 let _sent = clips.send(ClipData { rep, bytes }).await;
             }
@@ -172,6 +181,9 @@ async fn receive(
         }
         Err(e) => {
             tracing::info!(%xfer, %name, error = %e, "upload failed");
+            if let Some(drag) = daemon.transfers.drag_of(xfer) {
+                daemon.dnd.drags().tell(drag, Heard::Failed(format!("{name}: {e}")));
+            }
             let failed = XferMsg::Failed { xfer, name: Some(name), error: e.to_string() };
             let _sent = out.send(WorkerMsg::Xfer(failed)).await;
             return;
@@ -182,6 +194,14 @@ async fn receive(
     let done = XferMsg::Done { xfer, name: name.clone(), path, hash: landed.hash };
     let _sent = out.send(WorkerMsg::Xfer(done)).await;
     let Some(finished) = daemon.transfers.landed(xfer, &name, landed) else { return };
+    if let Some(drag) = finished.drag {
+        for path in &finished.paths {
+            let top = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            if let Some(top) = top {
+                daemon.dnd.drags().tell(drag, Heard::Landed { name: top, path: path.clone() });
+            }
+        }
+    }
     if finished.staging {
         let clip = Arc::clone(&daemon.clip);
         let paths = finished.paths.clone();

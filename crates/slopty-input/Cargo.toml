@@ -28,7 +28,8 @@ objc2.workspace = true
 objc2-app-kit = { workspace = true, features = [ "block2" ] }
 block2.workspace = true
 # A copied file named by reference resolved to its path (`pasteboard`).
-objc2-foundation = { workspace = true, features = [ "NSURL", "NSRunLoop" ] }
+# The spring delay a resting drag is nudged after (`nudge`).
+objc2-foundation = { workspace = true, features = [ "NSURL", "NSRunLoop", "NSUserDefaults" ] }
 objc2-core-foundation.workspace = true
 objc2-core-graphics.workspace = true
 # Caps Lock through the HID system (`backend`).

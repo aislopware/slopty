@@ -7362,6 +7362,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -7426,17 +7427,21 @@ name = "slopty-dnd"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "dispatch2",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
+ "parking_lot",
  "slopty-capture",
  "slopty-core",
  "slopty-input",
  "slopty-proto",
  "slopty-testkit",
  "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7936,6 +7941,7 @@ dependencies = [
  "slopty-codec",
  "slopty-core",
  "slopty-crash",
+ "slopty-dnd",
  "slopty-input",
  "slopty-media",
  "slopty-net",

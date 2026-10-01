@@ -12,8 +12,10 @@ use bytes::Bytes;
 use slopty_core::{ClientId, StreamId};
 use slopty_input::sources::Claim;
 use slopty_net::{Connection, WorkerMsg};
+use slopty_proto::drag::{DragEvent, DragInput};
 use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
 use slopty_worker::platform::{Native, Platform};
+use slopty_worker::screen::drag::Heard;
 #[cfg(target_os = "macos")]
 use slopty_worker::screen::synthetic::Synthetic;
 use slopty_worker::screen::{
@@ -22,6 +24,7 @@ use slopty_worker::screen::{
 use tokio::sync::mpsc;
 
 use crate::Daemon;
+use crate::dnd::{Carrying, Dnd};
 
 /// The most a stream holds its client's keys and text behind an input-source switch it asked
 /// for. The switch is answered once the worker hears it (`sources::SETTLE_MOST` bounds that),
@@ -214,7 +217,9 @@ async fn serve_opened<P: Platform>(
 
     // Dropped however the task ends, a panic included, so the claim never outlives the stream.
     let claim = daemon.sources.claimant();
-    let by_client = serve(&mut stream, client, &mut commands, &out, sized.as_mut(), &claim).await;
+    let dnd = Some(&*daemon.dnd);
+    let by_client =
+        serve(&mut stream, client, &mut commands, &out, sized.as_mut(), &claim, dnd).await;
     if by_client {
         tracing::info!(
             %client,
@@ -258,6 +263,10 @@ async fn serve_opened<P: Platform>(
 /// ask for the source the worker is under already is answered at once and holds nothing. A
 /// switch another stream makes is heard here too, and the client is told whether the worker
 /// still types under its source.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the stream, its commands and what it borrows from its connection, each apart"
+)]
 pub async fn serve<P: Platform>(
     stream: &mut Pipeline<P>,
     client: ClientId,
@@ -265,6 +274,7 @@ pub async fn serve<P: Platform>(
     out: &mpsc::Sender<WorkerMsg>,
     mut sized: Option<&mut sized::Sized>,
     claim: &Claim,
+    dnd: Option<&Dnd>,
 ) -> bool {
     let woken = stream.geometry_wake();
     let mut next_probe = tokio::time::Instant::now();
@@ -283,11 +293,37 @@ pub async fn serve<P: Platform>(
     // answer or the deadline.
     let mut held = std::collections::VecDeque::new();
     let mut hold_until: Option<tokio::time::Instant> = None;
+    // A drag from the client crossing the worker from this stream's tile.
+    let mut carrying: Option<Carrying> = None;
     let by_client = loop {
         tokio::select! {
             command = commands.recv() => match command {
                 None => break false,
                 Some(Command::Close) => break true,
+                Some(Command::Input(ScreenInput::Drag(input))) => {
+                    let id = stream.id();
+                    let mut tell = |event| telling.push(ScreenEvent::Drag { stream: id, event });
+                    if let DragInput::Enter { .. } = input {
+                        if let Some(mut was) = carrying.take() {
+                            let leave = Heard::Input(DragInput::Leave { drag: was.drag() });
+                            let acts = was.hear(leave);
+                            was.act(acts, stream, dnd, &mut tell);
+                        }
+                        match Carrying::enter(dnd, client, input) {
+                            Ok((mut entered, acts)) => {
+                                if !entered.act(acts, stream, dnd, &mut tell) {
+                                    carrying = Some(entered);
+                                }
+                            }
+                            Err(refused) => tell(refused),
+                        }
+                    } else if let Some(on) = carrying.as_mut().filter(|c| c.drag() == input.drag()) {
+                        let acts = on.hear(Heard::Input(input));
+                        if on.act(acts, stream, dnd, &mut tell) {
+                            carrying = None;
+                        }
+                    }
+                }
                 // The newest ask wins: the main queue selects in order, and only its answer goes.
                 Some(Command::Input(ScreenInput::KeyboardSource { source })) => {
                     let answer = Box::pin(claim.ask(source.clone()));
@@ -419,6 +455,21 @@ pub async fn serve<P: Platform>(
                     }
                 }
             }
+            heard = async {
+                match carrying.as_mut() {
+                    Some(on) => on.next().await,
+                    None => std::future::pending().await,
+                }
+            }, if carrying.is_some() => {
+                let id = stream.id();
+                if let Some(on) = carrying.as_mut() {
+                    let acts = on.hear(heard);
+                    let tell = |event| telling.push(ScreenEvent::Drag { stream: id, event });
+                    if on.act(acts, stream, dnd, tell) {
+                        carrying = None;
+                    }
+                }
+            }
             permit = out.reserve(), if !telling.is_empty() => match permit {
                 Ok(permit) => telling.send(permit),
                 Err(_gone) => telling.clear(),
@@ -433,6 +484,11 @@ pub async fn serve<P: Platform>(
     };
     if let Some(probe) = probing {
         probe.abort();
+    }
+    // A client gone mid-drag, or its stream closed, leaves: nothing is dropped.
+    if let Some(mut on) = carrying {
+        let acts = on.hear(Heard::Input(DragInput::Leave { drag: on.drag() }));
+        on.act(acts, stream, dnd, |_told| {});
     }
     // What is still untold is moot: the stream is ending, and `Closed` says so.
     by_client
@@ -458,9 +514,22 @@ fn geometry_due<P: Platform>(
 struct Telling(std::collections::VecDeque<ScreenEvent>);
 
 impl Telling {
+    /// A drag's events each tell a step, except its operation, of which only the last
+    /// matters.
     fn push(&mut self, event: ScreenEvent) {
-        let kind = std::mem::discriminant(&event);
-        self.0.retain(|waiting| std::mem::discriminant(waiting) != kind);
+        match &event {
+            ScreenEvent::Drag { event: DragEvent::Operation { drag, .. }, .. } => {
+                let drag = *drag;
+                self.0.retain(|waiting| {
+                    !matches!(waiting, ScreenEvent::Drag { event: DragEvent::Operation { drag: d, .. }, .. } if *d == drag)
+                });
+            }
+            ScreenEvent::Drag { .. } => {}
+            _ => {
+                let kind = std::mem::discriminant(&event);
+                self.0.retain(|waiting| std::mem::discriminant(waiting) != kind);
+            }
+        }
         self.0.push_back(event);
     }
 
@@ -967,8 +1036,18 @@ pub mod fake {
         rx
     }
 
+    static DRAGGED: LazyLock<Mutex<HashMap<u32, mpsc::UnboundedSender<&'static str>>>> =
+        LazyLock::new(Mutex::default);
+
+    /// The drag steps the sink of display `display` takes from now on, by name.
+    pub fn note_drags(display: u32) -> mpsc::UnboundedReceiver<&'static str> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        DRAGGED.lock().insert(display, tx);
+        rx
+    }
+
     /// An input sink that notes each event instead of posting it: the point where the real one
-    /// hands it to its thread.
+    /// hands it to its thread. A drag's entry is answered with its point as it came.
     pub struct Noted {
         display: u32,
         scale: f64,
@@ -1003,6 +1082,23 @@ pub mod fake {
         }
 
         fn release_all(&mut self) {}
+
+        fn drag(&mut self, step: slopty_input::DragStep) {
+            use slopty_input::DragStep;
+            let name = match step {
+                DragStep::Enter { x, y, answer } => {
+                    let _gone = answer.send(Ok((f64::from(x), f64::from(y))));
+                    "enter"
+                }
+                DragStep::Press { .. } => "press",
+                DragStep::Move { .. } => "move",
+                DragStep::Release => "release",
+                DragStep::Cancel => "cancel",
+            };
+            if let Some(tx) = DRAGGED.lock().get(&self.display) {
+                let _gone = tx.send(name);
+            }
+        }
 
         fn pointer(&self) -> PointerWatch {
             self.pointer.clone()
@@ -1227,7 +1323,8 @@ mod serving {
         let (out, events) = mpsc::channel(depth);
         while full && out.try_send(filler()).is_ok() {}
         let task = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commands, &out, None, &unsourced()).await;
+            serve(&mut stream, ClientId::new(), &mut commands, &out, None, &unsourced(), None)
+                .await;
             stream.close().await;
         });
         (commands_tx, events, queued, task)
@@ -1393,7 +1490,8 @@ mod serving {
         let (out, mut events) = mpsc::channel(1024);
         tokio::spawn(async move { while events.recv().await.is_some() {} });
         let task = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commands, &out, None, &unsourced()).await;
+            serve(&mut stream, ClientId::new(), &mut commands, &out, None, &unsourced(), None)
+                .await;
             stream.close().await;
         });
         (commands_tx, wake, task)
@@ -1688,6 +1786,7 @@ mod made {
                 &out,
                 Some(&mut sized),
                 &unsourced(),
+                None,
             )
             .await;
             let target = stream.target();
@@ -1763,7 +1862,7 @@ mod sourcing {
         let (out, events) = mpsc::channel(64);
         let claim = sources.claimant();
         let task = tokio::spawn(async move {
-            serve(&mut pipeline, client, &mut commanded, &out, None, &claim).await;
+            serve(&mut pipeline, client, &mut commanded, &out, None, &claim, None).await;
             drop(claim);
             pipeline.close().await;
         });
@@ -2026,7 +2125,8 @@ mod console {
             }
         });
         let serving = tokio::spawn(async move {
-            serve(&mut stream, ClientId::new(), &mut commanded, &out, None, &unsourced()).await;
+            serve(&mut stream, ClientId::new(), &mut commanded, &out, None, &unsourced(), None)
+                .await;
             stream.close().await;
         });
 
@@ -2047,5 +2147,190 @@ mod console {
         writer.abort();
         link.close();
         endpoint.close(0_u32.into(), b"done");
+    }
+}
+
+/// A drop from the client carried through a stream's task: the drag helper is a channel, the
+/// input sink answers where the point is, and the client is what the task tells.
+#[cfg(test)]
+mod dragging {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use slopty_core::{ClientId, StreamId};
+    use slopty_net::WorkerMsg;
+    use slopty_proto::dnd::{FromHelper, ToHelper};
+    use slopty_proto::drag::{DragEvent, DragId, DragInput, DragOp, DragOps};
+    use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
+    use slopty_worker::screen::Pipeline;
+    use slopty_worker::screen::drag::{BUSY, Heard};
+    use tokio::sync::mpsc;
+
+    use super::fake::{Fake, Nowhere, Plain, note, note_drags, unsourced};
+    use super::{Command, serve};
+    use crate::dnd::Dnd;
+
+    async fn within<T>(what: impl Future<Output = Option<T>>) -> T {
+        tokio::time::timeout(Duration::from_secs(5), what).await.expect("in time").expect("one")
+    }
+
+    /// The next drag event the client is told.
+    async fn told(events: &mut mpsc::Receiver<WorkerMsg>) -> DragEvent {
+        within(async {
+            loop {
+                if let WorkerMsg::Screen(ScreenEvent::Drag { event, .. }) = events.recv().await? {
+                    return Some(event);
+                }
+            }
+        })
+        .await
+    }
+
+    fn drag(input: DragInput) -> Command {
+        Command::Input(ScreenInput::Drag(input))
+    }
+
+    /// What waits to be told keeps every step of a drag, its end above all, and only the last
+    /// of its operations; another kind of event waiting goes as before.
+    #[test]
+    fn a_drags_end_is_never_coalesced_away() {
+        let (one, two) = (DragId::new(), DragId::new());
+        let ev = |event| ScreenEvent::Drag { stream: StreamId(1), event };
+        let op = |drag, op| ev(DragEvent::Operation { drag, op });
+        let mut telling = super::Telling::default();
+        telling.push(op(one, DragOp::Copy));
+        telling.push(op(two, DragOp::Copy));
+        telling.push(op(one, DragOp::None));
+        telling.push(ev(DragEvent::Ended { drag: one, op: DragOp::None, error: None }));
+        telling.push(ScreenEvent::Cursor { stream: StreamId(1), shape: None });
+        assert_eq!(
+            telling.0.iter().cloned().collect::<Vec<_>>(),
+            [
+                op(two, DragOp::Copy),
+                op(one, DragOp::None),
+                ev(DragEvent::Ended { drag: one, op: DragOp::None, error: None }),
+                ScreenEvent::Cursor { stream: StreamId(1), shape: None },
+            ]
+        );
+    }
+
+    /// The client's drag enters, the helper's source goes to the point, and the session it
+    /// begins carries the target's answer back to the client; the drop with nothing still to
+    /// come lets go at once, and the helper's end is the client's. A second drag meanwhile is
+    /// refused: the worker has one pointer.
+    #[tokio::test]
+    async fn a_drop_is_carried_from_entry_to_end_and_a_second_waits_its_turn() {
+        let _queued = note(31);
+        let mut steps = note_drags(31);
+        let target = CaptureTarget::Display(slopty_core::DisplayId(31));
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let (mut pipeline, _opened) =
+            Pipeline::<Fake<Plain>>::open(StreamId(31), target, Quality::default(), sink, |_e| {})
+                .await
+                .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let transfers = Arc::new(slopty_worker::xfer::Transfers::new(dir.path().to_path_buf()));
+        let (to_helper, mut helper) = mpsc::unbounded_channel();
+        let dnd = Arc::new(Dnd::with_helper(transfers, to_helper));
+        let (commands, mut commanded) = mpsc::unbounded_channel();
+        let (out, mut events) = mpsc::channel(64);
+        let serving = Arc::clone(&dnd);
+        let task = tokio::spawn(async move {
+            let claim = unsourced();
+            serve(
+                &mut pipeline,
+                ClientId::new(),
+                &mut commanded,
+                &out,
+                None,
+                &claim,
+                Some(&serving),
+            )
+            .await;
+            pipeline.close().await;
+        });
+
+        let id = DragId::new();
+        let enter = DragInput::Enter {
+            drag: id,
+            x: 40.0,
+            y: 30.0,
+            allowed: DragOps::COPY,
+            items: Vec::new(),
+        };
+        commands.send(drag(enter)).unwrap();
+        let ToHelper::SourceAt { drag: placed, x, y, .. } = within(helper.recv()).await else {
+            panic!("the source goes up first")
+        };
+        assert_eq!((placed, x, y), (id, 40.0, 30.0), "at the point the input sink mapped");
+        let says = |said| dnd.drags().tell(id, Heard::Helper(said));
+        assert_eq!(within(steps.recv()).await, "enter");
+        says(FromHelper::Ready { drag: id });
+        assert_eq!(within(steps.recv()).await, "press", "into the source, once it is up");
+        says(FromHelper::Began { drag: id });
+        says(FromHelper::Operation { drag: id, op: DragOp::Copy });
+        assert_eq!(told(&mut events).await, DragEvent::Operation { drag: id, op: DragOp::Copy });
+
+        let other = DragId::new();
+        let second = DragInput::Enter {
+            drag: other,
+            x: 0.0,
+            y: 0.0,
+            allowed: DragOps::COPY,
+            items: Vec::new(),
+        };
+        let mut busy_events = {
+            let (_queued, target) = (note(32), CaptureTarget::Display(slopty_core::DisplayId(32)));
+            let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+            let (mut pipeline, _opened) = Pipeline::<Fake<Plain>>::open(
+                StreamId(32),
+                target,
+                Quality::default(),
+                sink,
+                |_e| {},
+            )
+            .await
+            .unwrap();
+            let (commands, mut commanded) = mpsc::unbounded_channel();
+            let (out, events) = mpsc::channel(64);
+            let serving = Arc::clone(&dnd);
+            drop(tokio::spawn(async move {
+                let claim = unsourced();
+                serve(
+                    &mut pipeline,
+                    ClientId::new(),
+                    &mut commanded,
+                    &out,
+                    None,
+                    &claim,
+                    Some(&serving),
+                )
+                .await;
+                pipeline.close().await;
+            }));
+            commands.send(drag(second)).unwrap();
+            (events, commands)
+        };
+        let refused = told(&mut busy_events.0).await;
+        assert_eq!(
+            refused,
+            DragEvent::Ended { drag: other, op: DragOp::None, error: Some(BUSY.to_owned()) }
+        );
+
+        commands
+            .send(drag(DragInput::Drop { drag: id, x: 41.0, y: 30.0, promised: Vec::new() }))
+            .unwrap();
+        assert_eq!(within(steps.recv()).await, "move", "to the drop's point");
+        assert_eq!(within(steps.recv()).await, "release", "nothing to wait for");
+        says(FromHelper::Ended { drag: id, op: DragOp::Copy });
+        assert_eq!(
+            told(&mut events).await,
+            DragEvent::Ended { drag: id, op: DragOp::Copy, error: None }
+        );
+        assert_eq!(within(helper.recv()).await, ToHelper::Stop { drag: id });
+        assert_eq!(dnd.drags().live(), None, "the worker is free again");
+        commands.send(Command::Close).unwrap();
+        task.await.unwrap();
+        drop(busy_events);
     }
 }

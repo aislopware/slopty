@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use slopty_core::{DisplayId, Duration, StreamId, WindowId};
 
+use crate::drag::{DragEvent, DragInput};
 use crate::input::{KeyAction, KeyCode, Mods, MouseButton};
 
 /// A window on the worker that can be streamed.
@@ -365,6 +366,9 @@ pub enum ScreenInput {
         /// Sent to the remote app.
         remote: bool,
     },
+    /// A drag from the client over the tile, or the client taking the worker's own drag out of
+    /// it (`docs/decisions/audio.md`, "Drag and drop lands at the point, both ways").
+    Drag(DragInput),
 }
 
 /// Which way a [`ScreenInput::Swipe`] went.
@@ -399,10 +403,11 @@ impl ScreenInput {
     /// Whether this input applies only in its turn. A move sets where the pointer is, so a
     /// newer one may overtake an older one that has not arrived; everything else is an event
     /// the target sees once, in order (a key, a button, a scroll's delta, a pinch's or a
-    /// rotation's, a tap, a swipe, text, the input source the keys after it are read under).
+    /// rotation's, a tap, a swipe, text, the input source the keys after it are read under, a
+    /// drag's entry, drop and leaving). A drag's move is a move.
     #[must_use]
     pub const fn in_order(&self) -> bool {
-        !matches!(self, Self::Move { .. })
+        !matches!(self, Self::Move { .. } | Self::Drag(DragInput::Move { .. }))
     }
 
     /// When the client read a scroll, a pinch or a rotation, in microseconds on the client's
@@ -785,5 +790,12 @@ pub enum ScreenEvent {
         source: String,
         /// The worker selected it.
         applied: bool,
+    },
+    /// What a drag over the stream's target does, and drags that begin in it.
+    Drag {
+        /// Stream.
+        stream: StreamId,
+        /// What happened.
+        event: DragEvent,
     },
 }

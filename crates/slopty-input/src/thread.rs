@@ -18,7 +18,7 @@ use slopty_proto::screen::{CaptureTarget, ScreenInput};
 
 use crate::backend::{Backend, System};
 use crate::injector::Injector;
-use crate::{InputError, InputSink, PointerWatch};
+use crate::{DragStep, InputError, InputSink, PointerWatch};
 
 /// The worker's [`InputSink`]: an [`InputThread`] posting real `CGEvent`s.
 pub type CgEvents = InputThread;
@@ -38,6 +38,7 @@ enum Job {
     Focus,
     Scale(f64),
     Bounds(Option<Rect>, Instant),
+    Drag(DragStep),
     /// Let go of everything held, then answer on the sender, if there is one.
     Release(Option<Sender<()>>),
 }
@@ -172,10 +173,17 @@ impl InputSink for InputThread {
     fn pointer(&self) -> PointerWatch {
         self.pointer.clone()
     }
+
+    fn drag(&mut self, step: DragStep) {
+        if matches!(self.send(Job::Drag(step)), Err(InputError::Stopped)) {
+            tracing::debug!("drag step for a stopped input thread");
+        }
+    }
 }
 
 /// The input thread: jobs in order until the handle is dropped, then the injector's drop lets
-/// go of what is held.
+/// go of what is held. While a pressed drag rests, the thread wakes when it is due a nudge
+/// ([`Injector::nudge`]).
 ///
 /// A move with another move queued behind it is passed over: after a stall (an owner lookup
 /// before a press, a bounds read no probe spared) the moves handed over meanwhile would
@@ -194,9 +202,9 @@ fn serve<B: Backend>(
     loop {
         let job = match queued.pop_front() {
             Some(job) => job,
-            None => match queue.recv() {
-                Ok(job) => job,
-                Err(_gone) => break,
+            None => match next(&mut injector, queue) {
+                Some(job) => job,
+                None => break,
             },
         };
         if matches!(job, Job::Input(ScreenInput::Move { .. })) {
@@ -216,6 +224,10 @@ fn serve<B: Backend>(
                 injector.set_bounds(bounds, at);
                 Ok(())
             }
+            Job::Drag(step) => {
+                injector.drag_step(step);
+                Ok(())
+            }
             Job::Release(answer) => {
                 injector.release_all();
                 if let Some(answer) = answer {
@@ -226,6 +238,23 @@ fn serve<B: Backend>(
         };
         if let Err(e) = done {
             tracing::debug!(?target, error = %e, "input");
+        }
+    }
+}
+
+/// The next job, nudging a resting drag each time it is due while none comes; `None` once the
+/// handle is gone.
+fn next<B: Backend>(injector: &mut Injector<B>, queue: &Receiver<Job>) -> Option<Job> {
+    loop {
+        let Some(due) = injector.next_nudge() else { return queue.recv().ok() };
+        match queue.recv_timeout(due.saturating_duration_since(Instant::now())) {
+            Ok(job) => return Some(job),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {
+                if let Err(e) = injector.nudge(Instant::now()) {
+                    tracing::debug!(error = %e, "nudge");
+                }
+            }
         }
     }
 }
@@ -294,7 +323,14 @@ mod tests {
             let _gone = self.posts.send(post);
             Ok(())
         }
+
+        fn spring_delay_s(&mut self) -> f64 {
+            SPRING_DELAY_S
+        }
     }
+
+    /// The spring delay the tap answers: short, so a nudge comes within a test's patience.
+    const SPRING_DELAY_S: f64 = 0.05;
 
     /// The next post, waiting for the input thread.
     fn next(posts: &Receiver<Post>) -> Post {
@@ -311,6 +347,41 @@ mod tests {
                 Err(RecvTimeoutError::Timeout) => panic!("the input thread did not end: {all:?}"),
             }
         }
+    }
+
+    /// A drag carried as steps rests after its press, and the thread nudges it on its own, a
+    /// rest after the press's drag, with no job to wake it: two points out, then back. Dropping
+    /// the sink lets go of it.
+    #[test]
+    fn a_resting_drag_on_its_thread_is_nudged_with_no_input() {
+        let bounds = Rect { x: 100.0, y: 50.0, w: 800.0, h: 600.0 };
+        let (tap, posts) = Tap::new(Recorder::display(bounds));
+        let mut sink = InputThread::spawn(CaptureTarget::Display(DisplayId(1)), 1.0, tap);
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        sink.drag(DragStep::Enter { x: 10.0, y: 10.0, answer });
+        assert_eq!(answered.blocking_recv().unwrap().unwrap(), (110.0, 60.0));
+        sink.drag(DragStep::Press { x: 10.0, y: 10.0 });
+        let at = |post: &Post| match post.event {
+            Event::Mouse { kind, at, .. } => Some((kind, at)),
+            _ => None,
+        };
+        let dragged = CGEventType::LeftMouseDragged;
+        assert_eq!(at(&next(&posts)).map(|m| m.0), Some(CGEventType::LeftMouseDown));
+        assert_eq!(at(&next(&posts)), Some((dragged, CGPoint::new(112.0, 60.0))));
+        let pressed = Instant::now();
+        let out = next(&posts);
+        let waited = pressed.elapsed();
+        let rest = Duration::from_micros(crate::nudge::rest_us(SPRING_DELAY_S));
+        assert_eq!(at(&out), Some((dragged, CGPoint::new(114.0, 60.0))), "out");
+        assert!(
+            waited + Duration::from_millis(20) >= rest,
+            "a rest of {rest:?} first, waited {waited:?}"
+        );
+        assert_eq!(at(&next(&posts)), Some((dragged, CGPoint::new(112.0, 60.0))), "and back");
+        drop(sink);
+        let rest: Vec<CGEventType> =
+            drain(&posts).iter().filter_map(|p| at(p).map(|m| m.0)).collect();
+        assert!(rest.contains(&CGEventType::LeftMouseUp), "let go: {rest:?}");
     }
 
     fn key(code: KeyCode, action: KeyAction) -> ScreenInput {

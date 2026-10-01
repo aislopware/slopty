@@ -1,12 +1,19 @@
-//! Files dropped from apps that promise them rather than name them.
+//! Drags and drops onto the app's window.
 //!
-//! A Finder drop names files, and GPUI hands those to the tile under the pointer. Mail and
-//! Photos drag file promises instead (`NSFilePromiseReceiver`): the file is written only once
-//! the drop names a directory. On iPad every drop is item providers (`UIDropInteraction`).
-//! Both land here in a fresh temporary directory ([`Landing`]). The files that arrived whole go
-//! to the sink as one [`Dropped`], with where the drop was, for the app to hand to the tile
-//! there as an ordinary file drop, which uploads them. A file that failed is reported by name
-//! and left out, and whatever it wrote is deleted.
+//! On the Mac one view over the whole window takes every drag ([`DropSink`]), and asks the app
+//! what is under it ([`Over`]). Over a remote window or display, the drag is the app's: it
+//! carries what the drag holds to the worker, which drops it at the point there, and the badge
+//! is what the worker says a drop would do. Anywhere else the drag goes on to GPUI's own
+//! handling in the window, as if this view were not there, so a Finder drop names files that
+//! GPUI hands to the tile under the pointer.
+//!
+//! Mail and Photos drag file promises instead (`NSFilePromiseReceiver`): the file is written
+//! only once the drop names a directory, which macOS allows only inside the drop. On iPad every
+//! drop is item providers (`UIDropInteraction`). Both land here in a fresh temporary directory
+//! ([`Landing`]). The files that arrived whole go to the sink as one [`Dropped`], with where the
+//! drop was, for the app to hand to the tile there as an ordinary file drop, which uploads
+//! them, or to the remote drop that called them in. A file that failed is reported by name and
+//! left out, and whatever it wrote is deleted.
 //!
 //! A landing is deleted as soon as nothing in it is going anywhere: every file failed, or no
 //! view took the drop. Otherwise it is [`Dropped::landing`], for whoever uploads the files to
@@ -41,6 +48,42 @@ pub struct Dropped {
     pub x: f64,
     /// See `x`.
     pub y: f64,
+    /// A drop over a remote tile called them in ([`DropSink::dropped`]), which they go to.
+    pub remote: bool,
+}
+
+/// What a drag over the window is over, as the app decides from its point.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Over {
+    /// The app's own: a local tile, the bars. The drag goes on to GPUI's handling.
+    Local,
+    /// A remote tile's picture: what a drop there would do, as the worker last said.
+    Remote(slopty_proto::drag::DragOp),
+}
+
+/// Where a host view's drags and drops go, on the main thread.
+pub trait DropSink {
+    /// A drag is at `at` (the view's points from its top left), carrying what is on `board`,
+    /// which its source lets a target copy, link or move as `allowed` says: what it is over.
+    /// The app follows the drag from one remote tile to another, and off them, itself.
+    #[cfg(target_os = "macos")]
+    fn over(
+        &self,
+        at: (f64, f64),
+        board: &dyn crate::pasteboard::Pasteboard,
+        allowed: slopty_proto::drag::DragOps,
+    ) -> Over;
+    /// The drag left the window from over a remote tile, or ended there with no drop.
+    #[cfg(target_os = "macos")]
+    fn left(&self);
+    /// Dropped at `at` over a remote tile: whether it is taken. When it is, the `promised`
+    /// files it promises are called in, and arrive at [`Self::arrived`] marked
+    /// [`Dropped::remote`].
+    #[cfg(target_os = "macos")]
+    fn dropped(&self, at: (f64, f64), promised: usize) -> bool;
+    /// Files a drop called in have arrived, or failed to.
+    fn arrived(&self, dropped: Dropped);
 }
 
 /// Where each drop's files are received: a directory of its own under the system's temporary
@@ -214,6 +257,7 @@ pub struct Landing {
     paths: Vec<PathBuf>,
     failed: Vec<String>,
     at: (f64, f64),
+    remote: bool,
 }
 
 impl Landing {
@@ -224,7 +268,15 @@ impl Landing {
     /// As [`fresh_dir`].
     pub fn new(root: &Path, expected: usize, at: (f64, f64)) -> std::io::Result<Self> {
         let dir = fresh_dir(root)?;
-        Ok(Self { dir, expected, resolved: 0, paths: Vec::new(), failed: Vec::new(), at })
+        let (paths, failed) = (Vec::new(), Vec::new());
+        Ok(Self { dir, expected, resolved: 0, paths, failed, at, remote: false })
+    }
+
+    /// The same, for the drop over a remote tile that called the files in.
+    #[must_use]
+    pub const fn for_remote(mut self) -> Self {
+        self.remote = true;
+        self
     }
 
     /// The directory the files go to.
@@ -270,12 +322,13 @@ impl Landing {
             failed: std::mem::take(&mut self.failed),
             x: self.at.0,
             y: self.at.1,
+            remote: self.remote,
         })
     }
 }
 
-/// Where a view's drops go.
-type Sink = Rc<dyn Fn(Dropped)>;
+/// Where a view's drags and drops go.
+type Sink = Rc<dyn DropSink>;
 
 thread_local! {
     /// Each host view's sink, by the view's address, and what keeps its receiver alive.
@@ -294,7 +347,7 @@ fn deliver(host: usize, dropped: Dropped) {
         let sink = SINKS
             .with(|s| s.borrow().iter().find(|(h, ..)| *h == host).map(|(_, s, _)| Rc::clone(s)));
         if let Some(sink) = sink {
-            sink(dropped);
+            sink.arrived(dropped);
         } else {
             tracing::warn!(files = dropped.paths.len(), "a drop for a view that is gone");
             if let Some(landing) = &dropped.landing {
@@ -304,11 +357,18 @@ fn deliver(host: usize, dropped: Dropped) {
     });
 }
 
-/// Receive promised files dropped on `host` and hand each drop to `sink` on the main thread.
+/// The sink of the view `host`, while it has one.
+#[cfg(target_os = "macos")]
+fn sink_of(host: usize) -> Option<Sink> {
+    SINKS.with(|s| s.borrow().iter().find(|(h, ..)| *h == host).map(|(_, s, _)| Rc::clone(s)))
+}
+
+/// Take the drags and drops on `host` and hand them to `sink` on the main thread (the module
+/// docs).
 ///
 /// `host` is the view a GPUI window draws into (its `raw_window_handle` handle). Once per view:
 /// `false` off the main thread or when already done.
-pub fn install(host: NonNull<c_void>, sink: Rc<dyn Fn(Dropped)>) -> bool {
+pub fn install(host: NonNull<c_void>, sink: Rc<dyn DropSink>) -> bool {
     let key = host.as_ptr() as usize;
     if SINKS.with(|s| s.borrow().iter().any(|(h, ..)| *h == key)) {
         return false;
@@ -329,6 +389,7 @@ pub fn install(host: NonNull<c_void>, sink: Rc<dyn Fn(Dropped)>) -> bool {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::cell::Cell;
     use std::ffi::c_void;
     use std::path::PathBuf;
     use std::ptr::NonNull;
@@ -336,25 +397,41 @@ mod macos {
 
     use block2::RcBlock;
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyClass, NSObjectProtocol, ProtocolObject};
+    use objc2::runtime::{AnyClass, NSObjectProtocol, ProtocolObject, Sel};
     use objc2::{
-        ClassType as _, DefinedClass as _, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+        ClassType as _, DefinedClass as _, MainThreadMarker, MainThreadOnly, define_class,
+        msg_send, sel,
     };
     use objc2_app_kit::{
         NSAutoresizingMaskOptions, NSDragOperation, NSDraggingDestination, NSDraggingInfo,
-        NSFilePromiseReceiver, NSResponder, NSView, NSWindowOrderingMode,
+        NSFilePromiseReceiver, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePDF,
+        NSPasteboardTypeURL, NSResponder, NSView, NSWindowOrderingMode,
     };
     use objc2_foundation::{
         NSArray, NSDictionary, NSError, NSObject, NSOperationQueue, NSPoint, NSString, NSURL,
     };
     use parking_lot::Mutex;
+    use slopty_proto::drag::{DragOp, DragOps};
 
-    use super::{Landing, deliver, root};
+    use super::{Landing, Over, deliver, root, sink_of};
+    use crate::pasteboard::{MacPasteboard, uti_of};
+
+    /// Whose the drag is, as it last went.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Route {
+        /// Not over the window.
+        Outside,
+        /// GPUI's.
+        Local,
+        /// The app's, over a remote tile.
+        Remote,
+    }
 
     pub(super) struct Ivars {
         host: usize,
         /// Where the promised files are written from, off the main thread, one at a time.
         queue: Retained<NSOperationQueue>,
+        route: Cell<Route>,
     }
 
     define_class!(
@@ -364,7 +441,7 @@ mod macos {
         // - `DropView` does not implement `Drop`.
         #[unsafe(super(NSView, NSResponder, NSObject))]
         #[thread_kind = MainThreadOnly]
-        #[name = "SloptyPromiseDropView"]
+        #[name = "SloptyDropView"]
         #[ivars = Ivars]
         pub(super) struct DropView;
 
@@ -381,18 +458,47 @@ mod macos {
 
         unsafe impl NSDraggingDestination for DropView {
             #[unsafe(method(draggingEntered:))]
-            fn dragging_entered(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
-                NSDragOperation::Copy
+            fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+                self.track(sender)
             }
 
             #[unsafe(method(draggingUpdated:))]
-            fn dragging_updated(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
-                NSDragOperation::Copy
+            fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+                self.track(sender)
+            }
+
+            #[unsafe(method(draggingExited:))]
+            fn dragging_exited(&self, sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+                match self.ivars().route.replace(Route::Outside) {
+                    Route::Remote => {
+                        if let Some(sink) = sink_of(self.ivars().host) {
+                            sink.left();
+                        }
+                    }
+                    Route::Local => {
+                        if let Some(sender) = sender {
+                            self.window_hears(sel!(draggingExited:), sender);
+                        }
+                    }
+                    Route::Outside => {}
+                }
             }
 
             #[unsafe(method(performDragOperation:))]
             fn perform(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-                self.receive(sender)
+                match self.ivars().route.get() {
+                    Route::Remote => self.drop_remote(sender),
+                    Route::Local | Route::Outside => self.drop_local(sender),
+                }
+            }
+
+            #[unsafe(method(concludeDragOperation:))]
+            fn conclude(&self, sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+                if self.ivars().route.replace(Route::Outside) == Route::Local
+                    && let Some(sender) = sender
+                {
+                    self.window_hears(sel!(concludeDragOperation:), sender);
+                }
             }
         }
     );
@@ -403,57 +509,199 @@ mod macos {
         }
     }
 
+    /// What a drag's source lets a target do, as the wire says it. A generic operation is a
+    /// copy, as AppKit's own targets take it.
+    fn allowed(mask: NSDragOperation) -> DragOps {
+        let mut ops = DragOps::empty();
+        if mask.intersects(NSDragOperation::Copy | NSDragOperation::Generic) {
+            ops |= DragOps::COPY;
+        }
+        if mask.contains(NSDragOperation::Link) {
+            ops |= DragOps::LINK;
+        }
+        if mask.contains(NSDragOperation::Move) {
+            ops |= DragOps::MOVE;
+        }
+        ops
+    }
+
+    /// What AppKit shows for `op`.
+    const fn operation(op: DragOp) -> NSDragOperation {
+        match op {
+            DragOp::None => NSDragOperation::None,
+            DragOp::Copy => NSDragOperation::Copy,
+            DragOp::Link => NSDragOperation::Link,
+            DragOp::Move => NSDragOperation::Move,
+        }
+    }
+
+    /// The `file://` paths the drag names, one per item that names one.
+    fn named(pasteboard: &NSPasteboard) -> Vec<PathBuf> {
+        let Some(items) = pasteboard.pasteboardItems() else { return Vec::new() };
+        // SAFETY: AppKit rule: the extern string constant is valid for the process's life.
+        let url_type = unsafe { NSPasteboardTypeFileURL };
+        items
+            .iter()
+            .filter_map(|item| NSURL::URLWithString(&*item.stringForType(url_type)?))
+            .filter_map(|url| url.path().map(|p| PathBuf::from(p.to_string())))
+            .collect()
+    }
+
+    /// The drag's file promises.
+    fn receivers(pasteboard: &NSPasteboard) -> Vec<Retained<NSFilePromiseReceiver>> {
+        let class: &AnyClass = NSFilePromiseReceiver::class();
+        let classes = NSArray::from_slice(&[class]);
+        // SAFETY: AppKit rule: an array of classes that adopt `NSPasteboardReading` and no
+        // options; what comes back is instances of those classes.
+        let objects = unsafe { pasteboard.readObjectsForClasses_options(&classes, None) };
+        objects
+            .map(|o| o.iter().filter_map(|o| o.downcast::<NSFilePromiseReceiver>().ok()).collect())
+            .unwrap_or_default()
+    }
+
+    /// How many files `receivers` will write: as many as each names types, one at least.
+    fn promised(receivers: &[Retained<NSFilePromiseReceiver>]) -> usize {
+        receivers.iter().map(|r| r.fileTypes().count().max(1)).sum()
+    }
+
     impl DropView {
-        /// Receive the drop's promises into a landing of their own; `false` when it has none.
-        fn receive(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            let pasteboard = sender.draggingPasteboard();
-            // A drag that names its files as well goes on with those names: nothing to copy.
-            let named: Vec<PathBuf> = pasteboard
-                .pasteboardItems()
-                .map(|items| {
-                    let url_type = NSString::from_str("public.file-url");
-                    items
-                        .iter()
-                        .filter_map(|item| NSURL::URLWithString(&*item.stringForType(&url_type)?))
-                        .filter_map(|url| url.path().map(|p| PathBuf::from(p.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !named.is_empty() {
-                let (x, y) = self.location(sender);
-                deliver(
-                    self.ivars().host,
-                    super::Dropped { paths: named, landing: None, failed: Vec::new(), x, y },
-                );
-                return true;
+        /// The drag entered or moved: the app's over a remote tile, else the window's.
+        fn track(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            let ivars = self.ivars();
+            let Some(sink) = sink_of(ivars.host) else {
+                return NSDragOperation::None;
+            };
+            let at = self.location(sender);
+            let board = MacPasteboard::of(sender.draggingPasteboard());
+            let over = sink.over(at, &board, allowed(sender.draggingSourceOperationMask()));
+            let was = ivars.route.get();
+            match over {
+                Over::Remote(op) => {
+                    if was == Route::Local {
+                        self.window_hears(sel!(draggingExited:), sender);
+                    }
+                    ivars.route.set(Route::Remote);
+                    operation(op)
+                }
+                Over::Local => {
+                    let entering = was != Route::Local;
+                    ivars.route.set(Route::Local);
+                    let answer =
+                        if entering { sel!(draggingEntered:) } else { sel!(draggingUpdated:) };
+                    let op = self.window_answers(answer, sender);
+                    // GPUI takes only named files; a promise this view calls in at the drop.
+                    if op == NSDragOperation::None
+                        && !receivers(&sender.draggingPasteboard()).is_empty()
+                    {
+                        NSDragOperation::Copy
+                    } else {
+                        op
+                    }
+                }
             }
-            let class: &AnyClass = NSFilePromiseReceiver::class();
-            let classes = NSArray::from_slice(&[class]);
-            // SAFETY: AppKit rule: an array of classes that adopt `NSPasteboardReading` and no
-            // options; what comes back is instances of those classes.
-            let objects = unsafe { pasteboard.readObjectsForClasses_options(&classes, None) };
-            let receivers: Vec<Retained<NSFilePromiseReceiver>> = objects
-                .map(|o| {
-                    o.iter().filter_map(|o| o.downcast::<NSFilePromiseReceiver>().ok()).collect()
-                })
-                .unwrap_or_default();
+        }
+
+        /// The window, GPUI's dragging destination, hears that the drag left it
+        /// (`draggingExited:`), or that its drop is done (`concludeDragOperation:`).
+        fn window_hears(&self, selector: Sel, sender: &ProtocolObject<dyn NSDraggingInfo>) {
+            let Some(window) = self.window().filter(|w| w.respondsToSelector(selector)) else {
+                return;
+            };
+            if selector == sel!(draggingExited:) {
+                // SAFETY: AppKit's `NSDraggingDestination` rule: `draggingExited:` takes the
+                // dragging info and returns nothing; GPUI's window implements it.
+                let () = unsafe { msg_send![&*window, draggingExited: sender] };
+            } else {
+                // SAFETY: as above, for `concludeDragOperation:`.
+                let () = unsafe { msg_send![&*window, concludeDragOperation: sender] };
+            }
+        }
+
+        /// The window's answer to `selector` for `sender`; none when it has no answer.
+        fn window_answers(
+            &self,
+            selector: Sel,
+            sender: &ProtocolObject<dyn NSDraggingInfo>,
+        ) -> NSDragOperation {
+            let Some(window) = self.window().filter(|w| w.respondsToSelector(selector)) else {
+                return NSDragOperation::None;
+            };
+            if selector == sel!(draggingEntered:) {
+                // SAFETY: AppKit's `NSDraggingDestination` rule: `draggingEntered:` takes the
+                // dragging info and returns an `NSDragOperation`; GPUI's window implements it.
+                unsafe { msg_send![&*window, draggingEntered: sender] }
+            } else {
+                // SAFETY: as above, for `draggingUpdated:`.
+                unsafe { msg_send![&*window, draggingUpdated: sender] }
+            }
+        }
+
+        /// A drop over a remote tile: the app takes it or refuses it, and its promises are
+        /// called in for the drop once it is taken.
+        fn drop_remote(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            self.ivars().route.set(Route::Outside);
+            let Some(sink) = sink_of(self.ivars().host) else { return false };
+            let pasteboard = sender.draggingPasteboard();
+            // A drag that names its files goes with those names, as the app read them.
+            let receivers =
+                if named(&pasteboard).is_empty() { receivers(&pasteboard) } else { Vec::new() };
+            let at = self.location(sender);
+            let expected = promised(&receivers);
+            if !sink.dropped(at, expected) {
+                return false;
+            }
+            if expected > 0 {
+                self.receive(&receivers, at, true);
+            }
+            true
+        }
+
+        /// A drop anywhere else: GPUI takes named files; promises land here for the tile under
+        /// the drop.
+        fn drop_local(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            let pasteboard = sender.draggingPasteboard();
+            if !named(&pasteboard).is_empty() {
+                let Some(window) = self.window() else { return false };
+                // SAFETY: AppKit's `NSDraggingDestination` rule: `performDragOperation:` takes
+                // the dragging info and returns a `BOOL`; GPUI's window implements it.
+                return unsafe { msg_send![&*window, performDragOperation: sender] };
+            }
+            let receivers = receivers(&pasteboard);
             if receivers.is_empty() {
                 return false;
             }
-            let expected = receivers.iter().map(|r| r.fileTypes().count().max(1)).sum();
-            let at = self.location(sender);
+            self.receive(&receivers, self.location(sender), false)
+        }
+
+        /// Call `receivers`' files into a landing of their own: `false` when there is none.
+        fn receive(
+            &self,
+            receivers: &[Retained<NSFilePromiseReceiver>],
+            at: (f64, f64),
+            remote: bool,
+        ) -> bool {
+            let expected = promised(receivers);
+            let host = self.ivars().host;
             let landing = match Landing::new(&root(), expected, at) {
+                Ok(landing) if remote => landing.for_remote(),
                 Ok(landing) => landing,
                 Err(e) => {
                     tracing::warn!(error = %e, "no directory for a drop");
+                    if remote {
+                        let failed = vec![format!("the dropped files: {e}")];
+                        let (paths, (x, y)) = (Vec::new(), at);
+                        deliver(
+                            host,
+                            super::Dropped { paths, landing: None, failed, x, y, remote },
+                        );
+                    }
                     return false;
                 }
             };
             let Some(dir) = landing.dir().to_str().map(NSString::from_str) else { return false };
             let dir = NSURL::fileURLWithPath_isDirectory(&dir, true);
-            tracing::info!(files = expected, dir = %landing.dir().display(), "promised files dropped");
+            tracing::info!(files = expected, dir = %landing.dir().display(), remote, "promised files dropped");
             let landing = Arc::new(Mutex::new(landing));
-            let host = self.ivars().host;
             for receiver in receivers {
                 let landing = Arc::clone(&landing);
                 let reader = RcBlock::new(move |url: NonNull<NSURL>, error: *mut NSError| {
@@ -489,7 +737,7 @@ mod macos {
             true
         }
 
-        /// The drop's point in the GPUI view's coordinates: points from its top left.
+        /// The drag's point in the GPUI view's coordinates: points from its top left.
         fn location(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> (f64, f64) {
             // SAFETY: AppKit rule: the view hierarchy is read on the main thread, where this
             // view lives (`MainThreadOnly`) and AppKit delivers dragging messages.
@@ -500,8 +748,27 @@ mod macos {
         }
     }
 
-    /// A view over the whole of `host`, beneath its web pages, that takes drops of promised
-    /// files and nothing else.
+    /// The types a drag over the window is taken for: files named or promised, and every
+    /// format the clipboard carries.
+    fn taken_types() -> Retained<NSArray<NSString>> {
+        let mut types: Vec<Retained<NSString>> =
+            NSFilePromiseReceiver::readableDraggedTypes().to_vec();
+        types.extend(
+            slopty_proto::transfer::ClipFormat::ALL
+                .into_iter()
+                .map(|f| NSString::from_str(uti_of(f))),
+        );
+        #[expect(deprecated, reason = "what GPUI's window registers, and older apps still drag")]
+        // SAFETY: AppKit rule: the extern string constants are valid for the process's life.
+        let more = unsafe {
+            [objc2_app_kit::NSFilenamesPboardType, NSPasteboardTypeURL, NSPasteboardTypePDF]
+        };
+        types.extend(more.into_iter().map(objc2::Message::retain));
+        NSArray::from_retained_slice(&types)
+    }
+
+    /// A view over the whole of `host`, beneath its web pages, that takes every drag over the
+    /// window (the module docs).
     pub(super) fn install(host: NonNull<c_void>, key: usize) -> Option<Retained<DropView>> {
         let mtm = MainThreadMarker::new()?;
         // SAFETY: `raw_window_handle`'s AppKit rule: the handle is a live `NSView` of the
@@ -510,7 +777,8 @@ mod macos {
         let host: Retained<NSView> = unsafe { Retained::retain(host.as_ptr().cast::<NSView>()) }?;
         let queue = NSOperationQueue::new();
         queue.setMaxConcurrentOperationCount(1);
-        let this = DropView::alloc(mtm).set_ivars(Ivars { host: key, queue });
+        let ivars = Ivars { host: key, queue, route: Cell::new(Route::Outside) };
+        let this = DropView::alloc(mtm).set_ivars(ivars);
         // SAFETY: `NSView`'s designated initialiser on a freshly allocated instance.
         let view: Retained<DropView> =
             unsafe { msg_send![super(this), initWithFrame: host.bounds()] };
@@ -518,9 +786,9 @@ mod macos {
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        view.registerForDraggedTypes(&NSFilePromiseReceiver::readableDraggedTypes());
+        view.registerForDraggedTypes(&taken_types());
         host.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, None);
-        tracing::debug!("promised file drops accepted");
+        tracing::debug!("drags over the window taken");
         Some(view)
     }
 }

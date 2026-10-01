@@ -673,14 +673,14 @@ impl WorkspaceView {
         let body = self.render_body(placed, item, chrome, window, cx);
         // Files dropped on a shell go to its directory; on a remote window, to the worker's
         // clipboard; on a folder, into it.
+        // On the Mac a drag over a remote window or display is the worker's own drag, carried
+        // to the point under it (`remote::DropIn`), not a file drop.
         let takes_files = worker_up
-            && matches!(
-                item.kind,
-                ItemKind::Terminal { .. }
-                    | ItemKind::Window { .. }
-                    | ItemKind::Display { .. }
-                    | ItemKind::Folder { .. }
-            );
+            && match item.kind {
+                ItemKind::Terminal { .. } | ItemKind::Folder { .. } => true,
+                ItemKind::Window { .. } | ItemKind::Display { .. } => !cfg!(target_os = "macos"),
+                _ => false,
+            };
         let accent = theme.surfaces.accent;
 
         // The open animation grows the tile about its centre.

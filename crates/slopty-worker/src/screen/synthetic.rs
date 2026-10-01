@@ -28,7 +28,7 @@ use slopty_capture::{
 };
 use slopty_codec::PixelBuffer;
 use slopty_core::{DisplayId, WindowId};
-use slopty_input::{InputError, InputSink, PointerWatch};
+use slopty_input::{DragStep, InputError, InputSink, PointerWatch};
 use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, ScreenInput, WindowInfo};
 
 use crate::platform::Platform;
@@ -72,6 +72,15 @@ impl InputSink for Poke {
 
     fn pointer(&self) -> PointerWatch {
         self.pointer.clone()
+    }
+
+    /// A drawn screen has no desktop to drag on: each step counts as input, and the entry's
+    /// point is its own pixel, as if the stream were at the origin at one pixel a point.
+    fn drag(&mut self, step: DragStep) {
+        slopty_capture::synthetic::take_input();
+        if let DragStep::Enter { x, y, answer } = step {
+            let _gone = answer.send(Ok((f64::from(x), f64::from(y))));
+        }
     }
 }
 

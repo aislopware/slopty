@@ -933,3 +933,122 @@ fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
     let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
     assert!(stale.is_none(), "the chip: {}", stale.unwrap_or_default());
 }
+
+/// A worker's window tile streaming at `stream`, drawn.
+fn streaming(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+    stream: StreamId,
+) -> TileRef {
+    use slopty_proto::screen::VideoCodec;
+    let window = slopty_core::WindowId(9);
+    let tile = arrives(view, cx, fake, ItemKind::Window { window }, 1);
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        let opened = ScreenEvent::Opened {
+            stream,
+            target: CaptureTarget::Window(window),
+            codec: VideoCodec::Hevc,
+            width: 1600,
+            height: 1000,
+            scale: 2.0,
+            stripes: Vec::new(),
+        };
+        v.screen_event(key, opened, cx);
+    });
+    cx.run_until_parked();
+    tile
+}
+
+/// The drag steps sent to a worker.
+fn drag_steps(sent: Vec<ClientMsg>) -> Vec<slopty_proto::drag::DragInput> {
+    sent.into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Screen(ScreenRequest::Input {
+                input: slopty_proto::screen::ScreenInput::Drag(d),
+                ..
+            }) => Some(d),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A drag over a remote window's body is the worker's: it enters with what it carries, its
+/// files start up into the drag's landing and its big data goes up beside them. Off the body
+/// it is GPUI's again: the worker's drag ends and its upload stops. A drop the worker says did
+/// not land says why, and a drag over a remote tile carrying nothing a remote app takes is
+/// refused there.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_drag_over_a_remote_body_is_the_workers_and_elsewhere_gpuis(cx: &mut TestAppContext) {
+    use slopty_platform::file_drop::Over;
+    use slopty_proto::drag::{DragEvent, DragInput, DragOp, DragOps};
+    use slopty_proto::transfer::{INLINE_CLIP_BYTES, Source};
+
+    use crate::workspace::remote::DropIn;
+    let (view, cx) = workspace(cx);
+    let (mut studio, mut calls, _board) = connect_remote(&view, cx);
+    let tile = streaming(&view, cx, &studio, StreamId(1));
+    studio.drain();
+    let bounds = view.read_with(cx, |v, _| v.tile_bounds(tile)).expect("drawn");
+    let body = bounds.center();
+    let header = point(bounds.center().x, bounds.origin.y + px(4.0));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("shot.png");
+    std::fs::write(&file, b"png").unwrap();
+    let url = format!("file://{}", file.display());
+    let picture = vec![3_u8; INLINE_CLIP_BYTES + 1];
+    let drag_board = Memory::default();
+    drag_board.copy_items(&[&[("public.file-url", url.as_bytes())], &[("public.png", &picture)]]);
+    let mut state = DropIn::default();
+    let over = |state: &mut DropIn, p, cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, _w, cx| v.drag_over(state, p, &drag_board, DragOps::COPY, cx))
+    };
+
+    assert_eq!(over(&mut state, header, cx), Over::Local, "the header is GPUI's");
+    assert_eq!(over(&mut state, body, cx), Over::Remote(DragOp::Copy));
+    let drag = state.drag().expect("the worker's drag");
+    let steps = drag_steps(studio.drain());
+    let [DragInput::Enter { drag: entered, items, .. }] = steps.as_slice() else {
+        panic!("{steps:?}")
+    };
+    assert_eq!((*entered, items.len()), (drag, 2));
+    let Some(Call::Upload(xfer, files, Dest::Drag(to))) = calls.try_recv().ok() else {
+        panic!("the files go up at once")
+    };
+    assert_eq!((files, to), (vec![file], drag));
+    let Some(Call::SendClip(rep, Fetched::Data(bytes), false)) = calls.try_recv().ok() else {
+        panic!("the picture goes up beside them, in bulk")
+    };
+    assert_eq!((rep.source, rep.item, bytes.len()), (Source::Drag(drag), 1, picture.len()));
+
+    assert_eq!(over(&mut state, body, cx), Over::Remote(DragOp::Copy));
+    assert!(drag_steps(studio.drain()).is_empty(), "a still drag sends nothing");
+    assert_eq!(over(&mut state, header, cx), Over::Local, "off the body");
+    assert_eq!(drag_steps(studio.drain()), [DragInput::Leave { drag }]);
+    assert!(matches!(calls.try_recv(), Ok(Call::Cancel(x)) if x == xfer), "its upload stops");
+
+    assert_eq!(over(&mut state, body, cx), Over::Remote(DragOp::Copy), "back on");
+    let again = state.drag().expect("a new drag");
+    assert_ne!(again, drag);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        let error = Some("another drag is crossing this worker".to_owned());
+        let event = DragEvent::Ended { drag: again, op: DragOp::None, error };
+        v.screen_event(key, ScreenEvent::Drag { stream: StreamId(1), event }, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("The drop did not land: another drag is crossing this worker")
+    );
+
+    let empty = Memory::default();
+    empty.copy(&[("dyn.ah62d4rv4gu8y", b"x")]);
+    let mut fresh = DropIn::default();
+    let refused =
+        view.update_in(cx, |v, _w, cx| v.drag_over(&mut fresh, body, &empty, DragOps::COPY, cx));
+    assert_eq!(refused, Over::Remote(DragOp::None), "nothing a remote app takes");
+    assert_eq!(fresh.drag(), None);
+}

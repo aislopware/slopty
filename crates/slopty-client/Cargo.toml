@@ -35,6 +35,8 @@ tracing.workspace = true
 slopty-codec.workspace = true
 # This device's display key (`screen::display`).
 uuid.workspace = true
+# A dragged file's URL read as its path (`dnd`).
+url.workspace = true
 
 [features]
 # `ScreenHandle::detached` for the headless UI tests.
