@@ -400,3 +400,74 @@ fn a_workers_tiles_share_its_one_sound_and_say_its_mute_together(cx: &mut TestAp
     assert_eq!(muted(&view, cx), [false, false], "resumed from the other tile's pill");
     assert_eq!(pills(cx), [false, false]);
 }
+
+/// A stream's rate is one number wherever it shows: the pictures painted on this client in the
+/// last second. The status bar first reads it at the first picture, and then, drawn again more
+/// often than its clock ticks, once a second as its clock says, the same figure the stats
+/// overlay says. Before, the bar counted the layer's pictures on a clock that every draw set
+/// going again, and the overlay counted the frames that came off the link: "0 fps" beside
+/// "59 fps".
+#[gpui::test]
+fn a_streams_rate_is_one_number_in_the_overlay_and_the_status_bar(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let window = slopty_core::WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window }, 1);
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| {
+        let event = ScreenEvent::Opened {
+            stream: StreamId(1),
+            target: CaptureTarget::Window(window),
+            codec: slopty_proto::screen::VideoCodec::Hevc,
+            width: 1280,
+            height: 800,
+            scale: 2.0,
+            stripes: Vec::new(),
+        };
+        v.screen_event(key, event, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    let screen = view.read_with(cx, |v, _| v.screen(tile.item).cloned()).expect("streaming");
+    let picture = || {
+        core_video::pixel_buffer::CVPixelBuffer::new(
+            core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            1280,
+            800,
+            None,
+        )
+        .expect("pixel buffer")
+    };
+    let bar = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, cx| v.item(tile).cloned().and_then(|item| v.focus_facts(&item, cx)))
+    };
+    // A picture off the stream goes up on the layer, and the view's next notify has the
+    // workspace copy it as drawn.
+    screen.update(cx, |s, cx| s.show_picture(picture(), cx));
+    cx.run_until_parked();
+    screen.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert_eq!(bar(&view, cx).as_deref(), Some("1280\u{d7}800 \u{b7} 1 fps"), "the first picture");
+
+    // Pictures keep coming, and the bar is drawn again every 400 ms: its clock still reads.
+    for _ in 0..29 {
+        screen.update(cx, |s, cx| s.show_picture(picture(), cx));
+    }
+    for _ in 0..8 {
+        view.update(cx, |v, cx| App::notify(cx, v.chrome.statusbar.entity_id()));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(400));
+        cx.run_until_parked();
+    }
+    let drawn_often = bar(&view, cx);
+    assert_eq!(drawn_often.as_deref(), Some("1280\u{d7}800 \u{b7} 30 fps"), "read on its clock");
+    screen.update(cx, |s, cx| s.set_hud(true, cx));
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let painted = screen.read_with(cx, |s, _| s.paint_rate());
+    assert_eq!(painted.painted, 30, "every picture painted within the second: {painted:?}");
+    let overlay =
+        screen.read_with(cx, |s, _| s.hud_text().and_then(|(line, _)| line.first().cloned()));
+    assert_eq!(overlay.map(|figure| figure.text).as_deref(), Some("30 fps"));
+    assert_eq!(bar(&view, cx).as_deref(), Some("1280\u{d7}800 \u{b7} 30 fps"), "the same rate");
+}

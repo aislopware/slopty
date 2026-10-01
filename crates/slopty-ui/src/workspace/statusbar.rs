@@ -33,6 +33,7 @@ use gpui::{
     Styled as _, Task, Window, div, px,
 };
 use slopty_client::layout::WorkerKey;
+use slopty_client::pacing::PaintRate;
 use slopty_client::relay::RelayNotice;
 use slopty_core::ItemId;
 use slopty_proto::items::{Item, ItemKind};
@@ -48,6 +49,7 @@ use crate::draw::Draw;
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
 use crate::kit::{self, meta, separator, tabular};
 use crate::palette::section_heading;
+use crate::screen::fps_label;
 
 /// The bar's height: a line of meta text and a base unit round it, a notch under a tile's
 /// header, so the frame's two bars do not read as a second row of headers.
@@ -99,8 +101,11 @@ pub(super) struct Bar {
     add: Option<MenuRun>,
     /// Draws the bar again when the frame time's readout is due, while the stats show.
     tick: RefCell<Option<Task<()>>>,
+    /// [`Self::tick`] waits to fire. A draw while it waits leaves it be: one that set it going
+    /// again put the readouts off for good under a bar drawn more often than its clock.
+    ticking: Cell<bool>,
     /// The focused stream's painted rate, as the bar's clock last read it.
-    rate: Cell<Option<(ItemId, f32)>>,
+    rate: Cell<Option<(ItemId, PaintRate)>>,
     /// The pointer is over the bar, which then shows the link however quick it is.
     hovered: bool,
 }
@@ -272,24 +277,26 @@ impl WorkspaceView {
         readout.as_ref().and_then(|(_, text)| text.clone())
     }
 
-    /// The rate stream `id` is painted at, as the bar's clock last read it. Read from the
-    /// stream only when the clock has not read it yet: the bar would otherwise be built again
-    /// with every frame the stream paints, for a number it prints once a second.
-    fn stream_rate(&self, id: ItemId, cx: &App) -> Option<f32> {
-        if let Some((read, fps)) = self.bar.rate.get()
+    /// The rate stream `id` is painted at ([`crate::screen::ScreenView::paint_rate`]), as the bar's
+    /// clock last read it. Read from the stream only when the clock has not read it yet: the
+    /// bar would otherwise be built again with every frame the stream paints, for a number it
+    /// prints once a second.
+    fn stream_rate(&self, id: ItemId, cx: &App) -> Option<PaintRate> {
+        if let Some((read, rate)) = self.bar.rate.get()
             && read == id
         {
-            return Some(fps);
+            return Some(rate);
         }
-        let fps = self.screens.get(&id)?.read(cx).painted_fps();
-        self.bar.rate.set(Some((id, fps)));
-        Some(fps)
+        let rate = self.screens.get(&id)?.read(cx).paint_rate();
+        self.bar.rate.set(Some((id, rate)));
+        Some(rate)
     }
 
     /// What the bar's clock reads before it draws the bar again: the focused stream's rate.
     fn read_clock(&self, cx: &App) {
+        self.bar.ticking.set(false);
         let focused = self.focused().map(|t| t.item);
-        let rate = focused.and_then(|id| Some((id, self.screens.get(&id)?.read(cx).painted_fps())));
+        let rate = focused.and_then(|id| Some((id, self.screens.get(&id)?.read(cx).paint_rate())));
         self.bar.rate.set(rate);
     }
 
@@ -311,8 +318,8 @@ impl WorkspaceView {
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 let stream = self.stream(item.id).filter(|s| s.drawn)?;
                 let (w, h) = stream.size;
-                let fps = self.stream_rate(item.id, cx)?;
-                Some(format!("{w}\u{d7}{h} \u{b7} {fps:.0} fps"))
+                let rate = self.stream_rate(item.id, cx)?;
+                Some(format!("{w}\u{d7}{h} \u{b7} {}", fps_label(rate)))
             }
             ItemKind::Terminal { session } if self.agent_state(*session).is_none() => self
                 .running_for(*session)
@@ -351,17 +358,23 @@ impl WorkspaceView {
         let frame = stats.then(|| self.frame_readout(cx)).flatten();
         // The frame time, a command's running time and a stream's rate change with the clock.
         let clocked = stats || self.focus_clocked();
-        *self.bar.tick.borrow_mut() = clocked.then(|| {
+        // Set going once and left to fire: a draw that set it going again put the readouts off
+        // for as long as the bar was drawn more often than its clock ticks, a stream's rate
+        // stuck at its first reading.
+        if !clocked {
+            self.bar.tick.borrow_mut().take();
+            self.bar.ticking.set(false);
+        } else if !self.bar.ticking.replace(true) {
             let (bar, this) = (self.chrome.statusbar.entity_id(), cx.weak_entity());
-            cx.spawn(async move |cx| {
+            *self.bar.tick.borrow_mut() = Some(cx.spawn(async move |cx| {
                 cx.background_executor().timer(FRAME_READOUT_EVERY).await;
                 cx.update(|cx| {
                     let Some(this) = this.upgrade() else { return };
                     this.read(cx).read_clock(cx);
                     cx.notify(bar);
                 });
-            })
-        });
+            }));
+        }
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;

@@ -40,7 +40,7 @@ use gpui::composition::NativeHost;
 use gpui_apple::fast::video_layer::{VideoLayer, VideoLayerOptions};
 use parking_lot::Mutex;
 use slopty_client::Presentable;
-use slopty_client::pacing::{FrameStamp, GlassStats, Pace, Pacer, PacingStats};
+use slopty_client::pacing::{FrameStamp, GlassStats, Pace, Pacer, PacingStats, PaintRate};
 use tokio::sync::watch;
 
 use super::{Chroma, chroma_of};
@@ -451,6 +451,12 @@ impl Glass {
     /// Pictures put up on a layer so far.
     pub(super) fn put_up(&self) -> u64 {
         self.put_up.load(Ordering::Relaxed)
+    }
+
+    /// The stream's frames a second, and the frames that missed the display beside them: what
+    /// every readout of its rate says.
+    pub(super) fn rate(&self) -> PaintRate {
+        self.book.lock().pacer.rate()
     }
 
     /// Arrival → glass over the last pictures shown, and the counters.

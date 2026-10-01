@@ -215,6 +215,26 @@ struct Sample {
     interval: Option<Duration>,
 }
 
+/// The span a stream's frames a second are counted over ([`Pacer::rate`]).
+pub const RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Paints and misses remembered for [`Pacer::rate`]: a second at 240 Hz and then some.
+const RATE_KEPT: usize = 512;
+
+/// A stream's frames a second, as every readout of it says it: pictures this client painted
+/// over the last [`RATE_WINDOW`], and apart from them the frames that missed the display in it.
+///
+/// A frame dropped as late or replaced before a paint is never painted, so it is never in
+/// [`Self::painted`]; it is in [`Self::missed`], which a readout shows as its own flag.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PaintRate {
+    /// Pictures painted in the last [`RATE_WINDOW`]: the stream's frames a second.
+    pub painted: u32,
+    /// Frames in it that never reached the display: dropped as late, or replaced before a
+    /// paint (`PacingStats::late` and `PacingStats::skipped` over the same span).
+    pub missed: u32,
+}
+
 /// What the ring says about the last [`RING`] frames.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct PacingStats {
@@ -270,6 +290,10 @@ pub struct Pacer<C: Clock = SystemClock> {
     inputs: VecDeque<SentInput>,
     /// Input sent → shown, over the last [`RING`] inputs.
     input_ring: VecDeque<Duration>,
+    /// When pictures were painted, oldest first, for [`Self::rate`].
+    paints: VecDeque<Instant>,
+    /// When frames missed the display, and how many at once, for [`Self::rate`].
+    misses: VecDeque<(Instant, u64)>,
 }
 
 impl Default for Pacer<SystemClock> {
@@ -294,7 +318,35 @@ impl<C: Clock> Pacer<C> {
             captures: VecDeque::new(),
             inputs: VecDeque::new(),
             input_ring: VecDeque::new(),
+            paints: VecDeque::new(),
+            misses: VecDeque::new(),
         }
+    }
+
+    /// Frames painted over the last [`RATE_WINDOW`], and those that missed the display in it.
+    #[must_use]
+    pub fn rate(&self) -> PaintRate {
+        let now = self.clock.now();
+        let since = now.checked_sub(RATE_WINDOW);
+        let within = |at: Instant| since.is_none_or(|since| at > since);
+        let painted = self.paints.iter().rev().take_while(|at| within(**at)).count();
+        let missed: u64 =
+            self.misses.iter().rev().take_while(|(at, _)| within(*at)).map(|(_, n)| *n).sum();
+        PaintRate {
+            painted: u32::try_from(painted).unwrap_or(u32::MAX),
+            missed: u32::try_from(missed).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// `frames` missed the display now.
+    fn missed(&mut self, frames: u64) {
+        if frames == 0 {
+            return;
+        }
+        if self.misses.len() >= RATE_KEPT {
+            self.misses.pop_front();
+        }
+        self.misses.push_back((self.clock.now(), frames));
     }
 
     /// The worker's capture clock is this process's clock too (loopback), read together at
@@ -341,6 +393,7 @@ impl<C: Clock> Pacer<C> {
         if let Some(last) = self.last_seq {
             let lost_in_transit = stamp.decode_seq.saturating_sub(last).saturating_sub(1);
             self.stats.skipped = self.stats.skipped.saturating_add(lost_in_transit);
+            self.missed(lost_in_transit);
         }
         // Even a frame that is dropped as late advances the sequence, or the frames the channel
         // swallowed behind it would be counted twice.
@@ -348,11 +401,13 @@ impl<C: Clock> Pacer<C> {
         let newest = self.pending.map_or(self.shown, |p| Some(p.pts_us));
         if newest.is_some_and(|last| stamp.pts_us <= last) {
             self.stats.late = self.stats.late.saturating_add(1);
+            self.missed(1);
             return Pace::Drop;
         }
         if self.pending.is_some() {
             // The one it replaces was installed but never painted.
             self.stats.skipped = self.stats.skipped.saturating_add(1);
+            self.missed(1);
         }
         self.pending = Some(stamp);
         Pace::Present
@@ -361,12 +416,16 @@ impl<C: Clock> Pacer<C> {
     /// The element painted: the frame this paint put up, to be passed to [`Self::shown`] when
     /// the display shows it, or `None` when the paint showed the picture already up (a repeat).
     /// Call once per paint.
-    pub const fn painted(&mut self) -> Option<FrameStamp> {
+    pub fn painted(&mut self) -> Option<FrameStamp> {
         let Some(stamp) = self.pending.take() else {
             self.stats.repeats = self.stats.repeats.saturating_add(1);
             return None;
         };
         self.shown = Some(stamp.pts_us);
+        if self.paints.len() >= RATE_KEPT {
+            self.paints.pop_front();
+        }
+        self.paints.push_back(self.clock.now());
         Some(stamp)
     }
 
@@ -830,8 +889,41 @@ mod tests {
         assert_eq!(stats.decode_p50, MS, "the slow start has fallen out of the ring");
     }
 
-    /// With the clocks shared, a frame is timed from its capture too: captured 5 ms before it
-    /// arrived and shown a refresh after that, it took 5 ms and a refresh from capture to glass.
+    /// A stream's frames a second are the pictures painted over the last second and nothing
+    /// else: a frame dropped as late or replaced before a paint counts apart, a paint that
+    /// showed the picture already up counts not at all, and a still stream reads nought a
+    /// second after its last picture.
+    #[test]
+    fn the_rate_is_the_pictures_painted_in_the_last_second_and_misses_apart() {
+        let clock = FakeClock::new();
+        let mut pacer = Pacer::new(&clock);
+        assert_eq!(pacer.rate(), PaintRate::default());
+        for index in 1..=120 {
+            clock.advance(FRAME);
+            let s = stamp(&clock, index, clock.offset.get(), MS);
+            assert_eq!(pacer.offer(s), Pace::Present);
+            present(&mut pacer, &clock);
+        }
+        assert_eq!(pacer.rate(), PaintRate { painted: 60, missed: 0 }, "60 Hz for two seconds");
+
+        let late = stamp(&clock, 100, clock.offset.get(), MS);
+        assert_eq!(pacer.offer(late), Pace::Drop);
+        let replaced = stamp(&clock, 121, clock.offset.get(), MS);
+        assert_eq!(pacer.offer(replaced), Pace::Present);
+        let newer = stamp(&clock, 122, clock.offset.get(), MS);
+        assert_eq!(pacer.offer(newer), Pace::Present);
+        present(&mut pacer, &clock);
+        present(&mut pacer, &clock);
+        assert_eq!(
+            pacer.rate(),
+            PaintRate { painted: 61, missed: 2 },
+            "one more painted, a repeat not counted, the late and the replaced apart"
+        );
+
+        clock.advance(RATE_WINDOW);
+        assert_eq!(pacer.rate(), PaintRate::default(), "still for a second: nothing painted");
+    }
+
     /// A capture placed by an estimate says how far off it may be: the estimate's bound as it
     /// stood, widened by the clocks' drift over the way from the anchor, either side of it.
     #[test]
@@ -854,6 +946,8 @@ mod tests {
         assert_eq!(earlier.within, Duration::from_micros(380));
     }
 
+    /// With the clocks shared, a frame is timed from its capture too: captured 5 ms before it
+    /// arrived and shown a refresh after that, it took 5 ms and a refresh from capture to glass.
     /// Without an anchor it is timed from the capture its stamp's estimate places, and without
     /// either there is no capture timing at all, never a guess. The shared clock wins over an
     /// estimate, since it is exact.

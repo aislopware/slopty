@@ -2461,3 +2461,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_keyframe_coded_inside_the_submit_is_not_left_in_flight`,
     `a_frame_that_does_not_decode_is_refreshed_and_the_stream_goes_on` (worker);
     `a_slow_keyframe_costs_the_rung_nothing` (media).
+
+- ✅ **A stream's rate is one number: the pictures painted on this client in the last second**
+  (2026-10-01). The `stream-window-stats` golden had the overlay say "59 fps" and the status
+  bar "0 fps" for the same stream.
+  - *Two counters, two clocks.* The overlay divided the frames reassembled off the link by its
+    sample period: decoded frames, the ones the pacer then dropped as late or replaced included.
+    The status bar divided the pictures put up on the layer by a sample it kept per view, which
+    read 0 for the view's first second. It then held that first reading for good. Its clock
+    was a timer each draw of the bar set going again, so under a bar drawn more often than
+    once a second it never fired. A GPUI test that draws the bar every 400 ms saw "1 fps"
+    beside 30 painted.
+  - *One source.* The pacer counts the pictures it lets a paint put up, and the frames that
+    miss the display, late or replaced, apart from them, over `RATE_WINDOW` (1 s) on its own
+    clock (`Pacer::rate`, `PaintRate`). The overlay's figure, the status bar's and
+    `fps_label`, which words both, read it through `ScreenView::paint_rate`. Frames that
+    missed the display are a figure of their own after the rate in the overlay ("8 late", in
+    the warning tone, only while there are any), as the header's "Frames late" mark already
+    is. They are never in the rate.
+  - *The bar's clock fires.* A draw sets it going only when it is not already waiting, and
+    its firing reads the rate again and draws the bar.
+  - Tests: `the_rate_is_the_pictures_painted_in_the_last_second_and_misses_apart` (client),
+    `a_streams_rate_is_one_number_in_the_overlay_and_the_status_bar` (workspace),
+    `the_plain_line_leads_with_the_human_numbers_and_flags_trouble` (health).

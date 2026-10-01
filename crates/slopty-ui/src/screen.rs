@@ -41,7 +41,7 @@ use gpui::{
     Styled as _, Subscription, Task, TextInputAction, TextInputConfiguration, TouchDragEvent,
     TouchPhase, UTF16Selection, Window, canvas, div, point, px, size,
 };
-use slopty_client::pacing::{PacingStats, Spread};
+use slopty_client::pacing::{PacingStats, PaintRate, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
 use slopty_core::StreamId;
 use slopty_proto::ClientMsg;
@@ -64,7 +64,7 @@ mod keyboard;
 mod touch;
 mod zoom;
 
-pub use health::{Figure, Health, RTT_WARN_FROM};
+pub use health::{Figure, Health, RTT_WARN_FROM, fps_label};
 pub use zoom::Zoom;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -358,9 +358,6 @@ pub struct ScreenView {
     theme: Theme,
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
-    /// When the painted rate was last worked out, the count then, and the rate: the status bar
-    /// reads it every draw, and it is worked out at most once a second.
-    fps_sample: std::cell::Cell<(Instant, u64, f32)>,
     /// Keys whose press went to the worker, so a release for a locally-handled chord (its press
     /// was eaten by a workspace binding) is not forwarded as a stray key-up.
     held: Vec<KeyCode>,
@@ -492,8 +489,9 @@ pub struct HudInput<'a> {
     pub seams: Option<(u64, u64)>,
     /// The rate the stream is asked for, frames a second: its display period.
     pub target_fps: u16,
-    /// Decoded frames per second over the last sample period.
-    pub fps: f64,
+    /// The stream's frames a second, and the frames that missed the display beside them
+    /// ([`ScreenView::paint_rate`]).
+    pub paint: PaintRate,
     /// Received megabits per second over the last sample period.
     pub mbps: f64,
     /// Link round trip.
@@ -979,7 +977,6 @@ impl ScreenView {
             theme,
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
-            fps_sample: std::cell::Cell::new((Instant::now(), 0, 0.0)),
             held: Vec::new(),
             buttons: Vec::new(),
             pointer_at: (0.0, 0.0),
@@ -1234,20 +1231,12 @@ impl ScreenView {
         self.size
     }
 
-    /// Pictures painted a second, over the last second or so: what the status bar says of a
-    /// focused stream. A still window paints nothing, and says so.
+    /// The stream's frames a second: pictures painted on this client over the last second,
+    /// and apart from them the frames that missed the display. The one rate every readout says,
+    /// the overlay's and the status bar's alike. A still window paints nothing, and says so.
     #[must_use]
-    pub fn painted_fps(&self) -> f32 {
-        let (at, frames, fps) = self.fps_sample.get();
-        let elapsed = at.elapsed();
-        if elapsed < Duration::from_secs(1) {
-            return fps;
-        }
-        let now_frames = self.frames();
-        #[expect(clippy::cast_precision_loss, reason = "frames painted in a second or so")]
-        let fps = now_frames.saturating_sub(frames) as f32 / elapsed.as_secs_f32();
-        self.fps_sample.set((Instant::now(), now_frames, fps));
-        fps
+    pub fn paint_rate(&self) -> PaintRate {
+        self.glass.rate()
     }
 
     /// Receiver counters.
@@ -1451,7 +1440,7 @@ impl ScreenView {
     }
 
     /// The overlay's plain line and its engineering lines, as last sampled.
-    fn hud_text(&self) -> Option<(Vec<Figure>, SharedString)> {
+    pub(crate) fn hud_text(&self) -> Option<(Vec<Figure>, SharedString)> {
         self.hud.as_ref().map(|hud| (hud.summary.clone(), hud.text.clone()))
     }
 
@@ -1469,8 +1458,6 @@ impl ScreenView {
             let stats = self.handle.stats();
             let secs = elapsed.as_secs_f64();
             #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
-            let fps = stats.frames.saturating_sub(hud.sample.frames) as f64 / secs;
-            #[expect(clippy::cast_precision_loss, reason = "counter deltas over a second")]
             let mbps = stats.bytes.saturating_sub(hud.sample.bytes) as f64 * 8.0 / secs / 1e6;
             let pacing = self.glass.pacing();
             let glass = self.glass.glass();
@@ -1483,7 +1470,7 @@ impl ScreenView {
                     (seams.together, seams.split)
                 }),
                 target_fps: self.quality.fps,
-                fps,
+                paint: self.glass.rate(),
                 mbps,
                 rtt: self.shown_rtt,
                 frame_age: self.glass.age(),
@@ -3430,7 +3417,7 @@ mod tests {
             chroma: Some(Chroma::Full),
             seams: Some((1190, 3)),
             target_fps: 60,
-            fps: 59.6,
+            paint: PaintRate { painted: 60, missed: 0 },
             mbps: 18.25,
             rtt: Some(Duration::from_micros(9_400)),
             frame_age: Some(Duration::from_millis(12)),
@@ -3462,7 +3449,7 @@ mod tests {
             chroma: None,
             seams: None,
             target_fps: 60,
-            fps: 0.0,
+            paint: PaintRate::default(),
             mbps: 0.0,
             rtt: None,
             frame_age: None,

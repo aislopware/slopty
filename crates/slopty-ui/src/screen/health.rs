@@ -8,9 +8,9 @@
 use std::time::{Duration, Instant};
 
 use slopty_client::ScreenStats;
-use slopty_client::pacing::PacingStats;
 #[cfg(test)]
 use slopty_client::pacing::Spread;
+use slopty_client::pacing::{PacingStats, PaintRate};
 use slopty_proto::screen::RateVerdict;
 
 use super::HudInput;
@@ -37,6 +37,8 @@ pub struct Figure {
 
 /// The overlay's plain line: the painted rate, how long a frame takes to reach the glass
 /// (p50), the bitrate received and the round trip, which is flagged from [`RTT_WARN_FROM`].
+/// Frames that missed the display in the last second follow the rate as a figure of their own,
+/// in the warning tone, and only while there are any: they are never in the rate.
 ///
 /// "To glass" is from the capture on the worker once the stream's clock probes have placed the
 /// worker's clock, the number a remote desktop is judged on, and flagged when its p95 passes
@@ -69,12 +71,23 @@ pub fn summary(input: &HudInput<'_>) -> Vec<Figure> {
     };
     let rtt =
         input.rtt.map_or_else(|| "RTT \u{2013}".to_owned(), |d| format!("RTT {:.1} ms", ms(d)));
-    vec![
-        Figure { text: format!("{:.0} fps", input.fps), warn: false },
-        Figure { text: glass, warn: presented && slow },
-        Figure { text: rate, warn: false },
-        Figure { text: rtt, warn: input.rtt.is_some_and(|d| d >= RTT_WARN_FROM) },
-    ]
+    let missed = input.paint.missed;
+    let late = (missed > 0).then(|| Figure { text: format!("{missed} late"), warn: true });
+    std::iter::once(Figure { text: fps_label(input.paint), warn: false })
+        .chain(late)
+        .chain([
+            Figure { text: glass, warn: presented && slow },
+            Figure { text: rate, warn: false },
+            Figure { text: rtt, warn: input.rtt.is_some_and(|d| d >= RTT_WARN_FROM) },
+        ])
+        .collect()
+}
+
+/// How every readout says a stream's rate: the pictures painted on this client in the last
+/// second.
+#[must_use]
+pub fn fps_label(rate: PaintRate) -> String {
+    format!("{} fps", rate.painted)
 }
 
 /// What is wrong with a stream, worst first.
@@ -158,7 +171,7 @@ mod tests {
             chroma: None,
             seams: None,
             target_fps: 60,
-            fps: 59.6,
+            paint: PaintRate { painted: 60, missed: 0 },
             mbps: 18.25,
             rtt: Some(Duration::from_micros(1_700)),
             frame_age: None,
@@ -175,7 +188,8 @@ mod tests {
 
     /// The plain line says the rate, the time to glass, the bitrate and the round trip; a
     /// frame slower than two display periods at p95 and a round trip from 150 ms are flagged,
-    /// a low frame rate never is.
+    /// a low frame rate never is. Frames that missed the display are a flagged figure of their
+    /// own after the rate, which they are never in.
     #[test]
     fn the_plain_line_leads_with_the_human_numbers_and_flags_trouble() {
         let stats = ScreenStats::default();
@@ -200,7 +214,7 @@ mod tests {
         );
         pacing.latency_p95 = Duration::from_millis(40);
         let slow = HudInput {
-            fps: 3.0,
+            paint: PaintRate { painted: 3, missed: 0 },
             mbps: 0.42,
             rtt: Some(Duration::from_millis(180)),
             ..input(&stats, &pacing)
@@ -213,6 +227,14 @@ mod tests {
                 ("0.4 Mb/s".to_owned(), false),
                 ("RTT 180.0 ms".to_owned(), true),
             ]
+        );
+        let missing =
+            HudInput { paint: PaintRate { painted: 52, missed: 8 }, ..input(&stats, &pacing) };
+        let line = summary(&missing);
+        assert_eq!(
+            said(&line[..2]),
+            [("52 fps".to_owned(), false), ("8 late".to_owned(), true)],
+            "the painted rate, and the misses apart"
         );
         let none = PacingStats::default();
         let blank = summary(&HudInput { rtt: None, ..input(&stats, &none) });

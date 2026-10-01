@@ -69,7 +69,7 @@ pub use items::{ItemChange, ItemDoc};
 #[cfg(target_vendor = "apple")]
 pub use link::warm_up_decoder;
 pub use link::{LinkEvent, WorkerLink};
-pub use pacing::{Captured, Clock, FrameStamp, Pace, Pacer, PacingStats, SystemClock};
+pub use pacing::{Captured, Clock, FrameStamp, Pace, Pacer, PacingStats, PaintRate, SystemClock};
 #[cfg(target_vendor = "apple")]
 pub use screen::{CursorState, Presentable, ScreenHandle, ScreenStats};
 pub use term::{Effect, TermState, ViewRow};

@@ -534,6 +534,10 @@ steps with a clock that jumped; the decoder's callback places each picture's cap
 client's clock through its newest anchor (`FrameStamp::captured`), and the pacer times it to the
 layer's glass time. The overlay's plain line leads with capture → glass and says its bound
 (DECISIONS.md, "Capture to glass on any link").
+A stream's rate, wherever it shows (the overlay, the status bar), is one number from the pacer:
+the pictures painted on this client in the last second, with the frames that missed the display
+counted apart and shown as their own flag (`Pacer::rate`, `PaintRate`; DECISIONS.md, "A
+stream's rate is one number").
 
 **Worker capture path.** A display target is one `SCContentFilter(display:)`. A window target
 is served two ways, and the worker switches between them on the live stream
