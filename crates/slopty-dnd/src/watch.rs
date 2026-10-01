@@ -104,14 +104,20 @@ impl DragWatch {
     }
 
     /// What a drag that began since the mark carries, once: `None` until the count moves, and
-    /// again after it is reported, until it moves again.
+    /// again after it is reported, until it moves again. A board with no items yet is a write
+    /// under way: the clear moved the count and the write does not move it again, so the change
+    /// stays unreported until the items are there.
     pub fn began(&mut self) -> Option<Vec<Found>> {
         let count = self.board.changeCount();
         if count == self.marked {
             return None;
         }
+        let found = self.read();
+        if found.is_empty() {
+            return None;
+        }
         self.marked = count;
-        Some(self.read())
+        Some(found)
     }
 
     /// What the pasteboard's items hold now.
@@ -187,8 +193,9 @@ mod tests {
 
     use super::*;
 
-    /// A write moves the count and is reported once; a folder reads as a folder; text past the
-    /// cap is left out, though its type is still carried; nothing is reported before a change.
+    /// A write moves the count and is reported once, not at the clear before it; a folder reads
+    /// as a folder; text past the cap is left out, though its type is still carried; nothing is
+    /// reported before a change.
     #[test]
     fn a_change_is_reported_once_with_what_the_items_hold() {
         let dir = tempfile::tempdir().unwrap();
@@ -196,13 +203,15 @@ mod tests {
         let board = NSPasteboard::pasteboardWithName(&NSString::from_str(&name));
         let mut watch = DragWatch::named(&name);
         assert_eq!(watch.began(), None, "nothing changed");
+        board.clearContents();
+        assert!(watch.changed(), "the clear moves the count");
+        assert_eq!(watch.began(), None, "a cleared board is a write under way");
         let folder = NSURL::fileURLWithPath(&NSString::from_str(&dir.path().to_string_lossy()));
         let long = NSPasteboardItem::new();
         // SAFETY: framework-provided constant string.
         let _set = long.setString_forType(&NSString::from_str(&"x".repeat(TEXT_MAX + 1)), unsafe {
             NSPasteboardTypeString
         });
-        board.clearContents();
         let wrote = board.writeObjects(&objc2_foundation::NSArray::from_retained_slice(&[
             objc2::runtime::ProtocolObject::from_retained(folder),
             objc2::runtime::ProtocolObject::from_retained(long),
