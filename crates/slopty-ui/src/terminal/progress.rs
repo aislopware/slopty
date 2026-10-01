@@ -22,7 +22,8 @@ const SEGMENT: f32 = 0.3;
 /// What the bar fills: the tone, and the span of the edge as fractions of its width.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) struct Fill {
-    /// The state's tone: the accent while it runs, `warn` paused, `error` failed.
+    /// The state's tone: the accent while it runs, muted paused (a pause is not a warning),
+    /// `error` failed.
     pub tone: Rgb,
     /// How much of the tone shows: all of it, but for a sweep standing still.
     pub alpha: f32,
@@ -44,7 +45,7 @@ pub(super) fn fill(theme: &Theme, progress: Progress, step: Option<u32>) -> Opti
         ProgressState::None => return None,
         ProgressState::Set | ProgressState::Indeterminate => s.accent,
         ProgressState::Error => s.error,
-        ProgressState::Paused => s.warn,
+        ProgressState::Paused => s.text_muted,
     };
     if progress.state != ProgressState::Indeterminate {
         let done = progress.percent.map_or(1.0, |p| f32::from(p.min(100)) / 100.0);
@@ -116,7 +117,7 @@ mod tests {
         let failed = fill(&theme, progress(ProgressState::Error, Some(80)), None).unwrap();
         assert_eq!((failed.tone, failed.width), (s.error, 0.8));
         let paused = fill(&theme, progress(ProgressState::Paused, None), None).unwrap();
-        assert_eq!((paused.tone, paused.width), (s.warn, 1.0), "no figure: the whole edge");
+        assert_eq!((paused.tone, paused.width), (s.text_muted, 1.0), "no figure: the whole edge");
         let over = fill(&theme, progress(ProgressState::Set, Some(250)), None).unwrap();
         assert!((over.width - 1.0).abs() < f32::EPSILON, "never past the edge");
     }

@@ -2171,7 +2171,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **The terminal draws its program's progress and the restored chip itself** (2026-09-29).
   - **Progress.** A bar `spacing.xxs` tall runs along the terminal view's top edge, over the
     grid's first pixels, rather than in the tile header, which the streaming work owns. It
-    takes the state's tone: the accent while it runs, `warn` paused, `error` failed. A figure
+    takes the state's tone: the accent while it runs, `text_muted` paused, `error` failed. A
+    pause asks nothing of the person, so it is quiet rather than a warning (2026-10-02; it
+    was `warn` before, as the navigator's row line was). A figure
     sets the share filled, and a report without one fills the edge. An indeterminate report
     sweeps a segment across at the working mark's pace (`SPIN_STEP`, twelve steps a second).
     It steps rather than glides. Under Reduce Motion it stands still over the whole edge,

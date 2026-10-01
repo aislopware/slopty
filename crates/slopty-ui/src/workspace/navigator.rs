@@ -661,7 +661,7 @@ pub(super) fn progress_line(theme: &Theme, progress: Progress) -> Option<(Rgb, f
     let tone = match progress.state {
         ProgressState::None => return None,
         ProgressState::Set | ProgressState::Indeterminate => s.accent,
-        ProgressState::Paused => s.warn,
+        ProgressState::Paused => s.text_muted,
         ProgressState::Error => s.error,
     };
     Some(match (progress.state, progress.percent) {
@@ -2660,7 +2660,8 @@ mod tests {
         );
         assert_eq!(
             progress_line(&theme, report(ProgressState::Paused, None)).map(|l| l.0),
-            Some(s.warn)
+            Some(s.text_muted),
+            "a pause is not a warning"
         );
         assert!(RESTORED.chars().next().is_some_and(char::is_uppercase), "sentence case");
     }
