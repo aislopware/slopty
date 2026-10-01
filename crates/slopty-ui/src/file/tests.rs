@@ -740,3 +740,172 @@ fn a_picture_the_platform_cannot_read_says_so(cx: &mut TestAppContext) {
     assert_eq!(labels(cx, "Status"), ["Cannot show this file: This device cannot read it"]);
     assert!(view.read_with(cx, |v, _| v.preview_drawn()).is_empty());
 }
+
+/// A PDF of `count` letter pages, each saying which it is near its top in 24-point type.
+fn speaking_pdf(count: usize) -> Vec<u8> {
+    let texts: Vec<String> = (1..=count)
+        .map(|n| format!("BT /F1 24 Tf 72 700 Td (Page {n} says hello) Tj ET"))
+        .collect();
+    let pages: Vec<_> = texts.iter().map(|t| ((612, 792), 0, t.as_str())).collect();
+    decode::tests::pdf(&pages)
+}
+
+/// The top page of the pages in view.
+fn top_page(view: &Entity<FileView>, cx: &VisualTestContext) -> usize {
+    view.read_with(cx, |v, _| v.pages_top()).map_or(usize::MAX, |top| top.item_ix)
+}
+
+/// A place on page `ix` as painted, `across` and `down` its width and height from its corner.
+fn on_page(
+    view: &Entity<FileView>,
+    cx: &VisualTestContext,
+    ix: usize,
+    across: f32,
+    down: f32,
+) -> gpui::Point<gpui::Pixels> {
+    let bounds = view
+        .read_with(cx, |v, _| v.page_bounds(ix))
+        .unwrap_or_else(|| panic!("page {ix} on screen"));
+    gpui::point(
+        bounds.origin.x + bounds.size.width * across,
+        bounds.origin.y + bounds.size.height * down,
+    )
+}
+
+/// The keys page through a PDF as Preview's do, and the pointer selects its text, which ⌘C
+/// copies: a drag a run of letters, a double click a word, ⌘A every page.
+#[gpui::test]
+fn a_pdfs_keys_page_through_it_and_a_drag_copies_its_text(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/manual.pdf");
+    arrives(&view, cx, media("application/pdf", speaking_pdf(6)));
+    settle(cx);
+    view.update_in(cx, |v, window, cx| v.focus(window, cx));
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("right right");
+    settle(cx);
+    assert_eq!(top_page(&view, cx), 2, "→ goes a page");
+    cx.simulate_keystrokes("left");
+    settle(cx);
+    assert_eq!(top_page(&view, cx), 1, "← goes back one");
+    cx.simulate_keystrokes("down");
+    settle(cx);
+    let into = view.read_with(cx, |v, _| v.pages_top()).unwrap();
+    assert!(into.item_ix == 1 && into.offset_in_item > px(0.0), "↓ scrolls a little: {into:?}");
+    cx.simulate_keystrokes("left");
+    settle(cx);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.pages_top()).unwrap().offset_in_item,
+        px(0.0),
+        "← from inside a page goes to its top"
+    );
+    assert_eq!(top_page(&view, cx), 1);
+    cx.simulate_keystrokes("space");
+    settle(cx);
+    assert!(top_page(&view, cx) >= 1, "a screen down");
+    cx.simulate_keystrokes("end");
+    settle(cx);
+    assert!(top_page(&view, cx) >= 4, "End shows the last page: top {}", top_page(&view, cx));
+    cx.simulate_keystrokes("home");
+    settle(cx);
+    assert_eq!(top_page(&view, cx), 0, "Home the first");
+
+    // A drag over the first page's line selects it; ⌘C copies it.
+    let from = on_page(&view, cx, 0, 0.08, 0.105);
+    let to = on_page(&view, cx, 0, 0.9, 0.105);
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    settle(cx);
+    let selected = view.read_with(cx, |v, _| v.selected_text());
+    assert_eq!(
+        selected.as_deref().map(str::trim),
+        Some("Page 1 says hello"),
+        "the line dragged over"
+    );
+    cx.simulate_keystrokes("cmd-c");
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref().map(str::trim), Some("Page 1 says hello"));
+
+    // A double click selects the word under it.
+    let word = on_page(&view, cx, 0, 0.32, 0.105);
+    cx.simulate_event(gpui::MouseDownEvent {
+        button: MouseButton::Left,
+        position: word,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        button: MouseButton::Left,
+        position: word,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+    });
+    settle(cx);
+    assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("says"));
+
+    cx.simulate_keystrokes("cmd-a");
+    settle(cx);
+    let all = view.read_with(cx, |v, _| v.selected_text()).unwrap_or_default();
+    assert!(all.contains("Page 1 says hello") && all.contains("Page 6 says hello"), "{all:?}");
+
+    // A press off the text drops the selection.
+    let blank = on_page(&view, cx, 0, 0.5, 0.3);
+    cx.simulate_click(blank, Modifiers::none());
+    settle(cx);
+    assert_eq!(view.read_with(cx, |v, _| v.selected_text()), None);
+}
+
+/// What a page flip costs (MEASUREMENTS.md, "PDF keys and selection"): → on a 200-page PDF of
+/// text, from the key to the frame with every page in view drawn, and a drag's step to its
+/// frame, which asks `PDFKit` for the selection again. Median and 90th percentile of 60 flips and
+/// 60 steps.
+#[gpui::test]
+#[ignore = "timing: cargo nextest run -p slopty-ui --run-ignored only timing_of_a_page_flip --no-capture"]
+fn timing_of_a_page_flip(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+
+    fn spread(mut took: Vec<Duration>) -> String {
+        took.sort();
+        let at = |q: usize| {
+            let ix = took.len().saturating_mul(q).checked_div(100).unwrap_or(0);
+            took.get(ix).copied().unwrap_or_default()
+        };
+        format!(
+            "p50 {:.2} ms, p90 {:.2} ms",
+            at(50).as_secs_f64() * 1e3,
+            at(90).as_secs_f64() * 1e3
+        )
+    }
+
+    let (view, _events, cx) = tile(cx, "/w/manual.pdf");
+    arrives(&view, cx, media("application/pdf", speaking_pdf(200)));
+    settle(cx);
+    view.update_in(cx, |v, window, cx| v.focus(window, cx));
+    cx.run_until_parked();
+
+    let flips: Vec<Duration> = std::iter::repeat_with(|| {
+        let t = Instant::now();
+        cx.simulate_keystrokes("right");
+        t.elapsed()
+    })
+    .take(60)
+    .collect();
+    assert_eq!(top_page(&view, cx), 60, "every flip went a page");
+
+    let from = on_page(&view, cx, 60, 0.05, 0.05);
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    let steps: Vec<Duration> = (0..60_u16)
+        .map(|step| {
+            let to = on_page(&view, cx, 60, f32::from(step).mul_add(0.015, 0.05), 0.105);
+            let t = Instant::now();
+            cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+            t.elapsed()
+        })
+        .collect();
+    cx.simulate_mouse_up(from, MouseButton::Left, Modifiers::none());
+    assert!(view.read_with(cx, |v, _| v.selected_text()).is_some(), "the drag selected");
+    println!("page flip: {}; drag step: {}", spread(flips), spread(steps));
+}

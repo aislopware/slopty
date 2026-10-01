@@ -252,10 +252,18 @@ two macOS guests at once. To look at a guest's screen, run `tart run <name> --vn
 command of the lane does.
 
 ## Deep checks (on a schedule, not per commit)
+The `Deep` workflow (`.github/workflows/deep.yml`) runs these every night at 02:00 Bangkok time,
+a job per check, and mutation testing on Saturdays; `gh workflow run deep.yml` starts it now
+(`-f mutants=true` adds mutation testing). Each job's report is an artifact of the run
+(`gh run download <id>`), and a failure opens or comments on the "Deep checks failing" issue.
+Here, run one check at a time, and only the smallest that proves a change: one fuzz target for
+seconds, one crate under Miri.
+
 `cargo xtask deep <check>` runs what is too slow for the gate, each on its own target dir
 under `target/deep/`:
-- `miri` — the pure crates' tests under Miri (nightly; `PROPTEST_CASES=8`, isolation off for
-  insta). `-p <crate>` narrows it.
+- `miri` — the pure crates' tests under Miri through nextest's `miri` profile (nightly;
+  `PROPTEST_CASES=8`, isolation off for insta; the allocation-counting binaries left out, and a
+  test still running after 20 minutes ends). `-p <crate>` narrows it.
 - `sanitize [address|thread]` — the tests of every crate with `unsafe` built with
   `-Zsanitizer` and `-Zbuild-std` on nightly (`SANITIZED` in `xtask/src/deep.rs`).
 - `sanitize realtime` — the codec's tests under `RealtimeSanitizer`, with the audio render
@@ -265,9 +273,10 @@ under `target/deep/`:
   none, and all.
 - `coverage [--html]` — `cargo llvm-cov nextest` line coverage per crate (the live e2e crate
   left out).
-- `mutants -p <crate> [--timeout s]` — `cargo mutants` on one crate; the surviving mutants are
-  the lines no test would notice changing.
-- `fuzz [--time s]` — every fuzz target for 30 s (`cargo xtask fuzz` below).
+- `mutants -p <crate> [--timeout s] [--shard k/n] [--jobs n]` — `cargo mutants` on one crate,
+  or its `k`th of `n` shares counting from 0, into `target/deep/mutants/<crate>[-<k>of<n>]`; the
+  missed mutants (`mutants.out/missed.txt`) are the lines no test would notice changing.
+- `fuzz [--time s]` — every fuzz target for 30 s, or `--time` (`cargo xtask fuzz` below).
 - `loom` — the audio ring on loom's atomics (`--cfg slopty_loom`), every interleaving of its
   scenarios checked.
 - `leaks` — the daemon and wire test binaries under `leaks --atExit`: a leaked allocation fails.
@@ -276,9 +285,12 @@ under `target/deep/`:
 `cargo xtask fuzz [<target>] [--time s] [--jobs n]` builds `fuzz/` with cargo-fuzz (nightly,
 AddressSanitizer, debug assertions; `cargo binstall cargo-fuzz`) and runs each target, or the one
 named, for `--time` seconds (60 by default) under `nice`, in libFuzzer's fork mode so a crash is
-written and the run goes on. It replays the kept regression inputs first. The corpus of each
+written and the run goes on. libghostty is built `ReleaseSafe` for it, a target's dictionary in
+`fuzz/dicts/` is passed when there is one, and the terminal target may hold 8 GiB, since under
+AddressSanitizer its resident memory grows with every run. It replays the kept regression inputs first. The corpus of each
 target grows under `target/fuzz/corpus/<target>`. Beside it, seeds are rewritten every run from
-the wire goldens in `crates/slopty-proto/tests/snapshots`. Anything found lands under
+the wire goldens in `crates/slopty-proto/tests/snapshots`, and the terminal target's from the
+captures in `fuzz/seeds/terminal`. Anything found lands under
 `target/fuzz/artifacts/<target>/`, with the log in `target/fuzz/logs/`, and fails the run.
 `--keep <artifact>` minimises one into `fuzz/regressions/<target>/`, which the fuzz crate's
 `tests/regressions.rs` replays on a plain build: `cargo xtask fuzz --replay`, no nightly needed.
@@ -305,25 +317,28 @@ the gate checks its formatting.
 - A new measurement is an `#[ignore]`d test named `*_cost` that times its samples with
   `slopty_testkit::bench::Bench` (one `series` per thing timed, `report()` at the end). A series
   whose samples run other threads is `wall_only()`: the instruction count is the process's.
-- `cargo xtask soak [--seconds 60] [--interval 2] [--stacks] [--debug] [--out <dir>]` starts the
+- `cargo xtask soak [--seconds 1200] [--interval 2] [--stacks] [--debug] [--out <dir>]` starts the
   server, ptyd and worker from a temporary HOME and drives open, flood, hook, read and close
   cycles through the CLI. It first runs 1 536 cycles, four at a time, so the bounded stores
   (the server's event log, the worker's idempotency ledger) are full before the baseline, and
-  the slope is taken over the load alone. It fails on footprint growth, a peak over budget, descriptors or
-  threads left behind, or a leak `leaks` finds. The samples, logs, `leaks` reports and
+  the slope (Theil–Sen, the median of the pairwise slopes, so allocator steps and spikes do not
+  move it) is taken over the load after its first 300 s and judged only once that spans 900 s
+  (a shorter `--seconds` prints it as not judged). It fails on footprint growth, a peak over budget,
+  descriptors or threads left behind, or a leak `leaks` finds. The samples, logs, `leaks` reports and
   `summary.json` go to `target/deep/soak/last`. The daemons it runs are copies under
   `target/deep/soak/bin`, signed ad hoc for `leaks`; the build's own binaries keep their
   signature. `--stacks` adds `MallocStackLogging`, so the reports show where a leak came from.
 - `cargo xtask nightly [run] [--only <check>] [--skip <check>] [--soak-minutes 20]
-  [--proptest-cases 4096] [--iterations 50]` runs the heavy lanes one after another under
-  `nice`: `soak`, `bench` (with `--wall`), `proptest`, `gpui-iterations`, `app-soak` (every tile
-  kind opened and closed 1000 times), `miri`, `sanitize-address`, `sanitize-thread`,
-  `sanitize-realtime`, `coverage`, `features`, `fuzz`, `loom`, `leaks` and `metal`. Each writes
-  `<check>.log` and `<check>.json` under `target/nightly/<date>/`, beside a `summary.json`. A
-  check whose tool is missing is skipped and says why. `cargo xtask nightly install` writes and
-  loads the
-  LaunchAgent `dev.aislopware.slopty.nightly`, which runs it at 03:00 at background priority;
-  `cargo xtask nightly uninstall` removes it. A failing seed of `gpui-iterations` replays with
+  [--proptest-cases 4096] [--iterations 50]` runs the heavy lanes one after another: `soak`,
+  `bench` (with `--wall`), `proptest`, `gpui-iterations`, `app-soak` (every tile kind opened and
+  closed 1000 times), `miri`, `sanitize-address`, `sanitize-thread`, `sanitize-realtime`,
+  `coverage`, `features`, `fuzz`, `loom`, `leaks` and `metal`. Each writes `<check>.log` and
+  `<check>.json` under `target/nightly/<date>/`, beside a `summary.json`. A check whose tool is
+  missing is skipped and says why. Here each check runs at `nice -n 19` with four build jobs and
+  four test threads, and a full run is refused unless `--all-here` asks for it: the `Deep`
+  workflow runs them (above), and `--only <check>` runs one here. On a runner the checks keep
+  every core at `nice -n 10`. `cargo xtask nightly uninstall` removes the LaunchAgent an earlier
+  version installed. A failing seed of `gpui-iterations` replays with
   `SEED=<n> cargo nextest run -p slopty-ui <test>`.
 
 ## Tailnet fixture

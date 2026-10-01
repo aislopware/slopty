@@ -2701,8 +2701,13 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::Written { path, result }) => {
             view.update(cx, |v, cx| v.file_written(key, &path, &result, cx));
         }
-        LinkEvent::Control(WorkerMsg::FoundFiles { root, query, paths }) => {
-            view.update(cx, |v, cx| v.files_found(&root, &query, &paths, cx));
+        LinkEvent::Control(WorkerMsg::FoundFiles { root, query, paths, notice }) => {
+            view.update(cx, |v, cx| {
+                v.files_found(&root, &query, &paths, cx);
+                if let Some(notice) = notice {
+                    v.show_notice(notice, cx);
+                }
+            });
         }
         LinkEvent::Control(WorkerMsg::Folder { path, listing }) => {
             view.update(cx, |v, cx| v.folder_listed(key, &path, &listing, cx));

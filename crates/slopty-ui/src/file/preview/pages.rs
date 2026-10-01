@@ -6,12 +6,9 @@
 //! copies it and ⌘A selects every page's. The keys bind in the tile's key context while it shows
 //! a PDF ([`CTX`]), and the palette lists them ([`palette_items`]).
 
-use std::collections::HashMap;
-
 use gpui::{
-    Bounds, Context, DispatchPhase, Hitbox, HitboxBehavior, InteractiveElement as _, KeyBinding,
-    ListOffset, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window,
-    px,
+    Bounds, Context, DispatchPhase, InteractiveElement as _, KeyBinding, ListOffset, MouseButton,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Window, px,
 };
 
 use super::{Body, Pages, Preview};
@@ -181,23 +178,9 @@ impl FileView {
         cx.notify();
     }
 
-    /// The pages' mouse handling, registered as they paint: a press starts a selection, a
-    /// move with it held grows it wherever the pointer goes, a release ends it.
-    pub(super) fn listen_to_pages(
-        entity: &gpui::Entity<Self>,
-        hitbox: &Hitbox,
-        window: &mut Window,
-    ) {
-        window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
-        let (view, hitbox) = (entity.clone(), hitbox.clone());
-        window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
-            if phase == DispatchPhase::Bubble
-                && e.button == MouseButton::Left
-                && hitbox.is_hovered(window)
-            {
-                view.update(cx, |this, cx| this.press_pages(e.position, e.click_count, window, cx));
-            }
-        });
+    /// The pointer's moves and release, registered as the pages paint: wherever it goes while
+    /// held after a press on a page, the selection follows, and the release ends it.
+    pub(super) fn follow_pointer(entity: &gpui::Entity<Self>, window: &mut Window) {
         let view = entity.clone();
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, _window, cx| {
             if phase == DispatchPhase::Bubble && e.pressed_button == Some(MouseButton::Left) {
@@ -221,8 +204,9 @@ impl FileView {
         cx: &mut Context<Self>,
     ) {
         self.focus(window, cx);
+        let shown = self.shown_pages();
         let Some(pages) = self.pages_mut() else { return };
-        let Some(anchor) = spot_at(&pages.bounds, pages.clock, at, false) else {
+        let Some(anchor) = spot_at(&shown, at, false) else {
             pages.selection = None;
             cx.notify();
             return;
@@ -240,12 +224,13 @@ impl FileView {
     /// The pointer moved to `at` with the button down: the selection runs from its press to
     /// the nearest place on a page.
     pub(in crate::file) fn drag_pages(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let shown = self.shown_pages();
         let Some(pages) = self.pages_mut() else { return };
         let Some(Selection { anchor, by, held: true, .. }) = pages.selection.as_ref() else {
             return;
         };
         let (anchor, by) = (*anchor, *by);
-        let Some(here) = spot_at(&pages.bounds, pages.clock, at, true) else { return };
+        let Some(here) = spot_at(&shown, at, true) else { return };
         let selected = pages.text().and_then(|t| t.select(anchor, here, by));
         if let Some(selection) = pages.selection.as_mut()
             && selection.selected != selected
@@ -259,6 +244,42 @@ impl FileView {
         if let Some(selection) = self.pages_mut().and_then(|p| p.selection.as_mut()) {
             selection.held = false;
         }
+    }
+
+    /// Where the PDF's pages are scrolled to: the page at the top, and how far into it.
+    #[must_use]
+    pub fn pages_top(&self) -> Option<ListOffset> {
+        match &self.preview {
+            Some(Preview { body: Body::Pdf(p), .. }) => Some(p.list.logical_scroll_top()),
+            _ => None,
+        }
+    }
+
+    /// Where page `ix` is in the window, while it is on screen.
+    #[must_use]
+    pub fn page_bounds(&self, ix: usize) -> Option<Bounds<Pixels>> {
+        self.shown_pages().into_iter().find(|(shown, _)| *shown == ix).map(|(_, b)| b)
+    }
+
+    /// The pages on screen and where each is in the window, from the list's layout. Painted
+    /// bounds would not do: a scrolled list moves its layer without painting its pages again.
+    fn shown_pages(&self) -> Vec<(usize, Bounds<Pixels>)> {
+        let Some(Preview { body: Body::Pdf(p), .. }) = &self.preview else { return Vec::new() };
+        let k = self.zoom;
+        let side = px(self.pad * k);
+        let bottom = p.list.viewport_bounds().bottom();
+        let mut shown = Vec::new();
+        for (ix, &(w, h)) in p.sizes.iter().enumerate().skip(p.list.logical_scroll_top().item_ix) {
+            let Some(slot) = p.list.bounds_for_item(ix) else { break };
+            if slot.top() >= bottom {
+                break;
+            }
+            let above = if ix == 0 { self.pad } else { self.theme.spacing.sm };
+            let width = (slot.size.width - side * 2.0).max(px(0.0));
+            let origin = gpui::point(slot.left() + side, slot.top() + px(above * k));
+            shown.push((ix, Bounds { origin, size: gpui::size(width, width * (h / w.max(1.0))) }));
+        }
+        shown
     }
 
     /// The text selected, if any.
@@ -303,16 +324,15 @@ impl Pages {
     }
 }
 
-/// The page under `at`, and the spot on it, among the pages painted in layout `clock`. With
-/// `nearest`, a point off every page goes to the closest one, clamped onto it: a drag that
-/// leaves the page still selects to its edge.
+/// The page under `at`, and the spot on it, among the pages `shown`. With `nearest`, a point
+/// off every page goes to the closest one, clamped onto it: a drag that leaves the page still
+/// selects to its edge.
 fn spot_at(
-    bounds: &HashMap<usize, (u64, Bounds<Pixels>)>,
-    clock: u64,
+    shown: &[(usize, Bounds<Pixels>)],
     at: Point<Pixels>,
     nearest: bool,
 ) -> Option<(usize, Spot)> {
-    let mut painted = bounds.iter().filter(|(_, (when, _))| *when == clock);
+    let mut shown = shown.iter();
     let distance = |b: &Bounds<Pixels>| {
         let (top, bottom) = (f32::from(b.top()), f32::from(b.bottom()));
         let y = f32::from(at.y);
@@ -324,12 +344,10 @@ fn spot_at(
             0.0
         }
     };
-    let (ix, b) = if nearest {
-        painted
-            .min_by(|(_, (_, a)), (_, (_, b))| distance(a).total_cmp(&distance(b)))
-            .map(|(ix, (_, b))| (*ix, *b))?
+    let &(ix, b) = if nearest {
+        shown.min_by(|(_, a), (_, b)| distance(a).total_cmp(&distance(b)))?
     } else {
-        painted.find(|(_, (_, b))| b.contains(&at)).map(|(ix, (_, b))| (*ix, *b))?
+        shown.find(|(_, b)| b.contains(&at))?
     };
     let fraction = |v: Pixels, from: Pixels, len: Pixels| {
         let len = f32::from(len).max(1.0);
@@ -339,11 +357,6 @@ fn spot_at(
         ix,
         (fraction(at.x, b.origin.x, b.size.width), fraction(at.y, b.origin.y, b.size.height)),
     ))
-}
-
-/// A hitbox over the pages that does not keep the list under it from scrolling.
-pub(super) fn pages_hitbox(bounds: Bounds<Pixels>, window: &mut Window) -> Hitbox {
-    window.insert_hitbox(bounds, HitboxBehavior::Normal)
 }
 
 #[cfg(test)]
@@ -356,15 +369,15 @@ mod tests {
     fn a_point_is_placed_on_its_page_or_the_nearest_one() {
         let page =
             |y: f32| Bounds { origin: point(px(10.0), px(y)), size: size(px(100.0), px(200.0)) };
-        let bounds =
-            HashMap::from([(0, (7, page(0.0))), (1, (7, page(220.0))), (2, (6, page(440.0)))]);
-        assert_eq!(spot_at(&bounds, 7, point(px(60.0), px(100.0)), false), Some((0, (0.5, 0.5))));
-        assert_eq!(spot_at(&bounds, 7, point(px(10.0), px(320.0)), false), Some((1, (0.0, 0.5))));
-        assert_eq!(spot_at(&bounds, 7, point(px(60.0), px(210.0)), false), None, "between pages");
+        let shown = [(3, page(0.0)), (4, page(220.0))];
+        assert_eq!(spot_at(&shown, point(px(60.0), px(100.0)), false), Some((3, (0.5, 0.5))));
+        assert_eq!(spot_at(&shown, point(px(10.0), px(320.0)), false), Some((4, (0.0, 0.5))));
+        assert_eq!(spot_at(&shown, point(px(60.0), px(210.0)), false), None, "between pages");
         assert_eq!(
-            spot_at(&bounds, 7, point(px(500.0), px(500.0)), true),
-            Some((1, (1.0, 1.0))),
-            "a page painted in an older layout is not there any more"
+            spot_at(&shown, point(px(500.0), px(500.0)), true),
+            Some((4, (1.0, 1.0))),
+            "past the last page shown, its far corner"
         );
+        assert_eq!(spot_at(&[], point(px(0.0), px(0.0)), true), None, "no page on screen");
     }
 }

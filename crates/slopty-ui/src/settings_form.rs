@@ -874,7 +874,7 @@ impl SettingsForm {
                 let bare_ok = crate::keymap::current()
                     .commands()
                     .get(ix)
-                    .is_some_and(|c| c.scope().takes_bare_keys());
+                    .is_some_and(crate::keymap::Command::takes_bare_keys);
                 let said = match crate::keymap::canonical(&chord_text(stroke)) {
                     Ok(chord) if m.platform || m.control || function_key(key) || bare_ok => {
                         Ok(chord)

@@ -464,3 +464,26 @@ fn the_palette_finds_an_agent_by_its_first_prompt_and_last_answer(cx: &mut TestA
     assert!(found(cx, "correct step"), "by the last answer");
     assert!(!found(cx, "login redirect"), "by neither");
 }
+
+/// The navigator's lens is a command, and a screen reader hears it as one: an option named
+/// for what it does next, which turns to the other once chosen.
+#[gpui::test]
+fn the_lens_is_an_option_named_for_what_it_does(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let _studio = connect(&view, cx, 1, "studio");
+    let option = |cx: &mut VisualTestContext, named: &str| {
+        open_palette(cx);
+        cx.simulate_keystrokes("g r o u p");
+        let nodes = tree(cx);
+        let found = nodes.iter().any(|n| {
+            n.role == "ListBoxOption" && n.label.as_deref().is_some_and(|l| l.starts_with(named))
+        });
+        assert!(found, "{named}: {nodes:#?}");
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    };
+    option(cx, navigator::BY_REPOSITORY);
+    let lens = view.read_with(cx, |v, _| v.layout.navigator().lens);
+    assert_eq!(lens, slopty_client::layout::NavLens::Repositories, "chosen, it turns");
+    option(cx, navigator::BY_WORKER);
+}

@@ -95,14 +95,20 @@ pub const SHOW_CONVERSATION: &str = "Show conversation";
 /// The same button while the conversation shows.
 pub const SHOW_TERMINAL: &str = "Show terminal";
 
-/// The accessible name of the [`HOOKS`] pill.
-pub const INSTALL_HOOKS: &str = "Install hooks";
+/// The accessible name of the [`HOOKS`] pill: its words, then what they are for.
+pub const INSTALL_HOOKS: &str = "Install hooks for an exact status";
+
+/// What installing the hooks gives: the [`HOOKS`] pill's hint, and what its click does to a
+/// screen reader.
+pub const HOOKS_GIVE: &str =
+    "Then Claude Code tells Slopty exactly when it is working, waiting or blocked";
 
 /// The accessible name of the [`TAKE`] pill.
 pub const TAKE_OVER: &str = "Take over";
 
-/// The pill offering the hooks that make an agent's status precise.
-pub const HOOKS: &str = "Hooks";
+/// The pill offering the hooks that make an agent's status precise: what pressing it does,
+/// where "Hooks" alone named a thing and not the act.
+pub const HOOKS: &str = "Install hooks";
 /// The pill that takes a PTY's size from the client driving it.
 pub const TAKE: &str = "Take";
 /// A remote window's audio toggle: one name, pressed while this client has silenced it.
@@ -956,9 +962,15 @@ impl WorkspaceView {
             .filter(|(_, a)| a.source != AgentSource::Hook && !self.hooks_offered(tile.worker))
             .map(|_| {
                 let worker = tile.worker;
+                let hint_theme = std::rc::Rc::new(theme.clone());
                 let pill = pill("hooks", id, HOOKS, s.warn, theme, chrome)
                     .role(Role::Button)
-                    .aria_label(INSTALL_HOOKS);
+                    .aria_label(INSTALL_HOOKS)
+                    .aria_description(HOOKS_GIVE)
+                    .tooltip(move |_window, cx| {
+                        let theme = std::rc::Rc::clone(&hint_theme);
+                        cx.new(|_| kit::Hint::new(HOOKS_GIVE, "", theme)).into()
+                    });
                 tab_stop(pill, s.accent)
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.install_hooks(worker, cx)))
                     .into_any_element()
@@ -2453,15 +2465,18 @@ impl WorkspaceView {
                     Some(_) if self.popouts.holds(item.id) => {
                         let id = item.id;
                         let wait = Wait::Lasting(super::popout::IN_OWN_WINDOW.into());
-                        div()
+                        let popped = div()
                             .id(SharedString::from(format!("popped-{}", id.as_uuid())))
+                            .role(Role::Button)
+                            .aria_label(super::popout::SHOW_OWN_WINDOW)
                             .flex_1()
                             .w_full()
                             .flex()
+                            .child(self.waiting_body(item, wait, k));
+                        tab_stop(popped, self.theme.surfaces.accent)
                             .on_click(cx.listener(move |this, _, _window, cx| {
                                 this.raise_popped(id, cx);
                             }))
-                            .child(self.waiting_body(item, wait, k))
                             .into_any_element()
                     }
                     Some(view) => {

@@ -19,7 +19,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
 
-pub use index::{Index, Indexes};
+pub use index::{Answer, Index, Indexes};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
@@ -36,9 +36,10 @@ const MAX_VISITED: usize = 20_000;
 /// exclude are skipped, git repository or not. Nothing for an empty query.
 ///
 /// Answered from the worker's shared index of the worktree `root` is in ([`Indexes::shared`]),
-/// built on the first query; outside a worktree, from a bounded walk.
+/// built on the first query, with what the person should know of it the first time there is
+/// something; outside a worktree, from a bounded walk.
 #[must_use]
-pub fn matching(root: &Path, query: &str, limit: usize) -> Vec<String> {
+pub fn matching(root: &Path, query: &str, limit: usize) -> Answer {
     Indexes::shared().matching(root, query, limit)
 }
 

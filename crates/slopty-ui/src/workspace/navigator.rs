@@ -1477,7 +1477,7 @@ impl WorkspaceView {
         });
         let next = waited.chain(aged).min();
         *self.nav.tick.borrow_mut() = next.map(|wait| {
-            let navigator = self.chrome.navigator.downgrade();
+            let navigator = self.chrome.nav_rows.downgrade();
             cx.spawn(async move |cx| {
                 cx.background_executor().timer(wait).await;
                 let _gone = navigator.update(cx, |_, cx| cx.notify());
@@ -1551,32 +1551,10 @@ impl WorkspaceView {
         window: &Window,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
-        let rows = self.nav_rows(cx);
-        self.nav.list.set_rows(rows);
-        self.nav.list.selected.set(self.focused());
-        self.nav.list.reveal_selected(window);
-        self.schedule_navigator_tick(cx);
         let theme = &self.theme;
         let s = theme.surfaces;
         let safe = window.insets().effective();
-        let moves = self.chrome_moves(cx);
-        let rows = list(
-            self.nav.list.state.clone(),
-            cx.processor(|this, ix: usize, _window, cx| this.nav_row(ix, cx)),
-        )
-        .flex_1()
-        .min_h_0()
-        .pt(px(theme.spacing.xs))
-        .pb(px(theme.spacing.md));
-        let rows = div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(self.nav.list.space_plate.under_on(theme, moves, Some(self.clock_instant())))
-            .child(self.nav.list.plate.under_on(theme, moves, Some(self.clock_instant())))
-            .child(rows);
+        let rows = div().flex_1().min_h_0().flex().flex_col().child(self.chrome.nav_rows.clone());
         div()
             .id("navigator")
             .debug_selector(|| "navigator".to_owned())
@@ -1609,6 +1587,40 @@ impl WorkspaceView {
                 }
             }))
             .child(self.navigator_header(window, cx))
+            .child(rows)
+            .into_any_element()
+    }
+
+    /// The panel's rows, for a view of their own ([`super::Region::NavigatorRows`]): the list's
+    /// wheel builds the view that drew it again, and that is this one, not the panel with its
+    /// filter field, whose input writes its own state each time it is built.
+    pub(super) fn render_navigator_rows(
+        &self,
+        window: &Window,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        let rows = self.nav_rows(cx);
+        self.nav.list.set_rows(rows);
+        self.nav.list.selected.set(self.focused());
+        self.nav.list.reveal_selected(window);
+        self.schedule_navigator_tick(cx);
+        let theme = &self.theme;
+        let moves = self.chrome_moves(cx);
+        let rows = list(
+            self.nav.list.state.clone(),
+            cx.processor(|this, ix: usize, _window, cx| this.nav_row(ix, cx)),
+        )
+        .flex_1()
+        .min_h_0()
+        .pt(px(theme.spacing.xs))
+        .pb(px(theme.spacing.md));
+        div()
+            .relative()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(self.nav.list.space_plate.under_on(theme, moves, Some(self.clock_instant())))
+            .child(self.nav.list.plate.under_on(theme, moves, Some(self.clock_instant())))
             .child(rows)
             .into_any_element()
     }

@@ -239,7 +239,7 @@ impl WorkspaceView {
             return;
         }
         if was.summary != now.summary {
-            App::notify(cx, self.chrome.navigator.entity_id());
+            App::notify(cx, self.chrome.nav_rows.entity_id());
             App::notify(cx, self.strip_host.entity_id());
         } else if was.chips != now.chips {
             App::notify(cx, self.strip_host.entity_id());
@@ -344,7 +344,7 @@ impl WorkspaceView {
             matches!(&item.kind, slopty_proto::items::ItemKind::Terminal { session } if counting(session))
         });
         if shells || self.agents_work() {
-            App::notify(cx, self.chrome.navigator.entity_id());
+            App::notify(cx, self.chrome.nav_rows.entity_id());
         }
         if shells {
             App::notify(cx, self.strip_host.entity_id());

@@ -737,8 +737,19 @@ pub mod fake {
     pub static READING: AtomicBool = AtomicBool::new(false);
     /// The widths each capture update asked for: what a new encoder going in asks of the capture.
     pub static UPDATED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-    /// The displays the fake enumeration lists.
-    pub static LISTED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    /// The displays the fake enumeration lists; set through [`listing`].
+    static LISTED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+    /// Held by the test whose listing [`LISTED`] holds.
+    static LISTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Make the fake enumeration list `displays` for as long as the guard is held. The tests of
+    /// one process run at once and share this listing, so each holds it until it ends; a test
+    /// that set it and let go read another test's displays.
+    pub async fn listing(displays: &[u32]) -> tokio::sync::MutexGuard<'static, ()> {
+        let held = LISTING.lock().await;
+        *LISTED.lock() = displays.to_vec();
+        held
+    }
     /// Geometry reads of each display so far.
     static PROBED: LazyLock<Mutex<HashMap<u32, u64>>> = LazyLock::new(Mutex::default);
 
@@ -1496,7 +1507,7 @@ mod made {
     };
     use tokio::sync::mpsc;
 
-    use super::fake::{Fake, Gated, LISTED, Nowhere, unsourced};
+    use super::fake::{Fake, Gated, Nowhere, listing, unsourced};
     use super::{Command, serve};
 
     /// Displays numbered from 101 that settle at once and hold up to `max` pixels a side; what
@@ -1590,7 +1601,7 @@ mod made {
         let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
         sized::open::<Fake<Gated>, Instantly>(displays, StreamId(21), asked, sink, |_event| {})
             .await
-            .unwrap()
+            .unwrap_or_else(|e| panic!("the sized stream did not open: {e}"))
     }
 
     fn told(event: &ScreenEvent) -> VirtualDisplay {
@@ -1612,7 +1623,7 @@ mod made {
     /// the stream is closed and its sizing dropped.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_made_display_is_streamed_and_released_with_the_stream() {
-        *LISTED.lock() = vec![1, 101];
+        let _listing = listing(&[1, 101]).await;
         let factory = Instantly { max: 8192, ..Instantly::default() };
         let alive = Arc::clone(&factory.alive);
         let displays = displays(factory);
@@ -1630,7 +1641,7 @@ mod made {
     /// A worker that makes no display streams a physical one and says why, typed.
     #[tokio::test(flavor = "multi_thread")]
     async fn without_displays_a_physical_display_is_streamed_and_the_client_told_why() {
-        *LISTED.lock() = vec![1];
+        let _listing = listing(&[1]).await;
         let (stream, [display, _opened], sized) = open(None, asked(1920, 1080)).await;
         let physical =
             VirtualDisplay::Physical { display: DisplayId(1), why: NoVirtualDisplay::Unavailable };
@@ -1644,7 +1655,7 @@ mod made {
     /// streamed.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_display_never_listed_falls_back_and_is_released() {
-        *LISTED.lock() = vec![1];
+        let _listing = listing(&[1]).await;
         let factory = Instantly { max: 8192, ..Instantly::default() };
         let alive = Arc::clone(&factory.alive);
         let displays = displays(factory);
@@ -1661,12 +1672,12 @@ mod made {
     /// tells the client which, and the old display is gone.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_outgrown_display_is_remade_and_the_stream_follows_it() {
-        *LISTED.lock() = vec![1, 101, 102];
+        let _listing = listing(&[1, 101, 102]).await;
         let factory = Instantly { max: 3200, ..Instantly::default() };
         let alive = Arc::clone(&factory.alive);
         let displays = displays(factory);
         let (mut stream, _events, sized) = open(Some(&displays), asked(2560, 1600)).await;
-        let mut sized = sized.unwrap();
+        let mut sized = sized.expect("no display was made: the stream fell back to a physical one");
         let (commands_tx, mut commands) = mpsc::unbounded_channel();
         let (out, mut events) = mpsc::channel(64);
         let task = tokio::spawn(async move {
@@ -1684,7 +1695,9 @@ mod made {
             drop(sized);
             target
         });
-        commands_tx.send(Command::Resize { width: 6016, height: 3384, scale: None }).unwrap();
+        commands_tx
+            .send(Command::Resize { width: 6016, height: 3384, scale: None })
+            .expect("the stream ended before the resize");
         let switched = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match events.recv().await {
@@ -1695,11 +1708,11 @@ mod made {
             }
         })
         .await
-        .unwrap();
+        .expect("no display event within 5 s of the resize");
         assert_eq!(told(&switched), VirtualDisplay::Made(DisplayId(102)));
         assert_eq!(*alive.lock(), [102], "the outgrown display went first");
         drop(commands_tx);
-        let target = task.await.unwrap();
+        let target = task.await.expect("the serving task panicked");
         assert_eq!(target, CaptureTarget::Display(DisplayId(102)));
         until("the remade display outlived its stream", || alive.lock().is_empty()).await;
     }
@@ -2017,7 +2030,8 @@ mod console {
             stream.close().await;
         });
 
-        let (drawing, _) = heard(&mut events, |_| true).await;
+        // A loaded machine may encode the first frame past the idle grace, and say Idle first.
+        let (drawing, _) = heard(&mut events, |s| s != SourceState::Idle).await;
         assert_eq!(drawing, SourceState::Live, "the drawn Mac draws");
         set_console(Console::Locked);
         let (locked, took) = heard(&mut events, |s| s != SourceState::Live).await;

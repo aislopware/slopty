@@ -177,10 +177,12 @@ jobs:
             target/deep/mutants/*/mutants.out/outcomes.json
           if-no-files-found: ignore
 
-  # A failing night opens an issue, or comments on the open one; a clean night closes it.
+  # A failing night opens an issue, or comments on the open one; a clean night closes it. A
+  # cancelled run says nothing, and the weekly mutation run alone closes nothing, since a missed
+  # mutant is a finding and not a failure.
   report:
     needs: [mac, linux, mutants]
-    if: always()
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
       issues: write
@@ -189,6 +191,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      NIGHTLY: ${{ github.event.schedule != '0 7 * * 6' }}
     steps:
       - run: |
           failed=$(gh api "repos/$GH_REPO/actions/runs/${{ github.run_id }}/jobs" --paginate \
@@ -202,6 +205,6 @@ jobs:
             else
               gh issue create --title "$title" --body "$body"
             fi
-          elif [ -n "$open" ]; then
+          elif [ -n "$open" ] && [ "$NIGHTLY" = true ]; then
             gh issue close "$open" --comment "The [Deep run]($RUN_URL) on ${{ github.sha }} passed."
           fi

@@ -7,7 +7,9 @@ use slopty_grid::SemanticMark;
 use slopty_theme::alpha;
 
 use super::*;
-use crate::workspace::tile::{CLOSE_TILE, COPY_COMMAND, RECONNECTING, cwd_tail};
+use crate::workspace::tile::{
+    CLOSE_TILE, COPY_COMMAND, HOOKS, HOOKS_GIVE, INSTALL_HOOKS, RECONNECTING, cwd_tail,
+};
 use crate::workspace::toast::{SAY_FOR, SHOWN};
 
 /// The status marks drawn, by label.
@@ -368,6 +370,12 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     assert!(quads.iter().filter(|q| inside(q, hooks)).all(|q| q.background.is_transparent()));
     let slot = cx.debug_bounds(selector("status", waiting.item)).expect("the slot");
     let nodes = tree(cx);
+    let offer = nodes
+        .iter()
+        .find(|n| n.is("Button", Some(INSTALL_HOOKS)))
+        .unwrap_or_else(|| panic!("the hooks, by what pressing them does: {nodes:#?}"));
+    assert!(INSTALL_HOOKS.starts_with(HOOKS), "the name starts with the words shown");
+    assert_eq!(offer.description.as_deref(), Some(HOOKS_GIVE));
     let in_slot = |n: &&crate::a11y::Node| {
         let [x, y, ..] = n.bounds;
         slot.contains(&point(px(x + 1.0), px(y + 1.0)))

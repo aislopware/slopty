@@ -161,14 +161,25 @@ back there. Why a guest and why tart: `docs/decisions/testing.md` ▸ **Live tes
 desktop run in a macOS guest under tart**. Commands: `docs/DEV.md` ▸ "Live lane in a VM".
 
 ## Beyond the layers: the deep checks
-`cargo xtask deep <check>` (and the weekly `Deep` workflow) runs what no layer above can see
-in the gate's budget: Miri over the pure crates (undefined behaviour under the interpreter),
-ThreadSanitizer/AddressSanitizer builds of every crate with a share of the workspace's `unsafe`
-(the daemons, the codec, capture, platform, the virtual display, input, the crash reporter and
-the tailnet reader), `cargo hack --each-feature` (every feature alone and together), `cargo
+`cargo xtask deep <check>` runs what no layer above can see in the gate's budget: Miri over the
+pure crates (undefined behaviour under the interpreter), ThreadSanitizer/AddressSanitizer builds
+of every crate with a share of the workspace's `unsafe` (the daemons, the codec, capture,
+platform, the virtual display, input, drag and drop, the crash reporter, the testkit and the
+tailnet reader), `cargo hack --each-feature` (every feature alone and together), `cargo
 llvm-cov` line coverage per crate, and `cargo mutants` on one crate to find the lines no test
 would notice changing. A finding there becomes a test in the layer that can hold it.
 `docs/DEV.md` has the commands.
+
+They run on GitHub Actions, not on this Mac, where someone works over Parsec while other
+sessions gate (`docs/decisions/testing.md`, "The deep checks run on GitHub Actions"). The `Deep`
+workflow runs every night, each check a job of its own: on macOS the sanitizers, loom, `leaks`,
+the fuzz targets, the property tests at 4 096 cases, the GPUI scheduler seeds, the features and
+coverage; on Ubuntu, Miri. Mutation testing of the core crates runs weekly on Ubuntu, the wire
+crate split four ways. Each job uploads its report (the log, the tests' JUnit, `leaks`' reports,
+the fuzzers' crashes), and a failed night opens or adds to the "Deep checks failing" issue,
+which the next clean night closes. Two checks stay here: `deep metal` needs a GPU a hosted
+runner lacks, and the soak and bench measure this Mac. Here a check runs one at a time at
+`nice -n 19` on four cores, and `cargo xtask nightly` refuses a full run without `--all-here`.
 
 Four deep checks see what the rest cannot:
 - **Sanitizers and signals.** A sanitizer's runtime installs its own fatal-signal handlers, and
@@ -203,7 +214,12 @@ outside the workspace (nightly, AddressSanitizer, debug assertions). The control
 ways, the server's links and the unidirectional streams go through the real framing
 (`codec::try_take`, as `FramedRecv` reads it) in pieces of a size the fuzzer picks. The
 datagrams are covered too: the client's datagram, the terminal copy with its frame head, and the
-media header, the cursor and the pasteboard origin. The reassembler gets real packetized
+media header, the cursor and the pasteboard origin. The terminal target writes a program's output through the worker's engine, libghostty's VT
+parser built `ReleaseSafe` so a parser fault traps: every viewer applying the frames it was sent
+must show what a second engine fed the same bytes shows, a scrollback page holds no more lines
+than asked, and a checkpoint replayed into a fresh engine shows the same cells and cursor. Its
+seeds are captures of real programs' output (`fuzz/seeds/terminal`) and its dictionary the VT
+tokens (`fuzz/dicts/terminal.dict`). The reassembler gets real packetized
 fragments and Reed–Solomon parity, reordered, lost, repeated or damaged, with NACKs answered from
 the packetizer. The worker is fuzzed on NACKs and receiver reports. The worker's control socket
 gets its JSON line. A target panics on a crash and on a broken invariant: a decoded message must

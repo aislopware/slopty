@@ -11939,7 +11939,7 @@ PNG the size of a Retina screenshot.
 
 A tile of 800 points on a 2× screen decodes a 12 MP JPEG at 1 600 pixels for about three
 quarters of the full cost, and holds 7.7 MB of pixels instead of 48.8 MB. HEIC was slower at 400
-than at 1 600 in every run, which is not explained yet. A 12 MP picture drawn whole spent about 20 ms
+than at 1 600 in every run; "HEIC thumbnails in two steps" below explains it and the fix. A 12 MP picture drawn whole spent about 20 ms
 painting and 12 ms unpremultiplying in a probe before an opaque picture skipped the second
 pass. Every decode runs off the UI thread.
 
@@ -12012,6 +12012,97 @@ cargo nextest run -p slopty-worker --release quick_open_costs --run-ignored only
 SLOPTY_FIND_TREE=$PWD cargo nextest run -p slopty-worker --release quick_open_costs --run-ignored only --no-capture
 ```
 
+## 2026-10-01 — quick open's index on Linux, and the watch beside the walk
+
+The synthetic tree of the section above (4 000 folders of 50 files, 204 160 paths), the release
+build. Linux is aarch64 Debian trixie in Docker Desktop's VM on the same Mac (kernel 7.0.14,
+`max_user_watches` 1 048 576), the binaries cross-built with `cargo zigbuild`. Load average 20
+to 58 from other sessions throughout, so the p99s are the load's. "A file made" is a file
+written under a probe folder → the first query under that folder that returns it, polled every
+millisecond, so it is the event and the catch-up, not the scoring. "Watch up" is when the watch
+started beside the first walk was up.
+
+| system | first walk, no events / with | watch up | watches | first keystroke p50 / p99 | typed on p50 / p99 | before p50 | a file made p50 / p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Linux, inotify | 129 / 162 ms | 162 ms | 4 161 | 11.6 / 51.7 ms | 18.5 / 63.2 ms | 29.3 ms | 2.04 / 2.25 ms |
+| macOS, `FSEvents` | 271 / 222 ms | 222 ms | 0 | 9.10 / 28.5 ms | 14.5 / 28.6 ms | 99.1 ms | 18.3 / 66.5 ms |
+| macOS, this repository (7 943 paths) | 43 / 21 ms | 21 ms | 0 | 0.48 / 4.92 ms | 2.98 / 4.64 ms | 42.4 ms | 12.3 / 13.4 ms |
+
+- **inotify's cost.** 4 161 watches for 4 161 directories, 33 ms more on the first walk for
+  adding them. The kernel's slab could not be read in the container (`/proc/slabinfo` is
+  root's on the host), so the memory is from the kernel's own sizing of the limit, about 1 KiB
+  a watch on 64-bit: some 4 MiB for this tree, and 0.4 % of this machine's limit.
+- **A file made, before and after the merge.** Catching up one file pushed it on the sorted
+  paths and sorted all 204 160 again. On Linux that took a file made to visible at p50
+  17.5 ms (p99 47.7). Merging the new paths in takes it to 2.36 ms (p99 2.59) in the same
+  container, and 2.04 ms with the watch started beside the walk. On macOS the same row is
+  `FSEvents`' delivery, about 11 ms, plus the catch-up; it was 25.5 ms with the sort.
+- **The watch's start.** One debug run under a load of about 50, on a tree made 10 s before,
+  spent 882 ms in `FSEventStreamStart` before the walk began, which the first answer waited
+  for (1 882 ms against 400 ms without events). In the runs above the stream was up within
+  the walk. Either way the first answer now waits for the walk alone.
+- **Out of watches.** `past_the_kernels_watches_the_index_looks_at_times_and_stays_right`
+  runs with the limit lowered to 20 in a user namespace of its own: `ENOSPC` at the 21st
+  directory, the watch let go, and a file made then is found by the times.
+
+```sh
+cargo nextest run -p slopty-worker --release quick_open_costs --run-ignored only --no-capture
+CARGO_FEATURE_NO_NEON=1 cargo zigbuild --target aarch64-unknown-linux-gnu --target-dir target/linux \
+  -p slopty-worker --lib --tests --release
+docker --context desktop-linux run --rm --label dev.slopty.linux \
+  -v $PWD/target/linux/aarch64-unknown-linux-gnu/release/deps:/t:ro debian:trixie-slim \
+  sh -c '/t/slopty_worker-* --ignored --exact find::index::tests::quick_open_costs --nocapture'
+docker --context desktop-linux run --rm --privileged --label dev.slopty.linux \
+  -v $PWD/target/linux/aarch64-unknown-linux-gnu/release/deps:/t:ro debian:trixie-slim \
+  unshare -Ur sh -c 'echo 20 > /proc/sys/user/max_inotify_watches && /t/slopty_worker-* --ignored past_the_kernels'
+```
+
+## 2026-10-01 — HEIC thumbnails in two steps
+
+Same machine and pictures as "file tile pictures and PDFs" above, load average 17 to 44. CPU is
+`clock(3)` across the call, which another session's load does not inflate the way it does
+wall time. Median of five, two runs.
+
+| HEIC 4032 × 3024 to | one step, wall / CPU ms | two steps, wall / CPU ms |
+| --- | --- | --- |
+| 100 × 75 | 257.9 / 94.2, 128.2 / 68.4 | 131.4 / 66.0, 87.8 / 46.5 |
+| 400 × 300 | 128.2 / 71.7, 107.6 / 53.5 | 102.3 / 61.7, 75.1 / 44.3 |
+| 1 600 × 1 201 | 117.9 / 69.5, 81.6 / 56.7 | (one step) |
+
+ImageIO decodes a HEIC whole and then scales the image to the thumbnail; a JPEG it decodes
+at a reduced scale instead, which is why the JPEG rows fall with the size. The scaling's cost
+grows as the ratio does: in a probe, thumbnails straight from the source took 65 to 73 ms CPU
+at 100 pixels, 56 to 66 at 400 and 47 to 55 at 1 600. So a HEIC asked for at less than two
+fifths of its longest side is decoded at two fifths (1 612 pixels here) and drawn down to the
+size by Core Graphics, the draw the decode makes anyway. That takes 14 to 32 % less CPU at
+400 and 100 pixels. A JPEG, PNG or any other type keeps its one step.
+
+```sh
+cargo nextest run -p slopty-ui decode_and_draw_costs --run-ignored only --no-capture
+```
+
+## 2026-10-01 — a PDF's page flip and drag
+
+Same machine, the test profile, load average 20 to 48. A file tile 1 920 × 1 080 in GPUI's test
+window, showing a PDF of 200 US-letter pages of text. A flip is → from the key to the frame laid
+out, every page in view drawn (the window is headless, so no GPU work is in it). A drag step
+is the pointer moved with the button down → the selection asked of `PDFKit` again and its
+frame. 60 of each, three runs.
+
+| | p50 | p90 |
+| --- | --- | --- |
+| page flip | 3.03 to 3.63 ms | 9.27 to 9.95 ms |
+| drag step | 0.01 to 0.02 ms | 0.04 to 0.05 ms |
+
+A flip lands a page that is not drawn yet, so its p90 carries drawing one page 1 902 pixels
+wide, which "file tile pictures and PDFs" puts at about 1 ms, and the next page the list's
+overdraw reaches. `PDFKit` answers a selection between two points of one line in tens of
+microseconds, so a drag can ask it on every move.
+
+```sh
+cargo nextest run -p slopty-ui --run-ignored only timing_of_a_page_flip --no-capture
+```
+
 ## 2026-10-01 — the worker's blocking pool after a soak
 
 Mac Studio M1 Max, macOS 27.0, other sessions building beside it. It explains a soak failing
@@ -12045,4 +12136,145 @@ The server is not changed here.
 cargo test -p slopty-workerd --bin slopty-worker only_a_paused_turn_takes_the_blocking_pool
 cargo test -p xtask --bin xtask soak::
 cargo xtask soak --stream-lanes 0   # summary.json: daemons.<name>.thread_names
+```
+
+## 2026-10-01 — a nightly that shares the Mac
+
+Mac Studio M1 Max, macOS 27.0. Other sessions were building, and the load average stood at
+about 45. One cold build of `slopty-proto` and its dependencies into a fresh target dir, at the
+priority each mode gives a check (`xtask/src/nightly.rs`, `Share`):
+
+| mode | wall | CPU (user + sys) | cores used |
+| --- | --- | --- | --- |
+| a runner's: `nice -n 10`, every core | 67.3 s | 130.2 + 6.9 s | 2.0 |
+| this Mac's: `nice -n 19`, `CARGO_BUILD_JOBS=4` | 92.6 s | 134.2 + 7.7 s | 1.5 |
+
+The build does the same work either way. Here it takes 38 % longer and leaves a quarter of
+the cores it would have used to whoever else is on the machine.
+
+What the checks cost here, from the one local run (`target/nightly/2026-10-01/<check>.json`).
+That run is what moved them to GitHub Actions (decisions/testing.md, "The deep checks run on
+GitHub Actions"):
+
+| check | wall | result |
+| --- | --- | --- |
+| `sanitize realtime` | 59 s | 59 passed |
+| `sanitize address`, 10 crates (then `slopty-crash` apart, 19 s) | 619 s | 802 passed; 5 of 35 crash tests failed |
+| `sanitize thread`, 12 crates (then `slopty-crash` apart, 21 s) | 870 s | 809 passed, 1 failed, 1 timed out; 5 of 35 crash tests failed |
+| `miri`, before nextest and its timeout | stopped at 3 300 s | held 55 min by `slopty-grid`'s `tests/allocs.rs` |
+| `miri -p slopty-core` through nextest | 4.4 s of tests | 10 passed |
+
+```sh
+/usr/bin/time -l nice -n 10 cargo build -p slopty-proto --target-dir target/nice-a
+CARGO_BUILD_JOBS=4 /usr/bin/time -l nice -n 19 cargo build -p slopty-proto --target-dir target/nice-b
+cargo xtask nightly run --only sanitize-address    # one check at a time, here
+cargo xtask deep miri -p slopty-core
+```
+
+## 2026-10-01 — the terminal fuzz target
+
+Mac Studio M1 Max, macOS 27.0, nightly Rust and libFuzzer through cargo-fuzz, AddressSanitizer,
+with libghostty built `ReleaseSafe`. The corpus started from the nine captures in
+`fuzz/seeds/terminal`, with `fuzz/dicts/terminal.dict`.
+
+| run | executions/s | coverage | features | corpus | found |
+| --- | --- | --- | --- | --- | --- |
+| 300 s, one job | 19 | 4 750 | 21 126 | 831 | 2 checkpoint replay bugs, no trap, no panic, no viewer divergence |
+
+Resident memory per execution, on the same inputs replayed:
+
+| build | resident growth |
+| --- | --- |
+| AddressSanitizer (as fuzzed) | 0.40 to 0.55 MB per execution, until libFuzzer's 2 GiB limit stopped it |
+| `ReleaseFast` / `ReleaseSafe`, no sanitizer | flat, 8 to 12 MB |
+| AddressSanitizer with `detect_leaks=1` | no leak reported |
+
+The growth is AddressSanitizer's (its quarantine and shadow memory), not the engine's, so the
+terminal target runs with an 8 GiB RSS limit and every target with `-malloc_limit_mb=2048`.
+
+```sh
+cargo xtask fuzz terminal --time 300
+cargo xtask fuzz --replay           # the kept regressions, on a plain build
+```
+
+## 2026-10-01 — the soak's footprint slope against its window
+
+Mac Studio M1 Max, macOS 27.0, other sessions building beside it. It explains slopes that short
+soaks read as growth (ptyd up to 1 980 KiB/min, the server 204, the worker 930 once) and sets
+how the soak judges them (decisions/testing.md, "The soak judges footprint growth by Theil–Sen,
+over 900 s of load after its first 300"). Every run is `cargo xtask soak --no-build`, sampled
+every 2 s. "At once" means two or three soaks ran side by side.
+
+**No daemon grew underneath.** `leaks` found nothing of ours in any daemon, in any run. In
+`long-1` (900 s of load) `heap` every 60 s held ptyd's live heap at about 630 blocks
+(0.67–0.97 MB) and the worker's at about 51 000 (7.5–7.9 MB). Under `--stacks`,
+`malloc_history -callTree` 60 s and 620 s into a load found:
+
+- ptyd: 443 blocks both times, 1.03 → 1.17 MB, the difference a live session's `Ring::push`
+  (bounded by its capacity);
+- worker: 27.2 → 20.2 MB, all of it the ghostty pages of the terminals open at that moment.
+  Past those, the largest growth was 8 KiB (`Activity::begin`, a held sleep assertion).
+
+The server was not snapshotted under load, because a `malloc_history` of it stalled it into a
+`no answer` dial. Its slope never passed 16 over any window of 600 s.
+
+**Least squares against Theil–Sen, worst slope of any window** (KiB/min; `long-1`, `ten-1`,
+`ten-2`, no stream lane):
+
+| window | 40 s | 120 s | 200 s | 300 s | 400 s | 600 s |
+| --- | --- | --- | --- | --- | --- | --- |
+| least squares | 489 | 1 757 | 848 | 467 | 331 | 189 |
+| Theil–Sen | 398 | 1 160 | 439 | 263 | 199 | 40 |
+
+**Each soak's slope** over the last two thirds of its load (least squares / Theil–Sen):
+
+| run | load | lanes | at once | server | ptyd | worker |
+| --- | --- | --- | --- | --- | --- | --- |
+| long-1 | 900 s | 0 | no | 11 / 3 | 6 / 0 | 6 / 3 |
+| ten-1 | 600 s | 0 | 2 | 14 / 8 | 142 / 0 | −33 / 23 |
+| ten-2 | 600 s | 0 | 2 | 14 / 0 | 88 / 0 | −316 / 0 |
+| ts-2 | 900 s | 1 | 3 | 2 / 0 | 0 / 0 | 92 / 33 |
+| ts-3 | 900 s | 1 | 3 | 2 / 0 | 0 / 0 | 100 / 25 |
+| j-2 | 960 s | 0 | 3 | 1 / 0 | −110 / −103 | −302 / 4 |
+| j-3 | 960 s | 1 | 3 | 0 / 0 | −105 / −75 | 116 / 108 |
+| v-1 | 1 800 s | 1 | 3 | — / 0 | — / −13 | — / 19 |
+| v-2 | 1 800 s | 1 | 3 | — / 0 | — / −5 | — / 15 |
+| v-3 | 960 s | 0 | 3 | — / 4 | — / 58 | — / 0 |
+| threads-1 | 960 s | 0 | no | — / 0 | — / −19 | — / 39 |
+
+**With a stream lane the worker's floor climbs, then holds.** `footprint <pid>` every 120 s in
+v-1 and v-2 put the worker's `Malloc Small` dirty pages at 15 and 10 MB as the fill began, 21
+two minutes in, 24 to 25 by about 400 s into the load, and 24 to 26 MB from there to the end of
+30 minutes. `IOSurface` ran from 0 to 35 MB with the streams open at each sample. Without a lane
+(v-3) the worker held 18.6 → 18.8 MB for the whole load. The worst Theil–Sen slope of any window
+starting 300 s or more into the load (900 s and 1 200 s windows fit only v-1 and v-2):
+
+| window | 600 s | 900 s | 1 200 s |
+| --- | --- | --- | --- |
+| worker (stream lane) | 179 | 47 | 32 |
+| ptyd | 72 | 39 | 17 |
+| server | 10 | 4 | 3 |
+
+So the slope leaves out the first 300 s of load and is judged once the rest spans 900 s, with
+the 64 KiB/min budget unchanged, and the default load is 1 200 s.
+
+**Threads at the end.** With a 12 s settle, two soaks of seven ended with one unnamed thread
+more than the baseline. A C probe calling `dispatch_async` eight times and counting
+`task_threads` every 0.5 s read 1 → 9 threads, then 2 from 5.5 s to 90 s: idle dispatch threads
+end after about 5 s, and one stays. In threads-1, `sample` at the baseline and every two minutes
+showed the only unnamed thread of a settled worker to be that one (`start_wqthread`), and with
+a 20 s settle the run held 13 → 13. Two of three soaks run at once with the 20 s settle (v-2,
+v-3) still ended one over.
+
+**Soaks killed by another soak.** ts-1 and j-1 died in the fill with their CLI killed
+(`signal: 9`) 20 s after a second soak started. That second soak had rewritten
+`target/deep/soak/bin` in place. Staging by rename fixed it. Probes that pause a daemon
+(`heap`, `malloc_history`) caused `no answer` dials and hook timeouts of their own in four
+runs, and those are not counted above.
+
+```sh
+cargo test -p xtask --bin xtask soak::
+cargo xtask soak                      # 1 200 s; summary.json: daemons.<name>.slope_*
+cargo xtask soak --stacks --seconds 720   # then malloc_history <pid> -callTree -invert
+footprint <worker pid>                # Malloc Small, IOSurface
 ```

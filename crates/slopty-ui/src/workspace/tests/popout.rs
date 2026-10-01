@@ -83,6 +83,11 @@ fn a_tile_pops_out_into_its_own_window_and_back(cx: &mut TestAppContext) {
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
     assert!(cx.debug_bounds(placeholder).is_some(), "the tile says where it went");
+    let nodes = tree(cx);
+    assert!(
+        nodes.iter().any(|n| n.is("Button", Some(crate::workspace::popout::SHOW_OWN_WINDOW))),
+        "and is a button that shows that window: {nodes:#?}"
+    );
     assert!(palette_has(&view, cx, BACK_TO_WORKSPACE));
     assert!(view.read_with(cx, |v, _| v.screen(tile.item).is_some()), "the stream stays");
 

@@ -2,6 +2,8 @@
 //! the focused tile's row into view, keeps a row with nothing to add to one line, and laid
 //! over the frame runs through the home indicator's band.
 
+use std::time::Instant;
+
 use gpui::{AppContext as _, Bounds, Context, IntoElement, Render, Window};
 
 use super::*;
@@ -47,27 +49,101 @@ fn scroll_list(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, dy: f32
     cx.run_until_parked();
 }
 
-/// Of 120 tiles only the rows in the list's view, and a little past it, are laid out and
-/// drawn; scrolled to the end, the last ones are and the first are not.
+/// How many viewports of rows a scroll layer paints on each side of a list's view, where GPUI
+/// compiles layers in: gpui-fast's `fast::layers::paint::OVERSCAN_VIEWPORTS`.
+const LAYER_OVERSCAN_VIEWPORTS: f32 = 2.0;
+
+/// Of 200 tiles only the rows in the list's view, and a little past it, are laid out and
+/// drawn; scrolled to the end, the last ones are and the first are not. Past the end nothing
+/// is drawn, so what is drawn there is at most the view and, where the list is on a scroll
+/// layer, the viewports of overscan above it, far fewer than every row.
 #[gpui::test]
 fn the_navigator_draws_only_the_rows_in_view(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    notes(&view, cx, &studio, 120);
+    notes(&view, cx, &studio, 200);
     let tiles = rows(&view, cx);
-    assert_eq!(tiles.len(), 120);
+    assert_eq!(tiles.len(), 200);
     let count =
         |cx: &mut VisualTestContext| tiles.iter().filter(|t| drawn(cx, **t).is_some()).count();
     let shown = count(cx);
     // 800 points of window hold about 18 rows of 40.
-    assert!((10..40).contains(&shown), "{shown} of 120 rows drawn");
+    assert!((10..40).contains(&shown), "{shown} of 200 rows drawn");
     assert!(drawn(cx, tiles[0]).is_some(), "the first row is in view");
-    assert!(drawn(cx, tiles[119]).is_none(), "the last is not laid out");
+    assert!(drawn(cx, tiles[199]).is_none(), "the last is not laid out");
 
     scroll_list(&view, cx, -100_000.0);
-    assert!(in_view(&view, cx, tiles[119]), "scrolled to the end, the last row shows");
+    assert!(in_view(&view, cx, tiles[199]), "scrolled to the end, the last row shows");
     assert!(drawn(cx, tiles[0]).is_none(), "and the first is gone");
-    assert!(count(cx) < 40, "still only what is in view: {}", count(cx));
+    let list = view.read_with(cx, |v, _| v.navigator_list_bounds()).size.height;
+    let row = drawn(cx, tiles[199]).expect("the last row").size.height;
+    let in_view = (list / row).ceil() + 1.0;
+    let most = in_view * (1.0 + LAYER_OVERSCAN_VIEWPORTS);
+    let now = count(cx);
+    let drawn_rows = f32::from(u16::try_from(now).expect("a count of rows"));
+    assert!(drawn_rows <= most, "only the view and its overscan: {now} rows drawn, at most {most}");
+}
+
+/// A wheel over the navigator's list draws its rows again and leaves the panel around them, and
+/// the filter field in it, as they were drawn: the field's input writes its own state each time
+/// it is built, which a scroll need not pay for.
+#[gpui::test]
+fn a_scroll_of_the_navigator_draws_its_rows_alone(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    notes(&view, cx, &studio, 120);
+    let renders = |cx: &VisualTestContext| {
+        view.read_with(cx, |v, cx| {
+            (v.chrome.navigator.read(cx).renders, v.chrome.nav_rows.read(cx).renders)
+        })
+    };
+    let (panel, rows) = renders(cx);
+    for _ in 0..10 {
+        scroll_list(&view, cx, -12.0);
+    }
+    let (panel_now, rows_now) = renders(cx);
+    assert_eq!(panel_now, panel, "the panel was not drawn for a scroll");
+    assert!(rows_now >= rows.saturating_add(10), "the rows were, each time: {rows} → {rows_now}");
+}
+
+/// What a frame of the navigator's list under the wheel costs: 120 notes scrolled 12 points a
+/// frame, down for 100 frames and back up for 100, 600 frames after 20 of warm-up. It prints
+/// the frame's time, the views it built, and how many frames composited a scroll layer, where
+/// GPUI compiles them in. Run by hand (it prints, it does not judge); `docs/MEASUREMENTS.md`
+/// has the numbers and the command.
+#[gpui::test]
+#[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+fn measure_the_navigator_scrolling(cx: &mut TestAppContext) {
+    const FRAMES: usize = 600;
+    const WARM: usize = 20;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    notes(&view, cx, &studio, 120);
+    let mut took = Vec::with_capacity(FRAMES);
+    for n in 0..WARM + FRAMES {
+        if n == WARM {
+            cx.update(|window, _| window.reset_layout_stats());
+        }
+        let dy = if (n / 100) % 2 == 0 { -12.0 } else { 12.0 };
+        let start = Instant::now();
+        scroll_list(&view, cx, dy);
+        if n >= WARM {
+            took.push(start.elapsed());
+        }
+    }
+    let stats = cx.update(|window, _| window.layout_stats());
+    took.sort_unstable();
+    let pct = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+    println!(
+        "MEASURE navigator scrolling, 120 notes, {FRAMES} frames: p50 {:.3} ms p95 {:.3} ms; \
+         {} views built; layer frames composited {} repainted {} demoted {}",
+        pct(50),
+        pct(95),
+        stats.views_built,
+        stats.layer_frames_composited,
+        stats.layer_frames_repainted,
+        stats.layers_demoted,
+    );
 }
 
 /// Focus moving to a tile whose row is out of view scrolls the row into view, once: the human

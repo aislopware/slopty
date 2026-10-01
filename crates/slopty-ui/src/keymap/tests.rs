@@ -206,3 +206,19 @@ fn a_chords_words_come_with_the_keymap() {
     assert_eq!(keymap.label_of(&ws::NewTerminal), "⌥⌘Y");
     assert_eq!(keymap.label_of(&ws::NewAgent), "");
 }
+
+/// A key alone is a chord where nothing takes typing: a folder's rows, a board, a PDF's pages
+/// in a file tile; not the file tile's editor, whose scope the pages share.
+#[test]
+fn a_bare_key_binds_where_nothing_takes_typing() {
+    let all = defaults();
+    let bare = |scope: Scope, name: &str| {
+        all.iter().find(|c| c.scope() == scope && c.name() == name).unwrap().takes_bare_keys()
+    };
+    assert!(bare(Scope::File, "next_page"));
+    assert!(bare(Scope::File, "scroll_down"));
+    assert!(!bare(Scope::File, "save"), "the editor types");
+    assert!(!bare(Scope::File, "close_find"), "a find bar types");
+    assert!(bare(Scope::Folder, "open"));
+    assert!(!bare(Scope::Workspace, "new_terminal"));
+}

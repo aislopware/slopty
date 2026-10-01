@@ -744,6 +744,97 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     after the load (11 → 12). That is the server's to look at, and the named check will say
     which thread.
 
+- ✅ **The soak judges footprint growth by Theil–Sen, over 900 s of load after its first 300**
+  (2026-10-01, MEASUREMENTS "the soak's footprint slope against its window"). Short soaks read
+  ptyd growing by up to 1 980 KiB/min, the server by up to 204 and the worker by 930 once. None
+  of it was a leak or a store still filling. `leaks` found nothing of ours in any daemon.
+  `heap` every minute of a 15-minute load held ptyd's live heap at about 630 blocks and the
+  worker's at about 51 000, each flat. Call trees under `MallocStackLogging`, 60 s and 620 s
+  into a load, named no allocating site that grew. The differences were the terminals open at
+  that moment (ghostty pages in the worker, a session's bounded ring in ptyd) and an 8 KiB
+  sleep assertion. The footprint moves because the allocator takes and returns regions in
+  steps of 16 KiB to 2.5 MiB, because ptyd wanders by 1 MiB, and because the worker holds 0 to
+  35 MiB of `IOSurface` as streams open and close. A least-squares line follows every step and
+  spike, so the shorter the window, the larger the slope it reads.
+  - **With a stream lane the worker's floor climbs, then holds.** Its small-allocation pages
+    (`footprint`) rose from 10–15 MiB to 24–26 MiB over the fill and the first 400 s of load.
+    They then held for the remaining 25 minutes of two 30-minute soaks, while the live heap did
+    not grow. That is the allocator keeping the high-water mark of the most streams and
+    sessions alive at once, so the slope leaves out the load's first 300 s.
+  - **The judgement is now robust, and the budget is unchanged at 64 KiB/min.** The slope is the
+    Theil–Sen estimate, the median of the slopes between every pair of samples. A spike spans
+    almost no pairs, and a single step spans more than half of them only within `1/(2√n)` of
+    the window's middle, while growth spread over the window moves every pair. Across seven
+    soaks, most of them run three at once, the largest slope of any window starting 300 s or
+    more into the load was 179 over 600 s (the worker with a stream lane), and 47 over 900 s
+    and 32 over 1 200 s in the two 30-minute soaks. Least squares read up to 189 over 600 s on quieter loads. So the slope is judged
+    only once the load past its first 300 s spans 900 s, and the default load is 1 200 s, the
+    nightly's. A shorter `--seconds` still prints the slope, marked as not judged. Tests:
+    `a_climb_spikes_and_a_held_step_read_as_no_growth_and_growth_reads_its_rate` (6 MiB in the
+    first 300 s, 17 MiB spikes and 1 MiB held read under 1 KiB/min; the climb judged reads over
+    the budget; 128 KiB/min of growth under it all reads within a tenth) and
+    `the_slope_is_the_median_of_the_pairwise_slopes` (`xtask`).
+  - **The settle is 20 s.** Tokio ends a blocking thread after 10 s idle, and those exits can
+    hand the system's dispatch threads work. Dispatch threads end about 5 s after they go idle:
+    eight started at once in a probe, seven had ended by 5.5 s, and one stays as the pool's.
+    At 12 s, two soaks of seven ended with one more unnamed thread than at the baseline, and
+    the baseline's own unnamed thread was the dispatch pool's (`start_wqthread`). At 20 s a
+    16-minute soak alone held 13 → 13 threads, but two of three soaks run at once still each
+    caught one. So the settle covers a soak run alone, and a machine loaded that hard can
+    still trip it. *Not settled:* naming a dispatch thread apart from one of ours, so the check
+    can wait for those alone.
+  - **Staging the daemons no longer kills another soak.** The soak copied its binaries into
+    `target/deep/soak/bin` in place and then signed them. A file written in place keeps its
+    inode, so a second soak started beside a first rewrote the code the first was running, and
+    the first's CLI was killed (`SIGKILL`) mid-fill in two runs. Each binary is now copied
+    beside the old one, signed, and renamed over it, which leaves the running file whole. Test:
+    `a_staged_binary_replaces_the_path_and_leaves_the_running_file_whole`.
+  - **A leak's verdict names it.** `leaks` writes `1 leak for` in the singular, and the soak
+    looked only for `leaks for`, so a single leak failed as `no verdict line`. The verdict now
+    reads the `total leaked bytes` line and adds the first root leak, skipping the stack
+    headers `MallocStackLogging` adds. Test:
+    `a_leaks_verdict_reads_in_the_singular_and_names_the_root`.
+  - *Not settled here: three `leaks` reports that are no growth.* (1) With a stream lane, the
+    default, every soak's worker ends with `1 leak for 128 total leaked bytes`, a root
+    `NSPasteboard`. Its stack runs from `clip::watch` on the blocking pool through
+    `MacBoard::change_count` to `+[NSPasteboard _pasteboardWithName:]`. The soak gives the
+    worker a named pasteboard, and `MacBoard` looks it up by name on every call. A standalone
+    probe reproduces it outside Slopty: the first lookup of a named pasteboard off the main
+    thread leaves one such object per name (50 names, 50 objects), and every later lookup
+    returns that same object. The general pasteboard, a first lookup on the main thread, or a
+    strong reference kept by the caller each read 0. The fix belongs to `slopty-input`'s
+    `MacBoard`: keep the named board's `Retained<NSPasteboard>` rather than looking it up every
+    50 ms. (2) One 30-minute soak's worker reported 5.5 MiB in 41 546 blocks, rooted in one
+    1.4 MiB block. That block is the idempotency ledger's `HashMap` table. With 4 096 keys and
+    their churn, hashbrown grew it to 16 384 buckets, and the map points into its middle, at
+    the control bytes. `leaks` does not follow such a pointer for a block that large. In a
+    probe, a held `HashMap` of 4 096 entries read 0 leaks, and one of 14 000 (1.5 MiB) read as
+    a root leak. The table is bounded, and a run whose memory happens to hold its start
+    address reads clean. The fix belongs to the ledger (`orchestrate/idempotency.rs`): a
+    structure without an interior-pointer root, or a table that stays below the size. (3) Once,
+    under `--stacks`, 32 bytes leaked inside HIToolbox's input-source cache
+    (`InitializeInputSourceCache`, reached from `slopty_platform::input_source::current`).
+    That one is Apple's.
+
+- ✅ **A test that sets a process-wide fake holds it until it ends** (2026-10-01). Two worker
+  tests, `screens::made::a_made_display_is_streamed_and_released_with_the_stream` and
+  `…an_outgrown_display_is_remade_and_the_stream_follows_it`, failed under `cargo test` on this
+  Mac and passed in the gate. They are neither ignored nor gated, and they need no Screen
+  Recording grant and no `CGVirtualDisplay`: the whole platform is the `screens::fake` one. The
+  cause was a race between tests. The four `made` tests each wrote the displays the fake
+  enumeration lists into one process-wide static and then read them back through the stream, so
+  under `cargo test`, whose tests run as threads of one process, one test's listing replaced
+  another's before it was read. nextest runs every test as its own process, which hid it. Run
+  one at a time they passed three runs in three, and run together they failed three in three.
+  - **The fix is in the fake.** `fake::listing(displays)` takes an async lock and returns its
+    guard, and the listing is set only through it, so a test holds its listing for as long as it
+    runs. The four `made` tests now pass together five runs in five, and the worker's binary
+    passes all 35 tests three runs in three.
+  - **Their unwraps say what went wrong.** An empty `unwrap` in these tests now names what did
+    not happen: the stream did not open, no display was made (the stream fell back to a
+    physical one), the stream ended before the resize, no display event came within 5 s, or
+    the serving task panicked.
+
 - ✅ **A crate's integration tests stay one binary per file** (2026-10-01). Merging each crate's
   `tests/*.rs` into one binary would save about a CI-minute, and it would cost churn out of
   proportion. Rebuilding a crate's integration binaries against rebuilding only its smallest one
@@ -761,3 +852,65 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   - What was taken instead: `slopty-e2e`'s live targets, all `#[ignore]`d, build only with its
     `live` feature, which `cargo xtask e2e` and host clippy pass: twelve units and about 92 s of
     CPU out of every test build.
+
+- ✅ **The deep checks run on GitHub Actions** (2026-10-01). Miri, the sanitizers, loom, `leaks`,
+  the fuzz targets, the long property tests, the GPUI scheduler seeds, the feature matrix,
+  coverage and mutation testing run in the `Deep` workflow: nightly, a job per check, mutation
+  testing weekly. This Mac runs one check at a time, and only to prove a change. An audit of what
+  had actually run before this showed almost nothing had. The nightly had run once, in part (its
+  property tests, 2026-09-29), because its LaunchAgent was never installed. The `Deep` workflow
+  had run three times and failed each in about 90 s, setting up sccache. The fuzz crate had not
+  compiled since the stripes change, which nothing noticed because the gate checks only its
+  formatting. A local run of the checks then drove this Mac's load to 101 beside a gate and the
+  soaks, while someone worked on it over Parsec. The repository is public, so hosted minutes,
+  macOS ones included, cost nothing.
+  - **Which runner.** A check that builds crates calling Apple's frameworks (the sanitized
+    crates, loom's CoreAudio ring, `leaks`, the whole-workspace checks) runs on `macos-26`. Miri
+    and mutation testing read the pure crates, which build on Linux, so they run on Ubuntu, which
+    has shorter queues. xtask itself had to build there: the input-source module and a `statfs`
+    field are now macOS only.
+  - **Loud.** Each job uploads its report. A failed night opens the "Deep checks failing" issue,
+    or comments on it, and the next clean night closes it. A missed mutant is a finding to rank,
+    not a failure, so the mutation jobs never fail the run.
+  - **What stays here.** Metal validation needs a GPU, and a hosted runner's virtual Mac has
+    none. The soak and the bench measure this machine. Locally, `cargo xtask nightly` refuses a
+    full run without `--all-here`, and each check it runs gets `nice -n 19`, four build jobs and
+    four test threads (MEASUREMENTS 2026-10-01, "a nightly that shares the Mac").
+  - **The sanitizers' exclusions, each with its reason.** The testkit's instruction-count test
+    reads retired instructions, which ThreadSanitizer's instrumentation multiplies
+    (`TSAN_COUNTS_INSTRUCTIONS`). Under both sanitizers, 5 of `slopty-crash`'s 35 tests fail: in
+    the instrumented build, the frame they look for by name resolves to the `FnOnce::call_once`
+    shim of the thread's closure, in `function.rs`. That is a fragility of those tests, reported
+    to their owner, not hidden. Under ThreadSanitizer one worker test timed out
+    (`session_actor`, a viewer whose queue was dropped) and one PTY test hit the 120 s limit
+    (`a_typed_ssh_goes_through_the_cli`). Neither raised a race report.
+  - **Miri** runs through nextest with a 20-minute limit per test and without the
+    allocation-counting binaries: run locally, `slopty-grid`'s `tests/allocs.rs` held a run for
+    55 minutes under the interpreter. The audio ring stays loom's alone: it is safe atomics, and
+    its one `unsafe` is the FFI render callback, which Miri cannot run.
+
+- ✅ **Terminal output is fuzzed through the engine** (2026-10-01). A program's output is the
+  widest input a peer controls. Any program in a session writes it, a remote host's included, and
+  the worker's engine parses it with libghostty and turns it into frames. The `terminal` fuzz
+  target drives a `GhosttyEngine` with a script of writes, resizes, viewers joining, scrollback
+  pages and checkpoints. libghostty is built `ReleaseSafe`, so a fault in the parser traps
+  instead of passing silently. Seeded from nine captures of real programs and a dictionary of VT
+  tokens, five minutes reached 4 750 coverage points with no parser trap, no engine panic and no
+  viewer diverging (MEASUREMENTS 2026-10-01, "the terminal fuzz target").
+  - **The oracles.** Every viewer, applying the frames it was sent by absolute line, shows what a
+    second engine fed the same bytes shows whole. Every frame comes back from the wire as it
+    went. A scrollback page holds no more lines than asked. A checkpoint replayed into a fresh
+    engine shows the same cells and cursor.
+  - **What the checkpoint oracle forgives.** A cell never written comes back as a space, and a
+    blank's pen may differ where it draws nothing. During a synchronized update (mode 2026) the
+    check waits, since the replay holds its screen too.
+  - **Open findings, for the engine's owner.** A checkpoint loses the lines' OSC 133 prompt
+    marks (they come back as output) and their OSC 8 hyperlinks, so the oracle leaves both out
+    until the checkpoint carries them. The fuzzer also found two replay bugs, kept under
+    `target/fuzz/findings/`. Blanks come back struck through or overlined when the pen carries
+    those styles (autowrap off, then a resize). A DEC special-graphics glyph (`ESC ( 0`, on the
+    alternate screen) is lost.
+  - **Memory, not a leak.** Under AddressSanitizer the target's resident memory grows by about
+    0.5 MB per execution. Plain `ReleaseFast` and `ReleaseSafe` builds of the same inputs stay
+    flat at 8 to 12 MB, and LeakSanitizer reports no leak. The terminal target therefore gets an
+    8 GiB RSS limit, the others 2 GiB, and every target a 2 GiB limit on any one allocation.

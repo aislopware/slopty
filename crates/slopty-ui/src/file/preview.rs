@@ -100,8 +100,6 @@ struct Pages {
     /// `PDFKit`'s reading of the text, opened at the first press on a page; `None` inside when
     /// it cannot read it.
     text: std::cell::OnceCell<Option<super::pdf_text::PdfText>>,
-    /// Each page's bounds as last painted, with the layout it was painted in.
-    bounds: HashMap<usize, (u64, Bounds<Pixels>)>,
     /// The text selected.
     selection: Option<pages::Selection>,
 }
@@ -285,7 +283,6 @@ impl FileView {
             clock: 0,
             bytes: kept,
             text: std::cell::OnceCell::new(),
-            bounds: HashMap::new(),
             selection: None,
         }
     }
@@ -502,9 +499,8 @@ impl FileView {
                 {
                     redraw_next_frame(&entity, window);
                 }
-                pages::pages_hitbox(bounds, window)
             },
-            move |_, hitbox, window, _| Self::listen_to_pages(&listen, &hitbox, window),
+            move |_, (), window, _| Self::follow_pointer(&listen, window),
         )
         .absolute()
         .size_full();
@@ -513,7 +509,7 @@ impl FileView {
             pages.list.clone(),
             cx.processor(|this, ix: usize, _window, cx| {
                 this.want_page(ix, cx);
-                this.render_page(ix, cx)
+                this.render_page(ix)
             }),
         )
         .size_full();
@@ -525,12 +521,19 @@ impl FileView {
             .bg(hsla(s.canvas))
             .role(Role::Document)
             .aria_label(SharedString::from(summary))
+            .cursor(gpui::CursorStyle::IBeam)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.press_pages(e.position, e.click_count, window, cx);
+                }),
+            )
             .child(measure)
             .child(items)
             .into_any_element()
     }
 
-    fn render_page(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
+    fn render_page(&self, ix: usize) -> AnyElement {
         let Some(Preview { body: Body::Pdf(pages), .. }) = self.preview.as_ref() else {
             return div().into_any_element();
         };
@@ -543,16 +546,9 @@ impl FileView {
         let image = pages.drawn.get(&ix).map(|d| Arc::clone(&d.image));
         let selected = pages.selection.as_ref().map(|s| s.on_page(ix)).unwrap_or_default();
         let tint = hsla_alpha(s.accent, alpha::TINT);
-        let (view, clock) = (cx.entity(), pages.clock);
-        // Where the page is painted, for the pointer; and its selected text, over it.
+        // The page's selected text, over it.
         let overlay = canvas(
-            move |bounds: Bounds<Pixels>, _window, cx| {
-                view.update(cx, |this, _| {
-                    if let Some(p) = this.pages_mut() {
-                        p.bounds.insert(ix, (clock, bounds));
-                    }
-                });
-            },
+            |_, _, _| {},
             move |bounds: Bounds<Pixels>, (), window, _| {
                 for &area in &selected {
                     #[expect(clippy::cast_possible_truncation, reason = "a place on screen")]

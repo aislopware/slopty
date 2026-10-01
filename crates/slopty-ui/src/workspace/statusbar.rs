@@ -782,7 +782,9 @@ impl WorkspaceView {
     }
 
     /// One worker in the hosts popover: its mark, its name, its round trip or what is wrong,
-    /// and, under the pointer, what can be done to it. Clicked, it goes to the worker's tiles.
+    /// and what can be done to it, under the pointer or while the row or the action holds the
+    /// keyboard (a screen reader finds them in the tree either way). Clicked, it goes to the
+    /// worker's tiles.
     fn host_row(&self, key: WorkerKey, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -822,6 +824,7 @@ impl WorkspaceView {
         let actions = self.bar.hosts.get(&key).cloned().unwrap_or_default();
         let action = |id: String, label: &'static str, run: MenuRun| {
             let selector = id.clone();
+            let group = group.clone();
             let el = div()
                 .id(ElementId::Name(id.into()))
                 .debug_selector(move || selector)
@@ -835,7 +838,15 @@ impl WorkspaceView {
                 .text_color(hsla(s.text_secondary))
                 .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
                 .child(label);
-            tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, window, cx| {
+            // Hidden one by one, not by the strip that holds them: a hidden parent hides its
+            // children whatever their own focus says.
+            let el = tab_stop(el, s.accent)
+                .invisible()
+                .group_hover(group, gpui::Styled::visible)
+                .in_focus(gpui::Styled::visible)
+                // In place of the stop's own, which this replaces: its ring, and in view.
+                .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).visible());
+            el.on_click(cx.listener(move |this, _ev, window, cx| {
                 cx.stop_propagation();
                 this.bar.hosts_open = false;
                 cx.notify();
@@ -854,8 +865,6 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(spacing.xxs))
-            .invisible()
-            .group_hover(group.clone(), gpui::Styled::visible)
             .children(wake)
             .children(connect)
             .children(forget);

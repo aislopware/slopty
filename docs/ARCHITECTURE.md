@@ -980,13 +980,17 @@ the item (`ItemOp::SetFolder`), a file opens as a file tile beside it, rows drag
 up into it; a path of unknown kind is asked as a folder first (`WorkspaceView::open_path_on`).
 Each linked worker is sent the set of directories its folder tiles show
 (`ClientMsg::WatchFolders`, `workspace::folders::reconcile_folders`), and it lists one again
-unasked when an entry is made, removed or renamed (`fswatch::follow_folders`); the tile keeps
+unasked when an entry is made, removed or renamed (`fswatch::follow_folders`), and after
+`CONTENT_HOLD` when a file in it is written, for its size (inotify, or on macOS an `FSEvents`
+stream over the followed folders that rings the kqueue); the tile keeps
 its selection on the same name (`FolderView::set_listing`).
 A file tile whose read is `FileRead::Media` shows it instead of the editor
 (`slopty-ui::file::preview`): a picture decoded by ImageIO at the pixels it is drawn at, its
 frames animated unless Reduce Motion is on, and a PDF as a virtualized list of pages that
 CoreGraphics draws at the tile's width on a background thread, the pages near the view kept
-(`file::decode`).
+(`file::decode`). The pages take Preview's keys in the key context `FileEditor FilePages`, and
+a drag selects their text through `PDFKit` (`file::pdf_text`, opened at the first press), ⌘C
+copying it.
 
 **Search in files** (⌥⌘F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
 files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search(SearchEvent::Hits)`
@@ -1045,7 +1049,8 @@ also asked of the worker's files under that directory (`ClientMsg::FindFiles` �
 `WorkerMsg::FoundFiles`, protocol 36) whose hits are `Open <path>`
 lines after the commands. The worker answers from an index of the whole worktree the directory
 is in (`slopty_worker::find::Index`, one parallel walk honouring the ignore files, kept fresh by
-an `FSEvents` stream on macOS and by directory times elsewhere) and ranks with
+an `FSEvents` stream on macOS, an inotify watch a directory on Linux, and directory times
+elsewhere or past the kernel's watches, which `FoundFiles.notice` tells the person) and ranks with
 `nucleo-matcher`, fuzzily, across the cores; outside a worktree a bounded walk answers; the top bar's "⋯" button (`commands`, a11y "Commands") opens it too, the phone's way
 to every action. The palette remembers where the keyboard was (`window.focused`), puts it
 back when it closes and dispatches the choice on the next frame from there, so a terminal's

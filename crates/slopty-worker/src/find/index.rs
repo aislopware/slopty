@@ -150,6 +150,8 @@ pub struct Index {
     shared: Arc<Shared>,
     /// The file system's events over the tree, when it gives them.
     watch: Mutex<Option<Watch>>,
+    /// The watch starting beside a walk, until it is up.
+    starting: Mutex<Option<std::thread::JoinHandle<Option<Watch>>>>,
     /// Kernel watches the index may hold (inotify's, one a directory).
     limit: usize,
     /// Whether it asks for events at all.
@@ -160,6 +162,8 @@ pub struct Index {
     built_in: OnceLock<Duration>,
     /// The last query's matches, which the next keystroke scores again instead of the tree.
     last: Mutex<Option<Last>>,
+    /// What the person should be told about this index, not yet said.
+    notice: Mutex<Option<String>>,
 }
 
 /// A query's matches, kept for the query typed on from it.
@@ -186,11 +190,13 @@ impl Index {
         Self {
             shared,
             watch: Mutex::new(None),
+            starting: Mutex::new(None),
             limit: usize::MAX,
             events: AtomicBool::new(true),
             looked: Mutex::new(None),
             built_in: OnceLock::new(),
             last: Mutex::new(None),
+            notice: Mutex::new(None),
         }
     }
 
@@ -198,6 +204,13 @@ impl Index {
     #[must_use]
     pub fn limited(top: PathBuf, limit: usize) -> Self {
         Self { limit, ..Self::new(top) }
+    }
+
+    /// What the person should know of how it answers, once: the watches ran out, or the tree
+    /// is held in part. `None` after it has been taken.
+    #[must_use]
+    pub fn take_notice(&self) -> Option<String> {
+        self.notice.lock().take()
     }
 
     /// Kernel watches it holds: one a directory with inotify, none with `FSEvents`' stream.
@@ -236,6 +249,14 @@ impl Index {
         self.len() == 0
     }
 
+    /// Wait for the watch started with the walk, as a test that follows events must.
+    #[cfg(test)]
+    fn wait_for_watch(&self) {
+        if let Some(tree) = self.shared.tree.get() {
+            self.take_started(&tree.read(), true);
+        }
+    }
+
     /// The tree, walked the first time.
     fn ready(&self) -> &RwLock<Tree> {
         self.shared.tree.get_or_init(|| {
@@ -255,30 +276,53 @@ impl Index {
         })
     }
 
-    /// Walk the whole tree under a new watch. An `FSEvents` stream starts before the walk, so a
-    /// change during it is caught up after; inotify's watches are added after it, one a
-    /// directory walked.
+    /// Walk the whole tree while a new watch starts beside it. Starting an `FSEvents` stream
+    /// can take most of a second while `fseventsd` is busy, so the first answer does not wait
+    /// for it: until the watch is up, the index looks at its directories' times instead.
     fn build(&self) -> Tree {
-        let watch = if self.events.load(Ordering::Relaxed) {
-            Watch::start(Arc::clone(&self.shared), self.limit)
-        } else {
-            None
-        };
         // The old watch, if any, goes here, and its watches with it.
-        *self.watch.lock() = watch;
+        *self.watch.lock() = None;
+        *self.starting.lock() = self.events.load(Ordering::Relaxed).then(|| self.start()).flatten();
         let tree = walk_all(&self.shared.top);
-        self.cover(tree.dirs.iter().map(|(dir, time)| (dir.clone(), *time)).collect());
+        self.take_started(&tree, false);
+        if tree.partial {
+            *self.notice.lock() = Some(format!(
+                "Quick open holds the first {MAX_PATHS} paths of {}: past them it finds nothing",
+                self.shared.top.display()
+            ));
+        }
         tree
     }
 
-    /// Watch `dirs` (with their times at the walk), and list again any whose time moved before
-    /// its watch was there. Past the watches there are, let the watch go and say so.
+    /// Start a watch on a thread of its own.
+    fn start(&self) -> Option<std::thread::JoinHandle<Option<Watch>>> {
+        let (shared, limit) = (Arc::clone(&self.shared), self.limit);
+        std::thread::Builder::new()
+            .name("slopty-find-watch".into())
+            .spawn(move || Watch::start(shared, limit))
+            .inspect_err(|e| tracing::warn!(%e, "quick open's watch thread did not start"))
+            .ok()
+    }
+
+    /// Once the watch being started is up (or, with `wait`, when it is), follow `tree`'s
+    /// directories on it.
+    fn take_started(&self, tree: &Tree, wait: bool) {
+        let Some(started) = self.starting.lock().take_if(|s| wait || s.is_finished()) else {
+            return;
+        };
+        let Ok(Some(watch)) = started.join() else { return };
+        *self.watch.lock() = Some(watch);
+        self.cover(tree.dirs.iter().map(|(dir, time)| (dir.clone(), *time)).collect());
+    }
+
+    /// Watch `dirs` (with their times when they were listed), and list again any whose time
+    /// moved before the watch saw it. Past the watches there are, let the watch go and say so.
     fn cover(&self, dirs: Vec<(DirKey, Option<SystemTime>)>) {
         let mut watch = self.watch.lock();
         let Some(held) = watch.as_mut() else { return };
         let top = &self.shared.top;
         match held.cover(dirs.iter().map(|(dir, _)| top.join(dir.as_ref()))) {
-            Ok(()) if held.watches() > 0 => {
+            Ok(()) => {
                 drop(watch);
                 let moved = dirs
                     .into_iter()
@@ -288,7 +332,6 @@ impl Index {
                     pending.add(dir);
                 }
             }
-            Ok(()) => {}
             Err(out) => {
                 tracing::warn!(
                     top = %top.display(),
@@ -298,6 +341,13 @@ impl Index {
                      times before each query instead, slower on a tree this large"
                 );
                 *watch = None;
+                drop(watch);
+                *self.notice.lock() = Some(format!(
+                    "Quick open ran out of file watches ({}) under {}: it looks at the folders \
+                     before each search instead, which is slower on a tree this large",
+                    out.why,
+                    top.display()
+                ));
             }
         }
     }
@@ -345,6 +395,9 @@ impl Index {
     /// Bring the tree up to what the disk holds: what the events named, or with none, what the
     /// directories' times say.
     fn catch_up(&self, tree: &RwLock<Tree>) {
+        if self.starting.lock().as_ref().is_some_and(std::thread::JoinHandle::is_finished) {
+            self.take_started(&tree.read(), false);
+        }
         if !self.follows_events() {
             self.look_at_times(tree);
         }
@@ -580,14 +633,49 @@ fn apply(tree: &mut Tree, gone: &BTreeSet<Box<str>>, added: Vec<Found>) {
     if added.is_empty() {
         return;
     }
+    let mut fresh = Vec::with_capacity(added.len());
     for Found { path, kind } in added {
         if let Kind::Dir(time) = kind {
             tree.dirs.insert(path.clone(), time);
         }
-        tree.paths.push(path);
+        fresh.push(path);
     }
-    tree.paths.sort_unstable();
-    tree.paths.dedup();
+    fresh.sort_unstable();
+    fresh.dedup();
+    tree.paths = merged(std::mem::take(&mut tree.paths), fresh);
+}
+
+/// `paths` and `fresh`, each sorted without repeats, as one such list. A file made in a large
+/// tree costs a search per new path and a move of the rest, not a sort of every path.
+fn merged(paths: Vec<Box<str>>, fresh: Vec<Box<str>>) -> Vec<Box<str>> {
+    let cuts: Vec<(usize, bool)> = fresh
+        .iter()
+        .map(|p| {
+            let cut = paths.partition_point(|q| q < p);
+            (cut, paths.get(cut) == Some(p))
+        })
+        .collect();
+    let mut out = Vec::with_capacity(paths.len().saturating_add(fresh.len()));
+    let mut old = paths.into_iter();
+    let mut taken = 0;
+    for (path, (cut, held)) in fresh.into_iter().zip(cuts) {
+        out.extend(old.by_ref().take(cut.saturating_sub(taken)));
+        taken = taken.max(cut);
+        if !held {
+            out.push(path);
+        }
+    }
+    out.extend(old);
+    out
+}
+
+/// A quick-open answer.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Answer {
+    /// Paths best first, relative to the directory asked.
+    pub paths: Vec<String>,
+    /// What the person should be told, said once ([`Index::take_notice`]).
+    pub notice: Option<String>,
 }
 
 /// The worker's indexes, one per worktree asked about lately.
@@ -605,16 +693,21 @@ impl Indexes {
     }
 
     /// The paths under `dir` that `query` matches, best first, at most `limit`, relative to
-    /// `dir`: from its worktree's index, or a bounded walk outside one.
+    /// `dir`: from its worktree's index, or a bounded walk outside one; with what the person
+    /// should know of the index, the first time there is something.
     #[must_use]
-    pub fn matching(&self, dir: &Path, query: &str, limit: usize) -> Vec<String> {
+    pub fn matching(&self, dir: &Path, query: &str, limit: usize) -> Answer {
         if query.trim().is_empty() || limit == 0 {
-            return Vec::new();
+            return Answer::default();
         }
-        let Ok(dir) = std::fs::canonicalize(dir) else { return Vec::new() };
+        let Ok(dir) = std::fs::canonicalize(dir) else { return Answer::default() };
         match worktree_of(&dir) {
-            Some(top) => self.index(&top).matching(&dir, query, limit),
-            None => walk_matching(&dir, query, limit),
+            Some(top) => {
+                let index = self.index(&top);
+                let paths = index.matching(&dir, query, limit);
+                Answer { paths, notice: index.take_notice() }
+            }
+            None => Answer { paths: walk_matching(&dir, query, limit), notice: None },
         }
     }
 
@@ -681,6 +774,21 @@ mod tests {
         }
     }
 
+    /// New paths go into the sorted list in order, once each, before, between and after the
+    /// ones held.
+    #[test]
+    fn new_paths_merge_into_the_sorted_ones() {
+        let boxed = |v: &[&str]| v.iter().map(|p| Box::<str>::from(*p)).collect::<Vec<_>>();
+        let held = boxed(&["b", "d", "f"]);
+        assert_eq!(
+            merged(held.clone(), boxed(&["a", "c", "d", "g"])),
+            boxed(&["a", "b", "c", "d", "f", "g"])
+        );
+        assert_eq!(merged(held.clone(), Vec::new()), held);
+        assert_eq!(merged(Vec::new(), held.clone()), held);
+        assert_eq!(merged(held, boxed(&["e", "e2"])), boxed(&["b", "d", "e", "e2", "f"]));
+    }
+
     #[test]
     fn a_worktree_is_walked_once_and_asked_from_any_folder_in_it() {
         let (_dir, top) = worktree();
@@ -702,6 +810,7 @@ mod tests {
         let (_dir, top) = worktree();
         let index = Index::new(top.clone());
         assert!(index.matching(&top, "lib", 8).is_empty());
+        index.wait_for_watch();
         if cfg!(any(target_os = "macos", target_os = "linux")) {
             assert!(index.follows_events(), "FSEvents or inotify over the worktree");
         }
@@ -765,7 +874,11 @@ mod tests {
         let (_dir, top) = worktree();
         let index = Index::limited(top.clone(), 2);
         assert_eq!(index.matching(&top, "main", 8), ["src/main.rs"]);
+        index.wait_for_watch();
         assert!(!index.follows_events(), "the watch is let go");
+        let said = index.take_notice().unwrap_or_default();
+        assert!(said.contains("ran out of file watches"), "and the person is told: {said}");
+        assert_eq!(index.take_notice(), None, "once");
         assert_eq!(index.watches(), 0, "and its watches with it");
         fs::write(top.join("src/net/lib.rs"), "").unwrap();
         assert_eq!(until(&index, &top, "lib", |f| !f.is_empty()), ["src/net/lib.rs"]);
@@ -787,6 +900,7 @@ mod tests {
         }
         let index = Index::new(top.clone());
         assert_eq!(index.matching(&top, "main", 8), ["src/main.rs"]);
+        index.wait_for_watch();
         assert!(!index.follows_events(), "ENOSPC lets the watch go");
         fs::write(top.join("many/d7/lib.rs"), "").unwrap();
         assert_eq!(until(&index, &top, "lib", |f| !f.is_empty()), ["many/d7/lib.rs"]);
@@ -819,7 +933,7 @@ mod tests {
         assert_eq!(indexes.kept.lock().len(), KEPT);
         assert!(!Arc::ptr_eq(&first, &indexes.index(&trees[0].1)), "the oldest went");
         let (_dir, top) = &trees[1];
-        assert_eq!(indexes.matching(&top.join("src"), "main", 8), ["main.rs"]);
+        assert_eq!(indexes.matching(&top.join("src"), "main", 8).paths, ["main.rs"]);
     }
 
     /// A synthetic worktree of `dirs` folders three deep, `files` files in each.
@@ -845,10 +959,10 @@ mod tests {
         format!("p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms", at(50), at(99), at(100))
     }
 
-    /// Quick open's costs on a large worktree: the first walk, a keystroke's query (the first
-    /// of a query, and one typed on) against the bounded walk it replaced, and how soon a file
-    /// made shows. `SLOPTY_FIND_TREE` names a real worktree to measure; without it, a synthetic
-    /// one of 200,000 files.
+    /// Quick open's costs on a large worktree: the first walk and when its watch is up, a
+    /// keystroke's query (the first of a query, and one typed on) against the bounded walk it
+    /// replaced, and how soon a file made shows. `SLOPTY_FIND_TREE` names a real worktree to
+    /// measure; without it, a synthetic one of 200,000 files.
     #[test]
     #[ignore = "measurement, run by hand"]
     #[expect(clippy::disallowed_methods, reason = "the tree's own events drain before timing")]
@@ -882,12 +996,16 @@ mod tests {
         let at = Instant::now();
         let _first = index.matching(&top, "x", 50);
         let with_watch = at.elapsed();
+        index.wait_for_watch();
+        let watching = at.elapsed();
         println!(
-            "{}: {} paths, first walk {:.0} ms without events, {:.0} ms with, events {}, {} watches",
+            "{}: {} paths, first walk {:.0} ms without events, {:.0} ms with, watch up at {:.0} \
+             ms, events {}, {} watches",
             top.display(),
             index.len(),
             walk_only.as_secs_f64() * 1e3,
             with_watch.as_secs_f64() * 1e3,
+            watching.as_secs_f64() * 1e3,
             index.follows_events(),
             index.watches(),
         );

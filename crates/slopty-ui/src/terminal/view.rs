@@ -468,13 +468,6 @@ impl std::fmt::Debug for TerminalView {
 
 impl EventEmitter<TerminalViewEvent> for TerminalView {}
 
-/// Whether the system asks for motion to be reduced, as `slopty_platform` keeps it (read again
-/// at most once a second). Always false under test, which must not turn on the machine's
-/// setting.
-fn reduced_motion() -> bool {
-    !cfg!(test) && slopty_platform::reduce_motion()
-}
-
 /// The local-echo guesses a frame draws.
 #[derive(Clone, Copy, Debug)]
 pub struct Guesses<'a> {
@@ -3156,7 +3149,7 @@ impl TerminalView {
         // track beside it pages towards the click.
         let now = cx.background_executor().now();
         if event.button == MouseButton::Left
-            && let Some(thumb) = self.thumb(now)
+            && let Some(thumb) = self.thumb(now, crate::kit::motion(cx))
         {
             if thumb.contains(&event.position) {
                 self.thumb_drag = Some(event.position.y - thumb.origin.y);
@@ -3482,9 +3475,9 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// The scrollbar's thumb, while any of the bar shows.
-    fn thumb(&self, now: Instant) -> Option<Bounds<Pixels>> {
-        if self.scrollbar_opacity(now) <= 0.0 {
+    /// The scrollbar's thumb, while any of the bar shows (`moves`: [`crate::kit::motion`]).
+    fn thumb(&self, now: Instant, moves: bool) -> Option<Bounds<Pixels>> {
+        if self.scrollbar_opacity(now, moves) <= 0.0 {
             return None;
         }
         let m = self.metrics?;
@@ -3497,12 +3490,13 @@ impl TerminalView {
     }
 
     /// How much of the overlay scrollbar shows at `now`, 0 to 1: none without history, else
-    /// as [`Visibility`] rules.
-    pub(super) fn scrollbar_opacity(&self, now: Instant) -> f32 {
+    /// as [`Visibility`] rules. Where chrome may not move (`moves` is [`crate::kit::motion`]),
+    /// it goes at once after its linger rather than fading.
+    pub(super) fn scrollbar_opacity(&self, now: Instant, moves: bool) -> f32 {
         if self.state.history_len() == 0 {
             return 0.0;
         }
-        self.scrollbar.opacity(now, reduced_motion())
+        self.scrollbar.opacity(now, !moves)
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -6502,6 +6496,43 @@ mod tests {
         assert_eq!(wheels(&mut rx), [-1], "the alternate screen: the worker makes it a key");
     }
 
+    /// Under Reduce Motion the scrollbar a scroll brought up goes at once when its linger ends:
+    /// it draws once to go, and no frame of a fade is asked for.
+    #[gpui::test]
+    fn the_scrollbar_goes_without_a_fade_under_reduce_motion(cx: &mut TestAppContext) {
+        use crate::terminal::scrollbar::{FADE, LINGER};
+        let (view, _rx, cx) = terminal(cx);
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(history_frame(30, &["hello wor", "second", "third row"]), cx);
+        });
+        cx.run_until_parked();
+        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let at = point(m.origin.x + m.cell_width, m.origin.y + m.line_height * 1.5);
+        cx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Lines(point(0.0, 1.0)),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: TouchPhase::Started,
+            momentum_phase: None,
+        });
+        cx.run_until_parked();
+        let shown = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| {
+                v.scrollbar_opacity(cx.background_executor().now(), crate::kit::motion(cx))
+            })
+        };
+        let renders = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.renders());
+        assert!(shown(cx) >= 1.0, "a scroll brings it up");
+        cx.executor().advance_clock(LINGER);
+        cx.run_until_parked();
+        assert!(shown(cx) <= 0.0, "gone as the linger ends");
+        let gone = renders(cx);
+        cx.executor().advance_clock(FADE);
+        cx.run_until_parked();
+        assert_eq!(renders(cx), gone, "no frame of a fade");
+    }
+
     /// The scrollbar is an overlay: with history it is still hidden at rest, comes up while
     /// the pointer is near the right edge or the viewport scrolls, and is gone once the linger
     /// and the fade have run. Its thumb drags the viewport, a click on the track beside it
@@ -6515,10 +6546,10 @@ mod tests {
         });
         cx.run_until_parked();
         let shown = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now()))
+            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now(), true))
         };
         let thumb = |cx: &mut VisualTestContext| {
-            view.read_with(cx, |v, cx| v.thumb(cx.background_executor().now()))
+            view.read_with(cx, |v, cx| v.thumb(cx.background_executor().now(), true))
         };
         let mods = gpui::Modifiers::default();
         let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));

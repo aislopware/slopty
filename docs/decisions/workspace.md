@@ -668,13 +668,17 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     WebP or HEIC sequence keeps its frames and delays (up to 256 MiB of frames), and GPUI's
     `img` plays them unless Reduce Motion is on. The pixels are drawn into premultiplied BGRA
     and unpremultiplied, since GPUI's `RenderImage` takes straight alpha; an opaque picture
-    skips the pass, which was 12 ms of a 12 MP decode.
+    skips the pass, which was 12 ms of a 12 MP decode. A HEIC asked for at less than two
+    fifths of its longest side is decoded at two fifths and drawn down to the size: ImageIO
+    decodes the whole HEIC and then scales it, and that scaling costs more the smaller the
+    thumbnail, so a 400-pixel thumbnail of a 12 MP photo cost more than a 1 600-pixel one.
+    Two steps take 14 to 32 % less CPU (`a_heic_is_shrunk_in_two_steps_to_the_size_asked`).
   - **A PDF is pages, drawn lazily.** CoreGraphics opens it (`CGPDFDocument`, an empty password
     tried on an encrypted one) and each page is a row of a virtualized `list`, its height from
     its crop box and rotation, so scrolling a 500-page manual lays out 500 rows and draws the
     few in view. A page is drawn at the tile's width in device pixels on a background thread,
-    one at a time in order, on white, and the twelve seen last stay drawn. Text is not
-    selectable, and the keyboard does not scroll the pages yet.
+    one at a time in order, on white, and the twelve seen last stay drawn. The keys and text
+    selection came after ("A PDF's pages take the keys and select text").
   - **Why not the `image` crate or pdfium.** ImageIO and CoreGraphics are on every Mac and
     iPhone, decode HEIC and PDF (which no pure-Rust decoder does well), use the hardware JPEG
     and HEIC decoders, and add no dependency but `objc2-image-io`. A static library's `#[link]`
@@ -706,16 +710,24 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - **The same follower as file tiles.** `fswatch::follow_folders` is `fswatch`'s kqueue or
     inotify follower with a folder's own directory watched, and any event in it, not only one
     naming a file, counting as a change. The parent is watched too, so a folder deleted and
-    made again is followed. A write inside a file of the folder changes no entry and sends
-    nothing, though on macOS it also leaves a size in the listing stale until the next
-    change. The `QUIET` and `HOLD` pacing is the file tiles', so an `npm install` into a
-    folder shown is a listing every 50 ms at most.
+    made again is followed. The `QUIET` and `HOLD` pacing is the file tiles', so an
+    `npm install` into a folder shown is a listing every 50 ms at most.
+  - **A write inside a file updates its size.** A write changes no entry, but it changes the
+    size the listing shows. inotify's watch on the folder hears it (`IN_MODIFY`,
+    `IN_CLOSE_WRITE`, `IN_ATTRIB`). A kqueue watch on a directory does not, so on macOS one
+    `FSEvents` stream with file events covers the followed folders
+    (`kqueue::Queue::follow_contents`, started again when the set changes). It rings the
+    kqueue through an `EVFILT_USER` event, so the follower still waits on one descriptor. A
+    write to a direct child counts, and so does an entry made in a subfolder, whose count
+    the listing shows. Such a folder is listed again after `CONTENT_HOLD` (250 ms) and at
+    that rate at most, though its own stamp did not move: a growing log is a listing four
+    times a second, not one every 50 ms. `FSEvents`' 11 ms does not matter at that pace.
   - **The tile keeps its place.** A new listing of the same directory keeps the selection on
     the same name, or on the same row when that entry went, and does not scroll
     (`FolderView::set_listing`).
   - Numbers in MEASUREMENTS.md, 2026-10-01, "folder tiles on kernel events". Tests: worker
     `tests/fswatch.rs` `each_change_of_a_folders_entries_is_one_report`,
-    `a_write_inside_a_file_of_the_folder_is_no_report`,
+    `a_write_inside_a_file_of_the_folder_is_reported_for_its_size`,
     `a_folder_deleted_and_made_again_is_followed` and the measurement
     `folder_change_to_report`; e2e `a_followed_folder_is_listed_again_when_its_entries_change`;
     ui `a_folder_tile_follows_its_directory_and_keeps_its_place`; proto golden
@@ -742,8 +754,9 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     directory is walked whole. Its 11 ms never shows, since a person does not type that fast
     after a save. A changed `.gitignore`, or events the system dropped, walk the tree again;
     a build churning an ignored `target/` costs nothing, since a directory the index does not
-    hold is not noted. Elsewhere the index looks at its directories' modification times, at
-    most every 500 ms, before a query.
+    hold is not noted. On Linux inotify keeps it fresh ("Quick open's index on Linux follows
+    inotify"). Elsewhere the index looks at its directories' modification times, at most
+    every 500 ms, before a query.
   - **Fuzzy, fzf's scoring.** `nucleo-matcher` (Helix's port of fzf's algorithm) in its path
     mode, smart case: each word typed must match, its letters in order, with bonuses at the
     start of a name or a word in it; ties go to the shorter path. A list past 32 768 paths is
@@ -760,3 +773,68 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `without_events_the_times_of_the_folders_say_what_changed`,
     `the_worker_keeps_one_index_a_worktree_and_lets_the_oldest_go`) and the measurement
     `quick_open_costs`.
+
+- ✅ **Quick open's index on Linux follows inotify** (2026-10-01). A Linux worker's index
+  looked at every directory's time before a query, which is 4 000 `stat`s a keystroke on a
+  200 000-path tree. Now inotify(7) watches each directory the index holds, one watch a
+  directory, read by a thread of the watch's own (`find::watch`, Linux).
+  - **Why not `notify`.** Its recursive mode walks the top and watches every directory under
+    it, ignored or not, so a `target/` or `node_modules/` would spend thousands of the
+    user's watches on paths quick open never shows. The index already walks the tree with the
+    ignore rules, so it watches what it walked and the directories made later.
+  - **Nothing missed between the walk and the watches.** The watches are added after the
+    walk, so each directory's time is then compared with the walk's, and one that moved in
+    between is listed again. A queue overflow (`IN_Q_OVERFLOW`) walks the tree again.
+  - **Out of watches, said and still right.** Past `fs.inotify.max_user_watches` (`ENOSPC`)
+    the index lets the watch go whole, which frees its watches for the file tiles, and looks
+    at its directories' times instead, slower but never stale. The person is told once, in
+    the palette's answer: `WorkerMsg::FoundFiles` carries a `notice`, which the app shows.
+    The same notice says when a tree past 2 million paths is held in part.
+  - **The watch starts beside the walk.** Starting an `FSEvents` stream took 880 ms on a
+    freshly made 200 000-path tree while `fseventsd` was busy, and the first answer waited
+    for it. Now the watch starts on a thread of its own while the walk runs. Until it is up
+    the index looks at directory times, and once it is, every directory's time is compared
+    with the walk's. This holds on macOS and Linux alike.
+  - **A change is merged, not sorted.** Catching up a file made pushed it on the 204 160
+    sorted paths and sorted them all again, which was most of the 17 ms from a file made to
+    its answer. New paths are now merged into the sorted list, a binary search each: 2.4 ms.
+  - Numbers in MEASUREMENTS.md, 2026-10-01, "quick open's index on Linux, and the watch
+    beside the walk". Tests: worker `find::index`
+    (`past_its_watches_the_index_looks_at_times_and_stays_right`, and the ignored
+    `past_the_kernels_watches_the_index_looks_at_times_and_stays_right`, run in a user
+    namespace with the limit lowered, both Linux; `the_index_follows_the_tree`, which counts
+    four watches on Linux; `new_paths_merge_into_the_sorted_ones`) and the proto golden
+    `worker_found_files_notice`. The Linux tests run in a Debian container on binaries
+    cross-built with `cargo zigbuild` (MEASUREMENTS.md has the commands).
+
+- ✅ **A PDF's pages take the keys and select text** (2026-10-01). A PDF tile scrolled only
+  with the pointer, and its text could not be copied.
+  - **Preview's keys.** ↓ and ↑ scroll a few lines, Space and Page Down a screen less a line (⇧Space
+    and Page Up back), → and ← go to the next page's top and back (← inside a page goes to its
+    own top), and Home and End go to the first and last pages. They bind in the tile's key
+    context while it shows a PDF (`FileEditor FilePages`), and the palette lists them with
+    their chords.
+  - **Selection through PDFKit.** CoreGraphics draws the pages but cannot say where text is,
+    so `PDFKit` opens the same bytes the first time a page is pressed (`file::pdf_text`). A
+    drag selects from the press to the pointer through
+    `selectionFromPage:atPoint:toPage:atPoint:`, by character, word (double click) or line
+    (triple click), across pages. Each line's bounds are mapped through the crop box and
+    the page's rotation onto the drawn page and painted in the accent tint. ⌘C copies and
+    ⌘A selects every page. A press off the text drops the selection.
+  - **Where a page is, from the list's layout.** The pages' list scrolls as a layer in
+    gpui-fast, so a scrolled page is not painted again and paint-time bounds go stale. A
+    point is placed on a page from `ListState::bounds_for_item` and the page's padding.
+  - **Bare keys where nothing takes typing.** The settings form refused a bare key outside
+    the folder and project scopes, so it refused the arrows the PDF commands ship with. The
+    rule is now per command: a key alone is allowed when the command's scope allows it, or
+    when every context it binds in holds no text field (`TEXTLESS`: a PDF's pages, a folder
+    tile, a project board). Moving the PDF commands into a scope of their own would have
+    split one tile's commands across two settings tables, and would have left the next
+    textless view inside a typing scope with the same problem.
+  - Numbers in MEASUREMENTS.md, 2026-10-01, "a PDF's page flip and drag". Tests: ui
+    `a_pdfs_keys_page_through_it_and_a_drag_copies_its_text` (the keys, a drag, ⌘C into the
+    clipboard, a double click, ⌘A and a press off the text),
+    `a_point_is_placed_on_its_page_or_the_nearest_one`, `file::pdf_text` (a point on a turned
+    page mapped upright and back), keymap
+    `a_bare_key_binds_where_nothing_takes_typing`, and the timing
+    `timing_of_a_page_flip`.

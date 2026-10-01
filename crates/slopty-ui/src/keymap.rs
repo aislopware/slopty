@@ -167,6 +167,15 @@ impl Command {
         format!("{}.{}", self.scope.name(), self.name)
     }
 
+    /// Whether a key alone is a chord for it: its scope takes them, or every context it binds
+    /// in holds no text to type into ([`TEXTLESS`]), as a PDF's pages in a file tile, whose
+    /// scope also holds the editor's commands.
+    #[must_use]
+    pub fn takes_bare_keys(&self) -> bool {
+        self.scope.takes_bare_keys()
+            || (!self.contexts.is_empty() && self.contexts.iter().all(|c| TEXTLESS.contains(c)))
+    }
+
     /// What it runs.
     #[must_use]
     pub fn action(&self) -> &dyn Action {
@@ -202,6 +211,8 @@ const FILE: Option<&str> = Some(crate::file::CTX);
 const FILE_SEARCH: Option<&str> = Some("FileSearch");
 /// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
 const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
+/// Contexts with no text field in them, where a key alone cannot be wanted for typing.
+const TEXTLESS: [Option<&str>; 3] = [FILE_PAGES, FOLDER, BOARD];
 /// A conversation face, and its composer, where the keyboard sits in a face.
 const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");

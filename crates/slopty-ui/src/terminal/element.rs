@@ -1607,6 +1607,7 @@ impl Element for TerminalElement {
         // A viewport that moved since the last frame brings the scrollbar up in this one.
         let now = cx.background_executor().now();
         self.view.update(cx, |view, cx| view.viewport_drawn(now, cx));
+        let moves = crate::kit::motion(cx);
         let fading;
         let prepared = {
             let view = self.view.read(cx);
@@ -1629,7 +1630,7 @@ impl Element for TerminalElement {
             let grid_cols = state.size().cols;
             let (matches, current) = view.search_highlights().unwrap_or((&[], None));
             let link = view.link_highlight();
-            let shown = view.scrollbar_opacity(now);
+            let shown = view.scrollbar_opacity(now, moves);
             fading = shown > 0.0 && shown < 1.0;
             let scrollbar = (shown > 0.0).then(|| {
                 let held = view.thumb_held();
@@ -3376,7 +3377,7 @@ mod tests {
         view.update(cx, |view, cx| view.apply(history, cx));
         cx.run_until_parked();
         let shown = |cx: &mut gpui::VisualTestContext| {
-            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now()))
+            view.read_with(cx, |v, cx| v.scrollbar_opacity(cx.background_executor().now(), true))
         };
         let gone = |cx: &mut gpui::VisualTestContext| {
             cx.executor().advance_clock(LINGER.saturating_add(FADE));

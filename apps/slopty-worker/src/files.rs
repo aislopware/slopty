@@ -140,8 +140,8 @@ pub async fn save_in_order(
 
 /// Answer a quick-open query under `root`.
 pub async fn find(out: mpsc::Sender<WorkerMsg>, root: String, query: String) {
-    let paths = if query.is_empty() {
-        Vec::new()
+    let answer = if query.is_empty() {
+        slopty_worker::find::Answer::default()
     } else {
         let (dir, needle) = (root.clone(), query.clone());
         tokio::task::spawn_blocking(move || {
@@ -151,7 +151,8 @@ pub async fn find(out: mpsc::Sender<WorkerMsg>, root: String, query: String) {
         .await
         .unwrap_or_default()
     };
-    let _sent = out.send(WorkerMsg::FoundFiles { root, query, paths }).await;
+    let slopty_worker::find::Answer { paths, notice } = answer;
+    let _sent = out.send(WorkerMsg::FoundFiles { root, query, paths, notice }).await;
 }
 
 /// Watch the files behind a client's file tiles: each list `lists` holds replaces the last, and a

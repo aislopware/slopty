@@ -372,6 +372,38 @@ fn the_strip_thumb_shows_only_while_the_strip_moves(cx: &mut TestAppContext) {
     assert!(gone(cx), "gone a while after the pointer left");
 }
 
+/// The strip's thumb fades out once the pointer has left the edge a while; under Reduce
+/// Motion it goes at once, so no frame of a fade is asked for.
+#[gpui::test]
+fn the_strip_thumb_goes_at_once_under_reduce_motion(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    for n in 1..=4 {
+        let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, n);
+    }
+    view.update(cx, |v, _| v.set_animation(true));
+    let strip = cx.debug_bounds("strip").expect("the strip");
+    let near = point(strip.center().x, strip.bottom() - px(10.0));
+    let left_a_while = |cx: &mut VisualTestContext| {
+        cx.simulate_mouse_move(near, None, Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("strip-marks").is_some(), "the pointer near the edge brings it");
+        cx.simulate_mouse_move(strip.center(), None, Modifiers::default());
+        cx.executor().advance_clock(marks::MARKS_HOLD);
+        cx.run_until_parked();
+    };
+    left_a_while(cx);
+    assert!(cx.debug_bounds("strip-marks").is_some(), "it fades where it was");
+    let fading = frames_in_a_second(&view, cx);
+    assert!(fading > 1, "a fade draws frames: {fading}");
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    left_a_while(cx);
+    assert!(cx.debug_bounds("strip-marks").is_none(), "gone at once");
+    let after = frames_in_a_second(&view, cx);
+    assert!(after <= 1, "the frame it goes in at most: {after}");
+    assert_eq!(frames_in_a_second(&view, cx), 0, "then nothing");
+}
+
 /// A worker whose link is up says nothing about it: no word and no mark in the navigator, the
 /// palette or the empty workspace, and a round trip under `RTT_SHOWN_FROM` is not named. Once the
 /// link drops, each says what is wrong with the warn mark and a word, and so does the status bar.

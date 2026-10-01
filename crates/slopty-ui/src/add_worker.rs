@@ -313,6 +313,46 @@ mod tests {
         assert_eq!(install.current(), None);
     }
 
+    /// A busy install bar, counting its frames.
+    struct BusyBar {
+        theme: Theme,
+        renders: u32,
+    }
+
+    impl gpui::Render for BusyBar {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            self.renders = self.renders.saturating_add(1);
+            div().w(px(300.0)).children(bar(&self.theme, Bar::Busy, "busy-bar", cx))
+        }
+    }
+
+    /// The frames a busy bar draws in a second of 120 Hz frames, with Reduce Motion `reduced`.
+    fn busy_frames(cx: &mut gpui::TestAppContext, reduced: bool) -> u32 {
+        cx.update(|cx| cx.set_reduce_motion(reduced));
+        let (view, cx) = cx.add_window_view(|_, _| BusyBar { theme: Theme::default(), renders: 0 });
+        cx.run_until_parked();
+        let before = view.read_with(cx, |v, _| v.renders);
+        for _ in 0..120 {
+            cx.executor().advance_clock(Duration::from_nanos(8_333_333));
+            cx.update(Window::simulate_next_frame);
+            cx.run_until_parked();
+        }
+        view.read_with(cx, |v, _| v.renders).saturating_sub(before)
+    }
+
+    /// A busy bar's segment sweeps, a frame at a time; under Reduce Motion it is a still,
+    /// lighter fill and asks for no frame.
+    #[gpui::test]
+    fn a_busy_bar_sweeps_unless_motion_is_reduced(cx: &mut gpui::TestAppContext) {
+        let sweeping = busy_frames(cx, false);
+        assert!(sweeping > 60, "the sweep draws every frame: {sweeping}");
+        assert_eq!(busy_frames(cx, true), 0, "still under Reduce Motion");
+    }
+
     #[test]
     fn the_buttons_are_sentence_case() {
         for text in [UPDATE, TRY_AGAIN] {

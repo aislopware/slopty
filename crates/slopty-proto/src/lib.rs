@@ -257,6 +257,10 @@ pub enum WorkerMsg {
         query: String,
         /// Paths relative to `root`, best first; a directory ends in `/`.
         paths: Vec<String>,
+        /// Something the person should know about how the worker answers from now on, in a
+        /// sentence for them, said once: its file watches ran out and it looks at folder times
+        /// instead, or the tree is too large to hold whole.
+        notice: Option<String>,
     },
     /// Clipboard sync.
     Clip(transfer::ClipMsg),

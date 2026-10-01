@@ -15,8 +15,9 @@
 //!
 //! Every `--interval` it samples each daemon's physical footprint (`ri_phys_footprint`), open
 //! descriptors and threads (`slopty_testkit::process`). It fails when
-//! - a daemon's footprint grows, by least squares over the last two thirds of the load, faster than
-//!   [`SLOPE_KIB_PER_MIN`];
+//! - a daemon's footprint grows faster than [`SLOPE_KIB_PER_MIN`] by the Theil–Sen slope over the
+//!   load after its first [`UNJUDGED_SECONDS`], judged once that spans [`SLOPE_WINDOW_SECONDS`] (a
+//!   shorter load prints its slope as not judged);
 //! - a daemon's peak footprint passes its [`PEAK_MIB`] budget;
 //! - a daemon holds more descriptors or threads after the load has settled than before it;
 //! - `leaks <pid>` finds a leak in a daemon at the end (exit 1; `man leaks`);
@@ -62,6 +63,27 @@ use crate::tools::{repo_root, step};
 /// Growth a daemon's footprint may show over the load, in KiB a minute.
 const SLOPE_KIB_PER_MIN: f64 = 64.0;
 
+/// The first stretch of load, in seconds, that the slope leaves out.
+///
+/// With a stream lane, the worker's small-allocation pages climb 5 to 6 MiB to their high-water
+/// mark over its first five to seven minutes of streaming, the fill's three included, and hold
+/// there for the rest of a 30-minute load. Its live heap did not grow over the same stretch
+/// (`malloc_history`): the allocator keeps the pages the most streams and sessions at once
+/// needed. The climb ends about 400 s into the load.
+const UNJUDGED_SECONDS: f64 = 300.0;
+
+/// The shortest stretch of load, in seconds, whose footprint slope is judged against
+/// [`SLOPE_KIB_PER_MIN`].
+///
+/// The allocator takes and gives back its regions in steps of 16 KiB to 2.5 MiB, ptyd's
+/// footprint wanders by 1 MiB, and the worker's by 18 to 35 MiB of `IOSurface` as streams open
+/// and close. So a footprint with no growth under it still moves. Over seven soaks, most of them
+/// run three at once, the largest Theil–Sen slope of any window starting [`UNJUDGED_SECONDS`] or
+/// more into the load was 179 KiB/min over 600 s, and 47 over 900 s and 32 over 1 200 s in the
+/// two 30-minute ones, all of it the worker's with a stream lane (MEASUREMENTS, "the soak's
+/// footprint slope against its window"). From 900 s it stays within the budget.
+const SLOPE_WINDOW_SECONDS: f64 = 900.0;
+
 /// The largest footprint each daemon may reach, in MiB: a few times the first soak's peaks
 /// (server 4, ptyd 24, worker 28; MEASUREMENTS, "the first soak").
 const PEAK_MIB: [(&str, u64); 3] = [("server", 32), ("ptyd", 64), ("worker", 128)];
@@ -71,9 +93,13 @@ const PEAK_MIB: [(&str, u64); 3] = [("server", 32), ("ptyd", 64), ("worker", 128
 /// (104 to 146 MiB; MEASUREMENTS, "Deep checks widened, a stream soak, a loom model").
 const STREAM_PEAK_MIB: u64 = 64;
 
-/// How long the daemons are left alone before a count is compared: past tokio's blocking-pool
-/// keep-alive (10 s), so a thread that is only idle has gone.
-const SETTLE: Duration = Duration::from_secs(12);
+/// How long the daemons are left alone before a count is compared. Tokio's blocking pool ends a
+/// thread idle for 10 s, and those threads' exits can hand the system's dispatch threads work,
+/// which end once idle for about 5 s (of eight started at once, seven ended by 5.5 s and one
+/// stayed, as one does after any dispatch work; measured with `task_threads`).
+/// At 12 s two soaks of seven caught one such dispatch thread still alive (MEASUREMENTS, "the
+/// soak's footprint slope against its window").
+const SETTLE: Duration = Duration::from_secs(20);
 
 /// How long one CLI call may take.
 const CALL: Duration = Duration::from_secs(60);
@@ -111,8 +137,9 @@ const DROPPED_PERMILLE: u64 = 50;
 
 #[derive(Args, Debug, Clone)]
 pub struct SoakOpts {
-    /// How long the load runs, in seconds (the nightly run gives 1200).
-    #[arg(long, default_value_t = 60)]
+    /// How long the load runs, in seconds. The slope is judged over the load after its first
+    /// [`UNJUDGED_SECONDS`], and only once that spans [`SLOPE_WINDOW_SECONDS`].
+    #[arg(long, default_value_t = 1200)]
     pub seconds: u64,
     /// Seconds between samples.
     #[arg(long, default_value_t = 2)]
@@ -190,15 +217,36 @@ fn build(sh: &Shell, debug: bool, no_build: bool) -> Result<Utf8PathBuf> {
     )?;
     for name in BINARIES {
         let built = root.join("target").join(profile).join(name);
-        let copy = dir.join(name);
-        std::fs::copy(&built, &copy).with_context(|| format!("copying {built}"))?;
-        cmd!(sh, "codesign --force --sign - --entitlements {entitlements} {copy}")
-            .quiet()
-            .ignore_stderr()
-            .run()
-            .with_context(|| format!("signing {copy} for leaks"))?;
+        replace_signed(built.as_std_path(), dir.join(name).as_std_path(), |staged| {
+            cmd!(sh, "codesign --force --sign - --entitlements {entitlements} {staged}")
+                .quiet()
+                .ignore_stderr()
+                .run()
+                .with_context(|| format!("signing {} for leaks", staged.display()))
+        })?;
     }
     Ok(dir)
+}
+
+/// Put a copy of `built`, signed by `sign`, at `copy` by renaming it over the old one.
+///
+/// Another soak of this tree may be running these files. A file written in place keeps its
+/// inode, so a running daemon's code pages change under it and a CLI started between the write
+/// and the signature runs unsigned code, and macOS kills both (`SIGKILL`). A rename leaves the
+/// old file whole for whoever runs it.
+fn replace_signed(built: &Path, copy: &Path, sign: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let name = copy.file_name().context("a binary's file name")?.to_string_lossy();
+    let staged = copy.with_file_name(format!(".{name}.{}", std::process::id()));
+    let placed = std::fs::copy(built, &staged)
+        .with_context(|| format!("copying {}", built.display()))
+        .and_then(|_bytes| sign(&staged))
+        .and_then(|()| {
+            std::fs::rename(&staged, copy).with_context(|| format!("placing {}", copy.display()))
+        });
+    if placed.is_err() {
+        let _gone = std::fs::remove_file(&staged);
+    }
+    placed
 }
 
 /// The three daemons on a temporary root.
@@ -904,18 +952,46 @@ fn fill(
     })
 }
 
-/// The least-squares slope of `points` (seconds, bytes), in KiB a minute.
-#[expect(clippy::cast_precision_loss, reason = "a count of samples, far below 2^52")]
+/// The part of the load's `points` (seconds, bytes) whose slope is judged: all but its first
+/// [`UNJUDGED_SECONDS`].
+fn judged_part(points: &[(f64, f64)]) -> &[(f64, f64)] {
+    let Some(&(start, _)) = points.first() else { return points };
+    let from = points.partition_point(|&(at, _)| at - start < UNJUDGED_SECONDS);
+    points.get(from..).unwrap_or_default()
+}
+
+/// The seconds `points` (seconds, bytes) span.
+fn window_seconds(points: &[(f64, f64)]) -> f64 {
+    match (points.first(), points.last()) {
+        (Some(first), Some(last)) => last.0 - first.0,
+        _ => 0.0,
+    }
+}
+
+/// The Theil–Sen slope of `points` (seconds, bytes), in KiB a minute: the median of the slopes
+/// between every pair of points.
+///
+/// The footprint moves in allocator steps and in spikes a few seconds long, and a least-squares
+/// fit follows each of them. The median moves only when most pairs rise. Growth spread over the
+/// window makes them rise; a spike a few samples wide spans almost no pairs, and a single held
+/// step spans more than half only when it falls within `1/(2√n)` of the window's middle.
 fn slope_kib_per_min(points: &[(f64, f64)]) -> Option<f64> {
-    let n = points.len() as f64;
     if points.len() < 3 {
         return None;
     }
-    let mean_x = points.iter().map(|p| p.0).sum::<f64>() / n;
-    let mean_y = points.iter().map(|p| p.1).sum::<f64>() / n;
-    let sxy: f64 = points.iter().map(|p| (p.0 - mean_x) * (p.1 - mean_y)).sum();
-    let sxx: f64 = points.iter().map(|p| (p.0 - mean_x).powi(2)).sum();
-    (sxx > 0.0).then(|| sxy / sxx * 60.0 / 1024.0)
+    let mut slopes: Vec<f64> = points
+        .iter()
+        .enumerate()
+        .flat_map(|(i, a)| points.iter().skip(i.saturating_add(1)).map(move |b| (a, b)))
+        .filter(|(a, b)| b.0 > a.0)
+        .map(|(a, b)| (b.1 - a.1) / (b.0 - a.0))
+        .collect();
+    if slopes.is_empty() {
+        return None;
+    }
+    let middle = slopes.len() / 2;
+    let (_, median, _) = slopes.select_nth_unstable_by(middle, f64::total_cmp);
+    Some(*median * 60.0 / 1024.0)
 }
 
 /// `leaks <pid>`: the verdict line and whether it found none.
@@ -923,17 +999,29 @@ fn leaks(sh: &Shell, pid: i32, report: &Path) -> Result<(bool, String)> {
     let pid = pid.to_string();
     let output = cmd!(sh, "leaks {pid}").quiet().ignore_status().ignore_stderr().output()?;
     std::fs::write(report, &output.stdout)?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let verdict = text
-        .lines()
-        .find(|l| l.starts_with("Process ") && l.contains("leaks for"))
-        .unwrap_or("no verdict line")
-        .trim()
-        .to_owned();
+    let verdict = verdict(&String::from_utf8_lossy(&output.stdout));
     match output.status.code() {
         Some(0) => Ok((true, verdict)),
         Some(1) => Ok((false, verdict)),
         _ => bail!("leaks {pid} failed ({}): {verdict}", output.status),
+    }
+}
+
+/// The verdict of a `leaks` report, `Process 7: 1 leak for 128 total leaked bytes.`, with its
+/// first root leak after it.
+fn verdict(report: &str) -> String {
+    let Some(line) =
+        report.lines().find(|l| l.starts_with("Process ") && l.contains("total leaked bytes"))
+    else {
+        return "no verdict line".to_owned();
+    };
+    let root = report
+        .lines()
+        .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        .find_map(|l| l.split_once("ROOT LEAK: "));
+    match root {
+        Some((_, root)) => format!("{} (first: {})", line.trim(), root.trim()),
+        None => line.trim().to_owned(),
     }
 }
 
@@ -1035,8 +1123,10 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
             .filter(|s| s.daemon == name && s.phase == "load")
             .map(|s| (s.at, s.footprint as f64))
             .collect();
-        let tail = load.get(load.len() / 3..).unwrap_or_default();
+        let tail = judged_part(&load);
         let slope = slope_kib_per_min(tail);
+        let window = window_seconds(tail);
+        let judged = window >= SLOPE_WINDOW_SECONDS;
         let peak = samples.iter().filter(|s| s.daemon == name).map(|s| s.peak).max().unwrap_or(0);
         let streaming =
             if name == "worker" { STREAM_PEAK_MIB.saturating_mul(lanes as u64) } else { 0 };
@@ -1045,7 +1135,7 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
             .find(|(d, _)| *d == name)
             .map_or(u64::MAX, |(_, m)| m.saturating_add(streaming) << 20);
         let (clean, verdict) = leaks(&sh, pid, &out.join(format!("leaks-{name}.txt")))?;
-        if slope.is_some_and(|s| s > SLOPE_KIB_PER_MIN) {
+        if judged && slope.is_some_and(|s| s > SLOPE_KIB_PER_MIN) {
             failures.push(format!(
                 "{name}: footprint grows {:.0} KiB/min, over {SLOPE_KIB_PER_MIN}",
                 slope.unwrap_or(0.0)
@@ -1079,11 +1169,19 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
             failures.push(format!("{name}: {verdict} (leaks-{name}.txt)"));
         }
         println!(
-            "  {name}: footprint {} → {} filled → {} KiB, slope {} KiB/min, peak {} MiB; fds {} → {}; threads {} → {}; {verdict}",
+            "  {name}: footprint {} → {} filled → {} KiB, slope {} KiB/min{}, peak {} MiB; fds {} → {}; threads {} → {}; {verdict}",
             empty.footprint >> 10,
             before.footprint >> 10,
             after.footprint >> 10,
             slope.map_or_else(|| "—".to_owned(), |s| format!("{s:.1}")),
+            if judged {
+                String::new()
+            } else {
+                format!(
+                    " (not judged: {window:.0} s of load after the first {UNJUDGED_SECONDS:.0}, \
+                     {SLOPE_WINDOW_SECONDS:.0} s needed)"
+                )
+            },
             peak >> 20,
             before.fds,
             after.fds,
@@ -1097,6 +1195,8 @@ fn soak(stack: &Stack, opts: &SoakOpts, out: &Path) -> Result<Value> {
                 "footprint_baseline": before.footprint,
                 "footprint_end": after.footprint,
                 "slope_kib_per_min": slope,
+                "slope_window_s": window,
+                "slope_judged": judged,
                 "peak": peak,
                 "peak_budget": peak_budget,
                 "fds": [before.fds, after.fds],
@@ -1177,14 +1277,89 @@ mod tests {
         assert_eq!(grown(&before, &after), "+1 tokio-rt-worker");
     }
 
+    /// Twenty minutes of load sampled every 2 s at 4 MiB in 16 KiB steps: 6 MiB taken over the
+    /// first five minutes (the allocator reaching its high-water mark), then three 17 MiB spikes
+    /// two samples wide and 1 MiB taken at 900 s and held. The judged part leaves the climb out
+    /// and reads no growth, and the same with 128 KiB a minute of growth under it reads that.
     #[test]
-    fn the_slope_is_the_least_squares_fit() {
+    fn a_climb_spikes_and_a_held_step_read_as_no_growth_and_growth_reads_its_rate() {
+        let footprint = |kib_per_min: f64| -> Vec<(f64, f64)> {
+            (0..=600_u32)
+                .map(|i| {
+                    let at = f64::from(i * 2);
+                    let climbed = (at.min(300.0) / 300.0 * 6144.0 / 16.0).floor() * 16.0;
+                    let spike = [450.0, 750.0, 1050.0].iter().any(|s| (*s..*s + 4.0).contains(&at));
+                    let grown = (at / 60.0 * kib_per_min / 16.0).floor() * 16.0;
+                    let held = if at >= 900.0 { 1024.0 } else { 0.0 };
+                    let spiked = if spike { 17.0 * 1024.0 } else { 0.0 };
+                    let kib = 4096.0 + climbed + grown + held + spiked;
+                    (at, kib * 1024.0)
+                })
+                .collect()
+        };
+        let still = footprint(0.0);
+        let judged = judged_part(&still);
+        assert!(window_seconds(judged) >= SLOPE_WINDOW_SECONDS);
+        let slope = slope_kib_per_min(judged).unwrap_or(f64::NAN);
+        assert!(slope.abs() < 1.0, "no growth read as {slope} KiB/min");
+        let whole = slope_kib_per_min(&still).unwrap_or(f64::NAN);
+        assert!(whole > SLOPE_KIB_PER_MIN, "the climb, judged, reads {whole} KiB/min");
+        let growing = slope_kib_per_min(judged_part(&footprint(128.0))).unwrap_or(f64::NAN);
+        assert!((growing - 128.0).abs() < 128.0 * 0.1, "128 KiB/min read as {growing}");
+    }
+
+    /// A soak staging its daemons leaves the file another soak is running whole: what was open
+    /// still reads the old bytes, the path reads the new ones, and nothing is left beside them.
+    #[test]
+    fn a_staged_binary_replaces_the_path_and_leaves_the_running_file_whole() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("soak-stage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let built = dir.join("built");
+        let copy = dir.join("slopty-worker");
+        std::fs::write(&built, "new")?;
+        std::fs::write(&copy, "old")?;
+        let mut running = File::open(&copy)?;
+        replace_signed(&built, &copy, |staged| {
+            ensure!(staged != copy, "signed in place");
+            ensure!(std::fs::read_to_string(&copy)? == "old", "the path changed before the rename");
+            Ok(())
+        })?;
+        let mut was = String::new();
+        std::io::Read::read_to_string(&mut running, &mut was)?;
+        assert_eq!(was, "old", "the running file was written in place");
+        assert_eq!(std::fs::read_to_string(&copy)?, "new");
+        assert_eq!(std::fs::read_dir(&dir)?.count(), 2, "a staged copy was left behind");
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// `leaks` says `1 leak for` and `2 leaks for`, and names each root leak, after its stack under
+    /// `MallocStackLogging`.
+    #[test]
+    fn a_leaks_verdict_reads_in_the_singular_and_names_the_root() {
+        let one = "Process 83979: 56282 nodes malloced for 16716 KB\n\
+                   Process 83979: 1 leak for 128 total leaked bytes.\n\n\
+                   STACK OF 1 INSTANCE OF 'ROOT LEAK: <NSPasteboard>':\n\
+                   0   libsystem_malloc.dylib  0x1873d0820 _malloc_zone_calloc + 132\n====\n    \
+                   1 (128 bytes) ROOT LEAK: <NSPasteboard 0x78beeeff80> [128]\n";
+        assert_eq!(
+            verdict(one),
+            "Process 83979: 1 leak for 128 total leaked bytes. (first: <NSPasteboard 0x78beeeff80> \
+             [128])"
+        );
+        let none = "Process 7: 0 leaks for 0 total leaked bytes.\n";
+        assert_eq!(verdict(none), "Process 7: 0 leaks for 0 total leaked bytes.");
+        assert_eq!(verdict("leaks: cannot examine process"), "no verdict line");
+    }
+
+    #[test]
+    fn the_slope_is_the_median_of_the_pairwise_slopes() {
         let rising: Vec<(f64, f64)> =
             (0..10).map(|s| (f64::from(s), f64::from(s) * 1024.0)).collect();
-        let slope = slope_kib_per_min(&rising).unwrap();
+        let slope = slope_kib_per_min(&rising).unwrap_or(f64::NAN);
         assert!((slope - 60.0).abs() < 1e-9, "1 KiB a second is 60 KiB a minute: {slope}");
         let flat: Vec<(f64, f64)> = (0..10).map(|s| (f64::from(s), 5.0)).collect();
-        assert!(slope_kib_per_min(&flat).unwrap().abs() < 1e-9, "flat");
+        assert!(slope_kib_per_min(&flat).is_some_and(|s| s.abs() < 1e-9), "flat");
         assert_eq!(slope_kib_per_min(&rising[..2]), None, "two points fit anything");
     }
 

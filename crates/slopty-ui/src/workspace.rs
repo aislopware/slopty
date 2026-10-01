@@ -135,6 +135,9 @@ const ECHO_SLACK: Duration = Duration::from_nanos(16_666_667);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Region {
     Navigator,
+    /// The navigator's rows, inside its panel: the list's wheel builds this view alone,
+    /// not the panel with its filter field.
+    NavigatorRows,
     Titlebar,
     Statusbar,
 }
@@ -189,9 +192,10 @@ impl gpui::Render for StripHost {
     }
 }
 
-/// The chrome's three views.
+/// The chrome's views.
 struct Chrome {
     navigator: Entity<ChromeView>,
+    nav_rows: Entity<ChromeView>,
     titlebar: Entity<ChromeView>,
     statusbar: Entity<ChromeView>,
 }
@@ -211,6 +215,7 @@ impl Chrome {
         };
         Self {
             navigator: view(Region::Navigator),
+            nav_rows: view(Region::NavigatorRows),
             titlebar: view(Region::Titlebar),
             statusbar: view(Region::Statusbar),
         }
@@ -223,9 +228,9 @@ impl Chrome {
         }
     }
 
-    /// The three views.
-    fn ids(&self) -> [gpui::EntityId; 3] {
-        [&self.navigator, &self.titlebar, &self.statusbar].map(Entity::entity_id)
+    /// The views.
+    fn ids(&self) -> [gpui::EntityId; 4] {
+        [&self.navigator, &self.nav_rows, &self.titlebar, &self.statusbar].map(Entity::entity_id)
     }
 }
 
@@ -1333,6 +1338,7 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         match region {
             Region::Navigator => self.render_navigator_region(window, cx),
+            Region::NavigatorRows => self.render_navigator_rows(window, cx),
             Region::Titlebar => self.render_titlebar(window, cx),
             Region::Statusbar => self.render_statusbar(window, cx),
         }
@@ -1369,18 +1375,24 @@ impl WorkspaceView {
         }
         let view = match region {
             Region::Navigator => self.chrome.navigator.entity_id(),
+            Region::NavigatorRows => self.chrome.nav_rows.entity_id(),
             Region::Titlebar => self.chrome.titlebar.entity_id(),
             Region::Statusbar => self.chrome.statusbar.entity_id(),
         };
         window.on_next_frame(move |_window, cx| cx.notify(view));
     }
 
-    /// How many times each region of the chrome has drawn: the navigator, the title bar, the
-    /// status bar.
+    /// How many times each region of the chrome has drawn: the navigator (its panel and its
+    /// rows together), the title bar, the status bar.
     #[cfg(test)]
     fn chrome_renders(&self, cx: &App) -> [usize; 3] {
         let chrome = &self.chrome;
-        [&chrome.navigator, &chrome.titlebar, &chrome.statusbar].map(|v| v.read(cx).renders)
+        let renders = |view: &Entity<ChromeView>| view.read(cx).renders;
+        [
+            renders(&chrome.navigator).saturating_add(renders(&chrome.nav_rows)),
+            renders(&chrome.titlebar),
+            renders(&chrome.statusbar),
+        ]
     }
 
     /// The length of every map and list the workspace keeps per tile, session or worker, by
@@ -1451,7 +1463,7 @@ impl WorkspaceView {
     /// who sizes the PTY is its header's.
     fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
         let Some((was, now)) = self.copy_shell(session, cx) else { return };
-        let (navigator, strip) = (self.chrome.navigator.entity_id(), self.strip_host.entity_id());
+        let (navigator, strip) = (self.chrome.nav_rows.entity_id(), self.strip_host.entity_id());
         if was.running != now.running {
             self.number_twins();
             App::notify(cx, navigator);
@@ -1835,7 +1847,9 @@ impl WorkspaceView {
             Some(navigator::Mode::Docked) => {
                 let width = px(self.navigator_width());
                 let handle = Self::render_handle(width, cx);
-                (Some(navigator.cached(column(width))), None, None, Some(handle))
+                // Not cached, as in `navigator_over`.
+                let column = gpui::div().flex_none().h_full().w(width).flex().child(navigator);
+                (Some(column.into_any_element()), None, None, Some(handle))
             }
             Some(mode) => {
                 (None, None, Some(self.navigator_over(mode, navigator, window, cx)), None)
@@ -1891,7 +1905,9 @@ impl WorkspaceView {
         };
         let safe = window.insets().effective();
         let width = px(self.navigator_panel_width(mode, window)) + safe.left;
-        let panel = panel.cached(StyleRefinement::default().h_full().w(width));
+        // Not cached: a cached view is built again whenever a view in it is, and a scroll of
+        // the rows' view inside it then rebuilt the panel and its filter field.
+        let panel = gpui::div().h_full().w(width).flex().child(panel);
         let handle = (mode == navigator::Mode::Overlay).then(|| Self::render_handle(width, cx));
         let sheet = || {
             Animation::new(slopty_theme::Motion::DEFAULT.sheet).with_easing(crate::kit::drawer())

@@ -675,6 +675,16 @@ mod golden {
                 root: "~".to_owned(),
                 query: "main".to_owned(),
                 paths: vec!["w/slopty/src/main.rs".to_owned(), "w/manuals/".to_owned()],
+                notice: None,
+            },
+        );
+        snap(
+            "worker_found_files_notice",
+            &WorkerMsg::FoundFiles {
+                root: "/w/big".to_owned(),
+                query: "view".to_owned(),
+                paths: vec!["src/view.rs".to_owned()],
+                notice: Some("Quick open on mac-studio ran out of file watches".to_owned()),
             },
         );
         snap(

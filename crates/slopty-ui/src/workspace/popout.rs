@@ -38,6 +38,8 @@ pub(crate) const OPEN_OWN_WINDOW: &str = "Open in its own window";
 pub(crate) const BACK_TO_WORKSPACE: &str = "Back to the workspace";
 /// What a tile says while its picture is in a window of its own.
 pub(crate) const IN_OWN_WINDOW: &str = "In its own window";
+/// What a click on such a tile does, said to a screen reader.
+pub(crate) const SHOW_OWN_WINDOW: &str = "Show its window";
 /// How long the window holds a size before the remote window is asked to take it: a drag of
 /// its corner asks once, at the end.
 const RESIZE_SETTLE: Duration = Duration::from_millis(250);

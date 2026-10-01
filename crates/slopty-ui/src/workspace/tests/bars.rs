@@ -220,6 +220,62 @@ fn the_active_tab_joins_the_content_on_the_bars_midline(cx: &mut TestAppContext)
     assert_eq!((at(cx, "ws-tab-0"), at(cx, "ws-tab-1")), before, "switching moved a tab");
 }
 
+/// A worker's actions in the hosts popover wait for the pointer, and the keyboard brings
+/// them too: an action that holds the focus is drawn with its ring. A screen reader finds
+/// them in the tree either way, buttons with their names.
+#[gpui::test]
+fn the_keyboard_reaches_a_workers_actions(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    // The popover lands at once, so a ring is drawn at its full strength.
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    let laptop = connect(&view, cx, 1, "laptop");
+    let laptop_key = laptop.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(laptop_key, WorkerStatus::Reconnecting("lost".into()), cx);
+        let none: MenuRun = Rc::new(|_w, _cx| {});
+        let actions = HostActions {
+            connect: Some(Rc::clone(&none)),
+            forget: Some(Rc::clone(&none)),
+            wake: None,
+        };
+        v.set_host_actions(std::iter::once((laptop_key, actions)).collect(), None, cx);
+    });
+    cx.run_until_parked();
+    click(cx, "status-workers");
+    let nodes = tree(cx);
+    for name in ["Connect", "Forget"] {
+        assert!(nodes.iter().any(|n| n.is("Button", Some(name))), "{name}: {nodes:#?}");
+    }
+    let actions = ["connect", "forget"]
+        .map(|part| cx.debug_bounds(leak(format!("hosts-{part}-{laptop_key}"))).expect("laid out"));
+    let ring =
+        crate::colors::hsla_alpha(Theme::default().surfaces.accent, slopty_theme::alpha::STRONG);
+    let ringed = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
+        // A stop's ring stands two of its widths clear all round, as `a11y::tab_stop` draws it.
+        let around =
+            |b: &Bounds<Pixels>| 4.0_f32.mul_add(crate::a11y::RING, f32::from(b.size.width));
+        quads.iter().any(|q| {
+            let at = point(px(q.bounds.center().x.0 / scale), px(q.bounds.center().y.0 / scale));
+            let wide = q.bounds.size.width.0 / scale;
+            q.border_color == ring
+                && actions.iter().any(|b| b.contains(&at) && (wide - around(b)).abs() < 0.5)
+        })
+    };
+    assert!(!ringed(cx), "at rest, nothing of them is drawn");
+    // Along the ring a stop at a time, the keyboard the last input (a key that moves
+    // nothing), until an action holds the focus.
+    for _ in 0..16 {
+        if ringed(cx) {
+            break;
+        }
+        cx.update(Window::focus_next);
+        cx.simulate_keystrokes("f19");
+    }
+    assert!(ringed(cx), "an action focused from the keyboard is drawn, with its ring");
+}
+
 /// "N workers" shows, with a dot, once a worker is not up, and opens the hosts popover: each worker
 /// with its round trip or what is wrong, the app's connect and forget under the pointer, and
 /// a way to add one. A row goes to its worker; a click elsewhere closes it.
