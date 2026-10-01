@@ -12922,3 +12922,75 @@ shown meanwhile); past it the tile is plain text and lists none.
 ```sh
 cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_editor_helpers --no-capture
 ```
+
+## 2026-10-02 — pseudo-terminals in the tests lane, and a refusal far below the limit
+
+CI's tests lane twice had `/dev/ptmx` refuse an open with ENXIO, which `slopty-pty` reports as
+"every pseudo-terminal the system allows is in use (kern.tty.ptmx_max)" (runs 36817494749 and
+36892141848). Both times the test was `slopty-pty::spawn`
+`shells_start_while_other_threads_allocate_and_hold_locks`, and in the first run its neighbour
+`no_descriptor_of_the_daemon_leaks_into_a_shell` failed too. A `lsof -n /dev/ptmx`
+after the lane found nobody holding one.
+
+**What the tests hold.** The tests lane as CI runs it (`cargo xtask gate --ci --lane tests`) on a
+`git archive` of 9f34d7cb, on mac-studio (Darwin 27.0.1) under `nice -n 10`, counted every
+200 ms by `cargo xtask ptys`. A pair counts once whether its master, its slave or both are held,
+by any process under the gate or any that left it with the run's `NEXTEST_WORKSPACE_ROOT`.
+
+| Run | Test threads | Wall | Peak held by the tests | Lowest free minor at the peak | Held after their test |
+| --- | --- | --- | --- | --- | --- |
+| HEAD | 10 (this Mac) | 77 s | 25 | 17 | none |
+| HEAD | 3 (a runner's cores) | 171 s | 18 | 23 | none |
+| HEAD, `regrown`, the sampler in the lane | 3 | 327 s (load 24 to 58 from other sessions) | 16 | 18 | one `bash`, in one sample (under the grace) |
+
+The third run's lane failed on one test, which the count did not cause: `slopty-pty`
+`the_tty_is_the_controlling_terminal_of_the_child` read `dd`'s statistics up to "records out", so
+when the last line came in a read of its own nobody read it, and `dd`, a session leader whose
+exit waits for its tty to drain, never exited (180 s, the timeout).
+
+At the peak of the first run, `shells_start_while_other_threads_allocate_and_hold_locks` held 16,
+`no_descriptor_of_the_daemon_leaks_into_a_shell` 2, and seven processes of the `slopty-pty`
+shell integration tests (`fish`, `bash`, `sh`, `git`, `xcodebuild`) one each. No other test held
+more than 4 at once: `slopty-worker::agent_open` 4, the `slopty-cli::projects` tests 3 each.
+Over the whole run the probe's lowest free minor never passed 30, the most this user held, so no
+pair was held out of the census's sight. CI's `JUnit` reports agree: at both failures three tests
+ran (the runner has three cores), the two spawn tests and `slopty-predict::editing`, which opens
+none, so at most about 20 were held, and `slopty-ptyd` tests opening pairs 1.4 s later passed.
+
+**What refuses the open.** XNU's table of pairs (`bsd/kern/tty_ptmx.c`, xnu-12377.121.6) grows
+16 slots at a time and never shrinks. `ptmx_clone` hands an open the first empty slot, or the
+slot one past the table when it is full. `ptmx_get_ioctl` grows the table only when no slot is
+free, so when a pair is closed between the two, the table stays as it is, the minor is out of its
+range, and the open fails with ENXIO ("minor number %d was out of range"). It takes a full table
+and a close at that moment, so it shows on a freshly booted Mac whose table has never grown past
+what the tests hold: a hosted runner is one, and this Mac, after days of sessions, is not.
+
+`slopty-pty --test ptmx_churn` (ignored) opens 400 pairs and holds them while four threads open
+and close one each. On the macOS 26.6.2 guest (`slopty-26-dev`, tart, 4 cores, limit 511), each
+run on a fresh boot:
+
+| `open_master` | Refused while 400 were opened | Held at each refusal |
+| --- | --- | --- |
+| as at 9f34d7cb | 12; 14 | 14, 46, 62, 158, ... 396; 30, 46, 62, 94, ... 397 |
+| made again on ENXIO (`regrown`, up to 16 times) | 0; 0; 0 | — |
+
+Each refusal came with the held pairs, the churners and the guest's own two or three summing to
+a multiple of 16: the table was full. A second run on the same boot refused none either way,
+since the table had already grown past 400. CI's two failing tests, run unchanged but with 120
+shells in flight, passed on two fresh boots: the race is rare at a dozen pairs and certain over
+a few hundred.
+
+**The sampler's cost.** 17.6 to 18.9 ms a sample here, with some 640 processes of this user, and
+10.5 ms in the guest: under a tenth of a core at one sample every 200 ms.
+
+```sh
+# the tests lane, counted (here, or on a runner, which runs it in every tests lane)
+cargo xtask ptys --workspace "$PWD" -- nice -n 10 cargo xtask gate --ci --lane tests
+# three test threads, as a runner has
+NEXTEST_TEST_THREADS=3 cargo xtask ptys --workspace "$PWD" -- cargo xtask gate --ci --lane tests
+# the refusal, in a freshly booted guest
+cargo xtask vm start
+cargo nextest run -p slopty-pty --test ptmx_churn --no-run   # then copy the binary in
+cargo xtask vm ssh -- '/tmp/ptmx_churn --ignored --nocapture'
+cargo xtask vm stop
+```

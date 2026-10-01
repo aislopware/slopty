@@ -193,18 +193,45 @@ const REDRIVES: usize = 64;
 /// never hangs its shell up. `posix_openpt` is this `open` on macOS and Linux, and rustix
 /// passes it `O_CLOEXEC` only on Linux.
 fn open_master() -> io::Result<OwnedFd> {
-    redriven(|| {
-        rustix::fs::open(
-            c"/dev/ptmx",
-            OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
+    regrown(|| {
+        redriven(|| {
+            rustix::fs::open(
+                c"/dev/ptmx",
+                OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+        })
     })
     .map_err(exhausted)
 }
 
-/// ENXIO from the clone device means every pseudo-terminal the system allows is open: said so,
-/// with the limit to raise, instead of "Device not configured".
+/// How many times [`regrown`] makes again an open refused with ENXIO.
+const REGROWS: usize = 16;
+
+/// `open`, made again while it fails with ENXIO, giving way to other threads in between, up to
+/// [`REGROWS`] times; then the last refusal. XNU refuses an open of the clone device with ENXIO
+/// when its table of pairs is full and a pair is closed at that moment, far below the limit
+/// (`bsd/kern/tty_ptmx.c`): the clone hands out the minor one past the table, the close frees a
+/// slot, so the open does not grow the table, and that minor is out of its range. The table
+/// grows 16 at a time and never shrinks, so on a freshly booted Mac (a CI runner) the open that
+/// fills each 16 beside closes can be refused: 12 and 14 times in 400 opens beside four threads
+/// opening and closing, each with a multiple of 16 in use, and 0 times made again so, on a
+/// macOS 26.6 guest (`docs/MEASUREMENTS.md`, 2026-10-02). The open made again takes the freed
+/// slot; a system out of pairs refuses every time.
+fn regrown<T>(mut open: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let refused = Some(rustix::io::Errno::NXIO.raw_os_error());
+    for _ in 0..REGROWS {
+        match open() {
+            Err(e) if e.raw_os_error() == refused => std::thread::yield_now(),
+            opened => return opened,
+        }
+    }
+    open()
+}
+
+/// ENXIO from the clone device, refused again after [`regrown`], means every pseudo-terminal
+/// the system allows is open: said so, with the limit to raise, instead of "Device not
+/// configured".
 fn exhausted(error: io::Error) -> io::Error {
     if error.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) {
         io::Error::new(
@@ -667,8 +694,9 @@ mod tests {
         let mut dd = pty.spawn(&spec(&["dd", "if=/dev/tty", "of=/dev/null", "count=1"])).unwrap();
         let master = PtyMaster::new(pty.into_master()).unwrap();
         master.write_all(b"line\n").await.unwrap();
-        // Its closing statistics go to the tty, and it cannot finish exiting until they are read.
-        read_until(&master, b"records out").await;
+        // Its closing statistics go to the tty, and it cannot finish exiting until they are all
+        // read: the last of its three lines, which may come in a read of its own.
+        read_until(&master, b"bytes transferred").await;
         let status = dd.child.wait().await.unwrap();
         assert_eq!(status.code(), Some(0), "dd could not open /dev/tty: {status:?}");
 
@@ -846,6 +874,39 @@ mod tests {
         let path = dir.path().as_os_str().to_owned();
         let error = executable("slopty-unrunnable", Path::new("/"), Some(&path)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}");
+    }
+
+    /// An open refused while the kernel's table of pairs grows is made again until it takes;
+    /// one refused every time is refused as exhaustion, named so; any other failure comes back
+    /// at once.
+    #[test]
+    fn an_open_refused_as_the_table_grows_is_made_again() {
+        let refused = || io::Error::from_raw_os_error(rustix::io::Errno::NXIO.raw_os_error());
+        let mut tries = 0_usize;
+        let opened = regrown(|| {
+            tries = tries.saturating_add(1);
+            if tries < 3 { Err(refused()) } else { Ok(tries) }
+        });
+        assert_eq!(opened.unwrap(), 3);
+
+        let mut tries = 0_usize;
+        let error = regrown(|| {
+            tries = tries.saturating_add(1);
+            Err::<(), _>(refused())
+        })
+        .map_err(exhausted)
+        .unwrap_err();
+        assert_eq!(tries, REGROWS.saturating_add(1));
+        assert_eq!(error.kind(), io::ErrorKind::ResourceBusy, "{error}");
+        assert!(error.to_string().contains("kern.tty.ptmx_max"), "{error}");
+
+        let mut tries = 0_usize;
+        let error = regrown(|| {
+            tries = tries.saturating_add(1);
+            Err::<(), _>(io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()))
+        })
+        .unwrap_err();
+        assert_eq!((error.kind(), tries), (io::ErrorKind::PermissionDenied, 1));
     }
 
     #[test]

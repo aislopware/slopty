@@ -27,6 +27,7 @@ mod land;
 mod linux;
 mod nightly;
 mod prune;
+mod ptys;
 mod release;
 mod run;
 mod runner;
@@ -263,6 +264,19 @@ enum Cmd {
     /// `create`, `start`/`stop`, `ssh`, `exec`, `deploy`, `live -p <crate> -- <nextest args>`,
     /// `e2e`, `list`, `prune`.
     Vm(vm::VmOpts),
+    /// Run a command and count who holds the pseudo-terminals while it runs, every 200 ms: the
+    /// peak and the tests and processes that made it up, and any held after its test ended.
+    Ptys {
+        /// The workspace whose tests count when they left the command's tree.
+        #[arg(long)]
+        workspace: Option<camino::Utf8PathBuf>,
+        /// Where each sample is written (`ms ours visible lowest-free`).
+        #[arg(long, default_value = "target/logs/ptys.log")]
+        log: camino::Utf8PathBuf,
+        /// The command, after `--`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<std::ffi::OsString>,
+    },
     /// A real tailnet on loopback for the live tests: Headscale and two userspace `tailscaled`
     /// nodes with a Slopty grant between them (`up` holds it until Ctrl-C or `down`; `status`
     /// prints what a test reads).
@@ -356,5 +370,13 @@ fn main() -> Result<()> {
         Cmd::TestRunner { binary, args } => runner::exec(&binary, &args),
         Cmd::Vm(opts) => vm::run(&sh, &opts),
         Cmd::Tailnet { cmd } => tailnet::run(&cmd),
+        Cmd::Ptys { workspace, log, command } => {
+            let root = tools::repo_root()?;
+            ptys::watch(
+                &workspace.map_or_else(|| root.clone(), |w| root.join(w)),
+                &root.join(log),
+                &command,
+            )
+        }
     }
 }

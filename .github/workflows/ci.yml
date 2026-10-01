@@ -70,19 +70,18 @@ jobs:
         run: brew install zig
       - run: cargo xtask setup --lane ${{ matrix.lane }}
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
+      # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
+      # and fails on a leak, on more than its budget, or on running out.
       - run: cargo xtask gate --ci --lane ${{ matrix.lane }}
-      # Who holds the pseudo-terminals when the tests lane fails: the runner allows 511, as a Mac
-      # does, and the suite once ran out of them (run 36817494749).
-      - if: failure() && matrix.lane == 'tests'
-        run: lsof -n /dev/ptmx
-      # What a slow run is read from afterwards: each test's time, each unit of the build's, and
-      # how much of the build the compile cache served.
+      # What a slow run is read from afterwards: each test's time, each unit of the build's, how
+      # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
         uses: actions/upload-artifact@v4
         with:
           name: timings
           path: |
             target/**/nextest/ci/junit.xml
+            target/**/nextest/ci/ptys.log
             target/**/cargo-timings/cargo-timing.html
           if-no-files-found: ignore
       - if: always() && matrix.lane != 'tools'

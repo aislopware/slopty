@@ -34,9 +34,10 @@ mod spawn {
             .collect();
 
         let missing = std::env::temp_dir().join("slopty-no-such-dir-for-spawn");
-        // The race under test is spawns against threads that allocate and hold locks, not
-        // running the system out of pseudo-terminals, which a CI runner beside other PTY tests
-        // does at 120 open at once (ENXIO).
+        // The race under test is spawns against threads that allocate and hold locks, which 16
+        // in flight on four workers reach as 120 would. More at once only holds more
+        // pseudo-terminals, which the gate's tests lane counts against its budget
+        // (`xtask/src/ptys.rs`).
         let in_flight = Arc::new(tokio::sync::Semaphore::new(16));
         let spawns: Vec<_> = (0..120_usize)
             .map(|i| {

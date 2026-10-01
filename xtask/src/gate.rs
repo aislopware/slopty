@@ -482,7 +482,9 @@ const SPAWNED_BINS: [&str; 10] = [
 
 /// The gate's tests: build every test binary, then run nextest's `profile` (on `only`'s
 /// packages when given) and the doctests side by side. Cargo holds the target dir's lock only
-/// while it builds, and the build is done, so neither waits for the other.
+/// while it builds, and the build is done, so neither waits for the other. Meanwhile
+/// [`crate::ptys`] counts the pseudo-terminals they hold: the lane fails on a leak, on more than
+/// its budget at once, or on the system running out, naming the tests.
 fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) -> Result<()> {
     // On a runner, `--timings` leaves `cargo-timing.html` in the target dir for CI to keep: what
     // each unit of the build cost. Here it would pile up a report per gate.
@@ -501,7 +503,12 @@ fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) 
         let expr = packages.iter().map(|p| format!("package(={p})")).collect::<Vec<_>>();
         vec!["--no-tests=warn".to_owned(), "-E".to_owned(), expr.join(" | ")]
     });
-    std::thread::scope(|scope| {
+    let tree = Utf8PathBuf::from_path_buf(sh.current_dir())
+        .map_err(|p| anyhow::anyhow!("the tree's path is not UTF-8: {}", p.display()))?;
+    // Beside the JUnit report, which CI keeps.
+    let log = tree.join("target").join("nextest").join(profile).join("ptys.log");
+    let ptys = crate::ptys::Sampler::start(std::process::id(), &tree, Some(log));
+    let (tests, doctests) = std::thread::scope(|scope| {
         let doctests = scope
             .spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test --workspace --doc")));
         let tests = quiet_step(
@@ -509,9 +516,11 @@ fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) 
             cmd!(sh, "cargo nextest run --workspace --profile {profile} {filter...}")
                 .env(crate::runner::RUNNER_VAR, &runner),
         );
-        let doctests = join(doctests);
-        tests.and(doctests)
-    })
+        (tests, join(doctests))
+    });
+    let ptys = ptys.finish();
+    print!("{}", ptys.report());
+    both(both(tests, doctests), ptys.verdict())
 }
 
 /// Sync the **index** (what `git commit` would record, not the working tree) into

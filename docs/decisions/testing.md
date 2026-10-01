@@ -985,3 +985,26 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     0.5 MB per execution. Plain `ReleaseFast` and `ReleaseSafe` builds of the same inputs stay
     flat at 8 to 12 MB, and LeakSanitizer reports no leak. The terminal target therefore gets an
     8 GiB RSS limit, the others 2 GiB, and every target a 2 GiB limit on any one allocation.
+
+- ✅ **The tests lane counts pseudo-terminals while it runs; a refused `/dev/ptmx` is opened
+  again** (2026-10-02). CI's tests lane twice had an open of `/dev/ptmx` refused with ENXIO,
+  which read as all 511 pairs in use, and a `lsof` after the lane found none held. Counted
+  every 200 ms while the lane ran, the tests held 25 at most (18 with a runner's three
+  threads), and no process kept one past its test (`docs/MEASUREMENTS.md`, 2026-10-02). The
+  refusal is XNU's: its table of pairs grows 16 at a time, and an open that finds it full
+  fails when another pair is closed at that moment (`bsd/kern/tty_ptmx.c`). A freshly booted
+  runner meets it, as a guest on a fresh boot did 12 and 14 times in 400 opens. So:
+  - `slopty-pty` opens again, up to 16 times, an open refused with ENXIO, and only one still
+    refused is reported as exhaustion. The guest then refused none.
+  - The tests lane runs a sampler beside nextest (`xtask/src/ptys.rs`, also `cargo xtask ptys
+    -- <command>`). It lists this user's processes and their character devices, counts the
+    pairs held under the gate or by processes that left it with the run's
+    `NEXTEST_WORKSPACE_ROOT`, and names each holder by the `NEXTEST_BINARY_ID` and
+    `NEXTEST_TEST_NAME` it inherited, or by its parent's when it is one of Apple's programs,
+    whose environment no other process may read. It opens one master after each count, whose
+    minor, the lowest free, bounds what the count cannot see. The lane fails, naming the tests,
+    on a process holding a pair 2 s after its test ended, on more than 128 at once (a quarter
+    of the limit, five times the suite's peak), or on the system refusing an open 16 times in a
+    row. The samples go beside the `JUnit` report, which CI keeps, in place of the `lsof` step.
+  - The pairs are counted, never timed. No nextest test group bounds the PTY tests: none holds
+    more than 16, and a group would only stretch the run.
