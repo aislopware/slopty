@@ -48,7 +48,7 @@ pub struct Carried<'a> {
     pub board: &'a dyn slopty_platform::pasteboard::Pasteboard,
     /// What its source lets a target do.
     pub allowed: slopty_proto::drag::DragOps,
-    /// The tag of a drag this window began ([`super::DragsOut`]), if it is one.
+    /// The tag of a drag this window began (`DragsOut`), if it is one.
     pub own: Option<u64>,
 }
 
