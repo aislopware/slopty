@@ -213,6 +213,8 @@ const FILE_SEARCH: Option<&str> = Some("FileSearch");
 const FILE_TEXT: Option<&str> = Some("FileText > Input");
 /// A file tile's "go to line" field.
 const FILE_GO_TO: Option<&str> = Some(crate::file::GO_TO_CTX);
+/// A file tile's symbol list.
+const FILE_SYMBOLS: Option<&str> = Some(crate::file::SYMBOLS_CTX);
 /// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
 const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
 /// Contexts with no text field in them, where a key alone cannot be wanted for typing.
@@ -416,6 +418,34 @@ pub fn defaults() -> Vec<Command> {
         c(File, "duplicate_line", crate::file::DuplicateLine, &["alt-shift-down"], &[FILE_TEXT]),
         c(File, "jump_to_bracket", crate::file::JumpToBracket, &["cmd-shift-\\"], &[FILE_TEXT]),
         c(File, "toggle_soft_wrap", crate::file::ToggleSoftWrap, &[], &[FILE]),
+        // Zed's replace key; the find bar's toggles are the search surface's.
+        c(
+            File,
+            "toggle_replace",
+            crate::file::ToggleReplace,
+            &["cmd-shift-h"],
+            &[FILE_TEXT, FILE_SEARCH],
+        ),
+        c(
+            File,
+            "toggle_match_case",
+            crate::search::ToggleMatchCase,
+            &["cmd-alt-c"],
+            &[FILE_SEARCH],
+        ),
+        c(
+            File,
+            "toggle_whole_word",
+            crate::search::ToggleWholeWord,
+            &["cmd-alt-w"],
+            &[FILE_SEARCH],
+        ),
+        c(File, "toggle_regex", crate::search::ToggleRegex, &["cmd-alt-r"], &[FILE_SEARCH]),
+        // Zed's and VS Code's outline key; in the editor it is over "Point other devices".
+        c(File, "go_to_symbol", crate::file::GoToSymbol, &["cmd-shift-o"], &[FILE_TEXT]),
+        c(File, "close_symbols", crate::file::CloseSymbols, &["escape"], &[FILE_SYMBOLS]),
+        c(File, "next_symbol", crate::file::NextSymbol, &["down"], &[FILE_SYMBOLS]),
+        c(File, "previous_symbol", crate::file::PreviousSymbol, &["up"], &[FILE_SYMBOLS]),
         // A PDF's pages, as Preview reads them.
         c(File, "scroll_down", crate::file::ScrollDown, &["down"], &[FILE_PAGES]),
         c(File, "scroll_up", crate::file::ScrollUp, &["up"], &[FILE_PAGES]),

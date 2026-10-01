@@ -176,7 +176,10 @@ fn the_editor_s_chrome_and_palette_lines_are_sentence_case() {
     let words: Vec<String> = editor_palette_items(&[])
         .into_iter()
         .map(|item| item.label)
-        .chain([super::super::editing::GO_TO_LINE.to_owned()])
+        .chain(
+            [GO_TO_LINE, symbols::GO_TO_SYMBOL, symbols::READING_SYMBOLS, symbols::NO_SYMBOLS]
+                .map(str::to_owned),
+        )
         .collect();
     for word in words {
         let mut chars = word.chars();
@@ -186,4 +189,92 @@ fn the_editor_s_chrome_and_palette_lines_are_sentence_case() {
             "{word}"
         );
     }
+}
+
+#[gpui::test]
+fn find_counts_matches_and_a_pattern_s_groups_replace_all_in_one_undo(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/env.sh");
+    arrives(&view, cx, text_read("a=1 b=2\nc=3", true, 1));
+    select(&view, cx, 0..0);
+    keys(cx, "cmd-f");
+    cx.simulate_input("=");
+    cx.run_until_parked();
+    let found = |view: &Entity<FileView>, cx: &VisualTestContext| {
+        view.read_with(cx, |v, _| v.hits().map(|(m, c)| (m.to_vec(), c)))
+    };
+    assert_eq!(found(&view, cx), Some((vec![1..2, 5..6, 9..10], Some(0))), "matches, not lines");
+    keys(cx, "cmd-alt-r");
+    assert!(view.read_with(cx, |v, _| v.query().is_some_and(|q| q.regex)), "⌘⌥R: a pattern");
+    keys(cx, "cmd-a");
+    cx.simulate_input(r"(\w)=(\d");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.find_error().is_some()), "an open group says so");
+    cx.simulate_input(")");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.find_error().map(str::to_owned)), None);
+    keys(cx, "cmd-shift-h");
+    assert!(view.read_with(cx, |v, _| v.replacing()));
+    cx.simulate_input("$2:$1");
+    keys(cx, "enter");
+    assert_eq!(text(&view, cx), "1:a b=2\nc=3", "↩ replaces the match the tile is on");
+    keys(cx, "cmd-enter");
+    assert_eq!(text(&view, cx), "1:a 2:b\n3:c", "⌘↩ the rest, groups expanded");
+    assert!(view.read_with(cx, |v, _| v.dirty()));
+    view.update_in(cx, |v, window, cx| v.focus(window, cx));
+    keys(cx, "cmd-z");
+    assert_eq!(text(&view, cx), "1:a b=2\nc=3", "one ⌘Z takes the whole replace back");
+}
+
+#[gpui::test]
+fn text_is_replaced_as_typed_with_no_groups(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/notes.txt");
+    arrives(&view, cx, text_read("cost $5, cost $5", true, 1));
+    select(&view, cx, 0..0);
+    keys(cx, "cmd-shift-h");
+    cx.simulate_input("$5");
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.hits().map(|(m, _)| m.len())),
+        Some(2),
+        "text, not a pattern"
+    );
+    view.update_in(cx, |v, window, cx| {
+        let field = v.search.as_ref().and_then(|s| s.replace_field());
+        if let Some(field) = field {
+            field.update(cx, |f, cx| f.set_value("$1", window, cx));
+        }
+        v.replace_all(window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(text(&view, cx), "cost $1, cost $1", "`$1` is put in as written");
+}
+
+#[gpui::test]
+fn cmd_shift_o_lists_the_symbols_narrows_them_and_goes_to_one(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
+    let source = "struct Tile;\n\nfn make() -> Tile { Tile }\n\nfn main() {\n    make();\n}";
+    arrives(&view, cx, text_read(source, true, 1));
+    select(&view, cx, 0..0);
+    keys(cx, "cmd-shift-o");
+    assert!(view.read_with(cx, |v, _| v.listing_symbols()));
+    let shown = view.read_with(cx, |v, _| v.shown_symbols().map(|s| s.join(" ")));
+    assert_eq!(shown.as_deref(), Some("Tile make main"), "the definitions, not the calls");
+    cx.simulate_input("ma");
+    cx.run_until_parked();
+    let shown = view.read_with(cx, |v, _| v.shown_symbols().map(|s| s.join(" ")));
+    assert_eq!(shown.as_deref(), Some("make main"));
+    assert_eq!(selection(&view, cx), 17..21, "the caret follows the first, `make`");
+    keys(cx, "down");
+    assert_eq!(selection(&view, cx), 45..49, "then `main`");
+    keys(cx, "down");
+    assert_eq!(selection(&view, cx), 17..21, "wrapping");
+    keys(cx, "escape");
+    assert!(!view.read_with(cx, |v, _| v.listing_symbols()));
+    assert_eq!(selection(&view, cx), 0..0, "Esc puts the caret back");
+    keys(cx, "cmd-shift-o");
+    cx.simulate_input("main");
+    keys(cx, "enter");
+    assert_eq!(selection(&view, cx), 45..49, "↩ keeps it on the symbol");
+    keys(cx, "x");
+    assert!(text(&view, cx).contains("fn x()"), "the editor has the keyboard again");
 }

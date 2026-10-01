@@ -219,6 +219,105 @@ impl Syntax {
     }
 }
 
+/// A name the grammar marks as defined where it stands: a function, a type, a module, a
+/// Markdown heading.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Symbol {
+    /// The name as written.
+    pub name: String,
+    /// Its line, 0-based.
+    pub line: usize,
+    /// Its byte in the line.
+    pub column: usize,
+}
+
+/// The scopes a symbol list takes: Sublime Text's own (its `Symbol List.tmPreferences`) and the
+/// definitions the bundled grammars name the same way.
+const SYMBOL_SCOPES: [&str; 14] = [
+    "entity.name.function",
+    "entity.name.type",
+    "entity.name.class",
+    "entity.name.struct",
+    "entity.name.enum",
+    "entity.name.trait",
+    "entity.name.union",
+    "entity.name.interface",
+    "entity.name.impl",
+    "entity.name.namespace",
+    "entity.name.module",
+    "entity.name.macro",
+    "entity.name.section",
+    "meta.toc-list",
+];
+
+/// Symbols a list holds at most: past it a file is a table of data, not of code.
+pub const SYMBOLS_MAX: usize = 5_000;
+
+/// The symbols of `text` under `syntax`, in order.
+///
+/// Each run of text in a definition's scope (`SYMBOL_SCOPES`) is one. The whole text is
+/// parsed, off the UI thread since the cost is a colouring's; a line past [`LINE_MAX`] is
+/// skipped, and the list stops at [`SYMBOLS_MAX`].
+#[must_use]
+pub fn symbols(text: &str, syntax: Syntax) -> Vec<Symbol> {
+    let scopes: Vec<Scope> = SYMBOL_SCOPES.iter().filter_map(|s| Scope::new(s).ok()).collect();
+    let mut state = ParseState::new(syntax.0);
+    let mut stack = ScopeStack::new();
+    let mut out = Vec::new();
+    for (line_ix, line) in text.split_inclusive('\n').enumerate() {
+        if line.len() > LINE_MAX {
+            continue;
+        }
+        let Ok(ops) = state.parse_line(line, syntaxes()) else { continue };
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let mut open: Option<(usize, usize)> = None;
+        let mut at = 0_usize;
+        let mut runs = Vec::new();
+        let mut segment =
+            |from: usize, to: usize, inside: bool, open: &mut Option<(usize, usize)>| match (
+                inside, *open,
+            ) {
+                (true, None) => *open = Some((from, to)),
+                (true, Some((start, _))) => *open = Some((start, to)),
+                (false, Some(run)) => {
+                    runs.push(run);
+                    *open = None;
+                }
+                (false, None) => {}
+            };
+        let inside = |stack: &ScopeStack| {
+            stack.as_slice().iter().any(|s| scopes.iter().any(|p| p.is_prefix_of(*s)))
+        };
+        for (offset, op) in &ops {
+            let to = (*offset).min(body.len());
+            if to > at {
+                segment(at, to, inside(&stack), &mut open);
+                at = to;
+            }
+            if stack.apply(op).is_err() {
+                break;
+            }
+        }
+        if body.len() > at {
+            segment(at, body.len(), inside(&stack), &mut open);
+        }
+        segment(body.len(), body.len(), false, &mut open);
+        for (start, end) in runs {
+            let raw = body.get(start..end).unwrap_or_default();
+            let name = raw.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let column = start.saturating_add(raw.len().saturating_sub(raw.trim_start().len()));
+            out.push(Symbol { name: name.to_owned(), line: line_ix, column });
+            if out.len() >= SYMBOLS_MAX {
+                return out;
+            }
+        }
+    }
+    out
+}
+
 /// How a language writes a comment ([`Syntax::comment`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comment {
@@ -604,6 +703,28 @@ mod tests {
         ] {
             assert_eq!(grammar(tag)?.comment(), comment, "{tag}");
         }
+        Ok(())
+    }
+
+    /// A file's symbols are the names its grammar marks as defined, with where they stand.
+    #[test]
+    fn symbols_are_the_names_the_grammar_defines() -> Result<(), String> {
+        let named = |tag: &str, text: &str| -> Result<Vec<(String, usize)>, String> {
+            Ok(symbols(text, grammar(tag)?).into_iter().map(|s| (s.name, s.line)).collect())
+        };
+        let rust = "struct Foo;\nimpl Foo {\n    fn bar() { baz(); }\n}\nfn main() {}\n";
+        let found = named("rs", rust)?;
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"bar") && names.contains(&"main"), "{found:?}");
+        assert!(!names.contains(&"baz"), "a call is not a definition: {found:?}");
+        assert_eq!(found.iter().find(|(n, _)| n == "bar").map(|(_, l)| *l), Some(2));
+        assert!(names.first() == Some(&"Foo"), "{found:?}");
+        let python = named("py", "class A:\n    def f(self):\n        pass\n")?;
+        assert_eq!(python, [("A".to_owned(), 0), ("f".to_owned(), 1)]);
+        let markdown = named("md", "# Title\n\ntext\n\n## Part two\n")?;
+        assert_eq!(markdown, [("Title".to_owned(), 0), ("Part two".to_owned(), 4)]);
+        let first = symbols("fn alpha() {}", grammar("rs")?);
+        assert_eq!(first.first().map(|s| s.column), Some(3), "where the name starts");
         Ok(())
     }
 

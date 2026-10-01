@@ -4281,7 +4281,11 @@ mod tests {
         let said = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
         assert_eq!(
             said.as_deref(),
-            Some("Settings: ⇧⌘H runs `app.open_settings` now, no longer `app.add_worker`")
+            Some(
+                "Settings: ⇧⌘H runs `app.open_settings` now, no longer `file.toggle_replace` \
+                 (+1 more)"
+            ),
+            "it takes the file's replace key and the app's add worker"
         );
         assert!(press(cx, "cmd-shift-h"), "the file's command wins the chord");
 

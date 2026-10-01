@@ -313,7 +313,11 @@ impl WorkspaceView {
                 }
                 let (line, col) = file.caret(cx);
                 let caret = format!("Ln {line}, Col {col}");
-                Some(meta_line([file.coloured_as(), Some(caret.as_str())]))
+                let layout = file.layout_facts();
+                let facts = layout.iter().map(|f| Some(f.as_str()));
+                Some(meta_line(
+                    std::iter::once(file.coloured_as()).chain(facts).chain([Some(caret.as_str())]),
+                ))
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => {
                 let stream = self.stream(item.id).filter(|s| s.drawn)?;

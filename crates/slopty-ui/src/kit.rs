@@ -1108,6 +1108,7 @@ mod tests {
             crate::file::NOT_TEXT,
             crate::file::CANNOT_READ,
             crate::file::OPEN_IN_EDITOR,
+            crate::file::GO_TO_LINE,
             crate::file::OPEN_IN_PAGER,
             crate::screen::TRACKPAD_MODE,
             crate::folder::ENCLOSING_FOLDER,

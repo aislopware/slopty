@@ -19,15 +19,21 @@
 //! A picture or a PDF is shown instead (`preview`): the worker knows one by its first bytes
 //! and sends it whole, and the platform decodes it at the size the tile draws it.
 
+pub mod complete;
 pub mod decode;
 pub mod edit;
 mod editing;
+pub mod find;
 pub mod pdf_text;
 mod preview;
+mod search;
+mod symbols;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use edit::{Format, Indent};
+#[cfg(test)]
+pub(crate) use editing::GO_TO_LINE;
 pub use editing::{GO_TO_CTX, TEXT_CTX, palette_items as editor_palette_items};
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -37,25 +43,27 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
+    Editor, EditorState, InputEvent, RangeDecoration, RangeDecorationCollection,
     RangeDecorationStyle, Rope, RopeExt as _,
 };
 pub use preview::{
     CopyText, FirstPage, LastPage, NextPage, NextScreen, PAGES_CTX, PreviousPage, PreviousScreen,
     ScrollDown, ScrollUp, SelectAllText, palette_items as pages_palette_items,
 };
+pub use search::SEARCH_CTX;
 use slopty_client::layout::WorkerKey;
 use slopty_client::unsaved::Unsaved;
 use slopty_core::{ItemId, WallMs};
 use slopty_proto::file::{FILE_BYTES, FileRead, WriteResult};
 use slopty_proto::handoff::{EditOutcome, HandoffId};
 use slopty_theme::{Theme, alpha};
+pub use symbols::SYMBOLS_CTX;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
 use crate::icons::{IconName, IconSize};
-use crate::kit::{ButtonKind, FIND_PLACEHOLDER, size_label};
-use crate::terminal::{CloseFind, Find, FindNext, FindPrev};
+use crate::kit::{ButtonKind, size_label};
+use crate::terminal::Find;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 mod actions {
@@ -82,12 +90,23 @@ mod actions {
             JumpToBracket,
             /// Wrap long lines at the tile's width, or stop.
             ToggleSoftWrap,
+            /// Open the find bar with its replace field, or close the replace field.
+            ToggleReplace,
+            /// List the file's symbols to go to one.
+            GoToSymbol,
+            /// Close the symbol list, the caret back where it was.
+            CloseSymbols,
+            /// The next symbol in the list.
+            NextSymbol,
+            /// The previous symbol in the list.
+            PreviousSymbol,
         ]
     );
 }
 pub use actions::{
-    CloseGoToLine, DuplicateLine, FinishEdit, GoToLine, JumpToBracket, MoveLineDown, MoveLineUp,
-    SaveFile, ToggleComment, ToggleSoftWrap,
+    CloseGoToLine, CloseSymbols, DuplicateLine, FinishEdit, GoToLine, GoToSymbol, JumpToBracket,
+    MoveLineDown, MoveLineUp, NextSymbol, PreviousSymbol, SaveFile, ToggleComment, ToggleReplace,
+    ToggleSoftWrap,
 };
 
 /// The key context of a file tile; ⌘S is bound in it.
@@ -288,18 +307,6 @@ struct Waiting {
     finishing: bool,
 }
 
-/// The open find bar of a file tile.
-struct FileSearch {
-    input: Entity<InputState>,
-    /// What the hits are for.
-    needle: String,
-    /// Lines (0-based) holding the needle, in order.
-    hits: Vec<usize>,
-    /// Index into `hits` of the one the tile is on.
-    current: Option<usize>,
-    _subscription: Subscription,
-}
-
 /// The lines holding `needle`, in order; none for an empty needle.
 ///
 /// Found in the whole text at once: one pass for the matches and one count of the newlines
@@ -398,7 +405,7 @@ pub struct FileView {
     text_size: f32,
     theme: Theme,
     /// The find bar, while open.
-    search: Option<FileSearch>,
+    search: Option<search::FileSearch>,
     /// The program in a shell that waits for this file (`$EDITOR` handed it here), until the
     /// person is done with it or the program goes away.
     waiting: Option<Waiting>,
@@ -423,6 +430,8 @@ pub struct FileView {
     bracket_at: Option<(usize, u64)>,
     /// The "go to line" field, while open.
     goto: Option<editing::GoTo>,
+    /// The symbol list, while open.
+    symbols: Option<symbols::Symbols>,
     /// The editor's events, and its every change marking this view dirty: the tile draws
     /// this view from GPUI's view cache, which a change inside the editor would not otherwise
     /// invalidate.
@@ -497,6 +506,7 @@ impl FileView {
             bracket: None,
             bracket_at: None,
             goto: None,
+            symbols: None,
             _editor_events: [events, redraw],
         }
     }
@@ -999,139 +1009,12 @@ impl FileView {
         cx.notify();
     }
 
-    /// ⌘F: open the find bar, or put the caret back in it with the text selected.
-    pub fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // One field over the corner at a time: the find bar takes the place of "go to line".
-        self.goto = None;
-        if self.search.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(FIND_PLACEHOLDER));
-            let subscription = cx.subscribe(&input, |this, _input, event, cx| match event {
-                InputEvent::Change => this.search_changed(cx),
-                InputEvent::PressEnter { shift, .. } => {
-                    this.step_hit(if *shift { -1 } else { 1 }, cx);
-                }
-                InputEvent::Focus | InputEvent::Blur => {}
-            });
-            self.search = Some(FileSearch {
-                input,
-                needle: String::new(),
-                hits: Vec::new(),
-                current: None,
-                _subscription: subscription,
-            });
-        }
-        if let Some(search) = &self.search {
-            search.input.update(cx, |input, cx| {
-                input.focus(window, cx);
-                input.select_all(window, cx);
-            });
-        }
-        cx.notify();
-    }
-
-    /// Open the find bar on `needle` (a find in every tile chose this one): the field holds
-    /// it and the tile lands on the first hit.
-    pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.find(window, cx);
-        let Some(search) = &mut self.search else { return };
-        search.input.update(cx, |input, cx| input.set_value(needle.to_owned(), window, cx));
-        needle.clone_into(&mut search.needle);
-        self.refresh_hits(cx);
-    }
-
-    /// The find bar's needle, when the bar is open.
-    #[must_use]
-    pub fn search_needle(&self) -> Option<&str> {
-        self.search.as_ref().map(|s| s.needle.as_str())
-    }
-
-    /// Esc or ✕ in the find bar: close it; the editor takes the keyboard back.
-    pub fn close_find(&mut self, cx: &mut Context<Self>) {
-        if self.search.take().is_some() {
-            self.remark(cx);
-            cx.emit(FileViewEvent::FindClosed);
-            cx.notify();
-        }
-    }
-
-    /// Whether the find bar is open.
-    #[must_use]
-    pub const fn finding(&self) -> bool {
-        self.search.is_some()
-    }
-
-    /// The lines found (0-based) and which one the tile is on.
-    #[must_use]
-    pub fn hits(&self) -> Option<(&[usize], Option<usize>)> {
-        self.search.as_ref().map(|s| (s.hits.as_slice(), s.current))
-    }
-
-    fn search_changed(&mut self, cx: &mut Context<Self>) {
-        let Some(search) = &mut self.search else { return };
-        let needle = search.input.read(cx).value().to_string();
-        if needle == search.needle {
-            return;
-        }
-        search.needle = needle;
-        self.refresh_hits(cx);
-    }
-
-    /// Recount the hits for the needle (it, or the text, changed) and land on the first at
-    /// or after the caret.
-    fn refresh_hits(&mut self, cx: &mut Context<Self>) {
-        let Some(needle) = self.search.as_ref().map(|s| s.needle.clone()) else { return };
-        let hits = hit_lines(&self.text(cx), &needle);
-        let from = usize::try_from(self.editor.read(cx).cursor_position().line).unwrap_or(0);
-        let Some(search) = &mut self.search else { return };
-        search.hits = hits;
-        search.current = if search.hits.is_empty() {
-            None
-        } else {
-            Some(search.hits.iter().position(|&line| line >= from).unwrap_or(0))
-        };
-        self.go_to_hit(cx);
-        self.remark(cx);
-        cx.notify();
-    }
-
-    /// ⌘G / ↩ (+1) and ⌘⇧G / ⇧↩ (−1), wrapping.
-    pub fn step_hit(&mut self, delta: i64, cx: &mut Context<Self>) {
-        let Some(search) = &mut self.search else { return };
-        let count = i64::try_from(search.hits.len()).unwrap_or(0);
-        if count == 0 {
-            return;
-        }
-        let at = i64::try_from(search.current.unwrap_or(0)).unwrap_or(0);
-        search.current = usize::try_from(at.saturating_add(delta).rem_euclid(count)).ok();
-        self.go_to_hit(cx);
-        cx.notify();
-    }
-
-    /// Select the current hit's text, which scrolls it into view.
-    fn go_to_hit(&self, cx: &mut Context<Self>) {
-        let Some(search) = &self.search else { return };
-        let Some(line) = search.current.and_then(|c| search.hits.get(c)).copied() else { return };
-        let needle = search.needle.clone();
-        self.editor.update(cx, |e, cx| {
-            let text = e.text();
-            let start = text.line_start_offset(line);
-            let row = text.slice_line(line).to_string();
-            let at = if needle.chars().any(char::is_uppercase) {
-                row.find(&needle)
-            } else {
-                row.to_lowercase().find(&needle.to_lowercase())
-            };
-            let from = start.saturating_add(at.unwrap_or(0));
-            let to = from.saturating_add(if at.is_some() { needle.len() } else { 0 });
-            e.set_selected_range(from..to.min(text.len()), cx);
-        });
-    }
-
-    /// Paint the tints: the lines the last reload changed, and the find's hits.
+    /// Paint the tints: the lines the last reload changed, the find's matches and the bracket
+    /// pair at the caret.
     fn remark(&mut self, cx: &mut Context<Self>) {
         let s = &self.theme.surfaces;
-        let (tint, hit) = (hsla_alpha(s.success, alpha::FAINT), hsla_alpha(s.warn, alpha::FAINT));
-        let hits = self.search.as_ref().map(|s| s.hits.clone()).unwrap_or_default();
+        let tint = hsla_alpha(s.success, alpha::FAINT);
+        let found = self.search_marks();
         let changed = self.changed.clone();
         let brackets = self.bracket_marks();
         let marks = self.editor.update(cx, |e, _cx| {
@@ -1147,9 +1030,7 @@ impl FileView {
                 .filter(|row| **row < text.lines_len())
                 .map(|row| line(*row, tint))
                 .collect();
-            marks.extend(
-                hits.iter().filter(|row| **row < text.lines_len()).map(|row| line(*row, hit)),
-            );
+            marks.extend(found.into_iter().filter(|m| m.range().end <= text.len()));
             marks.extend(brackets.into_iter().filter(|m| m.range().end <= text.len()));
             marks
         });
@@ -1487,87 +1368,6 @@ impl FileView {
         };
         crate::a11y::tab_stop(button, s.accent).on_click(on_click).into_any_element()
     }
-
-    /// The find bar over the top-right corner, as the terminal's.
-    fn render_search(&self, search: &FileSearch, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
-        let wash = hsla_alpha(s.text, alpha::FAINT);
-        let bare = move |id: &'static str| {
-            div()
-                .id(id)
-                .px(px(spacing.xs))
-                .rounded(px(radii.xs))
-                .cursor_pointer()
-                .text_color(hsla(s.text_muted))
-                .hover(move |st| st.bg(wash))
-        };
-        let count: SharedString = if search.needle.is_empty() {
-            SharedString::default()
-        } else if search.hits.is_empty() {
-            "No matches".into()
-        } else {
-            let at = search.current.map_or(0, |c| c.saturating_add(1));
-            format!("{at}/{}", search.hits.len()).into()
-        };
-        div()
-            .id("file-search")
-            .debug_selector(|| "file-search".to_owned())
-            .key_context("FileSearch")
-            .absolute()
-            .top(px(spacing.sm))
-            .right(px(spacing.sm))
-            .flex()
-            .items_center()
-            .gap(px(spacing.sm))
-            .px(px(spacing.sm))
-            .py(px(spacing.xs))
-            .rounded(px(radii.sm))
-            .map(|el| crate::kit::elevate(el, theme))
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text))
-            .font_family(theme.typography.ui_family.clone())
-            .on_action(cx.listener(|this, _: &CloseFind, _window, cx| this.close_find(cx)))
-            .on_action(cx.listener(|this, _: &FindNext, _window, cx| this.step_hit(1, cx)))
-            .on_action(cx.listener(|this, _: &FindPrev, _window, cx| this.step_hit(-1, cx)))
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .role(Role::Group)
-            .aria_label("Find in file")
-            .child(div().w(px(180.0)).child(Input::new(&search.input).aria_label("Find in file")))
-            .child(
-                div()
-                    .id("file-search-count")
-                    .min_w(px(40.0))
-                    .text_color(hsla(s.text_secondary))
-                    .role(Role::Label)
-                    .aria_label("Matches")
-                    .aria_value(count.clone())
-                    .child(count),
-            )
-            .child(
-                bare("file-search-prev")
-                    .role(Role::Button)
-                    .aria_label("Previous match")
-                    .child("↑")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_hit(-1, cx))),
-            )
-            .child(
-                bare("file-search-next")
-                    .role(Role::Button)
-                    .aria_label("Next match")
-                    .child("↓")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_hit(1, cx))),
-            )
-            .child(
-                bare("file-search-close")
-                    .role(Role::Button)
-                    .aria_label("Close find")
-                    .child("✕")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.close_find(cx))),
-            )
-            .into_any_element()
-    }
 }
 
 /// The most lines a reload's diff compares exactly, once the common head and tail are trimmed.
@@ -1629,6 +1429,7 @@ impl Render for FileView {
         let id = *self.id.as_uuid();
         let search = self.search.as_ref().map(|s| self.render_search(s, cx));
         let goto = self.goto.as_ref().map(|g| self.render_goto(g, cx));
+        let symbols = self.symbols.as_ref().map(|l| self.render_symbols(l, cx));
         let bar = self.render_bar(cx);
         let waiting = self.render_waiting(cx);
         let theme = &self.theme;
@@ -1691,6 +1492,7 @@ impl Render for FileView {
             .child(body)
             .children(search)
             .children(goto)
+            .children(symbols)
     }
 }
 

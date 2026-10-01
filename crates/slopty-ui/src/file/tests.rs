@@ -310,12 +310,12 @@ fn a_twenty_thousand_line_file_stays_editable(cx: &mut TestAppContext) {
         assert!(hits.is_empty(), "a capital matches as typed");
     });
     view.update_in(cx, |v, window, cx| v.find_with("line_1999", window, cx));
-    view.read_with(cx, |v, _| {
-        let (hits, current) = v.hits().unwrap_or_default();
-        assert_eq!(hits.len(), 11, "line_1999 and line_19990..=19999");
-        assert_eq!(hits.first(), Some(&1_999));
-        assert_eq!(hits.get(1), Some(&19_991), "the edit moved the rest a line down");
-        assert!(current.is_some());
+    view.read_with(cx, |v, cx| {
+        let rows = v.hit_rows(cx);
+        assert_eq!(rows.len(), 11, "line_1999 and line_19990..=19999");
+        assert_eq!(rows.first(), Some(&1_999));
+        assert_eq!(rows.get(1), Some(&19_991), "the edit moved the rest a line down");
+        assert!(v.hits().is_some_and(|(_, current)| current.is_some()));
     });
 
     cx.simulate_keystrokes("cmd-s");

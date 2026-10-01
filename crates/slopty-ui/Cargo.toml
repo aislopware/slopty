@@ -55,6 +55,7 @@ objc2-pdf-kit = { workspace = true, features = [
 # What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
 parking_lot.workspace = true
 rustc-hash.workspace = true
+regex.workspace = true
 # The native view under the window, where a browser tile's page goes (`browser`).
 raw-window-handle.workspace = true
 # Which lines an agent's edit changed, when a file tile reads its file again (`file`).

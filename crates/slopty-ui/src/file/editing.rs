@@ -19,8 +19,8 @@ use slopty_theme::alpha;
 
 use super::edit::{self, Indent, LineEdit};
 use super::{
-    CloseGoToLine, DuplicateLine, FileView, GoToLine, JumpToBracket, MoveLineDown, MoveLineUp,
-    ToggleComment, ToggleSoftWrap,
+    CloseGoToLine, DuplicateLine, FileView, GoToLine, GoToSymbol, JumpToBracket, MoveLineDown,
+    MoveLineUp, ToggleComment, ToggleReplace, ToggleSoftWrap,
 };
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
@@ -57,6 +57,8 @@ pub fn palette_items(bindings: &[KeyBinding]) -> Vec<PaletteItem> {
         line("Duplicate line", IconName::Copy, Box::new(DuplicateLine)),
         line("Jump to matching bracket", IconName::MoveHorizontal, Box::new(JumpToBracket)),
         line("Wrap long lines", IconName::CornerDownLeft, Box::new(ToggleSoftWrap)),
+        line("Find and replace", IconName::Replace, Box::new(ToggleReplace)),
+        line("Jump to symbol", IconName::ListTree, Box::new(GoToSymbol)),
     ]
 }
 
@@ -78,6 +80,10 @@ impl FileView {
         )
         .on_action(cx.listener(|this, _: &JumpToBracket, _, cx| this.jump_to_bracket(cx)))
         .on_action(cx.listener(|this, _: &ToggleSoftWrap, _, cx| this.toggle_soft_wrap(cx)))
+        .on_action(
+            cx.listener(|this, _: &ToggleReplace, window, cx| this.toggle_replace(window, cx)),
+        )
+        .on_action(cx.listener(|this, _: &GoToSymbol, window, cx| this.go_to_symbol(window, cx)))
     }
 
     /// How the file indents, as read from it: what Tab puts in.
@@ -91,6 +97,13 @@ impl FileView {
     #[must_use]
     pub fn format_label(&self) -> Option<String> {
         self.base.as_ref().and_then(|b| b.format.label())
+    }
+
+    /// What the status line says of the file's layout: its indentation ("Spaces: 4", "Tabs"),
+    /// then its line ends and BOM when they are not the usual.
+    #[must_use]
+    pub fn layout_facts(&self) -> Vec<String> {
+        std::iter::once(self.indent.label()).chain(self.format_label()).collect()
     }
 
     /// Whether long lines wrap at the tile's width.
@@ -107,7 +120,7 @@ impl FileView {
 
     /// Whether the editor holds the text and takes edits: drawn, not still waiting for a read
     /// to land in it.
-    const fn editable(&self) -> bool {
+    pub(super) const fn editable(&self) -> bool {
         self.shows_text() && self.pending_text.is_none() && self.read_only.is_none()
     }
 
@@ -224,6 +237,7 @@ impl FileView {
         if self.search.take().is_some() {
             self.remark(cx);
         }
+        self.symbols = None;
         if self.goto.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(GO_TO_LINE));
             let subscription =
