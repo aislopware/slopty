@@ -29,6 +29,13 @@ mod tests {
     const STEP: Duration = Duration::from_secs(20);
 
     /// A binary of this build (`slopty_testkit::bins`).
+    /// A stream's handle with its worker's sound silenced on this client: these tests stream
+    /// the real display, which hears every app on this Mac, and tests make no sound on it.
+    fn silenced(screen: slopty_client::ScreenHandle) -> slopty_client::ScreenHandle {
+        screen.set_muted(true);
+        screen
+    }
+
     fn bin(name: &str) -> PathBuf {
         slopty_testkit::bins::bin(env!("CARGO_BIN_EXE_slopty-worker"), name)
     }
@@ -1410,7 +1417,7 @@ mod tests {
         };
         eprintln!("opened {stream} {codec:?} {width}x{height}");
 
-        let screen = link.screen(stream, codec);
+        let screen = silenced(link.screen(stream, codec));
         let mut frames = screen.frames();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let mut decoded = 0_u32;
@@ -1552,7 +1559,7 @@ mod tests {
             opened_ms: ms(sent_at, Some(std::time::Instant::now())),
             ..StartUp::default()
         };
-        let screen = link.screen(stream, codec);
+        let screen = silenced(link.screen(stream, codec));
         let mut frames = screen.frames();
         let deadline =
             tokio::time::Instant::now().checked_add(Duration::from_secs(seconds)).unwrap();
@@ -1713,7 +1720,7 @@ mod tests {
                 _other => {}
             }
         };
-        let screen = link.screen(stream, codec);
+        let screen = silenced(link.screen(stream, codec));
         let mut frames = screen.frames();
         let deadline =
             tokio::time::Instant::now().checked_add(Duration::from_secs(seconds)).unwrap();
@@ -2412,7 +2419,7 @@ mod tests {
                 _other => {}
             }
         };
-        let screen = link.screen(stream, codec);
+        let screen = silenced(link.screen(stream, codec));
 
         // The worker notices there is nothing to capture and says so, exactly as the app's
         // workspace would hear it.
@@ -2912,7 +2919,7 @@ mod tests {
                 _other => {}
             }
         };
-        let screen = link.screen(stream, codec);
+        let screen = silenced(link.screen(stream, codec));
 
         // Visible and unobstructed, so the worker serves it as a crop of its display.
         let cropping = wait_for_stats(&ctl, Duration::from_secs(15), |s| s.on_crop)
@@ -3163,7 +3170,7 @@ mod tests {
                 _other => {}
             }
         };
-        let screen = link.screen(stream, codec);
+        let screen = silenced(link.screen(stream, codec));
 
         // Measurement window: observes the heartbeat cadence over the full quiet duration; no event
         // to wait for.

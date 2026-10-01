@@ -492,16 +492,12 @@ impl Workspace {
         let events = cx.subscribe(&view, |ws: &mut Self, _view, event, cx| match event {
             // The badge is the inbox's count, which `Self::look` follows.
             WorkspaceEvent::NeedsYou(_) => {}
-            WorkspaceEvent::Attention(_session) => {
-                slopty_platform::attention();
-                slopty_platform::bounce();
-            }
+            WorkspaceEvent::Attention(_session) => alert(),
             // A bell while the human is elsewhere is an alert; in front of the window the
             // view's own flash is enough.
             WorkspaceEvent::Bell(_session) => {
                 if settings::bell_alerts(&ws.settings, cx.active_window().is_some()) {
-                    slopty_platform::attention();
-                    slopty_platform::bounce();
+                    alert();
                 }
             }
             WorkspaceEvent::Unanswered { route, why } => {
@@ -2979,6 +2975,19 @@ fn rebuild_app_menus(cx: &App) {
     if let Some(build) = cx.try_global::<AppMenus>().map(|menus| Rc::clone(&menus.0)) {
         cx.set_menus(build());
     }
+}
+
+/// The person's alert: the sound chosen in System Settings and a bounce of the Dock icon.
+#[cfg(not(feature = "e2e"))]
+fn alert() {
+    slopty_platform::attention();
+    slopty_platform::bounce();
+}
+
+/// The e2e build only notes the alert: tests make no sound on this Mac and never take its Dock.
+#[cfg(feature = "e2e")]
+fn alert() {
+    tracing::info!("alert");
 }
 
 /// In the e2e build, the worker's macOS grants as the harness names them
