@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use slopty_capture::{CaptureError, CaptureSource as _, CapturedAudio, Heard};
+use slopty_capture::{
+    AUDIO_CHANNELS, AUDIO_RATE, CaptureError, CaptureSource as _, CapturedAudio, Heard,
+};
 use slopty_codec::AudioEncoder as _;
 use slopty_media::{AudioCopies, MAX_AUDIO_COPIES, audio_datagram};
 use slopty_proto::media::SOUND;
@@ -127,6 +129,9 @@ pub struct SoundStats {
     pub failures: u64,
     /// Packets sent.
     pub packets: u64,
+    /// Times a capture's audio skipped ahead of where its last chunk ended, by more than half
+    /// a chunk: a hole in the sound's own timeline, whatever the scheduler did to its delivery.
+    pub holes: u64,
     /// What the running capture hears; `None` while none runs.
     pub heard: Option<Heard>,
 }
@@ -140,28 +145,58 @@ struct Voice<P: Platform> {
     copies: Mutex<AudioCopies>,
     sent: Mutex<[Bytes; MAX_AUDIO_COPIES]>,
     clock: Arc<SoundClock>,
+    /// [`SoundStats::holes`].
+    holes: AtomicU64,
 }
 
 struct AudioState<A> {
     encoder: Option<A>,
     seq: u32,
     last_loud_us: u64,
+    /// Where the running capture's last chunk ended on its own clock; `None` before its first.
+    next_pts_us: Option<u64>,
 }
 
 impl<P: Platform> Voice<P> {
     fn new(sink: Arc<dyn DatagramSink>) -> Self {
         Self {
             sink,
-            audio: Mutex::new(AudioState { encoder: None, seq: 0, last_loud_us: 0 }),
+            audio: Mutex::new(AudioState {
+                encoder: None,
+                seq: 0,
+                last_loud_us: 0,
+                next_pts_us: None,
+            }),
             copies: Mutex::new(AudioCopies::default()),
             sent: Mutex::new(Default::default()),
             clock: Arc::default(),
+            holes: AtomicU64::new(0),
+        }
+    }
+
+    /// A capture starts: its timeline is its own.
+    fn starts(&self) {
+        self.audio.lock().next_pts_us = None;
+    }
+
+    /// Follow the capture's timeline with `chunk`, counting a hole when it starts later than
+    /// the last one ended by more than half its own length.
+    fn timeline(&self, chunk: &CapturedAudio) {
+        let samples = u64::try_from(chunk.samples.len()).unwrap_or(u64::MAX);
+        let frames = samples.checked_div(u64::from(AUDIO_CHANNELS)).unwrap_or(0);
+        let length_us =
+            frames.saturating_mul(1_000_000).checked_div(u64::from(AUDIO_RATE)).unwrap_or(0);
+        let expected =
+            self.audio.lock().next_pts_us.replace(chunk.pts_us.saturating_add(length_us));
+        if expected.is_some_and(|at| chunk.pts_us > at.saturating_add(length_us / 2)) {
+            self.holes.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// The capture delivered PCM: encode and send unless the sound has gone quiet. Audio goes
     /// to QUIC at once, ahead of any video the streams hold in their lanes.
     fn on_audio(&self, chunk: &CapturedAudio) {
+        self.timeline(chunk);
         let now = now::<P>();
         let Some(packets) = self.encode(&chunk.samples, now) else { return };
         let datagrams = self.datagrams(&packets, now);
@@ -264,6 +299,7 @@ impl<P: Platform> Sound<P> {
     pub fn stats(&self) -> SoundStats {
         let mut stats = self.stats.lock().clone();
         stats.packets = self.voice.clock.packets();
+        stats.holes = self.voice.holes.load(Ordering::Relaxed);
         stats
     }
 }
@@ -302,6 +338,31 @@ impl<P: Platform> Listen for Sound<P> {
 /// Change the sound's counters under their lock, and nothing else.
 fn note(stats: &Mutex<SoundStats>, change: impl FnOnce(&mut SoundStats)) {
     change(&mut stats.lock());
+}
+
+/// A sound that never captures.
+///
+/// The streams listen and leave as through a [`Sound`], and nothing goes out. A worker serving
+/// the drawn screen has it unless a test asks for its tone (`synthetic::SOUND_SWITCH`), so no
+/// client of it opens a player.
+#[derive(Debug, Default)]
+pub struct Silent {
+    members: Arc<Members>,
+    clock: Arc<SoundClock>,
+}
+
+impl Listen for Silent {
+    fn listen(&self, heard: Heard) -> Listening {
+        let id = self.members.next.fetch_add(1, Ordering::Relaxed);
+        self.members.heard.lock().insert(id, heard);
+        Listening { members: Arc::clone(&self.members), id }
+    }
+
+    fn report(&self, _report: SoundReport) {}
+
+    fn clock(&self) -> Arc<SoundClock> {
+        Arc::clone(&self.clock)
+    }
 }
 
 /// Keep the capture hearing what the members want: started with the first, changed in place as
@@ -395,6 +456,7 @@ async fn start<P: Platform>(
     voice: &Arc<Voice<P>>,
     heard: &Heard,
 ) -> Result<<Source<P> as slopty_capture::CaptureSource>::Sound, CaptureError> {
+    voice.starts();
     let fed = Arc::clone(voice);
     let sink = Box::new(move |chunk: CapturedAudio| fed.on_audio(&chunk));
     let watched = Arc::clone(members);
@@ -458,11 +520,20 @@ mod tests {
             self.got.lock().len()
         }
 
-        /// The longest wait between two datagrams after `from`.
-        fn gap_after(&self, from: Instant) -> Duration {
-            let times: Vec<Instant> =
-                self.got.lock().iter().map(|(at, _)| *at).filter(|at| *at >= from).collect();
-            times.windows(2).map(|w| w[1].saturating_duration_since(w[0])).max().unwrap_or_default()
+        /// The sequence number of every datagram so far, in the order they came, each checked
+        /// to be an audio packet on the sound's lane.
+        fn seqs(&self) -> Vec<u32> {
+            let got = self.got.lock().clone();
+            got.iter()
+                .map(|(_, d)| {
+                    let (header, _) = MediaHeader::parse(d).expect("a media datagram");
+                    assert_eq!(header.stream.get(), SOUND.0, "on the sound lane");
+                    assert_eq!(header.kind(), Some(Kind::Audio));
+                    let payload = d.slice(HEADER_BYTES..);
+                    assert!(parse_audio(header.data_count.get(), &payload).is_some());
+                    header.frame.get()
+                })
+                .collect()
         }
     }
 
@@ -504,19 +575,7 @@ mod tests {
         until("packets", FOR_THE_MACHINE, || client.count() > 20).await;
         let stats = sound.stats();
         assert_eq!((stats.starts, stats.hears, stats.heard), (1, 0, Some(apps(&[7]))));
-        let seqs: Vec<u32> = client
-            .got
-            .lock()
-            .iter()
-            .map(|(_, d)| {
-                let (header, _) = MediaHeader::parse(d).expect("a media datagram");
-                assert_eq!(header.stream.get(), SOUND.0, "on the sound lane");
-                assert_eq!(header.kind(), Some(Kind::Audio));
-                let payload = d.slice(HEADER_BYTES..);
-                assert!(parse_audio(header.data_count.get(), &payload).is_some());
-                header.frame.get()
-            })
-            .collect();
+        let seqs = client.seqs();
         let expected: Vec<u32> = (1..).take(seqs.len()).collect();
         assert_eq!(seqs, expected, "one encoder, one sequence");
         drop(first);
@@ -526,8 +585,8 @@ mod tests {
     }
 
     /// A display and a window stream hear every app, once. The window going changes nothing
-    /// the capture hears and leaves no gap in the sound; the display going then narrows it to
-    /// the window's app in place, still with no gap and no new capture.
+    /// the capture hears and leaves no gap in the sound's timeline; the display going then
+    /// narrows it to the window's app in place, still with no gap and no new capture.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_display_and_a_window_are_one_sound_with_no_gap_when_one_goes() {
         let (sound, client) = sound();
@@ -535,7 +594,6 @@ mod tests {
         let window = sound.listen(apps(&[7]));
         until("packets", FOR_THE_MACHINE, || client.count() > 10).await;
         assert_eq!(sound.stats().heard, Some(Heard::Every));
-        let went = Instant::now();
         drop(window);
         let before = client.count();
         until("packets after the window went", FOR_THE_MACHINE, || client.count() > before + 20)
@@ -550,8 +608,12 @@ mod tests {
             .await;
         let stats = sound.stats();
         assert_eq!((stats.starts, stats.hears, stats.stops), (1, 1, 0), "changed in place");
-        let gap = client.gap_after(went);
-        assert!(gap < Duration::from_millis(60), "the sound went on: a {gap:?} gap");
+        // No gap, judged on the sound's own timeline and not on when packets reached the test,
+        // which is the scheduler's (129 ms on a loaded 3-core runner): one capture whose
+        // chunks follow each other with no hole, and one unbroken sequence of packets.
+        assert_eq!(stats.holes, 0, "the capture's audio skipped ahead: {stats:?}");
+        let seqs = client.seqs();
+        assert_eq!(seqs, (1..).take(seqs.len()).collect::<Vec<u32>>(), "no packet missing");
         drop(window);
     }
 
@@ -571,6 +633,27 @@ mod tests {
         drop(editor);
         until("stopped", FOR_THE_MACHINE, || sound.stats().stops == 1).await;
         assert_eq!(sound.stats().starts, 1);
+    }
+
+    /// A chunk that starts later than the last one ended, by more than half its length, is a
+    /// hole in the capture's timeline; one a little late is not, and a new capture starts a
+    /// timeline of its own.
+    #[test]
+    fn a_hole_in_the_captures_timeline_is_counted() {
+        let voice = Voice::<Synthetic>::new(Arc::new(Client::default()));
+        let samples = usize::try_from(FRAME_SAMPLES * CHANNELS).unwrap();
+        let chunk = |pts_us| CapturedAudio { pts_us, samples: vec![0.0; samples] };
+        let holes = || voice.holes.load(Ordering::Relaxed);
+        for pts in [1_000_000, 1_010_000, 1_020_004] {
+            voice.timeline(&chunk(pts));
+        }
+        assert_eq!(holes(), 0, "on time, and 4 µs late");
+        voice.timeline(&chunk(1_060_000));
+        assert_eq!(holes(), 1, "30 ms missing");
+        voice.timeline(&chunk(1_070_000));
+        voice.starts();
+        voice.timeline(&chunk(9_000_000));
+        assert_eq!(holes(), 1, "a new capture's own timeline");
     }
 
     /// Audio goes out while the source is loud and for the hold after it; silence past the

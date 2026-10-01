@@ -1,5 +1,7 @@
 # Testing
 
+Tests make no sound on this Mac: the drawn screen's worker sounds only under `SLOPTY_SYNTHETIC_SOUND=1`, and a test that plays sound keeps its player muted or off the output device.
+
 ## Four layers, fastest first
 1. **Unit**, in every crate: pure logic behind traits with fakes (`slopty_input::Recorder`
    for the injector, `Layout`/`ItemDoc` in `slopty-client`). Runs under `cargo gate`.

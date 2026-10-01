@@ -125,9 +125,21 @@ pub fn sound(conn: &Connection) -> Arc<dyn Listen> {
     let sink = Arc::new(QuicSink(conn.clone()));
     #[cfg(target_os = "macos")]
     if slopty_worker::screen::synthetic_screen() {
-        return Arc::new(Sound::<Synthetic>::new(sink));
+        return drawn_sound(sink, slopty_worker::screen::synthetic::sounding());
     }
     Arc::new(Sound::<Native>::new(sink))
+}
+
+/// The drawn screen's sound into `sink`: its tone only when a test asks for it (`sounding`,
+/// `SLOPTY_SYNTHETIC_SOUND`), else nothing, so no client of it opens a player and tests make
+/// no sound on this Mac.
+#[cfg(target_os = "macos")]
+fn drawn_sound(sink: Arc<dyn slopty_worker::DatagramSink>, sounding: bool) -> Arc<dyn Listen> {
+    if sounding {
+        Arc::new(Sound::<Synthetic>::new(sink))
+    } else {
+        Arc::new(slopty_worker::screen::sound::Silent::default())
+    }
 }
 
 /// Open the stream, then serve its commands and its geometry until it is closed or the
@@ -694,6 +706,63 @@ mod tests {
     use slopty_worker::DatagramSink as _;
 
     use super::QuicSink;
+
+    /// The client's end of a sound: how many datagrams came.
+    #[derive(Default)]
+    struct Heard(std::sync::atomic::AtomicUsize);
+
+    impl slopty_worker::DatagramSink for Heard {
+        fn send(&self, datagrams: &[bytes::Bytes]) -> Result<(), slopty_worker::screen::Refused> {
+            self.0.fetch_add(datagrams.len(), std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn max_size(&self) -> Option<usize> {
+            Some(slopty_proto::media::MAX_DATAGRAM)
+        }
+
+        fn held(&self) -> usize {
+            0
+        }
+
+        fn cwnd(&self) -> u64 {
+            0
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// The drawn screen's worker captures no sound unless a test asks for its tone: a stream
+    /// hearing every app sends nothing, so no client opens a player. Asked, the same stream's
+    /// tone comes.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_drawn_screen_makes_no_sound_unless_asked() {
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+
+        use slopty_capture::Heard as Hears;
+
+        for sounding in [false, true] {
+            let client = Arc::new(Heard::default());
+            let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::<Heard>::clone(&client);
+            let sound = super::drawn_sound(sink, sounding);
+            let listening = sound.listen(Hears::Every);
+            // Long enough for the tone's first chunks, and for `AudioToolbox` to make the Opus
+            // encoder on a loaded machine (`docs/decisions/testing.md`).
+            let deadline =
+                std::time::Instant::now() + Duration::from_secs(if sounding { 100 } else { 1 });
+            while std::time::Instant::now() < deadline && client.0.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let sent = client.0.load(Ordering::Relaxed);
+            assert_eq!(sent > 0, sounding, "sounding {sounding}: {sent} datagrams");
+            assert_eq!(sound.clock().packets() > 0, sounding);
+            drop(listening);
+        }
+    }
 
     /// Frames of datagrams handed to QUIC from a plain thread, as the encoder's callback does, one
     /// call per frame, to a loopback client: the one-way time each datagram took and what the

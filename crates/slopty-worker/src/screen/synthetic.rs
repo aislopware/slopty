@@ -97,6 +97,20 @@ pub fn serving() -> bool {
     *ON
 }
 
+/// The variable that gives [`Synthetic`] a sound, the canvas's tone: `1` turns it on.
+///
+/// Off, its worker captures no sound ([`crate::screen::sound::Silent`]), so no client opens a
+/// player for it: tests make no sound on this Mac. A test knob, read once.
+pub const SOUND_SWITCH: &str = "SLOPTY_SYNTHETIC_SOUND";
+
+/// Whether this process's [`Synthetic`] screen sounds ([`SOUND_SWITCH`]).
+#[must_use]
+pub fn sounding() -> bool {
+    static ON: LazyLock<bool> =
+        LazyLock::new(|| switched_on(std::env::var(SOUND_SWITCH).ok().as_deref()));
+    *ON
+}
+
 /// [`SWITCH`]'s value read as on or off.
 fn switched_on(value: Option<&str>) -> bool {
     value == Some("1")
@@ -2614,8 +2628,8 @@ mod tests {
 
     /// The desktop and two windows of one app, each its own stream hearing through `listen` as
     /// a worker's connection has them, are one sound on the wire: one capture hearing every
-    /// app, one sequence on the sound's media stream at one packet per 10 ms, none on the
-    /// streams' own. The windows closing changes nothing it hears and leaves no gap.
+    /// app, one sequence on the sound's media stream, none on the streams' own. The windows
+    /// closing changes nothing it hears and leaves no hole in its timeline.
     #[test]
     fn a_display_and_two_windows_of_one_app_are_one_sound_on_the_wire() {
         use slopty_capture::Heard;
@@ -2661,27 +2675,31 @@ mod tests {
             heard.extend(sound_on(&mut line));
             let stats = sound.stats();
             assert_eq!(
-                (stats.starts, stats.hears, stats.stops, stats.heard),
+                (stats.starts, stats.hears, stats.stops, stats.heard.clone()),
                 (1, 0, 0, Some(Heard::Every)),
                 "one capture of every app, changed by nothing"
             );
             assert!(heard.iter().all(|&(_, media, _)| media == slopty_proto::media::SOUND.0));
             let seqs: Vec<u32> = heard.iter().map(|&(_, _, seq)| seq).collect();
             assert_eq!(seqs, (1..).take(seqs.len()).collect::<Vec<u32>>(), "one sequence");
+            // No gap, judged on the sound's own timeline: one capture whose chunks follow each
+            // other with no hole, and one unbroken sequence. When the packets reached the test is
+            // the scheduler's to say (75 ms apart on a loaded 3-core runner), so it is printed,
+            // not judged.
+            assert_eq!(stats.holes, 0, "the capture's audio skipped ahead: {stats:?}");
             let span = heard.last().unwrap().0.saturating_duration_since(heard[0].0);
             let per_second = (seqs.len() - 1) as f64 / span.as_secs_f64();
-            assert!((80.0..=120.0).contains(&per_second), "{per_second:.0} packets a second");
-            let gap = heard
+            let wait = heard
                 .windows(2)
                 .filter(|w| w[1].0 >= closed_at)
                 .map(|w| w[1].0.saturating_duration_since(w[0].0))
                 .max()
-                .unwrap();
-            assert!(gap < Duration::from_millis(60), "a {gap:?} gap when the windows went");
+                .unwrap_or_default();
             eprintln!(
-                "MEASURE one sound for a display and two windows: {} packets at {per_second:.1} a second, the longest wait after the windows closed {:.1} ms",
+                "MEASURE one sound for a display and two windows: {} packets at {per_second:.1} a second, the longest wait after the windows closed {:.1} ms, {} holes",
                 seqs.len(),
-                gap.as_secs_f64() * 1e3
+                wait.as_secs_f64() * 1e3,
+                stats.holes
             );
             display.close().await;
         });

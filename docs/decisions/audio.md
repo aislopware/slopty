@@ -1409,7 +1409,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     applications picked by `SCRunningApplication.processID` (the objc2 `libc` feature). Its
     start completion may come before or after `start` returns, so a small state machine hands the
     capture on whichever comes second, and nothing blocks a ScreenCaptureKit queue. The canvas's
-    is a 440 Hz tone in 10 ms chunks that records what it was told to hear.
+    is a 440 Hz tone in 10 ms chunks that records what it was told to hear. A worker serving the
+    drawn screen sounds only under `SLOPTY_SYNTHETIC_SOUND=1`; otherwise its streams listen
+    through `Silent`, which captures nothing, so an e2e client opens no player and tests make no
+    sound on this Mac (`the_drawn_screen_makes_no_sound_unless_asked`).
   - *The worker* (`slopty_worker::screen::sound`). The connection makes its `Sound` with its
     first stream and keeps it for its life. Each `Pipeline::listen` joins it with what its target
     hears and holds a `Listening`, whose drop leaves. One task follows the members: it starts the
