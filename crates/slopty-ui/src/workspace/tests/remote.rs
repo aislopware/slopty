@@ -55,7 +55,12 @@ impl Remote for Recorder {
         self.0.send(Call::Cancel(xfer)).unwrap();
     }
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+    fn download(
+        &self,
+        path: String,
+        into: PathBuf,
+        _shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError> {
         let name =
             path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?;
         let file = into.join(name);
@@ -585,7 +590,12 @@ impl Remote for Serves {
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(&self, _path: String, _into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+    fn download(
+        &self,
+        _path: String,
+        _into: PathBuf,
+        _shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError> {
         Err(XferError::Worker("clipboard only".to_owned()))
     }
 

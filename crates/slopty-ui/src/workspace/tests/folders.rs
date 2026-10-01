@@ -226,7 +226,12 @@ impl Remote for Uploads {
     fn cancel(&self, _xfer: XferId) {}
 
     /// Writes a file named as the path's last part, whose text is the path.
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+    fn download(
+        &self,
+        path: String,
+        into: PathBuf,
+        _shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError> {
         let name =
             path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?;
         let file = into.join(name);

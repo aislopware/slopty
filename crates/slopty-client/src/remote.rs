@@ -32,7 +32,14 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
 
     /// Bring the worker's `path` (a file, or a directory as its files) into the directory
     /// `into`, blocking until every file has landed. Never call it on the main thread.
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError>;
+    /// `shown_at` is the file the person sees it become (a drop into Finder), where the system
+    /// shows its progress and a cancel; `None` for a download nobody watches land.
+    fn download(
+        &self,
+        path: String,
+        into: PathBuf,
+        shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError>;
 
     /// Representation `rep` of the worker's clipboard offer, capped at `max`, waiting at most
     /// `wait` for it. Blocks: this is what a pasteboard's data provider calls.
@@ -128,13 +135,18 @@ impl Remote for LinkRemote {
         }
     }
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+    fn download(
+        &self,
+        path: String,
+        into: PathBuf,
+        shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError> {
         let up = self.up.clone();
         let conn = self.conn().clone();
         let xfer = XferId::new();
         self.runtime.block_on(async move {
             tokio::select! {
-                landed = xfer::download(&up, xfer, path, into) => landed,
+                landed = xfer::download(&up, xfer, path, into, shown_at.as_deref()) => landed,
                 () = async { conn.closed().await; } => Err(XferError::LinkClosed),
             }
         })

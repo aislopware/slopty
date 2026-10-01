@@ -176,3 +176,9 @@ objc2-web-kit = { workspace = true, features = [
 tempfile.workspace = true
 # The Linux service tests stand in for `loginctl` behind a lock.
 parking_lot.workspace = true
+
+# Finder's view of a download's progress, which Foundation hands to a subscriber on the main
+# thread: its own harness, so the test runs there (`tests/file_progress.rs`).
+[[test]]
+name = "file_progress"
+harness = false

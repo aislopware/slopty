@@ -19,7 +19,12 @@ impl Remote for Echoes {
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+    fn download(
+        &self,
+        path: String,
+        into: PathBuf,
+        _shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError> {
         let file = into
             .join(path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?);
         std::fs::write(&file, &path).map_err(|e| XferError::Worker(e.to_string()))?;

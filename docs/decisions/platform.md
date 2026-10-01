@@ -487,3 +487,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     e2e`: an `xclip` copy reaches a watching client as an offer, and the client's text and
     promised picture are what `xclip -o`, `wl-paste` and Claude Code's picture check read there,
     the picture fetched from the client when read.
+
+- ✅ **A download into Finder shows its progress on the file, and Finder's cancel stops it**
+  (2026-10-02, readiness audit item 12). A worker's file dragged out, a folder row or the file
+  grip brought down with no sign of progress and no way to stop it: the download fills a hidden
+  directory beside the drop and is renamed into place at the end.
+  - **Finder's own progress, not a panel of ours.** Finder draws a pie on an item, with a cancel
+    button, for a progress published on its file URL (`NSProgress` of kind file, operation
+    downloading), as for Safari's downloads. That is where the person dropped the file and where
+    they look, so it feels like a local copy. `slopty_platform::continued::Work` is the system's
+    progress UI for a transfer on both platforms: a Live Activity on iOS, and on macOS this
+    progress when the work is given the file it lands as (`Work::begin`'s `at`).
+  - **A placeholder holds the name.** Until the rename Finder has nothing to draw on, so an
+    empty file is made at the destination when nothing is there, and removed, with the progress
+    unpublished, when the work ends, before the rename. Something already there is shown on and
+    left alone.
+  - **The cancel.** Finder's cancel calls the progress's cancellation handler, which is the
+    work's expiry: the transfer stops at its next chunk and the worker is told, as the Live
+    Activity's cancel does.
+  - **The path through.** `Remote::download` takes `shown_at`, the file the person sees it
+    become: the destination for a drop into Finder, `None` for a paste into another worker or the
+    iOS Files picker, which nobody watches land.
+  - **Tested on the main thread.** Foundation hands a publish to a subscriber on the main
+    thread's run loop (checked with a scratch program: never seen without it), which libtest
+    never gives a test, so `crates/slopty-platform/tests/file_progress.rs` is its own harness:
+    it subscribes to the destination as Finder does, sees the progress and its bytes, cancels
+    through it and sees the transfer's cancel, and finds the placeholder gone. It answers a
+    runner's `--list --format terse`, so nextest runs it. `continued::mac::tests` covers a file
+    already there.
+

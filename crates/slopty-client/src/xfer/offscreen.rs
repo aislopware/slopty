@@ -1,9 +1,10 @@
 //! A transfer kept running while the app is off screen, with the system's progress UI
-//! (`slopty_platform::continued`, iOS; nothing elsewhere).
+//! (`slopty_platform::continued`): a Live Activity on iOS, and on macOS a download's progress on
+//! the file it lands as, in Finder.
 //!
 //! The work begins where [`super::upload`] or [`super::download`] starts and ends where it
-//! returns. A person cancelling it from the Live Activity cancels the transfer as the UI's
-//! cancel does: its tasks stop at their next chunk and the worker is told.
+//! returns. A person cancelling it from the Live Activity or Finder cancels the transfer as the
+//! UI's cancel does: its tasks stop at their next chunk and the worker is told.
 
 use std::sync::{Arc, Weak};
 
@@ -42,21 +43,23 @@ pub(super) fn upload(
 ) -> Offscreen {
     let (title, subtitle) = upload_titles(list);
     let current = Arc::new(Mutex::new(xfer));
-    Offscreen(Arc::new(Work::begin(&title, &subtitle, cancel(table, out, xfer, current))))
+    Offscreen(Arc::new(Work::begin(&title, &subtitle, None, cancel(table, out, xfer, current))))
 }
 
-/// Begin the work of a download of `path` as `xfer`; `current` is its attempt now, which a
-/// retry moves on.
+/// Begin the work of a download of `path` as `xfer`, shown on the file `shown_at` when it
+/// lands as one; `current` is its attempt now, which a retry moves on.
 pub(super) fn download(
     table: &Arc<Table>,
     out: &mpsc::Sender<ClientMsg>,
     xfer: XferId,
     path: &str,
+    shown_at: Option<&std::path::Path>,
     current: Arc<Mutex<XferId>>,
 ) -> Offscreen {
     let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
     let title = format!("Downloading {name}");
-    Offscreen(Arc::new(Work::begin(&title, "From the worker", cancel(table, out, xfer, current))))
+    let cancel = cancel(table, out, xfer, current);
+    Offscreen(Arc::new(Work::begin(&title, "From the worker", shown_at, cancel)))
 }
 
 /// Cancel transfer `xfer` and its attempt now, as the UI's cancel does.

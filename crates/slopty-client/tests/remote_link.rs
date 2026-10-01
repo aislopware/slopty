@@ -139,8 +139,9 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting =
-            std::thread::spawn(move || remote.download("~/notes/todo.txt".to_owned(), target));
+        let waiting = std::thread::spawn(move || {
+            remote.download("~/notes/todo.txt".to_owned(), target, None)
+        });
         let (xfer, path, held) = expect(&mut client, |m| match m {
             ClientMsg::Xfer(XferMsg::Fetch { xfer, path, held }) => Some((xfer, path, held)),
             _ => None,
@@ -207,7 +208,7 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting = std::thread::spawn(move || remote.download("~/out".to_owned(), target));
+        let waiting = std::thread::spawn(move || remote.download("~/out".to_owned(), target, None));
         let (first, held) = fetched(&mut client).await;
         assert!(held.is_empty());
         let small = b"landed first".to_vec();
@@ -276,7 +277,8 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting = std::thread::spawn(move || remote.download("~/a.txt".to_owned(), target));
+        let waiting =
+            std::thread::spawn(move || remote.download("~/a.txt".to_owned(), target, None));
         for _attempt in 0..3 {
             let (xfer, _held) = fetched(&mut client).await;
             let begin = XferMsg::Begin { xfer, dest: None, files: 1, bytes: 3 };

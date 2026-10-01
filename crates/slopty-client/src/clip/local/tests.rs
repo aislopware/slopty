@@ -56,7 +56,12 @@ impl Remote for FakeRemote {
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(&self, _path: String, _into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+    fn download(
+        &self,
+        _path: String,
+        _into: PathBuf,
+        _shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError> {
         Ok(Vec::new())
     }
 

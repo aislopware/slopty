@@ -640,6 +640,9 @@ async fn send_file(
 /// Ask the worker for `path` (a file, or a directory sent as its files) as transfer `xfer`, and
 /// wait until every file of it has landed in `into`. Returns the files landed.
 ///
+/// `shown_at` is the file the person sees it become, where the system shows its progress and a
+/// cancel (Finder, on macOS), when it lands in one.
+///
 /// An attempt cut short (a stream ended early, a digest that does not match, the worker's
 /// `Failed`) is given up and fetched again under a new transfer, naming what is held of each
 /// file, three attempts in all. One that failed on this side (a file here that cannot be
@@ -649,9 +652,11 @@ pub async fn download(
     xfer: XferId,
     path: String,
     into: PathBuf,
+    shown_at: Option<&Path>,
 ) -> Result<Vec<PathBuf>, XferError> {
     let current = Arc::new(Mutex::new(xfer));
-    let shown = offscreen::download(&up.table, &up.out, xfer, &path, Arc::clone(&current));
+    let shown =
+        offscreen::download(&up.table, &up.out, xfer, &path, shown_at, Arc::clone(&current));
     let fetch = Arc::new(Fetch { work: Some(Arc::clone(shown.work())), ..Fetch::default() });
     let landed = attempts(up, xfer, &path, &into, &fetch, &current).await;
     shown.work().end(landed.is_ok());
@@ -969,8 +974,12 @@ mod tests {
     /// resumed, against the most the worker said it is.
     #[test]
     fn a_download_counts_what_each_file_holds_once() {
-        let work =
-            slopty_platform::continued::Work::begin("Downloading x", "From the worker", || {});
+        let work = slopty_platform::continued::Work::begin(
+            "Downloading x",
+            "From the worker",
+            None,
+            || {},
+        );
         let fetch = Arc::new(Fetch { work: Some(Arc::new(work)), ..Fetch::default() });
         let table = Table::default();
         let xfer = XferId::new();

@@ -390,7 +390,7 @@ impl WorkspaceView {
                 let dir = into.join(n.to_string());
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 remote
-                    .download(path.to_string_lossy().into_owned(), dir.clone())
+                    .download(path.to_string_lossy().into_owned(), dir.clone(), None)
                     .map_err(|e| e.to_string())?;
                 landed.push(dir.join(name));
             }
@@ -954,7 +954,7 @@ fn bring_down_to(remote: &dyn Remote, source: &str, dest: &std::path::Path) -> R
     let staging = parent.join(format!(".slopty-{}", XferId::new()));
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
     let moved = remote
-        .download(source.to_owned(), staging.clone())
+        .download(source.to_owned(), staging.clone(), Some(dest.to_path_buf()))
         .map_err(|e| e.to_string())
         .and_then(|landed| slopty_platform::file_drop::out::landed_top(&landed, &staging))
         .and_then(|top| std::fs::rename(top, dest).map_err(|e| e.to_string()));

@@ -26,7 +26,12 @@ impl Remote for Files {
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(&self, path: String, into: PathBuf) -> Result<Vec<PathBuf>, XferError> {
+    fn download(
+        &self,
+        path: String,
+        into: PathBuf,
+        _shown_at: Option<PathBuf>,
+    ) -> Result<Vec<PathBuf>, XferError> {
         self.asked.send(path.clone()).map_err(|e| XferError::Worker(e.to_string()))?;
         let bytes = self
             .held
