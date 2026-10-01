@@ -746,8 +746,160 @@ MonoCode)
   orchestrator's clone at the agent's commit, with origin fetched for the fork point.
 
 Not built in Phase 1:
-- merging a task's branch to the target (the verifier run and the merge queue);
+- merging a task's branch to the target (built in Phase 3, below);
 - the known gaps under "An agent never has more than the person gave it".
+
+## Phase 3, verify and merge, as built (2026-10-01)
+
+**The queue tests the commit that becomes the target, and only moves it forward.** ✅
+2026-10-01
+- Research, read 2026-10-01:
+  - bors and Graydon Hoare's "not rocket science rule": the target only ever holds a commit
+    that passed, because the queue tests the merged result and not the branch alone.
+  - GitHub's merge queue: each entry is tested as a temporary branch of the target, the entries
+    ahead of it, and itself. An entry that fails is removed with its reason, and those behind
+    it are rebuilt.
+  - Mergify: batches and speculative checks, plus a direct merge when the branch is already up
+    to date with the target.
+  - Graphite and Aviator: stacks of dependent pull requests. Aviator adds "optimistic"
+    parallel runs and bisection of a failed batch.
+  - Claude Code's own worktrees: it makes them and leaves merging and pushing to the person or
+    a pull request. It never merges or pushes a worktree branch itself.
+- What they agree on, and what Slopty does:
+  - Rebase onto the target, run the verifier on the rebased commit, and fast-forward the
+    target to that commit (`Verb::Rebase`, `Verb::Verify`, `Verb::FastForward`, served by
+    `slopty-worker::repo::verify`).
+  - Fast-forward only, so the target never holds a merge commit the verifier did not see.
+  - When the rebase leaves the commit that already passed, because the target had not moved,
+    the verifier is not run again. This is Mergify's direct merge.
+  - When the target moves between the rebase and the fast-forward, the queue rebases the same
+    work again, up to 3 tries, and then holds.
+- Moving the target is a compare and swap. `FastForward` names the commit the rebase went
+  onto, and the worker refuses if the target is no longer there or the new commit does not
+  descend from it.
+  - When a worktree of the clone has the target checked out (the person's own checkout,
+    usually), the worker runs `git merge --ff-only` in it. Its index and files then move with
+    the branch, and git refuses rather than overwrite the person's uncommitted changes.
+  - `git update-ref` is used only when no worktree has the target checked out. On a checked-out
+    branch it would move the ref under that worktree and leave its index and files stale, so
+    they would read as reverting the merge.
+- The rebase runs in a detached checkout the project keeps in the orchestrator's clone
+  (`~/slopty/verify/<project>`, a `git worktree add --detach`). It never runs in the person's
+  checkout or the agent's worktree, so neither has a rebase stopped in it or files changed
+  under it. A conflict lists the unmerged paths (`git diff --name-only --diff-filter=U`) and
+  aborts the rebase. The checkout is reused between runs to keep builds warm.
+- Rejected:
+  - Speculative batches and bisection (GitHub's, Mergify's, Aviator's). They pay off when CI
+    machines are plentiful and a run is long. Here a verifier runs on the orchestrator's
+    machine, which is the person's, and the plan quota bounds the agents feeding the queue.
+    Serial runs, with the retest skipped when nothing moved, keep each verdict about one
+    task's work, and its reason goes to the one agent that can act on it.
+  - `git replay` and `git merge-tree --write-tree`, which rebase without a checkout. The
+    verifier needs the files checked out anyway. `replay` is still marked experimental (since
+    git 2.44), and `merge-tree` (since 2.38) makes merges, not a linear history.
+  - An integrator agent that merges. Cursor found that role became the bottleneck. The queue is
+    the server's, and it gives the work back to the agent who wrote it.
+  - Verifying in the agent's own worktree. The agent may still be writing there, and the
+    verdict would judge a moving tree.
+- Tests: `a_project_verifies_in_one_checkout_of_its_own_kept_warm`,
+  `the_queue_rebases_in_the_project_s_checkout_and_names_conflicts` and
+  `the_target_moves_only_forward_and_never_under_the_person_s_changes` (real git,
+  `slopty-worker::repo::verify::tests`).
+
+**A verifier is a terminal the person can watch.** ✅ 2026-10-01
+- A task's branch reaches the orchestrator's clone (the `Home` trip, or the task worked there
+  all along), and its state moves to verifying. The project's lane then runs the verifier, the
+  task's own or else the project's, on the orchestrator's worker in the project's checkout.
+  - It runs as a terminal titled `Verifier for <project> #<task>`. The command is
+    `nice -n 10` around the person's login shell (`$SHELL -l -i -c <verifier>`), so their PATH
+    and toolchains apply.
+  - Its environment carries `SLOPTY_VERIFY_HEAD` and `SLOPTY_VERIFY_BASE`.
+  - The task's `Verify` step names that terminal (`TaskStep.term`), and every client lists it,
+    so the person can open it and watch.
+- While the verifier runs, the step shows its last line, read every 2 s. The lane learns the
+  exit from the session's own exit state.
+- The result is a `VerifierRun`:
+  - the commits it judged (`head` and `base`);
+  - the exit code and how long it took;
+  - the last lines of its output, kept to the summary's bound.
+  It goes on the task and on the timeline (`Moment::Verified`).
+- A pass closes the terminal. A failure keeps it, so the whole output can be read. It is closed
+  when the task is judged again.
+- A terminal the person closes before the verifier ends counts as a failure with no exit code.
+  There is no timeout, because the person can see the run and stop it.
+- A pass puts the task in the queue (`Task.merge = Merge::Queued { since_ms }`). The queue is
+  its tasks, done and queued, in the order they joined. Verifying comes before merging, since
+  an agent waits on each verdict and every pass feeds the queue.
+
+**A failure goes back to the agent that can fix it, as a report.** ✅ 2026-10-01
+- A failed verifier, a conflict, or anything else wrong with the work gives the task back:
+  - it leaves the queue;
+  - its step fails with the reason;
+  - it waits at its agent's prompt when that agent still runs, and is planned otherwise.
+- The agent is told through the delivery path every report takes (`deliver::Deliveries::notice`).
+  That path is its `SessionStart`, `UserPromptSubmit` and `Stop` hooks, never typing into its TUI.
+  - The report names what ran, on which commits, how it ended, the last lines, and what to do
+    next: fix, commit, and report done again.
+  - A conflict names its paths.
+  - A newer notice about the same task replaces an older one that has not been delivered yet.
+- The node above the task hears too, at once:
+  - "given back" with the reason;
+  - "merged into <target> at <short>", since what depends on the task can start then.
+- A job that stops for a reason that is not the task's holds the lane with that reason on the
+  step, and the task keeps its place. Examples: the worker is away, or the person's checkout of
+  the target has changes in the way. A worker registering again starts the lanes once more, and
+  so does the next change that concerns the project.
+- Only the person asks for a merge outside a done report (`TaskMerge`, `slopty task merge`).
+  An agent's call is `Forbidden`. A task with a verifier is verified first, and one with none
+  joins the queue at once. `Verify`, `Rebase` and `FastForward` are the server's own verbs and
+  `Forbidden` to every caller.
+
+**The queue survives a restart.** ✅ 2026-10-01
+- The lane keeps nothing the store does not. Each time, it reads its next job from the tasks
+  (`Projects::next_job`): the longest verifying task, else the head of the queue.
+- A step under way when the server stopped is marked failed on load ("the server stopped while
+  it ran"). The task keeps its state and its place, and registration starts the lane again.
+- Every move the lane makes is one store change with at most one timeline entry
+  (`Projects::advance`), checked against `TaskState::may_become`.
+
+**Pushing the target is the person's setting, off by default.** ✅ 2026-10-01
+- `Project.push` (`slopty project create --push`, `slopty project update --push true`). When it
+  is on, a merge pushes the target to `origin` without force. A push that fails leaves the
+  merge done and says why on its step ("not pushed: …").
+- It is off by default, and only the person can turn it on (an agent naming it is
+  `Forbidden`), because:
+  - a push publishes to a shared forge, and it may start CI and deploys;
+  - the verifier's pass is a local verdict;
+  - the push would use the person's credentials from a background process;
+  - Claude Code itself never pushes a worktree's branch.
+
+**No separate merge-queue view.** ✅ 2026-10-01
+- The board's lanes are the queue already: Verifying, Ready to merge, Merged. Each card shows
+  the step it is in (rebasing, verifying on the target, fast-forwarding), its verdict, and the
+  commits judged. A second view would show the same tasks again.
+
+Known gaps:
+- A conflict asks the agent to rebase onto the target as the orchestrator's clone has it. When
+  the agent works on another worker and pushing is off, its clone sees only the forge's target,
+  so the merged commits it must rebase over are not there. Carrying the target to the agent's
+  clone, the reverse of the `Home` trip, is the next step.
+- The fresh-context reviewer before a merge is not built.
+
+Tests:
+- `slopty-server::project::merge::tests`: the queue's order and its reload from the store's file
+  and from its log replayed, and what the person may merge.
+- `slopty-server::hub::queue::tests`, against a scripted worker:
+  - verified and merged by fast-forward;
+  - a failed verifier reaching its agent through hooks;
+  - a rebased head verified again, and a hold for the person's changes;
+  - a conflict with its paths.
+- `apps/slopty-cli/tests/projects.rs`, with real workers, git and the stub claude:
+  - `a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone` runs two workers:
+    done, home, verified, queued, and `main` fast-forwarded in the orchestrator's clone, with
+    nothing pushed;
+  - `a_failed_verifier_and_a_conflict_go_back_to_the_agent` runs one worker: the failure's
+    report read by the agent's next prompt hook, the kept terminal, then `slopty task merge`, a
+    pass, and a rebase conflict naming `a.txt` with `main` untouched.
 
 ## Phases
 
@@ -766,7 +918,7 @@ Not built in Phase 1:
    - Mirror presence as a placement fact (placement itself was built in Phase 1).
    - A worktree setup file (A3).
    - Linux worker hardening: systemd, x86_64 and a real network e2e.
-3. **Verify and merge.**
+3. **Verify and merge.** The verifier and the merge queue built 2026-10-01.
    - The verifier runs per task, and the merge queue on the server.
    - The fresh-context reviewer.
    - The timeline, and tokens per agent.

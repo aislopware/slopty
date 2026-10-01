@@ -18,12 +18,12 @@ use super::tests::{caps, registration, summary};
 use super::*;
 use crate::project::Policy;
 
-fn project() -> ProjectId {
+pub(super) fn project() -> ProjectId {
     ProjectId::new("slopty").unwrap()
 }
 
 /// A worker on `os` named `name`, running `sessions`.
-fn worker_on(
+pub(super) fn worker_on(
     hub: &Hub,
     name: &str,
     os: Os,
@@ -57,6 +57,7 @@ async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsCha
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
             verifier: None,
+            push: false,
             orchestrator,
             limits,
             metadata: None,
@@ -65,11 +66,11 @@ async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsCha
     assert!(matches!(made, Outcome::Project(_)), "{made:?}");
 }
 
-async fn create(hub: &Hub, orchestrator: Option<TermRef>) {
+pub(super) async fn create(hub: &Hub, orchestrator: Option<TermRef>) {
     create_with(hub, orchestrator, LimitsChange::default()).await;
 }
 
-async fn new_task(hub: &Hub, placement: Placement) -> TaskId {
+pub(super) async fn new_task(hub: &Hub, placement: Placement) -> TaskId {
     let spec = TaskSpec {
         title: "Server".to_owned(),
         brief: "Build it.".to_owned(),
@@ -86,7 +87,7 @@ fn linux_only() -> Placement {
     Placement { require: vec![r#"os == "linux""#.to_owned()], ..Placement::default() }
 }
 
-async fn status(hub: &Hub) -> ProjectStatus {
+pub(super) async fn status(hub: &Hub) -> ProjectStatus {
     let verb = Verb::ProjectStatus { project: project(), since: Some(0), timeout_ms: 0 };
     match hub.dispatch(verb).await {
         Outcome::Project(status) => *status,
@@ -94,7 +95,7 @@ async fn status(hub: &Hub) -> ProjectStatus {
     }
 }
 
-async fn task_now(hub: &Hub, task: TaskId) -> TaskCard {
+pub(super) async fn task_now(hub: &Hub, task: TaskId) -> TaskCard {
     status(hub).await.tasks.into_iter().find(|t| t.id == task).unwrap()
 }
 
@@ -371,6 +372,7 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
         project: project(),
         orchestrator: None,
         verifier: None,
+        push: None,
         limits: greedy,
         metadata: None,
     };
@@ -798,6 +800,8 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
             summary: "ok".to_owned(),
             head: "a".repeat(40),
             base: "b".repeat(40),
+            exit: Some(0),
+            took_ms: 0,
         }),
         ..TaskChange::default()
     });
@@ -814,6 +818,7 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
             project: project(),
             orchestrator: None,
             verifier: weaker(),
+            push: None,
             limits: LimitsChange::default(),
             metadata: None,
         },
@@ -1330,6 +1335,7 @@ async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
         project: project(),
         orchestrator: Some(persons),
         verifier: None,
+        push: None,
         limits: LimitsChange::default(),
         metadata: None,
     };
@@ -1364,6 +1370,7 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
             repo: "~/src/elsewhere".to_owned(),
             target: "main".to_owned(),
             verifier: None,
+            push: false,
             orchestrator: Some(TermRef { worker: linux, session: theirs }),
             limits: LimitsChange::default(),
             metadata: None,
@@ -1485,6 +1492,7 @@ async fn a_task_s_agent_splits_work_only_under_its_own_task() {
                 repo: "~/src/mine".to_owned(),
                 target: "main".to_owned(),
                 verifier: None,
+                push: false,
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -1608,7 +1616,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
 }
 
 /// A shell in the clone at `path` of the repository `origin`, cloned from `url`.
-fn in_repo(session: SessionId, path: &str, url: Option<&str>) -> SessionSummary {
+pub(super) fn in_repo(session: SessionId, path: &str, url: Option<&str>) -> SessionSummary {
     SessionSummary {
         repo: Some(path.to_owned()),
         repo_id: Some(slopty_proto::terminal::RepoId {
@@ -1626,7 +1634,7 @@ async fn step_of(hub: &Hub, task: TaskId) -> Option<slopty_proto::project::TaskS
 }
 
 /// The worker's answer to `verb` request `id`.
-fn answer(lease: &Lease, id: RequestId, outcome: Outcome) {
+pub(super) fn answer(lease: &Lease, id: RequestId, outcome: Outcome) {
     lease.handle(ToServer::Reply { id, outcome });
 }
 

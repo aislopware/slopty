@@ -57,6 +57,7 @@ fn large() -> Large {
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
             verifier: Some("cargo gate".to_owned()),
+            push: false,
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: Some(r#"{"ticket":"SLOP-1234","owner":"platform"}"#.to_owned()),

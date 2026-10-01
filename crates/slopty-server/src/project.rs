@@ -18,7 +18,7 @@ use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live,
-    METADATA_MAX, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives, NodeDetail,
+    METADATA_MAX, Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives, NodeDetail,
     NodeNatives, Project, ProjectStatus, ProjectUpdate, REF_MAX, Report, STATUS_MAX, SUMMARY_MAX,
     StepState, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId,
     TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
@@ -278,6 +278,7 @@ pub(crate) struct NewProject {
     pub repo: String,
     pub target: String,
     pub verifier: Option<String>,
+    pub push: bool,
     pub orchestrator: Option<TermRef>,
     pub limits: LimitsChange,
     pub metadata: Option<String>,
@@ -288,6 +289,7 @@ pub(crate) struct NewProject {
 pub(crate) struct ProjectChange {
     pub orchestrator: Option<TermRef>,
     pub verifier: Option<String>,
+    pub push: Option<bool>,
     pub limits: LimitsChange,
     pub metadata: Option<String>,
 }
@@ -979,6 +981,7 @@ impl Projects {
             repo_id: None,
             target: new.target.trim().to_owned(),
             verifier: verifier(new.verifier)?,
+            push: new.push,
             orchestrator: new.orchestrator,
             limits,
             metadata: metadata(new.metadata)?,
@@ -1018,6 +1021,10 @@ impl Projects {
         if let Some(metadata) = metadata {
             quiet |= record.project.metadata != metadata;
             record.project.metadata = metadata;
+        }
+        if let Some(push) = change.push {
+            quiet |= record.project.push != push;
+            record.project.push = push;
         }
         if limits != record.project.limits {
             record.project.limits = limits;
@@ -1115,6 +1122,7 @@ impl Projects {
             base: None,
             pr: None,
             verified: None,
+            merge: None,
             created_ms: now,
             updated_ms: now,
             step: None,
@@ -1241,6 +1249,11 @@ impl Projects {
         if let Some(to) = change.state.filter(|to| *to != t.state) {
             moments.push(Moment::State { from: t.state, to });
             t.state = to;
+            // A task moved out of done leaves the queue: what was verified is not what it is
+            // now.
+            if to != TaskState::Merged && t.merge.as_ref().is_some_and(|m| m.queued().is_some()) {
+                t.merge = None;
+            }
         }
         if let Some(status) = status.filter(|s| *s != t.status) {
             t.status = status;
@@ -1281,7 +1294,7 @@ impl Projects {
             quiet = true;
         }
         if let Some(run) = change.verified {
-            moments.push(Moment::Verified { passed: run.passed, summary: run.summary.clone() });
+            moments.push(Moment::Verified(run.clone()));
             t.verified = Some(run);
         }
         if let Some(text) = words(change.note) {
@@ -1929,5 +1942,7 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
 
 #[cfg(test)]
 mod cost;
+mod merge;
+pub(crate) use merge::{Advance, Job, Queue};
 #[cfg(test)]
 mod tests;

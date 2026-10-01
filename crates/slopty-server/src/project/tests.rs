@@ -45,6 +45,7 @@ fn new_project(orchestrator: Option<TermRef>, limits: LimitsChange) -> NewProjec
         repo: "~/src/slopty".to_owned(),
         target: "main".to_owned(),
         verifier: Some("cargo gate".to_owned()),
+        push: false,
         orchestrator,
         limits,
         metadata: None,
@@ -322,6 +323,8 @@ fn a_task_follows_its_agent_until_someone_else_moves_it() {
             summary: "2 errors".to_owned(),
             head: "a".repeat(40),
             base: "b".repeat(40),
+            exit: Some(0),
+            took_ms: 0,
         }),
         ..TaskChange::default()
     };
@@ -693,7 +696,8 @@ fn a_step_is_shown_as_it_goes_and_ends_with_the_server() {
     let mut p = project(None);
     let a = task(&mut p, "A", &[]);
     let (worker, since) = (WorkerId::new(), now());
-    let step = |state, since_ms| TaskStep { kind: StepKind::Clone, worker, state, since_ms };
+    let step =
+        |state, since_ms| TaskStep { kind: StepKind::Clone, worker, state, since_ms, term: None };
     let running = |percent| StepState::Running { phase: "Receiving objects".to_owned(), percent };
     let steps_logged = |p: &Projects| {
         status(p).timeline.iter().filter(|e| matches!(e.what, Moment::Step(_))).count()

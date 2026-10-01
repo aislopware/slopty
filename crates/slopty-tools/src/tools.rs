@@ -1485,6 +1485,7 @@ async fn run<D: Dispatch>(
                 repo: a.repo,
                 target: a.target,
                 verifier: a.verifier,
+                push: false,
                 orchestrator: a.orchestrator,
                 limits: a.limits.into(),
                 metadata: metadata_text(a.metadata)?,
@@ -1497,6 +1498,7 @@ async fn run<D: Dispatch>(
             let edit = ProjectEdit {
                 orchestrator: a.orchestrator,
                 verifier: a.verifier,
+                push: None,
                 limits: a.limits.into(),
                 metadata: metadata_text(a.metadata)?,
             };
@@ -1852,6 +1854,7 @@ mod tests {
             base: None,
             pr: None,
             verified: None,
+            merge: None,
             created_ms: WallMs::ZERO,
             updated_ms: WallMs::ZERO,
             step: None,
@@ -1868,6 +1871,7 @@ mod tests {
                 repo_id: None,
                 target: "main".to_owned(),
                 verifier: None,
+                push: false,
                 orchestrator: None,
                 limits: Limits::default(),
                 metadata: None,

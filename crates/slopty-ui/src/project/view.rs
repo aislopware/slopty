@@ -1210,8 +1210,8 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         }
         Moment::Branch { pr: Some(_), .. } => (IconName::GitPullRequest, s.text_secondary),
         Moment::Branch { .. } => (IconName::GitBranch, s.text_secondary),
-        Moment::Verified { passed: true, .. } => (IconName::CircleCheck, s.success),
-        Moment::Verified { passed: false, .. } => (IconName::CircleX, s.error),
+        Moment::Verified(run) if run.passed => (IconName::CircleCheck, s.success),
+        Moment::Verified(_) => (IconName::CircleX, s.error),
         Moment::AgentGone { .. } => (IconName::Power, s.text_muted),
         Moment::Note { .. } => (IconName::MessageSquare, s.text_secondary),
         Moment::Reported { report } => match report.kind {
@@ -1226,6 +1226,9 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
             (StepKind::Clone, _) => (IconName::FolderGit2, s.text_secondary),
             (StepKind::Home, StepState::Done { .. }) => (IconName::GitBranch, s.success),
             (StepKind::Home, _) => (IconName::Download, s.text_secondary),
+            (StepKind::Verify, _) => (IconName::ListChecks, s.text_secondary),
+            (StepKind::Merge, StepState::Done { .. }) => (IconName::GitMerge, s.success),
+            (StepKind::Merge, _) => (IconName::GitMerge, s.text_secondary),
         },
     };
     (glyph, hsla(tone))

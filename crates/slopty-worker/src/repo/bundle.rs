@@ -201,7 +201,7 @@ async fn verify(git: &Path, repo: &Path, bundle: &str) -> Result<(), Failed> {
 }
 
 /// `refs/heads/<branch>`, for a branch name git takes as one.
-fn branch_ref(branch: &str) -> Result<String, Failed> {
+pub(super) fn branch_ref(branch: &str) -> Result<String, Failed> {
     let fine = !branch.is_empty()
         && !branch.starts_with('-')
         && !branch.contains("..")
@@ -254,7 +254,7 @@ async fn digest_of(path: &Path) -> Result<(u64, [u8; 32]), String> {
 }
 
 /// `git -C repo args…`, asking nothing, within [`TIMEOUT`]: its output, or what it said.
-async fn run(git: &Path, repo: &Path, args: &[&str]) -> Result<String, Failed> {
+pub(super) async fn run(git: &Path, repo: &Path, args: &[&str]) -> Result<String, Failed> {
     let ran = tokio::process::Command::new(git)
         .arg("-C")
         .arg(repo)

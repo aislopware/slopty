@@ -444,6 +444,24 @@ the server's record of the session first, then `SLOPTY_PROJECT` and `SLOPTY_TASK
 (`slopty_tools::Scope`). Tests start `slopty-stub-claude`, never `claude`. Rulings in
 `docs/decisions/projects.md`.
 
+**Verify and merge.** Each project has one lane on the server (`slopty-server::hub::queue`). It
+runs one job at a time, and it reads each next job from the tasks (`Projects::next_job`), so
+the store is the queue and a restart takes it up where it stood:
+- A task whose branch is in the orchestrator's clone, and whose verifier applies, moves to
+  verifying. The lane runs the verifier there as a terminal of its own (`Verb::Verify`), in a
+  detached checkout the project keeps in that clone (`~/slopty/verify/<project>`,
+  `slopty-worker::repo::verify`). The step carries that terminal, and the last line shows as
+  progress. The exit comes from the session's own exit state.
+- A pass queues the task (`Merge::Queued`). The head of the queue is rebased onto the target in
+  the same checkout (`Verb::Rebase`), verified again unless the rebase left the commit that
+  passed, and the target is fast-forwarded (`Verb::FastForward`). That is a compare and swap
+  on the commit it was rebased onto, made with `merge --ff-only` in a worktree that has the
+  target checked out, and `update-ref` otherwise. It pushes only when the project's `push` is
+  on.
+- A failure or a conflict gives the task back (`Hub::give_back`) as a notice through
+  `deliver`, which the agent's hooks hand over. A reason that is not the task's holds the lane
+  until a worker registers or the project changes.
+
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
 `slopty-worker`; app `slopty-ptyd`.

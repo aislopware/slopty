@@ -512,6 +512,9 @@ pub enum Verb {
         target: String,
         /// The command that says a task's work is right.
         verifier: Option<String>,
+        /// Push the target to its clone's `origin` after each merge ([`Project::push`]); only
+        /// the person turns it on.
+        push: bool,
         /// The orchestrator's terminal.
         orchestrator: Option<TermRef>,
         /// Its limits over [`crate::project::Limits::default`], within the person's
@@ -520,8 +523,8 @@ pub enum Verb {
         /// Anything its agents keep with it: the text of a JSON object.
         metadata: Option<String>,
     },
-    /// Change a project's orchestrator, verifier, limits or metadata; what is absent stays.
-    /// Answered with [`Outcome::Project`].
+    /// Change a project's orchestrator, verifier, pushing, limits or metadata; what is absent
+    /// stays. Answered with [`Outcome::Project`].
     ProjectSet {
         /// Which.
         project: ProjectId,
@@ -529,6 +532,9 @@ pub enum Verb {
         orchestrator: Option<TermRef>,
         /// The verifier command; empty for none.
         verifier: Option<String>,
+        /// Whether to push the target after each merge ([`Project::push`]); only the person
+        /// sets it.
+        push: Option<bool>,
         /// Its limits, within the person's [`crate::project::Bounds`].
         limits: LimitsChange,
         /// New metadata, in place of the old.
@@ -684,6 +690,74 @@ pub enum Verb {
         /// The commit the branch is at, which the bundle must hold.
         head: String,
     },
+    /// Check out `head` in the project's verify checkout of the clone at `repo`
+    /// ([`crate::project::VERIFY_PLACES`]), made on first use and reused, and run `command`
+    /// there through the person's login shell in a new terminal under the id `session`, which
+    /// every client shows. Answered with [`Outcome::Verifying`] once it runs; its end is the
+    /// terminal's own.
+    Verify {
+        /// Where.
+        worker: WorkerId,
+        /// The clone the commit is in.
+        repo: String,
+        /// The checkout's name in [`crate::project::VERIFY_PLACES`]: the project's.
+        worktree: String,
+        /// The commit or branch to verify.
+        head: String,
+        /// The branch work lands on, whose fork point from `head` is the run's base.
+        target: String,
+        /// The verifier, a shell command line.
+        command: String,
+        /// The terminal's id, which the server chooses.
+        session: SessionId,
+        /// A name for its tile.
+        title: String,
+    },
+    /// Rebase `head` onto the branch `onto` in the project's verify checkout of the clone at
+    /// `repo`, as the merge queue does before it verifies again. A head that already holds
+    /// `onto` is answered as it is. Answered with [`Outcome::Rebased`], or
+    /// [`ErrorCode::Conflict`] naming the paths that conflict.
+    Rebase {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The checkout's name in [`crate::project::VERIFY_PLACES`].
+        worktree: String,
+        /// The commit to rebase.
+        head: String,
+        /// The branch it goes on top of.
+        onto: String,
+    },
+    /// Move the branch `target` of the clone at `repo` from `from` to `to`, a commit that
+    /// descends from it, and nothing else: in the checkout that has it checked out, as `git
+    /// merge --ff-only` does, so nothing of the person's there is overwritten. Then push it to
+    /// `origin` when asked. Answered with [`Outcome::FastForwarded`], or
+    /// [`ErrorCode::Conflict`] when the branch is no longer at `from`.
+    FastForward {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The branch.
+        target: String,
+        /// The commit it must be at now.
+        from: String,
+        /// The commit it moves to.
+        to: String,
+        /// Push it to `origin` after.
+        push: bool,
+    },
+    /// Put a task in its project's merge queue, the person's word: its verifier runs on its
+    /// branch first when the project or the task names one. How a task with no verifier is
+    /// merged, and how one is tried again after it was returned. Answered with
+    /// [`Outcome::Task`]; an agent is [`ErrorCode::Forbidden`].
+    TaskMerge {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -762,7 +836,11 @@ impl Verb {
             | Self::TaskSpawn { .. }
             | Self::TaskReport { .. }
             | Self::BundleBranch { .. }
-            | Self::FetchBundle { .. } => true,
+            | Self::FetchBundle { .. }
+            | Self::TaskMerge { .. }
+            | Self::Verify { .. }
+            | Self::Rebase { .. }
+            | Self::FastForward { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -1177,6 +1255,31 @@ pub enum Outcome {
         branch: String,
         /// Its commit.
         head: String,
+    },
+    /// For [`Verb::Verify`]: the verifier runs in `term`, on these commits.
+    Verifying {
+        /// Its terminal.
+        term: TermRef,
+        /// The commit checked out, in hex.
+        head: String,
+        /// Where it left the target branch, in hex.
+        base: String,
+    },
+    /// For [`Verb::Rebase`]: what the rebase made, on top of the target at `onto`.
+    Rebased {
+        /// The rebased commit, in hex; the head given when it already held `onto`.
+        head: String,
+        /// The target's commit it is on top of, in hex.
+        onto: String,
+    },
+    /// For [`Verb::FastForward`]: the branch is at `head`.
+    FastForwarded {
+        /// Its commit now, in hex.
+        head: String,
+        /// It was pushed to `origin`.
+        pushed: bool,
+        /// Why a push asked for did not happen; the branch moved all the same.
+        push_failed: Option<String>,
     },
 }
 

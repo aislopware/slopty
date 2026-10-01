@@ -60,6 +60,7 @@ use crate::deliver::Deliveries;
 use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
 
 mod projects;
+mod queue;
 mod steps;
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus
@@ -198,6 +199,8 @@ struct State {
     keeper: Option<mpsc::UnboundedSender<Keep>>,
     /// What the server does for tasks around their agents: clones, branches brought home.
     steps: steps::Steps,
+    /// The projects' lanes running: their verifiers and merge queues.
+    lanes: queue::Lanes,
 }
 
 /// A project change made under a key, so a repeat of the verb answers as the first did.
@@ -609,6 +612,8 @@ impl Hub {
             Self::push_batch(&state, &batch);
         }
         self.unpark_deliveries(&mut state);
+        // A lane that stopped for want of a worker, or one a restart left, goes on.
+        self.kick_all(&mut state);
         if reshaped || !replaced.is_empty() {
             self.persist(&state);
         }
@@ -824,13 +829,19 @@ impl Hub {
                 "the server clones and carries branches for tasks itself; task_spawn and \
                      task_report do it",
             ),
+            Verb::Verify { .. } | Verb::Rebase { .. } | Verb::FastForward { .. } => error(
+                ErrorCode::Forbidden,
+                "the server verifies and merges tasks itself, one at a time; a task's done \
+                 report starts it, and the person's task_merge asks for it",
+            ),
             verb @ (Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
             | Verb::TaskCreate { .. }
             | Verb::TaskClaim { .. }
             | Verb::TaskUpdate { .. }
             | Verb::TaskAssign { .. }
-            | Verb::TaskReport { .. }) => self.project_change(caller, key, &verb),
+            | Verb::TaskReport { .. }
+            | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
             other => self.forward(key, other).await,
         }
     }
@@ -1473,7 +1484,8 @@ fn remember(
         | Verb::TaskUpdate { project, .. }
         | Verb::TaskAssign { project, .. }
         | Verb::TaskSpawn { project, .. }
-        | Verb::TaskReport { project, .. } => Some(project),
+        | Verb::TaskReport { project, .. }
+        | Verb::TaskMerge { project, .. } => Some(project),
         _ => None,
     };
     let answer = match (outcome, project) {
@@ -1606,7 +1618,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WorkerFacts { .. }
         | Verb::TaskGet { .. }
         | Verb::WorkingOn { .. }
-        | Verb::TaskReport { .. } => None,
+        | Verb::TaskReport { .. }
+        | Verb::TaskMerge { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
@@ -1623,7 +1636,10 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WakePeer { worker, .. }
         | Verb::CloneRepo { worker, .. }
         | Verb::BundleBranch { worker, .. }
-        | Verb::FetchBundle { worker, .. } => Some(*worker),
+        | Verb::FetchBundle { worker, .. }
+        | Verb::Verify { worker, .. }
+        | Verb::Rebase { worker, .. }
+        | Verb::FastForward { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
             Some(item.worker)
         }

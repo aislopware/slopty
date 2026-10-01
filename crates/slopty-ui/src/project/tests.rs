@@ -263,8 +263,15 @@ fn every_moment_reads_as_a_sentence() {
         "Needs you"
     );
     assert_eq!(
-        say(Moment::Verified { passed: false, summary: "\nclippy: 3 warnings\nmore".into() }),
-        "Verifier failed: clippy: 3 warnings"
+        say(Moment::Verified(slopty_proto::project::VerifierRun {
+            passed: false,
+            summary: "Compiling a\nerror: could not compile `a`\n\n".into(),
+            head: "abcdef0123".into(),
+            base: "0123456789".into(),
+            exit: Some(101),
+            took_ms: 9000,
+        })),
+        "Verifier failed at abcdef0: error: could not compile `a`"
     );
     assert_eq!(
         say(Moment::Branch { branch: Some("slopty/board/1".into()), pr: Some(7) }),
@@ -275,7 +282,13 @@ fn every_moment_reads_as_a_sentence() {
         "Owns crates/a and 2 more"
     );
     let step = |kind, state| {
-        Moment::Step(slopty_proto::project::TaskStep { kind, worker, state, since_ms: AT })
+        Moment::Step(slopty_proto::project::TaskStep {
+            kind,
+            worker,
+            state,
+            since_ms: AT,
+            term: None,
+        })
     };
     let running = |phase: &str, percent| StepState::Running { phase: phase.into(), percent };
     assert_eq!(say(step(StepKind::Clone, running("Starting", None))), "Cloning on studio");

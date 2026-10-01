@@ -14,11 +14,11 @@ mod golden_project {
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::project::{
-        AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Moment, Native,
-        NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placement, Preference,
-        Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Reason, Report, ReportKind,
-        Runner, StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec,
-        TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
+        AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Merge, Moment,
+        Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placement,
+        Preference, Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Reason, Report,
+        ReportKind, Runner, StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch,
+        TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
@@ -67,6 +67,7 @@ mod golden_project {
             }),
             target: "main".to_owned(),
             verifier: Some("cargo gate".to_owned()),
+            push: false,
             orchestrator: Some(term()),
             limits: Limits::default(),
             metadata: Some(r#"{"goal":"open"}"#.to_owned()),
@@ -131,13 +132,18 @@ mod golden_project {
                 merge_request: false,
             }),
             verified: Some(run(false, "clippy: 2 errors")),
+            merge: Some(Merge::Queued { since_ms: at() }),
             created_ms: at(),
             updated_ms: WallMs::from_millis(1_790_000_005_000),
             step: Some(TaskStep {
-                kind: StepKind::Home,
+                kind: StepKind::Verify,
                 worker: term().worker,
-                state: StepState::Running { phase: "Sending".to_owned(), percent: Some(40) },
+                state: StepState::Running {
+                    phase: "Compiling slopty-server".to_owned(),
+                    percent: None,
+                },
                 since_ms: at(),
+                term: Some(term()),
             }),
         }
     }
@@ -147,7 +153,14 @@ mod golden_project {
     }
 
     fn run(passed: bool, summary: &str) -> VerifierRun {
-        VerifierRun { passed, summary: summary.to_owned(), head: commit('a'), base: commit('b') }
+        VerifierRun {
+            passed,
+            summary: summary.to_owned(),
+            head: commit('a'),
+            base: commit('b'),
+            exit: Some(if passed { 0 } else { 101 }),
+            took_ms: 133_000,
+        }
     }
 
     fn native_agent() -> NativeAgent {
@@ -223,6 +236,7 @@ mod golden_project {
                 repo: "~/src/slopty".to_owned(),
                 target: "main".to_owned(),
                 verifier: Some("cargo gate".to_owned()),
+                push: false,
                 orchestrator: Some(term()),
                 limits,
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
@@ -234,6 +248,7 @@ mod golden_project {
                 project: project_id(),
                 orchestrator: None,
                 verifier: None,
+                push: Some(true),
                 limits: LimitsChange { depth: Some(3), ..LimitsChange::default() },
                 metadata: None,
             }),
@@ -330,6 +345,71 @@ mod golden_project {
             "task_report",
             &request(Verb::TaskReport { project: project_id(), task: TaskId(3), report: report() }),
         );
+        snap("task_merge", &request(Verb::TaskMerge { project: project_id(), task: TaskId(3) }));
+    }
+
+    /// What the server asks of the orchestrator's worker to verify a task and merge it: a
+    /// verifier run in the project's checkout, a rebase there, the target moved; and how it
+    /// answers.
+    #[test]
+    fn verify_and_merge() {
+        let worker = term().worker;
+        let repo = "/w/slopty".to_owned();
+        snap(
+            "verify",
+            &request(Verb::Verify {
+                worker,
+                repo: repo.clone(),
+                worktree: "slopty".to_owned(),
+                head: "slopty/slopty/3".to_owned(),
+                target: "main".to_owned(),
+                command: "cargo gate".to_owned(),
+                session: term().session,
+                title: "Verifier for slopty #3".to_owned(),
+            }),
+        );
+        snap(
+            "verifying",
+            &reply(Outcome::Verifying { term: term(), head: commit('a'), base: commit('b') }),
+        );
+        snap(
+            "rebase",
+            &request(Verb::Rebase {
+                worker,
+                repo: repo.clone(),
+                worktree: "slopty".to_owned(),
+                head: commit('a'),
+                onto: "main".to_owned(),
+            }),
+        );
+        snap("rebased", &reply(Outcome::Rebased { head: commit('d'), onto: commit('c') }));
+        snap(
+            "fast_forward",
+            &request(Verb::FastForward {
+                worker,
+                repo,
+                target: "main".to_owned(),
+                from: commit('c'),
+                to: commit('d'),
+                push: true,
+            }),
+        );
+        snap(
+            "fast_forwarded",
+            &reply(Outcome::FastForwarded {
+                head: commit('d'),
+                pushed: false,
+                push_failed: Some("! [rejected] main -> main (fetch first)".to_owned()),
+            }),
+        );
+        let merged = Merge::Merged {
+            target: "main".to_owned(),
+            head: commit('d'),
+            at_ms: at(),
+            pushed: true,
+        };
+        let card = Task { merge: Some(merged), state: TaskState::Merged, ..task() };
+        snap("task_merged_card", &card.card(&Natives::default()));
     }
 
     /// What the server asks of workers for a task around its agent: a clone, a branch
@@ -493,7 +573,7 @@ mod golden_project {
             Moment::Assigned { term: term(), spawned: false },
             Moment::State { from: TaskState::Planned, to: TaskState::Running },
             Moment::Branch { branch: Some("slopty/slopty/3".to_owned()), pr: Some(42) },
-            Moment::Verified { passed: true, summary: "gate passed".to_owned() },
+            Moment::Verified(run(true, "gate passed")),
             Moment::AgentGone { term: term() },
             Moment::Reported { report: report() },
             Moment::Delivered { term: term(), reports: 3 },
@@ -503,11 +583,19 @@ mod golden_project {
                 worker: term().worker,
                 state: StepState::Failed { why: "fatal: Authentication failed".to_owned() },
                 since_ms: at(),
+                term: None,
+            }),
+            Moment::Step(TaskStep {
+                kind: StepKind::Merge,
+                worker: term().worker,
+                state: StepState::Done { detail: "main at dddddd".to_owned() },
+                since_ms: at(),
+                term: None,
             }),
         ];
         let timeline: Vec<TimelineEntry> =
             (1..).zip(moments).map(|(seq, what)| entry(seq, what)).collect();
-        let snapshot = status(timeline.clone(), 15);
+        let snapshot = status(timeline.clone(), 16);
         let part = ProjectsPart { seq: 49, first: true, last: true, projects: vec![snapshot] };
         snap("project_snapshot", &FromServer::Projects(Box::new(part)));
         let update = ProjectUpdate {

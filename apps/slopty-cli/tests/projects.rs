@@ -201,6 +201,7 @@ mod tests {
                 repo: root.to_string_lossy().into_owned(),
                 target: "main".to_owned(),
                 verifier: None,
+                push: false,
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -467,6 +468,7 @@ mod tests {
                 repo: root.to_string_lossy().into_owned(),
                 target: "main".to_owned(),
                 verifier: None,
+                push: false,
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -578,6 +580,7 @@ mod tests {
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
                 verifier: None,
+                push: false,
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -705,6 +708,7 @@ mod tests {
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
                 verifier: None,
+                push: false,
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -826,6 +830,374 @@ mod tests {
                 (StepKind::Home, true)
             ],
             "each step's start and end on the timeline"
+        );
+        server.shutdown().await;
+    }
+
+    /// The card of task 1 once `done` holds of it.
+    async fn card_when(
+        hub: &Hub,
+        project: &ProjectId,
+        what: &str,
+        done: impl Fn(&slopty_proto::project::TaskCard) -> bool,
+    ) -> slopty_proto::project::TaskCard {
+        until(what, async || {
+            let card = status(hub, project).await.tasks.into_iter().next()?;
+            done(&card).then_some(card)
+        })
+        .await
+    }
+
+    /// Each step and verdict of task 1 on the timeline, in words.
+    async fn moments(hub: &Hub, project: &ProjectId) -> Vec<String> {
+        use slopty_proto::project::StepState;
+        status(hub, project)
+            .await
+            .timeline
+            .into_iter()
+            .filter_map(|e| match e.what {
+                Moment::Step(s) => {
+                    let how = match s.state {
+                        StepState::Running { .. } => "began",
+                        StepState::Done { .. } => "done",
+                        StepState::Failed { .. } => "failed",
+                    };
+                    Some(format!("{:?} {how}", s.kind))
+                }
+                Moment::Verified(run) => Some(format!("verified {}", run.passed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The whole way, across two machines: a task's agent on the Linux worker reports done,
+    /// its branch comes home to the orchestrator's clone, the project's verifier runs on it
+    /// there in a checkout of its own and passes, and the merge queue fast-forwards the
+    /// clone's `main` to exactly the commit verified. Its checkout moves with it. Nothing is
+    /// pushed, since pushing is off until the person turns it on, and the verifier's terminal
+    /// is gone once it passed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone() {
+        use slopty_proto::project::{Merge, Placement, StepKind};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git_out(&seed, &["init", "-q", "-b", "main"]);
+        git_out(&seed, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git_out(&root, &["clone", "-q", "--bare", "seed", "forge.git"]);
+        let url = "https://example.com/o/demo.git";
+        let forge = root.join("forge.git");
+        let reach = format!("url.file://{}.insteadOf={url}", forge.display());
+        git_out(&root, &["-c", &reach, "clone", "-q", url, "demo"]);
+        let studio_clone = root.join("demo");
+        let forge_main = git_out(&forge, &["rev-parse", "main"]);
+
+        let config = format!("[url \"file://{}\"]\n\tinsteadOf = {url}\n", forge.display());
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        std::fs::write(root.join("home/.gitconfig"), &config).unwrap();
+        let (server, _daemons, studio) = fleet(&root, "").await;
+        let hub = server.hub().clone();
+        let linux_dir = root.join("linux");
+        let linux_home = linux_dir.join("home");
+        std::fs::create_dir_all(&linux_home).unwrap();
+        std::fs::write(linux_home.join(".gitconfig"), config).unwrap();
+        std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
+        let programs = root.join("programs");
+        let _linux_daemons =
+            worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
+        until("the second worker registers", async || {
+            (hub.directory().iter().filter(|w| w.liveness == Liveness::Online).count() == 2)
+                .then_some(())
+        })
+        .await;
+
+        let shell = Verb::OpenTerminal {
+            worker: studio,
+            cwd: Some(studio_clone.to_string_lossy().into_owned()),
+            command: Vec::new(),
+            env: Vec::new(),
+            name: None,
+            size: None,
+            session: None,
+        };
+        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
+        let project = ProjectId::new("demo").unwrap();
+        let verifier = "cat work.txt && grep -qx done work.txt";
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Demo".to_owned(),
+                repo: "demo".to_owned(),
+                target: "main".to_owned(),
+                verifier: Some(verifier.to_owned()),
+                push: false,
+                orchestrator: Some(orchestrator),
+                limits: LimitsChange::default(),
+                metadata: None,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        until("the project learns its repository", async || {
+            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
+        })
+        .await;
+
+        let on_linux = Placement {
+            require: vec![r#"name == "linux-box""#.to_owned()],
+            ..Placement::default()
+        };
+        let spec =
+            TaskSpec { title: "Write it".to_owned(), placement: on_linux, ..TaskSpec::default() };
+        let task =
+            hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
+        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
+        let gate = root.join("go");
+        let branch = "worktree-slopty-demo-1";
+        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": branch } }]);
+        let launch = TaskLaunch {
+            pin: None,
+            cwd: String::new(),
+            run: Runner::Claude { prompt: None, args: Vec::new() },
+            env: vec![
+                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+                ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+            ],
+            size: None,
+            ignore_dependencies: false,
+        };
+        let spawned = hub
+            .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
+            .await;
+        assert!(matches!(spawned, Outcome::Task(_)), "{spawned:?}");
+        let cloned = linux_home.join("slopty/clones/example.com/o/demo");
+        let tree = cloned.join(".claude/worktrees/slopty-demo-1");
+        let tree_text = tree.to_string_lossy().into_owned();
+        git_out(&cloned, &["worktree", "add", "-q", "-b", branch, &tree_text, "origin/main"]);
+        std::fs::write(tree.join("work.txt"), "done\n").unwrap();
+        git_out(&tree, &["add", "."]);
+        git_out(&tree, &["commit", "-q", "-m", "the work"]);
+        let head = git_out(&tree, &["rev-parse", "HEAD"]);
+        std::fs::write(&gate, "").unwrap();
+
+        let started = std::time::Instant::now();
+        let card = card_when(&hub, &project, "the task merges", |card| {
+            card.state == TaskState::Merged
+                || card.step.as_ref().is_some_and(|s| {
+                    matches!(s.state, slopty_proto::project::StepState::Failed { .. })
+                })
+        })
+        .await;
+        eprintln!("MEASURE done to merged across two workers: {:?}", started.elapsed());
+        assert_eq!(card.state, TaskState::Merged, "{card:?}");
+        let Some(Merge::Merged { target, head: merged, pushed, .. }) = card.merge else {
+            panic!("{card:?}")
+        };
+        assert_eq!((target.as_str(), merged.as_str(), pushed), ("main", head.as_str(), false));
+        let run = card.verified.unwrap();
+        assert!(run.passed && run.head == head && run.exit == Some(0), "{run:?}");
+        assert_eq!(run.base, forge_main, "where the work left main");
+        assert_eq!(card.step.map(|s| s.kind), Some(StepKind::Merge));
+
+        assert_eq!(git_out(&studio_clone, &["rev-parse", "main"]), head, "main fast-forwarded");
+        assert_eq!(std::fs::read_to_string(studio_clone.join("work.txt")).unwrap(), "done\n");
+        assert_eq!(git_out(&forge, &["rev-parse", "main"]), forge_main, "and not pushed");
+        let place = root.join("home/slopty/verify/demo");
+        assert_eq!(git_out(&place, &["rev-parse", "HEAD"]), head, "verified in its own checkout");
+        assert_eq!(
+            moments(&hub, &project).await,
+            [
+                "Clone began",
+                "Clone done",
+                "Home began",
+                "Home done",
+                "Verify began",
+                "verified true",
+                "Merge began",
+                "Merge done"
+            ]
+        );
+        let verifier_left = until("the passed verifier's terminal closes", async || {
+            match hub.dispatch(Verb::ListTerminals { worker: Some(studio) }).await {
+                Outcome::Terminals(list) => {
+                    list.iter().all(|(_, s)| !s.title.starts_with("Verifier")).then_some(list)
+                }
+                _ => None,
+            }
+        })
+        .await;
+        assert_eq!(verifier_left.len(), 1, "the orchestrator's shell alone: {verifier_left:?}");
+        server.shutdown().await;
+    }
+
+    /// One worker, with the task's agent in a worktree of the orchestrator's clone. Its
+    /// verifier fails: the task is given back, its agent's next prompt brings the report through
+    /// its hooks with the verifier's last lines, and the failed run's terminal stays to be read.
+    /// The person meanwhile commits on `main` over the file the task changed. The agent fixes
+    /// its work, the person asks for the merge with `slopty task merge`, the verifier passes,
+    /// and the queue's rebase conflicts: the task is given back again with the path, and
+    /// `main` keeps the person's commit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_verifier_and_a_conflict_go_back_to_the_agent() {
+        use slopty_proto::project::{StepKind, StepState};
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("demo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        git(&repo, &["remote", "add", "origin", "git@github.com:aislopware/demo.git"]);
+        let tree = repo.join(".claude/worktrees/t1");
+        git(&repo, &["worktree", "add", "-q", "-b", "task-1", &tree.to_string_lossy(), "main"]);
+        std::fs::write(tree.join("a.txt"), "the task's\n").unwrap();
+        std::fs::write(tree.join("work.txt"), "not yet\n").unwrap();
+        git(&tree, &["add", "."]);
+        git(&tree, &["commit", "-q", "-m", "the work, unfinished"]);
+        let (server, _daemons, worker) = fleet(&root, "").await;
+        let hub = server.hub().clone();
+
+        let shell = Verb::OpenTerminal {
+            worker,
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            command: Vec::new(),
+            env: Vec::new(),
+            name: None,
+            size: None,
+            session: None,
+        };
+        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
+        let project = ProjectId::new("demo").unwrap();
+        let verifier = "cat work.txt && grep -qx done work.txt";
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Demo".to_owned(),
+                repo: "demo".to_owned(),
+                target: "main".to_owned(),
+                verifier: Some(verifier.to_owned()),
+                push: false,
+                orchestrator: Some(orchestrator),
+                limits: LimitsChange::default(),
+                metadata: None,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        until("the project learns its repository", async || {
+            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
+        })
+        .await;
+        let spec = TaskSpec { title: "Write it".to_owned(), ..TaskSpec::default() };
+        let task =
+            hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
+        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
+        let (record, gate, later) = (root.join("record.json"), root.join("go"), root.join("later"));
+        std::fs::write(&gate, "").unwrap();
+        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": "task-1" } }]);
+        let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
+        let launch = TaskLaunch {
+            pin: Some(worker),
+            cwd: tree.to_string_lossy().into_owned(),
+            run: Runner::Claude { prompt: None, args: Vec::new() },
+            env: vec![
+                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
+                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+                ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+                ("STUB_LATER".to_owned(), prompt.to_string()),
+                ("STUB_LATER_AFTER".to_owned(), later.to_string_lossy().into_owned()),
+            ],
+            size: None,
+            ignore_dependencies: false,
+        };
+        let spawned = hub
+            .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
+            .await;
+        let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
+        let agent = spawned.assignment.unwrap().term;
+
+        let card = card_when(&hub, &project, "the verifier fails", |card| {
+            card.verified.as_ref().is_some_and(|run| !run.passed)
+                && card.state == TaskState::Waiting
+        })
+        .await;
+        let run = card.verified.unwrap();
+        assert_eq!(run.exit, Some(1));
+        assert!(run.summary.contains("not yet"), "its last lines: {:?}", run.summary);
+        assert_eq!(run.head, git_out(&tree, &["rev-parse", "HEAD"]));
+        let step = card.step.unwrap();
+        assert_eq!(step.kind, StepKind::Verify);
+        let kept = step.term.expect("the failed run's terminal");
+        let listed = match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
+            Outcome::Terminals(list) => list,
+            other => panic!("{other:?}"),
+        };
+        assert!(listed.iter().any(|(_, s)| s.id == kept.session), "kept to be read");
+
+        let reports = slopty_agent::reports::dir(&root.join("worker.sock"));
+        until("the report waits for the agent's hooks", async || {
+            reports.join(format!("{}.json", agent.session)).exists().then_some(())
+        })
+        .await;
+        std::fs::write(&later, "").unwrap();
+        let seen: Value = until("the agent's next prompt hands it the report", async || {
+            let seen: Value = serde_json::from_slice(&std::fs::read(&record).ok()?).ok()?;
+            (seen["hooks"].as_array()?.len() >= 2).then_some(seen)
+        })
+        .await;
+        let handed = seen["hooks"][1]["outputs"][0]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        for words in [&format!("The verifier `{verifier}` failed"), "exit 1", "not yet"] {
+            assert!(handed.contains(words), "{words:?} in {handed}");
+        }
+        assert_eq!(seen["typed"], json!([]), "nothing typed into the agent");
+
+        std::fs::write(repo.join("a.txt"), "main's own\n").unwrap();
+        git(&repo, &["commit", "-q", "-am", "the person's change"]);
+        let person_main = git_out(&repo, &["rev-parse", "main"]);
+        std::fs::write(tree.join("work.txt"), "done\n").unwrap();
+        git(&tree, &["commit", "-q", "-am", "the work, done"]);
+        let fixed = git_out(&tree, &["rev-parse", "HEAD"]);
+        let asked = slopty(
+            &root,
+            server.quic_addr(),
+            &["task", "merge", "--project", "demo", "--task", "1"],
+        )
+        .await;
+        assert!(asked.contains("#1"), "{asked}");
+
+        let card = card_when(&hub, &project, "the queue gives it back", |card| {
+            card.step.as_ref().is_some_and(|s| {
+                s.kind == StepKind::Merge && matches!(s.state, StepState::Failed { .. })
+            })
+        })
+        .await;
+        let run = card.verified.unwrap();
+        assert!(run.passed && run.head == fixed, "the fix passed first: {run:?}");
+        let Some(StepState::Failed { why }) = card.step.map(|s| s.state) else { panic!("failed") };
+        assert!(why.contains("a.txt"), "{why}");
+        assert_eq!((card.state, card.merge), (TaskState::Waiting, None));
+        assert_eq!(git_out(&repo, &["rev-parse", "main"]), person_main, "main keeps the person's");
+        let place = root.join("home/slopty/verify/demo");
+        let clean = git_out(&place, &["status", "--porcelain"]);
+        assert!(clean.is_empty(), "no rebase left stopped: {clean}");
+        let gone = match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
+            Outcome::Terminals(list) => list.iter().all(|(_, s)| s.id != kept.session),
+            other => panic!("{other:?}"),
+        };
+        assert!(gone, "the kept terminal closed once it was verified again");
+        assert_eq!(
+            moments(&hub, &project).await,
+            [
+                "Verify began",
+                "verified false",
+                "Verify began",
+                "verified true",
+                "Merge began",
+                "Merge failed"
+            ]
         );
         server.shutdown().await;
     }

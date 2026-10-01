@@ -48,6 +48,7 @@ use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
     Line, Outcome, Screen, Size, TermRef, Verb, WaitUntil,
 };
+use slopty_proto::project::VERIFY_PLACES;
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
 use tokio::sync::broadcast;
@@ -157,6 +158,15 @@ impl From<WorkerError> for Failure {
 
 /// A bundle that could not be made or fetched, as the server is told: a receiver that lacks
 /// the fork point is a conflict, which a whole-branch bundle resolves.
+fn verify_failure(failed: &crate::repo::verify::Failed) -> Failure {
+    use crate::repo::verify::Failed;
+    let code = match failed {
+        Failed::Conflict(_) | Failed::Moved(_) => ErrorCode::Conflict,
+        Failed::Other(_) => ErrorCode::Failed,
+    };
+    Failure::new(code, failed.to_string())
+}
+
 fn bundle_failure(failed: crate::repo::bundle::Failed) -> Failure {
     match failed {
         crate::repo::bundle::Failed::Prerequisites(why) => Failure::new(ErrorCode::Conflict, why),
@@ -263,6 +273,7 @@ impl Orchestrator {
             | Verb::Wake { .. }
             | Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
+            | Verb::TaskMerge { .. }
             | Verb::ProjectList
             | Verb::ProjectStatus { .. }
             | Verb::TaskCreate { .. }
@@ -363,7 +374,10 @@ impl Orchestrator {
             }
             verb @ (Verb::CloneRepo { .. }
             | Verb::BundleBranch { .. }
-            | Verb::FetchBundle { .. }) => Box::pin(self.repository(verb)).await,
+            | Verb::FetchBundle { .. }
+            | Verb::Verify { .. }
+            | Verb::Rebase { .. }
+            | Verb::FastForward { .. }) => Box::pin(self.repository(verb)).await,
             Verb::WriteFile { worker, path, bytes } => {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
@@ -720,6 +734,61 @@ impl Orchestrator {
                     .await
                     .map_err(bundle_failure)?;
                 Ok(Outcome::Fetched { branch: into, head })
+            }
+            Verb::Verify { worker, repo, worktree, head, target, command, session, title } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
+                let place = crate::repo::verify::place(&places, &worktree)
+                    .map_err(|f| verify_failure(&f))?;
+                let _choosing = self.choosing(Some(session)).await;
+                let made = crate::repo::verify::checkout(git, &repo, &place, &head, &target)
+                    .await
+                    .map_err(|f| verify_failure(&f))?;
+                let req = OpenSession {
+                    size: ORCHESTRATED_SIZE,
+                    cwd: Some(made.path.to_string_lossy().into_owned()),
+                    command: crate::repo::verify::command_line(&command),
+                    env: vec![
+                        ("SLOPTY_VERIFY_HEAD".to_owned(), made.head.clone()),
+                        ("SLOPTY_VERIFY_BASE".to_owned(), made.base.clone()),
+                    ],
+                    title: Some(title),
+                    attach: false,
+                };
+                let handle = self.open_as(Some(session), &req, ORCHESTRATOR).await?;
+                let term = TermRef { worker: self.inner.id, session: handle.id() };
+                Ok(Outcome::Verifying { term, head: made.head, base: made.base })
+            }
+            Verb::Rebase { worker, repo, worktree, head, onto } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
+                let place = crate::repo::verify::place(&places, &worktree)
+                    .map_err(|f| verify_failure(&f))?;
+                let made = crate::repo::verify::rebase(git, &repo, &place, &head, &onto)
+                    .await
+                    .map_err(|f| verify_failure(&f))?;
+                Ok(Outcome::Rebased { head: made.head, onto: made.onto })
+            }
+            Verb::FastForward { worker, repo, target, from, to, push } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let moved =
+                    crate::repo::verify::fast_forward(git, &repo, &target, &from, &to, push)
+                        .await
+                        .map_err(|f| verify_failure(&f))?;
+                let crate::repo::verify::Moved { head, pushed, push_failed } = moved;
+                Ok(Outcome::FastForwarded { head, pushed, push_failed })
             }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }

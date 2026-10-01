@@ -369,12 +369,7 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
                 pr.map_or_else(|| branch.to_owned(), |n| format!("{branch}, pull request #{n}"));
             ("branch", text)
         }
-        Moment::Verified { passed: true, summary } => {
-            ("verified", format!("verifier passed: {summary}"))
-        }
-        Moment::Verified { passed: false, summary } => {
-            ("verified", format!("verifier failed: {summary}"))
-        }
+        Moment::Verified(run) => ("verified", verified_text(run)),
         Moment::AgentGone { .. } => ("agent_gone", "its terminal closed".to_owned()),
         Moment::Note { text } => ("note", text.clone()),
         Moment::Reported { report } => ("reported", report_text(report)),
@@ -390,6 +385,8 @@ fn step_text(step: &TaskStep) -> String {
     let what = match step.kind {
         StepKind::Clone => format!("clone on worker {}", step.worker),
         StepKind::Home => format!("branch brought to worker {}", step.worker),
+        StepKind::Verify => format!("verifier on worker {}", step.worker),
+        StepKind::Merge => format!("merge on worker {}", step.worker),
     };
     match &step.state {
         StepState::Running { phase, percent: Some(p) } => format!("{what}: {phase} {p}%"),
@@ -397,6 +394,15 @@ fn step_text(step: &TaskStep) -> String {
         StepState::Done { detail } => format!("{what} done: {detail}"),
         StepState::Failed { why } => format!("{what} failed: {why}"),
     }
+}
+
+/// What a verifier said, at which commits.
+fn verified_text(run: &VerifierRun) -> String {
+    let short = |c: &str| c.get(..7).unwrap_or(c).to_owned();
+    let word = if run.passed { "passed" } else { "failed" };
+    let exit = run.exit.filter(|_| !run.passed).map(|e| format!(", exit {e}")).unwrap_or_default();
+    let at = format!("{} on {}", short(&run.head), short(&run.base));
+    format!("verifier {word} at {at}{exit}: {}", run.summary)
 }
 
 /// A report in a line: its kind, its note's first line, where its work is.

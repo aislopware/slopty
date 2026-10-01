@@ -345,6 +345,15 @@ fn names_verifier(verb: &Verb) -> bool {
     }
 }
 
+/// Whether `verb` turns pushing a project's target on or off: publishing is the person's.
+const fn names_push(verb: &Verb) -> bool {
+    match verb {
+        Verb::ProjectCreate { push, .. } => *push,
+        Verb::ProjectSet { push, .. } => push.is_some(),
+        _ => false,
+    }
+}
+
 /// The arguments `claude` gets from a command line that runs it: `claude …`, a runtime running
 /// its script, or a shell line with `claude` as one of its programs (`sh -c "cd x && claude
 /// --allowedTools Bash"`), read as the shell reads it ([`slopty_agent::detect`]).
@@ -846,6 +855,13 @@ impl Hub {
                  names one; say in the task's brief what should be checked",
             );
         }
+        if caller == Caller::Agent && names_push(verb) {
+            return error(
+                ErrorCode::Forbidden,
+                "whether merged work is pushed to the forge is the person's choice, so only the \
+                 person sets it",
+            );
+        }
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
         if let Some(key) = &key
@@ -861,6 +877,7 @@ impl Hub {
         let task = |t: Task| Outcome::Task(Box::new(t));
         let status = |s: ProjectStatus| Outcome::Project(Box::new(s));
         let mut named = None;
+        let mut kick = None;
         let answered = match verb.clone() {
             Verb::ProjectCreate {
                 project,
@@ -868,6 +885,7 @@ impl Hub {
                 repo,
                 target,
                 verifier,
+                push,
                 orchestrator,
                 limits,
                 metadata,
@@ -878,6 +896,7 @@ impl Hub {
                     repo,
                     target,
                     verifier,
+                    push,
                     orchestrator,
                     limits,
                     metadata,
@@ -885,10 +904,10 @@ impl Hub {
                 named = orchestrator.map(|_| new.id.clone());
                 state.projects.create(new, &running, now).map(|(s, u)| (status(s), u))
             }),
-            Verb::ProjectSet { project, orchestrator, verifier, limits, metadata } => {
+            Verb::ProjectSet { project, orchestrator, verifier, push, limits, metadata } => {
                 known_term(state, orchestrator).and_then(|()| {
                     let before = state.projects.status(&project, None, &running).ok();
-                    let change = ProjectChange { orchestrator, verifier, limits, metadata };
+                    let change = ProjectChange { orchestrator, verifier, push, limits, metadata };
                     let set = state.projects.set(&project, change, &running, now)?;
                     let was = before.and_then(|b| b.project.orchestrator);
                     if orchestrator.is_some() && set.0.project.orchestrator != was {
@@ -952,6 +971,18 @@ impl Hub {
                     (task(t), u)
                 })
             }
+            Verb::TaskMerge { .. } if caller == Caller::Agent => Err(error(
+                ErrorCode::Forbidden,
+                "only the person asks for a merge; a task whose verifier passes joins the merge \
+                 queue by itself, so report it done",
+            )),
+            Verb::TaskMerge { project, task: id } => {
+                let asked = state.projects.ask_merge(&project, id, now);
+                if asked.is_ok() {
+                    kick = Some(project);
+                }
+                asked.map(|(t, u)| (task(t), u))
+            }
             _other => Err(error(ErrorCode::Invalid, "not a project change")),
         };
         let outcome = match answered {
@@ -961,6 +992,9 @@ impl Hub {
             }
             Err(refused) => refused,
         };
+        if let Some(project) = kick {
+            self.kick(state, &project);
+        }
         if let Some(term) =
             named.as_ref().and_then(|p| state.projects.project(p).ok()?.orchestrator)
         {
@@ -1977,6 +2011,7 @@ mod tests {
             repo: "~/src/big".to_owned(),
             target: "main".to_owned(),
             verifier: None,
+            push: false,
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,

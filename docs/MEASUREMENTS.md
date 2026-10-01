@@ -12749,3 +12749,34 @@ $S/compare.sh $S/runs-a $S/runs-b                                  # medians, of
 ```
 
 Logs: `target/logs/upstream-measure-{1,2,3}.log` and `target/scratch-layers/runs-{a,b,c}/`.
+
+## 2026-10-01 — a finished task to its merge, across two workers
+
+Mac Studio M1 Max, macOS 27.0, debug build, under `nice`, load 10–15 with other sessions
+building; git 2.56.0.
+
+```sh
+cargo test -p slopty-cli --test projects -- verified_and_merged --nocapture 2>&1 | grep MEASURE
+```
+
+`a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone` uses two real workers on
+one machine and a local forge reached through `insteadOf`. The clock starts when the stub agent
+is let go to report done, and stops when the task reads merged. In between:
+- the agent's MCP `task_report`;
+- the branch's bundle from one worker, sent through the server and fetched into the other;
+- the project's checkout made with `git worktree add`;
+- the verifier as a terminal under a login shell (`cat work.txt && grep -qx done work.txt`);
+- the rebase check;
+- the fast-forward with `merge --ff-only` in the person's checkout.
+
+| run | done to merged |
+| --- | --- |
+| 1 | 679 ms |
+| 2 | 620 ms |
+| 3 | 755 ms |
+
+The verifier itself is a few milliseconds here. What remains is the queue's own cost: the git
+calls, the terminal's login shell, and the 2 s progress read, which a short run never waits for
+because the exit wakes the lane. Nothing on this path is a hot path for input or frames, so no
+optimisation follows. A real verifier (`cargo gate`, about a minute warm) dwarfs it.
+

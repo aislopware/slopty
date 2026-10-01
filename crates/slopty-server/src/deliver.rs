@@ -45,13 +45,15 @@ pub(crate) const CONTEXT_MAX: usize = 9_000;
 /// A node of a project's tree: a task, or the orchestrator's when the task is absent.
 pub(crate) type Node = (ProjectId, Option<TaskId>);
 
-/// What waits for a node: a task's report, or the server's own words (standing instructions)
-/// when the task is absent.
+/// What waits for a node: a task's report, or the server's own words: standing instructions
+/// when the task is absent, or a notice about the task (its verifier failed, it merged).
 #[derive(Clone, Debug)]
 struct Item {
     task: Option<TaskId>,
     report: Report,
     at: Instant,
+    /// The server wrote it, about `task`: its words are read as they are.
+    notice: bool,
 }
 
 impl Item {
@@ -144,13 +146,40 @@ impl Deliveries {
     /// A report of `task` for `node`: it replaces the task's checkpoint and finish still
     /// waiting, and its need or block when it is one; it waits with the task's others.
     pub(crate) fn add(&mut self, node: Node, task: Option<TaskId>, report: Report, at: Instant) {
+        self.push(node, Item { task, report, at, notice: false });
+    }
+
+    /// The server's own `note` about `task`, for `node`, paced as a report of `kind`: it
+    /// replaces the server's earlier notice about the task still waiting, never the task's own
+    /// reports, and counts as a report delivered.
+    pub(crate) fn notice(
+        &mut self,
+        node: Node,
+        task: TaskId,
+        kind: ReportKind,
+        note: &str,
+        at: Instant,
+    ) {
+        // It quotes what others wrote (a verifier's output, git's words), so it is kept from
+        // closing its block as an agent's words are.
+        let note = plain(note);
+        let report = Report { kind, note, artifacts: Vec::new(), branch: None, pr: None };
+        self.push(node, Item { task: Some(task), report, at, notice: true });
+    }
+
+    fn push(&mut self, node: Node, item: Item) {
         let queue = self.queues.entry(node).or_default();
-        let kind = report.kind;
+        let (task, kind) = (item.task, item.report.kind);
         queue.waiting.retain(|i| {
             let settles = matches!(i.report.kind, ReportKind::Checkpoint | ReportKind::Done);
-            i.task != task || !(settles || (task.is_some() && i.report.kind == kind))
+            let replaced = if item.notice {
+                i.notice
+            } else {
+                !i.notice && (settles || (task.is_some() && i.report.kind == kind))
+            };
+            i.task != task || !replaced
         });
-        queue.waiting.push(Item { task, report, at });
+        queue.waiting.push(item);
         queue.fresh = true;
     }
 
@@ -332,7 +361,7 @@ fn cut(text: &str, max: usize) -> String {
 /// an agent's, so they never close the block they sit in ([`plain`]).
 fn block(item: &Item) -> String {
     let r = &item.report;
-    let Some(task) = item.task else { return r.note.trim().to_owned() };
+    let Some(task) = item.task.filter(|_| !item.notice) else { return r.note.trim().to_owned() };
     let mut lines = vec![format!("task {task}: {}", kind_word(r.kind))];
     lines.extend(r.note.trim().lines().map(|line| format!("  {}", plain(line))));
     lines.extend(r.branch.iter().map(|branch| format!("  branch: {}", plain(branch))));

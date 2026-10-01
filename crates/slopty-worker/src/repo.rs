@@ -12,6 +12,7 @@
 
 pub mod bundle;
 pub mod cloning;
+pub mod verify;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

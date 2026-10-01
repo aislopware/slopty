@@ -1,0 +1,146 @@
+use super::*;
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let git = crate::changes::git().expect("git");
+    let out = std::process::Command::new(git)
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn commit(dir: &Path, file: &str, text: &str) -> String {
+    std::fs::write(dir.join(file), text).expect("write");
+    git_in(dir, &["add", file]);
+    git_in(dir, &["commit", "-q", "-m", &format!("{file}: {text}")]);
+    git_in(dir, &["rev-parse", "HEAD"])
+}
+
+/// A clone with `main` at two commits, and a task's branch off its first with one more.
+fn clone_with_a_task(root: &Path) -> (PathBuf, String, String) {
+    let repo = root.join("demo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    commit(&repo, ".gitignore", "target/\n");
+    let first = commit(&repo, "a.txt", "one\n");
+    git_in(&repo, &["switch", "-q", "-c", "slopty/demo/1"]);
+    let task = commit(&repo, "b.txt", "the task's\n");
+    git_in(&repo, &["switch", "-q", "main"]);
+    (repo, first, task)
+}
+
+/// The project's checkout is made once, at the commit asked for and detached, with the fork
+/// point from the target; a later run reuses it, at its own commit, keeping what git ignores
+/// (a build's output) and nothing else left behind. Neither the clone's checkout nor its
+/// branches move.
+#[tokio::test]
+async fn a_project_verifies_in_one_checkout_of_its_own_kept_warm() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, first, task) = clone_with_a_task(&root);
+    let place = place(&root.join("verify"), "demo").expect("a name");
+
+    let made = checkout(git, &repo, &place, "slopty/demo/1", "main").await.expect("checked out");
+    assert_eq!((made.head.as_str(), made.base.as_str()), (task.as_str(), first.as_str()));
+    assert_eq!(std::fs::read_to_string(place.join("b.txt")).expect("read"), "the task's\n");
+    assert_eq!(git_in(&place, &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD", "detached");
+
+    std::fs::create_dir_all(place.join("target")).expect("mkdir");
+    std::fs::write(place.join("target/warm"), "built").expect("write");
+    std::fs::write(place.join("stray.txt"), "left by a run").expect("write");
+    let again = checkout(git, &repo, &place, &first, "main").await.expect("reused");
+    assert_eq!(again.head, first);
+    assert!(!place.join("b.txt").exists(), "at its own commit");
+    assert!(!place.join("stray.txt").exists(), "nothing an earlier run left");
+    assert!(place.join("target/warm").exists(), "what git ignores stays warm");
+    assert_eq!(git_in(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert_eq!(git_in(&repo, &["rev-parse", "slopty/demo/1"]), task);
+
+    let unrelated = checkout(git, &repo, &place, "nope", "main").await;
+    assert!(matches!(unrelated, Err(Failed::Other(why)) if why.contains("not a commit")));
+    assert!(super::place(&root, "../up").is_err() && super::place(&root, ".hidden").is_err());
+}
+
+/// A head already on top of the target is taken as it is; one behind it is rebased onto it in
+/// the project's checkout, leaving the rebased commit checked out there; one that conflicts
+/// names the paths and leaves no rebase stopped behind.
+#[tokio::test]
+async fn the_queue_rebases_in_the_project_s_checkout_and_names_conflicts() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, _first, task) = clone_with_a_task(&root);
+    let place = place(&root.join("verify"), "demo").expect("a name");
+
+    let up_to_date = rebase(git, &repo, &place, &task, "main").await.expect("as it is");
+    assert_eq!(up_to_date.head, task, "main is where the task left it");
+
+    let moved = commit(&repo, "c.txt", "main moved on\n");
+    let rebased = rebase(git, &repo, &place, &task, "main").await.expect("rebased");
+    assert_eq!(rebased.onto, moved);
+    assert_ne!(rebased.head, task);
+    assert_eq!(git_in(&repo, &["rev-parse", &format!("{}^", rebased.head)]), moved);
+    assert_eq!(git_in(&place, &["rev-parse", "HEAD"]), rebased.head, "left for the verifier");
+    assert_eq!(git_in(&repo, &["rev-parse", "slopty/demo/1"]), task, "no branch moves");
+
+    git_in(&repo, &["switch", "-q", "-c", "slopty/demo/2", &moved]);
+    let clashing = commit(&repo, "a.txt", "the other task's\n");
+    git_in(&repo, &["switch", "-q", "main"]);
+    commit(&repo, "a.txt", "main's own\n");
+    let conflict = rebase(git, &repo, &place, &clashing, "main").await;
+    assert_eq!(conflict, Err(Failed::Conflict(vec!["a.txt".to_owned()])));
+    let stopped = git_in(&place, &["status", "--porcelain=v2", "--branch"]);
+    assert!(!stopped.contains("rebase"), "{stopped}");
+    let again = rebase(git, &repo, &place, &rebased.head, "main").await;
+    assert!(again.is_ok(), "the checkout serves the next rebase: {again:?}");
+}
+
+/// The target moves only from the commit asked, to a commit after it: by compare-and-swap
+/// where nothing has it checked out, through `merge --ff-only` where the person has it, which
+/// keeps their changes and refuses one the move would overwrite. A push asked for goes to
+/// `origin` as a fast-forward.
+#[tokio::test]
+async fn the_target_moves_only_forward_and_never_under_the_person_s_changes() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, first, task) = clone_with_a_task(&root);
+    git_in(&root, &["clone", "-q", "--bare", "demo", "forge.git"]);
+    git_in(&repo, &["remote", "add", "origin", &root.join("forge.git").to_string_lossy()]);
+
+    // The person has main checked out, with a change of their own beside the move.
+    std::fs::write(repo.join("mine.txt"), "unsaved\n").expect("write");
+    let moved = fast_forward(git, &repo, "main", &first, &task, true).await.expect("moved");
+    assert_eq!(moved, Moved { head: task.clone(), pushed: true, push_failed: None });
+    assert_eq!(git_in(&repo, &["rev-parse", "main"]), task);
+    assert_eq!(std::fs::read_to_string(repo.join("b.txt")).expect("read"), "the task's\n");
+    assert_eq!(std::fs::read_to_string(repo.join("mine.txt")).expect("read"), "unsaved\n");
+    assert_eq!(git_in(&root.join("forge.git"), &["rev-parse", "main"]), task, "pushed");
+
+    let stale = fast_forward(git, &repo, "main", &first, &task, false).await;
+    assert_eq!(stale, Err(Failed::Moved(task.clone())), "not from where it is now");
+    let backwards = fast_forward(git, &repo, "main", &task, &first, false).await;
+    assert!(matches!(backwards, Err(Failed::Other(why)) if why.contains("does not descend")));
+
+    git_in(&repo, &["switch", "-q", "-c", "slopty/demo/3"]);
+    let next = commit(&repo, "b.txt", "more\n");
+    git_in(&repo, &["switch", "-q", "main"]);
+    std::fs::write(repo.join("b.txt"), "the person's edit\n").expect("write");
+    let blocked = fast_forward(git, &repo, "main", &task, &next, false).await;
+    assert!(matches!(blocked, Err(Failed::Other(_))), "{blocked:?}");
+    assert_eq!(git_in(&repo, &["rev-parse", "main"]), task, "nothing moved");
+    assert_eq!(std::fs::read_to_string(repo.join("b.txt")).expect("read"), "the person's edit\n");
+
+    // Checked out nowhere: the ref moves by compare-and-swap.
+    git_in(&repo, &["checkout", "-q", "--detach"]);
+    let moved = fast_forward(git, &repo, "main", &task, &next, false).await.expect("moved");
+    assert_eq!((moved.head.as_str(), moved.pushed), (next.as_str(), false));
+    assert_eq!(git_in(&repo, &["rev-parse", "main"]), next);
+}

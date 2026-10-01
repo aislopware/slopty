@@ -505,11 +505,7 @@ pub fn moment_line(
             (None, Some(pr)) => format!("Pull request #{pr}"),
             (None, None) => "Left its branch".to_owned(),
         },
-        Moment::Verified { passed: true, .. } => "Verifier passed".to_owned(),
-        Moment::Verified { passed: false, summary } => match crate::kit::first_line(summary) {
-            "" => "Verifier failed".to_owned(),
-            line => format!("Verifier failed: {line}"),
-        },
+        Moment::Verified(run) => verdict_line(run),
         Moment::AgentGone { .. } => "Agent ended".to_owned(),
         Moment::Note { text } => crate::kit::first_line(text).to_owned(),
         Moment::Reported { report } => {
@@ -556,7 +552,42 @@ pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
         (StepKind::Home, StepState::Failed { why }) => {
             format!("Branch did not reach {at}: {}", first(why))
         }
+        (StepKind::Verify, StepState::Running { phase, .. }) => match first(phase).as_str() {
+            "" => format!("Verifying on {at}"),
+            line => format!("Verifying on {at}: {line}"),
+        },
+        (StepKind::Verify, StepState::Done { .. }) => format!("Verified on {at}"),
+        (StepKind::Verify, StepState::Failed { why }) => {
+            format!("Verifier on {at} failed: {}", first(why))
+        }
+        (StepKind::Merge, StepState::Running { phase, .. }) => {
+            format!("Merging on {at}: {}", first(phase))
+        }
+        (StepKind::Merge, StepState::Done { detail }) => format!("Merged: {}", first(detail)),
+        (StepKind::Merge, StepState::Failed { why }) => format!("Not merged: {}", first(why)),
     }
+}
+
+/// What a verifier said, in a line: where it ran to, and for a failure the last thing it
+/// printed, which is where a build or a test run says what broke.
+#[must_use]
+pub fn verdict_line(run: &slopty_proto::project::VerifierRun) -> String {
+    let at = short_commit(&run.head);
+    if run.passed {
+        return format!("Verifier passed at {at}");
+    }
+    let last = run.summary.lines().map(str::trim).rfind(|l| !l.is_empty());
+    match (last, run.exit) {
+        (Some(line), _) => format!("Verifier failed at {at}: {line}"),
+        (None, Some(code)) => format!("Verifier failed at {at}: exit {code}"),
+        (None, None) => format!("Verifier failed at {at}"),
+    }
+}
+
+/// A commit as people read it: its first seven hex digits.
+#[must_use]
+pub fn short_commit(commit: &str) -> &str {
+    commit.get(..7).unwrap_or(commit)
 }
 
 /// `item` at the end of `list`, the oldest going past [`NATIVES_KEPT`].

@@ -42,7 +42,7 @@ impl Steps {
 }
 
 /// What a forwarded verb that failed said.
-fn said(outcome: &Outcome) -> String {
+pub(super) fn said(outcome: &Outcome) -> String {
     match outcome {
         Outcome::Error { message, .. } => message.clone(),
         other => format!("an unexpected answer: {other:?}"),
@@ -66,7 +66,7 @@ impl Hub {
         worker: WorkerId,
         now: StepState,
     ) {
-        let step = TaskStep { kind, worker, state: now, since_ms: WallMs::now() };
+        let step = TaskStep { kind, worker, state: now, since_ms: WallMs::now(), term: None };
         self.step(&mut self.inner.state.lock(), (project, task), step);
     }
 
@@ -104,8 +104,13 @@ impl Hub {
                 (StepState::Failed { why: why.clone() }, Err(why))
             }
         };
-        let step =
-            TaskStep { kind: StepKind::Clone, worker, state: ended, since_ms: WallMs::now() };
+        let step = TaskStep {
+            kind: StepKind::Clone,
+            worker,
+            state: ended,
+            since_ms: WallMs::now(),
+            term: None,
+        };
         self.step(&mut state, (project, task), step);
         drop(state);
         cloned
@@ -141,6 +146,7 @@ impl Hub {
             worker,
             state: StepState::Running { phase, percent },
             since_ms: WallMs::now(),
+            term: None,
         };
         self.step(state, (&project, task), step);
     }
@@ -164,9 +170,12 @@ impl Hub {
         tokio::spawn(async move {
             let (project, task) = &key;
             loop {
-                hub.bring_home(project, *task, branch.clone()).await;
+                let home = hub.bring_home(project, *task, branch.clone()).await;
                 let mut state = hub.inner.state.lock();
                 if state.steps.homing.remove(&key) != Some(true) {
+                    if home {
+                        hub.verify_soon(&mut state, (project, *task));
+                    }
                     break;
                 }
                 state.steps.homing.insert(key.clone(), false);
@@ -176,15 +185,16 @@ impl Hub {
 
     /// Bring `task`'s branch (`branch`, else the one its card names) from the worker it ran on
     /// to the clone its orchestrator works in, as [`Task::home_branch`]. Nothing to do, and no
-    /// step, when it ran in that clone or a worktree of it, or names no branch.
-    async fn bring_home(&self, project: &ProjectId, task: TaskId, branch: Option<String>) {
+    /// step, when it ran in that clone or a worktree of it, or names no branch. Whether it is
+    /// there now, or never had to go.
+    async fn bring_home(&self, project: &ProjectId, task: TaskId, branch: Option<String>) -> bool {
         let at = (project, task);
         let trip = match self.trip(project, task, branch) {
             Ok(Some(trip)) => trip,
-            Ok(None) => return,
+            Ok(None) => return true,
             Err((worker, why)) => {
                 self.step_now(at, StepKind::Home, worker, StepState::Failed { why });
-                return;
+                return false;
             }
         };
         let to = trip.to.0;
@@ -201,13 +211,44 @@ impl Hub {
             },
             Err(Carry::Failed(why)) => StepState::Failed { why },
         };
+        let home = matches!(ended, StepState::Done { .. });
         self.step_now(at, StepKind::Home, to, ended);
+        home
     }
 
     /// Where `task`'s branch is and where it goes. `None` when there is nothing to carry: no
     /// branch, no agent, no orchestrator, or the branch is in the orchestrator's clone
     /// already. An error, with the worker it would go to, when it should go and cannot.
     fn trip(
+        &self,
+        project: &ProjectId,
+        task: TaskId,
+        branch: Option<String>,
+    ) -> Result<Option<Trip>, (WorkerId, String)> {
+        let route = self.route(project, task, branch)?;
+        Ok(route.filter(|trip| !trip.there()))
+    }
+
+    /// Where `task`'s work is in the orchestrator's clone, once its branch is home or when it
+    /// ran there: `None` with no branch, agent, orchestrator or known repository.
+    ///
+    /// # Errors
+    /// Why there is no such clone, or none where the branch is.
+    pub(super) fn landed(
+        &self,
+        project: &ProjectId,
+        task: TaskId,
+    ) -> Result<Option<Landed>, String> {
+        let route = self.route(project, task, None).map_err(|(_, why)| why)?;
+        Ok(route.map(|trip| {
+            let branch = if trip.there() { trip.branch } else { trip.into };
+            Landed { worker: trip.to.0, clone: trip.to.1, branch }
+        }))
+    }
+
+    /// Where `task`'s branch is and where it goes, [`Self::trip`]'s answer whether or not it
+    /// is in the orchestrator's clone already.
+    fn route(
         &self,
         project: &ProjectId,
         task: TaskId,
@@ -259,7 +300,7 @@ impl Hub {
             target: record.target.clone(),
         };
         drop(state);
-        Ok((!trip.there()).then_some(trip))
+        Ok(Some(trip))
     }
 
     /// Bundle the branch on its worker, send the bundle across, and fetch it there: what
@@ -345,6 +386,17 @@ struct Trip {
     into: String,
     /// The branch work lands on.
     target: String,
+}
+
+/// Where a task's work is in the orchestrator's clone.
+#[derive(Clone, Debug)]
+pub(super) struct Landed {
+    /// The orchestrator's worker.
+    pub worker: WorkerId,
+    /// Its clone.
+    pub clone: String,
+    /// The branch the work is there as: brought home, or its own when it ran in that clone.
+    pub branch: String,
 }
 
 impl Trip {

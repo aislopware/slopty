@@ -65,6 +65,9 @@ pub enum ProjectCmd {
         /// The command that says a task's work is right (`cargo gate`).
         #[arg(long)]
         verifier: Option<String>,
+        /// Push the target branch to the orchestrator's clone's `origin` after each merge.
+        #[arg(long)]
+        push: bool,
         /// The orchestrator's terminal; this one when run inside a Slopty terminal.
         #[arg(long)]
         orchestrator: Option<String>,
@@ -74,7 +77,7 @@ pub enum ProjectCmd {
         #[arg(long)]
         metadata: Option<String>,
     },
-    /// Change a project's orchestrator, verifier, limits or metadata.
+    /// Change a project's orchestrator, verifier, pushing, limits or metadata.
     Update {
         /// The project (this session's own when omitted).
         project: Option<String>,
@@ -84,6 +87,9 @@ pub enum ProjectCmd {
         /// A new verifier command; empty for none.
         #[arg(long)]
         verifier: Option<String>,
+        /// Push the target after each merge (`true`), or stop (`false`).
+        #[arg(long)]
+        push: Option<bool>,
         #[command(flatten)]
         limits: LimitArgs,
         /// New metadata, a JSON object.
@@ -329,6 +335,12 @@ pub enum TaskCmd {
         #[arg(long)]
         pr: Option<u32>,
     },
+    /// Put a task in the merge queue, as the person: its verifier runs on its branch first
+    /// when one applies; how a task with no verifier merges, or one given back is tried again.
+    Merge {
+        #[command(flatten)]
+        which: TaskRef,
+    },
     /// One node in full: a task with its brief and Claude Code's own subagents and to-dos, or
     /// with `--task orchestrator` the orchestrator's.
     Get {
@@ -384,6 +396,7 @@ pub async fn project(
             repo,
             target,
             verifier,
+            push,
             orchestrator,
             limits,
             metadata,
@@ -394,6 +407,7 @@ pub async fn project(
                 repo,
                 target: Some(target),
                 verifier,
+                push,
                 orchestrator,
                 limits: limits.change(),
                 metadata,
@@ -401,8 +415,9 @@ pub async fn project(
             let status = ops::project_create(&mut res, spec, key).await?;
             print_status(&mut res, &status, json).await
         }
-        ProjectCmd::Update { project, orchestrator, verifier, limits, metadata } => {
-            let edit = ProjectEdit { orchestrator, verifier, limits: limits.change(), metadata };
+        ProjectCmd::Update { project, orchestrator, verifier, push, limits, metadata } => {
+            let limits = limits.change();
+            let edit = ProjectEdit { orchestrator, verifier, push, limits, metadata };
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
         }
@@ -496,6 +511,8 @@ pub async fn task(
                 summary: summary.clone().unwrap_or_default(),
                 head: head.clone().unwrap_or_default(),
                 base: base.clone().unwrap_or_default(),
+                exit: None,
+                took_ms: 0,
             });
             if verified.is_none() && summary.is_some() {
                 bail!("--summary goes with --passed or --failed");
@@ -558,6 +575,10 @@ pub async fn task(
             let report = Report { kind: kind.kind(), note, artifacts, branch, pr };
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_report(link, project, task, report, key).await?
+        }
+        TaskCmd::Merge { which } => {
+            let (project, task) = (which.project.as_deref(), which.task.as_deref());
+            ops::task_merge(link, project, task, key).await?
         }
         TaskCmd::Get { which } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());

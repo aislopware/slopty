@@ -429,6 +429,9 @@ pub struct Project {
     pub target: String,
     /// The command that says a task's work is right (`cargo gate`), when there is one.
     pub verifier: Option<String>,
+    /// Whether the merge queue pushes the target branch to its clone's `origin` after each
+    /// merge. Off unless the person turns it on: publishing is theirs to choose.
+    pub push: bool,
     /// The terminal of the agent the person talks to, which splits the goal into tasks.
     pub orchestrator: Option<TermRef>,
     /// Its limits.
@@ -643,13 +646,63 @@ pub enum ReportKind {
 pub struct VerifierRun {
     /// Whether it passed.
     pub passed: bool,
-    /// What it said, in a few lines: the failing check, or the summary.
+    /// What it said: the last lines it printed when it failed, its last line when it passed.
+    /// At most [`SUMMARY_MAX`] bytes.
     pub summary: String,
     /// The commit it verified, in hex.
     pub head: String,
-    /// The commit the task's work was on top of then, in hex.
+    /// The commit the task's work was on top of then, in hex: where it left the target
+    /// branch, or the target itself for a head the merge queue rebased.
     pub base: String,
+    /// Its exit status, or the signal that ended it negated; none when it never ran to an
+    /// end (it could not start, or its terminal was closed first).
+    pub exit: Option<i32>,
+    /// How long it ran, in milliseconds.
+    pub took_ms: u64,
 }
+
+/// Where a task stands in its project's merge queue (`docs/decisions/projects.md`).
+///
+/// The queue takes its tasks one at a time, the longest queued first. It rebases each onto
+/// the target branch in the orchestrator's clone, runs the verifier again on what the rebase
+/// made unless that is the very commit already verified, and fast-forwards the target to it.
+/// A task that conflicts or fails leaves the queue, and its agent is told why.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Merge {
+    /// Waiting its turn: its verifier passed, or the person asked for the merge.
+    Queued {
+        /// Since when, by the server's clock: the queue's order.
+        since_ms: WallMs,
+    },
+    /// Its work is on the target branch.
+    Merged {
+        /// The branch it landed on.
+        target: String,
+        /// The commit the target was moved to, in hex.
+        head: String,
+        /// When, by the server's clock.
+        at_ms: WallMs,
+        /// Whether the target was pushed to its clone's `origin` too.
+        pushed: bool,
+    },
+}
+
+impl Merge {
+    /// When it joined the queue, while it waits there.
+    #[must_use]
+    pub const fn queued(&self) -> Option<WallMs> {
+        match self {
+            Self::Queued { since_ms } => Some(*since_ms),
+            Self::Merged { .. } => None,
+        }
+    }
+}
+
+/// Where a worker keeps the checkout a project's work is verified and rebased in.
+///
+/// It is `<VERIFY_PLACES>/<project>`, one per project, kept between runs so what a verifier
+/// builds stays warm.
+pub const VERIFY_PLACES: &str = "~/slopty/verify";
 
 /// One of Claude Code's own subagents inside a session.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -797,8 +850,10 @@ pub struct Task {
     pub pr: Option<PullRequest>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
+    /// Its place in the merge queue, or the merge that put its work on the target.
+    pub merge: Option<Merge>,
     /// What the server last did for it around its agent: a clone made, its branch brought
-    /// home.
+    /// home, verified or merged.
     pub step: Option<TaskStep>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
@@ -806,18 +861,24 @@ pub struct Task {
     pub updated_ms: WallMs,
 }
 
-/// What the server does for a task around its agent, so no wait is silent: a clone made
-/// before it can start, its branch brought to the orchestrator's machine once it is done.
+/// What the server does for a task around its agent, so no wait is silent.
+///
+/// A clone made before it can start, its branch brought to the orchestrator's machine once it
+/// is done, its verifier run, and its merge.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct TaskStep {
     /// Which.
     pub kind: StepKind,
-    /// The worker it happens on: the one cloning, or the one the branch comes to.
+    /// The worker it happens on: the one cloning, the one the branch comes to, or the one
+    /// verifying and merging in the orchestrator's clone.
     pub worker: WorkerId,
     /// How it goes.
     pub state: StepState,
     /// When it began, by the server's clock.
     pub since_ms: WallMs,
+    /// The terminal it runs in, for a person to open: a verifier's, kept after a failure so
+    /// its whole output can still be read.
+    pub term: Option<TermRef>,
 }
 
 /// Which [`TaskStep`].
@@ -827,6 +888,11 @@ pub enum StepKind {
     Clone,
     /// The task's branch fetched into the orchestrator's clone, from the worker it ran on.
     Home,
+    /// The task's verifier run on its branch, in a checkout of the orchestrator's clone.
+    Verify,
+    /// The merge queue rebasing the task's work onto the target, verifying it again and
+    /// fast-forwarding the target to it.
+    Merge,
 }
 
 /// How a [`TaskStep`] goes. Its texts are at most [`SUMMARY_MAX`] bytes.
@@ -860,7 +926,25 @@ impl TaskStep {
             StepState::Done { detail } => detail,
             StepState::Failed { why } => why,
         };
-        text.len().saturating_add(64)
+        text.len().saturating_add(104)
+    }
+
+    /// Whether it is under way.
+    #[must_use]
+    pub const fn running(&self) -> bool {
+        matches!(self.state, StepState::Running { .. })
+    }
+}
+
+impl VerifierRun {
+    /// About how many bytes it takes on the wire, never less.
+    #[must_use]
+    pub const fn approx_bytes(&self) -> usize {
+        self.summary
+            .len()
+            .saturating_add(self.head.len())
+            .saturating_add(self.base.len())
+            .saturating_add(48)
     }
 }
 
@@ -895,6 +979,7 @@ impl Task {
             worktree: self.worktree.clone(),
             pr: self.pr.clone(),
             verified: self.verified.clone(),
+            merge: self.merge.clone(),
             step: self.step.clone(),
             natives: natives.counts(),
             created_ms: self.created_ms,
@@ -937,6 +1022,8 @@ pub struct TaskCard {
     pub pr: Option<PullRequest>,
     /// What its verifier last said.
     pub verified: Option<VerifierRun>,
+    /// Its place in the merge queue, or its merge.
+    pub merge: Option<Merge>,
     /// What the server last did for it around its agent.
     pub step: Option<TaskStep>,
     /// How many natives its node holds.
@@ -955,8 +1042,8 @@ impl TaskCard {
         + KIND_MAX
         + DEPENDS_MAX * 5
         + 2 * SUMMARY_MAX
-        + 6 * REF_MAX
-        + 576;
+        + 8 * REF_MAX
+        + 704;
 }
 
 impl TaskCard {
@@ -971,12 +1058,12 @@ impl TaskCard {
             text(self.branch.as_deref()),
             text(self.worktree.as_deref()),
             self.pr.as_ref().map_or(0, |pr| pr.url.len().saturating_add(32)),
-            self.verified.as_ref().map_or(0, |v| {
-                v.summary
-                    .len()
-                    .saturating_add(v.head.len())
-                    .saturating_add(v.base.len())
-                    .saturating_add(32)
+            self.verified.as_ref().map_or(0, VerifierRun::approx_bytes),
+            self.merge.as_ref().map_or(0, |m| match m {
+                Merge::Queued { .. } => 16,
+                Merge::Merged { target, head, .. } => {
+                    target.len().saturating_add(head.len()).saturating_add(32)
+                }
             }),
             self.assignment
                 .as_ref()
@@ -1073,13 +1160,8 @@ pub enum Moment {
         /// The pull request's number.
         pr: Option<u32>,
     },
-    /// Its verifier ran.
-    Verified {
-        /// Whether it passed.
-        passed: bool,
-        /// What it said.
-        summary: String,
-    },
+    /// Its verifier ran, or the person recorded what it said.
+    Verified(VerifierRun),
     /// The terminal on it closed.
     AgentGone {
         /// The terminal.
@@ -1118,7 +1200,7 @@ impl TimelineEntry {
             Moment::TaskCreated { title } => text(title),
             Moment::Claimed { paths } => texts(paths),
             Moment::Branch { branch, .. } => branch.as_deref().map_or(0, text),
-            Moment::Verified { summary, .. } => text(summary),
+            Moment::Verified(run) => run.approx_bytes(),
             Moment::Note { text: words } => text(words),
             Moment::Reported { report } => text(&report.note)
                 .saturating_add(texts(&report.artifacts))
