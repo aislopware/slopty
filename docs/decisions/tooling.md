@@ -434,7 +434,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   its own paint writes, and is built in every frame for that alone. gpui-kit's text input
   writes its state in every render, which counts as news for every view that reads that state.
 
-**gpui-fast's scroll layers stay compiled out on Apple.** ✅ 2026-10-01
+**gpui-fast's scroll layers stay compiled out on Apple.** ✅ 2026-10-01, superseded the same day
+by "Scroll layers are on for macOS and iOS: the navigator and the face composite"
 
 *What changed.* longbridge's scroll layers (#24 with #25 Metal and #27 list rows, #26 with #29)
 are merged into the fork. `fast::layers::COMPILED` is off on macOS and iOS. The fork's Metal
@@ -461,55 +462,50 @@ animated.
 *A cost that stays.* #24's conservative glyph mask test costs the terminal strip 2 to 2.7%
 instructions a frame (`strip-scroll` 7.71M to 7.91M), whether layers are compiled in or not.
 
-**Scroll layers turn on for Apple once the navigator and the face composite.** ⏸ 2026-10-01
+**Scroll layers are on for macOS and iOS: the navigator and the face composite.** ✅ 2026-10-01
 
-*Where it stands.* PR #5 on our fork lets a view that holds a list write its own state while it
-is built, and the navigator's rows are now a view of their own. Layers are still compiled out on
-Apple. A scratch build with them compiled in on macOS ran 8 alternating rounds against
-`GPUI_SCROLL_LAYERS=0` (MEASUREMENTS, "scroll layers on Apple, measured in Slopty"):
+*What changed.* The fork's `fast::layers::COMPILED` now names macOS and iOS (aislopware/gpui-fast
+#9, pinned at `f71b3fe`), which share the Metal renderer. Every scroll container in the app is
+now eligible. Before the switch, neither list people scroll most ever composited, so layers on
+Apple only cost: the face paid 7%. Four fixes got there, each measured in 8 alternating rounds
+(MEASUREMENTS, "scroll layers on Apple: gpui-fast f71b3fe, gpui-kit 25b62b08"):
 
-- **The navigator never composites as Slopty draws it today.** `NavList::set_rows` reads the
-  list's `logical_scroll_top` on every render, only to keep a list at its top when rows are
-  spliced in above it. A render that reads the offset makes every scroll a change of the
-  content, so the layer repaints twice and is demoted for good. If the offset is read only when
-  rows are spliced, 500 of 600 wheel frames composite and the p50 goes from 0.341 to 0.229 ms
-  (−33%).
-- **The other 100 frames are bypassed because of the selection plate.** It is a canvas painted
-  under the list, so the background under the viewport is not one opaque quad while the plate
-  is in view. The fork then waits 60 frames before it tries the layer again (`defer_unbaked`).
-- **The face does not composite either, so it pays for layers without getting anything back.**
-  Panning while an answer streams goes from 0.575 to 0.615 ms (+7%), and panning a finished
-  session from 0.470 to 0.505 ms (+7%). That cost is not the demoted layer's per-frame
-  `changed_without_layer` check: with the check skipped, the face pans at 0.641 ms. At rest, the
-  layer composites 7 frames, then a content dependency changes about every 8 frames and the
-  layer is demoted. While a row's settle animation runs, the layer is not promoted at all.
-- **Nothing else moves outside the noise.** That covers the workspace, the chrome, the palette,
-  the pointer, echo and the terminal grid (keyed and afresh, ±2%).
+- **The navigator's render read its list's scroll offset.** `NavList::set_rows` read
+  `logical_scroll_top` on every render, just to keep a list at its top when rows are spliced in
+  above it. A render that reads the offset makes every scroll a change of the content. It now
+  reads it only when it splices, and 500 of 600 wheel frames composite.
+- **The selection plate was a canvas under the list.** With the plate there, the background
+  under the viewport was not one opaque quad, so the layer never baked (`defer_unbaked`). Now
+  `Plate::seat` paints the plate inside the selected row while it is still, and the glide still
+  paints under the list while it moves. 600 of 600 frames composite, and a frame goes from
+  0.343 to 0.221 ms.
+- **A GPUI Kit text view changed its state when it was first built** (aislopware/gpui-kit#3,
+  pinned at `25b62b08`). Its first parse notified inside the holder's render, and the parser's
+  acknowledgement made a no-op update. Every row a pan uncovered therefore changed the face's
+  content. With the fix, a finished face panned at rest goes from 0.479 to 0.4215 ms. It
+  composites every frame except those of the composer's 160 ms morph, during which a holder
+  asking for animation frames is not promoted.
+- **A layer-on panic in the fork** (#8). When the navigator's holding view was copied from the
+  last frame, the shift of its rows' paint ranges subtracted the window's scene index from the
+  layer's own and overflowed. This is debug only.
 
-*Why not now.* The switch is one line in the fork, but it applies to every scroll container in
-the app. Turning it on today would win on the navigator and lose on the face, and the face is
-the list people read most.
+*Step 4 found nothing to fix.* With the fixes in, a profile of the face panning with layers on
+puts the layer bookkeeping at 0.8% of the thread. Panning and following move +1.7% and +0.8%,
+inside a round-to-round spread of ±15%. Every other frame, the 28 terminal cases included, stays
+within noise.
 
-*The plan, in order, each step measured with the commands in that MEASUREMENTS section:*
+*What keeps it true.* `a_scroll_of_the_navigator_composites_its_layer` and
+`a_face_panned_at_rest_composites_its_layer` assert that every frame composites and nothing is
+demoted. The face test runs under Reduce Motion, so the wall-clock morph does not count. A render
+that reads a scroll offset, a canvas under a list, or a component that writes its own state while
+it is drawn fails one of them. `cargo test -p gpui_apple fast::layers` checks the Metal composite
+pixel for pixel.
 
-1. In Slopty, `set_rows` reads `logical_scroll_top` only when it splices rows. The read moves
-   inside `if spliced`, before `splice`, so a list at its top still stays there.
-2. In Slopty, the selection plate is painted inside the list's content: on the selected row, or
-   as content that is repainted while it glides and composited once it is still. Then the
-   background under the list is the panel's one fill again.
-3. Find what the face's content reads that changes during a pan, using the decision trace below,
-   and stop it from changing. A settle animation is short in real time, so it stays.
-4. In the fork, profile the face with layers on and off to find the 7% it pays without
-   compositing, and fix that at its source.
-5. In the fork, set `fast::layers::COMPILED` for macOS and iOS (upstream compiles Metal in), in a
-   PR on aislopware/gpui-fast. `cargo test -p gpui_apple fast::layers` already checks the Metal
-   composite pixel for pixel. Slopty then gets a test that a navigator scroll composites
-   (`layer_frames_composited` in `layout_stats`).
+*The tooling.* `target/scratch-layers` holds the scratch tree, its scripts (`refresh.sh`,
+`build.sh`, `suite2.sh`, `table.sh`) and `trace5.patch`. That patch prints each frame's decision
+under `GPUI_LAYER_TRACE=1`, with the check that failed. All of it lives under `target/`, which
+`xtask prune` may clear, and none of it is meant to land.
 
-*The decision trace.* A patch to the fork, `target/scratch-layers/trace.patch`, prints each
-frame's decision under `GPUI_LAYER_TRACE=1`, with the check that failed, entity by entity.
-`target/scratch-layers/suite.sh` runs the alternating rounds and `compare.sh` takes the medians.
-They live under `target/`, which `xtask prune` may clear, and none of them is meant to land.
 
 *Not candidates.* The terminal's scrollback is a custom element that moves its own grid, the
 strip's motion is a layout spring, and a screen tile holds a surface. None of them is a scroll

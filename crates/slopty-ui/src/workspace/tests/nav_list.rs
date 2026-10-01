@@ -318,3 +318,23 @@ fn runs_through_the_band(cx: &mut TestAppContext, (w, h): (f32, f32), mode: navi
     assert!((f32::from(scrim.bottom()) - h).abs() < 0.5, "the scrim too: {scrim:?}");
     assert!(drawer.top() == workspace.top(), "from the top: {drawer:?}");
 }
+
+/// A wheel over the navigator's list composites its scroll layer where GPUI compiles layers in.
+/// The list's view reads nothing a scroll changes, and the selected row's plate is painted
+/// inside the row, so the background under the list bakes.
+#[gpui::test]
+fn a_scroll_of_the_navigator_composites_its_layer(cx: &mut TestAppContext) {
+    const FRAMES: u64 = 30;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    notes(&view, cx, &studio, 120);
+    for _ in 0..3 {
+        scroll_list(&view, cx, -12.0);
+    }
+    cx.update(|window, _| window.reset_layout_stats());
+    for _ in 0..FRAMES {
+        scroll_list(&view, cx, -12.0);
+    }
+    let stats = cx.update(|window, _| window.layout_stats());
+    assert_eq!((stats.layer_frames_composited, stats.layers_demoted), (FRAMES, 0));
+}

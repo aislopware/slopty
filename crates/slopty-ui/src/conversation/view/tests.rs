@@ -876,3 +876,35 @@ fn diff_lines_picked_by_their_numbers_are_quoted_into_the_draft(cx: &mut TestApp
     assert_eq!(view.read_with(cx, |v, _| *v.pane()), super::Pane::Conversation);
     assert!(cx.debug_bounds("composer").is_some(), "the draft is on show");
 }
+
+/// A finished session's face panned at rest composites its scroll layer where GPUI compiles
+/// layers in: nothing its content reads changes under a pan, and a text view built for a row
+/// the pan uncovers is no change either. Under Reduce Motion, because the composer's morph
+/// after the fixture's last prompt runs on the wall clock, and while it runs the face asks for
+/// animation frames, which keeps its list from being promoted.
+#[gpui::test]
+fn a_face_panned_at_rest_composites_its_layer(cx: &mut TestAppContext) {
+    const FRAMES: u64 = 60;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.bind_keys(crate::workspace::key_bindings());
+        cx.set_reduce_motion(true);
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut face = ConversationView::new(SessionId::new(), Theme::default(), window, cx);
+        face.set_shown(true, cx);
+        face
+    });
+    cx.simulate_resize(size(px(1000.0), px(720.0)));
+    feed(&view, cx, fixtures::long(dir.path(), 80));
+    for _ in 0..3 {
+        scroll(cx, 40.0);
+    }
+    cx.update(|window, _| window.reset_layout_stats());
+    for frame in 0..FRAMES {
+        scroll(cx, if frame < FRAMES / 2 { 40.0 } else { -40.0 });
+    }
+    let stats = cx.update(|window, _| window.layout_stats());
+    assert_eq!((stats.layer_frames_composited, stats.layers_demoted), (FRAMES, 0));
+}

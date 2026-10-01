@@ -12705,7 +12705,7 @@ into `target/scratch-layers/tree`, patches `[patch."https://github.com/aislopwar
 clone, `fast::layers::COMPILED` also names `target_os = "macos"`. One binary runs every measure
 test in alternating rounds, with layers on and with `GPUI_SCROLL_LAYERS=0`. In that tree,
 `NavList::set_rows` reads the list's offset only when it splices rows (docs/decisions/tooling.md,
-"Scroll layers turn on for Apple once the navigator and the face composite"). Medians of 8
+"Scroll layers are on for macOS and iOS: the navigator and the face composite"). Medians of 8
 rounds, p50 in ms:
 
 | frame | layers off | layers on | change |
@@ -12749,6 +12749,61 @@ $S/compare.sh $S/runs-a $S/runs-b                                  # medians, of
 ```
 
 Logs: `target/logs/upstream-measure-{1,2,3}.log` and `target/scratch-layers/runs-{a,b,c}/`.
+
+## 2026-10-01 — scroll layers on Apple: gpui-fast f71b3fe, gpui-kit 25b62b08
+
+The steps of "Scroll layers are on for macOS and iOS: the navigator and the face composite"
+(docs/decisions/tooling.md), each measured in the scratch tree of the section above. The setup
+is the same: the measure tests alternate layers on and `GPUI_SCROLL_LAYERS=0`, 8 rounds, release,
+mac-studio, other sessions building (load 12 to 21). Medians of p50 in ms:
+
+| frame | today (off) | step 1 on | step 2 on | step 3 on | final off | final on |
+| --- | --- | --- | --- | --- | --- | --- |
+| navigator scrolling, 120 notes | 0.3455 | 0.2405 | 0.228 | 0.234 | 0.3435 | 0.221 |
+| frames of 600 composited | 0 | 500 | 600 | 600 | 0 | 600 |
+| finished face panned at rest | 0.508 | 0.5195 | 0.4995 | 0.4325 | 0.479 | 0.4215 |
+| frames of 600 composited | 0 | 3.5 | 5 | 393 | 0 | 385.5 |
+| face panning while it streams | 0.5855 | 0.602 | 0.575 | 0.5955 | 0.561 | 0.5405 |
+| face following an answer | 0.832 | 0.8485 | 0.8045 | 0.8485 | 0.7595 | 0.7635 |
+
+- **Step 1.** `NavList::set_rows` reads the offset only when it splices rows.
+- **Step 2.** The selection plate is seated inside the selected row (`Plate::seat`).
+- **Step 3.** gpui-kit's text view no longer changes its state when it is first built, or on
+  the parser's acknowledgement (aislopware/gpui-kit#3).
+- **Final.** The fork with #8 (the overflow below) and #9 (`COMPILED` names macOS and iOS),
+  and the kit at `25b62b08`. That is `6d32ce6f`, the merge of #3, plus a CI-only commit.
+- Columns are from two suites: "today" to "step 3" from `runs-d`, "final" from `runs-e`.
+  Compare within a suite.
+
+Every other frame stays within noise between final on and off: the chrome's echo, pointer,
+motion and keyboard; the stream; the palette; the registry; long notes; the docked and hidden
+navigator; and the 28 terminal cases (−5.9% to +0.7%, and −1.7% to +1.6% against today's off).
+
+- **Where the 215 frames at rest that do not composite go.** The fixture ends on a settled
+  prompt, so the composer's morph runs on the wall clock for `Pace::Settle`, 160 ms. A test
+  frame takes about 0.75 ms, so the morph spans about 215 of them. While the face asks for
+  animation frames, its list is not promoted (gpui-fast `fcc4533`). In the app that is 160 ms
+  of frames, once per prompt. `a_face_panned_at_rest_composites_its_layer` runs under Reduce
+  Motion and composites 60 of 60.
+- **Step 4 found nothing to fix in the fork.** A `sample` profile of the face panning with
+  layers on, after step 3, puts the layer bookkeeping at 77 of 9 482 samples on the test thread
+  (0.8%). The largest parts are `policy::decide`, `lists::list_id` and `owner_scrolled_only`.
+  Panning moves +1.7% and following +0.8% on against off, while one round differs from the
+  next by about ±15%.
+- **The overflow.** Step 2 made `measure_an_echo_frame_beside_long_notes` panic with layers on:
+  "attempt to subtract with overflow" in `PaintIndex::shifted`. When the view holding the
+  navigator was copied from the last frame, the shift subtracted the window's scene index from
+  a list row's own scene index, then threw the result away. Fixed in the fork's `e831224` (#8),
+  with a test that panicked before the fix.
+
+```sh
+S=target/scratch-layers
+$S/refresh.sh                                       # tree from HEAD, patched to the local clones
+$S/build.sh final                                   # release test binary into $S/bins/final
+$S/suite2.sh $PWD/$S/runs-e 8 head final            # alternating on/off rounds, OUT absolute
+$S/table.sh $S/runs-e head-off head-on final-off final-on
+cargo nextest run -p slopty-ui composites_its_layer # the two tests that see layers composite
+```
 
 ## 2026-10-01 — a finished task to its merge, across two workers
 
@@ -12841,6 +12896,28 @@ Mac Studio M1 Max, release, load average 26 from other sessions' builds, medians
 
 The worst case is under 3 % of a 120 Hz frame and only arises with the caret next to a bracket
 whose pair is hundreds of lines off; `BRACKET_SCAN_BYTES` bounds it by size, never by the clock.
+
+Round two, same machine and method, load average 23 to 32. A find runs again on every edit while
+its field is open, so it is on the input path; the symbol list and the word candidates run off
+the UI thread.
+
+| What | Median |
+| --- | --- |
+| Find over 1 MiB, a word on every line (10 000 matches kept) | 708 µs |
+| Find over 1 MiB, a word not in it | 119 µs |
+| Find over 1 MiB, the pattern `\w+\(` | 494 µs |
+| Find over 16 MiB (the largest text a worker sends), a word on every line | 707 µs |
+| Find over 16 MiB, a word not in it | 1.9 ms |
+| The editor's rope made one string, per MiB (each find starts so) | 269 µs |
+| Symbols over 1 MiB of Rust (off the UI thread) | 635 ms |
+| Word candidates for `va` over 1 MiB (off the UI thread) | 1.8 ms |
+| Word candidates for `va` over 16 MiB (off the UI thread) | 30 ms |
+
+A find stops at `MATCHES_MAX`, which is why a common word costs the same at 1 and at 16 MiB.
+The cost an edit pays is the string copy plus the scan: about 0.4 ms at 1 MiB, and some 6 ms in a
+16 MiB file, the one size where it nears a 120 Hz frame. The symbol list parses as a colouring
+does, so it reads a file only up to `COLOURED_BYTES` (2 MiB, about 1.3 s, "Reading symbols…"
+shown meanwhile); past it the tile is plain text and lists none.
 
 ```sh
 cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_editor_helpers --no-capture
