@@ -46,6 +46,7 @@ pub mod discover;
 pub mod hooks;
 pub mod live;
 pub mod loosening;
+pub mod observed;
 pub mod permission;
 pub mod reports;
 pub mod resume;

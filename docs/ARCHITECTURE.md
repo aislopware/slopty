@@ -1119,8 +1119,12 @@ what its tools are stay open strings. On the worker, `slopty_worker::thread::Hos
 thread. Each thread has a log under `threads/<id>/` (a snapshot plus a tail of framed actions,
 compacted at turn ends), the last few thousand actions are kept in memory for followers coming
 back, and per-thread intent outcomes are deduplicated by id. A `Follower` turns a cursor into
-frames, gathering batches within the client's latency budget and merging runs of appends. The
-model lands beside today's Claude path, described below, which it replaces once the clients
+frames, gathering batches within the client's latency budget and merging runs of appends.
+Claude Code is mapped into it by its observed adapter: a sans-IO codec,
+`slopty_agent::observed`, over the transcript decoder, the tracker's status, the held prompts,
+the status line and the mod's board. Its IO, `slopty_worker::thread::claude`, runs one task per
+terminal session beside the face's own path, and makes one thread per Claude Code session,
+named by the session's id, with a linked thread per subagent. The model lands beside today's Claude path, described below, which it replaces once the clients
 switch over.
 
 Claude Code only, for now, and always through its own TUI, which stays the source of truth.
@@ -1224,8 +1228,9 @@ broadcasts each change as `WorkerMsg::Agent` and replays the table to joining cl
 as a pill in the terminal tile's header and outlines the tile when the agent needs the human.
 A blocked badge (permission, question or elicitation) is itself the button: a click reveals
 and focuses the terminal so the human answers Claude Code's own prompt there; Slopty never
-answers for them. Finding them: ⌘⇧A (the "Next Agent Needing You" menu item) reveals and focuses the
-next waiting terminal in reading order, cycling from the active item; the bell's badge counts
+answers for them. Finding them: ⌘⇧A (the "Next Thing Needing You" menu item) reveals and focuses the
+next rung of the attention ladder on any worker, cycling from the active item: a waiting agent,
+then a finish not yet looked at, failed ones first; the bell's badge counts
 what is new and its inbox lists the waiting agents under "Needs you" (the phone's way in).
 `slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`;
 `slopty hook report working|blocked|done|idle|gone [message]`, run from inside a session by any

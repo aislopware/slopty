@@ -8,6 +8,7 @@
 //! longer holds the gap. The [`table`] keeps a row per thread for the lists that follow
 //! nothing. Every intent is acted on once per id ([`intents`], [`Host::intent`]).
 
+pub mod claude;
 pub mod follow;
 pub mod host;
 pub mod intents;

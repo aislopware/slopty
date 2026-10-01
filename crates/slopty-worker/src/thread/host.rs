@@ -130,6 +130,12 @@ impl Host {
         create(&mut self.inner.lock(), meta)
     }
 
+    /// Whether `thread` is held.
+    #[must_use]
+    pub fn holds(&self, thread: ThreadId) -> bool {
+        self.inner.lock().threads.contains_key(&thread)
+    }
+
     /// The threads held.
     #[must_use]
     pub fn threads(&self) -> Vec<ThreadId> {

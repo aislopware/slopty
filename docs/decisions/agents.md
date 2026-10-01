@@ -158,3 +158,42 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     therefore gets the first outcome, across a worker restart too. Intents that start a
     thread are kept in `threads/starts`. A check, its action and its record happen under one
     lock.
+
+- ✅ **Claude Code observed is an adapter: a codec in `slopty-agent`, its IO on the worker**
+  (2026-10-02, `crates/slopty-agent/src/observed.rs`, `crates/slopty-worker/src/thread/claude.rs`;
+  tests in `observed/tests.rs` over the recorded fixtures, and `crates/slopty-worker/tests/claude_threads.rs`).
+  - **Beside today's path, sharing its inputs.** The driver hears what every client hears: the
+    tracker's merged status (`WorkerMsg::Agent`), the held prompts (`WorkerMsg::Permission`),
+    and the session summaries for the working directory. It also gets the board each followed
+    session already has, with its hooks heard, meters, subagent files and the mod's blocks.
+    It reads the transcripts itself on the blocking pool, after each hook and every 250 ms,
+    with the same decoder the face uses. Nothing of the old path changes. The daemon starts it
+    (`apps/slopty-worker/src/threads.rs`), with the host under `<data dir>/threads`.
+  - **A thread per Claude Code session, named by the session's own id.** The id is derived
+    from the session id (and for a subagent, from that and its agent id). So the same session
+    is the same thread across a worker restart, and across a `claude --resume` in another
+    terminal. The thread begins once the session id is known, from a hook or from the
+    transcript's file name. A thread held from before starts over under a new epoch and is
+    read again, as the ruling has it: the log is a cache of the native session. When a
+    terminal moves to another session (`/clear`, `/resume`), the old thread is left exited and
+    resumable.
+  - **The mapping.**
+    - A prompt opens the next turn of its thread, and later entries belong to that turn. A
+      branch (a rewind or an edited prompt) truncates the thread back to before the prompt it
+      dropped.
+    - The transcript's turn record fills in the models, tokens and end. A turn with an
+      interrupt in it ends `Interrupted`.
+    - Edits and writes add up to the turn's +N −M.
+    - Tool kinds come from the decoder's typed detail, and titles are worded here.
+    - A subagent's thread links to the call that started it, and the call names the thread.
+  - **The mod's blocks are items.** The adapter keeps an `Overlay` as one more follower, so it
+    shares the settling rules the face has (`live:<turn>:<step>:<block>`). A text or thinking
+    block is a provisional item, appended to as it grows and removed once the transcript
+    settles it. A tool block takes the call's own id, so the transcript's entry replaces it.
+  - **Prompts are requests with Claude Code's own answers:** allow, always allow (worded with
+    what the suggestions grant), deny, and deny and stop. A question carries its questions, and
+    a plan is approve or deny. `observed::verdict` maps a choice back to the `Verdict` the
+    relay prints. The status, meters and open requests are told again whenever the main thread
+    begins anew, since the transcript has none of them.
+  - **Not carried yet:** the agent's version (the mod's hello has it), and a session's working
+    directory until its shell next reports one after the worker starts.

@@ -22,6 +22,7 @@ mod ports;
 mod screens;
 mod server;
 pub mod tailnet;
+mod threads;
 mod tunnel;
 mod xfer;
 
@@ -591,6 +592,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     tokio::spawn(ports::watch(daemon.clone(), port_hints));
     // Agents the hooks never report: the foreground process, the title, the transcript.
     tokio::spawn(agents::watch(daemon.clone()));
+    threads::start(&daemon, &data_dir.join("threads"));
 
     // A terminal whose program exits stays, its last screen and its status kept, until a client
     // closes it (`docs/decisions/terminal.md`, "An exited shell stays until it is closed"). The
