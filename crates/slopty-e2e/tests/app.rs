@@ -431,6 +431,9 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e app"]
     async fn the_hooks_pill_installs_the_relay_in_the_harness_home() {
+        /// The pill's accessible name: its words, then what they are for
+        /// (`slopty_ui::workspace::tile::INSTALL_HOOKS`).
+        const HOOKS_PILL: &str = "Install hooks for an exact status";
         let mut stack = Stack::launch_with_fake_claude("e2e-worker").await.unwrap();
         // Before anything else: the daemons' home is the run's own directory, so this test
         // cannot touch the developer's `~/.claude` even if the wiring were wrong.
@@ -452,21 +455,22 @@ mod tests {
             .await
             .unwrap();
 
-        // ⌘⇧T starts the fake `claude`; with no hook firing the worker has to guess, which is
-        // exactly when the pill is offered.
-        stack.driver.keys("cmd-shift-t").await.unwrap();
+        // ⌘⇧T would start `claude` with the relay on its command line, so it never needs the
+        // pill. A wrapper is what the relay cannot reach: the worker wires an open whose program
+        // is `claude`, and here `env` starts it, as `npx` or a script would. With no hook firing
+        // the worker has to guess, which is exactly when the pill is offered.
+        stack.driver.open(&["env", "claude"], 1).await.unwrap();
         let dump = stack
             .driver
             .wait_for("the hooks pill on the guessed agent", STEP, |d| {
                 d.terminals.iter().any(|t| t.agent_source.as_deref() == Some("process"))
-                    && d.a11y_node("Button", Some("Install hooks")).is_some()
+                    && d.a11y_node("Button", Some(HOOKS_PILL)).is_some()
             })
             .await
             .unwrap();
         assert!(!dump.hooks_offered, "not offered until it is clicked");
 
-        let [x, y, w, h] =
-            dump.a11y_node("Button", Some("Install hooks")).expect("the pill").bounds;
+        let [x, y, w, h] = dump.a11y_node("Button", Some(HOOKS_PILL)).expect("the pill").bounds;
         stack
             .driver
             .ok(&Command::Click { x: x + w / 2.0, y: y + h / 2.0, button: Button::Left, count: 1 })
@@ -475,7 +479,7 @@ mod tests {
         stack
             .driver
             .wait_for("the offer to retire", STEP, |d| {
-                d.hooks_offered && d.a11y_node("Button", Some("Install hooks")).is_none()
+                d.hooks_offered && d.a11y_node("Button", Some(HOOKS_PILL)).is_none()
             })
             .await
             .unwrap();
