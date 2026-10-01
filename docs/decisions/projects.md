@@ -873,10 +873,32 @@ Not built in Phase 1:
   - the push would use the person's credentials from a background process;
   - Claude Code itself never pushes a worktree's branch.
 
-**No separate merge-queue view.** ✅ 2026-10-01
-- The board's lanes are the queue already: Verifying, Ready to merge, Merged. Each card shows
-  the step it is in (rebasing, verifying on the target, fast-forwarding), its verdict, and the
-  commits judged. A second view would show the same tasks again.
+**No separate merge-queue view; the board is the queue.** ✅ 2026-10-01
+- The board's lanes are the queue already: Verifying, Ready to merge, Merged. A second view
+  would show the same tasks again. So the lanes take the queue's order:
+  - Ready to merge runs as the queue does, the task waiting longest first, and so the one
+    merging. Each card says where it stands ("Next to merge", "2nd to merge"). A done task the
+    queue does not hold, because it has no verifier and the person has not asked, comes last.
+  - Verifying puts the run under way first, then the rest in the order the server takes them.
+- A task's verifier shows under it (`Board::verdict`, `ProjectView::check_block`):
+  - its mark and word (Verifying, Passed, Failed);
+  - the commits it judged ("4a7aa6d over c08d4c1"), its exit and how long it took;
+  - for a failure, its last four lines in the mono face a terminal uses, trimmed to their first
+    word. They are a glance, and the terminal keeps the whole log.
+- The verdict shows only while it still describes the task as it is now: a pass while the task
+  waits to merge, and a failure until it is verified again or merged. A stale one would read
+  as current.
+- Where it shows:
+  - on the board, every card with a verdict shows the block;
+  - in the tree, a run under way or a failure stands under its row, and a pass is a word in
+    the row ("Passed at e5b0d17"), so a tree of finished work stays one line a task.
+- "Output" on the block opens the verifier's terminal (`ProjectEvent::Output`): the run under
+  way, or the failed run kept for its output. It does not open the agent the row opens, and a
+  terminal that has closed says so.
+- Tests: `the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds` (model),
+  `a_verifier_shows_on_its_task_and_opens_its_terminal` (workspace, drawn and clicked), and the
+  `project-tree`, `project-lanes` and `project-timeline` goldens. Those now hold a failed
+  verifier on an up-next task and a passed one waiting to merge.
 
 **A task given back on another machine is sent the target to rebase onto.** ✅ 2026-10-01
 - With pushing off, the forge never sees what the queue merged. An agent in a clone on another

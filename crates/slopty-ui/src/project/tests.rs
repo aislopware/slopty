@@ -376,3 +376,78 @@ fn an_update_copies_only_the_board_it_touches() {
         "the other board is shared still"
     );
 }
+
+/// Ready to merge is the merge queue: it runs in the order tasks joined it, so the one merging
+/// first, with a done task the queue does not hold after them. Verifying puts the run under way
+/// first. A pass speaks while its task waits to merge and a failure until the task is verified
+/// again or merged; each says the commits it judged, how it ended and its last lines.
+#[test]
+fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
+    use super::fixtures::{queued, run, step};
+    use super::model::{queue_words, verdict_detail, verdict_tail};
+    let worker = WorkerId::new();
+    let merging = {
+        let mut c = queued(card(4, "d", TaskState::Done, None), 5, "4444444");
+        let phase = StepState::Running { phase: "Rebasing onto main".into(), percent: None };
+        c.step = Some(step(StepKind::Merge, worker, phase, None));
+        c
+    };
+    let mut verifying = card(6, "f", TaskState::Verifying, None);
+    let line = StepState::Running { phase: "Compiling".into(), percent: None };
+    verifying.step = Some(step(StepKind::Verify, worker, line, None));
+    verifying.updated_ms = slopty_core::WallMs::from_millis(AT.as_millis().saturating_add(50));
+    let mut failed = card(7, "g", TaskState::Waiting, None);
+    failed.verified = Some(run(false, "7777777abc"));
+    let mirror = one(vec![
+        queued(card(1, "a", TaskState::Done, None), 20, "1111111"),
+        queued(card(2, "b", TaskState::Done, None), 10, "2222222"),
+        card(3, "c", TaskState::Done, None),
+        merging,
+        card(5, "e", TaskState::Verifying, None),
+        verifying,
+        failed,
+    ]);
+    let b = board(&mirror);
+    let lanes = b.lanes();
+    let lane = |l: Lane| lanes.iter().find(|(x, _)| *x == l).map(|(_, t)| t.clone()).unwrap();
+    assert_eq!(lane(Lane::ReadyToMerge), [TaskId(4), TaskId(2), TaskId(1), TaskId(3)]);
+    assert_eq!(lane(Lane::Verifying), [TaskId(6), TaskId(5)], "the run under way first");
+    assert_eq!(b.queue_place(TaskId(2)), Some((2, 3)));
+    assert_eq!(b.queue_place(TaskId(3)), None, "done, and not asked to merge");
+    assert_eq!(
+        (queue_words(1), queue_words(2), queue_words(13)),
+        ("Next to merge".to_owned(), "2nd to merge".to_owned(), "13th to merge".to_owned())
+    );
+
+    assert!(b.verdict(TaskId(1)).is_some_and(|r| r.passed), "a pass while it waits to merge");
+    assert!(b.verdict(TaskId(7)).is_some_and(|r| !r.passed), "a failure until it is judged again");
+    let pass = run(true, "4a7aa6d0");
+    assert_eq!(verdict_detail(&pass), "4a7aa6d over c08d4c1 \u{b7} 1m 12s");
+    let fail = run(false, "4a7aa6d0");
+    assert_eq!(verdict_detail(&fail), "4a7aa6d over c08d4c1 \u{b7} exit 101 \u{b7} 1m 12s");
+    assert_eq!(
+        verdict_tail(&fail, 2),
+        ["--> src/project/view.rs:12:5", "error: could not compile `slopty-ui`"],
+        "its last lines that say anything"
+    );
+
+    let mut again = one(vec![{
+        let mut c = card(1, "a", TaskState::Verifying, None);
+        c.verified = Some(run(false, "1111111"));
+        c
+    }]);
+    assert!(board(&again).verdict(TaskId(1)).is_none(), "judged again, the old word is gone");
+    again.apply_update(
+        11,
+        task_changed(
+            "board",
+            {
+                let mut c = card(1, "a", TaskState::Running, None);
+                c.verified = Some(run(true, "1111111"));
+                c
+            },
+            None,
+        ),
+    );
+    assert!(board(&again).verdict(TaskId(1)).is_none(), "a pass for work since moved on");
+}

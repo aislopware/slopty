@@ -18,7 +18,7 @@ use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Moment, Native, NativeChange, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
     ProjectUpdate, ProjectsPart, ReportKind, StepKind, StepState, TaskCard, TaskId, TaskState,
-    TaskStep, TimelineEntry,
+    TaskStep, TimelineEntry, VerifierRun,
 };
 
 /// How many timeline entries a board keeps: a screenful many times over, and a bound on a
@@ -411,7 +411,11 @@ impl Board {
         Some(lane)
     }
 
-    /// The board: each lane that holds a task, left to right, its tasks by number.
+    /// The board: each lane that holds a task, left to right. Ready to merge is the merge
+    /// queue, so it runs in the queue's order, and Verifying puts the run under way first and
+    /// the rest in the order the server takes them. A done task the queue does not hold comes
+    /// after those it does. Every other lane, and a parent standing
+    /// in a lane for a descendant, goes by number.
     #[must_use]
     pub fn lanes(&self) -> Vec<(Lane, Vec<TaskId>)> {
         let mut by_lane: BTreeMap<Lane, Vec<TaskId>> = BTreeMap::new();
@@ -420,7 +424,55 @@ impl Board {
                 by_lane.entry(lane).or_default().push(*id);
             }
         }
+        for (lane, tasks) in &mut by_lane {
+            tasks.sort_by_key(|id| {
+                let turn = self.turn(*lane, *id);
+                (turn.is_none(), turn, *id)
+            });
+        }
         by_lane.into_iter().collect()
+    }
+
+    /// Where `task` stands in `lane`'s order: `None` goes after every task that has a turn.
+    fn turn(&self, lane: Lane, task: TaskId) -> Option<(bool, WallMs)> {
+        let card = self.tasks.get(&task).filter(|c| Lane::of(c.state) == lane)?;
+        match lane {
+            // The queue merges the one waiting longest, so it is also the one merging.
+            Lane::ReadyToMerge => Some((false, card.merge.as_ref()?.queued()?)),
+            Lane::Verifying => {
+                let running = card.step.as_ref().is_some_and(TaskStep::running);
+                Some((!running, card.updated_ms))
+            }
+            _ => None,
+        }
+    }
+
+    /// Where `task` waits in the merge queue: its place from 1, and how many wait.
+    #[must_use]
+    pub fn queue_place(&self, task: TaskId) -> Option<(usize, usize)> {
+        let mut queue: Vec<(WallMs, TaskId)> = self
+            .tasks
+            .values()
+            .filter(|c| c.state == TaskState::Done)
+            .filter_map(|c| Some((c.merge.as_ref()?.queued()?, c.id)))
+            .collect();
+        queue.sort_unstable();
+        let at = queue.iter().position(|(_, id)| *id == task)?;
+        Some((at.saturating_add(1), queue.len()))
+    }
+
+    /// The verifier's last word on `task` while it still speaks to what the task is now: a
+    /// pass while the task waits to merge, a failure until it is verified again or merged.
+    #[must_use]
+    pub fn verdict(&self, task: TaskId) -> Option<&VerifierRun> {
+        let card = self.tasks.get(&task)?;
+        let run = card.verified.as_ref()?;
+        let speaks = if run.passed {
+            card.state == TaskState::Done
+        } else {
+            !matches!(card.state, TaskState::Merged | TaskState::Verifying)
+        };
+        speaks.then_some(run)
     }
 
     /// The tasks whose agent waits on the person, by number.
@@ -571,7 +623,7 @@ pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
 /// What a verifier said, in a line: where it ran to, and for a failure the last thing it
 /// printed, which is where a build or a test run says what broke.
 #[must_use]
-pub fn verdict_line(run: &slopty_proto::project::VerifierRun) -> String {
+pub fn verdict_line(run: &VerifierRun) -> String {
     let at = short_commit(&run.head);
     if run.passed {
         return format!("Verifier passed at {at}");
@@ -582,6 +634,50 @@ pub fn verdict_line(run: &slopty_proto::project::VerifierRun) -> String {
         (None, Some(code)) => format!("Verifier failed at {at}: exit {code}"),
         (None, None) => format!("Verifier failed at {at}"),
     }
+}
+
+/// What a verifier judged and how it went, after its verdict's word: the commit it ran on,
+/// the target's commit that work left from, how it ended and how long it took.
+#[must_use]
+pub fn verdict_detail(run: &VerifierRun) -> String {
+    let mut parts = vec![match run.base.as_str() {
+        "" => short_commit(&run.head).to_owned(),
+        base => format!("{} over {}", short_commit(&run.head), short_commit(base)),
+    }];
+    if !run.passed {
+        match run.exit {
+            Some(code) if code < 0 => parts.push(format!("signal {}", code.unsigned_abs())),
+            Some(code) => parts.push(format!("exit {code}")),
+            None => {}
+        }
+    }
+    if run.took_ms > 0 {
+        parts.push(crate::kit::duration(std::time::Duration::from_millis(run.took_ms)));
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// The last `n` lines a failed verifier printed that say anything, each from its first word:
+/// where a build or a test run says what broke, as a glance and not the log, which its
+/// terminal keeps whole.
+#[must_use]
+pub fn verdict_tail(run: &VerifierRun, n: usize) -> Vec<&str> {
+    let lines: Vec<&str> = run.summary.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let from = lines.len().saturating_sub(n);
+    lines.get(from..).map(<[&str]>::to_vec).unwrap_or_default()
+}
+
+/// A place in a queue as people say it: next, 2nd, 3rd.
+#[must_use]
+pub fn queue_words(place: usize) -> String {
+    let suffix = match (place % 10, place % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    if place == 1 { "Next to merge".to_owned() } else { format!("{place}{suffix} to merge") }
 }
 
 /// A commit as people read it: its first seven hex digits.

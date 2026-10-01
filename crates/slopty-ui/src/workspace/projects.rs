@@ -154,6 +154,15 @@ impl WorkspaceView {
         self.show_board(session, true, cx);
     }
 
+    /// A board asked for a verifier's terminal: its tile, focused, or why there is none.
+    fn open_output(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        if self.tile_of_session(session).is_none() {
+            self.show_notice("The verifier's terminal has closed".to_owned(), cx);
+            return;
+        }
+        self.reveal_session(session, cx);
+    }
+
     /// A board's row asked for its agent: its tile, focused with the keyboard in it. The
     /// orchestrator's own row turns its tile back to the terminal.
     fn open_node(&mut self, project: &ProjectId, node: Node, cx: &mut Context<Self>) {
@@ -291,6 +300,7 @@ impl WorkspaceView {
         let subscription =
             cx.subscribe(&view, move |this, _view, event: &ProjectEvent, cx| match *event {
                 ProjectEvent::Open(node) => this.open_node(&asked, node, cx),
+                ProjectEvent::Output(term) => this.open_output(term.session, cx),
             });
         self.projects.subscriptions.insert(project.clone(), subscription);
         self.projects.views.insert(project, view);

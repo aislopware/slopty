@@ -34,8 +34,9 @@ async fn golden(stack: &mut ProjectStack, name: &str) {
     assert_matches(name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
 }
 
-/// The server's project, with an orchestrator and four tasks in four states, one of them run by
-/// an agent the server started, reaches the app; ⇧⌘J turns the orchestrator's tile to its
+/// The server's project, with an orchestrator and six tasks in five states, one of them run by
+/// an agent the server started, one whose verifier broke and one waiting to merge, reaches the
+/// app; ⇧⌘J turns the orchestrator's tile to its
 /// board, the lenses are keys, ↓↓↩ opens the task's agent, and a change on the server moves the
 /// board while it shows.
 #[tokio::test]
@@ -80,6 +81,8 @@ async fn a_project_board_follows_its_orchestration() {
         ],
         &["--title", "Hold it to goldens", "--read-only", "--depends-on", "1"],
         &["--title", "Write the decision", "--owns", "docs/decisions/ui.md"],
+        &["--title", "Check the wire goldens", "--owns", "crates/slopty-proto/tests"],
+        &["--title", "Mirror the merge queue", "--owns", "crates/slopty-ui/src/project/tests.rs"],
     ] {
         let mut create = vec!["task", "create", "--project", PROJECT];
         create.extend_from_slice(args);
@@ -121,6 +124,30 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
     stack.slopty(&update("4", &["--state", "merged"])).await.unwrap();
+    // A verifier that broke stays on its task until it is judged again, and one that passed
+    // waits on the board to merge.
+    stack
+        .slopty(&update(
+            "5",
+            &[
+                "--failed",
+                "--summary",
+                "   Compiling slopty-proto\nerror[E0063]: missing field `push` in initializer\n  --> crates/slopty-proto/tests/golden_project.rs:88:5\nerror: could not compile `slopty-proto`",
+                "--head",
+                "9c1e2f3",
+                "--base",
+                "c08d4c1",
+            ],
+        ))
+        .await
+        .unwrap();
+    stack
+        .slopty(&update(
+            "6",
+            &["--state", "done", "--passed", "--head", "e5b0d17", "--base", "c08d4c1"],
+        ))
+        .await
+        .unwrap();
 
     // The first run's own shell is a tile too: the task's agent is the terminal its spawn named.
     let agent_session = session_of(&term(&spawned));
@@ -130,7 +157,7 @@ async fn a_project_board_follows_its_orchestration() {
             let agent =
                 d.items.iter().any(|i| i.session.as_deref() == Some(agent_session.as_str()));
             project(d)
-                .is_some_and(|p| p.tasks.len() == 4 && p.lanes.iter().any(|(l, _)| l == "merged"))
+                .is_some_and(|p| p.tasks.len() == 6 && p.lanes.iter().any(|(l, _)| l == "merged"))
                 && agent
         })
         .await

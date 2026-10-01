@@ -346,6 +346,87 @@ fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
     );
 }
 
+/// A verifier shows where its task does. In the tree, a run under way or a failure stands
+/// under its row, with the failure's last lines, and a pass is a word in the row. On the
+/// board, every card says its verdict and the commits judged, and Ready to merge runs in the
+/// queue's order. "Output" opens the verifier's terminal without opening the agent. A terminal
+/// that has closed says so.
+#[gpui::test]
+fn a_verifier_shows_on_its_task_and_opens_its_terminal(cx: &mut TestAppContext) {
+    use slopty_proto::project::{StepKind, StepState};
+
+    use crate::project::fixtures::{queued, run, step};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (orchestrator_tile, orchestrator) = setup.orchestrator;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let kept = SessionId::new();
+    let kept_tile = opens(&view, cx, &setup.fake, kept, setup.fake.me, 3);
+    let closed = SessionId::new();
+
+    let mut failed = card(4, "Read the snapshot", TaskState::Waiting, None);
+    failed.verified = Some(run(false, "4a7aa6d0"));
+    let why = StepState::Failed { why: "exit 101".into() };
+    failed.step =
+        Some(step(StepKind::Verify, worker, why, Some(TermRef { worker, session: kept })));
+    let mut running = card(5, "Draw the lanes", TaskState::Verifying, None);
+    let line = StepState::Running { phase: "Compiling slopty-ui".into(), percent: None };
+    running.step =
+        Some(step(StepKind::Verify, worker, line, Some(TermRef { worker, session: closed })));
+    let later = queued(card(6, "Hold it to goldens", TaskState::Done, None), 20, "6666666");
+    let sooner = queued(card(7, "Write the decision", TaskState::Done, None), 10, "7777777");
+    view.update_in(cx, |v, _w, cx| {
+        for (seq, c) in [(11, failed), (12, running), (13, later), (14, sooner)] {
+            v.project_update(seq, task_changed("board", c, None), cx);
+        }
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let drawn = |cx: &mut VisualTestContext, s: &str| {
+        cx.debug_bounds(Box::leak(s.to_owned().into_boxed_str())).is_some()
+    };
+    for part in [
+        "project-row-project-node-4-check",
+        "project-row-project-node-4-tail",
+        "project-row-project-node-4-output",
+        "project-row-project-node-5-check",
+    ] {
+        assert!(drawn(cx, part), "{part} is drawn");
+    }
+    assert!(!drawn(cx, "project-row-project-node-6-check"), "a pass is a word in its row");
+    assert!(!drawn(cx, "project-row-project-node-5-tail"), "a run under way has no last lines");
+
+    let link = cx.debug_bounds("project-row-project-node-4-output").expect("drawn").center();
+    cx.simulate_click(link, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(kept_tile), "the verifier's terminal, not the agent's");
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "the row's own click held back");
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
+    cx.run_until_parked();
+    let link = cx.debug_bounds("project-row-project-node-5-output").expect("drawn").center();
+    cx.simulate_click(link, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("The verifier's terminal has closed")
+    );
+    assert_eq!(focused(&view, cx), Some(orchestrator_tile), "and nothing else opened");
+
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| b.show(Lens::Board, cx));
+    cx.run_until_parked();
+    for part in ["project-card-4-tail", "project-card-6-check", "project-card-7-check"] {
+        assert!(drawn(cx, part), "{part} is drawn");
+    }
+    let y =
+        |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).expect("drawn").origin.y;
+    assert!(
+        y(cx, "project-card-7") < y(cx, "project-card-6"),
+        "the one waiting longest is next to merge"
+    );
+}
+
 /// Letting the server go takes its projects, their boards and everything kept for them.
 #[gpui::test]
 fn forgetting_the_server_keeps_nothing_of_its_projects(cx: &mut TestAppContext) {

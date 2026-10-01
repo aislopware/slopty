@@ -17,12 +17,17 @@ use gpui::{
     Stateful, StatefulInteractiveElement as _, Styled as _, Task, Window, div, px, relative,
 };
 use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Moment, NativeCounts, ProjectId, ReportKind, StepKind, StepState, TaskCard, TaskId, TaskState,
+    Merge, Moment, NativeCounts, ProjectId, ReportKind, StepKind, StepState, TaskCard, TaskId,
+    TaskState, VerifierRun,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
-use super::model::{Board, Lane, TreeRow, state_status, state_word};
+use super::model::{
+    Board, Lane, TreeRow, queue_words, short_commit, state_status, state_word, verdict_detail,
+    verdict_tail,
+};
 use super::{Lens, OpenNode, SelectNext, SelectPrevious, ShowBoard, ShowTimeline, ShowTree};
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
@@ -65,7 +70,29 @@ pub type Node = Option<TaskId>;
 pub enum ProjectEvent {
     /// Open this node's agent in its tile.
     Open(Node),
+    /// Show a terminal the server runs for a task, its verifier's, in its tile.
+    Output(TermRef),
 }
+
+/// What a task's verifier shows on its card and its row: a run under way, or its verdict.
+#[derive(Clone, Debug, PartialEq)]
+enum Check<'a> {
+    /// It runs now, with its last line.
+    Running { line: String, term: Option<TermRef> },
+    /// What it said, and the terminal a failed run is kept in.
+    Verdict { run: &'a VerifierRun, term: Option<TermRef> },
+}
+
+impl Check<'_> {
+    const fn term(&self) -> Option<TermRef> {
+        match self {
+            Self::Running { term, .. } | Self::Verdict { term, .. } => *term,
+        }
+    }
+}
+
+/// How many of a failed verifier's last lines its card and row show.
+const TAIL_LINES: usize = 4;
 
 /// How an agent this client follows is doing, beside its task's state on the server.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -664,7 +691,12 @@ impl ProjectView {
             .filter(|_| mark.is_none())
             .map(|c| (state_word(c.state), state_status(c.state).tone(theme)));
         let settled = card.is_some_and(|c| c.state == TaskState::Merged);
-        let meta = second.unwrap_or_else(|| self.node_meta(board, node, card));
+        // The tree shows a verifier running or failed under its row; a pass is a word in it.
+        let check = card
+            .filter(|_| prefix == "project-row")
+            .and_then(|c| Self::check(board, c))
+            .filter(|c| !matches!(c, Check::Verdict { run, .. } if run.passed));
+        let meta = second.unwrap_or_else(|| self.node_meta(board, node, card, check.as_ref()));
         let key = format!("{prefix}-{}", node_key(node));
         let picked =
             prefix == "project-row" && self.picked() == Some(node) && self.lens == Lens::Tree;
@@ -740,7 +772,16 @@ impl ProjectView {
                     .items_center()
                     .child(self.mark(status)),
             )
-            .child(div().flex_1().min_w_0().flex().flex_col().child(first).child(second));
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(first)
+                    .child(second)
+                    .children(check.as_ref().map(|c| self.check_block(&key, c, cx))),
+            );
         let arrive = ElementId::Name(format!("{key}-in").into());
         let row = if picked { self.plate.mark(row, key) } else { row };
         let row = tab_stop(row, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -788,7 +829,13 @@ impl ProjectView {
 
     /// A node's second line: where it runs, its branch and worktree, what it still waits on,
     /// what runs inside it, and what its agent says it is doing.
-    fn node_meta(&self, board: &Board, node: Node, card: Option<&TaskCard>) -> String {
+    fn node_meta(
+        &self,
+        board: &Board,
+        node: Node,
+        card: Option<&TaskCard>,
+        check: Option<&Check<'_>>,
+    ) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(worker) = board.worker(node) {
             parts.push(self.worker_name(worker));
@@ -810,10 +857,29 @@ impl ProjectView {
             if card.read_only {
                 parts.push("reads only".to_owned());
             }
-            // A step under way or failed says so on the row; one done is the timeline's.
-            let shown = card.step.as_ref().filter(|s| !matches!(s.state, StepState::Done { .. }));
+            // A step under way or failed says so on the row; one done is the timeline's, and a
+            // verifier running says it in its own block.
+            let shown = card
+                .step
+                .as_ref()
+                .filter(|s| !matches!(s.state, StepState::Done { .. }))
+                .filter(|_| !matches!(check, Some(Check::Running { .. })));
             if let Some(step) = shown {
                 parts.push(super::model::step_line(step, |w| self.worker_name(w)));
+            }
+            let merging =
+                card.step.as_ref().is_some_and(|s| s.kind == StepKind::Merge && s.running());
+            if let Some((place, _)) = board.queue_place(card.id).filter(|_| !merging) {
+                parts.push(queue_words(place));
+            }
+            if check.is_none()
+                && let Some(run) = board.verdict(card.id).filter(|r| r.passed)
+            {
+                parts.push(format!("Passed at {}", short_commit(&run.head)));
+            }
+            if let Some(Merge::Merged { target, head, pushed, .. }) = &card.merge {
+                let pushed = if *pushed { ", pushed" } else { "" };
+                parts.push(format!("into {target} at {}{pushed}", short_commit(head)));
             }
         }
         let counts = card.map_or(board.orchestrator_natives, |c| c.natives);
@@ -822,6 +888,125 @@ impl ProjectView {
             parts.push(crate::kit::first_line(status).to_owned());
         }
         parts.join(" \u{b7} ")
+    }
+
+    /// What `card`'s verifier shows: a run under way, else its verdict while that still
+    /// speaks to the task as it is now ([`Board::verdict`]).
+    fn check<'a>(board: &'a Board, card: &'a TaskCard) -> Option<Check<'a>> {
+        let running = card
+            .step
+            .as_ref()
+            .filter(|s| s.running() && (s.kind == StepKind::Verify || s.term.is_some()));
+        if let Some(step) = running
+            && let StepState::Running { phase, .. } = &step.state
+        {
+            let line = crate::kit::first_line(phase).to_owned();
+            return Some(Check::Running { line, term: step.term });
+        }
+        let run = board.verdict(card.id)?;
+        let kept = card.step.as_ref().filter(|s| matches!(s.state, StepState::Failed { .. }));
+        Some(Check::Verdict { run, term: kept.and_then(|s| s.term) })
+    }
+
+    /// A verifier's run or verdict under a task: its mark and word, the commits it judged and
+    /// how it ended, the way to its terminal, and for a failure the last lines it printed.
+    fn check_block(&self, key: &str, check: &Check<'_>, cx: &Context<Self>) -> Div {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let (status, word, detail, tail) = match check {
+            Check::Running { line, .. } => (Status::Working, "Verifying", line.clone(), Vec::new()),
+            Check::Verdict { run, .. } if run.passed => {
+                (Status::Done, "Passed", verdict_detail(run), Vec::new())
+            }
+            Check::Verdict { run, .. } => {
+                (Status::Failed, "Failed", verdict_detail(run), verdict_tail(run, TAIL_LINES))
+            }
+        };
+        let tone = status.tone(theme);
+        let output = check.term().map(|term| {
+            let id = format!("{key}-output");
+            let selector = id.clone();
+            let link = div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::Link)
+                .aria_label("Show the verifier's output")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(self.z(sp.xxs))
+                .px(self.z(sp.xxs))
+                .rounded(self.z(theme.radii.sm))
+                .cursor_pointer()
+                .text_color(hsla(s.text_muted))
+                .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.overlay)))
+                .child(
+                    icon(theme, IconName::SquareTerminal, IconSize::Inline, hsla(s.text_muted))
+                        .size(self.z(theme.typography.icon())),
+                )
+                .child("Output");
+            tab_stop(link, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
+                cx.stop_propagation();
+                cx.emit(ProjectEvent::Output(term));
+            }))
+        });
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(self.z(sp.xs))
+            .min_w_0()
+            .child(status_icon(theme, status, self.z(theme.typography.icon()), hsla(tone)))
+            .child(div().flex_none().text_color(hsla(tone)).child(word))
+            .child(
+                crate::kit::tabular(div())
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(hsla(s.text_muted))
+                    .child(dotted(theme, detail)),
+            )
+            .children(output);
+        let tail = (!tail.is_empty()).then(|| {
+            let id = format!("{key}-tail");
+            let selector = id.clone();
+            div()
+                .id(SharedString::from(id))
+                .debug_selector(move || selector)
+                .role(Role::Log)
+                .flex()
+                .flex_col()
+                .px(self.z(sp.sm))
+                .py(self.z(sp.xs))
+                .rounded(self.z(theme.radii.sm))
+                .bg(hsla(s.panel))
+                // What the program printed, in the face a terminal and a tool's output use; it
+                // reads a size larger than the chrome's at the same points.
+                .font_family(theme.typography.mono_families.first().cloned().unwrap_or_default())
+                .text_size(self.z(theme.typography.caption()))
+                .text_color(hsla(s.text_secondary))
+                .children(tail.into_iter().map(|line| {
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(SharedString::from(line.to_owned()))
+                }))
+        });
+        let selector = format!("{key}-check");
+        div()
+            .debug_selector(move || selector)
+            .flex()
+            .flex_col()
+            .gap(self.z(sp.xs))
+            .pt(self.z(sp.xxs))
+            .min_w_0()
+            .text_size(self.z(theme.typography.meta()))
+            .child(head)
+            .children(tail)
     }
 
     /// Claude Code's own subagents running under `node`, as leaves of the tree.
@@ -944,7 +1129,10 @@ impl ProjectView {
         let picked = self.picked() == Some(node);
         let own = Lane::of(card.state);
         let status = self.node_status(board, node);
-        let meta = self.node_meta(board, node, Some(card));
+        let check = Self::check(board, card);
+        let meta = self.node_meta(board, node, Some(card), check.as_ref());
+        let block =
+            check.as_ref().map(|c| self.check_block(&format!("project-card-{}", card.id), c, cx));
         // A parent standing in a lane for a descendant says whose it is.
         let why = (own != lane).then(|| format!("{} in a subtask", lane.title()));
         let key = format!("project-card-{}", card.id);
@@ -1000,6 +1188,7 @@ impl ProjectView {
                     .text_color(hsla(s.text_muted))
                     .child(dotted(theme, meta)),
             )
+            .children(block)
             .children(why.map(|why| {
                 div()
                     .text_size(self.z(theme.typography.meta()))
