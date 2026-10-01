@@ -1026,6 +1026,8 @@ impl ProjectView {
             )];
         }
         let now = self.seen.now;
+        // A run of entries of one age says it once, on the newest, as a heading would.
+        let mut above: Option<String> = None;
         board
             .timeline
             .iter()
@@ -1047,6 +1049,8 @@ impl ProjectView {
                 };
                 let (glyph, tone) = moment_icon(theme, &entry.what);
                 let age = age_label(now.since(entry.at_ms));
+                let shown = (above.as_ref() != Some(&age)).then(|| age.clone());
+                above = Some(age.clone());
                 let key = format!("project-entry-{seq}");
                 let selector = key.clone();
                 let picked = self.picked == Some(Pick::Entry(seq));
@@ -1108,13 +1112,15 @@ impl ProjectView {
                             .text_color(hsla(s.text))
                             .child(SharedString::from(line)),
                     )
-                    .child(
+                    .children(shown.map(|age| {
+                        let selector = format!("project-entry-{seq}-age");
                         crate::kit::tabular(div())
+                            .debug_selector(move || selector)
                             .flex_none()
                             .text_size(self.z(theme.typography.meta()))
                             .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(age)),
-                    );
+                            .child(SharedString::from(age))
+                    }));
                 let arrive = ElementId::Name(format!("{key}-in").into());
                 let row = if picked { self.plate.mark(row, key) } else { row };
                 let node = entry.task;

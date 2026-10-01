@@ -266,7 +266,7 @@ fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
 
 /// What waits on the person stands on the tree's column and says no word its heading says;
 /// the lanes share the tile's width equally, however many there are; a task made under the
-/// title it still has says only that it was made.
+/// title it still has says only that it was made; a run of entries of one age says it once.
 #[gpui::test]
 fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -327,6 +327,22 @@ fn the_board_says_each_thing_once_and_fills_its_tile(cx: &mut TestAppContext) {
     assert!(
         said.iter().any(|l| l.starts_with("#1 Wire the board: Created,")),
         "made under the title it has: {said:?}"
+    );
+    let drawn = |cx: &mut VisualTestContext, s: String| {
+        cx.debug_bounds(Box::leak(s.into_boxed_str())).is_some()
+    };
+    let entries: Vec<u64> =
+        (0..64).filter(|seq| drawn(cx, format!("project-entry-{seq}"))).collect();
+    let aged: Vec<u64> = entries
+        .iter()
+        .copied()
+        .filter(|seq| drawn(cx, format!("project-entry-{seq}-age")))
+        .collect();
+    assert!(entries.len() > 1, "a timeline to read: {entries:?}");
+    assert_eq!(
+        aged,
+        entries.iter().max().copied().into_iter().collect::<Vec<_>>(),
+        "entries of one age say it once, on the newest"
     );
 }
 
