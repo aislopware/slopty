@@ -12670,3 +12670,82 @@ worker now keeps a name's addresses for each client for a minute, as Chromium ke
 lookup (`HostCache`), with the address that answered last first. An address that stops
 answering is looked up again at once, so a host that moved costs one dial. The table above is
 that run: the name now costs what the address does.
+
+## 2026-10-01 — frame costs on gpui-fast 37b6e9a and gpui-kit 1cc5914d, and scroll layers on Apple, measured in Slopty
+
+gpui-kit moved from `d6e51664` to `1cc5914d`: upstream `3a142844` (#3343 single-line Input
+height, #3330 Textarea rows, #3329 TextView colour, #3322 capped code blocks, #3318 table
+columns, #3281 Markdown source ranges) under our 37 commits. gpui-fast is at fork main `37b6e9a`.
+That is `4afc87b` with formatting CI added, so the GPUI code is the code measured in "frame costs
+on gpui-fast 4afc87b". The gpui-pre compat crates, still locked at `4afc87b`, moved with it.
+Release, mac-studio, three runs at a load average of 6 to 12, median p50 / p95 in µs:
+
+| case | bare, afresh | bare, keyed | sprites, afresh | sprites, keyed |
+| --- | --- | --- | --- | --- |
+| unchanged | 206 / 211 | 23 / 24 | 721 / 756 | 136 / 143 |
+| cursor blinking | 204 / 211 | 27 / 28 | 723 / 763 | 145 / 152 |
+| a key echoed at the prompt | 208 / 218 | 31 / 38 | 733 / 781 | 145 / 155 |
+| a line of output a frame | 289 / 321 | 116 / 128 | 797 / 835 | 417 / 455 |
+| `yes`, a screen of one line a frame | 176 / 211 | 175 / 212 | 173 / 205 | 177 / 209 |
+| a screen of new text a frame | 2 081 / 3 755 | 2 107 / 3 913 | 2 575 / 4 225 | 2 530 / 4 106 |
+| scrolling the scrollback a line a frame | 279 / 324 | 104 / 126 | 834 / 900 | 399 / 419 |
+
+Every median is within a few percent of the `4afc87b` run. The p95 tails are shorter at this
+load. The grid draws no gpui-kit component, so the kit moving should not show here, and it does
+not. The navigator scrolling: p50 0.309, 0.325 and 0.324 ms, p95 0.375 to 0.431 ms (0.341 /
+0.419 before), with 600 views built and no layer frames, since layers are compiled out on Apple.
+
+```sh
+cargo test -p slopty-ui --release --lib -- --ignored --nocapture terminal_frames_cost measure_the_navigator_scrolling
+```
+
+**Scroll layers compiled in on macOS.** A scratch tree, `git archive` of `HEAD` (`5a4357ab`)
+into `target/scratch-layers/tree`, patches `[patch."https://github.com/aislopware/gpui-fast.git"]`
+(and the `gpui-pre*` crates.io patches) over to a local clone of the fork at `37b6e9a`. In that
+clone, `fast::layers::COMPILED` also names `target_os = "macos"`. One binary runs every measure
+test in alternating rounds, with layers on and with `GPUI_SCROLL_LAYERS=0`. In that tree,
+`NavList::set_rows` reads the list's offset only when it splices rows (docs/decisions/tooling.md,
+"Scroll layers turn on for Apple once the navigator and the face composite"). Medians of 8
+rounds, p50 in ms:
+
+| frame | layers off | layers on | change |
+| --- | --- | --- | --- |
+| navigator scrolling, 120 notes | 0.341 | 0.229 | −33% (500 of 600 frames composited) |
+| face following an answer, 80 turns | 0.794 | 0.815 | +2.6% |
+| face panning while it streams | 0.569 | 0.603 | +6.0% |
+| navigator docked / hidden | 0.609 / 0.260 | 0.623 / 0.258 | +2.3% / −0.8% |
+| palette glide, 300 lines | 0.214 | 0.217 | +1.4% |
+| workspace frame over a large registry | 0.853 | 0.819 | −4.0% |
+| a frame of motion; the keyboard moving | 0.334; 0.833 | 0.334; 0.829 | 0; −0.5% |
+| echo, pointer, stream, notes, neighbour frames | | | −1.0% to +0.5% |
+| the terminal grid, all 28 cases | | | −4.3% to +2.4%, none past the noise |
+
+Without the `set_rows` change, the navigator with layers on composited 3 frames, repainted 3 and
+was demoted once (p50 0.336 ms against 0.326 ms off): its render read the offset, so every
+scroll counted as a change of the content. The first 60 frames of each run are bypassed because
+of the selection plate under the list (`defer_unbaked`).
+
+The face, 6 more rounds with a test added only to the scratch tree that pans a finished 80-turn
+session ±40 points a frame. "Skip" is layers on with the demoted layer's per-frame
+`changed_without_layer` check turned off:
+
+| face frame | off | on | on, skip |
+| --- | --- | --- | --- |
+| following an answer | 0.843 | 0.804 | 0.862 |
+| panning while it streams | 0.575 | 0.615 | 0.641 |
+| panned at rest | 0.470 | 0.505 | 0.498 |
+
+Following an answer moves both ways between the two sets: that is noise. Panning costs 7% with
+layers on, whether or not the check runs. At rest, the trace shows 7 frames composited before a
+content dependency changes about every 8 frames and the layer is demoted, plus 185 frames of a
+row's settle animation, during which the layer is not promoted.
+
+```sh
+S=target/scratch-layers
+(cd $S/tree && CARGO_TARGET_DIR=../target cargo test -p slopty-ui --release --lib --no-run)
+$S/suite.sh $S/target/release/deps/slopty_ui-<hash> $S/runs-b 5   # on/off rounds of the measure tests
+$S/compare.sh $S/runs-a $S/runs-b                                  # medians, off against on
+# the decision trace: git -C $S/gpui-fast apply ../trace.patch, rebuild, GPUI_LAYER_TRACE=1
+```
+
+Logs: `target/logs/upstream-measure-{1,2,3}.log` and `target/scratch-layers/runs-{a,b,c}/`.

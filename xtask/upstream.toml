@@ -19,9 +19,9 @@ fork = "https://github.com/aislopware/gpui-fast.git"
 branch = "main"
 checkout = ".research/gpui-fast"
 strategy = "merge"
-base = "1b381adb68a6e5a4550f73b0cd29a231ce6c7281"
-base_date = "2026-09-30"
-checked = "2026-09-30"
+base = "92a9b0f7041c8701d4aef4c05534a603caff75d3"
+base_date = "2026-10-01"
+checked = "2026-10-01"
 check_every_days = 0
 
 # zed is not forked: the gpui-fast fork imports it (its `UPSTREAM` file and
@@ -31,9 +31,9 @@ check_every_days = 0
 upstream = "https://github.com/zed-industries/zed.git"
 upstream_branch = "main"
 checkout = ".research/zed-main"
-base = "39b5329322f4d2c14dc8fd6db535a31ac5431770"
-base_date = "2026-09-30"
-checked = "2026-09-30"
+base = "74c134a3c12418cc095122fff938ef1c2504ae06"
+base_date = "2026-10-01"
+checked = "2026-10-01"
 check_every_days = 7
 
 [gpui-kit]
@@ -43,9 +43,9 @@ fork = "https://github.com/aislopware/gpui-kit.git"
 branch = "main"
 checkout = ".research/gpui-kit"
 strategy = "rebase"
-base = "201b55a431fb1b82a6047e908de63913db3d4354"
-base_date = "2026-09-30"
-checked = "2026-09-30"
+base = "3a142844d3661159964dce9e5512ca9a40286160"
+base_date = "2026-10-01"
+checked = "2026-10-01"
 # It lands several changes a day, so every gate asks.
 check_every_days = 0
 

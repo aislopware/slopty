@@ -277,6 +277,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   zed's GPUI-owned hang monitor (0f9c923e), upstream's hook rules (#19), and the fork's own
   "take a line's content mask once, not once a glyph".
 
+**gpui-kit moves to upstream `3a142844` (fork `1cc5914d`), GPUI to the fork's `37b6e9a1`.** ✅
+2026-10-01
+- gpui-kit's ten commits rebased under our 37 without a conflict, and the sync's clippy and
+  tests pass. Judged against Slopty:
+  - #3343 sizes a single-line Input's root to at least its line (`min_h_full`). Before it, a
+    line taller than the frame's content box was clipped at the top and bottom. That reaches
+    every field Slopty draws.
+  - #3330 puts back `rows` setting a plain Textarea's height.
+  - #3329 has a `TextView` without a `.style()` take its container's text colour. Slopty
+    passes its own style (`markdown::style`), so nothing changes here.
+  - #3322 lets fenced code scroll inside a height cap. Slopty draws fenced blocks itself.
+  - #3318 stops remeasuring a scroll table's columns, #3281 adds `source` and
+    `range_for_source` to Markdown, and #3331 keeps a disabled radio disabled in a group.
+  - The rest touches docs and the shell's QuickJS.
+  - `slopty-ui` builds and passes clippy against the new kit with no edit.
+- gpui-fast's `base` lagged at `1b381adb`, although the fork had merged longbridge `92a9b0f`
+  (#24–#34) in its PR #6. The sync confirmed the fork holds it and that zed `74c134a3` changed
+  nothing in the imported directories, and recorded both bases. Fork main `37b6e9a1` adds only
+  formatting CI over `4afc87b`. The gpui-pre compat crates were still locked at `4afc87b` and now
+  share the one gpui-fast source.
+
 **The ghostty fork moves to upstream `26e64dfb`.** ✅ 2026-09-30
 - Upstream merged #14458 (a live pending wrap is repaired after a resize), which the fork had
   carried as a copy since `0386095`. The rebase dropped the copy for the merged commit and kept
@@ -439,6 +460,60 @@ animated.
 
 *A cost that stays.* #24's conservative glyph mask test costs the terminal strip 2 to 2.7%
 instructions a frame (`strip-scroll` 7.71M to 7.91M), whether layers are compiled in or not.
+
+**Scroll layers turn on for Apple once the navigator and the face composite.** ⏸ 2026-10-01
+
+*Where it stands.* PR #5 on our fork lets a view that holds a list write its own state while it
+is built, and the navigator's rows are now a view of their own. Layers are still compiled out on
+Apple. A scratch build with them compiled in on macOS ran 8 alternating rounds against
+`GPUI_SCROLL_LAYERS=0` (MEASUREMENTS, "scroll layers on Apple, measured in Slopty"):
+
+- **The navigator never composites as Slopty draws it today.** `NavList::set_rows` reads the
+  list's `logical_scroll_top` on every render, only to keep a list at its top when rows are
+  spliced in above it. A render that reads the offset makes every scroll a change of the
+  content, so the layer repaints twice and is demoted for good. If the offset is read only when
+  rows are spliced, 500 of 600 wheel frames composite and the p50 goes from 0.341 to 0.229 ms
+  (−33%).
+- **The other 100 frames are bypassed because of the selection plate.** It is a canvas painted
+  under the list, so the background under the viewport is not one opaque quad while the plate
+  is in view. The fork then waits 60 frames before it tries the layer again (`defer_unbaked`).
+- **The face does not composite either, so it pays for layers without getting anything back.**
+  Panning while an answer streams goes from 0.575 to 0.615 ms (+7%), and panning a finished
+  session from 0.470 to 0.505 ms (+7%). That cost is not the demoted layer's per-frame
+  `changed_without_layer` check: with the check skipped, the face pans at 0.641 ms. At rest, the
+  layer composites 7 frames, then a content dependency changes about every 8 frames and the
+  layer is demoted. While a row's settle animation runs, the layer is not promoted at all.
+- **Nothing else moves outside the noise.** That covers the workspace, the chrome, the palette,
+  the pointer, echo and the terminal grid (keyed and afresh, ±2%).
+
+*Why not now.* The switch is one line in the fork, but it applies to every scroll container in
+the app. Turning it on today would win on the navigator and lose on the face, and the face is
+the list people read most.
+
+*The plan, in order, each step measured with the commands in that MEASUREMENTS section:*
+
+1. In Slopty, `set_rows` reads `logical_scroll_top` only when it splices rows. The read moves
+   inside `if spliced`, before `splice`, so a list at its top still stays there.
+2. In Slopty, the selection plate is painted inside the list's content: on the selected row, or
+   as content that is repainted while it glides and composited once it is still. Then the
+   background under the list is the panel's one fill again.
+3. Find what the face's content reads that changes during a pan, using the decision trace below,
+   and stop it from changing. A settle animation is short in real time, so it stays.
+4. In the fork, profile the face with layers on and off to find the 7% it pays without
+   compositing, and fix that at its source.
+5. In the fork, set `fast::layers::COMPILED` for macOS and iOS (upstream compiles Metal in), in a
+   PR on aislopware/gpui-fast. `cargo test -p gpui_apple fast::layers` already checks the Metal
+   composite pixel for pixel. Slopty then gets a test that a navigator scroll composites
+   (`layer_frames_composited` in `layout_stats`).
+
+*The decision trace.* A patch to the fork, `target/scratch-layers/trace.patch`, prints each
+frame's decision under `GPUI_LAYER_TRACE=1`, with the check that failed, entity by entity.
+`target/scratch-layers/suite.sh` runs the alternating rounds and `compare.sh` takes the medians.
+They live under `target/`, which `xtask prune` may clear, and none of them is meant to land.
+
+*Not candidates.* The terminal's scrollback is a custom element that moves its own grid, the
+strip's motion is a layout spring, and a screen tile holds a surface. None of them is a scroll
+container, so they gain nothing from layers.
 
 **Native views compose through the fork's own mechanism, not longbridge #30.** ✅ 2026-10-01
 
