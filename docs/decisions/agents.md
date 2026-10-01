@@ -1,0 +1,70 @@
+# Agents
+
+How Slopty runs, shows and steers coding agents of every kind. The research, with sources, is in
+`.research/gui-first-2026-10-01/`. `plan.md` there synthesises it, and `protocols.md`,
+`desktops.md`, `orchestrators.md`, `workflows.md` and `design.md` hold the evidence.
+
+- ✅ **GUI-first: the agent's own session is the source of truth** (2026-10-01, verified against
+  Claude Code 2.1.286, Codex app-server at `ecc78e4`, pi 0.99.2 and ACP at `9e03215`). After a
+  long time working in terminals, the person found that a terminal's productivity cannot match
+  a GUI that is well designed, beautiful and complete. In agentic work the person mostly
+  directs, watches and reviews agents rather than typing commands. So Slopty becomes GUI-first
+  and agent-native. It keeps the best terminal there is, one action away. The GUI extends beyond
+  Claude Code to Codex, pi and any ACP agent. The core goal stays: directing and working on
+  many remote machines must feel like one local machine.
+  - **What this supersedes.** The rule that the TUI is the only source of truth (CLAUDE.md
+    until 2026-10-01, and the "What stays" half of "Claude Code gets a conversation face; the
+    TUI stays the source of truth" in `claude-code.md`, 2026-09-27). Its principle is kept and
+    widened: the agent's *own* session is the record, not the TUI's screen.
+  - **The rules.**
+    1. The native session is the record: Claude's session id and transcript, Codex's thread on
+       its daemon, pi's session file. The worker's thread log is a cache rebuilt from it, never
+       a second history.
+    2. One writer per session, enforced by the worker.
+    3. Slopty acts only through the agent's published doors: its protocol (Codex app-server,
+       pi RPC, Claude's stream-json control protocol when driven, ACP), its hooks, or
+       keystrokes into its TUI sent on the person's word behind the draft guard. It never reads
+       the screen to control an agent, never types menu digits or cycles mode keys, and never
+       answers for the person.
+    4. The TUI can always take a session over: live beside the face for Codex, by a handoff at
+       idle for a driven agent. A TUI-born agent gets the whole GUI.
+    5. Slopty launches the user's own unmodified binary, never offers a login and never reads a
+       credential. API keys and third-party providers are first-class.
+  - **Each agent's drive.** An adapter declares a drive and an open set of capabilities, and the
+    UI shows a control only where the capability is present.
+    - *Claude Code, observed by default.* Its TUI runs in the PTY, and the face reads hooks, the
+      transcript and the mod's live blocks. The worker owns the composer and the queue, and
+      types on the person's word. Approvals go through the blocking `PermissionRequest` hook.
+    - *Claude Code, driven, as an opt-in per profile* (`claude -p` stream-json with the control
+      protocol). Recommended for API keys and third-party providers. Handoff to the TUI at idle.
+    - *Codex, shared.* Slopty is a second live client of the user's app-server daemon socket,
+      and `codex` in a PTY attaches to the same thread beside the face.
+    - *pi, driven,* over `pi --mode rpc`, with Slopty's permission-gate extension, which fails
+      closed, because pi has no permission system of its own. Handoff to its TUI at idle.
+    - *Any ACP agent, driven,* through the `agent-client-protocol` crate.
+    - *Any other program:* status only, through `slopty hook report`.
+  - **Why Claude stays observed by default.** Driving gives a far richer face (token deltas,
+    mode and model in place, `rewind_files`, `stop_task`). But Zed reports that Agent SDK use
+    on subscription plans moved to a separate, limited credit pool, about 15–30× the cost for
+    heavy use. A driven `claude -p` session is very likely billed the same way. Anthropic's
+    legal page permits the unmodified binary with the user's own subscription, while its SDK
+    overview forbids third-party claude.ai login, and no page settles driven `-p` use. The
+    observed path is plainly allowed, already built and keeps the TUI live. Reopen this when
+    Anthropic settles the question.
+  - **Remote feels local.** Adapters, approval holds and turn snapshots live on the worker, so
+    a dropped link pauses nothing. Each followed thread streams a snapshot, then actions
+    numbered by epoch and sequence. A client resumes from where it left off with only the
+    actions it missed. Sends and approvals carry intent ids, render at once, survive a
+    reconnect and are deduplicated by the worker. The client caches each thread on disk, so it
+    opens in the first frame. The model follows Codex's thread, turn and item primitives with
+    the synchronisation semantics of Microsoft's Agent Host Protocol. Slopty takes AHP's
+    model, not its wire: AHP is pre-1.0 and breaks with each minor release, its types are
+    JSON-only and cannot travel on postcard, and its Rust crate is client-only.
+  - **Turn snapshots.** At each turn edge the worker writes the whole working tree to a private
+    git ref. Review, undo and rewind then cover every agent, including edits made through Bash,
+    which Claude's own checkpoints miss.
+  - **Order.** M1: one thread model with Claude GUI-first on it (the attention ladder, the
+    thread view that survives drops, the worker composer and queue, turn snapshots and the
+    review tile). M2: Codex, pi and the fleet overview. M3: projects the person directs from
+    the board. M4: takeover and reach (git panel, moving an agent between hosts, best-of-N,
+    generic ACP). The ranked list is `plan.md` §3.

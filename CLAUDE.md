@@ -1,10 +1,11 @@
 # Slopty
 
-One app on macOS, iPhone and iPad that reaches many remote hosts at once. It runs terminals and
-Claude Code agents, streams windows and whole desktops at Parsec quality or better, shares the
-clipboard and moves files either way. Everything sits on a niri-style scrolling workspace.
-Hosts are reached over Tailscale or a VPN, so the wire adds no encryption or pairing of its own.
-The aim is that working on a remote Mac feels local. Pure Rust on GPUI.
+One app on macOS, iPhone and iPad that reaches many remote hosts at once. It runs coding agents
+(Claude Code, Codex, pi and any ACP agent) and terminals, streams windows and whole desktops at
+Parsec quality or better, shares the clipboard and moves files either way. Everything sits on a
+niri-style scrolling workspace. Hosts are reached over Tailscale or a VPN, so the wire adds no
+encryption or pairing of its own. The aim is that working on many remote machines feels like
+working on one local one. Pure Rust on GPUI.
 
 Maps: `docs/ARCHITECTURE.md` (how it is built), `docs/decisions/` (rulings with their evidence;
 `docs/DECISIONS.md` is the index), `docs/MEASUREMENTS.md` (numbers and the commands behind them),
@@ -38,13 +39,22 @@ in it until checked here.
 - **Pre-release, so no backward compatibility.** Replace a format, protocol, setting or API
   cleanly. Delete the old path, shims, serde defaults kept for old files, and aliases. Never
   layer compatibility on top.
-- **Priorities.** The terminal and the remote desktop come first: streaming, input, audio,
-  clipboard and files, polished to a fine grain. Claude Code support is the status (which shell
-  runs an agent, and whether it is working, waiting or blocked) plus a conversation face over
-  the TUI, toggled per tile. The face is a read-only projection of the transcript and hooks, a
-  composer that types into the same PTY, and approvals through the `PermissionRequest` hook.
-  The TUI stays the source of truth: nothing replaces it, drives the agent behind its back or
-  types its menu digits.
+- **Priorities.** GUI-first and agent-native. The person mostly directs, watches and reviews
+  agents, so the GUI leads: what needs them at a glance, fast review, everything else quiet,
+  across every worker as if it were one machine. Every surface runs where the work is and
+  streams to the client with local-feel latency (intents shown at once, incremental streams,
+  client caches). The terminal stays the best there is and always one action away. The remote
+  desktop, input, audio, clipboard and files stay polished to a fine grain. The editor stays
+  light, with no LSP. Readiness comes before new performance projects.
+- **Agents.** Every agent speaks one agent-neutral thread model, fed on the worker by one
+  adapter per agent: Claude Code observed through its TUI by default, Codex over its app-server
+  beside its own TUI, pi over its RPC mode, any other over ACP. The agent's own session is the
+  source of truth: the worker's log is a cache rebuilt from it, one writer holds a session at a
+  time, and its TUI can always take it over. Slopty acts only through the agent's published
+  doors (its protocol, its hooks, or keys into its TUI on the person's word). It never reads
+  the screen to control an agent, never types menu digits or cycles mode keys, and never
+  answers for the person. It launches the user's own unmodified binary and never offers a login
+  or touches a credential.
 - **Design.** Minimal and modern, in the Warp and Zed school. Every colour, size and spacing
   comes from the theme tokens, and the lint-as-tests in `crates/slopty-ui/src/kit.rs` enforce
   it. Honour Reduce Motion. Chrome text is sentence case. Keybindings go in the palette, not on
@@ -91,8 +101,10 @@ in it until checked here.
 - Checks run as tests, never by hand. That means no synthetic keys into a pid, no screenshots of
   other windows, and no reading images back: that pattern reads as surveillance tooling and has
   been flagged. A *pass or fail* is decided on the diff numbers, never by eye.
-- To test agent status, send hook JSON to the worker's control socket (`CtlRequest::Hook`) or spawn
-  `slopty hook` as the test's own child. Never type a command into a shell under test.
+- To test an agent, play it with a stand-in the test starts: hook JSON to the worker's control
+  socket (`CtlRequest::Hook`), `slopty hook` as the test's own child, or a stub that replays
+  recorded stream-json, app-server or RPC fixtures. Never type a command into a shell under
+  test, and never run a signed-in agent in a test.
 - Never read old Claude Code session transcripts (`~/.claude/projects/**/*.jsonl`).
 - One exception, granted 2026-09-15: Slopty's own renders (`crates/slopty-e2e/golden/*.png` and
   `target/e2e/artifacts/*.png`) may be opened **for design review**. They are this app's own

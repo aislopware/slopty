@@ -29,3 +29,4 @@ One file per topic under `docs/decisions/`; an entry is cited by its bold title 
 - [Crash reports](decisions/crashes.md)
 - [Brand](decisions/brand.md)
 - [Projects](decisions/projects.md)
+- [Agents](decisions/agents.md)

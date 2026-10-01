@@ -1023,6 +1023,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     could not toggle back.
   - What stays: nothing replaces the TUI, Slopty never types menu digits, and a driven
     (stream-json) session waits until the observed face's lag is measured and found wanting.
+    *Superseded 2026-10-01* by "GUI-first: the agent's own session is the source of truth"
+    (`agents.md`): the agent's own session is the record, and driven Claude is an opt-in.
 - **Architecture: observe the TUI.** `claude` keeps running in its PTY with the relay on
   `--settings`. A tile toggles between the grid and the face with no restart. For a session a
   client follows, the worker tails the transcript, each subagent's `agent_transcript_path` and
