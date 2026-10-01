@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden_ctl_clip.rs
+expression: line
+---
+{"cmd":"clip","op":"clear","selection":"primary"}

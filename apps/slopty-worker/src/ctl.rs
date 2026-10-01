@@ -94,6 +94,8 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
             CtlReply::Handoff(crate::handoff::edit(&daemon, ask, closed(rd)).await)
         }
         CtlRequest::Wake => CtlReply::Wake(daemon.wake.lock().awake()),
+        // Bytes follow the line, on either side.
+        CtlRequest::Clip(ask) => return crate::clip::answer(&daemon, ask, &mut rd, &mut wr).await,
     };
     let mut out = serde_json::to_vec(&reply)?;
     out.push(b'\n');

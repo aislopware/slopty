@@ -135,8 +135,8 @@ impl Access for slopty_input::pasteboard::MacBoard {
     }
 }
 
-/// Nothing to read, and nothing that asks.
-impl Access for slopty_input::pasteboard::Unsupported {
+/// The worker's own clipboard: nothing asks before a read.
+impl Access for slopty_input::pasteboard::Held {
     fn access(&self) -> ReadAccess {
         ReadAccess::Allowed
     }

@@ -125,14 +125,16 @@ fn board(name: Option<&str>) -> Board {
     name.map_or_else(Board::general, Board::named)
 }
 
-/// No clipboard is synced on Linux yet (`docs/decisions/platform.md`, "Linux seams").
+/// The clipboard the worker syncs off macOS: one it holds itself, which the session's `xclip`,
+/// `xsel`, `wl-copy` and `wl-paste` reach (`docs/decisions/platform.md`, "A Linux worker holds
+/// its clipboard").
 #[cfg(not(target_os = "macos"))]
-pub type Board = slopty_input::pasteboard::Unsupported;
+pub type Board = slopty_input::pasteboard::Held;
 
-/// The board that refuses every paste, whatever it is named.
+/// A fresh held clipboard: there is only ever the one, whatever it is named.
 #[cfg(not(target_os = "macos"))]
-const fn board(_name: Option<&str>) -> Board {
-    slopty_input::pasteboard::Unsupported
+fn board(_name: Option<&str>) -> Board {
+    Board::default()
 }
 
 /// Shared daemon state.
@@ -155,6 +157,8 @@ pub struct Daemon {
     pub agents: Arc<parking_lot::Mutex<AgentTable>>,
     /// Clipboard sync over the worker's pasteboard.
     pub clip: Arc<slopty_worker::clip::Clipboard<Board>>,
+    /// The primary selection the session's `xclip` and `xsel` keep, never synced.
+    pub primary: Arc<slopty_input::pasteboard::Held>,
     /// Uploads in flight.
     pub transfers: Arc<slopty_worker::xfer::Transfers>,
     /// The drag from a client crossing the worker, and the helper that carries it.
@@ -552,6 +556,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             board(args.pasteboard.as_deref()),
             slopty_proto::transfer::Peer::Worker(id),
         )),
+        primary: Arc::default(),
         transfers: Arc::clone(&transfers),
         dnd: Arc::new(dnd::Dnd::new(transfers)),
         ports: Arc::default(),

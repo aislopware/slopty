@@ -26,6 +26,7 @@ mod tests {
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::server::Os;
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
+    use slopty_proto::transfer::{ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Rep};
     use slopty_proto::{ClientMsg, WorkerMsg};
     use tokio::io::AsyncWriteExt as _;
     use tokio::sync::mpsc;
@@ -303,6 +304,97 @@ mod tests {
             .unwrap();
         assert_eq!(agent.status, AgentStatus::Working, "{agent:?}");
         assert_eq!(agent.detail.as_deref(), Some("tidy the linux box"), "{agent:?}");
+
+        shell.close().await;
+    }
+
+    /// The clipboard both ways, through the commands a Linux program runs: a copy with `xclip`
+    /// in the shell reaches the watching client as an offer, and the client's copy (text, and a
+    /// picture it keeps until asked) is what `xclip -o`, `wl-paste` and Claude Code's picture
+    /// check read there, the picture fetched from the client when read. The primary selection
+    /// stays on the worker.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask linux e2e"]
+    async fn the_clipboard_crosses_between_a_linux_shell_and_the_client() {
+        let linux = linux();
+        let size = TermSize { cols: 100, rows: 24, ..TermSize::default() };
+        let (mut shell, _ack) = Client::open(&linux, &[], size).await.unwrap();
+        shell.link.send(ClientMsg::Clip(ClipMsg::Watch(true))).await.unwrap();
+
+        // 1. The worker's copy, announced with its text inline.
+        shell.type_line("printf 'from-linux-%s' 42 | xclip -selection clipboard").await.unwrap();
+        // Waited for alone: a wait on the screen would pass over an offer that came first.
+        let offer = shell
+            .until_control("the worker's offer", |msg| match msg {
+                WorkerMsg::Clip(ClipMsg::Offer(offer)) => Some(offer),
+                _other => None,
+            })
+            .await
+            .unwrap();
+        let text = offer.items.iter().flat_map(|item| &item.reps).find_map(|rep| {
+            (rep.kind == ClipType::Format(ClipFormat::Text)).then(|| rep.inline.clone())
+        });
+        assert_eq!(text, Some(Some(b"from-linux-42".to_vec())), "{offer:?}");
+
+        // 2. The client's copy, mirrored there as text and a promised picture.
+        let picture: Vec<u8> = (0..70_000_u32).map(|i| (i % 253) as u8).collect();
+        let rep = |format, bytes: &[u8], inline: bool| Rep {
+            kind: ClipType::Format(format),
+            size: Some(bytes.len() as u64),
+            hash: Some(blake3::hash(bytes).into()),
+            inline: inline.then(|| bytes.to_vec()),
+        };
+        let theirs = Offer {
+            origin: Peer::Client(ClientId::new()),
+            generation: 1,
+            age_ms: 0,
+            concealed: false,
+            items: vec![ClipEntry {
+                reps: vec![
+                    rep(ClipFormat::Text, b"from-the-mac", true),
+                    rep(ClipFormat::Png, &picture, false),
+                ],
+            }],
+        };
+        let png = theirs.rep_ref(0, ClipType::Format(ClipFormat::Png));
+        shell.link.send(ClientMsg::Clip(ClipMsg::Offer(theirs))).await.unwrap();
+        shell.type_line("echo \"got-$(xclip -selection clipboard -o)\"").await.unwrap();
+        shell.until_row("got-from-the-mac").await.unwrap();
+        shell.type_line("echo \"pasted-$(wl-paste)\"").await.unwrap();
+        shell.until_row("pasted-from-the-mac").await.unwrap();
+        shell
+            .type_line(
+                "xclip -selection clipboard -t TARGETS -o | grep -qE 'image/(png|jpeg)' && echo has-$((2*3))",
+            )
+            .await
+            .unwrap();
+        shell.until_row("has-6").await.unwrap();
+
+        // 3. The picture, read as Claude Code reads one, is asked of this client.
+        shell
+            .type_line("echo bytes-$(xclip -selection clipboard -t image/png -o | wc -c)")
+            .await
+            .unwrap();
+        let fetch = shell
+            .until_control("the picture's fetch", |msg| match msg {
+                WorkerMsg::Clip(ClipMsg::Fetch { rep, .. }) => Some(rep),
+                _other => None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(fetch, png, "the promised picture");
+        shell
+            .link
+            .send(ClientMsg::Clip(ClipMsg::Data { rep: fetch, bytes: picture.clone() }))
+            .await
+            .unwrap();
+        shell.until_row(&format!("bytes-{}", picture.len())).await.unwrap();
+
+        // 4. The primary selection is the worker's own.
+        shell.type_line("printf sel | xsel -p -i && echo \"primary-$(xsel -p -o)\"").await.unwrap();
+        shell.until_row("primary-sel").await.unwrap();
+        shell.type_line("echo \"still-$(xclip -selection clipboard -o)\"").await.unwrap();
+        shell.until_row("still-from-the-mac").await.unwrap();
 
         shell.close().await;
     }

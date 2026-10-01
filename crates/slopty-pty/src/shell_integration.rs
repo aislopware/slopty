@@ -8,8 +8,9 @@
 //! **Web pages and editors go to the client** ([`ShellIntegration::handoff_env`]). Every session,
 //! shell or not, gets `BROWSER` and `EDITOR` naming Slopty's handoff commands, and a directory
 //! ([`BIN`]) first on its `PATH` that holds them and an `open` (`xdg-open` on Linux) that
-//! forwards web addresses and hands anything else to the system's. All of them are the `slopty`
-//! CLI under another name, which it reads from `argv[0]`.
+//! forwards web addresses and hands anything else to the system's, and on Linux the `xclip`,
+//! `xsel`, `wl-copy` and `wl-paste` that reach the worker's clipboard ([`CLIPBOARD_COMMANDS`]). All
+//! of them are the `slopty` CLI under another name, which it reads from `argv[0]`.
 //!
 //! Both variables are defaults. `VISUAL` is never set, since git, `crontab`, `less` and Claude
 //! Code read it ahead of `EDITOR`, and it would beat an `EDITOR` the user's shell files export.
@@ -52,6 +53,14 @@ pub const OPENER: &str = "open";
 /// The system's opener that [`BIN`] shadows.
 #[cfg(not(target_os = "macos"))]
 pub const OPENER: &str = "xdg-open";
+/// The clipboard commands the CLI answers as (`slopty_proto::ctl::ClipAsk`), which [`BIN`] holds
+/// where [`SHADOWS_CLIPBOARD`].
+pub const CLIPBOARD_COMMANDS: [&str; 4] = ["xclip", "xsel", "wl-copy", "wl-paste"];
+/// Whether [`BIN`] holds [`CLIPBOARD_COMMANDS`]: on Linux only.
+///
+/// There the worker holds the clipboard the session's programs reach through them. A Mac's
+/// programs use its pasteboard, which the worker syncs itself.
+pub const SHADOWS_CLIPBOARD: bool = cfg!(not(target_os = "macos"));
 /// Where the zsh bootstrap finds the user's original `ZDOTDIR`, when there was one.
 const ZSH_ORIGINAL_ZDOTDIR: &str = "SLOPTY_ZSH_ZDOTDIR";
 /// Tells the bash bootstrap the shell was asked to be a login shell (bash ignores `--rcfile`
@@ -146,10 +155,15 @@ fn names_own(var: &str) -> bool {
     std::env::var(var).is_ok_and(|v| !v.is_empty() && !is_handoff_command(&v))
 }
 
+/// The clipboard commands [`BIN`] holds here.
+fn clipboard_shims() -> impl Iterator<Item = &'static str> {
+    CLIPBOARD_COMMANDS.into_iter().filter(|_| SHADOWS_CLIPBOARD)
+}
+
 /// Link the handoff commands in `bin` to `cli`, replacing links to anything else.
 pub fn link_shims(bin: &Path, cli: &Path) -> io::Result<()> {
     fs::create_dir_all(bin)?;
-    for name in [OPENER, BROWSER_SHIM, EDITOR_SHIM] {
+    for name in [OPENER, BROWSER_SHIM, EDITOR_SHIM].into_iter().chain(clipboard_shims()) {
         let link = bin.join(name);
         if fs::read_link(&link).is_ok_and(|to| to == cli) {
             continue;
@@ -1021,7 +1035,7 @@ mod tests {
         std::os::unix::fs::symlink(&other, bin.join(OPENER)).unwrap();
         link_shims(&bin, &cli).unwrap();
         link_shims(&bin, &cli).unwrap();
-        for name in [OPENER, BROWSER_SHIM, EDITOR_SHIM] {
+        for name in [OPENER, BROWSER_SHIM, EDITOR_SHIM].into_iter().chain(clipboard_shims()) {
             assert_eq!(fs::read_link(bin.join(name)).unwrap(), cli, "{name}");
         }
     }

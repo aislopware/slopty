@@ -5,7 +5,8 @@
 //! polled), the types of each item it holds, one representation's bytes when asked, and a way to
 //! replace the contents with bytes and promises. [`MacBoard`] is `NSPasteboard`, either the
 //! general one or a named one; tests use a named one ([`MacBoard::unique`]) and release it, so no
-//! test ever touches the user's clipboard.
+//! test ever touches the user's clipboard. [`Held`] is a clipboard the worker keeps itself, on
+//! Linux.
 
 use std::sync::Arc;
 
@@ -164,29 +165,88 @@ pub const fn serve_main_run_loop() -> bool {
     false
 }
 
-/// The board of a worker that has no clipboard to sync yet.
+/// A clipboard the worker holds itself, for a machine with none it can sync.
 ///
-/// That is Linux, where no Wayland or X11 board is wired up. It never changes and holds
-/// nothing, so nothing is sent from it, and every write fails, so a paste into it is refused
-/// rather than lost.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Unsupported;
+/// That is a Linux worker, terminal-only and most often headless. The programs there reach it
+/// through Slopty's `xclip`, `xsel`, `wl-copy` and `wl-paste` (`slopty_proto::ctl::ClipAsk`),
+/// so it holds what they copy and what clipboard sync mirrors from the client in front. A
+/// promised type is asked of [`Provide`] when first read, outside the lock, and kept.
+#[derive(Default)]
+pub struct Held {
+    contents: parking_lot::Mutex<Contents>,
+}
 
-impl Board for Unsupported {
+/// What a [`Held`] board holds.
+#[derive(Default)]
+struct Contents {
+    count: isize,
+    items: Vec<Item>,
+    provide: Option<Provide>,
+}
+
+impl std::fmt::Debug for Held {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let contents = self.contents.lock();
+        f.debug_struct("Held")
+            .field("count", &contents.count)
+            .field("items", &contents.items.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Board for Held {
     fn change_count(&self) -> isize {
-        0
+        self.contents.lock().count
     }
 
     fn items(&self) -> Vec<Vec<String>> {
-        Vec::new()
+        let contents = self.contents.lock();
+        contents
+            .items
+            .iter()
+            .map(|item| {
+                let mut types: Vec<String> = item.data.iter().map(|(t, _)| t.clone()).collect();
+                for kind in &item.promised {
+                    if !types.contains(kind) {
+                        types.push(kind.clone());
+                    }
+                }
+                types
+            })
+            .collect()
     }
 
-    fn data(&self, _item: usize, _kind: &str) -> Option<Vec<u8>> {
-        None
+    fn data(&self, item: usize, kind: &str) -> Option<Vec<u8>> {
+        let (count, provide) = {
+            let contents = self.contents.lock();
+            let held = contents.items.get(item)?;
+            if let Some((_, bytes)) = held.data.iter().find(|(t, _)| t == kind) {
+                return Some(bytes.clone());
+            }
+            if !held.promised.iter().any(|t| t == kind) {
+                return None;
+            }
+            (contents.count, contents.provide.clone()?)
+        };
+        // The provider may wait seconds on a client: never under the lock.
+        let bytes = provide(item, kind)?;
+        let mut contents = self.contents.lock();
+        if contents.count == count
+            && let Some(held) = contents.items.get_mut(item)
+        {
+            held.promised.retain(|t| t != kind);
+            held.data.push((kind.to_owned(), bytes.clone()));
+        }
+        drop(contents);
+        Some(bytes)
     }
 
-    fn write(&self, _items: &[Item], _provide: Option<Provide>) -> Option<isize> {
-        None
+    fn write(&self, items: &[Item], provide: Option<Provide>) -> Option<isize> {
+        let mut contents = self.contents.lock();
+        contents.count = contents.count.wrapping_add(1);
+        contents.items = items.to_vec();
+        contents.provide = provide;
+        Some(contents.count)
     }
 }
 
@@ -428,18 +488,71 @@ mod mac {
 }
 
 #[cfg(test)]
-mod unsupported_tests {
-    use super::{Board as _, ClipFormat, Item, Unsupported, board_type};
+mod held_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A board with no clipboard behind it offers nothing and refuses a paste.
+    use super::{Board as _, Held, Item, Provide};
+
+    const TEXT: &str = "text/plain;charset=utf-8";
+    const PNG: &str = "image/png";
+
+    /// A copy holds its types in order and reads back; each write moves the count, and an
+    /// empty write clears it.
     #[test]
-    fn an_unsupported_board_holds_nothing_and_refuses_writes() {
-        let board = Unsupported;
-        let text = Item::data(vec![(board_type(ClipFormat::Text), b"hi".to_vec())]);
-        assert_eq!(board.write(&[text], None), None);
-        assert_eq!(board.change_count(), 0);
+    fn a_held_board_keeps_what_is_written() {
+        let board = Held::default();
+        let start = board.change_count();
+        let item = Item::data(vec![(TEXT.to_owned(), b"hi".to_vec())]);
+        let wrote = board.write(&[item], None).unwrap();
+        assert_ne!(wrote, start);
+        assert_eq!(board.change_count(), wrote);
+        assert_eq!(board.items(), vec![vec![TEXT.to_owned()]]);
+        assert_eq!(board.data(0, TEXT).as_deref(), Some(&b"hi"[..]));
+        assert_eq!(board.data(0, PNG), None, "a type it does not hold");
+        assert_eq!(board.data(1, TEXT), None, "an item it does not hold");
+        assert!(board.clear_if(wrote).is_some_and(|n| n != wrote), "a clear is a change");
         assert!(board.items().is_empty());
-        assert_eq!(board.data(0, &board_type(ClipFormat::Text)), None);
+    }
+
+    /// A promise is asked once, when first read, and kept; one answered after the board moved
+    /// on is handed to its reader and not kept for the new contents.
+    #[test]
+    fn a_promise_is_asked_once_and_kept_while_the_contents_stand() {
+        let board = Arc::new(Held::default());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let provide: Provide = {
+            let asked = Arc::clone(&asked);
+            Arc::new(move |item, kind| {
+                asked.fetch_add(1, Ordering::Relaxed);
+                (item == 0 && kind == PNG).then(|| vec![0x89, b'P', b'N', b'G'])
+            })
+        };
+        let item = Item {
+            data: vec![(TEXT.to_owned(), b"caption".to_vec())],
+            promised: vec![PNG.to_owned()],
+        };
+        board.write(&[item], Some(Arc::clone(&provide))).unwrap();
+        assert_eq!(board.items(), vec![vec![TEXT.to_owned(), PNG.to_owned()]]);
+        assert_eq!(board.data(0, PNG).map(|b| b.len()), Some(4));
+        assert_eq!(board.data(0, PNG).map(|b| b.len()), Some(4));
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "kept after the first read");
+
+        // The provider runs outside the lock: here it writes the board itself, as a copy
+        // landing while a client's bytes are on their way would.
+        let racing: Provide = {
+            let board = Arc::downgrade(&board);
+            Arc::new(move |_item, _kind| {
+                let newer = Item::data(vec![(TEXT.to_owned(), b"newer".to_vec())]);
+                board.upgrade()?.write(&[newer], None)?;
+                Some(b"late".to_vec())
+            })
+        };
+        let item = Item { data: Vec::new(), promised: vec![PNG.to_owned()] };
+        board.write(&[item], Some(racing)).unwrap();
+        assert_eq!(board.data(0, PNG).as_deref(), Some(&b"late"[..]), "its reader gets it");
+        assert_eq!(board.items(), vec![vec![TEXT.to_owned()]], "the newer copy stands alone");
+        assert_eq!(board.data(0, TEXT).as_deref(), Some(&b"newer"[..]));
     }
 }
 

@@ -25,6 +25,7 @@
 mod attach;
 mod bench;
 mod client;
+mod clipboard;
 mod deploy;
 mod handoff;
 mod hook;

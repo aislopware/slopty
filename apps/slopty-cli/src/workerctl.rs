@@ -124,6 +124,9 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         CtlReply::Permission(answer) => bail!("a permission decision nobody asked for: {answer:?}"),
         CtlReply::Handoff(handed) => bail!("a handoff nobody asked for: {handed:?}"),
         CtlReply::Reports { batch, .. } => bail!("reports nobody asked for: {batch:?}"),
+        reply @ (CtlReply::ClipTypes { .. } | CtlReply::ClipData { .. }) => {
+            bail!("a clipboard answer nobody asked for: {reply:?}")
+        }
         CtlReply::Error { message } => bail!("{message}"),
     }
     Ok(())

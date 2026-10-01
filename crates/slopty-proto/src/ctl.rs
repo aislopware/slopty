@@ -1,5 +1,7 @@
-//! The worker's local control protocol: newline-delimited JSON over its Unix socket, one
-//! [`CtlRequest`] and one [`CtlReply`] per connection.
+//! The worker's local control protocol: newline-delimited JSON over its Unix socket.
+//!
+//! One [`CtlRequest`] and one [`CtlReply`] go per connection, with a clipboard's raw bytes after
+//! the line that announces them ([`ClipAsk`]).
 //!
 //! Three kinds of process speak it to `slopty-worker`: the `slopty` CLI (status, doctor, the
 //! screen bench), the `slopty hook` relay (hooks and permission requests) and the app, which
@@ -90,6 +92,58 @@ pub enum CtlRequest {
     Edit(EditAsk),
     /// What keeps the machine awake now.
     Wake,
+    /// A program in a session reads or writes the clipboard: the `xclip`, `xsel`, `wl-copy`
+    /// and `wl-paste` a Linux session finds first on its `PATH`. Raw bytes travel after the
+    /// request line ([`ClipAsk::Write`]) or after the reply line ([`CtlReply::ClipData`]).
+    Clip(ClipAsk),
+}
+
+/// Which of the worker's clipboards a [`CtlRequest::Clip`] means.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Selection {
+    /// The one synced with the client in front.
+    #[default]
+    Clipboard,
+    /// X11's primary selection: kept on the worker for the programs there, and never synced,
+    /// since a Mac has none.
+    Primary,
+}
+
+/// A program's use of the clipboard ([`CtlRequest::Clip`]). Types are named as X11 and
+/// Wayland name them: MIME types, and the X11 names of text (`UTF8_STRING`, `STRING`, `TEXT`).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ClipAsk {
+    /// The types it holds, answered with [`CtlReply::ClipTypes`].
+    Types {
+        /// Which clipboard.
+        selection: Selection,
+    },
+    /// One type's bytes, answered with [`CtlReply::ClipData`] and then that many bytes, or an
+    /// error when it holds no such type. A type the client in front holds may take a moment:
+    /// it is fetched from that client.
+    Read {
+        /// Which clipboard.
+        selection: Selection,
+        /// The type.
+        kind: String,
+    },
+    /// Replace the contents with `len` bytes of type `kind`, which follow the request line.
+    /// `text/uri-list` holds one file or address per line.
+    Write {
+        /// Which clipboard.
+        selection: Selection,
+        /// The type.
+        kind: String,
+        /// How many bytes follow.
+        len: u64,
+    },
+    /// Empty it.
+    Clear {
+        /// Which clipboard.
+        selection: Selection,
+    },
 }
 
 /// A program's ask to edit a file ([`CtlRequest::Edit`]).
@@ -280,6 +334,16 @@ pub enum CtlReply {
         /// The hook's output, JSON; none when the agent read the batch already, through its
         /// inbox.
         print: Option<String>,
+    },
+    /// The types a [`ClipAsk::Types`] found, best first.
+    ClipTypes {
+        /// The types.
+        types: Vec<String>,
+    },
+    /// A [`ClipAsk::Read`]'s answer: `len` bytes follow the reply line.
+    ClipData {
+        /// How many bytes follow.
+        len: u64,
     },
     /// Done.
     Ok {

@@ -89,8 +89,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       memory, and no encoder, display, capture or injection; no client offers a stream. The
       daemon's desktop start-up and input release (`desktop`, `let_go`) and the doctor's grant
       checks are macOS-only.
-    - The clipboard is `slopty_input::pasteboard::Unsupported`: it never changes and refuses
-      every write. Off macOS, `board_type` spells each format as its MIME type; a Mac test holds
+    - The clipboard is one the worker holds itself (see "A Linux worker holds its clipboard",
+      2026-10-01). Off macOS, `board_type` spells each format as its MIME type; a Mac test holds
       the macOS spelling to AppKit's statics.
   - **Also on Linux, from `/proc`.** A session's listening ports: children from each thread's
     `task/*/children` (every `stat`'s parent where the kernel keeps no such list), socket inodes
@@ -443,3 +443,47 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `continued::ledger::tests` (the state machine), `continued::tests` (what the system
     hears), `xfer::offscreen::tests` (titles, a cancel stopping the current attempt),
     `xfer::tests::a_download_counts_what_each_file_holds_once`.
+
+- ✅ **A Linux worker holds its clipboard, and the session's `xclip`, `xsel`, `wl-copy` and
+  `wl-paste` reach it** (2026-10-01, readiness audit item 13). Its board was `Unsupported`, so
+  copy and paste with a Linux shell were dead both ways, and a picture pasted into Claude Code
+  there could not be read.
+  - **Why a held board rather than the desktop's.** A Linux worker is terminal-only and usually
+    headless, a systemd user unit with no `WAYLAND_DISPLAY` or `DISPLAY`. Even on a desktop, the
+    person typing in a Slopty session is at the client, so the clipboard that session's programs
+    should see is the client's, not that of a screen nobody is looking at. A Wayland
+    data-control or X11 board belongs with a Linux desktop stream, which does not exist yet.
+  - **The board.** `slopty_input::pasteboard::Held` holds items, their types and a change
+    count, and asks clipboard sync's provider for a promised type when it is first read, outside
+    its lock, keeping the answer while the contents stand. Clipboard sync itself is unchanged:
+    the poller announces a copy made there, a client's offer is mirrored as promises, and a
+    shell's picture paste is fetched before the chord goes on. The primary selection is a
+    second `Held` in the daemon, never synced, since a Mac has none.
+  - **The commands.** On Linux the session's `SLOPTY_BIN` directory, first on its `PATH`, holds
+    `xclip`, `xsel`, `wl-copy` and `wl-paste` as links to the `slopty` CLI
+    (`shell_integration::CLIPBOARD_COMMANDS`), beside `xdg-open`. Each reads the flags programs
+    pass: X toolkit prefixes for `xclip` (`-sel c`, `-t TARGETS -o`, `-rmlastnl`, `-f`), grouped
+    GNU flags and the piped-ends default for `xsel`, `--type=` spellings for `wl-copy` and
+    `wl-paste`, with `wl-paste`'s trailing newline and `wl-copy`'s type told from the bytes.
+    Claude Code reads a picture with `xclip -selection clipboard -t TARGETS -o` and `-t
+    image/png -o`, or `wl-paste -l` and `--type image/png`, with no display check, so its
+    picture paste works through them. It copies through them only when a display is set, and
+    by OSC 52 otherwise, which already reached the client.
+  - **The wire.** `CtlRequest::Clip(ClipAsk)` on the control socket: `Types`, `Read`, `Write`
+    and `Clear`, for `Selection::Clipboard` or `Primary`. Bytes travel raw after the line that
+    announces them (a write's after the request, a read's after `CtlReply::ClipData`), since
+    a picture in JSON would be base64. Types are named the X11 and Wayland way: the worker maps
+    MIME types and the X11 names of text (`UTF8_STRING`, `STRING`, `TEXT`, `text/plain`) to its
+    board's types, lists text under all of them, leaves out markers and Apple types, and turns
+    a `text/uri-list` into one item a file, as a Mac copies files. A read of the Mac's general
+    pasteboard is refused when it would raise the paste alert.
+  - **No worker.** A shell that outlives its worker runs the system's own command of that name
+    when there is one past Slopty's directory on `PATH`, and says why otherwise.
+  - Tests: `pasteboard::held_tests` (a write and its count, a promise asked once and kept, a
+    late answer not kept for newer contents), the worker's `clip::tests` (the listing, text's
+    names, file lists), the CLI's `clipboard::tests` (Claude Code's commands and each tool's
+    flags, including how a bad one fails), `golden_ctl_clip`, and live,
+    `linux::the_clipboard_crosses_between_a_linux_shell_and_the_client` in `cargo xtask linux
+    e2e`: an `xclip` copy reaches a watching client as an offer, and the client's text and
+    promised picture are what `xclip -o`, `wl-paste` and Claude Code's picture check read there,
+    the picture fetched from the client when read.

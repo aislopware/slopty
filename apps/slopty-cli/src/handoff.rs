@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use slopty_proto::ctl::{CtlReply, CtlRequest, EditAsk, Handed};
 use slopty_proto::handoff::{EditOutcome, is_openable, page};
-use slopty_pty::shell_integration::{BIN, BROWSER_SHIM, EDITOR_SHIM, OPENER};
+use slopty_pty::shell_integration::{BIN, BROWSER_SHIM, CLIPBOARD_COMMANDS, EDITOR_SHIM, OPENER};
 
 use crate::{hook, workerctl};
 
@@ -37,8 +37,8 @@ const OPEN_WAIT: Duration = Duration::from_secs(20);
 /// The editor used where no client can show the file: the one `git` falls back to.
 const FALLBACK_EDITOR: &str = "vi";
 
-/// Run as the command `argv[0]` names, when it is one of the handoff commands; `None` for
-/// `slopty` itself.
+/// Run as the command `argv[0]` names, when it is one of the handoff commands or a clipboard
+/// command (`crate::clipboard`); `None` for `slopty` itself.
 pub async fn by_name() -> Option<Result<ExitCode>> {
     let mut args = std::env::args_os();
     let arg0 = PathBuf::from(args.next()?);
@@ -49,6 +49,7 @@ pub async fn by_name() -> Option<Result<ExitCode>> {
         n if n == OPENER => open_shim(&data_dir, rest).await,
         BROWSER_SHIM => browse(&data_dir, &lossy(&rest)).await,
         EDITOR_SHIM => edit(&data_dir, true, rest).await,
+        n if CLIPBOARD_COMMANDS.contains(&n) => crate::clipboard::run(n, &data_dir, rest).await,
         _ => return None,
     })
 }
