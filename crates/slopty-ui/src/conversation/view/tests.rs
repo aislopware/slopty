@@ -653,6 +653,56 @@ fn measure_a_face_frame_while_an_answer_streams(cx: &mut TestAppContext) {
     }
 }
 
+/// What a frame of the face costs while a finished 80-turn session is read back: panned ±40
+/// points a frame, 600 frames after 20, with nothing streaming. It prints the frame's time and
+/// how many frames composited a scroll layer, where GPUI compiles them in. Run by hand (it
+/// prints, it does not judge); `docs/MEASUREMENTS.md` has the numbers and the command.
+#[gpui::test]
+#[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
+fn measure_a_face_panned_at_rest(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+
+    const FRAMES: usize = 600;
+    const WARM: usize = 20;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        cx.bind_keys(crate::workspace::key_bindings());
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let mut face = ConversationView::new(SessionId::new(), Theme::default(), window, cx);
+        face.set_shown(true, cx);
+        face
+    });
+    cx.simulate_resize(size(px(1000.0), px(720.0)));
+    feed(&view, cx, fixtures::long(dir.path(), 80));
+    let mut took: Vec<Duration> = Vec::with_capacity(FRAMES);
+    for frame in 0..WARM + FRAMES {
+        if frame == WARM {
+            cx.update(|window, _| window.reset_layout_stats());
+        }
+        let dy = if (frame / 100).is_multiple_of(2) { 40.0 } else { -40.0 };
+        let begin = Instant::now();
+        scroll(cx, dy);
+        if frame >= WARM {
+            took.push(begin.elapsed());
+        }
+    }
+    let stats = cx.update(|window, _| window.layout_stats());
+    took.sort_unstable();
+    let ms = |p: usize| slopty_client::pacing::percentile(&took, p).as_secs_f64() * 1e3;
+    println!(
+        "MEASURE face panned at rest, 80 turns, {FRAMES} frames: p50 {:.3} ms p95 {:.3} ms; {} \
+         views built; layer frames composited {} repainted {} demoted {}",
+        ms(50),
+        ms(95),
+        stats.views_built,
+        stats.layer_frames_composited,
+        stats.layer_frames_repainted,
+        stats.layers_demoted,
+    );
+}
+
 /// A turn the transcript shows streaming, before any hook has said the agent works, offers
 /// Stop in place of Send, and Esc in the composer stops it.
 #[gpui::test]

@@ -215,8 +215,44 @@ impl Plate {
         let key = key_of(key);
         row.child(
             gpui::canvas(
-                move |bounds, _window, _cx| glide.borrow_mut().row = Some((key, bounds)),
+                move |bounds, _window, _cx| {
+                    glide.borrow_mut().row = Some(Marked { key, bounds, seated: false });
+                },
                 |_, (), _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+    }
+
+    /// [`Self::mark`], for a row that paints the plate itself while it rests there: the plate is
+    /// then part of the list's content, so a list on a scroll layer keeps it in its tiles and
+    /// the background under the list stays the panel's one fill, which the layer bakes. A glide
+    /// is still painted by [`Self::under_on`], under the rows. Call it before the row gets its
+    /// content, so the plate paints under that.
+    pub(crate) fn seat<E: ParentElement + Styled>(
+        &self,
+        row: E,
+        key: impl Hash,
+        theme: &Theme,
+    ) -> E {
+        let glide = Rc::clone(&self.0);
+        let key = key_of(key);
+        let fill = hsla(theme.surfaces.overlay);
+        let radius = px(theme.radii.sm);
+        row.child(
+            gpui::canvas(
+                {
+                    let glide = Rc::clone(&glide);
+                    move |bounds, _window, _cx| {
+                        glide.borrow_mut().row = Some(Marked { key, bounds, seated: true });
+                    }
+                },
+                move |bounds, (), window, _cx| {
+                    if glide.borrow().seated == Some(key) {
+                        window.paint_quad(gpui::fill(bounds, fill).corner_radii(radius));
+                    }
+                },
             )
             .absolute()
             .inset_0(),
@@ -251,6 +287,9 @@ impl Plate {
                 let Some(plate) = glide.frame(now.unwrap_or_else(Instant::now), moving) else {
                     return;
                 };
+                if glide.seated.is_some() {
+                    return;
+                }
                 window.with_content_mask(Some(gpui::ContentMask { bounds: region }), |window| {
                     window.paint_quad(gpui::fill(plate, fill).corner_radii(radius));
                 });
@@ -271,12 +310,23 @@ fn key_of(key: impl Hash) -> u64 {
     hasher.finish()
 }
 
+/// The selected row as it reported itself in a frame: its key, where it was laid out, and
+/// whether it paints the plate itself at rest ([`Plate::seat`]).
+#[derive(Clone, Copy, Debug)]
+struct Marked {
+    key: u64,
+    bounds: Bounds<Pixels>,
+    seated: bool,
+}
+
 /// The plate's motion: where the selected row is, where the plate was drawn, and the move in
 /// flight, as offsets from the row it is going to so a scroll carries it along.
 #[derive(Default, Debug)]
 struct Glide {
     /// The selected row this frame, as it reported itself; taken by the frame that paints.
-    row: Option<(u64, Bounds<Pixels>)>,
+    row: Option<Marked>,
+    /// The row painting the plate itself this frame: a seated row with no move in flight.
+    seated: Option<u64>,
     /// The row the plate is on or going to.
     on: Option<u64>,
     /// Where the plate was drawn in the last frame, if it was.
@@ -299,9 +349,10 @@ impl Glide {
     /// starts a move from where the plate was drawn, unless `moving` is off, the plate was not
     /// drawn, or the key repeats faster than [`HELD`].
     fn frame(&mut self, now: Instant, moving: bool) -> Option<Bounds<Pixels>> {
-        let Some((key, row)) = self.row.take() else {
+        let Some(Marked { key, bounds: row, seated }) = self.row.take() else {
             self.drawn = None;
             self.flight = None;
+            self.seated = None;
             return None;
         };
         if self.on != Some(key) {
@@ -340,6 +391,7 @@ impl Glide {
                 row
             }
         };
+        self.seated = (seated && self.flight.is_none()).then_some(key);
         self.drawn = Some(plate);
         Some(plate)
     }
@@ -1987,6 +2039,11 @@ mod tests {
         Bounds::new(point(px(0.0), px(y)), size(px(320.0), px(32.0)))
     }
 
+    /// The row `key` at `y`, as it reports itself to the plate.
+    fn marked(key: u64, y: f32, seated: bool) -> Marked {
+        Marked { key, bounds: line(y), seated }
+    }
+
     /// On glass the fade over the list's foot keeps the sheet's rounded corners; over the
     /// legend's band it is square, the band being what meets the corners.
     #[test]
@@ -2008,7 +2065,7 @@ mod tests {
 
     /// The plate's top, drawn over `row` at `ms` past `t0`.
     fn top_at(glide: &mut Glide, row: (u64, f32), t0: Instant, ms: u64) -> f32 {
-        glide.row = Some((row.0, line(row.1)));
+        glide.row = Some(marked(row.0, row.1, false));
         let drawn = glide.frame(after(t0, ms), true).expect("a row, a plate");
         f32::from(drawn.origin.y)
     }
@@ -2027,12 +2084,12 @@ mod tests {
         assert!(mid > 0.0 && mid < 32.0, "on its way: {mid}");
         // A scroll of 10 during the move carries the plate the same 10.
         let scrolled = {
-            glide.row = Some((2, line(42.0)));
+            glide.row = Some(marked(2, 42.0, false));
             let at = after(t0, 1_060);
             f32::from(glide.frame(at, true).expect("drawn").origin.y)
         };
         assert!((scrolled - mid - 10.0).abs() < 0.01, "carried by the scroll: {scrolled}");
-        glide.row = Some((2, line(32.0)));
+        glide.row = Some(marked(2, 32.0, false));
         let _back = glide.frame(after(t0, 1_060), true);
         // ↓ again before it landed: from `mid`, straight to the third row.
         assert!((top_at(&mut glide, (3, 64.0), t0, 1_080) - mid).abs() < 0.01, "from where it is");
@@ -2051,11 +2108,42 @@ mod tests {
         assert!(before < 160.0, "not landed at the held pace: {before}");
         let settled = top_at(&mut glide, (6, 160.0), t0, 3_000 + settle);
         assert!((settled - 160.0).abs() < 0.01, "on the settle");
-        glide.row = Some((7, line(192.0)));
+        glide.row = Some(marked(7, 192.0, false));
         let still = glide.frame(after(t0, 9_000), false).expect("drawn");
         assert_eq!(still, line(192.0), "under Reduce Motion, on the row at once");
         glide.row = None;
         assert_eq!(glide.frame(after(t0, 10_000), true), None, "no row, no plate");
+    }
+
+    /// A seated row paints the plate itself while it rests there, so a list on a scroll layer
+    /// holds it in its content; a move in flight is painted under the rows, and the row takes
+    /// it back once it lands. A row that only marks itself never paints it.
+    #[test]
+    fn a_seated_row_holds_the_plate_at_rest_and_the_glide_is_painted_under() {
+        let t0 = Instant::now();
+        let mut glide = Glide::default();
+        let at = |glide: &mut Glide, row: Marked, ms: u64| {
+            glide.row = Some(row);
+            glide.frame(after(t0, ms), true).expect("a row, a plate");
+            glide.seated
+        };
+        assert_eq!(at(&mut glide, marked(1, 0.0, true), 0), Some(1), "at rest on its first row");
+        assert_eq!(at(&mut glide, marked(2, 32.0, true), 1_000), None, "gliding: painted under");
+        let settle = u64::try_from(Pace::Settle.duration().as_millis()).unwrap_or(0);
+        let landed = 1_000_u64.saturating_add(settle);
+        assert_eq!(
+            at(&mut glide, marked(2, 32.0, true), landed),
+            Some(2),
+            "landed: the row's again"
+        );
+        assert_eq!(
+            at(&mut glide, marked(2, 32.0, false), landed),
+            None,
+            "a marked row never holds it"
+        );
+        glide.row = None;
+        assert_eq!(glide.frame(after(t0, 9_000), true), None);
+        assert_eq!(glide.seated, None, "no row, nothing seated");
     }
 
     /// A palette over `n` tiles, drawn.

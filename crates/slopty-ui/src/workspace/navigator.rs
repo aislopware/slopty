@@ -223,15 +223,19 @@ impl NavList {
     ///
     /// A list at its very top stays there: a section that opens above the first row (*Needs
     /// you*, *Working*) shows, rather than pushing the view down past it.
+    ///
+    /// The scroll offset is read only when rows are spliced: this runs in the render, and a
+    /// render that reads the offset makes every scroll a change of what the list's scroll layer
+    /// holds, so the layer could never be composited.
     fn set_rows(&self, rows: Vec<NavRow>) {
-        let scrolled = self.state.logical_scroll_top();
-        let at_top = scrolled.item_ix == 0 && scrolled.offset_in_item <= px(0.0);
         let same = |(a, b): &(&NavRow, &NavRow)| a.shape() == b.shape();
         let mut was = self.rows.borrow_mut();
         let old = was.len();
         let head = was.iter().zip(&rows).take_while(same).count();
         let spliced = head != old || old != rows.len();
         if spliced {
+            let scrolled = self.state.logical_scroll_top();
+            let at_top = scrolled.item_ix == 0 && scrolled.offset_in_item <= px(0.0);
             let most = old.min(rows.len()).saturating_sub(head);
             let tail = was.iter().rev().zip(rows.iter().rev()).take(most).take_while(same);
             let tail = tail.count();
@@ -1860,25 +1864,26 @@ impl WorkspaceView {
         };
         let label = SharedString::from(format!("{}, {count}", space.name));
         let ink = if space.active { s.text } else { s.text_secondary };
-        let row =
-            row(
-                theme,
-                kit::Row::One,
-                ElementId::Name(format!("nav-space-{ix}").into()),
-                format!("nav-space-{ix}"),
-                label,
-                space.active,
-            )
-            .child(lead_slot(
-                theme,
-                icon(theme, IconName::PanelsTopLeft, IconSize::Inline, hsla(s.text_muted)),
-            ))
-            .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
+        let row = row(
+            theme,
+            kit::Row::One,
+            ElementId::Name(format!("nav-space-{ix}").into()),
+            format!("nav-space-{ix}"),
+            label,
+            space.active,
+        )
+        .map(|row| if space.active { self.nav.list.space_plate.seat(row, ix, theme) } else { row })
+        .child(lead_slot(
+            theme,
+            icon(theme, IconName::PanelsTopLeft, IconSize::Inline, hsla(s.text_muted)),
+        ))
+        .child(
+            title(space.name.clone(), hsla(ink)).when(space.active, |el| {
                 el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-            }))
-            .child(readout(theme, space.tiles.to_string()))
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
-        let row = if space.active { self.nav.list.space_plate.mark(row, ix) } else { row };
+            }),
+        )
+        .child(readout(theme, space.tiles.to_string()))
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
         row.into_any_element()
     }
 
@@ -2273,6 +2278,7 @@ impl WorkspaceView {
             label.into(),
             selected,
         )
+        .map(|row| if selected { self.nav.list.plate.seat(row, tile, theme) } else { row })
         // The two lines sit in the middle of the row at either density, the kind beside the
         // first.
         .items_center()
@@ -2300,7 +2306,6 @@ impl WorkspaceView {
                         .children(bar),
                 ),
         )
-        .map(|row| if selected { self.nav.list.plate.mark(row, tile) } else { row })
         .when(self.nav.list.autoscroll.get() == Some(tile), |row| {
             row.child(
                 canvas(|bounds, window, _cx| window.request_autoscroll(bounds), |_, (), _, _| {})
