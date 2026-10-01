@@ -310,6 +310,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     under a development-signed build.
   - Open: whether a hidden domain can be switched on at all, and whether other apps raise a
     privacy prompt when they read a placeholder. Both are one manual check.
+  - Rechecked for P5, the lazy files of the drag-and-drop plan (2026-10-01). Still paused,
+    because it cannot be proved without a person.
+    - *One appex serves both ends.* The worker already ships inside `Slopty.app`
+      (`Contents/MacOS/slopty-worker`, `xtask bundle`), so one `SloptyFiles.appex` in
+      `Slopty.app/Contents/PlugIns` (a new `apps/slopty-files`) serves the worker's incoming
+      domain (drops and pastes from clients) and one domain per worker on the client (drags
+      out and copies). The earlier plan's separate `SloptyWorker.app` is not needed.
+      `objc2-file-provider` 0.3.2, in our objc2 pin family, carries
+      `NSFileProviderReplicatedExtension`, the enumerator, item, manager and domain APIs.
+    - *The switch-on.* Apple's sample says a new domain "is in a disabled state by default".
+      On macOS the person switches it on under System Settings → General → Login Items &
+      Extensions → File Providers. The only way past that is
+      `NSFileProviderDomainTestingModeAlwaysEnabled`, and a process "must have the
+      com.apple.developer.fileprovider.testing-mode entitlement in order to configure a domain
+      with non-empty testing modes" (`NSFileProviderDomain.h`). That entitlement comes only
+      with a provisioning profile, and this Mac has no macOS profile for the Developer ID
+      team. Ruled: the product asks for a one-time switch-on through `NSFileProviderManager`'s
+      management interface, and until it is on, drops and pastes keep today's whole-file path.
+      Tests and CI need either that switch made once on the machine, or a macOS profile for
+      `dev.aislopware.slopty.files` with the testing-mode entitlement. Neither is to hand, so
+      nothing of it is built yet.
+    - *Builds.* An appex registers only from a bundle LaunchServices knows, so dev and test
+      runs use a signed `cargo xtask bundle --debug` at a fixed path, registered with
+      `lsregister`. `bundle` gains the appex, its `NSExtension` plist
+      (`com.apple.fileprovider-nonui`) and the entitlements: the app sandbox, the
+      `AJ4R8GWM7A.dev.aislopware.slopty` app group and `network.client`.
+    - *A risk to settle first.* The worker daemon runs from the bundle under its own signing
+      identifier (`dev.aislopware.slopty.worker`). Whether `NSFileProviderManager` lets it add
+      a domain for the bundle's extension is unknown. If not, the worker's side needs a small
+      bundled agent that does it.
   - Withdrawn (2026-09-25): an attempt at the pasteboard route, file promises on the general
     pasteboard, sat uncommitted in the tree. Finder pastes only files that are already on disk,
     so it could not work, and it was taken out of the tree. Its diff is kept outside the
