@@ -532,6 +532,7 @@ mod golden_project {
             ("project_reply_unknown_task", ErrorCode::UnknownTask),
             ("project_reply_limit", ErrorCode::Limit),
             ("project_reply_bad_expression", ErrorCode::BadExpression),
+            ("project_reply_nothing_new", ErrorCode::NothingNew),
         ] {
             snap(name, &reply(Outcome::Error { code, message: String::new() }));
         }

@@ -459,7 +459,9 @@ the store is the queue and a restart takes it up where it stood:
   target checked out, and `update-ref` otherwise. It pushes only when the project's `push` is
   on.
 - A failure or a conflict gives the task back (`Hub::give_back`) as a notice through
-  `deliver`, which the agent's hooks hand over. A reason that is not the task's holds the lane
+  `deliver`, which the agent's hooks hand over. A task on another machine is first sent the
+  target, as `slopty/<project>/target` in its clone (`Hub::send_target`, the home trip
+  reversed), so it can rebase onto what the queue judged it against with pushing off. A reason that is not the task's holds the lane
   until a worker registers or the project changes.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),

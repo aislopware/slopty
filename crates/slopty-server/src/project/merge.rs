@@ -12,7 +12,7 @@ use slopty_proto::project::StepState;
 
 use super::{
     Change, Changed, Merge, Moment, ProjectId, Projects, Record, Refused, SUMMARY_MAX, Task,
-    TaskId, TaskState, TaskStep, VerifierRun, clipped, invalid, overlapping,
+    TaskId, TaskState, TaskStep, VerifierRun, clipped, invalid, overlapping, unknown_project,
 };
 
 /// What a project's lane does next.
@@ -137,19 +137,9 @@ impl Projects {
     /// task with none joins the queue at once. A task given up takes its paths again, as any
     /// move back into a live state does.
     pub(crate) fn ask_merge(&mut self, id: &ProjectId, task: TaskId, now: WallMs) -> Changed<Task> {
+        self.may_merge(id, task)?;
         let record = self.record(id)?;
         let t = record.task(task)?;
-        if t.state == TaskState::Merged {
-            return Err(invalid(format!("task {task} is merged already")));
-        }
-        if t.read_only {
-            return Err(invalid(format!("task {task} only reads, so it has nothing to merge")));
-        }
-        if !t.state.holds_paths()
-            && let Some((theirs, path, ours)) = record.conflict(Some(task), &t.owns)
-        {
-            return Err(overlapping(theirs, path, &ours));
-        }
         let verifies = t.verifier.is_some() || record.project.verifier.is_some();
         let from = t.state;
         let advance = if verifies {
@@ -164,6 +154,28 @@ impl Projects {
         let to = advance.state.unwrap_or(from);
         let moment = (from != to).then_some(Moment::State { from, to });
         self.advance(id, task, Advance { moment, ..advance }, now)
+    }
+
+    /// Why the person may not ask for `task`'s merge now, if they may not: it is merged
+    /// already, it only reads, or its paths are another live task's since it let them go.
+    ///
+    /// # Errors
+    /// That reason.
+    pub(crate) fn may_merge(&self, id: &ProjectId, task: TaskId) -> Result<(), Refused> {
+        let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
+        let t = record.task(task)?;
+        if t.state == TaskState::Merged {
+            return Err(invalid(format!("task {task} is merged already")));
+        }
+        if t.read_only {
+            return Err(invalid(format!("task {task} only reads, so it has nothing to merge")));
+        }
+        if !t.state.holds_paths()
+            && let Some((theirs, path, ours)) = record.conflict(Some(task), &t.owns)
+        {
+            return Err(overlapping(theirs, path, &ours));
+        }
+        Ok(())
     }
 }
 

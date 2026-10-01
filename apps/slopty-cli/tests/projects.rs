@@ -870,21 +870,41 @@ mod tests {
             .collect()
     }
 
-    /// The whole way, across two machines: a task's agent on the Linux worker reports done,
-    /// its branch comes home to the orchestrator's clone, the project's verifier runs on it
-    /// there in a checkout of its own and passes, and the merge queue fast-forwards the
-    /// clone's `main` to exactly the commit verified. Its checkout moves with it. Nothing is
-    /// pushed, since pushing is off until the person turns it on, and the verifier's terminal
-    /// is gone once it passed.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone() {
-        use slopty_proto::project::{Merge, Placement, StepKind};
+    /// Two workers, as the person has them: the studio, with the orchestrator's shell in its
+    /// clone of a forge, and a Linux box. One task, placed on the Linux box, whose stub agent
+    /// reports done on `branch` once `gate` is there, with `env` beside it. Its worktree is
+    /// made in the clone the server had made there, at the forge's `main`, for the test to
+    /// commit the agent's work in.
+    struct Across {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        server: Server,
+        _daemons: Vec<Child>,
+        _linux: Vec<Child>,
+        studio: WorkerId,
+        studio_clone: PathBuf,
+        linux_dir: PathBuf,
+        forge: PathBuf,
+        forge_main: String,
+        project: ProjectId,
+        agent: slopty_proto::orchestration::TermRef,
+        cloned: PathBuf,
+        tree: PathBuf,
+        gate: PathBuf,
+    }
+
+    const ACROSS_BRANCH: &str = "worktree-slopty-demo-1";
+
+    async fn across(verifier: &str, env: Vec<(String, String)>) -> Across {
+        use slopty_proto::project::Placement;
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let seed = root.join("seed");
         std::fs::create_dir_all(&seed).unwrap();
         git_out(&seed, &["init", "-q", "-b", "main"]);
-        git_out(&seed, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        std::fs::write(seed.join("a.txt"), "one\n").unwrap();
+        git_out(&seed, &["add", "."]);
+        git_out(&seed, &["commit", "-q", "-m", "first"]);
         git_out(&root, &["clone", "-q", "--bare", "seed", "forge.git"]);
         let url = "https://example.com/o/demo.git";
         let forge = root.join("forge.git");
@@ -896,7 +916,7 @@ mod tests {
         let config = format!("[url \"file://{}\"]\n\tinsteadOf = {url}\n", forge.display());
         std::fs::create_dir_all(root.join("home")).unwrap();
         std::fs::write(root.join("home/.gitconfig"), &config).unwrap();
-        let (server, _daemons, studio) = fleet(&root, "").await;
+        let (server, daemons, studio) = fleet(&root, "").await;
         let hub = server.hub().clone();
         let linux_dir = root.join("linux");
         let linux_home = linux_dir.join("home");
@@ -904,8 +924,7 @@ mod tests {
         std::fs::write(linux_home.join(".gitconfig"), config).unwrap();
         std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
         let programs = root.join("programs");
-        let _linux_daemons =
-            worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
+        let linux = worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
         until("the second worker registers", async || {
             (hub.directory().iter().filter(|w| w.liveness == Liveness::Online).count() == 2)
                 .then_some(())
@@ -923,7 +942,6 @@ mod tests {
         };
         let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
         let project = ProjectId::new("demo").unwrap();
-        let verifier = "cat work.txt && grep -qx done work.txt";
         let made = hub
             .dispatch(Verb::ProjectCreate {
                 project: project.clone(),
@@ -953,35 +971,82 @@ mod tests {
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
         let gate = root.join("go");
-        let branch = "worktree-slopty-demo-1";
-        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": branch } }]);
+        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": ACROSS_BRANCH } }]);
+        let mut all = vec![
+            ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
+            ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
+        ];
+        all.extend(env);
         let launch = TaskLaunch {
             pin: None,
             cwd: String::new(),
             run: Runner::Claude { prompt: None, args: Vec::new() },
-            env: vec![
-                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
-                ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
-            ],
+            env: all,
             size: None,
             ignore_dependencies: false,
         };
         let spawned = hub
             .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
             .await;
-        assert!(matches!(spawned, Outcome::Task(_)), "{spawned:?}");
+        let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
+        let agent = spawned.assignment.unwrap().term;
         let cloned = linux_home.join("slopty/clones/example.com/o/demo");
         let tree = cloned.join(".claude/worktrees/slopty-demo-1");
         let tree_text = tree.to_string_lossy().into_owned();
-        git_out(&cloned, &["worktree", "add", "-q", "-b", branch, &tree_text, "origin/main"]);
+        git_out(
+            &cloned,
+            &["worktree", "add", "-q", "-b", ACROSS_BRANCH, &tree_text, "origin/main"],
+        );
+        Across {
+            _dir: dir,
+            root,
+            server,
+            _daemons: daemons,
+            _linux: linux,
+            studio,
+            studio_clone,
+            linux_dir,
+            forge,
+            forge_main,
+            project,
+            agent,
+            cloned,
+            tree,
+            gate,
+        }
+    }
+
+    /// The whole way, across two machines: a task's agent on the Linux worker reports done,
+    /// its branch comes home to the orchestrator's clone, the project's verifier runs on it
+    /// there in a checkout of its own and passes, and the merge queue fast-forwards the
+    /// clone's `main` to exactly the commit verified. Its checkout moves with it. Nothing is
+    /// pushed, since pushing is off until the person turns it on, and the verifier's terminal
+    /// is gone once it passed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone() {
+        use slopty_proto::project::{Merge, StepKind};
+        let fix = across("cat work.txt && grep -qx done work.txt", Vec::new()).await;
+        let Across {
+            root,
+            server,
+            studio,
+            studio_clone,
+            forge,
+            forge_main,
+            project,
+            tree,
+            gate,
+            ..
+        } = &fix;
+        let hub = server.hub().clone();
         std::fs::write(tree.join("work.txt"), "done\n").unwrap();
-        git_out(&tree, &["add", "."]);
-        git_out(&tree, &["commit", "-q", "-m", "the work"]);
-        let head = git_out(&tree, &["rev-parse", "HEAD"]);
-        std::fs::write(&gate, "").unwrap();
+        git_out(tree, &["add", "."]);
+        git_out(tree, &["commit", "-q", "-m", "the work"]);
+        let head = git_out(tree, &["rev-parse", "HEAD"]);
+        std::fs::write(gate, "").unwrap();
 
         let started = std::time::Instant::now();
-        let card = card_when(&hub, &project, "the task merges", |card| {
+        let card = card_when(&hub, project, "the task merges", |card| {
             card.state == TaskState::Merged
                 || card.step.as_ref().is_some_and(|s| {
                     matches!(s.state, slopty_proto::project::StepState::Failed { .. })
@@ -996,16 +1061,16 @@ mod tests {
         assert_eq!((target.as_str(), merged.as_str(), pushed), ("main", head.as_str(), false));
         let run = card.verified.unwrap();
         assert!(run.passed && run.head == head && run.exit == Some(0), "{run:?}");
-        assert_eq!(run.base, forge_main, "where the work left main");
+        assert_eq!(&run.base, forge_main, "where the work left main");
         assert_eq!(card.step.map(|s| s.kind), Some(StepKind::Merge));
 
-        assert_eq!(git_out(&studio_clone, &["rev-parse", "main"]), head, "main fast-forwarded");
+        assert_eq!(git_out(studio_clone, &["rev-parse", "main"]), head, "main fast-forwarded");
         assert_eq!(std::fs::read_to_string(studio_clone.join("work.txt")).unwrap(), "done\n");
-        assert_eq!(git_out(&forge, &["rev-parse", "main"]), forge_main, "and not pushed");
+        assert_eq!(git_out(forge, &["rev-parse", "main"]), *forge_main, "and not pushed");
         let place = root.join("home/slopty/verify/demo");
         assert_eq!(git_out(&place, &["rev-parse", "HEAD"]), head, "verified in its own checkout");
         assert_eq!(
-            moments(&hub, &project).await,
+            moments(&hub, project).await,
             [
                 "Clone began",
                 "Clone done",
@@ -1018,7 +1083,7 @@ mod tests {
             ]
         );
         let verifier_left = until("the passed verifier's terminal closes", async || {
-            match hub.dispatch(Verb::ListTerminals { worker: Some(studio) }).await {
+            match hub.dispatch(Verb::ListTerminals { worker: Some(*studio) }).await {
                 Outcome::Terminals(list) => {
                     list.iter().all(|(_, s)| !s.title.starts_with("Verifier")).then_some(list)
                 }
@@ -1027,7 +1092,116 @@ mod tests {
         })
         .await;
         assert_eq!(verifier_left.len(), 1, "the orchestrator's shell alone: {verifier_left:?}");
-        server.shutdown().await;
+        fix.server.shutdown().await;
+    }
+
+    /// Across two machines with pushing off, the queue's rebase conflicts with what the person
+    /// committed on the orchestrator's `main`, which the forge never saw. The task goes back,
+    /// and that `main` is sent to the agent's clone as `slopty/demo/target`. The agent's report
+    /// names it, so the agent can rebase onto it there. Once it has, the person asks for the
+    /// merge, the newer work comes home first, it is verified, and `main` fast-forwards to
+    /// it: the person's commit and the agent's on top, nothing pushed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_conflict_on_another_machine_brings_it_the_target_to_rebase_onto() {
+        use slopty_proto::project::{StepKind, StepState};
+        let fix = across("test -f work.txt", Vec::new()).await;
+        let hub = fix.server.hub().clone();
+        let project = &fix.project;
+
+        std::fs::write(fix.studio_clone.join("a.txt"), "main's own\n").unwrap();
+        git_out(&fix.studio_clone, &["commit", "-q", "-am", "the person's change"]);
+        let person = git_out(&fix.studio_clone, &["rev-parse", "main"]);
+        std::fs::write(fix.tree.join("a.txt"), "the task's\n").unwrap();
+        std::fs::write(fix.tree.join("work.txt"), "done\n").unwrap();
+        git_out(&fix.tree, &["add", "."]);
+        git_out(&fix.tree, &["commit", "-q", "-m", "the work"]);
+        std::fs::write(&fix.gate, "").unwrap();
+
+        let card = card_when(&hub, project, "the queue gives it back", |card| {
+            card.step.as_ref().is_some_and(|s| {
+                s.kind == StepKind::Merge && matches!(s.state, StepState::Failed { .. })
+            })
+        })
+        .await;
+        assert_eq!(card.state, TaskState::Waiting, "{card:?}");
+        let arrived = git_out(&fix.cloned, &["rev-parse", "slopty/demo/target"]);
+        assert_eq!(arrived, person, "the orchestrator's main, in the agent's clone");
+        assert_eq!(git_out(&fix.forge, &["rev-parse", "main"]), fix.forge_main, "never pushed");
+
+        let reports = slopty_agent::reports::dir(&fix.linux_dir.join("worker.sock"));
+        let batch = until("the report waits for the agent's hooks", async || {
+            std::fs::read_to_string(reports.join(format!("{}.json", fix.agent.session))).ok()
+        })
+        .await;
+        assert!(batch.contains("slopty/demo/target"), "the report says where: {batch}");
+
+        let rebase = std::process::Command::new("git")
+            .current_dir(&fix.tree)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "rebase",
+                "-q",
+                "slopty/demo/target",
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(!rebase.status.success(), "the agent meets the same conflict");
+        std::fs::write(fix.tree.join("a.txt"), "main's own\nthe task's\n").unwrap();
+        git_out(&fix.tree, &["add", "a.txt"]);
+        let go_on = std::process::Command::new("git")
+            .current_dir(&fix.tree)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "core.editor=true"])
+            .args(["rebase", "--continue"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(go_on.status.success(), "{}", String::from_utf8_lossy(&go_on.stderr));
+        let resolved = git_out(&fix.tree, &["rev-parse", "HEAD"]);
+        assert_eq!(git_out(&fix.tree, &["rev-parse", "HEAD~1"]), person);
+
+        let asked = slopty(
+            &fix.root,
+            fix.server.quic_addr(),
+            &["task", "merge", "--project", "demo", "--task", "1"],
+        )
+        .await;
+        assert!(asked.contains("#1"), "{asked}");
+        card_when(&hub, project, "the resolved work merges", |card| {
+            card.state == TaskState::Merged
+        })
+        .await;
+        assert_eq!(git_out(&fix.studio_clone, &["rev-parse", "main"]), resolved);
+        assert_eq!(
+            std::fs::read_to_string(fix.studio_clone.join("a.txt")).unwrap(),
+            "main's own\nthe task's\n"
+        );
+        assert_eq!(git_out(&fix.forge, &["rev-parse", "main"]), fix.forge_main, "never pushed");
+        let steps = moments(&hub, project).await;
+        assert_eq!(
+            steps,
+            [
+                "Clone began",
+                "Clone done",
+                "Home began",
+                "Home done",
+                "Verify began",
+                "verified true",
+                "Merge began",
+                "Merge failed",
+                "Home began",
+                "Home done",
+                "Verify began",
+                "verified true",
+                "Merge began",
+                "Merge done"
+            ],
+            "{steps:?}"
+        );
+        fix.server.shutdown().await;
     }
 
     /// One worker, with the task's agent in a worktree of the orchestrator's clone. Its

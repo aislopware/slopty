@@ -962,6 +962,14 @@ impl Task {
         format!("slopty/{project}/{task}")
     }
 
+    /// The branch the project's target lands as in a task's clone on another machine, when
+    /// the merge queue gives the task back to rebase onto it: `slopty/<project>/target`, a
+    /// name only the server sets and no task's number can take.
+    #[must_use]
+    pub fn target_branch(project: &ProjectId) -> String {
+        format!("slopty/{project}/target")
+    }
+
     /// Its line in the tree, with its node's natives counted.
     #[must_use]
     pub fn card(&self, natives: &Natives) -> TaskCard {

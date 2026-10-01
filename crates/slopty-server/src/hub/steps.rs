@@ -8,7 +8,7 @@
 //! [`Task::home_branch`] (`docs/decisions/projects.md`). Merging it stays with the
 //! orchestrator.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use slopty_core::{WallMs, WorkerId, XferId};
 use slopty_proto::orchestration::{BUNDLES, BranchBundle, ErrorCode, Outcome, UploadPart, Verb};
@@ -31,6 +31,8 @@ pub(super) struct Steps {
     /// The tasks whose branch is on its way home, one trip each at a time; `true` when it was
     /// reported done again meanwhile, so the trip goes once more for the newer commits.
     homing: HashMap<(ProjectId, TaskId), bool>,
+    /// The tasks the person asked to merge whose branch is on its way home first.
+    merge_after: HashSet<(ProjectId, TaskId)>,
 }
 
 impl Steps {
@@ -173,7 +175,10 @@ impl Hub {
                 let home = hub.bring_home(project, *task, branch.clone()).await;
                 let mut state = hub.inner.state.lock();
                 if state.steps.homing.remove(&key) != Some(true) {
-                    if home {
+                    let merge = state.steps.merge_after.remove(&key);
+                    if home && merge {
+                        hub.merge_asked(&mut state, (project, *task));
+                    } else if home {
                         hub.verify_soon(&mut state, (project, *task));
                     }
                     break;
@@ -181,6 +186,22 @@ impl Hub {
                 state.steps.homing.insert(key.clone(), false);
             }
         });
+    }
+
+    /// The person asked for `task`'s merge: when its branch is on another machine, or in
+    /// another clone, it comes home first and the merge is asked once it is there, so the
+    /// queue judges what the agent has now. Whether it went home for it.
+    pub(super) fn merge_when_home(
+        &self,
+        state: &mut State,
+        (project, task): (&ProjectId, TaskId),
+    ) -> bool {
+        let away = matches!(route_in(state, project, task, None), Ok(Some(trip)) if !trip.there());
+        if away {
+            state.steps.merge_after.insert((project.clone(), task));
+            self.bring_home_soon(state, (project.clone(), task), None);
+        }
+        away
     }
 
     /// Bring `task`'s branch (`branch`, else the one its card names) from the worker it ran on
@@ -200,16 +221,17 @@ impl Hub {
         let to = trip.to.0;
         let packing = StepState::Running { phase: "Bundling".to_owned(), percent: None };
         self.step_now(at, StepKind::Home, to, packing);
-        let carried = match self.carry(at, &trip, Some(trip.target.clone())).await {
-            Err(Carry::Lacking) => self.carry(at, &trip, None).await,
+        let shown = (StepKind::Home, to, "Sending");
+        let carried = match self.carry(at, &trip, Some(trip.target.clone()), shown).await {
+            Err(Carry::Lacking) => self.carry(at, &trip, None, shown).await,
             other => other,
         };
         let ended = match carried {
-            Ok(detail) => StepState::Done { detail },
+            Ok(Arrived { detail, .. }) => StepState::Done { detail },
             Err(Carry::Lacking) => StepState::Failed {
                 why: "the orchestrator's clone lacks the branch's history".to_owned(),
             },
-            Err(Carry::Failed(why)) => StepState::Failed { why },
+            Err(Carry::NothingNew(why) | Carry::Failed(why)) => StepState::Failed { why },
         };
         let home = matches!(ended, StepState::Done { .. });
         self.step_now(at, StepKind::Home, to, ended);
@@ -246,6 +268,46 @@ impl Hub {
         }))
     }
 
+    /// Send the project's target, as the orchestrator's clone has it, to the clone `task`'s
+    /// agent works in on another machine, as [`Task::target_branch`]: the merge queue gave the
+    /// task back to rebase onto it, and with pushing off the forge never saw what the queue
+    /// merged. Shown on `task`'s merge step on `worker` as it goes.
+    pub(super) async fn send_target(
+        &self,
+        (project, task): (&ProjectId, TaskId),
+        worker: WorkerId,
+    ) -> Onto {
+        let route = match self.route(project, task, None) {
+            Ok(Some(route)) if !route.there() => route,
+            Ok(_) => return Onto::Here,
+            Err((_, why)) => return Onto::Failed(why),
+        };
+        let back = Trip {
+            from: route.to,
+            to: route.from,
+            branch: route.target.clone(),
+            into: Task::target_branch(project),
+            target: route.target,
+        };
+        let label = format!("Sending {} to the task's clone", back.branch);
+        let shown = (StepKind::Merge, worker, label.as_str());
+        let phase = StepState::Running { phase: label.clone(), percent: None };
+        self.step_now((project, task), StepKind::Merge, worker, phase);
+        let at = (project, task);
+        let carried = match self.carry(at, &back, Some(back.target.clone()), shown).await {
+            Err(Carry::Lacking) => self.carry(at, &back, None, shown).await,
+            other => other,
+        };
+        match carried {
+            Ok(Arrived { head, .. }) => Onto::Sent { branch: back.into, head },
+            Err(Carry::NothingNew(_)) => Onto::Forge,
+            Err(Carry::Lacking) => {
+                Onto::Failed("the task's clone lacks the target's history".to_owned())
+            }
+            Err(Carry::Failed(why)) => Onto::Failed(why),
+        }
+    }
+
     /// Where `task`'s branch is and where it goes, [`Self::trip`]'s answer whether or not it
     /// is in the orchestrator's clone already.
     fn route(
@@ -255,62 +317,20 @@ impl Hub {
         branch: Option<String>,
     ) -> Result<Option<Trip>, (WorkerId, String)> {
         let state = self.inner.state.lock();
-        let (Ok(record), Ok(card)) =
-            (state.projects.project(project), state.projects.task(project, task))
-        else {
-            return Ok(None);
-        };
-        let (Some(id), Some(orchestrator)) = (record.repo_id.as_ref(), record.orchestrator) else {
-            return Ok(None);
-        };
-        let (Some(branch), Some(assigned)) =
-            (branch.or_else(|| card.branch.clone()), card.assignment.as_ref())
-        else {
-            return Ok(None);
-        };
-        let from = assigned.term;
-        let to = orchestrator.worker;
-        let session_repo = |term: slopty_proto::orchestration::TermRef| {
-            let entry = state.workers.get(&term.worker)?;
-            let s = entry.sessions.iter().find(|s| s.id == term.session)?;
-            s.repo_id.as_ref().is_some_and(|other| other.same(id)).then(|| s.repo.clone())?
-        };
-        // The orchestrator's own checkout while it is still in the project's repository, else
-        // any clone of it on that worker.
-        let Some(to_repo) =
-            session_repo(orchestrator).or_else(|| super::projects::clone_on(&state, record, to))
-        else {
-            let why = "the orchestrator's worker has no clone of the project's repository";
-            return Err((to, why.to_owned()));
-        };
-        let Some(from_repo) = card
-            .worktree
-            .clone()
-            .or_else(|| session_repo(from))
-            .or_else(|| super::projects::clone_on(&state, record, from.worker))
-        else {
-            let why = format!("no clone of the project's repository is known where {branch} is");
-            return Err((to, why));
-        };
-        let trip = Trip {
-            from: (from.worker, from_repo),
-            to: (to, to_repo),
-            branch,
-            into: Task::home_branch(project, task),
-            target: record.target.clone(),
-        };
+        let route = route_in(&state, project, task, branch);
         drop(state);
-        Ok(Some(trip))
+        route
     }
 
-    /// Bundle the branch on its worker, send the bundle across, and fetch it there: what
-    /// arrived, in words.
+    /// Bundle the branch on its worker, send the bundle across, and fetch it there, showing
+    /// each part sent as `shown`'s step (its kind, its worker, and the phase's words).
     async fn carry(
         &self,
         at: (&ProjectId, TaskId),
         trip: &Trip,
         target: Option<String>,
-    ) -> Result<String, Carry> {
+        (kind, worker, sending): (StepKind, WorkerId, &str),
+    ) -> Result<Arrived, Carry> {
         let (from, to) = (trip.from.0, trip.to.0);
         let bundle = Verb::BundleBranch {
             worker: from,
@@ -321,6 +341,9 @@ impl Hub {
         let BranchBundle { path, name, size, digest, head, .. } =
             match self.forward(None, bundle).await {
                 Outcome::Bundle(made) => *made,
+                Outcome::Error { code: ErrorCode::NothingNew, message } => {
+                    return Err(Carry::NothingNew(message));
+                }
                 other => return Err(Carry::Failed(said(&other))),
             };
         let upload = XferId::new();
@@ -346,8 +369,8 @@ impl Hub {
             offset = offset.saturating_add(len);
             let percent =
                 offset.saturating_mul(100).checked_div(size).and_then(|p| u8::try_from(p).ok());
-            let phase = StepState::Running { phase: "Sending".to_owned(), percent };
-            self.step_now(at, StepKind::Home, to, phase);
+            let phase = StepState::Running { phase: sending.to_owned(), percent };
+            self.step_now(at, kind, worker, phase);
         }
         let finish = UploadPart::Finish { size, digest, mode: None };
         let finished = Verb::Upload { worker: to, path: into, upload, part: finish };
@@ -365,7 +388,8 @@ impl Hub {
         match self.forward(None, fetch).await {
             Outcome::Fetched { branch, head } => {
                 let short = head.get(..7).unwrap_or(&head);
-                Ok(format!("{} as {branch} at {short} in {}", trip.branch, trip.to.1))
+                let detail = format!("{} as {branch} at {short} in {}", trip.branch, trip.to.1);
+                Ok(Arrived { detail, head })
             }
             Outcome::Error { code: ErrorCode::Conflict, .. } if target.is_some() => {
                 Err(Carry::Lacking)
@@ -373,6 +397,60 @@ impl Hub {
             other => Err(Carry::Failed(said(&other))),
         }
     }
+}
+
+/// [`Hub::route`] in `state`.
+fn route_in(
+    state: &State,
+    project: &ProjectId,
+    task: TaskId,
+    branch: Option<String>,
+) -> Result<Option<Trip>, (WorkerId, String)> {
+    let (Ok(record), Ok(card)) =
+        (state.projects.project(project), state.projects.task(project, task))
+    else {
+        return Ok(None);
+    };
+    let (Some(id), Some(orchestrator)) = (record.repo_id.as_ref(), record.orchestrator) else {
+        return Ok(None);
+    };
+    let (Some(branch), Some(assigned)) =
+        (branch.or_else(|| card.branch.clone()), card.assignment.as_ref())
+    else {
+        return Ok(None);
+    };
+    let from = assigned.term;
+    let to = orchestrator.worker;
+    let session_repo = |term: slopty_proto::orchestration::TermRef| {
+        let entry = state.workers.get(&term.worker)?;
+        let s = entry.sessions.iter().find(|s| s.id == term.session)?;
+        s.repo_id.as_ref().is_some_and(|other| other.same(id)).then(|| s.repo.clone())?
+    };
+    // The orchestrator's own checkout while it is still in the project's repository, else
+    // any clone of it on that worker.
+    let Some(to_repo) =
+        session_repo(orchestrator).or_else(|| super::projects::clone_on(state, record, to))
+    else {
+        let why = "the orchestrator's worker has no clone of the project's repository";
+        return Err((to, why.to_owned()));
+    };
+    let Some(from_repo) = card
+        .worktree
+        .clone()
+        .or_else(|| session_repo(from))
+        .or_else(|| super::projects::clone_on(state, record, from.worker))
+    else {
+        let why = format!("no clone of the project's repository is known where {branch} is");
+        return Err((to, why));
+    };
+    let trip = Trip {
+        from: (from.worker, from_repo),
+        to: (to, to_repo),
+        branch,
+        into: Task::home_branch(project, task),
+        target: record.target.clone(),
+    };
+    Ok(Some(trip))
 }
 
 /// A branch's way home.
@@ -410,11 +488,40 @@ impl Trip {
     }
 }
 
+/// A branch that arrived.
+struct Arrived {
+    /// What arrived, in words.
+    detail: String,
+    /// The commit it is at.
+    head: String,
+}
+
 /// Why a bundle did not arrive.
 enum Carry {
     /// The receiving clone lacks the fork point the bundle starts after, even after fetching
     /// its origin.
     Lacking,
+    /// The branch has no commit beyond the target the forge has.
+    NothingNew(String),
+    Failed(String),
+}
+
+/// Where the target is for a task the merge queue gave back ([`Hub::send_target`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) enum Onto {
+    /// The task works in the orchestrator's clone, or nothing runs for it: the target is
+    /// there as it is.
+    Here,
+    /// Sent to the task's clone as `branch`, at `head`.
+    Sent {
+        /// [`Task::target_branch`].
+        branch: String,
+        /// The commit it is at.
+        head: String,
+    },
+    /// The forge has it all: the task's clone fetches its origin.
+    Forge,
+    /// It could not be sent, and why.
     Failed(String),
 }
 

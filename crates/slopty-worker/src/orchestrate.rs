@@ -156,8 +156,8 @@ impl From<WorkerError> for Failure {
     }
 }
 
-/// A bundle that could not be made or fetched, as the server is told: a receiver that lacks
-/// the fork point is a conflict, which a whole-branch bundle resolves.
+/// The queue's git work that failed, as the server is told: a conflict, or a target that
+/// moved, is the work's to settle; anything else is not.
 fn verify_failure(failed: &crate::repo::verify::Failed) -> Failure {
     use crate::repo::verify::Failed;
     let code = match failed {
@@ -167,9 +167,12 @@ fn verify_failure(failed: &crate::repo::verify::Failed) -> Failure {
     Failure::new(code, failed.to_string())
 }
 
+/// A bundle that could not be made or fetched, as the server is told: a receiver that lacks
+/// the fork point is a conflict, which a whole-branch bundle resolves.
 fn bundle_failure(failed: crate::repo::bundle::Failed) -> Failure {
     match failed {
         crate::repo::bundle::Failed::Prerequisites(why) => Failure::new(ErrorCode::Conflict, why),
+        crate::repo::bundle::Failed::NothingNew(why) => Failure::new(ErrorCode::NothingNew, why),
         crate::repo::bundle::Failed::Other(why) => Failure::new(ErrorCode::Failed, why),
     }
 }

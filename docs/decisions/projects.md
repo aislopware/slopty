@@ -878,11 +878,42 @@ Not built in Phase 1:
   the step it is in (rebasing, verifying on the target, fast-forwarding), its verdict, and the
   commits judged. A second view would show the same tasks again.
 
+**A task given back on another machine is sent the target to rebase onto.** ✅ 2026-10-01
+- With pushing off, the forge never sees what the queue merged. An agent in a clone on another
+  machine could not rebase onto the target the queue judged it against, because its clone has
+  only the forge's target. So when the queue gives a task back after a conflict, or after a
+  verifier that failed on the rebased work, the server first sends the target the other way.
+  This is the `Home` trip reversed:
+  - a bundle of the target's commits beyond the forge's `origin/<target>` in the
+    orchestrator's clone;
+  - uploaded to the agent's worker;
+  - fetched into the agent's clone as `slopty/<project>/target` (`Task::target_branch`).
+  That name is one only the server sets, and no task's number can take it.
+- The report then names where the target is. Each case:
+  - sent: "main as the queue has it is in your clone as slopty/demo/target at <short>:
+    rebase onto slopty/demo/target";
+  - the forge has it all (`ErrorCode::NothingNew`, a bundle with no commit beyond the forge's
+    target): fetch origin and rebase onto `origin/<target>`;
+  - the task works in the orchestrator's clone: the target as it is;
+  - the target could not be sent: fetch origin, with the reason, and a warning that the
+    forge may lack what the queue merged.
+- While the target is sent, the merge step shows "Sending main to the task's clone" with a
+  percent.
+- The person's `slopty task merge` on such a task brings its branch home first. Only then is
+  the merge asked, so the queue judges what the agent has now and not the commit an earlier
+  trip carried.
+- Tests: `the_target_reaches_a_task_s_clone_the_same_way_with_what_the_forge_lacks` (real git),
+  and `a_conflict_on_another_machine_brings_it_the_target_to_rebase_onto` in
+  `apps/slopty-cli/tests/projects.rs`. That one runs two workers with push off:
+  1. The person commits on the orchestrator's `main`, and the task's work conflicts with it.
+  2. The task is given back, and its clone has `slopty/demo/target` at the person's commit.
+  3. The report waiting for the agent's hooks names that branch.
+  4. The agent rebases onto it and resolves the conflict, and the person runs `slopty task
+     merge`.
+  5. The branch comes home again and is verified, and `main` fast-forwards to the resolved
+     work with nothing pushed.
+
 Known gaps:
-- A conflict asks the agent to rebase onto the target as the orchestrator's clone has it. When
-  the agent works on another worker and pushing is off, its clone sees only the forge's target,
-  so the merged commits it must rebase over are not there. Carrying the target to the agent's
-  clone, the reverse of the `Home` trip, is the next step.
 - The fresh-context reviewer before a merge is not built.
 
 Tests:
@@ -897,6 +928,7 @@ Tests:
   - `a_finished_task_is_verified_and_merged_into_the_orchestrator_s_clone` runs two workers:
     done, home, verified, queued, and `main` fast-forwarded in the orchestrator's clone, with
     nothing pushed;
+  - `a_conflict_on_another_machine_brings_it_the_target_to_rebase_onto`, above;
   - `a_failed_verifier_and_a_conflict_go_back_to_the_agent` runs one worker: the failure's
     report read by the agent's next prompt hook, the kept terminal, then `slopty task merge`, a
     pass, and a rebase conflict naming `a.txt` with `main` untouched.

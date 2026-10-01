@@ -977,11 +977,16 @@ impl Hub {
                  queue by itself, so report it done",
             )),
             Verb::TaskMerge { project, task: id } => {
-                let asked = state.projects.ask_merge(&project, id, now);
-                if asked.is_ok() {
-                    kick = Some(project);
+                let checked = state.projects.may_merge(&project, id);
+                if checked.is_ok() && self.merge_when_home(state, (&project, id)) {
+                    state.projects.task(&project, id).map(|t| (task(t.clone()), Vec::new()))
+                } else {
+                    let asked = checked.and_then(|()| state.projects.ask_merge(&project, id, now));
+                    if asked.is_ok() {
+                        kick = Some(project);
+                    }
+                    asked.map(|(t, u)| (task(t), u))
                 }
-                asked.map(|(t, u)| (task(t), u))
             }
             _other => Err(error(ErrorCode::Invalid, "not a project change")),
         };

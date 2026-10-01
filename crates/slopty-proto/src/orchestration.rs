@@ -1118,6 +1118,9 @@ pub enum ErrorCode {
     /// The caller may not do this: an agent answering a permission, or moving a task where
     /// only the person or the merge queue may.
     Forbidden,
+    /// There is nothing new to carry: the branch has no commit beyond the one it would start
+    /// after, so the other side has it from the same forge.
+    NothingNew,
 }
 
 /// The answer to a [`Verb`].

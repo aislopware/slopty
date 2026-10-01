@@ -40,6 +40,9 @@ pub enum Failed {
     /// The receiving repository lacks a commit the bundle starts after: send the whole
     /// branch.
     Prerequisites(String),
+    /// The branch has no commit beyond where it left the target: there is nothing to bundle,
+    /// and a clone of the same forge has it all already.
+    NothingNew(String),
     /// Anything else, in words.
     Other(String),
 }
@@ -47,7 +50,7 @@ pub enum Failed {
 impl std::fmt::Display for Failed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Prerequisites(why) | Self::Other(why) => f.write_str(why),
+            Self::Prerequisites(why) | Self::NothingNew(why) | Self::Other(why) => f.write_str(why),
         }
     }
 }
@@ -58,7 +61,8 @@ impl std::fmt::Display for Failed {
 /// `<target>`), or the whole branch when `target` is `None` or neither is there.
 ///
 /// # Errors
-/// A branch that is not a branch here, has no commit beyond `target`, or a git that failed.
+/// [`Failed::NothingNew`] when the branch has no commit beyond `target`; otherwise a branch
+/// that is not a branch here, or a git that failed.
 pub async fn bundle_branch(
     git: &Path,
     repo: &Path,
@@ -88,7 +92,7 @@ pub async fn bundle_branch(
     }
     if base.as_deref() == Some(head.as_str()) {
         let target = target.unwrap_or_default();
-        return Err(Failed::Other(format!("{branch} has no commit beyond {target}")));
+        return Err(Failed::NothingNew(format!("{branch} has no commit beyond {target}")));
     }
     tokio::fs::create_dir_all(dir)
         .await
@@ -352,7 +356,9 @@ mod tests {
         assert!(!got.join(&made.name).exists(), "the bundle goes once fetched");
 
         let nothing = bundle_branch(git, &linux, "main", Some("main"), &sent).await;
-        assert!(matches!(nothing, Err(Failed::Other(why)) if why.contains("no commit beyond")));
+        assert!(
+            matches!(nothing, Err(Failed::NothingNew(why)) if why.contains("no commit beyond"))
+        );
 
         // A repository with no origin that has the fork point: the bundle of the branch's own
         // commits cannot go in, and the whole branch does.
@@ -367,6 +373,53 @@ mod tests {
         std::fs::copy(&whole.path, got.join(&whole.name)).expect("copy");
         let want = Fetch { name: &whole.name, ..want };
         assert_eq!(fetch_bundle(git, &stranger, &got, want).await, Ok(head));
+    }
+
+    /// The other way, for a task the merge queue gives back: the orchestrator's `main`, with
+    /// commits the forge never saw, reaches the task's clone on another machine as a branch
+    /// only the server names, from its commits beyond the forge's `main` alone. The agent's
+    /// work then rebases onto it there. A `main` the forge has already is nothing new to carry.
+    #[tokio::test]
+    async fn the_target_reaches_a_task_s_clone_the_same_way_with_what_the_forge_lacks() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir_all(&origin).expect("mkdir");
+        git_in(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a.txt"), "one\n").expect("write");
+        git_in(&origin, &["add", "."]);
+        git_in(&origin, &["commit", "-q", "-m", "first"]);
+        git_in(tmp.path(), &["clone", "-q", "origin", "studio"]);
+        git_in(tmp.path(), &["clone", "-q", "origin", "linux"]);
+        let (studio, linux) = (tmp.path().join("studio"), tmp.path().join("linux"));
+        let sent = tmp.path().join("sent");
+        let nothing = bundle_branch(git, &studio, "main", Some("main"), &sent).await;
+        assert!(matches!(nothing, Err(Failed::NothingNew(_))), "the forge has it: {nothing:?}");
+
+        std::fs::write(studio.join("b.txt"), "merged\n").expect("write");
+        git_in(&studio, &["add", "."]);
+        git_in(&studio, &["commit", "-q", "-m", "merged by the queue"]);
+        let target = git_in(&studio, &["rev-parse", "main"]);
+        git_in(&linux, &["switch", "-q", "-c", "task-1"]);
+        std::fs::write(linux.join("c.txt"), "the task's\n").expect("write");
+        git_in(&linux, &["add", "."]);
+        git_in(&linux, &["commit", "-q", "-m", "the work"]);
+
+        let made = bundle_branch(git, &studio, "main", Some("main"), &sent).await.expect("bundled");
+        assert_eq!(made.head, target);
+        assert_eq!(made.base, Some(git_in(&studio, &["rev-parse", "origin/main"])));
+        let got = tmp.path().join("got");
+        std::fs::create_dir_all(&got).expect("mkdir");
+        std::fs::copy(&made.path, got.join(&made.name)).expect("copy");
+        let into = "slopty/demo/target";
+        let want = Fetch { name: &made.name, branch: "main", into, head: &target };
+        assert_eq!(fetch_bundle(git, &linux, &got, want).await, Ok(target.clone()));
+        assert_eq!(
+            git_in(&linux, &["rev-parse", "main"]),
+            git_in(&linux, &["rev-parse", "origin/main"])
+        );
+        git_in(&linux, &["rebase", "-q", into]);
+        assert_eq!(git_in(&linux, &["rev-parse", "HEAD~1"]), target, "the work on top of it");
     }
 
     #[test]

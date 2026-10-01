@@ -27,7 +27,7 @@ use slopty_proto::project::{
 };
 use slopty_proto::terminal::SessionState;
 
-use super::steps::said;
+use super::steps::{Onto, said};
 use super::{Hub, State};
 use crate::project::{Advance, Job, Queue};
 
@@ -168,6 +168,15 @@ impl Hub {
         match state.projects.advance(project, task, advance, WallMs::now()) {
             Ok((_, updates)) => self.projects_moved(state, updates),
             Err(refused) => tracing::debug!(%project, %task, ?refused, "not verifying"),
+        }
+        self.kick(state, project);
+    }
+
+    /// The person's ask for `task`'s merge, made once its branch came home for it.
+    pub(super) fn merge_asked(&self, state: &mut State, (project, task): (&ProjectId, TaskId)) {
+        match state.projects.ask_merge(project, task, WallMs::now()) {
+            Ok((_, updates)) => self.projects_moved(state, updates),
+            Err(refused) => tracing::debug!(%project, %task, ?refused, "not merged after all"),
         }
         self.kick(state, project);
     }
@@ -477,13 +486,12 @@ impl Hub {
             let (rebased, onto) = match self.forward(None, rebase).await {
                 Outcome::Rebased { head, onto } => (head, onto),
                 Outcome::Error { code: ErrorCode::Conflict, message } => {
+                    let onto = onto_words(&place.target, &self.send_target(at, place.worker).await);
                     let told = format!(
-                        "Your work at {} does not rebase onto {}: {message}. Rebase it onto \
-                         {} as it is now, resolve the conflicts, commit, and report done \
-                         again with task_report.",
+                        "Your work at {} does not rebase onto {}: {message}. {onto}, resolve \
+                         the conflicts, commit, and report done again with task_report.",
                         short(&candidate),
                         place.target,
-                        place.target
                     );
                     let told = Told { run: None, words: told };
                     self.give_back(at, StepKind::Merge, Some(place.worker), &message, Some(told));
@@ -513,7 +521,9 @@ impl Hub {
                             place.target,
                             short(&onto)
                         );
-                        let words = verifier_words(&place, &run, Some(&onto));
+                        let sent = self.send_target(at, place.worker).await;
+                        let next = onto_words(&place.target, &sent);
+                        let words = verifier_words(&place, &run, Some((&onto, &next)));
                         let told = Told { run: Some((run, term)), words };
                         self.give_back(at, StepKind::Merge, Some(place.worker), &why, Some(told));
                         return Went::Next;
@@ -694,10 +704,10 @@ impl Hub {
 
 /// What a failed verifier tells the agent whose work it judged: what ran, on which commits,
 /// how it ended and its last lines, and what to do.
-fn verifier_words(place: &Place, run: &VerifierRun, rebased_onto: Option<&str>) -> String {
+fn verifier_words(place: &Place, run: &VerifierRun, rebased: Option<(&str, &str)>) -> String {
     let command = place.verifier.as_deref().unwrap_or_default();
-    let on = match rebased_onto {
-        Some(onto) => format!(
+    let on = match rebased {
+        Some((onto, _)) => format!(
             "your work rebased onto {} at {} (as {})",
             place.target,
             short(onto),
@@ -715,12 +725,34 @@ fn verifier_words(place: &Place, run: &VerifierRun, rebased_onto: Option<&str>) 
         all.push_str(line);
         all
     });
+    let fix = match rebased {
+        Some((_, next)) => format!("{next}, fix it"),
+        None => "Fix it".to_owned(),
+    };
     format!(
-        "The verifier `{command}` failed on {on}: {} after {}. Its last lines:{lines}\nFix it, \
+        "The verifier `{command}` failed on {on}: {} after {}. Its last lines:{lines}\n{fix}, \
          commit, and report done again with task_report; the server verifies the new head.",
         exit_words(run.exit),
         took(run.took_ms)
     )
+}
+
+/// Where a task given back finds the target to rebase onto, as the start of what its agent
+/// is told to do.
+fn onto_words(target: &str, onto: &Onto) -> String {
+    match onto {
+        Onto::Here => format!("Rebase it onto {target} as it is now"),
+        Onto::Sent { branch, head } => format!(
+            "{target} as the queue has it is in your clone as {branch} at {}: rebase onto \
+             {branch}",
+            short(head)
+        ),
+        Onto::Forge => format!("Fetch origin and rebase onto origin/{target}"),
+        Onto::Failed(why) => format!(
+            "{target} could not be sent to your clone ({why}): fetch origin and rebase onto \
+             origin/{target}, which may lack what the queue merged since"
+        ),
+    }
 }
 
 /// `exit` as a failure says it.
