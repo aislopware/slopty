@@ -1,0 +1,154 @@
+//! A terminal opened on `claude` (⌘⇧T, a tile's command) against a real `slopty-ptyd` and the
+//! stub agent: the worker starts it the way it starts an agent of its own.
+
+#[cfg(test)]
+mod agent_open {
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::Value;
+    use slopty_core::SessionId;
+    use slopty_proto::agent::SessionAgent;
+    use slopty_proto::terminal::{OpenSession, TermSize};
+    use slopty_worker::Worker;
+    use slopty_worker::orchestrate::Agents;
+    use tokio::process::{Child, Command};
+
+    const WAIT: Duration = Duration::from_secs(20);
+
+    struct NoAgents;
+
+    impl Agents for NoAgents {
+        fn status(&self, _session: SessionId) -> Option<SessionAgent> {
+            None
+        }
+
+        fn forget(&self, _session: SessionId) {}
+    }
+
+    /// `name` from this build (`slopty_testkit::bins`), found from the profile directory: this
+    /// package has no binary of its own to name.
+    fn bin(name: &str) -> PathBuf {
+        let exe = std::env::current_exe().unwrap();
+        let target = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap();
+        let profile = exe.ancestors().find(|dir| dir.parent() == Some(target)).unwrap();
+        slopty_testkit::bins::bin(&profile.join("slopty-worker-tests").to_string_lossy(), name)
+    }
+
+    /// A ptyd on its own socket in `dir`, with the stub as `claude` first on its `PATH`.
+    async fn ptyd(dir: &Path) -> (Child, PathBuf) {
+        let programs = dir.join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        let socket = dir.join("ptyd.sock");
+        let mut child = Command::new(bin("slopty-ptyd"));
+        slopty_testkit::env::scrub(child.as_std_mut(), &dir.join("home"));
+        let child = child
+            .env("PATH", slopty_testkit::env::path_with(&programs))
+            .arg("--socket")
+            .arg(&socket)
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(WAIT, async {
+            while tokio::net::UnixStream::connect(&socket).await.is_err() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("ptyd listens");
+        (child, socket)
+    }
+
+    /// Open `command` and read what the stub was started with.
+    async fn started(worker: &Worker, dir: &Path, command: &[&str]) -> Value {
+        let record = dir.join(format!("record-{}.json", SessionId::new()));
+        let open = OpenSession {
+            size: TermSize::default(),
+            cwd: Some(dir.to_string_lossy().into_owned()),
+            command: command.iter().map(|&w| w.to_owned()).collect(),
+            env: vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())],
+            title: None,
+            attach: false,
+        };
+        worker.open(&open).await.unwrap();
+        tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(seen) = std::fs::read(&record)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the stub's record")
+    }
+
+    fn argv(seen: &Value) -> Vec<String> {
+        seen["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A bare `claude` gets the relay, so its status and its permission prompts reach the app,
+    /// Slopty's tools when the worker has a server, the mod, and a conversation id of its own,
+    /// and the person's mode is not locked. One already wired, a `--print` run, and a worker
+    /// with no relay to hand out start as asked.
+    #[tokio::test]
+    async fn claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let (_ptyd, socket) = ptyd(&dir).await;
+        let (worker, _reports) =
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.join("kept")).await.unwrap();
+        let mod_dir = dir.join("claude-mod/abc");
+        std::fs::create_dir_all(&mod_dir).unwrap();
+        worker.set_session_env(vec![
+            (slopty_proto::project::SERVER_ENV.to_owned(), "127.0.0.1:9".to_owned()),
+            (slopty_agent::claude_mod::DIR_ENV.to_owned(), mod_dir.to_string_lossy().into_owned()),
+            (slopty_agent::claude_mod::SOCKET_ENV.to_owned(), "/tmp/mod.sock".to_owned()),
+        ]);
+        // A relay that answers every hook with nothing, under the name the hooks know it by.
+        let relay = dir.join("relay/slopty");
+        std::fs::create_dir_all(relay.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", &relay).unwrap();
+        worker.set_relay(Some(relay.clone()));
+
+        let seen = started(&worker, &dir, &["claude", "--model", "opus"]).await;
+        let args = argv(&seen);
+        let kept = slopty_agent::resume::invocation(&args);
+        assert!(kept.relay && kept.mcp && !kept.locked, "{args:?}");
+        assert_eq!(kept.args, ["--model", "opus"], "its own flags kept");
+        let pinned = args.iter().position(|a| a == "--session-id").expect("a conversation id");
+        assert!(uuid_like(&args[pinned + 1]), "{args:?}");
+        let plugin = format!("--plugin-dir={}", mod_dir.display());
+        assert!(args.contains(&plugin), "the mod: {args:?}");
+        assert_eq!(seen["env"][slopty_agent::claude_mod::SOCKET_ENV], "/tmp/mod.sock");
+
+        let mut wired = slopty_agent::hooks::with_relay(Vec::new(), &relay.to_string_lossy(), &dir);
+        wired.insert(0, "claude".to_owned());
+        let words: Vec<&str> = wired.iter().map(String::as_str).collect();
+        let seen = started(&worker, &dir, &words).await;
+        assert_eq!(argv(&seen), wired[1..], "wired already: as asked");
+        let seen = started(&worker, &dir, &["claude", "-p", "hello"]).await;
+        assert_eq!(argv(&seen), ["-p", "hello"], "a print run: as asked");
+
+        worker.set_relay(None);
+        let seen = started(&worker, &dir, &["claude"]).await;
+        assert!(argv(&seen).is_empty(), "no relay to hand out: {:?}", argv(&seen));
+    }
+
+    fn uuid_like(word: &str) -> bool {
+        word.len() == 36 && word.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    }
+}

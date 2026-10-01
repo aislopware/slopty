@@ -276,7 +276,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     human while the app is not in front notifies: a permission, a question, input it asks for.
     Its title is the tile's name (the worker's for an agent with no tile here) and its body is
     `agent_ask_line`. A shell command that ran at least the slow-command time (`SLOW_COMMAND`)
-    and ends while the app is away notifies too, with the command and how it ended. An agent
+    and ends while the app is away notifies too, with the command and how it ended. So does an
+    agent's turn that ran that long and finished on a tile out of sight (2026-10-01): it badges
+    the tile, lands under Finished in the inbox with the agent's own summary, and counts toward
+    the bell, because the end of a long agent turn is what the person waits for just as much as
+    the end of a build. A turn that goes idle without finishing earns nothing. An agent
     already waiting when the app left says nothing new. Nothing notifies while the app is in
     front, where the inbox says it.
   - **One note per tile.** A note's identifier is its session's, so a newer one replaces the

@@ -1053,6 +1053,47 @@ Tests:
     report read by the agent's next prompt hook, the kept terminal, then `slopty task merge`, a
     pass, and a rebase conflict naming `a.txt` with `main` untouched.
 
+## Agents the person starts, and agents after a reboot (2026-10-01)
+
+**An agent opened on `claude` is started the way Slopty starts its own.** ✅ 2026-10-01
+- Before: ⌘⇧T, and any tile opened on `claude`, ran a bare `claude`. It had no hook relay, so
+  its permission prompts never reached the face or the inbox, and its status was guessed from
+  the title and the transcript. It had no Slopty tools, so an orchestrator the person started
+  saw `project_*` and `task_*` only after a `claude mcp add` on each machine.
+- Now the worker wires every open whose program is `claude` and which Slopty has not wired
+  already (`Worker::as_agent`, beside the spawn path):
+  - the relay on its `--settings`;
+  - `--mcp-config` naming `slopty mcp`, when the worker has a server;
+  - the mod;
+  - `--session-id`, so it can come back after a reboot.
+- It is the person's own agent, so the mode that asks no permission is not locked. The open's
+  own flags and variables are kept.
+- Left as asked:
+  - a command that already carries the relay (the server's spawn, the person's own settings);
+  - a `--print` run;
+  - a worker with no `slopty` beside it to hand out.
+- A `claude` typed at a shell prompt still goes through the shell integration's function.
+- Test: `claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents`
+  (`crates/slopty-worker/tests/agent_open.rs`, a real ptyd and the stub agent).
+
+**A resumed project agent keeps its tools, its role and its lock.** ✅ 2026-10-01
+- Before: a reboot resumed a project's agent with its kept flags and the relay, but without its
+  tools, its role or the lock on the mode that asks nothing. So the agent no longer knew its
+  task, could not report, and could switch the lock off.
+- What Slopty put on the command line is now noted in the kept conversation
+  (`slopty_agent::resume::Resume`), never as the documents themselves, and given afresh:
+  - `mcp`: an `--mcp-config` serving `slopty mcp`;
+  - `locked`: `--settings` holding `permissions.disableBypassPermissionsMode`.
+- One system prompt is kept: the one appended to an agent started with Slopty's tools, which is
+  the server's role. A system prompt on any other agent is still never written down, since it
+  may carry anything.
+- A shell the person ran the agent in gets everything back but the role. The role spans lines,
+  which a line typed at a prompt cannot carry.
+- `--worktree` is not kept, because the resume runs in the directory the agent was in, which is
+  the worktree. Kept, it would make another worktree.
+- Tests: `slopty_s_own_wiring_is_noted_and_its_role_kept` (`slopty-agent`) and
+  `a_project_s_agent_comes_back_with_its_tools_role_and_lock` (`slopty-worker::restore`).
+
 ## Phases
 
 1. **Wiring and state.** Built 2026-09-30, except the tile.

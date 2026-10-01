@@ -141,12 +141,25 @@ impl Recipe {
                 restored: self.restored(again),
             };
         };
+        // What Slopty gave it is given again: the relay, the lock, its tools, and its role,
+        // which a line typed at a prompt cannot carry when it spans lines.
         let args = |in_shell: bool| {
             let mut args = agent.args();
+            if let Some(role) = agent.role.as_ref().filter(|_| !in_shell) {
+                args.push(format!("--append-system-prompt={role}"));
+            }
             if agent.relay
                 && let Some(relay) = &launch.relay
             {
                 args = slopty_agent::hooks::with_relay(args, relay, &cwd);
+            }
+            if agent.locked {
+                args = slopty_agent::hooks::without_bypass(args, &cwd);
+            }
+            if agent.mcp
+                && let Some(relay) = &launch.relay
+            {
+                args = slopty_agent::hooks::with_mcp(args, relay);
             }
             if let Some(installed) = launch.claude_mod.as_ref().filter(|_mod| !in_shell) {
                 installed.args(args)
@@ -541,6 +554,9 @@ mod tests {
             transcript: Some(transcript.to_string_lossy().into_owned()),
             args: vec!["--model".to_owned(), "opus 5".to_owned()],
             relay: false,
+            mcp: false,
+            locked: false,
+            role: None,
         };
         let open = |command: &[&str]| Recipe {
             agent: Some(agent.clone()),
@@ -592,6 +608,39 @@ mod tests {
                 "{word:?}"
             );
         }
+    }
+
+    /// A project's agent comes back wired as Slopty started it: its relay, its tools, the lock
+    /// on the mode that asks nothing, and its role. A shell the person ran it in gets all but
+    /// the role, which spans lines a prompt cannot take.
+    #[test]
+    fn a_project_s_agent_comes_back_with_its_tools_role_and_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let transcript = home.path().join("abc.jsonl");
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let agent = Resume {
+            session: "abc".to_owned(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            transcript: Some(transcript.to_string_lossy().into_owned()),
+            args: Vec::new(),
+            relay: true,
+            mcp: true,
+            locked: true,
+            role: Some("You work on task 3.\nReport with task_report.".to_owned()),
+        };
+        let launch = AgentLaunch { relay: Some("/opt/slopty".to_owned()), claude_mod: None };
+        let recipe = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
+        let tile = recipe(&["claude"]).reopen(SessionId::new(), SHELLS, home.path(), &launch);
+        let kept = slopty_agent::resume::invocation(&tile.command[1..]);
+        assert!(kept.relay && kept.mcp && kept.locked, "{:?}", tile.command);
+        assert_eq!(kept.role, agent.role, "its role");
+        assert!(tile.command.windows(2).any(|w| w == ["--resume", "abc"]), "{:?}", tile.command);
+
+        let shell = recipe(&["/bin/zsh"]).reopen(SessionId::new(), SHELLS, home.path(), &launch);
+        let line = shell.launch.expect("typed at its prompt");
+        assert!(line.contains("--mcp-config") && line.contains("disableBypassPermissionsMode"));
+        assert!(!line.contains("--append-system-prompt"), "{line}");
     }
 
     /// Recipes and screens round-trip through the directory; a checkpoint updates where the
@@ -652,6 +701,9 @@ mod tests {
             transcript: None,
             args: Vec::new(),
             relay: false,
+            mcp: false,
+            locked: false,
+            role: None,
         };
         keeper.agent(a, Some(conversation("first")));
         keeper.agent(b, Some(conversation("other")));

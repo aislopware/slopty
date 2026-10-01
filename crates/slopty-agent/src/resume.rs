@@ -6,6 +6,11 @@
 //! and directories it may use. Nothing else of the command line is kept. The prompt was sent
 //! already, and `--settings`, `--mcp-config`, `--agents` and the system prompts can carry
 //! tokens, so none of them is ever written down.
+//!
+//! What Slopty itself put on the command line is noted instead, to be given afresh: its hook
+//! relay, its tools, and the lock on the mode that asks no permission. One system prompt is
+//! kept, the one appended to an agent started with Slopty's tools: that is the role the server
+//! wrote for a project's agent, and a resumed one without it would not know its task.
 
 use std::path::{Path, PathBuf};
 
@@ -28,6 +33,13 @@ pub struct Resume {
     /// It was started with Slopty's hook relay on its `--settings`, which is not kept: the
     /// resumed one is given the relay afresh.
     pub relay: bool,
+    /// It was started with Slopty's tools on its `--mcp-config`, given afresh.
+    pub mcp: bool,
+    /// Its `--settings` locked it out of the mode that asks no permission, locked afresh.
+    pub locked: bool,
+    /// The system prompt appended to it, kept only when it was started with Slopty's tools:
+    /// the server's role for a project's agent.
+    pub role: Option<String>,
 }
 
 impl Resume {
@@ -69,9 +81,18 @@ pub struct Invocation {
     pub args: Vec<String>,
     /// Its `--settings` registered Slopty's relay.
     pub relay: bool,
+    /// Its `--mcp-config` served Slopty's tools.
+    pub mcp: bool,
+    /// Its `--settings` locked out the mode that asks no permission.
+    pub locked: bool,
+    /// Its appended system prompt, when it also had Slopty's tools ([`Resume::role`]).
+    pub role: Option<String>,
     /// It is a `--print` run, not a conversation in the terminal.
     pub print: bool,
 }
+
+/// The flag a system prompt is appended with.
+const APPEND_SYSTEM_PROMPT: &str = "--append-system-prompt";
 
 /// Flags kept that take no value.
 const SWITCHES: [&str; 7] = [
@@ -127,6 +148,7 @@ const PERMISSION_MODES: [&str; 6] =
 /// typed at a prompt, where it would drive the line editor.
 pub fn invocation(args: &[String]) -> Invocation {
     let mut out = Invocation::default();
+    let mut role = None;
     let mut words = args.iter().peekable();
     while let Some(word) = words.next() {
         if word == "--" {
@@ -140,7 +162,20 @@ pub fn invocation(args: &[String]) -> Invocation {
             out.print = true;
         } else if flag == "--settings" {
             let value = inline.or_else(|| words.next().map(String::as_str));
-            out.relay |= value.is_some_and(registers_relay);
+            let doc = value.and_then(|v| serde_json::from_str::<Value>(v).ok());
+            out.relay |=
+                doc.as_ref().is_some_and(|d| crate::hooks::has_relay(d, HookEvent::SessionStart));
+            out.locked |= doc.as_ref().is_some_and(crate::hooks::locks_bypass);
+        } else if flag == crate::hooks::MCP_CONFIG_FLAG {
+            let mut configs: Vec<&str> = inline.into_iter().collect();
+            if inline.is_none() {
+                while let Some(value) = words.next_if(|w| !w.starts_with('-')) {
+                    configs.push(value);
+                }
+            }
+            out.mcp |= configs.iter().any(|c| serves_slopty(c));
+        } else if flag == APPEND_SYSTEM_PROMPT {
+            role = inline.map(str::to_owned).or_else(|| words.next().cloned());
         } else if SWITCHES.contains(&flag) {
             if inline.is_none() {
                 out.args.push(word.clone());
@@ -168,7 +203,20 @@ pub fn invocation(args: &[String]) -> Invocation {
             }
         }
     }
+    out.role = role.filter(|_| out.mcp);
     out
+}
+
+/// Whether an `--mcp-config` document serves Slopty's tools (`hooks::mcp_config`).
+fn serves_slopty(value: &str) -> bool {
+    serde_json::from_str::<Value>(value).is_ok_and(|doc| {
+        let args = doc
+            .get("mcpServers")
+            .and_then(|servers| servers.get(crate::hooks::MCP_SERVER_NAME))
+            .and_then(|server| server.get("args"))
+            .and_then(Value::as_array);
+        args.is_some_and(|a| matches!(a.as_slice(), [m] if m == "mcp"))
+    })
 }
 
 /// `args` with the permission mode the agent was last in (`mode`, from its hooks) in place of
@@ -252,11 +300,6 @@ pub fn typeable(word: &str) -> bool {
 
 /// Whether a `--settings` value is JSON that registers Slopty's relay. A file is not read: an
 /// agent started with one reports through whatever it says, and so does the resumed one.
-fn registers_relay(value: &str) -> bool {
-    serde_json::from_str::<Value>(value)
-        .is_ok_and(|doc| crate::hooks::has_relay(&doc, HookEvent::SessionStart))
-}
-
 /// Whether a plugin directory is Slopty's mod (`<data dir>/claude-mod/<digest>`).
 fn is_mod_dir(dir: &str) -> bool {
     Path::new(dir).parent().and_then(Path::file_name).is_some_and(|name| name == "claude-mod")
@@ -333,6 +376,28 @@ mod tests {
         assert!(!invocation(&words("--settings={}")).relay);
     }
 
+    /// What Slopty put on a command line is noted, never kept: its tools, the lock on the mode
+    /// that asks nothing. The role appended to an agent with Slopty's tools is kept; a system
+    /// prompt on any other is not, as it may carry anything.
+    #[test]
+    fn slopty_s_own_wiring_is_noted_and_its_role_kept() {
+        let dir = Path::new("/nowhere");
+        let ours = crate::hooks::with_mcp(words("--model x"), "/bin/slopty");
+        let ours = crate::hooks::without_bypass(ours, dir);
+        let mut args = ours;
+        args.push("--append-system-prompt=You work on task 3.\nReport with task_report.".into());
+        let kept = invocation(&args);
+        assert!(kept.mcp && kept.locked && !kept.relay, "{kept:?}");
+        assert_eq!(kept.role.as_deref(), Some("You work on task 3.\nReport with task_report."));
+        assert_eq!(kept.args, words("--model x"), "no document is kept");
+
+        let theirs = words("--mcp-config {\"mcpServers\":{\"db\":{\"command\":\"pg\"}}}");
+        let mut theirs = theirs;
+        theirs.extend(["--append-system-prompt".to_owned(), "token=hush".to_owned()]);
+        let kept = invocation(&theirs);
+        assert!(!kept.mcp && !kept.locked && kept.role.is_none(), "{kept:?}");
+    }
+
     /// The mode the hooks last reported replaces the one the agent was started with; `default`
     /// drops the flag, and leaving the skip-everything mode keeps only the right to go back.
     #[test]
@@ -379,6 +444,9 @@ mod tests {
             transcript: None,
             args: kept.args,
             relay: false,
+            mcp: false,
+            locked: false,
+            role: None,
         };
         let args = resume.args();
         assert_eq!(args.iter().filter(|a| a.starts_with("--resume")).count(), 1);
@@ -407,6 +475,9 @@ mod tests {
             transcript: None,
             args: words("--model x"),
             relay: false,
+            mcp: false,
+            locked: false,
+            role: None,
         };
         assert_eq!(
             resume.transcript(Path::new("/h")),

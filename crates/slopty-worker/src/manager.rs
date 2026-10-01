@@ -103,6 +103,9 @@ struct Inner {
     session_env: Mutex<Vec<(String, String)>>,
     /// Where each session's presence file goes (`CLAUDE_CLIENT_PRESENCE_FILE`), once set.
     presence: Mutex<Option<PathBuf>>,
+    /// The `slopty` binary agents report through and are served Slopty's tools by
+    /// ([`Worker::set_relay`]).
+    relay: Mutex<Option<PathBuf>>,
     /// The key each session's token is made under ([`slopty_agent::vouch`]), once set.
     session_key: Mutex<Option<slopty_agent::vouch::SessionKey>>,
     /// Sessions whose output named a local server ([`SessionStart::port_hints`]).
@@ -201,6 +204,7 @@ impl Worker {
                 opened: Notify::new(),
                 session_env: Mutex::new(Vec::new()),
                 presence: Mutex::new(None),
+                relay: Mutex::new(slopty_agent::hooks::relay_beside_this_binary()),
                 session_key: Mutex::new(None),
                 port_hints,
                 moves,
@@ -324,6 +328,12 @@ impl Worker {
         *self.inner.presence.lock() = Some(dir);
     }
 
+    /// Name the `slopty` binary the agents this worker starts report through and get Slopty's
+    /// tools from; the one beside this binary until told otherwise, none when there is none.
+    pub fn set_relay(&self, relay: Option<PathBuf>) {
+        *self.inner.relay.lock() = relay;
+    }
+
     /// What session `id` is spawned with: the request's `extra`, then every session's
     /// variables, then its own id, token and presence file. The later wins, so no request moves
     /// what the worker tells its sessions (its control socket, its server, its mod): a hook
@@ -358,9 +368,10 @@ impl Worker {
         req: &OpenSession,
     ) -> Result<SessionHandle, WorkerError> {
         let _opening = Opening::new(&self.inner, id);
-        let env = self.env_for(id, &req.env);
+        let (command, extra) = self.as_agent(req).await;
+        let env = self.env_for(id, &extra);
         let spec = SpawnSpec {
-            command: req.command.clone(),
+            command,
             // `~` is this worker's home: a client types it without knowing the path.
             cwd: req.cwd.as_deref().map(|cwd| crate::file::expand_home(Path::new(cwd))),
             env,
@@ -380,6 +391,52 @@ impl Worker {
         self.inner.keeper.opened(id, recipe);
         let adoption = Adoption { command: req.command.clone(), ..Adoption::default() };
         self.adopt(id, req.size, adoption).await
+    }
+
+    /// What a request runs, and with what environment. One whose program is Claude Code itself
+    /// and which Slopty has not wired yet (a tile opened on `claude`, ⌘⇧T) is started the way
+    /// the worker starts an agent of its own: with the hook relay, so its status and its
+    /// permission prompts reach the app; with Slopty's tools when this worker has a server;
+    /// with the mod; and pinned to a conversation id, so it can come back after a reboot. It
+    /// is the person's own, so the mode that asks no permission is not locked. The request's
+    /// arguments and variables are kept, and the mod's variables go last.
+    async fn as_agent(&self, req: &OpenSession) -> (Vec<String>, Vec<(String, String)>) {
+        let unchanged = (req.command.clone(), req.env.clone());
+        let Some(program) = req.command.first() else { return unchanged };
+        let name = program.rsplit('/').next().unwrap_or(program);
+        if name != "claude" || !slopty_agent::detect::is_claude(name, &req.command) {
+            return unchanged;
+        }
+        let args = req.command.get(1..).unwrap_or_default().to_vec();
+        let started = slopty_agent::resume::invocation(&args);
+        let launch = self.agent_launch();
+        let Some(relay) = launch.relay.filter(|_| !started.relay && !started.print) else {
+            return unchanged;
+        };
+        let served = self
+            .inner
+            .session_env
+            .lock()
+            .iter()
+            .any(|(k, _)| k == slopty_proto::project::SERVER_ENV);
+        let cwd = req.cwd.as_deref().map_or_else(slopty_platform::dirs::home, |cwd| {
+            crate::file::expand_home(Path::new(cwd))
+        });
+        let wired = tokio::task::spawn_blocking(move || {
+            let (args, _conversation) = slopty_agent::resume::with_session_id(args);
+            let args = slopty_agent::hooks::with_relay(args, &relay, &cwd);
+            if served { slopty_agent::hooks::with_mcp(args, &relay) } else { args }
+        })
+        .await;
+        let Ok(args) = wired else { return unchanged };
+        let (args, env) = match &launch.claude_mod {
+            Some(installed) => (
+                installed.args(args),
+                req.env.iter().cloned().chain(installed.agent_env()).collect(),
+            ),
+            None => (args, req.env.clone()),
+        };
+        (std::iter::once(program.clone()).chain(args).collect(), env)
     }
 
     /// Reopen every kept session whose shell was lost (ptyd did not hold it when this worker
@@ -420,7 +477,11 @@ impl Worker {
             .zip(var(slopty_agent::claude_mod::SOCKET_ENV))
             .map(|(dir, socket)| slopty_agent::claude_mod::Installed { dir, socket });
         AgentLaunch {
-            relay: slopty_agent::hooks::relay_beside_this_binary()
+            relay: self
+                .inner
+                .relay
+                .lock()
+                .as_ref()
                 .map(|relay| relay.to_string_lossy().into_owned()),
             claude_mod,
         }

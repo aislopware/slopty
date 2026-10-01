@@ -141,6 +141,12 @@ pub fn without_bypass(args: Vec<String>, cwd: &Path) -> Vec<String> {
     })
 }
 
+/// Whether a settings document holds the lock [`without_bypass`] puts on.
+#[must_use]
+pub fn locks_bypass(doc: &Value) -> bool {
+    doc.pointer(&format!("/permissions/{DISABLE_BYPASS}")).is_some_and(|v| v == "disable")
+}
+
 /// `args` with their one `--settings` (the caller's last one, read as Claude Code reads it,
 /// or an empty one) edited by `edit` and put first. One that cannot be read leaves `args` as
 /// they are, for Claude Code to report.

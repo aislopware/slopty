@@ -15,7 +15,7 @@
 
 pub(super) mod approvals;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
@@ -25,7 +25,8 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_client::layout::WorkerKey;
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
+use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::conversation::Verdict;
 use slopty_theme::{Theme, alpha};
 
@@ -50,8 +51,11 @@ pub(super) const LOG_MAX: usize = 200;
 pub(super) const ALL_CAUGHT_UP: &str = "You're all caught up";
 
 /// What an inbox that has never held anything adds: what lands in it.
-pub(super) const INBOX_HOLDS: &str =
-    "Agents that need you and long commands that finish while you look away land here.";
+pub(super) const INBOX_HOLDS: &str = "Agents that need you, and long commands and agent turns \
+                                      that finish while you look away, land here.";
+
+/// What an agent's finished turn says when its worker gave no words of the turn's own.
+pub(super) const TURN_FINISHED: &str = "Turn finished";
 
 /// The button that reads every unread row.
 pub(super) const MARK_ALL_READ: &str = "Mark all read";
@@ -85,6 +89,10 @@ pub(super) struct Inbox {
     plate: Plate,
     /// The permission prompts this client may answer from here.
     approvals: approvals::Approvals,
+    /// When each agent's turn under way began, on its worker's clock.
+    turns: HashMap<SessionId, WallMs>,
+    /// The sessions whose unread finish is an agent's turn rather than a command.
+    agent_turns: HashSet<SessionId>,
 }
 
 /// One of the inbox's rows, before it is drawn.
@@ -142,6 +150,60 @@ impl WorkspaceView {
         inbox.log.push_back(Logged { seq, session, worker, cwd, done, at });
     }
 
+    /// An agent's state moved: a turn begins when it starts to work, and the turn it ends
+    /// with "Turn finished" ran this long. A turn that waits on the person goes on; one that
+    /// went idle without finishing, or an agent that is gone, has nothing to say.
+    pub(super) fn agent_turn(&mut self, event: &AgentEvent) -> Option<Duration> {
+        let turns = &mut self.inbox.turns;
+        match &event.status {
+            AgentStatus::Working | AgentStatus::Tool { .. } | AgentStatus::Waiting { .. } => {
+                turns.entry(event.session).or_insert(event.since_ms);
+                None
+            }
+            AgentStatus::Blocked(why) if *why != BlockReason::IdlePrompt => None,
+            AgentStatus::Done => {
+                let began = turns.remove(&event.session)?;
+                let ran = event.since_ms.as_millis().saturating_sub(began.as_millis());
+                Some(Duration::from_millis(ran))
+            }
+            _ => {
+                turns.remove(&event.session);
+                None
+            }
+        }
+    }
+
+    /// An agent's turn of `elapsed` ended in `session`. Long enough, and not watched, it earns
+    /// what a long command does: a header badge, an inbox row under Finished, and a note while
+    /// the app is away ([`super::attention::Look::turns`]), cleared when the tile is focused.
+    pub(super) fn agent_finished(
+        &mut self,
+        event: &AgentEvent,
+        elapsed: Duration,
+        cx: &mut Context<Self>,
+    ) {
+        let session = event.session;
+        let watched = self.app_active
+            && self.tile_of_session(session).is_some_and(|t| self.focused() == Some(t));
+        if watched || elapsed < self.slow_command {
+            return;
+        }
+        let said = event.detail.as_deref().map(str::trim).filter(|d| !d.is_empty());
+        let command = said.unwrap_or(TURN_FINISHED).to_owned();
+        let done = Finished { command, exit: None, elapsed };
+        self.log_finished(session, &done);
+        self.finished.insert(session, done);
+        let finished = &self.finished;
+        self.inbox.agent_turns.retain(|s| finished.contains_key(s));
+        self.inbox.agent_turns.insert(session);
+        cx.notify();
+    }
+
+    /// The sessions whose unread finish is an agent's turn.
+    pub(super) fn agent_turns(&self) -> impl Iterator<Item = SessionId> + '_ {
+        self.inbox.agent_turns.iter().copied().filter(|s| self.finished.contains_key(s))
+    }
+
     /// Show the history (`true`) or only what is unread.
     pub fn show_inbox_all(&mut self, all: bool, cx: &mut Context<Self>) {
         self.inbox.all = all;
@@ -167,7 +229,7 @@ impl WorkspaceView {
     /// unread while its session's badge is up and no later command there has replaced it.
     fn finished_rows(&self, all: bool) -> Vec<Row> {
         let now = Instant::now();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         self.inbox
             .log
             .iter()

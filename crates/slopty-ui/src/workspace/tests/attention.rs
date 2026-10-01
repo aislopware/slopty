@@ -39,11 +39,19 @@ fn attention() -> (Attention, Rc<Memory>) {
 fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
     let (mut attention, memory) = attention();
     let (a, b) = (route(1), route(2));
-    attention.look(&Look { asking: vec![asking(a, "Run cargo test")], unread: 1 });
+    attention.look(&Look {
+        asking: vec![asking(a, "Run cargo test")],
+        turns: Vec::new(),
+        unread: 1,
+    });
     assert!(memory.posted().is_empty(), "in front, the inbox says it");
 
     attention.set_active(false);
-    attention.look(&Look { asking: vec![asking(a, "Run cargo test")], unread: 1 });
+    attention.look(&Look {
+        asking: vec![asking(a, "Run cargo test")],
+        turns: Vec::new(),
+        unread: 1,
+    });
     assert!(
         memory.posted().is_empty(),
         "an agent seen waiting before the app left says nothing new"
@@ -51,6 +59,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
 
     attention.look(&Look {
         asking: vec![asking(a, "Run cargo test"), asking(b, "Asks: which one?")],
+        turns: Vec::new(),
         unread: 2,
     });
     let posted = memory.posted();
@@ -75,11 +84,11 @@ fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
     let a = route(1);
     let id = a.session.to_string();
     attention.set_active(false);
-    attention.look(&Look { asking: vec![asking(a, "Run make")], unread: 1 });
+    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
     attention.look(&Look::default());
     assert_eq!(memory.withdrawn(), vec![id.clone()], "answered elsewhere, its note goes");
 
-    attention.look(&Look { asking: vec![asking(a, "Run make")], unread: 1 });
+    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
     let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
     attention.command_finished(a, "api".into(), &done, Duration::from_secs(5));
     let ids: Vec<String> = memory.posted().into_iter().map(|n| n.id).collect();
@@ -125,7 +134,7 @@ fn a_command_notifies_when_it_ran_long_and_ended_with_the_app_away() {
 fn the_badge_is_the_inboxs_unread_count() {
     let (mut attention, memory) = attention();
     assert_eq!(memory.badge(), None, "nothing set before the first look");
-    attention.look(&Look { asking: Vec::new(), unread: 3 });
+    attention.look(&Look { asking: Vec::new(), turns: Vec::new(), unread: 3 });
     assert_eq!(memory.badge(), Some(3), "the unread count");
     attention.set_active(false);
     attention.look(&Look::default());
@@ -282,11 +291,11 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
     let (mut attention, memory) = attention();
     let a = route(1);
     attention.set_active(false);
-    attention.look(&Look { asking: vec![asking(a, "Run make")], unread: 1 });
+    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
     let held = Asking { approval: Some(3), ..asking(a, "Run make") };
-    attention.look(&Look { asking: vec![held.clone()], unread: 1 });
-    attention.look(&Look { asking: vec![held], unread: 1 });
-    attention.look(&Look { asking: vec![asking(a, "Run make")], unread: 1 });
+    attention.look(&Look { asking: vec![held.clone()], turns: Vec::new(), unread: 1 });
+    attention.look(&Look { asking: vec![held], turns: Vec::new(), unread: 1 });
+    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
     let said: Vec<(bool, bool, Option<String>)> = memory
         .posted()
         .into_iter()
@@ -303,15 +312,19 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
 
     memory.clear();
     let b = route(2);
-    let asks = || Look { asking: vec![asking(b, "Run make")], unread: 1 };
+    let asks = || Look { asking: vec![asking(b, "Run make")], turns: Vec::new(), unread: 1 };
     attention.look(&asks());
     memory.clear();
     attention.look(&Look {
         asking: vec![Asking { approval: Some(4), ..asking(b, "Run make") }],
+        turns: Vec::new(),
         unread: 1,
     });
-    let answered =
-        Look { asking: vec![Asking { answered: Some(4), ..asking(b, "Run make") }], unread: 1 };
+    let answered = Look {
+        asking: vec![Asking { answered: Some(4), ..asking(b, "Run make") }],
+        turns: Vec::new(),
+        unread: 1,
+    };
     attention.look(&answered);
     attention.look(&answered);
     attention.look(&asks());
@@ -518,4 +531,92 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
 
 fn leak(text: String) -> &'static str {
     Box::leak(text.into_boxed_str())
+}
+
+/// An agent's turn that finished unwatched notifies once, while the app is away, with what it
+/// said and how long it ran; in front, the inbox has it.
+#[test]
+fn a_finished_turn_notifies_once_while_the_app_is_away() {
+    let (mut attention, memory) = attention();
+    let a = route(1);
+    let turn = Turn { route: a, title: "api".into(), body: "Fixed the test · Done · 2m".into() };
+    let look = Look { asking: Vec::new(), turns: vec![turn.clone()], unread: 1 };
+    attention.look(&look);
+    assert!(memory.posted().is_empty(), "in front, the inbox says it");
+
+    attention.look(&Look::default());
+    attention.set_active(false);
+    attention.look(&look);
+    attention.look(&look);
+    let posted = memory.posted();
+    assert_eq!(posted.len(), 1, "once: {posted:?}");
+    assert_eq!((posted[0].title.as_str(), posted[0].body.as_str()), ("api", turn.body.as_str()));
+    assert_eq!(posted[0].id, a.session.to_string(), "the tile's one note");
+}
+
+fn agent(
+    session: SessionId,
+    status: AgentStatus,
+    since_s: u64,
+    detail: Option<&str>,
+) -> AgentEvent {
+    AgentEvent {
+        session,
+        kind: AgentKind::ClaudeCode,
+        status,
+        agent_session: None,
+        detail: detail.map(str::to_owned),
+        attention: false,
+        source: AgentSource::Hook,
+        since_ms: WallMs::from_millis(since_s.saturating_mul(1000)),
+        mode: None,
+    }
+}
+
+/// A turn that ran long and finished on a tile not in focus earns a badge, an inbox row under
+/// Finished with the agent's words, and a turn in the look; focusing the tile reads it. A turn
+/// on the focused tile, a short one, and one that went idle without finishing earn nothing.
+#[gpui::test]
+fn an_agent_finishing_out_of_sight_lands_in_the_inbox(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (away, here) = (SessionId::new(), SessionId::new());
+    let (tiles, _link) = worker(&view, cx, WorkerKey::new(7), "mini", &[away, here]);
+    view.update_in(cx, |v, _window, cx| {
+        v.focus_tile(tiles[1], cx);
+        for session in [away, here] {
+            v.agent_event(agent(session, AgentStatus::Working, 100, None), cx);
+            let tool = AgentStatus::Tool { tool: "Bash".into() };
+            v.agent_event(agent(session, tool, 130, None), cx);
+            v.agent_event(agent(session, AgentStatus::Done, 220, Some("Fixed the test")), cx);
+        }
+    });
+    cx.run_until_parked();
+    view.update(cx, |v, _| {
+        assert_eq!(v.inbox_count(), 1, "the one out of sight");
+        let look = v.attention_look();
+        let [turn] = look.turns.as_slice() else { panic!("one turn: {look:?}") };
+        assert_eq!(turn.route.session, away);
+        assert_eq!(turn.body, "Fixed the test \u{b7} Done \u{b7} 2m 0s");
+    });
+    let bell = cx.debug_bounds("bell").expect("the bell").center();
+    cx.simulate_click(bell, gpui::Modifiers::none());
+    cx.run_until_parked();
+    let row = format!("inbox-finished-{away}");
+    assert!(cx.debug_bounds(Box::leak(row.into_boxed_str())).is_some(), "its row");
+
+    let short = SessionId::new();
+    let idle = SessionId::new();
+    view.update_in(cx, |v, _window, cx| {
+        v.focus_tile(tiles[0], cx);
+        v.agent_event(agent(short, AgentStatus::Working, 300, None), cx);
+        v.agent_event(agent(short, AgentStatus::Done, 301, None), cx);
+        v.agent_event(agent(idle, AgentStatus::Working, 300, None), cx);
+        v.agent_event(agent(idle, AgentStatus::Idle, 400, None), cx);
+        v.agent_event(agent(idle, AgentStatus::Done, 500, None), cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |v, _| {
+        assert_eq!(v.inbox_count(), 0, "read by its focus; nothing else earned a row");
+        assert!(v.attention_look().turns.is_empty());
+    });
 }

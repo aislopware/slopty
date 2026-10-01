@@ -980,6 +980,9 @@ impl Tracker {
             transcript: self.transcript_path.clone(),
             args: resume::with_mode(invocation.args, self.permission_mode.as_deref()),
             relay: invocation.relay,
+            mcp: invocation.mcp,
+            locked: invocation.locked,
+            role: invocation.role,
         })
     }
 

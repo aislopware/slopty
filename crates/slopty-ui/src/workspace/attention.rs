@@ -1,8 +1,9 @@
 //! Attention on a pocketed phone: which moments become a system notification while the app is
 //! not in front, and where a tapped one leads.
 //!
-//! Two moments notify. An agent starts to need the human (a permission, a question, input it
-//! asks for), or a shell command that ran at least the slow-command time ends. Nothing notifies
+//! Three moments notify. An agent starts to need the human (a permission, a question, input it
+//! asks for), an agent's turn that ran at least the slow-command time ends, or a shell command
+//! that ran that long ends. Nothing notifies
 //! while the app is in front, since the inbox says it there. A tile has at most one
 //! notification up: the note's identifier is its session's, so a newer one replaces the older,
 //! and an agent answered anywhere takes its own back. Coming back to the app takes back every
@@ -116,11 +117,24 @@ impl Asking {
     }
 }
 
+/// An agent's turn that finished unwatched, as its note would say it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Turn {
+    /// Where it runs.
+    pub route: Route,
+    /// The tile's name, else the worker's.
+    pub title: String,
+    /// What it said it did, and how long the turn ran.
+    pub body: String,
+}
+
 /// What notifications follow in the workspace, at one moment.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Look {
     /// The agents waiting on the human.
     pub asking: Vec<Asking>,
+    /// The agents whose turn finished unwatched and is unread.
+    pub turns: Vec<Turn>,
     /// The inbox's unread count: the icon badge.
     pub unread: usize,
 }
@@ -141,6 +155,8 @@ pub struct Attention {
     active: bool,
     /// The sessions whose agent was waiting at the last look.
     asking: HashSet<SessionId>,
+    /// The sessions whose agent's finished turn was unread at the last look.
+    turns: HashSet<SessionId>,
     /// The notes up, by session.
     posted: HashMap<SessionId, Why>,
     /// The prompt each agent's note up answers, by session.
@@ -168,6 +184,7 @@ impl Attention {
             notifier,
             active: true,
             asking: HashSet::new(),
+            turns: HashSet::new(),
             posted: HashMap::new(),
             answers: HashMap::new(),
             badge: None,
@@ -225,6 +242,22 @@ impl Attention {
             self.answers.remove(&session);
         }
         self.asking = now;
+        let turns: HashSet<SessionId> = look.turns.iter().map(|t| t.route.session).collect();
+        if !self.active {
+            let fresh: Vec<&Turn> =
+                look.turns.iter().filter(|t| !self.turns.contains(&t.route.session)).collect();
+            for turn in fresh {
+                let note = Note {
+                    id: turn.route.session.to_string(),
+                    title: turn.title.clone(),
+                    body: turn.body.clone(),
+                    info: turn.route.info(),
+                    ..Note::default()
+                };
+                self.post(turn.route.session, Why::Finished, note);
+            }
+        }
+        self.turns = turns;
         if self.badge != Some(look.unread) {
             self.badge = Some(look.unread);
             self.notifier.set_badge(look.unread);
@@ -320,7 +353,16 @@ impl WorkspaceView {
                 Some(Asking { route, title, body, approval, answered })
             })
             .collect();
-        Look { asking, unread: self.inbox_count() }
+        let turns = self
+            .agent_turns()
+            .filter_map(|session| {
+                let (route, title) = self.attention_route(session)?;
+                let done = self.finished.get(&session)?;
+                let body = format!("{} \u{b7} {}", done.command.trim(), done.label());
+                Some(Turn { route, title, body })
+            })
+            .collect();
+        Look { asking, turns, unread: self.inbox_count() }
     }
 
     /// Where a note about `session` leads, and the name its title says; `None` for a session
