@@ -2937,3 +2937,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     only other way to that text system, panics off the main thread, and a test has a thread
     of its own). Both pass over 60 seeds. With the place left out of the key off the grid,
     Core Text fails at seed 2, step 97.
+
+- ✅ **A checkpoint carries the engine's own marks in an OSC of Slopty's, and `WRAPPED` is the
+  row above's wrap flag** (2026-10-01). A checkpoint is VT bytes that a fresh engine replays,
+  so whatever it carries has to be bytes in that stream. libghostty holds each row's prompt
+  flag and each cell's content, which the formatter now writes. The lines prompts started on,
+  the statuses commands ended with and the command blocks are the engine's alone, so after
+  each screen a checkpoint appends them as `OSC 6973` (`ghostty/carried.rs`), each line counted
+  from that screen's oldest row. Only a fresh engine's first write reads it, and a program that
+  writes one forges nothing it could not already forge with OSC 133.
+  - `WRAPPED` was read from libghostty's `wrap_continuation`. A scrolling region, an inserted or
+    deleted line, or history eviction leaves that cache stale. It is now the row above's own
+    wrap flag, the one reflow and selection use. So a line's `WRAPPED` can change when only the
+    row above it changed. A frame then sends the clean row below again with only the flag
+    changed. A changed row whose row above is clean takes its wrap from its own line as last
+    sent, which costs no grid lookup.
+  - Rejected: a side field beside the checkpoint for the marks (a second format next to the VT
+    stream every replay already reads); replaying the marks as OSC 133 (a replay
+    would count them again and wake whatever waits on a command's end); walking every row to
+    look up the row above (about 1 % of a keystroke's frame).
+  - Tests: the terminal fuzzer holds every replayed line to the oracle, marks, links and wraps
+    included, and `fuzz/regressions/terminal` keeps one input of each loss it found
+    (decisions/testing.md, "What it found next"); `carried.rs`'s round-trip tests.
