@@ -10,7 +10,9 @@ use super::*;
 /// are greyed. A note's editor answers all six.
 #[gpui::test]
 fn the_edit_menu_reaches_whichever_control_has_the_keyboard(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
+    // Held still: a tile arriving fades in on the wall clock, and a slow machine asked the menu
+    // of a frame that had not yet drawn the shell's controls.
+    let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [(shell, tile), ..] = three_shells(&view, cx, &studio);
     view.update_in(cx, |v, _w, cx| {
@@ -19,7 +21,12 @@ fn the_edit_menu_reaches_whichever_control_has_the_keyboard(cx: &mut TestAppCont
     });
     cx.run_until_parked();
     assert!(terminal_focused(&view, cx, shell));
+    // The clipboard is the test platform's own, never the person's: start it from nothing.
+    cx.update(|_w, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new())));
     let offered = |cx: &mut VisualTestContext| {
+        // The menu asks of the frame drawn last: draw one with the keyboard where it is now.
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
         cx.update(|window, cx| {
             [
                 window.is_action_available(&input::Undo, cx),

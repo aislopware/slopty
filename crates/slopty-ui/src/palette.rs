@@ -269,7 +269,8 @@ impl Plate {
     /// whose owner holds its chrome still), and on its owner's clock: the plate glides by
     /// `now`, the instant the owner's frame stands for, so it moves in step with the owner's
     /// other motion (the workspace's springs) and a frame drawn again at that instant draws it
-    /// in the same place. `None` reads the wall clock at paint.
+    /// in the same place. `None` reads GPUI's clock at paint: the wall in the app, the test's
+    /// own under a test, so no test can be caught by a slow machine half way through a move.
     pub(crate) fn under_on(
         &self,
         theme: &Theme,
@@ -284,7 +285,8 @@ impl Plate {
             move |region, (), window, cx| {
                 let moving = moves && crate::kit::motion(cx);
                 let mut glide = glide.borrow_mut();
-                let Some(plate) = glide.frame(now.unwrap_or_else(Instant::now), moving) else {
+                let now = now.unwrap_or_else(|| cx.background_executor().now());
+                let Some(plate) = glide.frame(now, moving) else {
                     return;
                 };
                 if glide.seated.is_some() {
@@ -2256,7 +2258,8 @@ mod tests {
         let (refreshed, _) = counts(cx);
         step(&palette, cx);
         let (_, before) = counts(cx);
-        // The plate glides on the wall clock: these frames all fall inside the move.
+        // The plate glides on GPUI's clock, which the test holds still: every frame here falls
+        // inside the move however slow the machine.
         let frames = 20;
         for _ in 0..frames {
             assert!(palette.read_with(cx, |p, _| p.plate.0.borrow().flight.is_some()), "gliding");
