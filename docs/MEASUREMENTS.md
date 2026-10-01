@@ -12918,6 +12918,8 @@ The cost an edit pays is the string copy plus the scan: about 0.4 ms at 1 MiB, a
 16 MiB file, the one size where it nears a 120 Hz frame. The symbol list parses as a colouring
 does, so it reads a file only up to `COLOURED_BYTES` (2 MiB, about 1.3 s, "Reading symbols…"
 shown meanwhile); past it the tile is plain text and lists none.
+The word candidates are read from the 1 MiB round the caret (`complete::SCAN_BYTES`), so a
+keystroke costs the 1 MiB row above at any file size rather than the 16 MiB one.
 
 ```sh
 cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_editor_helpers --no-capture

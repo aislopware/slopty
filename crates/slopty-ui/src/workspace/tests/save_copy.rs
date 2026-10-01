@@ -112,6 +112,7 @@ fn a_file_tiles_copy_is_saved_whole_where_the_panel_says(cx: &mut TestAppContext
         size: text.len() as u64,
         modified_ms: WallMs::from_millis(1),
         final_newline: true,
+        editorconfig: Vec::new(),
     };
     let dest = save("/w/src/main.rs", shown, "main copy.rs", cx);
     assert_eq!(std::fs::read(&dest).unwrap(), text, "the text, past the inline limit");

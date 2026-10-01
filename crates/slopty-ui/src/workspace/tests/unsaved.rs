@@ -21,6 +21,7 @@ fn read(text: &str, modified_ms: u64) -> FileRead {
         size: 8,
         modified_ms: WallMs::from_millis(modified_ms),
         final_newline: true,
+        editorconfig: Vec::new(),
     }
 }
 

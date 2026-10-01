@@ -97,6 +97,7 @@ fn items(
         size: 8,
         modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
+        editorconfig: Vec::new(),
     };
     view.update_in(cx, |v, _w, cx| {
         v.file_read(key, &path, &text, cx);

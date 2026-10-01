@@ -697,6 +697,11 @@ mod golden {
                     size: 4096,
                     modified_ms: WallMs::from_millis(1_788_000_000_000),
                     final_newline: false,
+                    editorconfig: vec![
+                        ("indent_style".to_owned(), "space".to_owned()),
+                        ("indent_size".to_owned(), "4".to_owned()),
+                        ("trim_trailing_whitespace".to_owned(), "true".to_owned()),
+                    ],
                 },
             },
         );
@@ -708,7 +713,10 @@ mod golden {
                     xfer: XferId::from_uuid(Uuid::from_u128(0x0f11e)),
                     size: 1_400_000,
                     modified_ms: WallMs::from_millis(1_788_000_000_000),
-                    body: slopty_proto::file::Body::Text { final_newline: true },
+                    body: slopty_proto::file::Body::Text {
+                        final_newline: true,
+                        editorconfig: vec![("end_of_line".to_owned(), "lf".to_owned())],
+                    },
                 },
             },
         );

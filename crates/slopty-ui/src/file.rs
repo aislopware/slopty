@@ -31,7 +31,7 @@ mod symbols;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use edit::{Format, Indent};
+use edit::{Format, Indent, Rules};
 #[cfg(test)]
 pub(crate) use editing::GO_TO_LINE;
 pub use editing::{GO_TO_CTX, TEXT_CTX, palette_items as editor_palette_items};
@@ -43,8 +43,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{
-    Editor, EditorState, InputEvent, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, Rope, RopeExt as _,
+    CompletionProvider, Editor, EditorState, InputEvent, RangeDecoration,
+    RangeDecorationCollection, RangeDecorationStyle, Rope, RopeExt as _,
 };
 pub use preview::{
     CopyText, FirstPage, LastPage, NextPage, NextScreen, PAGES_CTX, PreviousPage, PreviousScreen,
@@ -189,13 +189,25 @@ struct Version {
     format: Format,
     /// Its modification time on disk.
     modified_ms: WallMs,
+    /// What its `EditorConfig` asks.
+    rules: Rules,
 }
 
 impl Version {
     /// The version a text read describes.
-    fn of(text: &str, final_newline: bool, modified_ms: WallMs) -> Self {
-        let (text, format) = Format::split(text, final_newline);
-        Self { text: text.into_owned(), newline: final_newline, format, modified_ms }
+    fn of(
+        text: &str,
+        final_newline: bool,
+        modified_ms: WallMs,
+        editorconfig: &[(String, String)],
+    ) -> Self {
+        let rules = Rules::read(editorconfig);
+        let (text, mut format) = Format::split(text, final_newline);
+        if !final_newline && !text.contains('\n') {
+            // No line break yet to follow: the first one is the EditorConfig's.
+            format.crlf = rules.crlf.unwrap_or(format.crlf);
+        }
+        Self { text: text.into_owned(), newline: final_newline, format, modified_ms, rules }
     }
 
     /// The bytes the file holds for this text.
@@ -681,8 +693,8 @@ impl FileView {
             return;
         }
         match &read {
-            FileRead::Text { text, modified_ms, final_newline, .. } => {
-                let incoming = Version::of(text, *final_newline, *modified_ms);
+            FileRead::Text { text, modified_ms, final_newline, editorconfig, .. } => {
+                let incoming = Version::of(text, *final_newline, *modified_ms, editorconfig);
                 self.read_only = None;
                 self.preview = None;
                 self.take_version(incoming, cx);
@@ -750,14 +762,15 @@ impl FileView {
     /// takes the disk's, "Overwrite" the edit.
     fn restore_over(&mut self, read: &FileRead, kept: &Backup, cx: &mut Context<Self>) {
         let disk = match read {
-            FileRead::Text { text, modified_ms, final_newline, .. } => {
-                Version::of(text, *final_newline, *modified_ms)
+            FileRead::Text { text, modified_ms, final_newline, editorconfig, .. } => {
+                Version::of(text, *final_newline, *modified_ms, editorconfig)
             }
             _ => Version {
                 text: String::new(),
                 newline: kept.mark.newline,
                 format: Format::default(),
                 modified_ms: WallMs::ZERO,
+                rules: Rules::default(),
             },
         };
         let text_read = matches!(read, FileRead::Text { .. });
@@ -856,7 +869,7 @@ impl FileView {
             None
         };
         let (indent, prose) = editing::opening_layout(&incoming.text, self.syntax);
-        self.indent = indent;
+        self.indent = incoming.rules.indent(indent);
         if !reload {
             // A reload keeps what the person chose.
             self.wrap = prose;
@@ -968,15 +981,41 @@ impl FileView {
 
     fn send(&mut self, base_modified_ms: Option<WallMs>, cx: &mut Context<Self>) {
         let text = self.text(cx);
-        let (newline, format) =
-            self.base.as_ref().map(|b| (b.newline, b.format)).unwrap_or_default();
+        let (newline, format, rules) =
+            self.base.as_ref().map(|b| (b.newline, b.format, b.rules)).unwrap_or_default();
+        let newline = rules.final_newline.unwrap_or(newline);
         let modified_ms = base_modified_ms.unwrap_or(WallMs::ZERO);
-        let sent = Version { text, newline, format, modified_ms };
+        let sent = Version { text, newline, format, modified_ms, rules };
         let file = sent.file_text(&sent.text);
         tracing::debug!(path = %self.path, bytes = file.len(), ?base_modified_ms, "save file");
         self.saving = Some(sent);
         cx.emit(FileViewEvent::Save { text: file, base_modified_ms });
         cx.notify();
+    }
+
+    /// Before the person's save (⌘S, "Done", "Overwrite"), the trailing whitespace off the lines
+    /// the edit touched, as one edit in the editor, so the tile holds what goes to disk. On
+    /// unless the `EditorConfig` says `trim_trailing_whitespace = false`; off in Markdown, where
+    /// two spaces end a line, unless it says `true`. A save the tile makes on its own (a tile
+    /// closed on a waiting program) sends the text as it stands.
+    pub fn trim_touched(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.dirty {
+            return;
+        }
+        let Some(base) = &self.base else { return };
+        let prose = self.syntax.is_some_and(editing::is_prose);
+        if !base.rules.trim.unwrap_or(!prose) {
+            return;
+        }
+        let text = self.text(cx);
+        let touched = changed_lines(&base.text, &text);
+        let edit = {
+            let editor = self.editor.read(cx);
+            edit::trim_lines(editor.text(), &touched, &editor.selected_range())
+        };
+        if let Some(edit) = edit {
+            self.apply(edit, window, cx);
+        }
     }
 
     /// "Reload": drop the edit and take the disk's text.
@@ -1067,9 +1106,15 @@ impl FileView {
     fn install_highlighter(&self, cx: &mut Context<Self>) {
         let factory = crate::highlight::editor::factory(self.syntax, self.theme.clone());
         let language = self.syntax.map_or_else(String::new, |s| s.name().to_lowercase());
+        // Code repeats its names; prose would open the menu on every word typed.
+        let words = self.syntax.is_some_and(|s| !editing::is_prose(s));
         self.editor.update(cx, |e, cx| {
             e.set_highlighter_factory(factory, cx);
             e.set_highlighter(language, cx);
+            e.lsp_mut().completion_provider = words.then(|| {
+                let words: std::rc::Rc<dyn CompletionProvider> = std::rc::Rc::new(complete::Words);
+                words
+            });
         });
     }
 
@@ -1248,7 +1293,8 @@ impl FileView {
                         "file-overwrite",
                         OVERWRITE,
                         ButtonKind::Ghost,
-                        cx.listener(|this, _ev, _w, cx| {
+                        cx.listener(|this, _ev, window, cx| {
+                            this.trim_touched(window, cx);
                             this.overwrite(cx);
                         }),
                     ),
@@ -1275,7 +1321,10 @@ impl FileView {
                 "file-done",
                 DONE,
                 ButtonKind::Secondary,
-                cx.listener(|this, _ev, _w, cx| this.finish_edit(cx)),
+                cx.listener(|this, _ev, window, cx| {
+                    this.trim_touched(window, cx);
+                    this.finish_edit(cx);
+                }),
             ),
             self.bar_button(
                 "file-give-up",
@@ -1473,9 +1522,15 @@ impl Render for FileView {
             .role(Role::Document)
             .aria_label(SharedString::from(format!("File {}", self.path)))
             .aria_value(SharedString::from(self.summary(cx)))
-            .on_action(cx.listener(|this, _: &SaveFile, _window, cx| this.save(cx)))
+            .on_action(cx.listener(|this, _: &SaveFile, window, cx| {
+                this.trim_touched(window, cx);
+                this.save(cx);
+            }))
             .when(self.waiting.is_some(), |el| {
-                el.on_action(cx.listener(|this, _: &FinishEdit, _window, cx| this.finish_edit(cx)))
+                el.on_action(cx.listener(|this, _: &FinishEdit, window, cx| {
+                    this.trim_touched(window, cx);
+                    this.finish_edit(cx);
+                }))
             })
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find(window, cx)))
             .when(self.shows_text(), |el| Self::editing_keys(el, cx))

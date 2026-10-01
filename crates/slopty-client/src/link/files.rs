@@ -83,10 +83,12 @@ impl Join {
 fn joined(path: String, meta: Meta, bytes: Result<Bytes, String>) -> WorkerMsg {
     let Meta { size, modified_ms, body } = meta;
     let read = match (bytes, body) {
-        (Ok(bytes), Body::Text { final_newline }) => match String::from_utf8(bytes.into()) {
-            Ok(text) => FileRead::Text { text, size, modified_ms, final_newline },
-            Err(_not_text) => FileRead::Missing { error: "The read was not text".to_owned() },
-        },
+        (Ok(bytes), Body::Text { final_newline, editorconfig }) => {
+            match String::from_utf8(bytes.into()) {
+                Ok(text) => FileRead::Text { text, size, modified_ms, final_newline, editorconfig },
+                Err(_not_text) => FileRead::Missing { error: "The read was not text".to_owned() },
+            }
+        }
         (Ok(bytes), Body::Media { media_type }) => {
             FileRead::Media { media_type, bytes, modified_ms }
         }
@@ -169,7 +171,7 @@ mod tests {
     use super::*;
 
     fn streamed(xfer: XferId, modified_ms: WallMs) -> FileRead {
-        let body = Body::Text { final_newline: true };
+        let body = Body::Text { final_newline: true, editorconfig: Vec::new() };
         FileRead::Streamed { xfer, size: 10, modified_ms, body }
     }
 
@@ -203,7 +205,8 @@ mod tests {
                     text: "alpha".to_owned(),
                     size: 10,
                     modified_ms: WallMs::from_millis(1),
-                    final_newline: true
+                    final_newline: true,
+                    editorconfig: Vec::new(),
                 },
             })
         );

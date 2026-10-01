@@ -153,6 +153,7 @@ fn a_search_streams_grouped_matches_and_opens_one_at_its_line(cx: &mut TestAppCo
         size: 32,
         modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
+        editorconfig: Vec::new(),
     };
     view.update_in(cx, |v, _w, cx| v.file_read(key, &path, &text, cx));
     cx.run_until_parked();

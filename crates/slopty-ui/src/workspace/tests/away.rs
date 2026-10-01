@@ -46,6 +46,7 @@ fn file_tile(
         size: 8,
         modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
+        editorconfig: Vec::new(),
     };
     let key = fake.key;
     view.update_in(cx, |v, _w, cx| {

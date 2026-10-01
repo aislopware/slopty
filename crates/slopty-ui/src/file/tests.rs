@@ -20,6 +20,7 @@ fn text_read(text: &str, newline: bool, modified_ms: u64) -> FileRead {
         size,
         modified_ms: WallMs::from_millis(modified_ms),
         final_newline: newline,
+        editorconfig: Vec::new(),
     }
 }
 

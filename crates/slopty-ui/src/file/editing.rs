@@ -13,7 +13,7 @@ use gpui::{
 };
 use gpui_kit::component::input::{
     Input, InputEvent, InputState, RangeDecoration, RangeDecorationStyle, Rope, RopeExt as _,
-    TabSize,
+    SelectAllOccurrences, SelectNextOccurrence, TabSize,
 };
 use slopty_theme::alpha;
 
@@ -59,6 +59,12 @@ pub fn palette_items(bindings: &[KeyBinding]) -> Vec<PaletteItem> {
         line("Wrap long lines", IconName::CornerDownLeft, Box::new(ToggleSoftWrap)),
         line("Find and replace", IconName::Replace, Box::new(ToggleReplace)),
         line("Jump to symbol", IconName::ListTree, Box::new(GoToSymbol)),
+        line(
+            "Add the next match to the selection",
+            IconName::TextCursorInput,
+            Box::new(SelectNextOccurrence),
+        ),
+        line("Select every match", IconName::TextSearch, Box::new(SelectAllOccurrences)),
     ]
 }
 
@@ -125,7 +131,7 @@ impl FileView {
     }
 
     /// Replace a block of lines as one undo step, then place the selection.
-    fn apply(&mut self, edit: LineEdit, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn apply(&mut self, edit: LineEdit, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |e, cx| {
             e.set_selected_range(edit.range, cx);
             e.replace(edit.text, window, cx);
@@ -350,6 +356,10 @@ impl FileView {
 /// The indentation and wrap a file opens with: read from its text, and wrapped when it is
 /// prose (Markdown), where a paragraph is one long line.
 pub(super) fn opening_layout(text: &str, syntax: Option<Syntax>) -> (Indent, bool) {
-    let prose = syntax.is_some_and(|s| s.name() == "Markdown");
-    (edit::detect_indent(text), prose)
+    (edit::detect_indent(text), syntax.is_some_and(is_prose))
+}
+
+/// Whether the grammar is prose's (Markdown): wrapped, and offered no words.
+pub(super) fn is_prose(syntax: Syntax) -> bool {
+    syntax.name() == "Markdown"
 }

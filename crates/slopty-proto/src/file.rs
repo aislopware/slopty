@@ -29,6 +29,17 @@ pub const MEDIA_BYTES: u64 = 128 << 20;
 /// same reason.
 pub const INLINE_FILE_BYTES: usize = crate::transfer::INLINE_CLIP_BYTES;
 
+/// A text file's `EditorConfig` properties, resolved on the worker.
+///
+/// Each `key = value` the `.editorconfig` files above the file set for it
+/// (<https://editorconfig.org>), in the order they apply. Keys are lowercased, and so are the
+/// values of the keys the specification defines.
+///
+/// The list is open: the client acts on the keys it knows (`indent_style`, `indent_size`,
+/// `tab_width`, `end_of_line`, `insert_final_newline`, `trim_trailing_whitespace`) and passes
+/// over the rest. Empty when no `.editorconfig` applies.
+pub type EditorConfig = Vec<(String, String)>;
+
 /// What the worker found at a path.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum FileRead {
@@ -42,6 +53,8 @@ pub enum FileRead {
         modified_ms: WallMs,
         /// The file ends with a newline, which `text` leaves off; a save puts it back.
         final_newline: bool,
+        /// The file's [`EditorConfig`] properties.
+        editorconfig: EditorConfig,
     },
     /// Not text (a NUL byte, or not UTF-8), and not a picture or document the tile shows.
     Binary {
@@ -92,6 +105,8 @@ pub enum Body {
     Text {
         /// The file ends with a newline, which the streamed text leaves off.
         final_newline: bool,
+        /// As the [`FileRead::Text`]'s.
+        editorconfig: EditorConfig,
     },
     /// A [`FileRead::Media`] of this media type.
     Media {

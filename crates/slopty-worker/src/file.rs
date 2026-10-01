@@ -82,7 +82,46 @@ pub fn read(path: &Path) -> FileRead {
     if final_newline {
         text.pop();
     }
-    FileRead::Text { text, size, modified_ms, final_newline }
+    FileRead::Text { text, size, modified_ms, final_newline, editorconfig: editorconfig(&path) }
+}
+
+/// The properties the specification defines, whose values are case-insensitive.
+const EDITORCONFIG_KEYS: [&str; 7] = [
+    "indent_style",
+    "indent_size",
+    "tab_width",
+    "end_of_line",
+    "charset",
+    "trim_trailing_whitespace",
+    "insert_final_newline",
+];
+
+/// The `EditorConfig` properties the `.editorconfig` files above `path` set for it, with the
+/// specification's fallbacks (`indent_size = tab` takes `tab_width`, and the other way round).
+///
+/// A file that cannot be read or parsed sets nothing: the tile then follows the text alone, as
+/// it does with no `.editorconfig` at all.
+fn editorconfig(path: &Path) -> slopty_proto::file::EditorConfig {
+    let mut properties = match ec4rs::properties_of(path) {
+        Ok(properties) => properties,
+        Err(error) => {
+            tracing::debug!(path = %path.display(), %error, "editorconfig not read");
+            return Vec::new();
+        }
+    };
+    properties.use_fallbacks();
+    properties
+        .iter()
+        .map(|(key, value)| {
+            let value = value.into_str();
+            let value = if EDITORCONFIG_KEYS.contains(&key) {
+                value.to_lowercase()
+            } else {
+                value.to_owned()
+            };
+            (key.to_owned(), value)
+        })
+        .collect()
 }
 
 /// A read as it goes on the control stream, and the bytes to follow it on a bulk stream.
@@ -93,11 +132,11 @@ pub fn read(path: &Path) -> FileRead {
 #[must_use]
 pub fn announce(read: FileRead) -> (FileRead, Option<(XferId, Bytes)>) {
     match read {
-        FileRead::Text { text, size, modified_ms, final_newline }
+        FileRead::Text { text, size, modified_ms, final_newline, editorconfig }
             if text.len() > INLINE_FILE_BYTES =>
         {
             let xfer = XferId::new();
-            let body = Body::Text { final_newline };
+            let body = Body::Text { final_newline, editorconfig };
             let text = Bytes::from(text.into_bytes());
             (FileRead::Streamed { xfer, size, modified_ms, body }, Some((xfer, text)))
         }
@@ -256,7 +295,7 @@ mod tests {
         let text = dir.path().join("a.txt");
         std::fs::write(&text, "one\ntwo\n").unwrap();
         match read(&text) {
-            FileRead::Text { text, size, modified_ms, final_newline } => {
+            FileRead::Text { text, size, modified_ms, final_newline, .. } => {
                 assert_eq!((text.as_str(), size), ("one\ntwo", 8));
                 assert!(final_newline, "the newline left off is reported");
                 assert!(!modified_ms.is_zero());
@@ -313,6 +352,41 @@ mod tests {
         assert_eq!(read(&over), FileRead::TooLarge { size: FILE_BYTES + 1 });
     }
 
+    /// A text read carries what the `.editorconfig` files above it set for it: the nearer file
+    /// over the farther, the walk stopping at `root = true`, the specification's values in lower
+    /// case and the fallbacks added, and a key it does not define kept as written.
+    #[test]
+    fn a_text_read_carries_its_editorconfig() {
+        let dir = tempfile::tempdir().unwrap();
+        let ec = |dir: &Path, body: &str| std::fs::write(dir.join(".editorconfig"), body).unwrap();
+        ec(dir.path(), "root = true\n[*]\nindent_style = tab\ntrim_trailing_whitespace = TRUE\n");
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        ec(&src, "[*.py]\nindent_style = Space\nindent_size = 4\nx_house_style = KeepCase\n");
+        std::fs::write(src.join("a.py"), "x = 1\n").unwrap();
+        std::fs::write(src.join("b.txt"), "x\n").unwrap();
+        let config = |name: &str| match read(&src.join(name)) {
+            FileRead::Text { editorconfig, .. } => editorconfig,
+            other => panic!("{other:?}"),
+        };
+        let py = config("a.py");
+        let value = |key: &str| py.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        assert_eq!(value("indent_style"), Some("space"), "the nearer file wins: {py:?}");
+        assert_eq!(value("indent_size"), Some("4"));
+        assert_eq!(value("tab_width"), Some("4"), "the fallback: {py:?}");
+        assert_eq!(value("trim_trailing_whitespace"), Some("true"), "lower case");
+        assert_eq!(value("x_house_style"), Some("KeepCase"), "an unknown key as written");
+        let txt = config("b.txt");
+        assert!(txt.contains(&("indent_style".to_owned(), "tab".to_owned())), "{txt:?}");
+        assert!(!txt.iter().any(|(k, _)| k == "x_house_style"), "a section for other files");
+        std::fs::write(dir.path().join("loose.txt"), "x").unwrap();
+        ec(dir.path(), "root = true\n");
+        let FileRead::Text { editorconfig, .. } = read(&dir.path().join("loose.txt")) else {
+            panic!("text")
+        };
+        assert!(editorconfig.is_empty(), "nothing set is nothing sent: {editorconfig:?}");
+    }
+
     /// A text that fits a clipboard's worth goes inline; a larger one is announced under a
     /// transfer and its text handed back to follow on a bulk stream. Nothing else streams.
     #[test]
@@ -322,6 +396,7 @@ mod tests {
             size: len as u64 + 1,
             modified_ms: WallMs::from_millis(7),
             final_newline: true,
+            editorconfig: vec![("indent_style".to_owned(), "tab".to_owned())],
         };
         let small = text(INLINE_FILE_BYTES);
         assert_eq!(announce(small.clone()), (small, None), "the limit is inclusive");
@@ -334,7 +409,10 @@ mod tests {
                 xfer,
                 size: INLINE_FILE_BYTES as u64 + 2,
                 modified_ms: WallMs::from_millis(7),
-                body: Body::Text { final_newline: true },
+                body: Body::Text {
+                    final_newline: true,
+                    editorconfig: vec![("indent_style".to_owned(), "tab".to_owned())],
+                },
             }
         );
         let media = |len: usize| FileRead::Media {

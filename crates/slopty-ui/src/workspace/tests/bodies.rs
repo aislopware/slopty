@@ -56,6 +56,7 @@ fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
         size: 8,
         modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
+        editorconfig: Vec::new(),
     };
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {

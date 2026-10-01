@@ -443,6 +443,21 @@ pub fn defaults() -> Vec<Command> {
         c(File, "toggle_regex", crate::search::ToggleRegex, &["cmd-alt-r"], &[FILE_SEARCH]),
         // Zed's and VS Code's outline key; in the editor it is over "Point other devices".
         c(File, "go_to_symbol", crate::file::GoToSymbol, &["cmd-shift-o"], &[FILE_TEXT]),
+        // Sublime's, Zed's and VS Code's keys for more selections from the selected text.
+        c(
+            File,
+            "select_next_occurrence",
+            gpui_kit::component::input::SelectNextOccurrence,
+            &["cmd-d"],
+            &[FILE_TEXT],
+        ),
+        c(
+            File,
+            "select_all_occurrences",
+            gpui_kit::component::input::SelectAllOccurrences,
+            &["cmd-shift-l"],
+            &[FILE_TEXT],
+        ),
         c(File, "close_symbols", crate::file::CloseSymbols, &["escape"], &[FILE_SYMBOLS]),
         c(File, "next_symbol", crate::file::NextSymbol, &["down"], &[FILE_SYMBOLS]),
         c(File, "previous_symbol", crate::file::PreviousSymbol, &["up"], &[FILE_SYMBOLS]),

@@ -2,9 +2,16 @@
 //!
 //! No language server: the candidates are the other words of the same text that start with
 //! what is typed, the nearest to the caret first, as Sublime's and Zed's buffer words are.
+//! [`Words`] hands them to gpui-kit's completion menu.
 
 use std::ops::Range;
 
+use gpui::{App, AppContext as _, Task, Window};
+use gpui_kit::base::input::lsp_types::{
+    self, CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse,
+    CompletionTextEdit, TextEdit,
+};
+use gpui_kit::component::input::{CompletionProvider, Rope, RopeExt as _};
 use rustc_hash::FxHashMap;
 
 /// Candidates offered at most.
@@ -13,6 +20,9 @@ pub const WORDS_MAX: usize = 50;
 pub const PREFIX_MIN: usize = 2;
 /// How far back the typed word is looked for; a longer run is not a word anyone completes.
 const PREFIX_BYTES: usize = 128;
+/// The text round the caret the words are read from, so a keystroke in a 16 MiB file costs what
+/// one in a 1 MiB file does.
+const SCAN_BYTES: usize = 1 << 20;
 
 /// Whether `c` is part of a word: a letter, a digit or `_`.
 #[must_use]
@@ -69,6 +79,55 @@ pub fn candidates(text: &str, prefix: &str, typed: Range<usize>) -> Vec<String> 
     let mut found: Vec<(usize, &str)> = nearest.into_iter().map(|(w, d)| (d, w)).collect();
     found.sort_unstable();
     found.into_iter().take(WORDS_MAX).map(|(_, w)| w.to_owned()).collect()
+}
+
+/// The file's words for gpui-kit's completion menu, read off the UI thread on each word
+/// character typed.
+#[derive(Clone, Copy, Debug)]
+pub struct Words;
+
+impl CompletionProvider for Words {
+    fn completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        _trigger: CompletionContext,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<CompletionResponse>> {
+        let text = text.clone();
+        cx.background_spawn(async move { Ok(CompletionResponse::Array(offered(&text, offset))) })
+    }
+
+    fn is_completion_trigger(&self, _offset: usize, new_text: &str, _cx: &mut App) -> bool {
+        let mut chars = new_text.chars();
+        chars.next().is_some_and(is_word) && chars.next().is_none()
+    }
+}
+
+/// The menu's items at `caret`: each candidate replacing the typed word.
+fn offered(text: &Rope, caret: usize) -> Vec<CompletionItem> {
+    let caret = caret.min(text.len());
+    let half = SCAN_BYTES / 2;
+    let lo = text.line_start_offset(text.offset_to_point(caret.saturating_sub(half)).row);
+    let hi = text.line_end_offset(text.offset_to_point(caret.saturating_add(half)).row);
+    let window = text.slice(lo..hi.max(caret)).to_string();
+    let at = caret.saturating_sub(lo);
+    let start = prefix_start(&window, at);
+    let prefix = window.get(start..at).unwrap_or_default();
+    let range = lsp_types::Range::new(
+        text.offset_to_position(lo.saturating_add(start)),
+        text.offset_to_position(caret),
+    );
+    candidates(&window, prefix, start..at)
+        .into_iter()
+        .map(|word| CompletionItem {
+            label: word.clone(),
+            kind: Some(CompletionItemKind::TEXT),
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text: word })),
+            ..CompletionItem::default()
+        })
+        .collect()
 }
 
 /// Every word of `text` with its start, in bytes.

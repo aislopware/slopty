@@ -1776,6 +1776,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ec4rs"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b31a881d38439026e3d5dd938ab20328d36e23caca8fd5981c42e4b677f5842"
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2636,7 +2642,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.7.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#5b79c23a8d627ceaae8ff46e9f681167e96614ac"
+source = "git+https://github.com/aislopware/gpui-kit.git#d5b2e28f0ba7e78f2d896d83279f3085abe82695"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2676,7 +2682,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.7.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#5b79c23a8d627ceaae8ff46e9f681167e96614ac"
+source = "git+https://github.com/aislopware/gpui-kit.git#d5b2e28f0ba7e78f2d896d83279f3085abe82695"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2719,7 +2725,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.7.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#5b79c23a8d627ceaae8ff46e9f681167e96614ac"
+source = "git+https://github.com/aislopware/gpui-kit.git#d5b2e28f0ba7e78f2d896d83279f3085abe82695"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2730,7 +2736,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.7.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#5b79c23a8d627ceaae8ff46e9f681167e96614ac"
+source = "git+https://github.com/aislopware/gpui-kit.git#d5b2e28f0ba7e78f2d896d83279f3085abe82695"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -2743,7 +2749,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.7.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#5b79c23a8d627ceaae8ff46e9f681167e96614ac"
+source = "git+https://github.com/aislopware/gpui-kit.git#d5b2e28f0ba7e78f2d896d83279f3085abe82695"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -7885,6 +7891,7 @@ dependencies = [
  "blake3",
  "bytes",
  "dispatch2",
+ "ec4rs",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",

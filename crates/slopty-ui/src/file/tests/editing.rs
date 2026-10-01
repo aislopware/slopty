@@ -1,5 +1,6 @@
 //! The editor's own commands in a real tile, by their default keys: comment, move and copy
-//! lines, go to line, the bracket pair, the file's indentation, its line ends and BOM, wrap.
+//! lines, go to line, the bracket pair, the file's indentation, its line ends and BOM, wrap,
+//! more selections, completed words, and what an `EditorConfig` asks.
 
 use super::*;
 
@@ -277,4 +278,142 @@ fn cmd_shift_o_lists_the_symbols_narrows_them_and_goes_to_one(cx: &mut TestAppCo
     assert_eq!(selection(&view, cx), 45..49, "↩ keeps it on the symbol");
     keys(cx, "x");
     assert!(text(&view, cx).contains("fn x()"), "the editor has the keyboard again");
+}
+
+#[gpui::test]
+fn cmd_d_adds_the_next_match_and_cmd_shift_l_takes_every_one(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
+    arrives(&view, cx, text_read("let n = 1;\nlet m = n + n;", true, 1));
+    select(&view, cx, 4..4);
+    keys(cx, "cmd-d");
+    assert_eq!(selection(&view, cx), 4..5, "the first press selects the word at the caret");
+    keys(cx, "cmd-d");
+    cx.simulate_input("k");
+    cx.run_until_parked();
+    assert_eq!(text(&view, cx), "let k = 1;\nlet m = k + n;", "the second adds the next one");
+    keys(cx, "cmd-z");
+    select(&view, cx, 19..19);
+    keys(cx, "cmd-shift-l");
+    cx.simulate_input("count");
+    cx.run_until_parked();
+    assert_eq!(text(&view, cx), "let count = 1;\nlet m = count + count;", "⌘⇧L takes them all");
+}
+
+#[gpui::test]
+fn a_word_typed_in_code_is_completed_from_the_file(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
+    arrives(&view, cx, text_read("fn compute_total() {}\n", true, 1));
+    let end = text(&view, cx).len();
+    select(&view, cx, end..end);
+    cx.simulate_input("com");
+    cx.run_until_parked();
+    let open = view.read_with(cx, |v, cx| v.editor().read(cx).completion_menu_state().open);
+    assert!(open, "the file's word is offered");
+    keys(cx, "enter");
+    assert_eq!(text(&view, cx), "fn compute_total() {}\ncompute_total", "↩ takes it");
+}
+
+#[gpui::test]
+fn prose_is_offered_no_words(cx: &mut TestAppContext) {
+    let (notes, _events, cx) = tile(cx, "/w/README.md");
+    arrives(&notes, cx, text_read("compute_total", true, 1));
+    let end = text(&notes, cx).len();
+    select(&notes, cx, end..end);
+    cx.simulate_input(" com");
+    cx.run_until_parked();
+    let open = notes.read_with(cx, |v, cx| v.editor().read(cx).completion_menu_state().open);
+    assert!(!open, "Markdown would open the menu on every word");
+}
+
+/// A text read whose `.editorconfig` set `pairs` for it.
+fn configured(text: &str, newline: bool, pairs: &[(&str, &str)]) -> FileRead {
+    let size = u64::try_from(text.len()).unwrap_or(0).saturating_add(u64::from(newline));
+    FileRead::Text {
+        text: text.to_owned(),
+        size,
+        modified_ms: WallMs::from_millis(1),
+        final_newline: newline,
+        editorconfig: pairs.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect(),
+    }
+}
+
+fn last_save(events: &Events) -> Option<String> {
+    events.borrow().iter().rev().find_map(|e| match e {
+        FileViewEvent::Save { text, .. } => Some(text.clone()),
+        _ => None,
+    })
+}
+
+#[gpui::test]
+fn an_editorconfig_sets_the_indentation_over_the_text_s_own(cx: &mut TestAppContext) {
+    let (view, _events, cx) = tile(cx, "/w/run.py");
+    let pairs = [("indent_style", "tab"), ("tab_width", "8")];
+    arrives(&view, cx, configured("def f():\n    pass", true, &pairs));
+    assert_eq!(view.read_with(cx, |v, _| v.indent()), Indent { hard_tabs: true, width: 8 });
+    let (spaced, _events, cx) = tile(cx, "/w/main.go");
+    arrives(&spaced, cx, configured("func f() {\n\treturn\n}", true, &[("indent_size", "2")]));
+    assert_eq!(
+        spaced.read_with(cx, |v, _| v.indent()),
+        Indent { hard_tabs: true, width: 2 },
+        "the text's tabs, drawn at the EditorConfig's width"
+    );
+}
+
+#[gpui::test]
+fn a_save_trims_the_lines_the_edit_touched_and_no_others(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/src/lib.rs");
+    arrives(&view, cx, text_read("let a = 1;  \nlet b = 2;", true, 1));
+    let end = text(&view, cx).len();
+    select(&view, cx, end..end);
+    cx.simulate_input(" // two   ");
+    cx.run_until_parked();
+    keys(cx, "cmd-s");
+    assert_eq!(
+        last_save(&events).as_deref(),
+        Some("let a = 1;  \nlet b = 2; // two\n"),
+        "the typed spaces go, the untouched line keeps its own"
+    );
+    assert_eq!(text(&view, cx), "let a = 1;  \nlet b = 2; // two", "the tile holds what was saved");
+    keys(cx, "cmd-z");
+    assert_eq!(text(&view, cx), "let a = 1;  \nlet b = 2; // two   ", "one ⌘Z puts them back");
+}
+
+#[gpui::test]
+fn markdown_keeps_its_trailing_spaces_unless_the_editorconfig_asks(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/README.md");
+    arrives(&view, cx, text_read("a", true, 1));
+    types(&view, cx, "line break  \n");
+    keys(cx, "cmd-s");
+    assert_eq!(last_save(&events).as_deref(), Some("line break  \na\n"), "two spaces end a line");
+
+    let (asked, events, cx) = tile(cx, "/w/NOTES.md");
+    arrives(&asked, cx, configured("a", true, &[("trim_trailing_whitespace", "true")]));
+    types(&asked, cx, "b  \n");
+    keys(cx, "cmd-s");
+    assert_eq!(last_save(&events).as_deref(), Some("b\na\n"));
+}
+
+#[gpui::test]
+fn an_editorconfig_says_how_a_file_ends_and_breaks_its_lines(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/a.txt");
+    let pairs = [("end_of_line", "crlf"), ("insert_final_newline", "true")];
+    arrives(&view, cx, configured("one", false, &pairs));
+    let end = text(&view, cx).len();
+    select(&view, cx, end..end);
+    keys(cx, "enter t w o");
+    keys(cx, "cmd-s");
+    assert_eq!(
+        last_save(&events).as_deref(),
+        Some("one\r\ntwo\r\n"),
+        "the first line break is the EditorConfig's, and the file ends with one"
+    );
+    let (lf, events, cx) = tile(cx, "/w/b.txt");
+    arrives(&lf, cx, configured("x\r\ny\r", true, &[("end_of_line", "lf")]));
+    types(&lf, cx, "w");
+    keys(cx, "cmd-s");
+    assert_eq!(
+        last_save(&events).as_deref(),
+        Some("wx\r\ny\r\n"),
+        "a file that already breaks its lines keeps its own way"
+    );
 }

@@ -375,6 +375,7 @@ fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
         size: 8,
         modified_ms: WallMs::from_millis(1_000),
         final_newline: true,
+        editorconfig: Vec::new(),
     };
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| {

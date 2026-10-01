@@ -4595,7 +4595,7 @@ mod tests {
 
         link.send(ClientMsg::ReadFile { path: name.clone() }).await.unwrap();
         let WorkerMsg::File {
-            read: FileRead::Text { text, size, modified_ms: base, final_newline },
+            read: FileRead::Text { text, size, modified_ms: base, final_newline, .. },
             ..
         } = next_file_event(&mut events, &name).await
         else {

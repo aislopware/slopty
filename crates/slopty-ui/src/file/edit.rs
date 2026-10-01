@@ -1,7 +1,8 @@
 //! What a file tile works out about a text on its own, as plain functions.
 //!
-//! How the file indents and ends its lines, a block of lines commented, moved or copied, the
-//! bracket that matches one at the caret, and where "go to line" lands. The view applies the
+//! How the file indents and ends its lines, what its `EditorConfig` asks, a block of lines
+//! commented, moved, copied or trimmed, the bracket that matches one at the caret, and where
+//! "go to line" lands. The view applies the
 //! results to the editor ([`super::FileView`]); nothing here knows about GPUI.
 
 use std::borrow::Cow;
@@ -152,6 +153,76 @@ impl Format {
     }
 }
 
+/// The widest indentation an `EditorConfig` is taken at; past it the number is a typo.
+const RULE_WIDTH_MAX: usize = 16;
+
+/// What a file's `EditorConfig` asks of the tile ([`slopty_proto::file::EditorConfig`]): each
+/// `None` where it says nothing, or says what the tile cannot do, so the text's own way holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rules {
+    /// `indent_style`: tabs, or spaces.
+    pub hard_tabs: Option<bool>,
+    /// `indent_size` for spaces, `tab_width` for tabs.
+    pub width: Option<usize>,
+    /// `end_of_line`: `crlf` or `lf`. `cr` is left to the file, as no editor line break is one.
+    pub crlf: Option<bool>,
+    /// `insert_final_newline`: a save ends the file with a newline, or without one.
+    pub final_newline: Option<bool>,
+    /// `trim_trailing_whitespace`: a save takes it off the lines the edit touched, or leaves it.
+    pub trim: Option<bool>,
+}
+
+impl Rules {
+    /// The rules in `pairs`, the worker's resolution: the last value of a key wins, and a key
+    /// or value the specification does not define is passed over.
+    #[must_use]
+    pub fn read(pairs: &[(String, String)]) -> Self {
+        let value = |key: &str| pairs.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        let flag = |key: &str| match value(key) {
+            Some("true") => Some(true),
+            Some("false") => Some(false),
+            _ => None,
+        };
+        let number = |key: &str| {
+            value(key)
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|w| (1..=RULE_WIDTH_MAX).contains(w))
+        };
+        let hard_tabs = match value("indent_style") {
+            Some("tab") => Some(true),
+            Some("space") => Some(false),
+            _ => None,
+        };
+        let width = if hard_tabs == Some(true) {
+            number("tab_width").or_else(|| number("indent_size"))
+        } else {
+            number("indent_size").or_else(|| number("tab_width"))
+        };
+        let crlf = match value("end_of_line") {
+            Some("crlf") => Some(true),
+            Some("lf") => Some(false),
+            _ => None,
+        };
+        Self {
+            hard_tabs,
+            width,
+            crlf,
+            final_newline: flag("insert_final_newline"),
+            trim: flag("trim_trailing_whitespace"),
+        }
+    }
+
+    /// The indentation to edit with: what the rules say, and the guess from the text for what
+    /// they leave out.
+    #[must_use]
+    pub fn indent(self, guessed: Indent) -> Indent {
+        Indent {
+            hard_tabs: self.hard_tabs.unwrap_or(guessed.hard_tabs),
+            width: self.width.unwrap_or(guessed.width),
+        }
+    }
+}
+
 /// A block of whole lines rewritten: the bytes it covers and what they become, with where
 /// the selection goes after it. Offsets are bytes of the editor's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +233,45 @@ pub struct LineEdit {
     pub text: String,
     /// The selection after the edit.
     pub selection: std::ops::Range<usize>,
+}
+
+/// The trailing spaces and tabs taken off `lines` of `text` (0-based), or none when no line
+/// has any.
+///
+/// One edit spans the first line that has any to the last, so one ⌘Z puts them back. A caret
+/// past a line's new end lands on it, and one after the edit moves with its text.
+#[must_use]
+pub fn trim_lines(
+    text: &Rope,
+    lines: &[usize],
+    selection: &std::ops::Range<usize>,
+) -> Option<LineEdit> {
+    let mut cuts: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut rows: Vec<usize> = lines.iter().copied().filter(|&r| r < text.lines_len()).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    for row in rows {
+        let (start, end) = (text.line_start_offset(row), text.line_end_offset(row));
+        let line = text.slice(start..end).to_string();
+        let kept = line.trim_end_matches([' ', '\t']).len();
+        if kept < line.len() {
+            cuts.push(start.saturating_add(kept)..end);
+        }
+    }
+    let (first, last) = (cuts.first()?.start, cuts.last()?.end);
+    let mut out = String::with_capacity(last.saturating_sub(first));
+    let mut at = first;
+    for cut in &cuts {
+        out.push_str(&text.slice(at..cut.start).to_string());
+        at = cut.end;
+    }
+    let map = |offset: usize| {
+        let removed: usize =
+            cuts.iter().map(|cut| offset.min(cut.end).saturating_sub(cut.start)).sum();
+        offset.saturating_sub(removed)
+    };
+    let selection = map(selection.start)..map(selection.end);
+    Some(LineEdit { range: first..last, text: out, selection })
 }
 
 /// The lines a selection covers, first and last (0-based): a selection that ends at the start

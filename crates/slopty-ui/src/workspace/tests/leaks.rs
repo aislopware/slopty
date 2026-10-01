@@ -155,6 +155,7 @@ fn a_closed_file_with_an_edit_leaves_nothing(cx: &mut TestAppContext) {
             size: 8,
             modified_ms: WallMs::from_millis(1_000),
             final_newline: true,
+            editorconfig: Vec::new(),
         };
         view.update_in(cx, |v, _w, cx| {
             v.file_read(key, &path, &text, cx);

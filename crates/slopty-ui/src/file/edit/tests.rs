@@ -160,6 +160,53 @@ fn go_to_line_takes_a_line_and_a_column_and_clamps_them() {
 /// the whole bound), the indentation guess over its 10 000-line sample, and a comment toggled
 /// over 1 000 lines.
 #[test]
+fn editorconfig_rules_fill_in_what_the_text_does_not_say() {
+    let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+        list.iter().map(|&(k, v)| (k.to_owned(), v.to_owned())).collect()
+    };
+    let tabs = Rules::read(&pairs(&[
+        ("indent_style", "tab"),
+        ("indent_size", "tab"),
+        ("tab_width", "8"),
+        ("end_of_line", "crlf"),
+        ("insert_final_newline", "true"),
+        ("trim_trailing_whitespace", "false"),
+        ("x_house_style", "KeepCase"),
+    ]));
+    assert_eq!(tabs.indent(Indent::DEFAULT), Indent { hard_tabs: true, width: 8 });
+    assert_eq!((tabs.crlf, tabs.final_newline, tabs.trim), (Some(true), Some(true), Some(false)));
+    let size_only = Rules::read(&pairs(&[("indent_size", "2")]));
+    let guessed = Indent { hard_tabs: true, width: 4 };
+    assert_eq!(
+        size_only.indent(guessed),
+        Indent { hard_tabs: true, width: 2 },
+        "the text's own style where the rules say none"
+    );
+    let nonsense = Rules::read(&pairs(&[
+        ("indent_style", "both"),
+        ("indent_size", "400"),
+        ("end_of_line", "cr"),
+        ("trim_trailing_whitespace", "yes"),
+    ]));
+    assert_eq!(nonsense, Rules::default(), "what the specification does not define is passed over");
+    let later = Rules::read(&pairs(&[("indent_size", "2"), ("indent_size", "3")]));
+    assert_eq!(later.width, Some(3), "the last value of a key wins");
+}
+
+#[test]
+fn trailing_whitespace_comes_off_the_lines_asked_in_one_edit() {
+    let (text, selection) = marked("a  \nb\t\nc   |\nd  ");
+    let Some(edit) = trim_lines(&text, &[0, 2, 1], &selection) else { panic!("an edit") };
+    assert_eq!(applied(&text, &edit), "a\nb\nc|\nd  ", "line 3 was not touched");
+    assert_eq!(edit.range, 1..11, "one span, from the first cut to the last");
+    let (text, selection) = marked("x  \ny|");
+    let edit = trim_lines(&text, &[0], &selection).unwrap_or_else(|| panic!("an edit"));
+    assert_eq!(applied(&text, &edit), "x\ny|", "a caret after the edit moves with its text");
+    let (clean, caret) = marked("a\nb|");
+    assert_eq!(trim_lines(&clean, &[0, 1, 9], &caret), None, "nothing to take off");
+}
+
+#[test]
 #[ignore = "timing: cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_editor_helpers --no-capture"]
 fn timing_of_the_editor_helpers() {
     use std::time::{Duration, Instant};
