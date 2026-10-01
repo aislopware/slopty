@@ -1024,7 +1024,7 @@ impl ProjectSearch {
                     theme,
                     crate::icons::Status::Working,
                     px(theme.typography.icon()),
-                    hsla(s.accent),
+                    hsla(s.text_muted),
                 ))
             })
             .child(

@@ -4,14 +4,15 @@
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
 //! On a phone, where the title bar has no tabs, *Workspaces* heads the list: a row per
 //! workspace with its tile count, the active one on a plate of its own, then "New workspace".
-//! *Needs you* appears only while an agent waits on the human and *Working* only while one is
-//! at its turn (its heading turns the working mark and counts them, its rows tick their turn's
-//! time once a second), each only for agents whose own row is out of sight. Then the workers,
-//! whose heading is left out when it would be the only one. Each worker has a header disclosing its
-//! tiles: its name in the strong weight after a server icon (crossed out while the worker is away),
-//! then on its right edge a word for what is wrong with its link, else its round trip when that
-//! is slow enough to matter, led by what its tiles add up to while it is folded. The pointer
-//! brings out the chevron and "+" (a new shell on that worker) in the readouts' place. Its
+//! *Needs you* appears only while an agent waits on the human, *To review* only while one's turn
+//! ended unseen (its row says what it did, else how long it ran), and *Working* only while one
+//! is at its turn (its heading turns the working mark and counts them, its rows tick their
+//! turn's time once a second), each only for agents whose own row is out of sight. Then the
+//! workers, whose heading is left out when it would be the only one. Each worker has a header
+//! disclosing its tiles: its name in the strong weight after a server icon (crossed out while the
+//! worker is away), then on its right edge a word for what is wrong with its link, else its round
+//! trip when that is slow enough to matter, led by what its tiles add up to while it is folded. The
+//! pointer brings out the chevron and "+" (a new shell on that worker) in the readouts' place. Its
 //! tiles come in order of attention: what needs the human, then what finished unseen, then what
 //! is working, then the rest, each class in reading order. Each tile is two lines: its kind and
 //! its title, ended by its state in a word ("Needs approval", "Working", "Done", "Failed"),
@@ -305,6 +306,8 @@ pub(super) struct Filter {
     input: Option<Entity<InputState>>,
     query: String,
     events: Option<Subscription>,
+    /// The field takes the keyboard once it is drawn: asked by key.
+    focus_asked: bool,
 }
 
 impl std::fmt::Debug for NavState {
@@ -805,6 +808,41 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Show the navigator and type into its filter: what is typed narrows every row.
+    pub fn filter_navigator(
+        &mut self,
+        _: &super::actions::FilterNavigator,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.navigator_mode(window) {
+            Mode::Docked => {
+                let nav = self.layout.navigator();
+                if !nav.shown {
+                    self.layout.set_navigator(Navigator { shown: true, ..nav });
+                    self.layout_touched(cx);
+                }
+            }
+            Mode::Overlay | Mode::Drawer => self.nav.open = true,
+        }
+        self.nav.filter.focus_asked = true;
+        cx.notify();
+    }
+
+    /// Give the filter the keyboard when a key asked for it and the field is there.
+    pub(super) fn settle_navigator_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.nav.filter.focus_asked {
+            return;
+        }
+        if let Some(input) = self.nav.filter.input.clone() {
+            self.nav.filter.focus_asked = false;
+            input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+    }
+
     /// Group the navigator by repository, or back by worker (kept with the layout).
     pub fn toggle_navigator_lens(
         &mut self,
@@ -1203,6 +1241,14 @@ impl WorkspaceView {
             .map(|a| {
                 if needs_human(a) {
                     agent_ask_line(a).unwrap_or_default()
+                } else if status == Status::Done {
+                    // Under *To review*, which says it ended: what it said it did, else how long
+                    // the turn ran.
+                    self.face_summary(at.session)
+                        .or_else(|| {
+                            self.finished.get(&at.session).map(|f| kit::duration(f.elapsed))
+                        })
+                        .unwrap_or_default()
                 } else if status == Status::Working && calm(a) {
                     // Listed as working by its face while the hook lags: what the face says,
                     // or nothing yet, never the hook's calm word.
@@ -1417,6 +1463,15 @@ impl WorkspaceView {
                 working: None,
             });
             rows.extend(waiting.into_iter().map(NavRow::Agent));
+        }
+        let review = agents(&self.to_review(), Status::Done);
+        if !review.is_empty() {
+            rows.push(NavRow::Heading {
+                selector: "nav-to-review",
+                text: "To review",
+                working: None,
+            });
+            rows.extend(review.into_iter().map(NavRow::Agent));
         }
         let working = agents(&self.working(), Status::Working);
         if !working.is_empty() {
@@ -1788,7 +1843,11 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let (first, second) = line_heights(theme);
         let session = agent.at.session;
-        let prefix = if agent.status == Status::NeedsYou { "nav-waiting" } else { "nav-working" };
+        let prefix = match agent.status {
+            Status::NeedsYou => "nav-waiting",
+            Status::Done => "nav-review",
+            _ => "nav-working",
+        };
         let label = [agent.title.as_str(), agent.words.as_str(), agent.status.label()]
             .into_iter()
             .filter(|part| !part.is_empty())

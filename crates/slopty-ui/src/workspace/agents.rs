@@ -390,6 +390,22 @@ impl WorkspaceView {
         shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
     }
 
+    /// The agents whose turn ended while nobody looked, left to review: unread and not snoozed,
+    /// in reading order.
+    pub(super) fn to_review(&self) -> Vec<Waiting> {
+        let mut ended: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
+            .agent_turns()
+            .filter(|session| !self.snoozed(*session))
+            .filter_map(|session| {
+                let tile = self.tile_of_session(session)?;
+                let at = Waiting { worker: tile.worker, tile: Some(tile), session };
+                Some((self.layout.position(tile), at))
+            })
+            .collect();
+        ended.sort_by_key(|(pos, w)| (pos.map(|p| (p.workspace, p.column, p.tile)), w.session));
+        ended.into_iter().map(|(_, w)| w).collect()
+    }
+
     /// What is known about a session's agent: the worker's own word while its link is up,
     /// else the server's.
     pub(super) fn agent_state(&self, session: SessionId) -> Option<&AgentEvent> {

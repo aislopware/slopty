@@ -31,6 +31,28 @@ fn filter(cx: &mut VisualTestContext, text: &str) {
     cx.run_until_parked();
 }
 
+/// ⌘⇧E shows a hidden navigator and puts the keyboard in its filter, so what is typed next
+/// narrows the rows.
+#[gpui::test]
+fn a_key_types_into_the_navigators_filter(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let slopty =
+        opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/w/oss/slopty"));
+    let site = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/w/web/site"));
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    assert!(!shown(cx, "nav-filter"), "hidden");
+    cx.simulate_keystrokes("cmd-shift-e");
+    cx.run_until_parked();
+    assert!(shown(cx, "nav-filter"), "shown again");
+    cx.simulate_input("site");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.navigator_filter().to_owned()), "site");
+    let row = |t: TileRef| selector("nav-tile", t.item);
+    assert!(shown(cx, row(site)) && !shown(cx, row(slopty)), "typed, it narrows");
+}
+
 /// The filter keeps the tiles whose title or second line has what was typed, and every tile
 /// of a worker whose name has it. A fold hides nothing while it filters; with nothing left it
 /// says so; ↩ goes to the first tile listed, and Esc empties it.

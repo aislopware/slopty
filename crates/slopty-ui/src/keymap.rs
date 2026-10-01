@@ -287,6 +287,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "undo_close", ws::UndoClose, &["cmd-z"], W),
         c(Workspace, "next_attention", ws::NextAttention, &["cmd-shift-a"], W),
         c(Workspace, "toggle_inbox", ws::ToggleInbox, &["cmd-shift-u"], W),
+        c(Workspace, "filter_navigator", ws::FilterNavigator, &["cmd-shift-e"], W),
         c(Workspace, "toggle_mute", ws::ToggleMute, &["cmd-shift-m"], W),
         c(Workspace, "toggle_stats", ws::ToggleStats, &["cmd-shift-i"], W),
         c(Workspace, "type_clipboard", ws::TypeClipboard, &[], W),

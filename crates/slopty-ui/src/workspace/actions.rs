@@ -47,6 +47,8 @@ actions!(
         NextAttention,
         /// Open the inbox, or close it.
         ToggleInbox,
+        /// Show the navigator and type into its filter.
+        FilterNavigator,
         /// Silence or resume the focused remote window's audio on this client.
         ToggleMute,
         /// Show or hide the stream stats overlay on every remote window.
@@ -262,6 +264,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Undo close", IconName::Undo2, Box::new(UndoClose)),
         w("Next thing that needs you", IconName::BellRing, Box::new(NextAttention)),
         w("Inbox", IconName::Bell, Box::new(ToggleInbox)),
+        w("Filter the navigator", IconName::ListFilter, Box::new(FilterNavigator)),
         w("Mute sound", IconName::VolumeX, Box::new(ToggleMute)),
         w("Stream stats", IconName::Activity, Box::new(ToggleStats)),
         w(

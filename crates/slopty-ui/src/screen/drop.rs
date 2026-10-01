@@ -272,7 +272,8 @@ impl ScreenView {
             .items_center()
             .justify_center()
             .debug_selector(|| "screen-drop-ring".to_owned())
-            .child(status_icon(theme, Status::Working, px(icon), hsla(theme.surfaces.accent)));
+            // Busy is muted: colour is kept for what needs the person.
+            .child(status_icon(theme, Status::Working, px(icon), hsla(theme.surfaces.text_muted)));
         Some(ring)
     }
 }

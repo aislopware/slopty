@@ -78,6 +78,39 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
     );
 }
 
+/// With the person at another of their devices nothing notifies here, and what was up is
+/// taken back as they arrive there; once they leave it, a new moment notifies again.
+#[test]
+fn nothing_notifies_while_the_person_is_at_another_device() {
+    let (mut attention, memory) = attention();
+    let (a, b) = (route(1), route(2));
+    attention.set_active(false);
+    attention.look(&Look {
+        asking: vec![asking(a, "Run cargo test")],
+        turns: Vec::new(),
+        unread: 1,
+    });
+    assert_eq!(memory.posted().len(), 1, "away from every device: the phone says it");
+
+    attention.set_present_elsewhere(true);
+    assert_eq!(memory.withdrawn(), [a.session.to_string()], "at the Mac, the phone's note goes");
+    let both = vec![asking(a, "Run cargo test"), asking(b, "Asks: which one?")];
+    attention.look(&Look { asking: both.clone(), turns: Vec::new(), unread: 2 });
+    let done =
+        Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(60) };
+    attention.command_finished(route(3), "build".into(), &done, Duration::from_secs(5));
+    assert_eq!(memory.posted().len(), 1, "nothing new while the Mac is in front of them");
+
+    attention.set_present_elsewhere(false);
+    let c = route(4);
+    let mut three = both;
+    three.push(asking(c, "Asks: ship it?"));
+    attention.look(&Look { asking: three, turns: Vec::new(), unread: 3 });
+    let posted = memory.posted();
+    assert_eq!(posted.len(), 2, "gone from the Mac, a new wait notifies: {posted:?}");
+    assert_eq!(posted[1].id, c.session.to_string());
+}
+
 #[test]
 fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
     let (mut attention, memory) = attention();
@@ -619,4 +652,29 @@ fn an_agent_finishing_out_of_sight_lands_in_the_inbox(cx: &mut TestAppContext) {
         assert_eq!(v.inbox_count(), 0, "read by its focus; nothing else earned a row");
         assert!(v.attention_look().turns.is_empty());
     });
+}
+
+/// An agent whose turn ended unseen, with its own row out of sight (its worker folded), is
+/// listed under *To review* in the navigator, saying what it did; a press goes to it, which
+/// reads it, and the section goes.
+#[gpui::test]
+fn an_agent_that_ended_unseen_is_listed_to_review(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (away, here) = (SessionId::new(), SessionId::new());
+    let key = WorkerKey::new(7);
+    let (tiles, _link) = worker(&view, cx, key, "mini", &[away, here]);
+    view.update_in(cx, |v, _window, cx| {
+        v.focus_tile(tiles[1], cx);
+        v.agent_event(agent(away, AgentStatus::Working, 100, None), cx);
+        v.agent_event(agent(away, AgentStatus::Done, 220, Some("Fixed the test")), cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("nav-to-review").is_none(), "its own row says it");
+    press(cx, leak(format!("nav-worker-{key}")));
+    assert!(cx.debug_bounds("nav-to-review").is_some(), "folded away, the section lists it");
+    let words = view.read_with(cx, |v, _| v.to_review());
+    assert_eq!(words.iter().map(|w| w.session).collect::<Vec<_>>(), [away]);
+    press(cx, leak(format!("nav-review-{away}")));
+    assert_eq!(view.read_with(cx, |v, _| v.focused()), Some(tiles[0]), "it went there");
+    assert!(cx.debug_bounds("nav-to-review").is_none(), "looked at, nothing is left to review");
 }

@@ -4563,3 +4563,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   by the pointer they keep the 120 ms fade, which helps the eye find where they came from.
   Which it was is GPUI's own `Window::last_input_was_keyboard` at the moment of opening. The
   inbox has its own key now, ⌘⇧U, and a palette row.
+
+- ✅ **Notifications by presence, and children through their parent** (2026-10-02, GUI-first
+  plan §3 item 8).
+  - **Presence.** The phone posts nothing while the person is at another of their devices,
+    and takes back what it had up as they arrive there: the Mac in front of them says it
+    (`Attention::set_present_elsewhere`). Who is where is the server's list of every client's
+    `Presence` (`FromServer::Present`): the app sets the gate while another client on a desk
+    seat is active and this one is handheld.
+  - **Children report through their parent** in the server's ladder, which folds each
+    subagent into the thread it hangs from (`slopty_proto::thread::attention`), so the rail,
+    the inbox and the notes take the root's word. A client-side fold was written and dropped
+    rather than kept beside it: one fold, on the server, for every list. The rule it settled,
+    asked of the ladder: a child that needs the person always lifts its root, naming the
+    child; a child's failure stays its parent's (the root reads Working) while the parent
+    works, and is the person's once the family has settled.
+  - **To review.** The rail lists an agent whose turn ended unseen under *To review*, between
+    *Needs you* and *Working*, while its own row is out of sight, with what it said it did,
+    else how long it ran; the status bar counts them per worker beside working, waiting and
+    blocked. Once the worker reports a turn's diff, *To review* narrows to turns that changed
+    files.
+  - Tests: `attention::tests::nothing_notifies_while_the_person_is_at_another_device` and
+    `an_agent_that_ended_unseen_is_listed_to_review`.

@@ -1743,6 +1743,7 @@ impl gpui::Render for WorkspaceView {
         self.place_navigator(window);
         if self.nav.drawn.is_some() {
             self.ensure_navigator_filter(window, cx);
+            self.settle_navigator_filter(window, cx);
         }
         let active = self.layout.active_workspace();
         let bare = self.layout.workspaces().get(active).is_none_or(|w| w.columns().is_empty());
@@ -1791,6 +1792,7 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::undo_close))
             .on_action(cx.listener(Self::next_attention))
             .on_action(cx.listener(Self::toggle_inbox))
+            .on_action(cx.listener(Self::filter_navigator))
             .on_action(cx.listener(Self::toggle_mute))
             .on_action(cx.listener(Self::toggle_stats))
             .on_action(cx.listener(Self::type_clipboard))

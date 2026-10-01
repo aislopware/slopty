@@ -10,8 +10,9 @@
 //! itself (a file's language and caret; a page's host is its header's), the ports forwarded
 //! here (which list them when clicked), the uploads in flight to tiles other than the focused
 //! one (whose header says its own), the count of workers only while one of them is not up
-//! (which opens the hosts popover: each worker's link, connect and forget), and the agents at
-//! work off screen (a tile in view says its own), each a faint "·" from the next. Who waits on
+//! (which opens the hosts popover: each worker's link, connect and forget), and each worker's
+//! agents: working, waiting, blocked and to review (a turn that ended unseen), each a faint "·"
+//! from the next. Who waits on
 //! the human is counted once, on the bell. The frame time shows only with the stream stats (⌘⇧I).
 //! Each readout is meta text with no icon, its figures tabular, and a state is a small dot of its
 //! fill beside quiet words: the tile and the bell carry the loud marks. A phone keeps the worker, a
@@ -121,13 +122,15 @@ impl std::fmt::Debug for Bar {
     }
 }
 
-/// How one worker's agents stand, in Claude Code's own three words: busy on a turn, waiting on
-/// work in the background, blocked on the person. An agent at rest is not counted.
+/// How one worker's agents stand, in Claude Code's own three words (busy on a turn, waiting on
+/// work in the background, blocked on the person), and how many ended a turn nobody has looked
+/// at yet. An agent at rest and seen is not counted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct AgentCounts {
     working: usize,
     waiting: usize,
     blocked: usize,
+    review: usize,
 }
 
 impl AgentCounts {
@@ -142,8 +145,13 @@ impl AgentCounts {
         *n = n.saturating_add(1);
     }
 
+    /// Count an agent whose turn ended unseen.
+    const fn add_review(&mut self) {
+        self.review = self.review.saturating_add(1);
+    }
+
     const fn is_empty(self) -> bool {
-        self.working == 0 && self.waiting == 0 && self.blocked == 0
+        self.working == 0 && self.waiting == 0 && self.blocked == 0 && self.review == 0
     }
 
     /// Each count there is, with its word and the mark's tone.
@@ -153,6 +161,7 @@ impl AgentCounts {
             (self.working, "working", s.text_muted),
             (self.waiting, "waiting", s.text_muted),
             (self.blocked, "blocked", s.warn_fill),
+            (self.review, "to review", s.accent_fill),
         ]
         .into_iter()
         .filter(|(n, ..)| *n > 0)
@@ -215,6 +224,9 @@ impl WorkspaceView {
             if let Some(status) = self.agent_mark(session) {
                 by_worker.entry(worker).or_default().add(status);
             }
+        }
+        for ended in self.to_review() {
+            by_worker.entry(ended.worker).or_default().add_review();
         }
         by_worker
             .into_iter()
@@ -1034,9 +1046,10 @@ mod tests {
         assert_eq!(agents_label(&theme, &[("studio".into(), one)]), "2 working, 1 blocked");
         let mut other = AgentCounts::default();
         other.add(Status::Running);
+        other.add_review();
         assert_eq!(
             agents_label(&theme, &[("studio".into(), one), ("mini".into(), other)]),
-            "studio: 2 working, 1 blocked; mini: 1 waiting",
+            "studio: 2 working, 1 blocked; mini: 1 waiting, 1 to review",
             "each worker named once there are two"
         );
         let mut rest = AgentCounts::default();

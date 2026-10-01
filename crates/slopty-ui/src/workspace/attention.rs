@@ -18,6 +18,10 @@
 //! this client answered takes its note away instead: the agent still reads as waiting until its
 //! worker says the prompt settled, and the answer is not news.
 //!
+//! Nothing notifies either while the person is at another of their devices
+//! ([`Attention::set_present_elsewhere`]): at the Mac, the phone in their pocket stays quiet, and
+//! what it had up is taken back, since the Mac in front of them says it.
+//!
 //! [`Attention`] decides and hands what it decided to a [`Notifier`]; the app owns one and
 //! feeds it a [`Look`] after every change of the workspace, and each finished command.
 
@@ -153,6 +157,8 @@ pub struct Attention {
     notifier: Rc<dyn Notifier>,
     /// The app is in front.
     active: bool,
+    /// The person is at another of their devices.
+    elsewhere: bool,
     /// The sessions whose agent was waiting at the last look.
     asking: HashSet<SessionId>,
     /// The sessions whose agent's finished turn was unread at the last look.
@@ -183,6 +189,7 @@ impl Attention {
         Self {
             notifier,
             active: true,
+            elsewhere: false,
             asking: HashSet::new(),
             turns: HashSet::new(),
             posted: HashMap::new(),
@@ -200,19 +207,38 @@ impl Attention {
     /// The app came to the front or left it. Coming back takes back every note up.
     pub fn set_active(&mut self, active: bool) {
         if active && !self.active {
-            for (session, _) in self.posted.drain() {
-                self.notifier.withdraw(&session.to_string());
-            }
-            self.answers.clear();
+            self.withdraw_all();
         }
         self.active = active;
+    }
+
+    /// The person is at another of their devices, or has left it. Arriving there takes back
+    /// every note up here: the device in front of them says it.
+    pub fn set_present_elsewhere(&mut self, elsewhere: bool) {
+        if elsewhere && !self.elsewhere {
+            self.withdraw_all();
+        }
+        self.elsewhere = elsewhere;
+    }
+
+    /// Whether a moment is worth a note now: the app is not in front, and the person is not
+    /// at another device.
+    const fn away(&self) -> bool {
+        !self.active && !self.elsewhere
+    }
+
+    fn withdraw_all(&mut self) {
+        for (session, _) in self.posted.drain() {
+            self.notifier.withdraw(&session.to_string());
+        }
+        self.answers.clear();
     }
 
     /// The workspace changed: an agent that has just started to wait notifies while the app is
     /// away, one that stopped takes its note back, and the badge follows the inbox.
     pub fn look(&mut self, look: &Look) {
         let now: HashSet<SessionId> = look.asking.iter().map(|a| a.route.session).collect();
-        if !self.active {
+        if self.away() {
             for asking in &look.asking {
                 let session = asking.route.session;
                 let up = self.posted.get(&session) == Some(&Why::Asks);
@@ -243,7 +269,7 @@ impl Attention {
         }
         self.asking = now;
         let turns: HashSet<SessionId> = look.turns.iter().map(|t| t.route.session).collect();
-        if !self.active {
+        if self.away() {
             let fresh: Vec<&Turn> =
                 look.turns.iter().filter(|t| !self.turns.contains(&t.route.session)).collect();
             for turn in fresh {
@@ -273,7 +299,7 @@ impl Attention {
         done: &Finished,
         slow: Duration,
     ) {
-        if self.active || done.elapsed < slow {
+        if !self.away() || done.elapsed < slow {
             return;
         }
         let command = done.command.trim();
@@ -295,7 +321,7 @@ impl Attention {
     /// A program in `route`'s session asked for a desktop notification: it notifies while the
     /// app is away. In front, the tile's own attention mark is enough.
     pub fn program(&mut self, route: Route, title: String, body: String) {
-        if self.active {
+        if !self.away() {
             return;
         }
         let note = Note {
@@ -311,7 +337,7 @@ impl Attention {
     /// A note's "Allow" or "Deny" for `route`'s agent found no prompt to answer (`why`): said
     /// in a note of its own while the app is away. `title` is the tile's name.
     pub fn unanswered(&mut self, route: Route, title: String, why: &str) {
-        if self.active {
+        if !self.away() {
             return;
         }
         let note = Note {
