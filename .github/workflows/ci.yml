@@ -71,6 +71,10 @@ jobs:
       - run: cargo xtask setup --lane ${{ matrix.lane }}
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       - run: cargo xtask gate --ci --lane ${{ matrix.lane }}
+      # Who holds the pseudo-terminals when the tests lane fails: the runner allows 511, as a Mac
+      # does, and the suite once ran out of them (run 36817494749).
+      - if: failure() && matrix.lane == 'tests'
+        run: lsof -n /dev/ptmx
       # What a slow run is read from afterwards: each test's time, each unit of the build's, and
       # how much of the build the compile cache served.
       - if: always() && matrix.lane == 'tests'
