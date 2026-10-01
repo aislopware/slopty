@@ -21,6 +21,7 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
         id: id(name),
         title: "Ship the project board".to_owned(),
         repo: "slopty".to_owned(),
+        repo_id: None,
         target: "main".to_owned(),
         verifier: Some("cargo gate".to_owned()),
         orchestrator,

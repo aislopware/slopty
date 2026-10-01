@@ -59,6 +59,10 @@ mod golden_project {
             id: project_id(),
             title: "Projects mode".to_owned(),
             repo: "~/src/slopty".to_owned(),
+            repo_id: Some(slopty_proto::terminal::RepoId {
+                origin: Some("github.com/aislopware/slopty".to_owned()),
+                root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+            }),
             target: "main".to_owned(),
             verifier: Some("cargo gate".to_owned()),
             orchestrator: Some(term()),

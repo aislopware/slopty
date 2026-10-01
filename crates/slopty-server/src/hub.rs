@@ -595,6 +595,7 @@ impl Hub {
             let term = TermRef { worker, session: summary.id };
             self.happen(Happening::SessionOpened { worker, summary });
             self.adopt(&mut state, term);
+            self.repo_seen(&mut state, term);
         }
         // What was sent to its agents and never handed over goes again.
         for batch in state.deliveries.outstanding_on(worker) {
@@ -1306,6 +1307,7 @@ impl Lease {
                 hub.announce(FromServer::Load { worker, load });
             }
             ToServer::SessionChanged(summary) => {
+                let term = TermRef { worker, session: summary.id };
                 // A known session reports a change (a resize, a new directory): no event of its
                 // own, but for its program exiting.
                 if let Some(known) = entry.sessions.iter_mut().find(|s| s.id == summary.id) {
@@ -1323,6 +1325,7 @@ impl Lease {
                     hub.adopt(&mut state, term);
                     hub.unpark_deliveries(&mut state);
                 }
+                hub.repo_seen(&mut state, term);
             }
             ToServer::SessionClosed { session, .. } => {
                 entry.sessions.retain(|s| s.id != session);

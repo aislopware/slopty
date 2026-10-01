@@ -24,6 +24,7 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 
 use crate::agent::{AgentBranch, PullRequest};
 use crate::orchestration::{Size, TermRef};
+use crate::terminal::RepoId;
 
 /// The variable naming the server, `host[:port]`, in every session a worker runs: `slopty mcp`
 /// and the CLI inside it find the server with no flag.
@@ -421,6 +422,9 @@ pub struct Project {
     pub title: String,
     /// The repository its tasks work in, as the orchestrator names it (a path or a URL).
     pub repo: String,
+    /// Which repository that is on every machine ([`RepoId`]), learned from where its
+    /// orchestrator works: a task started with no directory goes beside a clone of it.
+    pub repo_id: Option<RepoId>,
     /// The branch finished work lands on.
     pub target: String,
     /// The command that says a task's work is right (`cargo gate`), when there is one.
@@ -1097,6 +1101,7 @@ impl Project {
             self.target.len(),
             self.verifier.as_deref().map_or(0, str::len),
             self.metadata.as_deref().map_or(0, str::len),
+            self.repo_id.as_ref().map_or(0, |id| id.keys().map(str::len).sum()),
         ]
         .into_iter()
         .fold(128_usize, |sum, len| sum.saturating_add(len).saturating_add(10))

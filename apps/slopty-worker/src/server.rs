@@ -234,9 +234,16 @@ async fn session(
                             _ => None,
                         };
                         let outcome = orchestrator.serve(key, verb).await;
-                        // The server lists each terminal's size from its summaries: the new one
-                        // goes ahead of the answer, so a listing after it shows the size.
-                        if let (Some(session), Outcome::Done) = (resized, &outcome)
+                        // The server knows each terminal from its summaries: a terminal opened
+                        // and a new size go ahead of the answer, so whatever its caller does
+                        // next with the answer (name it a project's orchestrator, list it) finds
+                        // it as it is.
+                        let ahead = match (&outcome, resized) {
+                            (Outcome::Opened(term), _) => Some(term.session),
+                            (Outcome::Done, resized) => resized,
+                            _ => None,
+                        };
+                        if let Some(session) = ahead
                             && let Some(summary) = orchestrator.summary(session).await
                         {
                             let _sent = out.send(ToServer::SessionChanged(summary)).await;

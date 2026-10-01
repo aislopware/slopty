@@ -78,6 +78,8 @@ fn main() -> ExitCode {
 struct Record {
     at: Option<PathBuf>,
     argv: Vec<String>,
+    /// The directory it was started in.
+    cwd: Option<String>,
     env: serde_json::Map<String, Value>,
     /// Every variable it was started with, by name, as a digest of its value
     /// (`slopty_testkit::env::digests`): no value is written.
@@ -95,6 +97,7 @@ impl Record {
         let Some(at) = &self.at else { return Ok(()) };
         let doc = json!({
             "argv": self.argv,
+            "cwd": self.cwd,
             "env": self.env,
             "inherited": self.inherited,
             "mcp_config": self.mcp_config,
@@ -110,6 +113,7 @@ fn run(args: &[String]) -> Fallible<()> {
     let mut record = Record {
         at: std::env::var_os("STUB_RECORD").map(PathBuf::from),
         argv: args.to_vec(),
+        cwd: std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()),
         env: std::env::vars()
             .filter(|(k, _)| k.starts_with("SLOPTY_") || k.starts_with("CLAUDE_"))
             .map(|(k, v)| (k, Value::String(v)))

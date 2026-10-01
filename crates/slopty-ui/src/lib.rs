@@ -60,6 +60,7 @@ pub mod palette;
 pub mod paste_key;
 pub mod picker;
 pub mod project;
+pub mod repo_groups;
 #[cfg(any(test, feature = "e2e"))]
 pub mod retained;
 #[expect(

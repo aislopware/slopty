@@ -25,6 +25,7 @@ use slopty_proto::project::{
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
+use slopty_proto::terminal::RepoId;
 
 use crate::placement;
 
@@ -967,6 +968,7 @@ impl Projects {
             id: new.id.clone(),
             title,
             repo: new.repo.trim().to_owned(),
+            repo_id: None,
             target: new.target.trim().to_owned(),
             verifier: verifier(new.verifier)?,
             orchestrator: new.orchestrator,
@@ -1593,6 +1595,22 @@ impl Projects {
             updates.push(Change { durable, ..record.task_update(&task, entry) });
         }
         updates
+    }
+
+    /// The terminal `term` is in the repository `id`: a project it orchestrates that knows no
+    /// repository yet learns it, each key clipped like any other ref. Learned once: the
+    /// orchestrator walking into another checkout later does not move where tasks go.
+    pub(crate) fn repo_seen(&mut self, term: TermRef, id: &RepoId) -> Vec<Change> {
+        let clip = |key: &Option<String>| key.as_deref().map(|k| clipped(k, REF_MAX));
+        let id = RepoId { origin: clip(&id.origin), root: clip(&id.root) };
+        self.records
+            .values_mut()
+            .filter(|r| r.project.orchestrator == Some(term) && r.project.repo_id.is_none())
+            .map(|record| {
+                record.project.repo_id = Some(id.clone());
+                record.record_update(None)
+            })
+            .collect()
     }
 
     /// The terminal `term` closed: what worked in it is gone.

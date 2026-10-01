@@ -1864,6 +1864,7 @@ mod tests {
                 id,
                 title: "Slopty".to_owned(),
                 repo: "~/slopty".to_owned(),
+                repo_id: None,
                 target: "main".to_owned(),
                 verifier: None,
                 orchestrator: None,

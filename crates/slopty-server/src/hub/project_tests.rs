@@ -1526,11 +1526,80 @@ async fn the_orchestrator_is_told_where_its_repository_is_cloned() {
     };
     assert!(
         context.contains(
-            "Its repository is github.com/aislopware/slopty on every worker: clones of it are on \
+            "Its repository is github.com/aislopware/slopty on every worker; clones of it are on \
              linux (/home/c/slopty), studio (/w/slopty)."
         ),
         "{context}"
     );
     assert!(context.contains(r#"`"github.com/aislopware/slopty" in repos`"#), "{context}");
+    let learned = status(&hub).await.project.repo_id;
+    assert_eq!(learned.and_then(|id| id.origin).as_deref(), origin, "the project keeps it");
     delivering.abort();
+}
+
+/// A task started with no directory goes beside a clone of the project's repository, the
+/// rules permitting, and starts in it: an agent that writes in a git worktree of its own,
+/// named for the task, one that only reads in the clone itself. A worker with no clone cannot
+/// take it, and the refusal says so.
+#[tokio::test]
+async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let in_clone = |session: SessionId, path: &str, origin: Option<&str>| SessionSummary {
+        repo: Some(path.to_owned()),
+        repo_id: Some(slopty_proto::terminal::RepoId {
+            origin: origin.map(str::to_owned),
+            root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+        }),
+        ..summary(session)
+    };
+    let orchestrator = SessionId::new();
+    let origin = Some("github.com/aislopware/slopty");
+    let studio = vec![in_clone(orchestrator, "/w/slopty", origin)];
+    let (studio, _studio_lease, _studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let linux = vec![in_clone(SessionId::new(), "/home/c/slopty", None)];
+    let (_linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
+    let (_bare, _bare_lease, _bare_rx) = worker_on(&hub, "bare", Os::Linux, Vec::new());
+    create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
+    let anywhere = TaskLaunch { cwd: String::new(), ..claude(&[]) };
+
+    let writes = new_task(&hub, linux_only()).await;
+    let verb = Verb::TaskSpawn { project: project(), task: writes, launch: anywhere.clone() };
+    let asked = spawn(&hub, verb);
+    let start = request(&mut linux_rx).await;
+    let Verb::SpawnAgent { cwd, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
+    assert_eq!(cwd, "/home/c/slopty", "the clone on the Linux worker, found by its first commit");
+    let name = format!("slopty-slopty-{writes}");
+    assert!(args.windows(2).any(|w| w == ["--worktree", name.as_str()]), "{args:?}");
+    let role = args.iter().find(|a| a.starts_with("--append-system-prompt=")).unwrap();
+    assert!(role.contains(&format!("a git worktree of your own, {name}")), "{role}");
+    opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    let spec = TaskSpec {
+        title: "Read the logs".to_owned(),
+        read_only: true,
+        placement: linux_only(),
+        ..TaskSpec::default()
+    };
+    let Outcome::Task(reads) =
+        hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await
+    else {
+        panic!("no task")
+    };
+    let verb = Verb::TaskSpawn { project: project(), task: reads.id, launch: anywhere.clone() };
+    let asked = spawn(&hub, verb);
+    let start = request(&mut linux_rx).await;
+    let Verb::SpawnAgent { cwd, args, .. } = start.1.clone() else { panic!("{:?}", start.1) };
+    assert_eq!(cwd, "/home/c/slopty");
+    assert!(!args.iter().any(|a| a == "--worktree"), "one that only reads needs none: {args:?}");
+    opened(&linux_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    let only_bare =
+        Placement { require: vec![r#"name == "bare""#.to_owned()], ..Placement::default() };
+    let there = new_task(&hub, only_bare).await;
+    let launch = anywhere;
+    let no = hub.dispatch(Verb::TaskSpawn { project: project(), task: there, launch }).await;
+    let said = refused(&no, ErrorCode::Unplaced);
+    assert!(said.contains("in repos"), "the clone rule is named: {said}");
 }

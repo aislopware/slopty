@@ -511,12 +511,50 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   and `repos["github.com/o/r"]` says where. An orchestrator's role names its repository by that
   key and lists the workers with a clone and their paths.
 - The navigator's "By repository" lens is to group by the same keys, so one repository cloned
-  on two workers is one group (the UI's part, not yet built).
+  on two workers is one group. The grouping is `slopty_ui::repo_groups::group`, a pure
+  function: clones join when their identities match or they share a path, transitively, and
+  a group is keyed by its least origin, else its first commit, else its path, so a fold kept
+  under the key holds whatever order the tiles come in. The navigator is not wired to it yet.
 - Tests: `an_origin_is_the_same_however_it_was_spelled`,
   `the_origin_is_read_from_the_config_worktrees_share`, `clones_share_their_first_commit`
   (real git), `a_repository_is_identified_once_and_its_sessions_told`,
   `a_repository_is_a_fact_of_every_worker_with_a_clone` and
   `the_orchestrator_is_told_where_its_repository_is_cloned`.
+
+**A task with no directory starts beside a clone, in a worktree of its own.** ✅ 2026-10-01
+- An orchestrator could start a task only in a directory it named, and it cannot know the
+  paths on another machine. Two agents started in one checkout also edit the same files.
+- A project learns its repository's identity from the shell its orchestrator works in
+  (`Project::repo_id`): when the project is created or its orchestrator named, and whenever
+  that terminal's summary first names one. It is learned once, so the orchestrator walking into
+  another checkout later does not move where tasks go.
+- `task_spawn` with an empty `cwd` adds a rule to the task's placement: either key of that
+  identity is in the worker's `repos`. The task then starts in the clone's root on the worker
+  chosen. When no worker fits, the refusal says the task needed a clone, and of what.
+- An agent that writes starts with `--worktree slopty-<project>-<task>`, unless its arguments
+  name a worktree already. Claude Code makes the worktree under the clone's `.claude/worktrees/`
+  on branch `worktree-<name>`, and reopens it when the task is started again. Its status line
+  reports it, so the board shows the branch as for any agent. A read-only task runs in the clone
+  itself. The agent's role says where it works and which branch to report.
+- Why Claude Code's own `--worktree` rather than a worker verb that runs `git worktree add`:
+  it is a safe flag the server already lets through. It reopens a worktree by name, it
+  honours the person's `worktree.baseRef` and `WorktreeCreate` hook, and the worktree it makes
+  already reaches the board through the status line. A verb of our own would duplicate all of
+  that and still need the status line to report it.
+- The orchestrator's role says this, and that work needing no Apple platform belongs on a
+  Linux worker (`os == "linux"`).
+- Tests: `a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own` (hub, with a
+  Linux clone found by its first commit only), and
+  `a_task_with_no_directory_starts_in_a_worktree_of_the_project_s_clone` in
+  `apps/slopty-cli/tests/projects.rs`. In that test a real worker identifies a real git
+  repository with an origin, the project learns it, and the stub `claude` starts in the clone
+  with `--worktree slopty-demo-1`.
+- That test found a race: a terminal opened through the server could be answered before the
+  worker's summary of it arrived, so naming it a project's orchestrator at once was refused as
+  an unknown terminal (2 of 30 runs at 8 at a time). The worker now sends the summary of a
+  terminal it opened ahead of the answer, as it already did a resize's
+  (`a_worker_registers_answers_forwarded_verbs_and_comes_back` holds the order); 40 of 40
+  runs passed after.
 
 **An idle agent is woken through its inbox, and the hooks still decide.** ✅ 2026-09-30
 - Claude Code takes messages from other processes on a socket it names in each session's
@@ -611,8 +649,9 @@ MonoCode)
   the same order on every run. Three runs rendered byte-identical goldens.
 
 Not built in Phase 1:
-- worktrees and mirrors, so a task's `cwd` must already exist on the placed worker (`repos`
-  says where a clone is);
+- clones made on demand: a task with no `cwd` waits for a worker that already has a clone,
+  and nothing clones the repository onto one that has none;
+- merging a worktree's branch from another machine back to the target;
 - the verifier run and the merge queue;
 - the known gaps under "An agent never has more than the person gave it".
 

@@ -518,4 +518,96 @@ mod tests {
 
         server.shutdown().await;
     }
+
+    /// `git -C dir args…`, with nobody's git config, once it succeeded.
+    fn git(dir: &Path, args: &[&str]) {
+        let ran = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+    }
+
+    /// The project learns which repository it works in from the shell its orchestrator runs
+    /// in, as the real worker identifies it (its origin, read from the config, and its first
+    /// commit, from git). A task then started with no directory goes beside that clone and
+    /// its agent starts there in a git worktree of its own, named for the task.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_task_with_no_directory_starts_in_a_worktree_of_the_project_s_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("demo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&repo, &["remote", "add", "origin", "git@github.com:aislopware/demo.git"]);
+        let (server, _daemons, worker) = fleet(&root, "").await;
+        let hub = server.hub().clone();
+
+        let shell = Verb::OpenTerminal {
+            worker,
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            command: Vec::new(),
+            env: Vec::new(),
+            name: None,
+            size: None,
+            session: None,
+        };
+        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("no shell") };
+        let project = ProjectId::new("demo").unwrap();
+        let made = hub
+            .dispatch(Verb::ProjectCreate {
+                project: project.clone(),
+                title: "Demo".to_owned(),
+                repo: "demo".to_owned(),
+                target: "main".to_owned(),
+                verifier: None,
+                orchestrator: Some(orchestrator),
+                limits: LimitsChange::default(),
+                metadata: None,
+            })
+            .await;
+        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+        let id = until("the project learns its repository", async || {
+            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
+        })
+        .await;
+        assert_eq!(id.origin.as_deref(), Some("github.com/aislopware/demo"));
+
+        let task = hub
+            .dispatch(Verb::TaskCreate {
+                project: project.clone(),
+                spec: Box::new(TaskSpec { title: "Write it".to_owned(), ..TaskSpec::default() }),
+            })
+            .await;
+        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
+        let record = root.join("record.json");
+        let launch = TaskLaunch {
+            pin: None,
+            cwd: String::new(),
+            run: Runner::Claude { prompt: None, args: Vec::new() },
+            env: vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())],
+            size: None,
+            ignore_dependencies: false,
+        };
+        let spawned = hub
+            .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
+            .await;
+        assert!(matches!(spawned, Outcome::Task(_)), "{spawned:?}");
+        let seen: Value = until("the agent starts", async || {
+            std::fs::read(&record).ok().and_then(|b| serde_json::from_slice(&b).ok())
+        })
+        .await;
+        assert_eq!(seen["cwd"].as_str().map(PathBuf::from), Some(repo), "beside the clone");
+        let argv: Vec<&str> =
+            seen["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert!(argv.windows(2).any(|w| w == ["--worktree", "slopty-demo-1"]), "{argv:?}");
+
+        server.shutdown().await;
+    }
 }

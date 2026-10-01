@@ -1078,7 +1078,11 @@ mod tests {
             panic!("the terminal opens");
         };
         assert_eq!(term.worker, worker);
-        peer.heard(|m| matches!(m, ToServer::SessionChanged(s) if s.id == term.session)).await;
+        // The server hears of the terminal before the answer, so a caller naming it next (a
+        // project's orchestrator) finds it.
+        let announced =
+            |m: &ToServer| matches!(m, ToServer::SessionChanged(s) if s.id == term.session);
+        assert!(peer.heard.iter().any(announced), "before the answer: {:?}", peer.heard);
 
         // Resized with no client showing it; the server hears the new size before the answer.
         let size = Size { cols: 100, rows: 30 };

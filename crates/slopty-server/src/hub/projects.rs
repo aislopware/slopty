@@ -22,7 +22,7 @@ use slopty_proto::project::{
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
-use slopty_proto::terminal::SessionSummary;
+use slopty_proto::terminal::{RepoId, SessionSummary};
 
 use super::{
     Again, Entry, Hub, State, WAIT_CAP_MS, branch_of, digest, error, keep_start, keyed, known_term,
@@ -488,14 +488,10 @@ struct Clones {
     on: Vec<(String, String)>,
 }
 
-/// [`Clones`] of the repository `project`'s orchestrator's terminal is in: keyed by its origin
-/// when it has one, else its first commit.
+/// [`Clones`] of `project`'s repository (learned from where its orchestrator works): keyed by
+/// its origin when it has one, else its first commit.
 fn clones_of(state: &State, project: &Project) -> Clones {
-    let Some(term) = project.orchestrator else { return Clones::default() };
-    let here = state.workers.get(&term.worker).and_then(|e| {
-        e.sessions.iter().find(|s| s.id == term.session).and_then(|s| s.repo_id.clone())
-    });
-    let Some(id) = here else { return Clones::default() };
+    let Some(id) = &project.repo_id else { return Clones::default() };
     let Some(key) = id.origin.clone().or_else(|| id.root.clone()) else {
         return Clones::default();
     };
@@ -516,7 +512,7 @@ fn clones_of(state: &State, project: &Project) -> Clones {
 }
 
 /// The repositories a worker has a shell in, by each key of their identity
-/// ([`RepoId`](slopty_proto::terminal::RepoId): the
+/// ([`RepoId`]: the
 /// normalized origin, the first commit), to where the clone is. One repository cloned on two
 /// workers has the same keys on both, so `"github.com/o/r" in repos` places a task beside
 /// a clone of it and `repos["github.com/o/r"]` says where; with several clones on one worker
@@ -546,8 +542,43 @@ fn rules(project: &Project, key: &str) -> Option<String> {
     Some(plain(text.get(..end).unwrap_or_default())).filter(|t| !t.is_empty())
 }
 
+/// Claude Code's flag that starts a session in a git worktree of its own, by its two names.
+const WORKTREE_FLAGS: [&str; 2] = ["--worktree", "-w"];
+
+/// Where the server starts a task that named no directory: beside a clone of the project's
+/// repository on the worker it placed it on.
+struct Place {
+    /// The clone's root there.
+    path: String,
+    /// The worktree its agent works in, by the name Claude Code is given (`--worktree`), for
+    /// an agent that writes. Each such task has its own, so agents in one clone never edit
+    /// the same checkout.
+    worktree: Option<String>,
+}
+
+/// The placement rule that holds on a worker with a clone of `id`: either key of it in its
+/// `repos`. `None` for an identity with no key.
+fn beside_a_clone(id: &RepoId) -> Option<String> {
+    let held: Vec<String> = id
+        .keys()
+        .filter_map(|key| serde_json::to_string(key).ok())
+        .map(|key| format!("{key} in repos"))
+        .collect();
+    (!held.is_empty()).then(|| held.join(" || "))
+}
+
+/// Where `worker` has a clone of `project`'s repository.
+fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Option<String> {
+    let id = project.repo_id.as_ref()?;
+    let Fact::Map(repos) = repos_of(&state.workers.get(&worker)?.sessions) else { return None };
+    id.keys().find_map(|key| match repos.get(key) {
+        Some(Fact::Text(path)) => Some(path.clone()),
+        _ => None,
+    })
+}
+
 /// What an agent started for `task` is told of its role, beside Claude Code's own prompt.
-fn agent_role(project: &Project, task: &Task) -> String {
+fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
     let owns = if task.read_only {
         "none: it only reads".to_owned()
     } else if task.owns.is_empty() {
@@ -587,6 +618,17 @@ fn agent_role(project: &Project, task: &Task) -> String {
          they are."
             .to_owned(),
     ];
+    if let Some(Place { path, worktree }) = at {
+        lines.push(match worktree {
+            Some(name) => format!(
+                "- You work in a git worktree of your own, {name}, made from the clone at {} \
+                 (branch worktree-{name}). Commit your work there, and name that branch when \
+                 you report done.",
+                plain(path)
+            ),
+            None => format!("- You work in the clone at {}.", plain(path)),
+        });
+    }
     lines.extend(rules(project, "agent_rules"));
     lines.join("\n")
 }
@@ -609,15 +651,26 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
         "- Implement nothing yourself, merge nothing, and answer no permission: approvals are \
          the person's."
             .to_owned(),
+        "- Work that needs no Apple platform belongs on a Linux worker: require \
+         `os == \"linux\"` in its placement."
+            .to_owned(),
     ];
     if let Some(key) = &clones.key {
-        let on = clones.on.iter().map(|(name, path)| format!("{} ({})", plain(name), plain(path)));
+        let on: Vec<String> = clones
+            .on
+            .iter()
+            .map(|(name, path)| format!("{} ({})", plain(name), plain(path)))
+            .collect();
+        let on = if on.is_empty() {
+            "no worker has a clone of it yet".to_owned()
+        } else {
+            format!("clones of it are on {}", on.join(", "))
+        };
         lines.push(format!(
-            "- Its repository is {key} on every worker: clones of it are on {}. Place a task \
-             beside one with the rule `\"{key}\" in repos` and start it in \
-             `repos[\"{key}\"]`, the clone's path there; a worker without one needs a clone made \
-             first.",
-            on.collect::<Vec<_>>().join(", ")
+            "- Its repository is {key} on every worker; {on}. A task started with no cwd goes \
+             beside a clone, in a git worktree of its own when its agent writes. For a \
+             placement of your own, `\"{key}\" in repos` holds on a worker with a clone and \
+             `repos[\"{key}\"]` is its path there."
         ));
     }
     lines.extend(rules(project, "orchestrator_rules"));
@@ -887,6 +940,11 @@ impl Hub {
             }
             Err(refused) => refused,
         };
+        if let Some(term) =
+            named.as_ref().and_then(|p| state.projects.project(p).ok()?.orchestrator)
+        {
+            self.repo_seen(state, term);
+        }
         if let Some(project) = named
             && let Ok(record) = state.projects.project(&project)
         {
@@ -924,6 +982,19 @@ impl Hub {
         let on = term_of(&state, session).and_then(|term| state.projects.working_on(term));
         drop(state);
         Outcome::WorkingOn(on)
+    }
+
+    /// What `term`'s summary says of its repository goes to the projects it orchestrates.
+    pub(super) fn repo_seen(&self, state: &mut State, term: TermRef) {
+        let id = state
+            .workers
+            .get(&term.worker)
+            .and_then(|e| e.sessions.iter().find(|s| s.id == term.session))
+            .and_then(|s| s.repo_id.clone());
+        if let Some(id) = id {
+            let updates = state.projects.repo_seen(term, &id);
+            self.projects_moved(state, updates);
+        }
     }
 
     /// Every worker's facts, or one's.
@@ -1321,6 +1392,13 @@ impl Hub {
         fleet_room(state, &running, bounds, None)?;
         let mut placement = state.projects.task(project, task)?.placement.clone();
         placement.pin = launch.pin.or(placement.pin);
+        // With no directory named, it goes beside a clone of the project's repository.
+        let repo = state.projects.project(project)?.repo_id.as_ref();
+        if launch.cwd.trim().is_empty()
+            && let Some(rule) = repo.and_then(beside_a_clone)
+        {
+            placement.require.push(rule);
+        }
         Ok((placement, bounds.permission_flags))
     }
 
@@ -1393,6 +1471,17 @@ impl Hub {
             Ok(worker) => worker,
             Err(why) => {
                 let message = format!("no worker can take task {task} now: {why}");
+                let repo = self.inner.state.lock().projects.project(project).ok().and_then(|p| {
+                    let id = p.repo_id.as_ref()?;
+                    Some((id.origin.clone().or_else(|| id.root.clone())?, beside_a_clone(id)?))
+                });
+                let message = match repo.filter(|_| launch.cwd.trim().is_empty()) {
+                    Some((key, rule)) => format!(
+                        "{message}. With no cwd it must go beside a clone of {key} ({rule}): \
+                         clone it on a worker that fits, or name a cwd"
+                    ),
+                    None => message,
+                };
                 return error(ErrorCode::Unplaced, &message);
             }
         };
@@ -1401,28 +1490,42 @@ impl Hub {
             Self::reserve(&mut state, (project, task), &launch, worker).and_then(|placed| {
                 let permission_flags =
                     state.projects.policy().bounds_for(Some(project)).permission_flags;
-                let role = agent_role(
-                    state.projects.project(project)?,
-                    state.projects.task(project, task)?,
-                );
+                let (record, card) =
+                    (state.projects.project(project)?, state.projects.task(project, task)?);
+                let clone = launch.cwd.trim().is_empty().then(|| clone_on(&state, record, worker));
+                let at = clone.flatten().map(|path| {
+                    let writes = !card.read_only
+                        && matches!(&launch.run, Runner::Claude { args, .. }
+                            if !names(args, &WORKTREE_FLAGS));
+                    let worktree = writes.then(|| format!("slopty-{project}-{task}"));
+                    Place { path, worktree }
+                });
+                let role = agent_role(record, card, at.as_ref());
                 if !permission_flags && matches!(launch.run, Runner::Claude { .. }) {
                     watch(&mut state, placed.1, |w| w.locked = true);
                 }
-                Ok((placed, permission_flags, role))
+                Ok((placed, permission_flags, role, at))
             })
         };
-        let ((id, term), permission_flags, role) = match reserved {
+        let ((id, term), permission_flags, role, at) = match reserved {
             Ok(reserved) => reserved,
             Err(refused) => return refused,
         };
         let placed = Placed { hub: self, id, settled: false };
         let TaskLaunch { cwd, run, mut env, size, .. } = launch;
+        let (cwd, worktree) = match at {
+            Some(Place { path, worktree }) => (path, worktree),
+            None => (cwd, None),
+        };
         // Last, so they win over the caller's own.
         env.push((PROJECT_ENV.to_owned(), project.to_string()));
         env.push((TASK_ENV.to_owned(), task.to_string()));
         let session = Some(term.session);
         let (start, conversation) = match run {
-            Runner::Claude { prompt, args } => {
+            Runner::Claude { prompt, mut args } => {
+                if let Some(name) = worktree {
+                    args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name]);
+                }
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
                 let agent = AgentKind::ClaudeCode;
                 let spawn = Verb::SpawnAgent {
@@ -1630,7 +1733,7 @@ mod tests {
             cwd: Some(repo.to_owned()),
             repo: Some(repo.to_owned()),
             branch: None,
-            repo_id: Some(slopty_proto::terminal::RepoId {
+            repo_id: Some(RepoId {
                 origin: origin.map(str::to_owned),
                 root: root.map(str::to_owned),
             }),
