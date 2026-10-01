@@ -102,6 +102,41 @@ impl Driver {
         self.ok(&Command::DropFiles { paths, x, y }).await
     }
 
+    /// Carry a drag of `paths` to a window point: what it is over (`local`, or the worker's
+    /// `none`, `copy`, `link`, `move`) and the drag the window carries to the worker.
+    ///
+    /// # Errors
+    ///
+    /// When the app answers an error or the socket fails.
+    pub async fn drag_over(
+        &mut self,
+        paths: &[&Path],
+        x: f32,
+        y: f32,
+    ) -> Result<(String, Option<String>)> {
+        let paths = paths.iter().map(|p| p.display().to_string()).collect();
+        let command = Command::DragOver { paths, x, y };
+        match self.call(&command).await? {
+            Reply::Over { op, drag } => Ok((op, drag)),
+            Reply::Error { message } => bail!("{command:?}: {message}"),
+            other => bail!("{command:?}: unexpected {other:?}"),
+        }
+    }
+
+    /// Let go of the carried drag at a window point: whether the drop was taken.
+    ///
+    /// # Errors
+    ///
+    /// When the app answers an error or the socket fails.
+    pub async fn drag_drop(&mut self, x: f32, y: f32) -> Result<bool> {
+        let command = Command::DragDrop { x, y };
+        match self.call(&command).await? {
+            Reply::Taken { taken } => Ok(taken),
+            Reply::Error { message } => bail!("{command:?}: {message}"),
+            other => bail!("{command:?}: unexpected {other:?}"),
+        }
+    }
+
     /// Left click at a window point.
     ///
     /// # Errors

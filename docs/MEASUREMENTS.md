@@ -11033,6 +11033,33 @@ ms of the moves.
   and one promise. The promise's file arrived whole in the catcher's folder, and the app saw a
   copy.
 
+## 2026-10-01 — the drop in, end to end
+
+Mac Studio M1 Max, macOS 27.0.1, other sessions building beside it. The app against a worker
+that records its drops, on the drawn display, two runs:
+
+```sh
+cargo xtask e2e app --filter 'test(~dnd::)'
+```
+
+The app's self-test hands the workspace each step of the drag as the platform's destination
+would, 20 ms apart, and the test reads the worker's record and its drop directory every 20 ms,
+so each figure is up to 20 ms late. A note (20 bytes) and 24 MiB of bytes that do not repeat
+are dragged.
+
+| | ms |
+| --- | ---: |
+| refusing target: the first step → the badge reads none | 33.7, 35.7 |
+| drop → the release, both files whole in the landing | 269.4, 278.0 (1156.1 in a run before the fixes) |
+| refused drop → its landing gone on the worker | 21.5, 21.8 |
+| left drag → its landing gone | 20.9, 22.1 |
+
+- The digests the release found in the landing are the sources' own.
+- The drop was let go right after the badge read copy, so the 24 MiB went up mostly after the
+  drop: the release waited for it, as it should.
+- Before the fixes the refusing target's drag read copy for the whole 20 s, and a left drag's
+  landing still held `note.txt` and `frames.bin.partial` 20 s on.
+
 ## 2026-10-01 — the badge, timed, and a drag out of a window
 
 macOS 26 in a tart guest (4 cores, 8 GB, `--no-graphics`), each test once, ten rounds where a

@@ -14,6 +14,10 @@ mod clipboard;
 mod conversation;
 
 #[cfg(test)]
+#[path = "app/dnd.rs"]
+mod dnd;
+
+#[cfg(test)]
 #[path = "app/gallery.rs"]
 mod gallery;
 

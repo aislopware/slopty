@@ -5,7 +5,7 @@ use slopty_proto::transfer::{ClipFormat, INLINE_CLIP_BYTES};
 use super::*;
 
 fn url(path: &std::path::Path) -> String {
-    url::Url::from_file_path(path).unwrap().to_string()
+    file_url(path).unwrap()
 }
 
 /// A drag's pasteboard reads as the worker's drag will carry it: a file it names, by its name

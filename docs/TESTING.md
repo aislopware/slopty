@@ -60,6 +60,17 @@
    compared pixel for pixel while the page moves. Its `frame_time` case, under
    `cargo xtask e2e smooth`, times drawn frames from their capture stamp to the paint that
    shows them.
+   A drag from this Mac onto a remote tile is driven the same way. `drag_over`, `drag_drop` and
+   `drag_leave` hand the workspace each step as the platform's drop destination would
+   (`DropSink`), with the files on a pasteboard of the command's own, so no system drag runs
+   here. On the worker, `SLOPTY_DND_RECORD=<file>:<copy|none>` is the seam: no drag helper
+   starts and no system drag runs there either. A scripted one answers every step with the
+   operation named, and each release appends a line to `<file>` naming the drag and each file
+   in its landing with its BLAKE3 digest. Only a test sets it; a worker installed or launched
+   by the app never has it. `tests/app/dnd.rs` judges a drop on those digests against its
+   sources, and a refused or left drag on its landing being gone (`SLOPTY_DROP_DIR`). The
+   system's half (the destination, the helper's source and catcher, the badge) is proved in
+   `crates/slopty-dnd/tests/roles.rs` against apps the test owns.
    `cargo xtask e2e ios [--sim iphone|ipad]` is the same socket with
    the app in the simulator: the way to check anything on the phone or the tablet. There the
    socket also takes `ui_key_press` / `ui_touch` / `ui_pinch` / `ui_insert_text` /

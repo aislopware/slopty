@@ -7450,6 +7450,7 @@ name = "slopty-e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "data-encoding",
  "image",
  "objc2 0.6.4",

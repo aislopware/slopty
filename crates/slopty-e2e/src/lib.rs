@@ -182,6 +182,31 @@ pub enum Command {
         /// Window y in points.
         y: f32,
     },
+    /// Carry a drag of files from this machine to a window point, as the platform's drag
+    /// destination hands the workspace each step of a system drag (`DropSink::over`): the
+    /// files sit on a pasteboard of the command's own, and no system drag runs. Over a remote
+    /// tile the drag goes on to the worker. The first step carries the files; while the drag
+    /// stays on the same tile the paths are not read again. Answers [`Reply::Over`]. macOS
+    /// only.
+    DragOver {
+        /// Absolute paths on this machine.
+        paths: Vec<String>,
+        /// Window x in points.
+        x: f32,
+        /// Window y in points.
+        y: f32,
+    },
+    /// Let go of the drag [`Command::DragOver`] carries at a window point, as the platform's
+    /// `performDragOperation:` would (`DropSink::dropped`): answers [`Reply::Taken`]. macOS
+    /// only.
+    DragDrop {
+        /// Window x in points.
+        x: f32,
+        /// Window y in points.
+        y: f32,
+    },
+    /// The drag [`Command::DragOver`] carries leaves the window (`DropSink::left`). macOS only.
+    DragLeave,
     /// Move the pointer to a window point (no button).
     Move {
         /// Window x in points.
@@ -478,6 +503,19 @@ pub enum Reply {
         width: u32,
         /// Height.
         height: u32,
+    },
+    /// A [`Command::DragOver`]: what the drag is over.
+    Over {
+        /// `local` over the app's own (GPUI takes it); over a remote tile, what a drop there
+        /// would do as the worker last said: `none`, `copy`, `link` or `move`.
+        op: String,
+        /// The drag the window carries to the worker, if it is.
+        drag: Option<String>,
+    },
+    /// A [`Command::DragDrop`]: whether the drop was taken (a refused one slides back).
+    Taken {
+        /// Taken.
+        taken: bool,
     },
     /// The command failed.
     Error {

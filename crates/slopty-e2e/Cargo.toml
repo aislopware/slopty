@@ -102,6 +102,8 @@ slopty-proto.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+# A drop's files, as the worker's record of its release names them (`tests/app/dnd.rs`).
+blake3.workspace = true
 data-encoding.workspace = true
 slopty-agent.workspace = true
 # The Linux worker test reaches its worker as the app does (`tests/linux.rs`).

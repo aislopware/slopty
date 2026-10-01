@@ -99,12 +99,17 @@ fn moves_coalesce_and_a_still_hover_posts_nothing() {
 }
 
 /// What the target under the drag would do goes to the client when it changes, within what the
-/// source allows.
+/// source allows, and the first word always goes: a refusal from the start too, which the
+/// client would otherwise take for the copy it assumes.
 #[test]
 fn the_operation_is_told_when_it_changes() {
     let mut drop_in = live(&[file("a.txt")]);
     let drag = drop_in.drag();
     let op = |op| Heard::Helper(FromHelper::Operation { drag, op });
+    assert_eq!(
+        drop_in.hear(op(DragOp::None)),
+        [Act::Tell(DragEvent::Operation { drag, op: DragOp::None })]
+    );
     assert_eq!(
         drop_in.hear(op(DragOp::Copy)),
         [Act::Tell(DragEvent::Operation { drag, op: DragOp::Copy })]

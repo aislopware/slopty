@@ -116,6 +116,13 @@ impl Dnd {
         &self.drags
     }
 
+    /// Nothing landed from `drag`: its landing goes, off the stream's task
+    /// ([`Transfers::discard_drag`]).
+    fn discard_landing(&self, drag: DragId) {
+        let transfers = Arc::clone(&self.transfers);
+        drop(tokio::task::spawn_blocking(move || transfers.discard_drag(drag)));
+    }
+
     /// No drag yet, its files landing as `transfers` puts them.
     #[must_use]
     pub fn new(transfers: Arc<Transfers>) -> Self {
@@ -253,6 +260,8 @@ pub struct Carrying {
     /// The input thread's answer to where the drag's point is, while it is awaited.
     mapping: Option<oneshot::Receiver<Result<(f64, f64), InputError>>>,
     deadline: Option<tokio::time::Instant>,
+    /// The target took the drop: its landing is what it read, and stays.
+    landed: bool,
 }
 
 impl Carrying {
@@ -270,11 +279,14 @@ impl Carrying {
         let refuse =
             |why: &str| DragEvent::Ended { drag, op: DragOp::None, error: Some(why.to_owned()) };
         let Some(dnd) = dnd else { return Err(refuse(NOT_HERE)) };
-        let Some(claim) = dnd.drags().claim(client, drag) else { return Err(refuse(BUSY)) };
+        let Some(claim) = dnd.drags().claim(client, drag) else {
+            dnd.discard_landing(drag);
+            return Err(refuse(BUSY));
+        };
         let dir = dnd.transfers.drag_dir(drag);
         let (drop_in, acts) = DropIn::enter(drag, (x, y), allowed, &items, &dir);
         tracing::info!(%client, %drag, items = items.len(), "a drag enters");
-        Ok((Self { drop_in, claim, mapping: None, deadline: None }, acts))
+        Ok((Self { drop_in, claim, mapping: None, deadline: None, landed: false }, acts))
     }
 
     /// The drag.
@@ -327,6 +339,10 @@ impl Carrying {
         let mut over = false;
         for act in acts {
             match act {
+                Act::Tell(DragEvent::Ended { op, .. }) if op.takes() => self.landed = true,
+                _ => {}
+            }
+            match act {
                 Act::Enter { x, y } => {
                     let (answer, mapping) = oneshot::channel();
                     self.mapping = Some(mapping);
@@ -356,9 +372,12 @@ impl Carrying {
             }
         }
         if over {
-            tracing::info!(drag = %self.drag(), "the drag is over");
+            tracing::info!(drag = %self.drag(), landed = self.landed, "the drag is over");
             if let Some(dnd) = dnd {
                 dnd.drags().forget(self.drag());
+                if !self.landed {
+                    dnd.discard_landing(self.drag());
+                }
             }
         }
         over

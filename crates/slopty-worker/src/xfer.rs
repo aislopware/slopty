@@ -12,12 +12,13 @@
 //! The entries of unfinished transfers are listed in a ledger in the drop directory, and
 //! [`Transfers::sweep`] removes the partial files under them that nothing wrote to for
 //! [`STALE_PARTIAL`]: an upload cut for good leaves nothing behind in the directory it went to.
+//! A drag's landing that nothing landed from goes at once ([`Transfers::discard_drag`]).
 //!
 //! A download goes the other way, and resumes the same way: a retried fetch names the bytes the
 //! client holds of each file, and [`Transfers::resume_points`] sends a file from there when
 //! this worker sent that very version of it before, from the start otherwise.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Component, Path, PathBuf};
@@ -38,6 +39,10 @@ pub const STALE_PARTIAL: Duration = Duration::from_hours(24);
 /// The ledger of unfinished transfers' entries, in the drop directory: one JSON array of the
 /// transfer id and the entry's path per line.
 const LEDGER: &str = ".partials";
+
+/// Discarded drags remembered, so an upload into one that comes late is not begun: a drag's
+/// uploads begin on the control stream, which nothing orders against its end on the stream's.
+const DISCARDED: usize = 32;
 
 /// Why a transfer or one of its files failed.
 #[derive(Debug, thiserror::Error)]
@@ -193,6 +198,8 @@ pub struct Transfers {
     begun: Notify,
     /// Held while the ledger is read or written.
     ledger: Mutex<()>,
+    /// The drags whose landing was discarded, newest last, up to [`DISCARDED`].
+    discarded: Mutex<VecDeque<DragId>>,
 }
 
 /// `name` as a path under its transfer's root ([`relative_path`]).
@@ -263,6 +270,7 @@ impl Transfers {
             sent: Mutex::default(),
             begun: Notify::new(),
             ledger: Mutex::default(),
+            discarded: Mutex::default(),
         }
     }
 
@@ -275,7 +283,14 @@ impl Transfers {
     /// A client begins transfer `xfer` of `files` files to `dest`. `cwd` is the session's
     /// directory for [`Dest::SessionCwd`] (`None` when it never said: the drop directory).
     /// Beginning a transfer that is known already (a retry) keeps what it has and re-arms it.
+    /// One into a discarded drag's landing is not begun, so its files are refused.
     pub fn begin(&self, xfer: XferId, dest: &Dest, cwd: Option<&str>, files: u32) {
+        if let Dest::Drag(drag) = dest
+            && self.discarded.lock().contains(drag)
+        {
+            tracing::debug!(%xfer, %drag, "an upload into a discarded drag");
+            return;
+        }
         let fallback = self.drop_root.join(xfer.to_string());
         let (base, staging) = match dest {
             Dest::SessionCwd(_) => (cwd.map(|c| crate::file::expand_home(Path::new(c))), false),
@@ -315,6 +330,36 @@ impl Transfers {
     #[must_use]
     pub fn drag_dir(&self, drag: DragId) -> PathBuf {
         self.drop_root.join(drag.to_string())
+    }
+
+    /// `drag` ended with nothing landed from its landing, so nothing will read it: the uploads
+    /// into it stop and are forgotten, one that begins later is refused, and the landing is
+    /// deleted with whatever reached it, whole files and partial ones. The ledger keeps their
+    /// entries, so the sweep still finds a partial a stream wrote after this.
+    pub fn discard_drag(&self, drag: DragId) {
+        {
+            let mut discarded = self.discarded.lock();
+            if !discarded.contains(&drag) {
+                if discarded.len() == DISCARDED {
+                    discarded.pop_front();
+                }
+                discarded.push_back(drag);
+            }
+        }
+        self.inner.lock().retain(|_, t| {
+            let into = t.drag == Some(drag);
+            if into {
+                t.cancel.send_replace(true);
+            }
+            !into
+        });
+        let dir = self.drag_dir(drag);
+        match std::fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                tracing::warn!(%drag, dir = %dir.display(), error = %e, "a drag's landing");
+            }
+            _ => {}
+        }
     }
 
     /// The drag `xfer` uploads the drop of, while it is in flight.
@@ -870,6 +915,45 @@ mod tests {
         let staged = XferId::new();
         t.begin(staged, &Dest::Staging, None, 1);
         assert_eq!(t.drag_of(staged), None);
+    }
+
+    /// A drag that ended with nothing landed takes its landing with it: the file that landed,
+    /// the one still going up (stopped and forgotten) and an upload that begins after; another
+    /// drag's landing stays.
+    #[test]
+    fn a_discarded_drags_landing_goes_and_takes_no_more() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = transfers(dir.path());
+        let (drag, other) = (DragId::new(), DragId::new());
+        let (landed, going, kept) = (XferId::new(), XferId::new(), XferId::new());
+        for (xfer, into) in [(landed, drag), (going, drag), (kept, other)] {
+            t.begin(xfer, &Dest::Drag(into), None, 1);
+        }
+        let whole = t.target(landed, "a.txt").unwrap();
+        let mut rx = Receiving::open(&whole, 0, 1).unwrap();
+        rx.write(b"a").unwrap();
+        let done = rx.finish(0, WallMs::ZERO).unwrap();
+        assert!(t.landed(landed, "a.txt", done).is_some());
+        let mut part = Receiving::open(&t.target(going, "b.bin").unwrap(), 0, 4).unwrap();
+        part.write(b"bb").unwrap();
+        let _held = part.keep();
+        let mut cancelled = t.cancelled(going).unwrap();
+        let theirs = t.target(kept, "c.txt").unwrap();
+        let mut rx = Receiving::open(&theirs, 0, 2).unwrap();
+        rx.write(b"c").unwrap();
+        let _held = rx.keep();
+
+        t.discard_drag(drag);
+        assert!(!t.drag_dir(drag).exists(), "landed and partial alike");
+        assert!(*cancelled.borrow_and_update(), "its stream stops");
+        assert_eq!(t.drag_of(going), None, "forgotten");
+        let late = XferId::new();
+        t.begin(late, &Dest::Drag(drag), None, 1);
+        assert!(matches!(t.target(late, "d.txt"), Err(XferError::Unknown)), "not begun");
+        assert!(!t.drag_dir(drag).exists());
+        assert_eq!(t.drag_of(kept), Some(other));
+        assert!(partial_of(&theirs).exists(), "another drag's landing stays");
+        t.discard_drag(drag);
     }
 
     #[tokio::test]

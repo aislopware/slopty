@@ -188,8 +188,9 @@ pub struct DropIn {
     carried: (f32, f32),
     /// The drop's point, once the client dropped.
     dropped: Option<(f32, f32)>,
-    /// The operation last told.
-    op: DragOp,
+    /// The operation last told; none before the first, which always goes, since the client
+    /// takes a drop for a copy until the worker says otherwise.
+    op: Option<DragOp>,
     phase: Phase,
     /// What the helper's source declares, until it is asked for.
     source: Option<Vec<SourceItem>>,
@@ -217,7 +218,7 @@ impl DropIn {
             at: (x, y),
             carried: (x, y),
             dropped: None,
-            op: DragOp::None,
+            op: None,
             phase: Phase::Mapping,
             source: Some(source_items(items, dir)),
             stray: Vec::new(),
@@ -361,10 +362,10 @@ impl DropIn {
             }
             FromHelper::Operation { op, .. } => {
                 let op = op.within(self.allowed);
-                if op == self.op || !matches!(self.phase, Phase::Live) {
+                if self.op == Some(op) || !matches!(self.phase, Phase::Live) {
                     return Vec::new();
                 }
-                self.op = op;
+                self.op = Some(op);
                 vec![Act::Tell(DragEvent::Operation { drag: self.drag, op })]
             }
             FromHelper::Ended { op, .. } => match self.phase {

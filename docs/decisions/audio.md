@@ -1236,8 +1236,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       `leaving_the_tile_during_a_worker_drag_hands_it_over` (`slopty-ui`); live in a guest,
       `a_window_streams_press_drags_out_and_the_catch_takes_it` and
       `the_badge_follows_a_drag_across_touching_targets` (MEASUREMENTS, "the badge, timed, and
-      a drag out of a window"). Coming back onto a tile of the same worker, and the app e2e
-      with a recording worker, are still to do.
+      a drag out of a window"). Coming back onto a tile of the same worker is still to do.
       - *A window stream's left press goes through the HID tap when its window is on top at
         the point*, raised by the click as before, until its release, which puts the real
         pointer back. One something covers there keeps its own route, since the HID tap would
@@ -1274,6 +1273,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         another never says none, and a refusal still shows at most 37 ms after the drag enters
         the refusing target. The plan's `RTT + 25 ms` holds for the worker's part only where the
         drag manager steps at the display's rate; in the guest, its own steps are most of it.
+    - ✅ *The drop in, end to end in the app* (2026-10-01). The app's self-test hands the
+      workspace each step of a drag as the platform's destination would (`drag_over`,
+      `drag_drop`, `drag_leave`), and the worker records its drops instead of carrying them
+      (`SLOPTY_DND_RECORD`, `docs/TESTING.md`). `tests/app/dnd.rs`:
+      `files_dropped_on_a_display_are_whole_on_the_worker_when_it_lets_go` and
+      `a_refused_or_left_drag_leaves_nothing_on_the_worker` (MEASUREMENTS, "the drop in, end
+      to end"). It found two faults, and the rulings are:
+      - *The worker's first word on the operation always goes.* The client takes a drop for a
+        copy until the worker speaks, and the worker said only a change from none, so a
+        target that refused from the start was never told: the badge showed a copy and the
+        drop was sent to be refused there. Now a refusal from the start reaches the badge and
+        the drop slides back here (`the_operation_is_told_when_it_changes`).
+      - *A drag that ends with nothing landed takes its landing with it.* A left, refused or
+        failed drag left every file that had gone up, whole or partial, in
+        `~/.slopty/drop/<drag>/`, where nothing would read it and the sweep finds only
+        partials. Now the uploads into it stop and are forgotten, one that begins later is
+        refused, and the landing is deleted off the stream's task
+        (`Transfers::discard_drag`, `a_discarded_drags_landing_goes_and_takes_no_more`). A
+        drop the target took keeps its landing: an app may open the file where it is, so its
+        files are the person's from then on.
     - *P4 — iPad and iPhone.* The drop proposal, a drop held for its upload, the edge chip.
     - *P5 — lazy files.* The ⏸ File Provider domains (**Worker files paste into Finder through
       a File Provider domain**) on both ends: a dropped file exists at once as a placeholder

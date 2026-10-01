@@ -70,8 +70,26 @@ pub(crate) fn serve(
         });
         #[cfg(target_os = "macos")]
         let dragged = park_drags(&workspace, cx);
+        #[cfg(target_os = "macos")]
+        let mut carried = slopty_ui::workspace::remote::DropIn::default();
         while let Some((command, reply)) = rx.recv().await {
             let answer = match command {
+                #[cfg(target_os = "macos")]
+                Command::DragOver { .. } | Command::DragDrop { .. } | Command::DragLeave => {
+                    let mut answer = None;
+                    let applied = cx.update_window(window, |_root, _window, cx| {
+                        answer = Some(carry(&workspace, &mut carried, command, cx));
+                    });
+                    match (applied, answer) {
+                        (Ok(()), Some(answer)) => after_frame(window, answer, cx).await,
+                        (Ok(()), None) => Reply::Error { message: "not applied".into() },
+                        (Err(e), _) => error(&e),
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                Command::DragOver { .. } | Command::DragDrop { .. } | Command::DragLeave => {
+                    Reply::Error { message: "no drag destination here".into() }
+                }
                 #[cfg(target_os = "macos")]
                 Command::KeepDragged { into } => keep_dragged(&dragged, into, &handle).await,
                 #[cfg(not(target_os = "macos"))]
@@ -200,6 +218,54 @@ fn park_drags(workspace: &Entity<Workspace>, cx: &mut gpui::AsyncApp) -> Parked 
         });
     });
     parked
+}
+
+/// A step of a drag from this machine, handed to the workspace as the platform's destination
+/// hands it each one (`slopty_ui::workspace::remote::Sink`), with the files on a pasteboard of
+/// the step's own.
+#[cfg(target_os = "macos")]
+fn carry(
+    workspace: &Entity<Workspace>,
+    state: &mut slopty_ui::workspace::remote::DropIn,
+    command: Command,
+    cx: &mut App,
+) -> Reply {
+    use slopty_platform::file_drop::Over;
+    use slopty_proto::drag::{DragOp, DragOps};
+    let view = workspace.read(cx).view.clone();
+    match command {
+        Command::DragOver { paths, x, y } => {
+            let board = slopty_platform::pasteboard::Memory::default();
+            let urls: Option<Vec<String>> = paths
+                .iter()
+                .map(|p| slopty_client::dnd::file_url(std::path::Path::new(p)))
+                .collect();
+            let Some(urls) = urls else {
+                return Reply::Error { message: format!("not absolute paths: {paths:?}") };
+            };
+            board.copy_files(&urls.iter().map(String::as_str).collect::<Vec<_>>());
+            let over = view.update(cx, |v, cx| {
+                v.drag_over(state, point(px(x), px(y)), &board, DragOps::COPY, cx)
+            });
+            let op = match over {
+                Over::Local => "local",
+                Over::Remote(DragOp::None) => "none",
+                Over::Remote(DragOp::Copy) => "copy",
+                Over::Remote(DragOp::Link) => "link",
+                Over::Remote(DragOp::Move) => "move",
+            };
+            Reply::Over { op: op.to_owned(), drag: state.drag().map(|d| d.to_string()) }
+        }
+        Command::DragDrop { x, y } => {
+            let taken = view.update(cx, |v, cx| v.drag_dropped(state, point(px(x), px(y)), 0, cx));
+            Reply::Taken { taken }
+        }
+        Command::DragLeave => {
+            view.update(cx, |v, cx| v.drag_left(state, cx));
+            Reply::Ok
+        }
+        other => Reply::Error { message: format!("not a drag step: {other:?}") },
+    }
 }
 
 /// Keep the parked promises in `into`, each as the drop there would ask, off the main thread
@@ -712,6 +778,9 @@ fn apply(
         Command::Dump
         | Command::AddWorker { .. }
         | Command::KeepDragged { .. }
+        | Command::DragOver { .. }
+        | Command::DragDrop { .. }
+        | Command::DragLeave
         | Command::PageKeys { .. }
         | Command::Render { .. }
         | Command::Quit

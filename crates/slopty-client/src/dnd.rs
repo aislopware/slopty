@@ -69,6 +69,12 @@ fn promise_type(uti: &str) -> bool {
         || uti == "com.apple.NSFilePromiseItemMetaData"
 }
 
+/// The `file://` URL a pasteboard names `path` by; `None` for a relative path.
+#[must_use]
+pub fn file_url(path: &std::path::Path) -> Option<String> {
+    url::Url::from_file_path(path).ok().map(String::from)
+}
+
 /// The file a `file://` URL names, by path.
 fn file_path(url: &[u8]) -> Option<PathBuf> {
     let text = std::str::from_utf8(url).ok()?.trim();
