@@ -3240,6 +3240,9 @@ pub fn open_workspace(
     if let Err(e) = slopty_ui::fonts::install(cx) {
         tracing::error!(error = %e, "bundled fonts");
     }
+    // Every window and the terminal draw text at the weight it is set in: AppKit's smoothing
+    // would thicken light text on dark by up to 15 % ink (docs/decisions/ui.md).
+    cx.set_text_smoothing(gpui::TextSmoothing::Antialiased);
     // The table's defaults until the settings are read, below, lay their `[keys]` over it.
     slopty_ui::keymap::install(keymap_for(&slopty_settings::KeySettings::default()), cx);
     // gpui-kit widgets follow their own theme; put it on the tokens now, and again once the

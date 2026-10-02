@@ -13336,3 +13336,53 @@ thread costs a third of a 120 Hz frame, and no streaming or panning frame came n
 cargo nextest run -p slopty-ui --release --run-ignored only -E 'test(/timing_of_the_thread/)' --no-capture
 cargo xtask e2e smooth --filter 'test(/frame_time::the_thread/)'
 ```
+
+## 2026-10-02 — renderer: text drawn antialiased (gpui-fast 9072710)
+
+The workspace draws text with gpui-fast's `TextSmoothing::Antialiased` (fork PR #11, `2d3df6a`)
+in place of `Native`. Under `Native`, macOS dilates a glyph by the luminance of its colour, as Core
+Graphics' font smoothing does. The dark theme's `#e6e6e6` text is drawn at level 3 and
+`#1d1d1f` at 0, so the same weight inks heavier on dark. Antialiased draws every colour at
+dilation 0.
+
+**Glyph ink.** Printable ASCII (94 glyphs) rasterised by Core Text at 2×, in release, on
+mac-studio. Ink is the sum of the coverage bytes, against dilation 0. The semibold face inks
++30.0 % over the regular (10 710 px against 8 236 px), so +13 % is about four tenths of the step
+from 400 to 600, nearly a whole CSS weight.
+
+| Face | d2 | d3 | d4 | raster per glyph, p50 (d0 … d4) |
+| --- | --- | --- | --- | --- |
+| system 13 regular | +6.5 % | +13.0 % | +14.9 % | 6.95 to 7.19 µs |
+| system 13 semibold | +5.0 % | +10.0 % | +11.4 % | 6.94 to 7.04 µs |
+| system 15 regular | +6.5 % | +10.9 % | +10.9 % | 6.86 to 7.00 µs |
+| Menlo 13 | +6.1 % | +12.1 % | +13.9 % | 3.88 to 3.95 µs |
+
+A raster costs the same at every level. Under `Native` one glyph in four tones of text can
+hold up to four rasters in the atlas. Antialiased, it holds one.
+
+**Frame cost.** The same tree was built twice. A calls `set_text_smoothing(Native)` and B
+`Antialiased`: the binaries differ only in that argument (`mov w1, #0x0` against `#0x1` before
+the call). The two smooth scenarios with the most text ran in alternating rounds, A then B,
+three rounds each, one test at a time, at a load average of 12 to 24 (another session was
+building). Draw time p50 / p95 / p99 in ms, the median of three rounds, then the worst max:
+
+| Scenario | A, Native | B, Antialiased | Over 16.7 ms (A / B, all rounds) |
+| --- | --- | --- | --- |
+| (a) 20 streaming shells, strip column to column | 0.9 / 2.3 / 2.6, max 3.0 | 0.8 / 2.2 / 2.4, max 5.6 | 0 / 0 of about 950 |
+| (b) 20 streaming shells, overview in and out | 1.1 / 2.3 / 3.4, max 18.1 | 1.0 / 2.1 / 3.1, max 16.6 | 1 / 0 of about 940 |
+| (j) typing into one shell, its echo drawn | 0.3 / 0.4 / 0.6 | 0.3 / 0.4 / 0.6 | 0 / 0 of 183 |
+
+The frame cost is unchanged: every B median is equal to or a tenth below A's, within the noise
+at this load. B's 5.6 ms max in (a) came in its last round, while the load average reached 38.
+
+```sh
+# glyph ink and raster cost, in the gpui-fast checkout
+IPHONEOS_DEPLOYMENT_TARGET= cargo test -p gpui_macos --features font-kit --release --lib \
+  measure_dilation -- --ignored --nocapture
+# frame cost: build the e2e binaries once per argument, copy each into target/r-ab/{A,B}, then
+# alternate rounds (target/r-ab/run.sh: SLOPTY_E2E_BIN_DIR=target/r-ab/$v SLOPTY_BINS_FRESH=1 and
+# a data dir of its own)
+cargo nextest run --binaries-metadata target/r-ab/smooth.json --cargo-metadata \
+  target/r-ab/metadata.json --run-ignored only --test-threads 1 \
+  -E 'test(~on_the_mac) & (test(twenty_streaming_shells) | test(typing_draws_only_the_echo))'
+```

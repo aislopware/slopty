@@ -4655,3 +4655,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   whatever the tile shows next: the thread's view, or its TUI.
   - Tests: `workspace::tests::thread_face::a_thread_that_moves_away_hands_the_keyboard_back_to_its_tile`,
     `the_thread_view_takes_the_keyboard_from_the_face_it_replaces`.
+
+- ✅ **Text at the weight it is set in** (2026-10-02, design checkpoint 0). macOS's font smoothing
+  thickens a glyph by the luminance of its colour, and GPUI copied it, so the dark theme's light
+  text inked up to 15 % more than the same text on light: nearly a whole CSS weight, and the
+  400/500/600 ladder read a step heavier in dark. The workspace sets gpui-fast's
+  `TextSmoothing::Antialiased` for every window at launch (`open_workspace`), as MonoCode draws
+  (the web's antialiased smoothing) and Ghostty does by default. Every colour draws at dilation 0,
+  and a glyph holds one raster in the atlas whatever its colour. Frame cost is unchanged
+  (MEASUREMENTS "renderer: text drawn antialiased"). Tests: gpui-fast
+  `fast::tests::text_smoothing::antialiased_text_is_never_dilated_and_shares_one_raster_across_colours`,
+  `a_scoped_smoothing_overrides_the_applications`; `gpui_macos`
+  `a_dilated_glyph_inks_more_than_an_antialiased_one`.
