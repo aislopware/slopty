@@ -944,9 +944,13 @@ impl ProjectView {
                     .text_color(hsla(s.text))
                     .child(SharedString::from(project.title.clone())),
             )
-            .child(readout("project-live", live))
-            .children(progress.map(|p| readout("project-progress", p)))
-            .children(self.spent_readouts(board))
+            .child(
+                self.facts(
+                    std::iter::once(readout("project-live", live))
+                        .chain(progress.map(|p| readout("project-progress", p)))
+                        .chain(self.spent_readouts(board)),
+                ),
+            )
             .child(ask_toggle)
             .child(push_toggle)
             .child(terminal);
@@ -971,6 +975,21 @@ impl ProjectView {
             .child(title)
             .child(meta)
             .child(self.bar(board))
+    }
+
+    /// Readouts side by side, parted by the quiet middle dot, so two counts never read as one
+    /// run of words.
+    fn facts(&self, readouts: impl Iterator<Item = Stateful<Div>>) -> Div {
+        let theme = &self.theme;
+        let mut row = div().flex_none().flex().items_center().gap(self.z(theme.spacing.xs));
+        for (ix, readout) in readouts.enumerate() {
+            if ix > 0 {
+                row = row
+                    .child(crate::kit::separator(theme).text_size(self.z(theme.typography.meta())));
+            }
+            row = row.child(readout);
+        }
+        row
     }
 
     /// What the project spent, in the header: its time at work, then its cost and the plan's
@@ -1660,8 +1679,13 @@ impl ProjectView {
                 hsla(board_tone(theme, status)),
             )),
             None => slot.child(
-                icon(theme, IconName::Bot, IconSize::Inline, hsla(theme.surfaces.text_secondary))
-                    .size(self.z(theme.typography.icon())),
+                icon(
+                    theme,
+                    IconName::Sparkles,
+                    IconSize::Inline,
+                    hsla(theme.surfaces.text_secondary),
+                )
+                .size(self.z(theme.typography.icon())),
             ),
         }
     }
@@ -2900,7 +2924,7 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
     let s = &theme.surfaces;
     let (glyph, tone) = match what {
         Moment::Created | Moment::TaskCreated { .. } => (IconName::Plus, s.text_muted),
-        Moment::Orchestrator { .. } => (IconName::Bot, s.text_secondary),
+        Moment::Orchestrator { .. } => (IconName::Sparkles, s.text_secondary),
         Moment::Limits { .. } | Moment::Needs { .. } => (IconName::ListFilter, s.text_muted),
         Moment::Claimed { .. } => (IconName::Lock, s.text_muted),
         Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),

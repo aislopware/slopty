@@ -11,7 +11,6 @@ use slopty_proto::terminal::TermRequest;
 
 use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenFolder, OpenPalette, StartThread};
 use super::agents::{agent_status_text, needs_human};
-use super::tile::kind_icon;
 use super::{AGENT_COMMAND, WorkspaceView};
 use crate::icons::Status;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
@@ -79,11 +78,10 @@ impl WorkspaceView {
             .session_rows()
             .into_iter()
             .map(|row| {
-                let icon = if row.status.is_some() {
-                    crate::icons::IconName::Bot
-                } else {
-                    crate::icons::IconName::SquareTerminal
-                };
+                let icon = self.session_agent(row.session).map_or(
+                    crate::icons::Glyph::Icon(crate::icons::IconName::SquareTerminal),
+                    crate::icons::Glyph::agent,
+                );
                 PaletteItem::session(&row.title, row.session)
                     .with_icon(icon)
                     .with_status(row.mark)
@@ -103,7 +101,7 @@ impl WorkspaceView {
                 continue;
             }
             let title = self.tile_title(item);
-            let line = PaletteItem::item(&title, kind_icon(item, false), item.id)
+            let line = PaletteItem::item(&title, self.kind_glyph(item), item.id)
                 .placed(self.tile_place(item));
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
@@ -139,7 +137,8 @@ impl WorkspaceView {
             .map(|agent| {
                 let label = format!("New {} thread", super::projects::agent_label(agent));
                 let action = StartThread { worker, agent: agent.clone(), cwd: cwd.clone() };
-                PaletteItem::new(&label, crate::icons::IconName::Bot, Box::new(action), &[])
+                PaletteItem::new(&label, crate::icons::IconName::Sparkles, Box::new(action), &[])
+                    .with_icon(crate::icons::Glyph::agent(&agent.0))
                     .on_worker(self.worker_label(worker))
                     .in_dir(Some(cwd.clone()))
             })

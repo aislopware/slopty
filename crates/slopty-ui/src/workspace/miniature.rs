@@ -19,7 +19,7 @@ use gpui::{
     Styled as _, div, px,
 };
 use slopty_client::layout::Placed;
-use slopty_proto::items::{Item, ItemKind};
+use slopty_proto::items::Item;
 use slopty_theme::Typography;
 
 use super::WorkspaceView;
@@ -64,15 +64,8 @@ impl WorkspaceView {
         let t = &theme.typography;
         let id = item.id;
         let muted = hsla(s.text_muted);
-        let agent = matches!(item.kind, ItemKind::Terminal { session } if self.agent_state(session).is_some());
         let (mark, _) = self.tile_marks(placed.tile, item);
-        let lead = crate::palette::status_slot(
-            theme,
-            super::tile::kind_icon(item, agent),
-            mark,
-            muted,
-            1.0,
-        );
+        let lead = crate::palette::status_slot(theme, self.kind_glyph(item), mark, muted, 1.0);
         let name = div()
             .debug_selector(move || format!("shapes-label-{}", id.as_uuid()))
             .h(px(t.icon_large()))

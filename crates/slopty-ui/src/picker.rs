@@ -257,7 +257,8 @@ impl WindowPicker {
         for (i, s) in self.sessions.iter().enumerate() {
             let status = s.status.clone().unwrap_or_default();
             // A session an agent was seen in is an agent's; the rest are shells.
-            let icon = if s.status.is_some() { IconName::Bot } else { IconName::SquareTerminal };
+            let icon =
+                if s.status.is_some() { IconName::Sparkles } else { IconName::SquareTerminal };
             rows.push(Row {
                 id: ("session", i),
                 section: Section::Sessions,

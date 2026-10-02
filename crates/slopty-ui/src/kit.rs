@@ -2229,4 +2229,26 @@ mod tests {
         assert!(lw < ew && lh < eh, "a list is the smaller overlay");
         assert!(ew - lw >= 40.0 && eh - lh >= 40.0, "far enough apart to tell apart");
     }
+
+    /// Every icon the chrome names is one Hugeicons draws: one gpui-kit's Lucide bundle backs
+    /// would be the one glyph on screen at another hand and weight.
+    #[test]
+    fn every_icon_the_chrome_names_is_drawn_by_one_set() {
+        let by_name: std::collections::HashMap<String, SharedString> =
+            crate::icons::IconName::ALL.iter().map(|i| (format!("{i:?}"), i.path())).collect();
+        let mut stray = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            for (file, line, text) in chrome_lines(dir) {
+                for rest in text.split("IconName::").skip(1) {
+                    let name: String =
+                        rest.chars().take_while(char::is_ascii_alphanumeric).collect();
+                    let Some(path) = by_name.get(&name) else { continue };
+                    if !crate::icons::drawn(path) {
+                        stray.push(format!("{file}:{line}: {name}"));
+                    }
+                }
+            }
+        }
+        assert!(stray.is_empty(), "drawn by the Lucide fallback:\n{}", stray.join("\n"));
+    }
 }

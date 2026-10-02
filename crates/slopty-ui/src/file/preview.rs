@@ -76,6 +76,8 @@ struct Picture {
     /// The decode running, with the longer side it asks for.
     decoding: Option<(u32, Task<()>)>,
     area: Option<Area>,
+    /// Shown at its own size, scrolled, rather than fitted to the tile.
+    actual: bool,
 }
 
 struct Pages {
@@ -128,6 +130,22 @@ impl Preview {
         }
     }
 
+    /// What the foot says, parted by middle dots: `PNG · 1200 × 800 · 240 KB`,
+    /// `PDF · 12 pages · 2.4 MB`.
+    pub(crate) fn facts(&self) -> String {
+        let kind = kind_label(&self.media_type);
+        let size = size_label(self.size);
+        let middle = match &self.body {
+            Body::Picture(p) => p.size.map(|s| format!("{} × {}", s.pixels.0, s.pixels.1)),
+            Body::Pdf(pages) if pages.sizes.len() == 1 => Some("1 page".to_owned()),
+            Body::Pdf(pages) if !pages.sizes.is_empty() => {
+                Some(format!("{} pages", pages.sizes.len()))
+            }
+            Body::Pdf(_) | Body::Failed(_) => None,
+        };
+        [Some(kind), middle, Some(size)].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+    }
+
     /// The picture's decoded size in pixels (as page 0), or each page drawn with its size: what
     /// the tile holds.
     fn drawn(&self) -> Vec<(usize, u32, u32)> {
@@ -165,6 +183,14 @@ impl Preview {
     }
 }
 
+/// A media type as a person names the format: `image/png` is PNG, `image/svg+xml` SVG.
+fn kind_label(media_type: &str) -> String {
+    let sub = media_type.rsplit('/').next().unwrap_or(media_type);
+    let sub = sub.split(['+', ';']).next().unwrap_or(sub);
+    let sub = sub.strip_prefix("x-").unwrap_or(sub);
+    sub.to_ascii_uppercase()
+}
+
 /// The largest the picture shows inside `area`, in points: its own size, or less to fit.
 fn fitted(size: PictureSize, area: Area) -> (f32, f32) {
     #[expect(clippy::cast_possible_truncation, reason = "a size on screen")]
@@ -177,9 +203,29 @@ fn fitted(size: PictureSize, area: Area) -> (f32, f32) {
     (w * fit, h * fit)
 }
 
-/// The longer side to decode `size` at to cover `area`'s pixels one to one.
-fn wanted(size: PictureSize, area: Area) -> u32 {
+/// The size the picture shows at in points: its own when `actual`, else [`fitted`].
+fn shown_at(size: PictureSize, area: Area, actual: bool) -> (f32, f32) {
+    if actual {
+        #[expect(clippy::cast_possible_truncation, reason = "a size on screen")]
+        let own = (size.points.0 as f32, size.points.1 as f32);
+        own
+    } else {
+        fitted(size, area)
+    }
+}
+
+/// Whether `size` is larger than `area`, so fitting it scales it down.
+fn outgrows(size: PictureSize, area: Area) -> bool {
     let (w, h) = fitted(size, area);
+    #[expect(clippy::cast_possible_truncation, reason = "a size on screen")]
+    let own = (size.points.0 as f32, size.points.1 as f32);
+    w < own.0 - 0.5 || h < own.1 - 0.5
+}
+
+/// The longer side to decode `size` at to cover its pixels on screen one to one, shown at
+/// its own size (`actual`) or fitted to `area`.
+fn wanted(size: PictureSize, area: Area, actual: bool) -> u32 {
+    let (w, h) = shown_at(size, area, actual);
     whole_pixels(w.max(h) * area.scale)
 }
 
@@ -233,7 +279,14 @@ impl FileView {
                 Some(Body::Picture(old)) => (old.shown, old.area),
                 _ => (None, None),
             };
-            Body::Picture(Picture { bytes: bytes.clone(), size: None, shown, decoding: None, area })
+            Body::Picture(Picture {
+                bytes: bytes.clone(),
+                size: None,
+                shown,
+                decoding: None,
+                area,
+                actual: false,
+            })
         } else {
             Body::Failed(PreviewError::Unreadable)
         };
@@ -291,7 +344,8 @@ impl FileView {
     fn decode_picture(&mut self, cx: &Context<Self>) {
         let Some(Preview { body: Body::Picture(p), .. }) = self.preview.as_mut() else { return };
         let Some(area) = p.area else { return };
-        let want = p.size.map(|size| wanted(size, area));
+        let actual = p.actual;
+        let want = p.size.map(|size| wanted(size, area, actual));
         let most = p.size.map_or(u32::MAX, |s| s.pixels.0.max(s.pixels.1));
         let settled = |have: Option<u32>| match (have, want) {
             (Some(have), Some(want)) => serves(have, want, most),
@@ -308,7 +362,7 @@ impl FileView {
                 .background_spawn(async move {
                     let mut longest = 0;
                     let picture = decode::picture(bytes, |size| {
-                        longest = wanted(size, area);
+                        longest = wanted(size, area, actual);
                         longest
                     })?;
                     Ok::<_, PreviewError>((picture, longest))
@@ -430,7 +484,13 @@ impl FileView {
                 if pages.doc.is_none() {
                     return div().size_full().into_any_element();
                 }
-                self.render_pages(summary, cx)
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h_0().child(self.render_pages(summary, cx)))
+                    .child(self.preview_foot(cx))
+                    .into_any_element()
             }
         }
     }
@@ -456,31 +516,160 @@ impl FileView {
         .absolute()
         .size_full();
         let id = *self.id.as_uuid();
+        let actual = self.picture_actual();
+        let checker = self.checker();
         let picture = shown.zip(size).map(|(image, (w, h))| {
             div()
                 .id("file-picture-image")
+                .flex_none()
+                .relative()
                 .w(px(w))
                 .h(px(h))
                 .role(Role::Image)
                 .aria_label(SharedString::from(summary.to_owned()))
-                .child(img(ImageSource::Render(image)).size_full())
+                .child(checker)
+                .child(img(ImageSource::Render(image)).absolute().size_full())
         });
+        // At its own size the picture scrolls, centred while it is smaller than the tile on an
+        // axis; fitted, it is centred and never larger than the tile.
+        let stage = if actual {
+            div()
+                .id("file-picture-stage")
+                .size_full()
+                .overflow_scroll()
+                .flex()
+                .children(picture.map(gpui::Styled::m_auto))
+        } else {
+            div()
+                .id("file-picture-stage")
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .overflow_hidden()
+                .children(picture)
+        };
         div()
             .id("file-picture")
             .debug_selector(move || format!("file-picture-{id}"))
             .size_full()
-            .p(px(self.pad * self.zoom))
+            .flex()
+            .flex_col()
             .child(
                 div()
-                    .relative()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .overflow_hidden()
-                    .child(measure)
-                    .children(picture),
+                    .flex_1()
+                    .min_h_0()
+                    .p(px(self.pad * self.zoom))
+                    .child(div().relative().size_full().child(measure).child(stage)),
             )
+            .child(self.preview_foot(cx))
+            .into_any_element()
+    }
+
+    /// Whether the picture shows at its own size rather than fitted.
+    const fn picture_actual(&self) -> bool {
+        matches!(&self.preview, Some(Preview { body: Body::Picture(p), .. }) if p.actual)
+    }
+
+    /// Whether the picture is larger than its area, so its own size differs from the fitted.
+    fn picture_outgrows(&self) -> bool {
+        match &self.preview {
+            Some(Preview { body: Body::Picture(p), .. }) => {
+                p.size.zip(p.area).is_some_and(|(size, area)| outgrows(size, area))
+            }
+            _ => false,
+        }
+    }
+
+    /// Show the picture at its own size, scrolled, or fitted to the tile again.
+    pub(crate) fn toggle_actual_size(&mut self, cx: &mut Context<Self>) {
+        let Some(Preview { body: Body::Picture(p), .. }) = self.preview.as_mut() else { return };
+        p.actual = !p.actual;
+        tracing::info!(actual = p.actual, "picture zoom");
+        self.decode_picture(cx);
+        cx.notify();
+    }
+
+    /// The board a picture's transparent pixels show over: two neutral steps of the content
+    /// plane in squares, as Preview and Figma show one.
+    fn checker(&self) -> AnyElement {
+        let theme = &self.theme;
+        let (even, odd) = (hsla(theme.content()), hsla(theme.surfaces.raised));
+        let cell = px(theme.spacing.sm * self.zoom);
+        canvas(
+            |_, _, _| {},
+            move |bounds: Bounds<Pixels>, (), window, _| {
+                window.paint_quad(gpui::fill(bounds, even));
+                let mut y = px(0.0);
+                let mut shifted = false;
+                while y < bounds.size.height {
+                    let mut x = if shifted { px(0.0) } else { cell };
+                    while x < bounds.size.width {
+                        let side = gpui::size(
+                            cell.min(bounds.size.width - x),
+                            cell.min(bounds.size.height - y),
+                        );
+                        let at = bounds.origin + gpui::point(x, y);
+                        window.paint_quad(gpui::fill(Bounds::new(at, side), odd));
+                        x += cell + cell;
+                    }
+                    y += cell;
+                    shifted = !shifted;
+                }
+            },
+        )
+        .absolute()
+        .size_full()
+        .into_any_element()
+    }
+
+    /// The foot of a picture or PDF: what it is in a quiet line (its type, its pixels or pages,
+    /// its size), and for a picture larger than the tile the way between fitted and its own
+    /// size.
+    fn preview_foot(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let k = self.zoom;
+        let facts = self.preview.as_ref().map(Preview::facts).unwrap_or_default();
+        let zoom = (self.picture_outgrows() || self.picture_actual()).then(|| {
+            let label = if self.picture_actual() { "Fit" } else { "Actual size" };
+            div()
+                .id("file-picture-zoom")
+                .debug_selector(|| "file-picture-zoom".to_owned())
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .cursor_pointer()
+                .text_color(hsla(s.text_secondary))
+                .hover(|el| el.text_color(hsla(s.text)))
+                .child(label)
+                .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_actual_size(cx)))
+        });
+        div()
+            .id("file-preview-foot")
+            .debug_selector(|| "file-preview-foot".to_owned())
+            .flex_none()
+            .h(px(theme.density.row * k))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(theme.spacing.sm * k))
+            .px(px(theme.spacing.inset() * k))
+            .whitespace_nowrap()
+            .font_family(theme.typography.ui_family.clone())
+            .text_size(px(theme.typography.meta() * k))
+            .text_color(hsla(s.text_muted))
+            .child(
+                div()
+                    .id("file-preview-facts")
+                    .role(Role::Label)
+                    .aria_label(SharedString::from(facts.clone()))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(facts),
+            )
+            .children(zoom)
             .into_any_element()
     }
 
@@ -624,12 +813,32 @@ mod tests {
     fn a_picture_fits_the_tile_at_its_own_size_at_most() {
         let photo = PictureSize { pixels: (4000, 3000), points: (4000.0, 3000.0) };
         assert_eq!(fitted(photo, area(800.0, 800.0, 2.0)), (800.0, 600.0), "scaled to fit");
-        assert_eq!(wanted(photo, area(800.0, 800.0, 2.0)), 1600, "one pixel a pixel on Retina");
+        assert_eq!(
+            wanted(photo, area(800.0, 800.0, 2.0), false),
+            1600,
+            "one pixel a pixel on Retina"
+        );
         let icon = PictureSize { pixels: (64, 64), points: (64.0, 64.0) };
         assert_eq!(fitted(icon, area(800.0, 800.0, 2.0)), (64.0, 64.0), "never enlarged");
         let shot = PictureSize { pixels: (2880, 1800), points: (1440.0, 900.0) };
         assert_eq!(fitted(shot, area(1600.0, 1000.0, 2.0)), (1440.0, 900.0), "its real size");
-        assert_eq!(wanted(shot, area(1600.0, 1000.0, 2.0)), 2880);
+        assert_eq!(wanted(shot, area(1600.0, 1000.0, 2.0), false), 2880);
+    }
+
+    /// At its own size a picture shows and decodes at its own resolution, however large;
+    /// only one larger than its area is scaled down to fit.
+    #[test]
+    fn a_picture_at_its_own_size_is_decoded_whole() {
+        let photo = PictureSize { pixels: (4000, 3000), points: (4000.0, 3000.0) };
+        let tile = area(800.0, 800.0, 2.0);
+        assert_eq!(shown_at(photo, tile, true), (4000.0, 3000.0));
+        assert_eq!(wanted(photo, tile, true), decode::LARGEST.min(8000));
+        assert!(outgrows(photo, tile));
+        let icon = PictureSize { pixels: (64, 64), points: (64.0, 64.0) };
+        assert!(!outgrows(icon, tile), "fitted is its own size");
+        assert_eq!(kind_label("image/png"), "PNG");
+        assert_eq!(kind_label("image/svg+xml"), "SVG");
+        assert_eq!(kind_label("application/pdf"), "PDF");
     }
 
     #[test]

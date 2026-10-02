@@ -76,13 +76,12 @@ use slopty_theme::{Rgb, Theme, Typography, alpha};
 use super::actions::{ToggleNavigator, ToggleNavigatorLens};
 use super::agents::{Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
-use super::tile::kind_icon;
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{IconName, IconSize, Status, icon, status_icon, status_mark};
+use crate::icons::{Glyph, IconName, IconSize, Status, icon, status_icon, status_mark};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -605,7 +604,7 @@ pub(super) fn line_heights(theme: &Theme) -> (f32, f32) {
 #[derive(Clone)]
 struct NavTile {
     tile: TileRef,
-    kind: IconName,
+    kind: Glyph,
     mark: Option<Status>,
     /// The state's word, said in the row's accessible name (the row draws the state as its
     /// glyph): [`agent_status_word`] for an agent that waits ("Needs approval", "Has a
@@ -1003,12 +1002,6 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Whether a coding agent runs in `item`'s terminal.
-    pub(super) fn runs_agent(&self, item: &Item) -> bool {
-        let ItemKind::Terminal { session } = item.kind else { return false };
-        self.agent_state(session).is_some_and(|a| a.status != AgentStatus::None)
-    }
-
     /// A tile's status mark, and whether it holds news the human has not looked at: a long
     /// command that finished unwatched, while the tile is not busy or waiting.
     pub(super) fn tile_marks(&self, tile: TileRef, item: &Item) -> (Option<Status>, bool) {
@@ -1187,7 +1180,7 @@ impl WorkspaceView {
                 if !named && !matches(&query, &[&title, &meta, repo_named]) {
                     continue;
                 }
-                let kind = kind_icon(item, self.runs_agent(item));
+                let kind = self.kind_glyph(item);
                 let summary = match &item.kind {
                     ItemKind::Terminal { session } => self.summary(*session),
                     _ => None,
@@ -1970,7 +1963,11 @@ impl WorkspaceView {
         )
         .items_start()
         .pt(px(theme.spacing.xs))
-        .child(lead_slot(theme, icon(theme, IconName::Bot, IconSize::Inline, hsla(s.text_muted))))
+        .child(lead_slot(theme, {
+            let mark =
+                self.session_agent(session).map_or(Glyph::Icon(IconName::Sparkles), Glyph::agent);
+            crate::icons::glyph(theme, mark, px(theme.typography.icon()), hsla(s.text_muted))
+        }))
         .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
         .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_waiting(waiting, cx)))
         .into_any_element()

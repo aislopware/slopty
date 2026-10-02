@@ -257,7 +257,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
     };
     let mut items = vec![
         w("New terminal", IconName::SquareTerminal, Box::new(NewTerminal)),
-        w("New agent", IconName::Bot, Box::new(NewAgent)),
+        w("New agent", IconName::Sparkles, Box::new(NewAgent)),
         w("New note", IconName::StickyNote, Box::new(NewNote)),
         w("Add a window or display", IconName::AppWindow, Box::new(AddWindow)),
         w("Open file…", IconName::FileText, Box::new(OpenFile)),

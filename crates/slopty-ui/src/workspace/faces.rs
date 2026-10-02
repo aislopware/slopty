@@ -26,7 +26,7 @@ use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Keystroke, Win
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
-use slopty_proto::agent::AgentStatus;
+use slopty_proto::agent::{AgentKind, AgentStatus};
 use slopty_proto::conversation::{ConversationEvent, ConversationRequest, PermissionEvent};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::TermRequest;
@@ -91,6 +91,8 @@ pub(super) struct ThreadFaces {
     item_asks: HashMap<ItemId, gpui::Subscription>,
     /// Each thread's title as its worker's table last said, for its tile's header.
     titles: HashMap<ThreadId, String>,
+    /// Each thread's agent as its worker's table last said, for the mark its tile leads with.
+    agents: HashMap<ThreadId, AgentId>,
     /// Each thread's terminal as its worker's table last said, for its tile's way to it.
     terminals: HashMap<ThreadId, SessionId>,
     /// Starts sent and not yet answered, and the worker each went to.
@@ -203,6 +205,36 @@ impl WorkspaceView {
             .filter(|t| !t.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| THREAD.to_owned())
+    }
+
+    /// The agent `item` shows, by its [`AgentId`] name: a thread's, or the one at work in a
+    /// terminal, as its thread's row names it or else by the kind the terminal reports.
+    pub(super) fn item_agent(&self, item: &Item) -> Option<&str> {
+        let threads = &self.faces.threads;
+        match item.kind {
+            ItemKind::Thread { thread } => threads.agents.get(&thread).map(|a| a.0.as_str()),
+            ItemKind::Terminal { session } => self.session_agent(session),
+            _ => None,
+        }
+    }
+
+    /// The agent at work in `session`, by its [`AgentId`] name: as its thread's row names it,
+    /// or else by the kind the terminal reports.
+    pub(super) fn session_agent(&self, session: SessionId) -> Option<&str> {
+        let threads = &self.faces.threads;
+        let at_work = self.agent_state(session).filter(|a| a.status != AgentStatus::None)?;
+        let named = threads.of_session.get(&session).and_then(|t| threads.agents.get(t));
+        Some(named.map_or_else(
+            || match at_work.kind {
+                AgentKind::ClaudeCode => AgentId::CLAUDE_CODE,
+            },
+            |a| a.0.as_str(),
+        ))
+    }
+
+    /// What `item`'s tile leads with ([`super::tile::kind_icon`]), its agent looked up.
+    pub(super) fn kind_glyph(&self, item: &Item) -> crate::icons::Glyph {
+        super::tile::kind_icon(item, self.item_agent(item))
     }
 
     /// Keep each worker's threads in `dir`, a directory per worker.
@@ -357,6 +389,7 @@ impl WorkspaceView {
         of.extend(found);
         for row in rows.values() {
             self.faces.threads.titles.insert(row.id, row.title.clone());
+            self.faces.threads.agents.insert(row.id, row.agent.clone());
             match row.terminal {
                 Some(session) => self.faces.threads.terminals.insert(row.id, session),
                 None => self.faces.threads.terminals.remove(&row.id),

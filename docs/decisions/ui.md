@@ -1284,8 +1284,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   that chrome carries no decorative glyph. An icon is not decoration when it names a kind, a
   state or an action. No emoji, and still no glyph without a meaning.
 
-  *Icons.* Lucide (ISC), from gpui-kit's asset crate. `slopty_ui::icons` embeds only the icons
-  it lists and backs them with gpui-kit's component bundle; the macOS and iOS apps register it. Sizes
+  *Icons.* Hugeicons (MIT) under gpui-kit's Lucide names, at 1.75, backed by gpui-kit's Lucide
+  bundle at the same stroke (amended 2026-10-02, "One icon set at one weight"); the macOS and
+  iOS apps register the source. Sizes
   come from the type scale: `Typography::icon()` is base + 1 beside text and `icon_large()` is
   base + 3 standing alone. An icon takes the colour of the text it sits beside. Zed's icon crate
   is GPL, so none of its files are used.
@@ -4844,3 +4845,53 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   tray; the plan and edits above it scroll past 30 % of the window, so the conversation keeps
   its rows. The plain allow is the one white button; "always" and rules are quiet buttons of
   their own that never lead.
+
+- ✅ **One icon set at one weight; files and agents by their own marks** (2026-10-02, design
+  checkpoint 4, `crates/slopty-ui/src/icons.rs`, `file_types.rs`; licences vendored beside the
+  drawings).
+  - **Hugeicons draws the chrome, at 1.75.** Its free set is MIT (`assets/icons/LICENSE`,
+    taken from the GitHub repository, whose README puts the free icons under MIT; the site's
+    agreement restricts Pro). Each file in `assets/icons` is the Hugeicons glyph for the
+    Lucide name gpui-kit's `IconName` carries, so call sites keep their names. The stroke went
+    from Hugeicons' 1.5 to 1.75 when vendored; an outline Hugeicons draws as a fill gains the
+    same quarter point from a stroke of its own. An icon the set does not draw comes from
+    gpui-kit's Lucide bundle (ISC) with its stroke of 2 brought to 1.75, so a component's own
+    icon keeps the weight. Where Hugeicons' drawing under a name reads poorly at 14 pt or
+    means something else, its nearer drawing is taken: the arrows are its `-02` shafts (its
+    `-01` are chevrons), the plain file `file-empty-02`, the terminal `command-line` (its
+    `square-terminal` is a squircle with a dot of a prompt), activity `pulse-01`, maximize
+    `arrow-expand-01` (its `maximize` are hands).     icon keeps the weight. A lint-as-test fails on any `IconName` the chrome names that
+    Hugeicons does not draw, which is how case-sensitive, eye, git-merge, layout-dashboard
+    and minus were found falling back.
+  - **A file shows its type.** Material Icon Theme's drawings (MIT, `assets/file-types/
+    LICENSE`), 55 of them, in their own colours: by the whole name first (Dockerfile,
+    README, Cargo.lock, .gitignore), then the extension. A type the set does not draw keeps
+    the plain file icon, so an unknown file never reads as a known one. Tile headers, the
+    palette's file lines and the folder tile's rows show them.
+  - **A coloured drawing is rasterised at the window's device pixels**, once for each size
+    it shows at, and drawn on the first frame: `img()` from an asset path rasterises an SVG
+    at its intrinsic size and loads it asynchronously, which blurs a 32-unit drawing at 14 pt
+    on Retina and leaves the slot blank for a frame.
+  - **An agent shows its own mark only where its licence allows one.** pi's mark is drawn
+    from the four-by-four layout its MIT source spells out, in its own colours; OpenCode's
+    comes from its MIT repository, without the tile behind it, in the ink beside it as its
+    light and dark variants are. Anthropic allows its marks only in materials it approves
+    and forbids visuals that mimic Claude Code; OpenAI's permission is non-transferable, so
+    forks of an open repository would not hold it (Simple Icons removed its OpenAI icon for
+    that reason); Google's needs approved artwork. Those agents, and any without a mark, take
+    the neutral sparkles in the theme's agent orange (`Surfaces::agent`). No robot: the
+    Lucide `Bot` is gone from the chrome.
+  - **A picture's tile says what it is and can show it whole.** Transparent pixels show over
+    a checkerboard of two neutral steps of the content plane; a foot under the picture or
+    PDF says its type, pixels or pages, and size (`PNG · 1200 × 800 · 240 KB`); a picture
+    larger than its tile can be shown at its own size, scrolled and decoded whole, and fitted
+    again.
+  - **Readouts side by side are parted by the middle dot** (the project header's
+    `2 of 12 live · 1 of 7 merged`).
+  - Tests: `icons::tests::every_icon_is_drawn_at_one_stroke_and_the_component_bundle_still_loads`,
+    `icons::tests::an_agent_shows_its_own_mark_only_where_its_licence_allows`,
+    `kit::tests::every_icon_the_chrome_names_is_drawn_by_one_set`,
+    `file_types::tests::a_file_is_known_by_its_name_then_its_extension`,
+    `file_types::tests::every_type_is_drawn_and_served`,
+    `file::preview::tests::a_picture_at_its_own_size_is_decoded_whole`,
+    `palette::tests::every_line_icon_is_embedded`.

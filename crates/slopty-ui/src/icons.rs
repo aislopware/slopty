@@ -1,182 +1,245 @@
-//! The icons chrome draws: Lucide (ISC), from gpui-kit's asset crate.
+//! The icons chrome draws: Hugeicons' drawings (MIT, `assets/icons/LICENSE`) under the names
+//! of gpui-kit's Lucide set, a file's type (`crate::file_types`), and the agents' marks.
 //!
-//! Only the icons this module lists are embedded; gpui-kit's own component bundle backs
-//! them so its inputs and menus keep theirs. An icon takes its size from the type scale
-//! ([`slopty_theme::Typography::icon`]) and its colour from the text beside it, so it never
-//! outweighs the words it marks.
+//! Each file under `assets/icons` is the Hugeicons glyph for the Lucide name it carries, its
+//! stroke taken from 1.5 to 1.75 when it was vendored; an outline drawn as a fill gains the
+//! same weight from a quarter-point stroke. An icon this set does not draw falls back to
+//! gpui-kit's bundle, its stroke brought to the same 1.75. An icon takes its size from the
+//! type scale ([`slopty_theme::Typography::icon`]) and its colour from the text beside it, so
+//! it never outweighs the words it marks.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::accesskit::Role;
 use gpui::{
-    AnyElement, App, AssetSource, Bounds, Div, Element, ElementId, EntityId, Global,
+    AnyElement, App, AssetSource, Bounds, DevicePixels, Div, Element, ElementId, EntityId, Global,
     GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
-    ParentElement as _, Pixels, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled as _, Svg, Transformation, Window, div, px, radians, svg,
+    ParentElement as _, Pixels, RenderImage, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled as _, Svg, SvgSize, Transformation, Window, div, px,
+    radians, svg,
 };
 pub use gpui_kit::assets::IconName;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
+use slopty_proto::thread::AgentId;
 use slopty_theme::{Rgb, Theme};
 
 use crate::colors::hsla;
+pub use crate::file_types::FileType;
 
-gpui_kit::assets::icon_assets!(
-    Chosen,
-    [
-        AArrowDown,
-        AArrowUp,
-        Activity,
-        AlignCenterHorizontal,
-        AppWindow,
-        ArrowDown,
-        ArrowLeft,
-        ArrowLeftToLine,
-        ArrowRight,
-        ArrowRightToLine,
-        ArrowUp,
-        ArrowUpDown,
-        Asterisk,
-        Bell,
-        BellRing,
-        BetweenHorizontalEnd,
-        BetweenHorizontalStart,
-        Bot,
-        Brain,
-        Cable,
-        Cast,
-        Check,
-        ChevronDown,
-        ChevronLeft,
-        ChevronRight,
-        ChevronUp,
-        ChevronsLeft,
-        ChevronsRight,
-        Circle,
-        CircleAlert,
-        CircleCheck,
-        CircleDashed,
-        CircleDot,
-        CirclePause,
-        CircleX,
-        Clipboard,
-        Clock,
-        Columns2,
-        Command,
-        Copy,
-        CornerDownLeft,
-        Cpu,
-        Download,
-        Ellipsis,
-        Eraser,
-        Expand,
-        ExternalLink,
-        File,
-        FileDiff,
-        FilePen,
-        FilePlus,
-        FileText,
-        Flag,
-        FoldHorizontal,
-        Folder,
-        FolderGit2,
-        FolderOpen,
-        FolderSearch,
-        GitBranch,
-        GitPullRequest,
-        GitPullRequestDraft,
-        Globe,
-        Hand,
-        Image,
-        Inbox,
-        Info,
-        Kanban,
-        Keyboard,
-        LayoutGrid,
-        Link,
-        ListChecks,
-        ListFilter,
-        ListTodo,
-        ListTree,
-        LoaderCircle,
-        Lock,
-        Map,
-        Maximize2,
-        MessageSquare,
-        MessageSquareWarning,
-        Monitor,
-        MonitorOff,
-        MousePointer2,
-        MoveDown,
-        MoveHorizontal,
-        MoveLeft,
-        MoveRight,
-        MoveUp,
-        MoveVertical,
-        NotebookPen,
-        PanelLeft,
-        PanelsTopLeft,
-        Paperclip,
-        Pause,
-        Pencil,
-        Plug,
-        Plus,
-        Power,
-        Regex,
-        Replace,
-        ReplaceAll,
-        RotateCw,
-        Save,
-        Scissors,
-        Search,
-        Server,
-        ServerOff,
-        Settings,
-        Shield,
-        ShieldBan,
-        ShieldOff,
-        Square,
-        SquareTerminal,
-        StickyNote,
-        Terminal,
-        TextCursorInput,
-        TextSearch,
-        Type,
-        Undo2,
-        UnfoldHorizontal,
-        UnfoldVertical,
-        Unplug,
-        Upload,
-        Volume2,
-        VolumeX,
-        WholeWord,
-        Wifi,
-        WifiOff,
-        Workflow,
-        Wrench,
-        X,
-    ]
-);
+macro_rules! drawn {
+    ($($stem:literal),* $(,)?) => {
+        /// The icons Hugeicons draws, by the path [`IconName::path`] gives, with their bytes.
+        const DRAWN: &[(&str, &[u8])] = &[$((
+            concat!("icons/", $stem, ".svg"),
+            include_bytes!(concat!("../assets/icons/", $stem, ".svg")),
+        )),*];
+    };
+}
 
-/// The asset source every window registers: the chosen icons, then gpui-kit's bundle.
+drawn![
+    "a-arrow-down",
+    "a-arrow-up",
+    "activity",
+    "align-center-horizontal",
+    "app-window",
+    "arrow-down",
+    "arrow-left",
+    "arrow-left-to-line",
+    "arrow-right",
+    "arrow-right-to-line",
+    "arrow-up",
+    "arrow-up-down",
+    "asterisk",
+    "bell",
+    "bell-ring",
+    "between-horizontal-end",
+    "between-horizontal-start",
+    "bot",
+    "brain",
+    "cable",
+    "case-sensitive",
+    "cast",
+    "check",
+    "chevron-down",
+    "chevron-left",
+    "chevron-right",
+    "chevron-up",
+    "chevrons-left",
+    "chevrons-right",
+    "circle",
+    "circle-alert",
+    "circle-check",
+    "circle-dashed",
+    "circle-dot",
+    "circle-pause",
+    "circle-x",
+    "clipboard",
+    "clock",
+    "columns-2",
+    "command",
+    "copy",
+    "corner-down-left",
+    "cpu",
+    "download",
+    "ellipsis",
+    "eraser",
+    "expand",
+    "external-link",
+    "eye",
+    "file",
+    "file-diff",
+    "file-pen",
+    "file-plus",
+    "file-text",
+    "flag",
+    "fold-horizontal",
+    "folder",
+    "folder-git-2",
+    "folder-open",
+    "folder-search",
+    "git-branch",
+    "git-merge",
+    "git-pull-request",
+    "git-pull-request-draft",
+    "globe",
+    "hand",
+    "image",
+    "inbox",
+    "info",
+    "kanban",
+    "keyboard",
+    "layout-dashboard",
+    "layout-grid",
+    "link",
+    "list-checks",
+    "list-filter",
+    "list-todo",
+    "list-tree",
+    "loader-circle",
+    "lock",
+    "map",
+    "maximize-2",
+    "message-square",
+    "message-square-warning",
+    "minus",
+    "monitor",
+    "monitor-off",
+    "mouse-pointer-2",
+    "move-down",
+    "move-horizontal",
+    "move-left",
+    "move-right",
+    "move-up",
+    "move-vertical",
+    "notebook-pen",
+    "panel-left",
+    "panels-top-left",
+    "paperclip",
+    "pause",
+    "pencil",
+    "plug",
+    "plus",
+    "power",
+    "regex",
+    "replace",
+    "replace-all",
+    "rotate-cw",
+    "save",
+    "scissors",
+    "search",
+    "server",
+    "server-off",
+    "settings",
+    "shield",
+    "shield-ban",
+    "shield-off",
+    "sparkles",
+    "square",
+    "square-terminal",
+    "sticky-note",
+    "terminal",
+    "text-cursor-input",
+    "text-search",
+    "type",
+    "undo-2",
+    "unfold-horizontal",
+    "unfold-vertical",
+    "unplug",
+    "upload",
+    "volume-2",
+    "volume-x",
+    "whole-word",
+    "wifi",
+    "wifi-off",
+    "workflow",
+    "wrench",
+    "x",
+];
+
+/// The agents' own marks, where their licences allow one: pi's, drawn from the layout its MIT
+/// source spells out (`assets/agents/LICENSE-pi`), and `OpenCode`'s, from its MIT repository
+/// (`assets/agents/LICENSE-opencode`) without the tile behind it.
+const AGENT_MARKS: &[(&str, &[u8])] = &[
+    ("agents/pi.svg", include_bytes!("../assets/agents/pi.svg")),
+    ("agents/opencode.svg", include_bytes!("../assets/agents/opencode.svg")),
+];
+
+/// The stroke gpui-kit's Lucide icons are drawn at, and the one this set's are.
+const LUCIDE_STROKE: &str = "stroke-width=\"2\"";
+const STROKE: &str = "stroke-width=\"1.75\"";
+
+/// The asset source every window registers: Hugeicons' drawings, the file types and the agent
+/// marks, then gpui-kit's bundle at this set's stroke.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Assets;
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        match Chosen.load(path)? {
-            Some(bytes) => Ok(Some(bytes)),
-            None => gpui_kit::assets::Assets.load(path),
+        let ours = DRAWN
+            .iter()
+            .chain(AGENT_MARKS)
+            .find(|(p, _)| *p == path)
+            .map(|(_, bytes)| *bytes)
+            .or_else(|| crate::file_types::load(path));
+        if let Some(bytes) = ours {
+            return Ok(Some(Cow::Borrowed(bytes)));
         }
+        Ok(gpui_kit::assets::Assets.load(path)?.map(at_our_stroke))
     }
 
     fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
-        let mut paths = Chosen.list(path)?;
+        let mut paths: Vec<SharedString> = DRAWN
+            .iter()
+            .chain(AGENT_MARKS)
+            .map(|(p, _)| SharedString::from(*p))
+            .chain(crate::file_types::paths())
+            .filter(|p| p.starts_with(path))
+            .collect();
         paths.extend(gpui_kit::assets::Assets.list(path)?);
         paths.sort();
         paths.dedup();
         Ok(paths)
     }
+}
+
+/// A Lucide icon from gpui-kit's bundle at the stroke this set is drawn at.
+fn at_our_stroke(bytes: Cow<'static, [u8]>) -> Cow<'static, [u8]> {
+    match std::str::from_utf8(&bytes) {
+        Ok(text) if text.contains(LUCIDE_STROKE) => {
+            Cow::Owned(text.replace(LUCIDE_STROKE, STROKE).into_bytes())
+        }
+        _ => bytes,
+    }
+}
+
+/// Whether Hugeicons draws the icon at `path` ([`IconName::path`]), rather than gpui-kit's
+/// Lucide fallback.
+#[must_use]
+pub fn drawn(path: &str) -> bool {
+    DRAWN.iter().any(|(p, _)| *p == path)
 }
 
 /// How large an icon is drawn.
@@ -196,6 +259,198 @@ pub fn icon(theme: &Theme, name: IconName, size: IconSize, color: Hsla) -> Svg {
         IconSize::Large => theme.typography.icon_large(),
     };
     svg().path(name.path()).flex_shrink_0().size(px(side)).text_color(color)
+}
+
+/// What a row or a header leads with: a chrome icon, a file's type, or an agent's mark.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Glyph {
+    /// A chrome icon, in the ink of the words beside it.
+    Icon(IconName),
+    /// A file's type, in its own colours.
+    File(FileType),
+    /// An agent, by its own mark or the neutral one.
+    Agent(AgentMark),
+}
+
+impl From<IconName> for Glyph {
+    fn from(icon: IconName) -> Self {
+        Self::Icon(icon)
+    }
+}
+
+impl Glyph {
+    /// The asset it is drawn from.
+    #[must_use]
+    pub fn path(self) -> SharedString {
+        match self {
+            Self::Icon(name) => name.path(),
+            Self::File(kind) => kind.path(),
+            Self::Agent(AgentMark::Pi) => SharedString::new_static(PI_MARK),
+            Self::Agent(AgentMark::OpenCode) => SharedString::new_static(OPENCODE_MARK),
+            Self::Agent(AgentMark::Neutral) => IconName::Sparkles.path(),
+        }
+    }
+
+    /// The file at `path`: its type's drawing, or the plain file icon for a type the set does
+    /// not draw.
+    #[must_use]
+    pub fn file(path: &str) -> Self {
+        FileType::of(path).map_or(Self::Icon(IconName::File), Self::File)
+    }
+
+    /// The agent named `agent` (an [`AgentId`]'s name).
+    #[must_use]
+    pub fn agent(agent: &str) -> Self {
+        Self::Agent(AgentMark::of(agent))
+    }
+}
+
+/// An agent's mark: its own where its licence allows one, else the neutral one.
+///
+/// Claude Code's and Codex's owners allow their marks only with their approval, so they and
+/// any agent without a mark of its own take the neutral sparkles, in the theme's agent orange.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentMark {
+    /// pi's four-by-four mark, in its own colours.
+    Pi,
+    /// `OpenCode`'s mark, in the ink beside it as its light and dark variants are.
+    OpenCode,
+    /// The sparkles, in [`slopty_theme::Surfaces::agent`].
+    Neutral,
+}
+
+impl AgentMark {
+    /// The mark of the agent named `agent`, reached directly or over ACP.
+    #[must_use]
+    pub fn of(agent: &str) -> Self {
+        match agent.strip_prefix(AgentId::ACP_PREFIX).unwrap_or(agent) {
+            AgentId::PI => Self::Pi,
+            "opencode" => Self::OpenCode,
+            _ => Self::Neutral,
+        }
+    }
+}
+
+/// `glyph`, `side` square. An icon and `OpenCode`'s mark take `ink`; a file type and pi's mark
+/// keep their own colours; the neutral agent mark takes the theme's agent orange.
+#[must_use]
+pub fn glyph(theme: &Theme, glyph: Glyph, side: Pixels, ink: Hsla) -> AnyElement {
+    let mask = |path: SharedString, color: Hsla| {
+        svg().path(path).flex_shrink_0().size(side).text_color(color).into_any_element()
+    };
+    let path = glyph.path();
+    match glyph {
+        Glyph::Icon(_) | Glyph::Agent(AgentMark::OpenCode) => mask(path, ink),
+        Glyph::File(_) | Glyph::Agent(AgentMark::Pi) => {
+            Picture { path, side, inner: None }.into_any_element()
+        }
+        Glyph::Agent(AgentMark::Neutral) => mask(path, hsla(theme.surfaces.agent)),
+    }
+}
+
+const PI_MARK: &str = "agents/pi.svg";
+const OPENCODE_MARK: &str = "agents/opencode.svg";
+
+/// A drawing in its own colours, rasterised once for each size it shows at in the window's
+/// device pixels: as sharp as an icon, and there on the first frame, with no load to wait for.
+struct Picture {
+    path: SharedString,
+    side: Pixels,
+    inner: Option<AnyElement>,
+}
+
+/// The pictures rasterised so far, by path and side in device pixels; `None` for one that
+/// would not draw, so it is not tried again.
+#[derive(Default)]
+struct Pictures(HashMap<(SharedString, i32), Option<Arc<RenderImage>>>);
+
+impl Global for Pictures {}
+
+/// `path` rasterised `device` pixels square.
+fn picture(cx: &mut App, path: &SharedString, device: i32) -> Option<Arc<RenderImage>> {
+    let key = (path.clone(), device);
+    if let Some(made) = cx.try_global::<Pictures>().and_then(|p| p.0.get(&key)) {
+        return made.clone();
+    }
+    let renderer = cx.svg_renderer();
+    let side = gpui::size(DevicePixels(device), DevicePixels(device));
+    let made = Assets
+        .load(path)
+        .ok()
+        .flatten()
+        .and_then(|bytes| renderer.parse_svg(&bytes).ok())
+        .and_then(|svg| renderer.render_parsed(&svg, SvgSize::ExactSize(side)).ok());
+    cx.default_global::<Pictures>().0.insert(key, made.clone());
+    made
+}
+
+impl IntoElement for Picture {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Picture {
+    type PrepaintState = ();
+    type RequestLayoutState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        #[expect(clippy::cast_possible_truncation, reason = "an icon's side in device pixels")]
+        let device = (f32::from(self.side) * window.scale_factor()).round().max(1.0) as i32;
+        let box_ = div().flex_shrink_0().size(self.side);
+        let mut inner = match picture(cx, &self.path, device) {
+            Some(image) => gpui::img(image).flex_shrink_0().size(self.side).into_any_element(),
+            None => box_.into_any_element(),
+        };
+        let layout = inner.request_layout(window, cx);
+        self.inner = Some(inner);
+        (layout, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        if let Some(inner) = &mut self.inner {
+            inner.prepaint(window, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(inner) = &mut self.inner {
+            inner.paint(window, cx);
+        }
+    }
 }
 
 /// The one vocabulary for how a thing is doing, wherever it is shown: a tile's header, a
@@ -661,16 +916,53 @@ impl Element for Spinner {
 mod tests {
     use super::*;
 
+    /// Every drawing is the Hugeicons glyph for one of gpui-kit's names, at this set's stroke
+    /// and in the ink it is given; an icon the set does not draw comes from gpui-kit's bundle
+    /// at the same stroke.
     #[test]
-    fn every_chosen_icon_loads_and_the_component_bundle_still_does() {
-        for name in Chosen.list("").unwrap_or_default() {
-            let bytes = Assets.load(&name).ok().flatten();
-            assert!(bytes.is_some_and(|b| b.starts_with(b"<svg")), "{name} did not load");
+    fn every_icon_is_drawn_at_one_stroke_and_the_component_bundle_still_loads() {
+        let names: std::collections::HashSet<SharedString> =
+            IconName::ALL.iter().map(|i| i.path()).collect();
+        for (path, bytes) in DRAWN {
+            assert!(names.contains(*path), "{path} is not one of gpui-kit's names");
+            let text = std::str::from_utf8(bytes).unwrap_or_default();
+            assert!(text.starts_with("<svg"), "{path} is not an SVG");
+            assert!(text.contains(STROKE), "{path} is not at 1.75");
+            assert!(!text.contains("stroke-width=\"1.5\""), "{path} kept Hugeicons' 1.5");
+            assert!(!text.contains("#141B34"), "{path} paints its own ink");
         }
-        assert!(Assets.load(&IconName::SquareTerminal.path()).ok().flatten().is_some());
+        let lucide = IconName::ALL
+            .iter()
+            .map(|i| i.path())
+            .find(|p| !drawn(p))
+            .and_then(|p| Assets.load(&p).ok().flatten())
+            .unwrap_or_default();
+        let text = std::str::from_utf8(&lucide).unwrap_or_default();
+        assert!(text.contains(STROKE) && !text.contains(LUCIDE_STROKE), "{text}");
         let component = gpui_kit::assets::Assets.list("").unwrap_or_default();
         let first = component.first().map(SharedString::to_string).unwrap_or_default();
         assert!(Assets.load(&first).ok().flatten().is_some(), "component icon {first} lost");
+        for (path, _) in AGENT_MARKS {
+            assert!(Assets.load(path).ok().flatten().is_some(), "{path}");
+            assert!(Assets.list("agents/").unwrap_or_default().iter().any(|p| p == path));
+        }
+    }
+
+    /// Each agent is known by its name, directly or over ACP; Claude Code and Codex, whose
+    /// owners allow their marks only with approval, and any agent without one take the
+    /// neutral mark.
+    #[test]
+    fn an_agent_shows_its_own_mark_only_where_its_licence_allows() {
+        assert_eq!(AgentMark::of(AgentId::PI), AgentMark::Pi);
+        assert_eq!(AgentMark::of("acp:opencode"), AgentMark::OpenCode);
+        assert_eq!(AgentMark::of(AgentId::CLAUDE_CODE), AgentMark::Neutral);
+        assert_eq!(AgentMark::of(AgentId::CODEX), AgentMark::Neutral);
+        assert_eq!(AgentMark::of("acp:gemini"), AgentMark::Neutral);
+        assert_eq!(Glyph::file("/w/main.rs").path().as_ref(), "file-types/rust.svg");
+        assert_eq!(Glyph::file("/w/notes"), Glyph::Icon(IconName::File));
+        for glyph in [Glyph::agent("pi"), Glyph::agent("opencode"), Glyph::agent("codex")] {
+            assert!(Assets.load(&glyph.path()).ok().flatten().is_some(), "{glyph:?}");
+        }
     }
 
     #[test]
@@ -687,7 +979,7 @@ mod tests {
         let icons: std::collections::HashSet<_> = all.iter().map(|s| s.icon()).collect();
         assert_eq!(icons.len(), all.len());
         for s in all {
-            assert!(Chosen.load(&s.icon().path()).ok().flatten().is_some(), "{s:?}");
+            assert!(drawn(&s.icon().path()), "{s:?}");
         }
     }
 

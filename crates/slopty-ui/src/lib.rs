@@ -46,6 +46,7 @@ pub mod colors;
 pub mod conversation;
 mod draw;
 pub mod file;
+pub mod file_types;
 pub mod folder;
 pub mod fonts;
 pub mod frames;

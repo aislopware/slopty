@@ -31,7 +31,7 @@ use slopty_proto::orchestration::FileKind;
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{Glyph, IconName, IconSize};
 use crate::palette::Plate;
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -625,9 +625,10 @@ impl FolderView {
         let chosen = self.selected == Some(ix);
         let folder = entry.kind == FileKind::Dir;
         let icon = match entry.kind {
-            FileKind::Dir => IconName::Folder,
-            FileKind::Symlink => IconName::Link,
-            FileKind::File | FileKind::Other => IconName::File,
+            FileKind::Dir => Glyph::Icon(IconName::Folder),
+            FileKind::Symlink => Glyph::Icon(IconName::Link),
+            FileKind::File => Glyph::file(&entry.name),
+            FileKind::Other => Glyph::Icon(IconName::File),
         };
         let ink = RowInk::of(theme, entry, chosen);
         let detail = if folder {
@@ -697,10 +698,12 @@ impl FolderView {
             .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
                 this.clicked(ix, ev.click_count(), cx);
             }))
-            .child(
-                crate::icons::icon(theme, icon, IconSize::Inline, hsla(ink.icon))
-                    .size(px(theme.typography.icon() * k)),
-            )
+            .child(crate::icons::glyph(
+                theme,
+                icon,
+                px(theme.typography.icon() * k),
+                hsla(ink.icon),
+            ))
             .child(
                 div()
                     .flex_1()

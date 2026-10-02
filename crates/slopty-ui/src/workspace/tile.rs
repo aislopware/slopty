@@ -31,7 +31,7 @@ use crate::chrome_text::ChromeText;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::folder::FolderView;
-use crate::icons::{IconName, IconSize, Status};
+use crate::icons::{AgentMark, Glyph, IconName, IconSize, Status};
 use crate::{add_worker, kit};
 
 /// Below this zoom the overview draws a tile as its miniature: the header's surface without its
@@ -444,19 +444,23 @@ fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
 /// The pill's words while an update has no step to name yet.
 const UPDATING: &str = "Updating the worker";
 
-/// The icon a tile's header leads with: what the tile is.
-pub(super) const fn kind_icon(item: &Item, agent: bool) -> IconName {
-    match item.kind {
-        ItemKind::Terminal { .. } if agent => IconName::Bot,
-        ItemKind::Terminal { .. } => IconName::SquareTerminal,
-        ItemKind::Window { .. } => IconName::AppWindow,
-        ItemKind::Display { .. } => IconName::Monitor,
-        ItemKind::Note { .. } => IconName::StickyNote,
-        ItemKind::File { .. } => IconName::FileText,
-        ItemKind::Folder { .. } => IconName::Folder,
-        ItemKind::Browser { .. } => IconName::Globe,
-        ItemKind::Review { .. } => IconName::FileDiff,
-        ItemKind::Thread { .. } => IconName::Bot,
+/// What a tile's header leads with: what the tile is. A file shows its type; a terminal an
+/// agent runs in and a thread show the agent's mark (`agent`, an `AgentId`'s name).
+pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Glyph {
+    if let (ItemKind::Terminal { .. } | ItemKind::Thread { .. }, Some(agent)) = (&item.kind, agent)
+    {
+        return Glyph::agent(agent);
+    }
+    match &item.kind {
+        ItemKind::Terminal { .. } => Glyph::Icon(IconName::SquareTerminal),
+        ItemKind::Thread { .. } => Glyph::Agent(AgentMark::Neutral),
+        ItemKind::Window { .. } => Glyph::Icon(IconName::AppWindow),
+        ItemKind::Display { .. } => Glyph::Icon(IconName::Monitor),
+        ItemKind::Note { .. } => Glyph::Icon(IconName::StickyNote),
+        ItemKind::File { path } => Glyph::file(path),
+        ItemKind::Folder { .. } => Glyph::Icon(IconName::Folder),
+        ItemKind::Browser { .. } => Glyph::Icon(IconName::Globe),
+        ItemKind::Review { .. } => Glyph::Icon(IconName::FileDiff),
     }
 }
 
@@ -883,7 +887,7 @@ impl WorkspaceView {
                 .text_size(px(theme.typography.ui_size * k))
                 .text_color(hsla(s.text_secondary))
                 .font_family(theme.typography.ui_family.clone())
-                .child(crate::palette::status_slot(theme, kind_icon(item, false), None, muted, k))
+                .child(crate::palette::status_slot(theme, self.kind_glyph(item), None, muted, k))
                 .child(SharedString::from(self.tile_title(item)))
         });
         let ghost = div()
@@ -1281,7 +1285,7 @@ impl WorkspaceView {
             .filter(|st| !(opening && *st == Status::Working));
         let ink = if focused { s.text_secondary } else { s.text_muted };
         let slot =
-            crate::palette::status_slot(&self.theme, kind_icon(item, agent), status, hsla(ink), k)
+            crate::palette::status_slot(&self.theme, self.kind_glyph(item), status, hsla(ink), k)
                 .debug_selector(move || format!("status-{}", id.as_uuid()))
                 .into_any_element();
         self.file_proxy(item, tile, slot, k, cx)
@@ -1411,13 +1415,9 @@ impl WorkspaceView {
             let id = item.id;
             let shown = tab == placed.tile;
             let ink = title_ink(theme, shown && placed.focused);
-            let agent = match item.kind {
-                ItemKind::Terminal { session } => self.agent_state(session).is_some(),
-                _ => false,
-            };
             let status = self.tile_status(tab, item);
             let slot =
-                crate::palette::status_slot(theme, kind_icon(item, agent), status, hsla(ink), k)
+                crate::palette::status_slot(theme, self.kind_glyph(item), status, hsla(ink), k)
                     .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
             let title = self.tile_title(item);
             let label = SharedString::from(title.clone());

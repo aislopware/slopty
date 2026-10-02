@@ -25,7 +25,7 @@ use super::actions::PointOthers;
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{IconName, IconSize};
+use crate::icons::{Glyph, IconName};
 
 /// How long a pointing or a word stays up.
 pub(super) const SAY_FOR: Duration = Duration::from_secs(6);
@@ -284,7 +284,7 @@ impl WorkspaceView {
                         this.dismiss_pointed(tile);
                         this.focus_tile(tile, cx);
                     }));
-                ("pointed", Some(IconName::MousePointer2), vec![go])
+                ("pointed", Some(Glyph::Icon(IconName::MousePointer2)), vec![go])
             }
             ToastKind::Closed { seq, .. } => {
                 let seq = *seq;
@@ -293,7 +293,7 @@ impl WorkspaceView {
                     .closed
                     .iter()
                     .find(|c| c.seq == seq)
-                    .map_or(IconName::X, |c| super::tile::kind_icon(&c.item, false));
+                    .map_or(Glyph::Icon(IconName::X), |c| self.kind_glyph(&c.item));
                 let undo = action("toast-undo", "Undo")
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.take_back(Some(seq), cx)));
                 ("closed", Some(icon), vec![undo])
@@ -313,7 +313,7 @@ impl WorkspaceView {
                         cx.notify();
                     }));
                 body = Some(self.offer_body(offer));
-                ("offered", Some(IconName::Globe), vec![open, dismiss])
+                ("offered", Some(Glyph::Icon(IconName::Globe)), vec![open, dismiss])
             }
             ToastKind::Triaged(undo) => {
                 let (undo, seq) = (undo.clone(), shown.seq);
@@ -360,7 +360,7 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .text_color(hsla(s.text))
             .children(icon.map(|icon| {
-                crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))
+                crate::icons::glyph(theme, icon, px(theme.typography.icon()), hsla(s.text_secondary))
             }))
             .children(mark)
             .child(body.unwrap_or_else(|| {
