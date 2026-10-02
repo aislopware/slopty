@@ -11,7 +11,8 @@
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::selection::Selection;
 use libghostty_vt::terminal::{Point, PointCoordinate};
-use slopty_grid::{LineFlags, SemanticMark};
+use slopty_grid::{LineFlags, LineIndex, SemanticMark};
+use slopty_proto::terminal::{BlockMark, MAX_BLOCKS};
 
 use super::GhosttyEngine;
 use crate::{EngineError, osc133};
@@ -129,6 +130,8 @@ impl GhosttyEngine {
                     && block.output.is_none()
                 {
                     block.output = Some(line.max(block.prompt));
+                    let prompt = LineIndex(block.prompt);
+                    self.note_block(BlockMark { prompt, exit: None });
                 }
             }
             osc133::Mark::CommandEnd { exit } => {
@@ -137,6 +140,8 @@ impl GhosttyEngine {
                     && block.end.is_none()
                 {
                     block.end = Some(End { line, col, exit });
+                    let prompt = LineIndex(block.prompt);
+                    self.note_block(BlockMark { prompt, exit });
                     self.commands_ended = self.commands_ended.wrapping_add(1);
                 }
             }
@@ -145,6 +150,14 @@ impl GhosttyEngine {
         while self.commands.front().is_some_and(|b| b.prompt < base) {
             self.commands.pop_front();
         }
+    }
+
+    /// A block started or ended: news for the next frame, where its last word stands.
+    fn note_block(&mut self, mark: BlockMark) {
+        if self.block_news.last().is_some_and(|m| m.prompt == mark.prompt) {
+            self.block_news.pop();
+        }
+        self.block_news.push(mark);
     }
 
     /// Whether each of screen rows `first_y..=last_y` soft-wraps into the next, for search to
@@ -357,6 +370,18 @@ impl GhosttyEngine {
         Ok(out)
     }
 
+    /// Every command block the history holds (a prompt whose output started), the newest
+    /// [`MAX_BLOCKS`], oldest first: what
+    /// [`slopty_proto::terminal::TermEvent::Blocks`] lists whole.
+    pub(super) fn block_marks(&self) -> Vec<BlockMark> {
+        let started = self.commands.iter().filter(|b| b.output.is_some() && b.prompt >= self.base);
+        let skip = started.clone().count().saturating_sub(MAX_BLOCKS);
+        started
+            .skip(skip)
+            .map(|b| BlockMark { prompt: LineIndex(b.prompt), exit: b.end.and_then(|e| e.exit) })
+            .collect()
+    }
+
     /// What was typed between a prompt and its output: the cells libghostty marked as input
     /// (written after `133;B`), soft-wrapped rows joined and continuation rows on lines of
     /// their own. A shell that never marks its input gets the last prompt row whole.
@@ -407,6 +432,44 @@ mod tests {
     }
 
     const PROMPT: &[u8] = b"\x1b]133;A\x07$ \x1b]133;B\x07";
+
+    /// The blocks the scrollbar marks: news when one starts or ends (its last word only, within
+    /// a frame), nothing for a prompt that ran nothing, and every one with a frame every viewer
+    /// takes whole, a joiner's included, without taking the others' news.
+    #[test]
+    fn blocks_go_out_as_news_and_whole() {
+        let mark = |prompt, exit| BlockMark { prompt: LineIndex(prompt), exit };
+        let mut e = engine(20, 5);
+        let _first = e.full_frame(0).unwrap();
+        assert_eq!(e.drain_blocks().map(|b| (b.whole, b.marks.len())), Some((true, 0)));
+
+        run(&mut e, "false", "no\r\n", 1);
+        let _frame = e.take_frame(0).unwrap().expect("a frame");
+        let news = e.drain_blocks().expect("news");
+        assert!(!news.whole);
+        assert_eq!(news.marks, [mark(0, Some(1))], "started and ended: its end");
+
+        // An empty Enter at a prompt is no block.
+        e.write(PROMPT);
+        e.write(b"\r\n");
+        e.write(PROMPT);
+        let _frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(e.drain_blocks(), None);
+
+        // One running.
+        e.write(b"sleep 9\r\n\x1b]133;C\x07");
+        let joined = e.join_frame(0).unwrap();
+        let whole = joined.blocks.expect("a joiner hears of every block");
+        assert!(whole.whole);
+        assert_eq!(whole.marks, [mark(0, Some(1)), mark(3, None)]);
+        let _frame = e.take_frame(0).unwrap().expect("a frame");
+        let news = e.drain_blocks().expect("the others' news is theirs still");
+        assert_eq!((news.whole, news.marks), (false, vec![mark(3, None)]));
+
+        // Every viewer takes a resize whole.
+        let _resized = e.full_frame(0).unwrap();
+        assert_eq!(e.drain_blocks().map(|b| b.whole), Some(true));
+    }
 
     /// A shell session as the integration scripts write it: prompt, typed command, `C`,
     /// output, `D` with the status.

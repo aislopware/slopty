@@ -193,6 +193,15 @@ impl Target {
         }
     }
 
+    /// Put `text` at the end of the draft and give the composer the keyboard, unless the
+    /// composer is gone.
+    pub fn quote(&self, text: &str, window: &mut gpui::Window, cx: &mut gpui::App) {
+        let _gone = match self {
+            Self::Face(face) => face.update(cx, |v, cx| v.quote_into_draft(text, window, cx)),
+            Self::Thread(view) => view.update(cx, |v, cx| v.quote_into_draft(text, window, cx)),
+        };
+    }
+
     /// Chip `id` is `fraction` of the way up.
     pub fn progress(&self, id: u64, fraction: f32, cx: &mut gpui::App) {
         let _gone = match self {

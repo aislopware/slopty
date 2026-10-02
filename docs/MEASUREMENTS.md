@@ -13477,3 +13477,40 @@ CARGO_TARGET_DIR=target/v-probe SLOPTY_BINS_FRESH=1 nice cargo nextest run -p wo
   -p slopty-ui -p slopty-client -p slopty-worker -p slopty-workerd -p slopty-shape \
   --profile gate --no-fail-fast --status-level all
 ```
+
+## 2026-10-02 — images in the history and block marks on the frame path
+
+Release, mac-studio, other sessions building beside it (`nice -n 19`, 4 jobs). The engine now
+lays out the placements above the screen when a frame is due to list them, keeps the placeholder
+runs that scrolled up, and queues command-block news. One run, after both changes:
+
+```sh
+SLOPTY_BENCH_OUT=target/bench/laneT.jsonl \
+  cargo test -p slopty-engine --release --lib frame_cost -- --ignored --nocapture --test-threads 1
+```
+
+| series | budget | measured |
+| --- | --- | --- |
+| `engine.frame_cost.take_frame.60x12` | 18 922 | 19 043 (+0.6 %) |
+| `engine.frame_cost.take_frame.200x60` | 45 011 | 44 949 (−0.1 %) |
+| `engine.frame_cost.take_frame_unchanged.60x12` | 901 | 908 (+0.8 %) |
+| `engine.frame_cost.take_frame_unchanged.200x60` | 1 022 | 1 004 (−1.8 %) |
+| `engine.frame_cost.write` | 795 | 825 (+3.8 %) |
+| `engine.scroll_frame_cost.80x24` | 123 537 | 123 574 (0.0 %) |
+| `engine.scroll_frame_cost.200x60` | 361 833 | 363 012 (+0.3 %) |
+| `engine.history_image_frame_cost.scroll` | new | 100 890 (p50 6.6 µs) |
+| `engine.history_image_frame_cost.graphics_changed` | new | 67 240 (p50 4.3 µs) |
+
+- **A frame with nothing new is where the checks sit.** A first build tested the two new "is a
+  list due" flags before the no-frame return and read 945 at 60×12 (+4.9 %). They are only
+  needed once a frame is being built, and moved past the return it reads 908. The one check
+  left before it, whether any block news waits, is a length read.
+- **The write path is untouched.** Block news is queued only when an `OSC 133` mark lands.
+  `write` read 850 and then 825 across two builds of the same write path; the entry above
+  ("ghostty sync to 83edd491e") found it spreading 690 to 920 round to round.
+- **The history's images.** `history_image_frame_cost` puts fifty one-cell images in the
+  history of an 80×24 screen. A frame of plain output over them (`scroll`) lists nothing
+  above, as before, since the clients move placements up themselves. A frame after the
+  graphics storage changed (`graphics_changed`, one image sent again) lays out and lists all
+  fifty above the screen, with no rows to diff. Both are new series, recorded as budgets in
+  `xtask/budgets.toml` at these numbers.

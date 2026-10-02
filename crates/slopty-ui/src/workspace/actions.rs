@@ -231,7 +231,8 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
     use crate::terminal::{
-        ClearScreen, CopyLastOutput, Find, NextPrompt, NoteLastBlock, PrevPrompt, RerunLast,
+        ClearScreen, CopyBlockOutput, CopyLastOutput, Find, NextPrompt, NoteLastBlock, PrevPrompt,
+        RerunLast,
     };
     let workspace = key_bindings();
     let terminal = crate::terminal::key_bindings();
@@ -356,6 +357,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Previous prompt", IconName::ChevronUp, Box::new(PrevPrompt)),
         t("Next prompt", IconName::ChevronDown, Box::new(NextPrompt)),
         t("Copy last output", IconName::Copy, Box::new(CopyLastOutput)),
+        t("Copy block output", IconName::Copy, Box::new(CopyBlockOutput)),
         t("Rerun last command", IconName::RotateCw, Box::new(RerunLast)),
         t("Keep last block as a note", IconName::NotebookPen, Box::new(NoteLastBlock)),
         t("Clear the screen and history", IconName::Eraser, Box::new(ClearScreen)),
@@ -369,4 +371,16 @@ pub fn palette_items() -> Vec<PaletteItem> {
         items.push(w("Inspect page", IconName::Wrench, Box::new(InspectPage)));
     }
     items
+}
+
+impl super::WorkspaceView {
+    /// "Attach block to agent", while the focused terminal's blocks have an agent to go to
+    /// ([`super::WorkspaceView::block_target`]): the palette offers no line that would do
+    /// nothing.
+    pub(super) fn attach_line(&self) -> Option<PaletteItem> {
+        self.block_target(self.focused_session()?)?;
+        let terminal = crate::terminal::key_bindings();
+        let attach = Box::new(crate::terminal::AttachBlock);
+        Some(PaletteItem::new("Attach block to agent", IconName::Paperclip, attach, &terminal))
+    }
 }

@@ -124,7 +124,7 @@ pub fn run(data: &[u8]) {
                         viewer.apply(&frame);
                     }
                 }
-                let (frame, _images) = subject.join_frame(0).expect("a join");
+                let frame = subject.join_frame(0).expect("a join").frame;
                 let mut joiner = Viewer::default();
                 joiner.apply(&round_trip(&frame));
                 viewers.push(joiner);

@@ -2452,6 +2452,65 @@ exec sleep 60"#;
         let _killed = child.kill().await;
     }
 
+    /// An image that scrolled into the history reaches every viewer as a placement above the
+    /// screen: one watching as it was shown and scrolled away, and one attaching after, which
+    /// gets its pixels too.
+    #[tokio::test]
+    async fn an_image_in_the_history_reaches_every_viewer_above_the_screen() {
+        // A red pixel placed over a cell, then more lines than the screen holds.
+        let script = r"printf '\033_Ga=T,f=32,s=1,v=1,i=5,q=2;/wAA/w==\033\\'; seq 1 12; echo ready; exec sleep 60";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let (tx, mut rx) = viewer(256);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        let above: Vec<_> = rx.state.placements_above().iter().map(|p| (p.image, p.line)).collect();
+        assert_eq!(above, [(5, LineIndex(0))], "the watcher holds it above");
+
+        let (tx, mut late) = viewer(256);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let (seen, _) = wait_for(&mut late, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::ImagesAbove(a) if !a.is_empty()))
+        })
+        .await;
+        assert!(seen.iter().any(|e| matches!(e, TermEvent::Image { id: 5, .. })), "{seen:?}");
+        let above: Vec<_> =
+            late.state.placements_above().iter().map(|p| (p.image, p.line)).collect();
+        assert_eq!(above, [(5, LineIndex(0))]);
+        assert!(late.state.image(&late.state.placements_above()[0]).is_some(), "with its pixels");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A command block reaches every viewer with its status: one watching as the command ran
+    /// hears of it as news, and one attaching after gets every block with its first frame.
+    #[tokio::test]
+    async fn command_blocks_reach_every_viewer() {
+        let script = r"printf '\033]133;A\007$ \033]133;B\007false\r\n\033]133;C\007no\r\n\033]133;D;1\007'; echo ready; exec sleep 60";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let (tx, mut rx) = viewer(256);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let blocks =
+            |s: &TermState| s.block_marks().iter().map(|(p, e)| (*p, *e)).collect::<Vec<_>>();
+        let ended = |ev: &[TermEvent]| {
+            ev.iter().any(|e| {
+                matches!(e, TermEvent::Blocks { marks, .. } if marks.iter().any(|m| m.exit.is_some()))
+            })
+        };
+        let _seen = wait_for(&mut rx, |ev, _| ended(ev)).await;
+        assert_eq!(blocks(&rx.state), [(LineIndex(0), Some(1))], "the watcher hears of it");
+
+        let (tx, mut late) = viewer(256);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut late, |ev, _| {
+            ev.iter()
+                .any(|e| matches!(e, TermEvent::Blocks { whole: true, marks } if !marks.is_empty()))
+        })
+        .await;
+        assert_eq!(blocks(&late.state), [(LineIndex(0), Some(1))], "the late one gets it whole");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// A drop that reaches the worker after the program stopped asking for drops is told back
     /// to its viewer, whose drop then goes the way it goes without the protocol.
     #[tokio::test]

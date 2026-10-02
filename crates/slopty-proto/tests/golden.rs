@@ -15,7 +15,7 @@ mod golden {
         Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest,
     };
     use slopty_proto::terminal::{
-        ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent,
+        BlockMark, ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent,
         TermRequest,
     };
     use slopty_proto::transfer::{
@@ -1557,7 +1557,7 @@ mod golden {
                     image: 9,
                     generation: 4,
                     col: 2,
-                    row: -1,
+                    line: slopty_grid::LineIndex(9),
                     cols: 3,
                     rows: 2,
                     x_offset: 1,
@@ -1569,6 +1569,36 @@ mod golden {
                 }],
             }),
         );
+    }
+
+    /// The images placed above the screen, in the history.
+    #[test]
+    fn images_above() {
+        let placement = Placement {
+            image: 9,
+            generation: 4,
+            col: 0,
+            line: slopty_grid::LineIndex(3),
+            cols: 3,
+            rows: 2,
+            x_offset: 0,
+            y_offset: 0,
+            width: 24,
+            height: 32,
+            source: PixelRect { x: 0, y: 0, width: 6, height: 8 },
+            z: 0,
+        };
+        snap("worker_term_images_above", &TermEvent::ImagesAbove(vec![placement]));
+    }
+
+    /// The command blocks the scrollbar marks: a failed one, then one still running.
+    #[test]
+    fn blocks() {
+        let marks = vec![
+            BlockMark { prompt: slopty_grid::LineIndex(12), exit: Some(1) },
+            BlockMark { prompt: slopty_grid::LineIndex(300), exit: None },
+        ];
+        snap("worker_term_blocks", &TermEvent::Blocks { whole: true, marks });
     }
 
     #[test]

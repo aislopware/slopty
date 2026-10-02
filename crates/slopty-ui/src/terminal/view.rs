@@ -104,15 +104,20 @@ mod actions {
             RerunLast,
             /// Save the last command and its output as a note tile beside the shell.
             NoteLastBlock,
+            /// Copy the output of the selected command block (the last one with none selected).
+            CopyBlockOutput,
+            /// Attach the selected command block (the last one with none selected) to an
+            /// agent's thread as context.
+            AttachBlock,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
             ClearScreen,
         ]
     );
 }
 pub use actions::{
-    ClearScreen, CloseFind, Copy, CopyLastOutput, Find, FindNext, FindPrev, NextPrompt,
-    NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp, ScrollToBottom,
-    ScrollToTop, SelectAll,
+    AttachBlock, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, Find, FindNext,
+    FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
 };
 
 /// The terminal's key bindings in effect: the keymap's terminal scope ([`crate::keymap`], where
@@ -240,6 +245,10 @@ pub enum TerminalViewEvent {
     /// "Save as note" on a block's menu: the block as a note's Markdown (`block_note`); the
     /// workspace puts a note tile with it beside the shell.
     NoteBlock(String),
+    /// "Attach to agent" on a block's menu, or the palette's "Attach block to agent": the block
+    /// as context for an agent's message, Markdown (`block_context`), for the workspace to put
+    /// in the draft of the agent it picks. Offered only while the attach probe finds one.
+    AttachBlock(String),
     /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
     /// the workspace opens (or reveals) a file tile for it, a relative path made absolute
     /// against the session's directory, landing on `line` (1-based) when one is known.
@@ -278,6 +287,9 @@ pub enum ClipPaste {
 
 /// Asked by ⌘V and ⌃V before they go on: what the clipboard holds.
 pub type ClipHook = Rc<dyn Fn() -> ClipPaste>;
+
+/// Asked before a block is offered to an agent: whether one would take it.
+pub type AttachProbe = Rc<dyn Fn(&App) -> bool>;
 
 /// Whether `keystroke` is ⌃V, the key Claude Code pastes a picture on.
 fn is_control_v(keystroke: &Keystroke) -> bool {
@@ -373,6 +385,8 @@ pub struct TerminalView {
     path_press: Option<(url::PathSpan, bool, gpui::Point<Pixels>)>,
     /// Asked by ⌘V and ⌃V for what the clipboard holds.
     clip_hook: Option<ClipHook>,
+    /// Whether an agent would take a block as context ([`Self::set_attach_probe`]).
+    attach_probe: Option<AttachProbe>,
     /// A ⌘C whose history is still arriving.
     copying: Option<Copying>,
     /// The buttons whose press went to the program (one bit each, as [`ProtoButton::bit`]): their
@@ -562,6 +576,7 @@ impl TerminalView {
             click_at: None,
             path_press: None,
             clip_hook: None,
+            attach_probe: None,
             copying: None,
             program_buttons: 0,
             reported_cell: None,
@@ -991,7 +1006,7 @@ impl TerminalView {
                 .py(px(spacing.xxs))
                 .rounded(px(radii.xs))
                 .cursor_pointer()
-                .when(accent, |el| el.bg(hsla(s.accent_fill)).text_color(hsla(s.accent_ink)))
+                .when(accent, |el| crate::kit::solid(el, theme))
                 .when(!accent, |el| {
                     el.text_color(hsla(s.text_secondary))
                         .hover(move |el| el.bg(hsla_alpha(s.text, alpha::FAINT)))
@@ -1053,12 +1068,15 @@ impl TerminalView {
         )
     }
 
-    /// The pointer's shape over the grid: a hand over the link ⌘ would open, the I-beam while
-    /// ⇧ takes the mouse back from a program (as a click does), then the shape the program
-    /// asked for (`OSC 22`), an arrow while a program has the mouse, and the I-beam over text.
+    /// The pointer's shape over the grid: a hand over the link ⌘ would open and in the gutter
+    /// beside a block (a click selects it), the I-beam while ⇧ takes the mouse back from a
+    /// program (as a click does), then the shape the program asked for (`OSC 22`), an arrow
+    /// while a program has the mouse, and the I-beam over text.
     #[must_use]
     pub fn pointer(&self) -> CursorStyle {
-        if self.link_highlight().is_some() {
+        if self.link_highlight().is_some()
+            || (self.pointer_in_gutter() && self.hovered_block().is_some())
+        {
             return CursorStyle::PointingHand;
         }
         let tracking = self.state.modes().contains(TermModes::MOUSE_TRACKING);
@@ -1350,7 +1368,11 @@ impl TerminalView {
 
     /// The menu's items, in order: what applies to the block under the click, then the
     /// terminal's own (Copy only with something selected).
-    fn block_menu_items(block: Option<&CommandBlock>, has_selection: bool) -> Vec<BlockMenuItem> {
+    fn block_menu_items(
+        block: Option<&CommandBlock>,
+        has_selection: bool,
+        can_attach: bool,
+    ) -> Vec<BlockMenuItem> {
         let mut items = Vec::new();
         if let Some(block) = block {
             if block.command.is_some() {
@@ -1363,6 +1385,9 @@ impl TerminalView {
                 items.push(BlockMenuItem::Rerun);
             }
             items.push(BlockMenuItem::Note);
+            if can_attach {
+                items.push(BlockMenuItem::Attach);
+            }
             items.push(BlockMenuItem::SelectBlock);
         }
         if has_selection {
@@ -1403,6 +1428,7 @@ impl TerminalView {
             BlockMenuItem::CopyCommand
             | BlockMenuItem::CopyOutput
             | BlockMenuItem::Rerun
+            | BlockMenuItem::Attach
             | BlockMenuItem::SelectBlock => {
                 if let Some(block) = menu.block {
                     self.block_item_pick(item, block, cx);
@@ -1435,18 +1461,62 @@ impl TerminalView {
                     self.run_text(command, cx);
                 }
             }
-            BlockMenuItem::SelectBlock => {
-                let last = LineIndex(block.end.0.saturating_sub(1).max(block.prompt.0));
-                let cols = self.state.size().cols;
-                self.selection =
-                    Some(Selection::run((block.prompt, 0), (last, cols.saturating_sub(1))));
-                self.selecting = false;
-            }
+            BlockMenuItem::Attach => cx.emit(TerminalViewEvent::AttachBlock(block_context(&block))),
+            BlockMenuItem::SelectBlock => self.select_block(&block),
             BlockMenuItem::Copy
             | BlockMenuItem::Paste
             | BlockMenuItem::Find
             | BlockMenuItem::ClearScreen
             | BlockMenuItem::Note => {}
+        }
+    }
+
+    /// Select `block` whole, its prompt's first cell to its last row's last: what a copy then
+    /// takes, the command with its output.
+    fn select_block(&mut self, block: &CommandBlock) {
+        let last = LineIndex(block.end.0.saturating_sub(1).max(block.prompt.0));
+        let cols = self.state.size().cols;
+        self.selection = Some(Selection::run((block.prompt, 0), (last, cols.saturating_sub(1))));
+        self.selecting = false;
+    }
+
+    /// The block the block commands act on: the one the selection starts in, else the last
+    /// finished one. `None` on the alternate screen, which has no blocks.
+    fn target_block(&self) -> Option<CommandBlock> {
+        if self.state.modes().contains(TermModes::ALT_SCREEN) {
+            return None;
+        }
+        match self.selection {
+            Some(selection) => self.state.command_block(selection.ordered().0.0),
+            None => self.state.last_block(),
+        }
+    }
+
+    /// The palette's "Copy block output": the output of the block [`Self::target_block`]
+    /// picks to the clipboard; nothing for a block that printed nothing.
+    pub fn copy_block_output(
+        &mut self,
+        _: &CopyBlockOutput,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(block) = self.target_block().filter(|b| !b.output.is_empty()) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(block.output));
+        }
+    }
+
+    /// The palette's "Attach block to agent": the block [`Self::target_block`] picks goes to
+    /// an agent's draft as context ([`TerminalViewEvent::AttachBlock`]). With no agent to take
+    /// it ([`Self::set_attach_probe`]) the palette lists no line for it, and a key bound to it
+    /// says so.
+    pub fn attach_block(&mut self, _: &AttachBlock, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_attach(cx) {
+            cx.emit(TerminalViewEvent::Notice("No agent to attach the block to".to_owned()));
+            return;
+        }
+        match self.target_block() {
+            Some(block) => cx.emit(TerminalViewEvent::AttachBlock(block_context(&block))),
+            None => cx.emit(TerminalViewEvent::Notice("No command block to attach".to_owned())),
         }
     }
 
@@ -1638,8 +1708,7 @@ impl TerminalView {
         .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, _window, cx| {
             cx.stop_propagation();
             let block = this.state.command_block(prompt);
-            this.block_menu = Some(BlockMenu { block, at: ev.position() });
-            cx.notify();
+            this.open_block_menu(block, ev.position(), cx);
         }));
         let mut row = crate::kit::tabular(div())
             .id("block-facts")
@@ -1708,7 +1777,7 @@ impl TerminalView {
         let s = &theme.surfaces;
         let spacing = &theme.spacing;
         let has_selection = self.selection_has_text();
-        let items = Self::block_menu_items(menu.block.as_ref(), has_selection);
+        let items = Self::block_menu_items(menu.block.as_ref(), has_selection, menu.attach);
         let list = div()
             .id("block-menu")
             .debug_selector(|| "block-menu".to_owned())
@@ -1738,7 +1807,7 @@ impl TerminalView {
                     .py(px(spacing.xxs))
                     .rounded(px(theme.radii.xs))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla_alpha(s.accent, alpha::PRESSED)))
+                    .hover(move |el| el.bg(hsla(s.raised)))
                     .child(SharedString::from(item.label()));
                 crate::a11y::tab_stop(row, s.accent).on_click(cx.listener(
                     move |this, _ev, window, cx| {
@@ -1882,6 +1951,31 @@ impl TerminalView {
     /// Where ⌘V and ⌃V ask what the clipboard holds.
     pub fn set_clip_hook(&mut self, hook: ClipHook) {
         self.clip_hook = Some(hook);
+    }
+
+    /// Where the view asks whether an agent would take a block as context: only then does the
+    /// block menu offer "Attach to agent" (the palette asks the workspace itself).
+    pub fn set_attach_probe(&mut self, probe: AttachProbe) {
+        self.attach_probe = Some(probe);
+    }
+
+    /// An agent would take a block as context. Asked where a block is offered (the menu
+    /// opening, the action), never while drawing: the probe reads the workspace, and a read in
+    /// render would draw the terminal again whenever the workspace changes.
+    fn can_attach(&self, cx: &App) -> bool {
+        self.attach_probe.as_ref().is_some_and(|probe| probe(cx))
+    }
+
+    /// Open the block menu for `block` (none off every block) at `at`.
+    fn open_block_menu(
+        &mut self,
+        block: Option<CommandBlock>,
+        at: gpui::Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let attach = self.can_attach(cx);
+        self.block_menu = Some(BlockMenu { block, at, attach });
+        cx.notify();
     }
 
     /// The session's worker is back on a new link, whose sender is `out` and whose clipboard
@@ -2703,7 +2797,12 @@ impl TerminalView {
     /// the alternate screen.
     #[must_use]
     pub fn hovered_block(&self) -> Option<LineIndex> {
-        let row = self.pointer_row(self.pointer_at.get())?;
+        self.block_at_row(self.pointer_row(self.pointer_at.get())?)
+    }
+
+    /// The prompt row of the command block view row `row` is in, as [`Self::hovered_block`]
+    /// counts blocks.
+    fn block_at_row(&self, row: u16) -> Option<LineIndex> {
         if self.state.modes().contains(TermModes::ALT_SCREEN) {
             return None;
         }
@@ -2711,6 +2810,11 @@ impl TerminalView {
         let done = self.state.prompt_after(prompt).is_some();
         let running = self.state.command_running() && !done;
         typed.then_some(prompt).filter(|_| done || running)
+    }
+
+    /// The pointer is in the gutter, the inset left of the grid's first column.
+    fn pointer_in_gutter(&self) -> bool {
+        self.pointer_at.get().zip(self.metrics).is_some_and(|(at, m)| at.x < m.origin.x)
     }
 
     /// The grid row a pointer at `at` is level with.
@@ -2731,19 +2835,28 @@ impl TerminalView {
     /// The pointer moved over the grid's element (`Some`, wherever it is covered) or left it.
     /// Whether that hovers another block, which the view is to be drawn again for.
     pub(super) fn pointer_over(&self, at: Option<gpui::Point<Pixels>>) -> bool {
-        let before = self.hovered_block();
+        let before = (self.hovered_block(), self.pointer_in_gutter());
         self.pointer_at.set(at);
-        self.hovered_block() != before
+        (self.hovered_block(), self.pointer_in_gutter()) != before
     }
 
-    /// The images the latest frame places, each with its texture.
+    /// The images the view shows, each with its texture: the latest frame's, and scrolled back,
+    /// the history's.
     ///
     /// A texture is made once per image generation when the pixels are first painted, and
     /// dropped from the atlas when the state forgets the pixels (its cache budget) or a newer
     /// generation replaces them.
     pub fn placed_images(&mut self, window: &mut Window) -> Vec<PlacedImage> {
         let mut out = Vec::new();
-        for placement in self.state.placements() {
+        // Scrolled back, the history's placements show too, under the screen's. At the bottom
+        // every one of them is wholly above the view.
+        let (top, rows) = (self.state.index_at_row(0).0, u64::from(self.state.size().rows));
+        let in_view = |p: &&Placement| {
+            p.line.0.saturating_add(u64::from(p.rows)) > top && p.line.0 < top.saturating_add(rows)
+        };
+        let above = self.state.placements_above();
+        let above = if self.state.view_offset() == 0 { &[][..] } else { above };
+        for placement in above.iter().filter(in_view).chain(self.state.placements()) {
             let Some(pixels) = self.state.image(placement) else { continue };
             let texture = match self.textures.get(&placement.image) {
                 Some(t) if t.generation == placement.generation => Arc::clone(&t.image),
@@ -3213,11 +3326,30 @@ impl TerminalView {
             let track_x = event.position.x >= thumb.origin.x
                 && event.position.x < thumb.origin.x + thumb.size.width;
             if track_x && let Some(m) = self.metrics {
+                if let Some(prompt) = self.tick_at(&m, event.position.y) {
+                    // A block's mark goes to its prompt.
+                    for effect in self.state.scroll_to_line(prompt) {
+                        if let Effect::Request(req) = effect {
+                            self.send(req, cx);
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
                 let page = i64::from(m.rows).max(1);
                 let up = event.position.y < thumb.origin.y;
                 self.scroll_lines(if up { page } else { page.saturating_neg() }, cx);
                 return;
             }
+        }
+        if event.button == MouseButton::Left
+            && !event.modifiers.modified()
+            && let Some(block) = self.gutter_block(event.position)
+        {
+            // A click beside a block, in the inset left of the text, selects it whole.
+            self.select_block(&block);
+            cx.notify();
+            return;
         }
         let Some((col, row)) = self.metrics.and_then(|m| m.cell_at(event.position)) else {
             return;
@@ -3239,8 +3371,7 @@ impl TerminalView {
                 None if armed => {
                     // The phone has no right button: the armed tap on a bare row is its menu.
                     let block = self.state.command_block(index);
-                    self.block_menu = Some(BlockMenu { block, at: event.position });
-                    cx.notify();
+                    self.open_block_menu(block, event.position, cx);
                 }
                 None => {}
             }
@@ -3253,8 +3384,7 @@ impl TerminalView {
         // (shell integration marks them), the terminal's own always.
         if event.button == MouseButton::Right && (!program_wants_mouse || event.modifiers.shift) {
             let block = self.state.command_block(self.state.index_at_row(row));
-            self.block_menu = Some(BlockMenu { block, at: event.position });
-            cx.notify();
+            self.open_block_menu(block, event.position, cx);
             return;
         }
         if event.button == MouseButton::Left && (!program_wants_mouse || event.modifiers.shift) {
@@ -3526,6 +3656,40 @@ impl TerminalView {
             }
         }
         cx.notify();
+    }
+
+    /// The prompt of the block whose scrollbar mark is at `y` (half a row of slack either side,
+    /// a mark being thinner than a finger or a pointer's aim).
+    fn tick_at(&self, m: &CellMetrics, y: Pixels) -> Option<LineIndex> {
+        if self.state.modes().contains(TermModes::ALT_SCREEN) {
+            return None;
+        }
+        let height = px(slopty_theme::stroke::MARK * self.zoom);
+        let slack = m.line_height / 2.0;
+        let ticks = super::element::block_ticks(
+            m,
+            self.state.block_marks(),
+            self.state.scrollback().oldest(),
+            self.state.history_len(),
+            height,
+        );
+        ticks
+            .iter()
+            .filter(|t| y >= t.bounds.origin.y - slack && y < t.bounds.bottom() + slack)
+            .map(|t| (f32::from(t.bounds.center().y - y).abs(), t.prompt))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, prompt)| prompt)
+    }
+
+    /// The command block beside `at` when it is in the gutter, level with a row of a block the
+    /// pointer would hover ([`Self::block_at_row`]): what a click there selects.
+    fn gutter_block(&self, at: gpui::Point<Pixels>) -> Option<CommandBlock> {
+        let m = self.metrics?;
+        if at.x >= m.origin.x {
+            return None;
+        }
+        let (_, row) = m.cell_at(point(m.origin.x, at.y))?;
+        self.state.command_block(self.block_at_row(row)?)
     }
 
     /// The scrollbar's thumb, while any of the bar shows (`moves`: [`crate::kit::motion`]).
@@ -3823,9 +3987,7 @@ impl TerminalView {
                 bare("terminal-search-regex")
                     .role(gpui::accesskit::Role::Button)
                     .aria_label(if search.regex { "Plain text" } else { "Regular expression" })
-                    .when(search.regex, |el| {
-                        el.bg(hsla(s.accent_fill)).text_color(hsla(s.accent_ink))
-                    })
+                    .when(search.regex, |el| crate::kit::selected(el, theme))
                     .child(".*")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
             )
@@ -3903,6 +4065,8 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::copy_last_output))
             .on_action(cx.listener(Self::rerun_last))
             .on_action(cx.listener(Self::note_last_block))
+            .on_action(cx.listener(Self::copy_block_output))
+            .on_action(cx.listener(Self::attach_block))
             .on_action(cx.listener(Self::clear_screen))
             .on_action(cx.listener(Self::scroll_page_up))
             .on_action(cx.listener(Self::scroll_page_down))
@@ -4091,6 +4255,8 @@ struct BlockMenu {
     block: Option<CommandBlock>,
     /// Where the click landed (window coordinates), the menu's anchor.
     at: gpui::Point<Pixels>,
+    /// An agent would take the block as context, as asked when the menu opened.
+    attach: bool,
 }
 
 /// What waits on a confirmation at the tile's foot.
@@ -4113,6 +4279,8 @@ enum BlockMenuItem {
     Rerun,
     /// The block as a note tile beside the shell: the command runnable, the output under it.
     Note,
+    /// The block into an agent's draft as context.
+    Attach,
     /// Select the whole block, prompt to last output row.
     SelectBlock,
     /// The selection to the clipboard.
@@ -4127,6 +4295,30 @@ enum BlockMenuItem {
 
 /// The shortest command whose row gets a "took" caption.
 pub const TOOK_MIN: Duration = Duration::from_secs(1);
+
+/// A command block as context for an agent's message: what was run and how it ended, then
+/// its output fenced (with a fence longer than any run of backticks in it).
+#[must_use]
+pub(super) fn block_context(block: &CommandBlock) -> String {
+    let failed = block.exit.filter(|&code| code != 0);
+    let text = match (&block.command, failed) {
+        (Some(command), _) if command.contains('\n') => {
+            let ended = failed.map(|code| format!(", which exited {code}")).unwrap_or_default();
+            format!("The terminal ran{ended}:\n\n```sh\n{command}\n```\n")
+        }
+        (Some(command), Some(code)) => {
+            format!("The terminal ran `{command}`, which exited {code}:\n")
+        }
+        (Some(command), None) => format!("The terminal ran `{command}`:\n"),
+        (None, _) => "From the terminal:\n".to_owned(),
+    };
+    if block.output.is_empty() {
+        return format!("{text}\n(no output)\n");
+    }
+    let longest = block.output.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2).saturating_add(1));
+    format!("{text}\n{fence}\n{}\n{fence}\n", block.output)
+}
 
 /// A command block as a note: the command as a heading and a runnable `sh` fence, the
 /// output as a plain fence under it; either half alone when the block has only that.
@@ -4158,6 +4350,7 @@ impl BlockMenuItem {
             Self::CopyOutput => "copy-output",
             Self::Rerun => "rerun",
             Self::Note => "note",
+            Self::Attach => "attach",
             Self::SelectBlock => "select-block",
             Self::Copy => "copy",
             Self::Paste => "paste",
@@ -4172,6 +4365,7 @@ impl BlockMenuItem {
             Self::CopyOutput => "Copy output",
             Self::Rerun => "Rerun",
             Self::Note => "Save as note",
+            Self::Attach => "Attach to agent",
             Self::SelectBlock => "Select block",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
@@ -4591,7 +4785,7 @@ mod tests {
                 image: 1,
                 generation,
                 col: 0,
-                row: 0,
+                line: LineIndex(0),
                 cols: 1,
                 rows: 1,
                 x_offset: 0,
@@ -4644,6 +4838,69 @@ mod tests {
         );
     }
 
+    /// An image that scrolled into the history shows again when the view is scrolled back to
+    /// it, at its line, and not while the view follows the screen.
+    #[gpui::test]
+    fn an_image_in_the_history_shows_when_scrolled_back_to(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::PixelRect;
+        let (view, _rx, cx) = terminal(cx);
+        let placement = Placement {
+            image: 7,
+            generation: 3,
+            col: 0,
+            line: LineIndex(1),
+            cols: 1,
+            rows: 1,
+            x_offset: 0,
+            y_offset: 0,
+            width: 2,
+            height: 1,
+            source: PixelRect { x: 0, y: 0, width: 2, height: 1 },
+            z: 0,
+        };
+        let frame = |seq, first: u64, images: Vec<Placement>| {
+            TermEvent::Frame(Frame {
+                seq,
+                full: seq == 1,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor::default(),
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(first),
+                total_lines: first.saturating_add(3),
+                input_ack: 0,
+                images,
+                updates: Vec::new(),
+            })
+        };
+        let image =
+            TermEvent::Image { id: 7, generation: 3, width: 2, height: 1, bgra: vec![9; 8] };
+        let placed = |cx: &mut VisualTestContext| {
+            view.update_in(cx, |view, window, _cx| {
+                view.placed_images(window).iter().map(|p| p.placement.line).collect::<Vec<_>>()
+            })
+        };
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(image, cx);
+            view.apply(frame(1, 0, vec![placement]), cx);
+            // Ten lines on, the image is in the history.
+            view.apply(frame(2, 10, Vec::new()), cx);
+        });
+        assert_eq!(placed(cx), [], "at the bottom it is above the view");
+        // Scrolled back so the view starts at line 0: the image is on its row 1.
+        view.update(cx, |view, _cx| {
+            let _effects = view.state.scroll_to(10);
+        });
+        assert_eq!(placed(cx), [LineIndex(1)]);
+        // Scrolled back part way, the view starting at line 5: not in it.
+        view.update(cx, |view, _cx| {
+            let _effects = view.state.scroll_to(5);
+        });
+        assert_eq!(placed(cx), []);
+    }
+
     /// A placed image gets one texture, kept across frames while its generation holds and
     /// dropped when the frame stops placing it and the state forgets the pixels.
     #[gpui::test]
@@ -4654,7 +4911,7 @@ mod tests {
             image: 7,
             generation: 3,
             col: 0,
-            row: 0,
+            line: LineIndex(0),
             cols: 1,
             rows: 1,
             x_offset: 0,
@@ -5642,6 +5899,117 @@ mod tests {
         assert!(cx.debug_bounds("block-menu").is_none());
     }
 
+    /// Warp's block gestures. A click in the gutter beside a block selects it whole, its prompt
+    /// to its last output row, and is not the program's; the palette's "Copy block output"
+    /// copies that block's output and "Attach block to agent" hands the workspace the block as
+    /// context while an agent would take it (and is not offered otherwise), and with nothing
+    /// selected both take the last block. While the scrollbar shows, a click on a block's mark
+    /// scrolls its prompt to the top.
+    #[gpui::test]
+    fn a_gutter_click_selects_a_block_and_the_palette_acts_on_it(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        drain_words(&mut rx);
+        let clipboard = |cx: &mut VisualTestContext| {
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()))
+        };
+        let dispatch = |cx: &mut VisualTestContext, action: Box<dyn gpui::Action>| {
+            cx.update(|window, cx| window.dispatch_action(action, cx));
+            cx.run_until_parked();
+        };
+        // Row 0 of the viewport is line 6 ("2"), in `seq 2`'s block (lines 4 to 7).
+        let gutter = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            point(m.origin.x - px(1.0), m.origin.y + m.line_height * 0.5)
+        });
+        cx.simulate_mouse_move(gutter, None, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let hand = view.read_with(cx, |v, _| v.pointer() == CursorStyle::PointingHand);
+        assert!(hand, "a hand beside a block");
+        cx.simulate_click(gutter, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let selected = view.read_with(cx, |v, _| v.selection.map(Selection::ordered));
+        assert_eq!(selected, Some(((LineIndex(4), 0), (LineIndex(7), 9))));
+        assert!(drain_input(&mut rx).is_empty(), "a gutter click is not the program's");
+
+        dispatch(cx, Box::new(CopyBlockOutput));
+        assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
+        let attached = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&attached);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::AttachBlock(text) = event {
+                    seen.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        // No agent to take it: the action says so, and the menu does not offer it.
+        let menu = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| {
+                let block = v.state.command_block(LineIndex(4));
+                TerminalView::block_menu_items(block.as_ref(), false, v.can_attach(cx))
+            })
+        };
+        let notices = Rc::new(RefCell::new(Vec::new()));
+        let heard = Rc::clone(&notices);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if let TerminalViewEvent::Notice(text) = event {
+                    heard.borrow_mut().push(text.clone());
+                }
+            })
+            .detach();
+        });
+        dispatch(cx, Box::new(AttachBlock));
+        assert!(attached.borrow().is_empty());
+        assert_eq!(notices.borrow().as_slice(), ["No agent to attach the block to"]);
+        assert!(!menu(cx).contains(&BlockMenuItem::Attach));
+        let probe: AttachProbe = Rc::new(|_cx: &App| true);
+        view.update(cx, |view, cx| {
+            view.set_attach_probe(probe);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(menu(cx).contains(&BlockMenuItem::Attach));
+        dispatch(cx, Box::new(AttachBlock));
+        assert_eq!(attached.borrow().as_slice(), ["The terminal ran `seq 2`:\n\n```\n1\n2\n```\n"]);
+
+        // Nothing selected: the last block, here the same one.
+        view.update(cx, |view, _cx| view.selection = None);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
+        dispatch(cx, Box::new(CopyBlockOutput));
+        assert_eq!(clipboard(cx).as_deref(), Some("1\n2"));
+
+        // The marks: `ls` at line 0, `false` (failed) at 3, `seq 2` at 4, over 6 lines of
+        // history and the 3-row screen.
+        view.update_in(cx, |view, window, cx| {
+            let mark =
+                |line, exit| slopty_proto::terminal::BlockMark { prompt: LineIndex(line), exit };
+            let marks = vec![mark(0, Some(0)), mark(3, Some(1)), mark(4, Some(0))];
+            view.apply(TermEvent::Blocks { whole: true, marks }, cx);
+            view.pointer_near_scrollbar(true, cx);
+            window.refresh();
+        });
+        cx.run_until_parked();
+        let tick = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            let ticks = crate::terminal::element::block_ticks(
+                &m,
+                v.state.block_marks(),
+                LineIndex(0),
+                v.state.history_len(),
+                px(slopty_theme::stroke::MARK * v.zoom),
+            );
+            ticks.iter().find(|t| t.prompt == LineIndex(3)).map(|t| (t.bounds.center(), t.failed))
+        });
+        let (at, failed) = tick.expect("a mark for the failed block");
+        assert!(failed);
+        cx.simulate_click(at, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(top_line(&view, cx), LineIndex(3), "its prompt at the top");
+    }
+
     /// A right click off any block (no shell integration, a program's output) still offers
     /// the terminal's own items: Paste, Find, Clear screen, and Copy once something is
     /// selected; each does what its shortcut does and closes the menu.
@@ -5837,6 +6205,35 @@ mod tests {
             "a multi-line command is headed by its first line"
         );
         assert_eq!(block_note(&block(None, "")), "");
+    }
+
+    /// A block as an agent's context says what ran and how it ended, then fences its output
+    /// with a fence no run of backticks in it closes.
+    #[test]
+    fn a_block_as_context_says_what_ran_and_how_it_ended() {
+        let block = |command: Option<&str>, exit, output: &str| CommandBlock {
+            prompt: LineIndex(0),
+            end: LineIndex(1),
+            exit,
+            command: command.map(str::to_owned),
+            output: output.to_owned(),
+        };
+        assert_eq!(
+            block_context(&block(Some("false"), Some(1), "")),
+            "The terminal ran `false`, which exited 1:\n\n(no output)\n"
+        );
+        assert_eq!(
+            block_context(&block(Some("ls"), Some(0), "a\nb")),
+            "The terminal ran `ls`:\n\n```\na\nb\n```\n"
+        );
+        assert_eq!(
+            block_context(&block(Some("for x in 1 2\ndo echo $x; done"), None, "1\n2")),
+            "The terminal ran:\n\n```sh\nfor x in 1 2\ndo echo $x; done\n```\n\n```\n1\n2\n```\n"
+        );
+        assert_eq!(
+            block_context(&block(None, None, "x ``` y")),
+            "From the terminal:\n\n````\nx ``` y\n````\n"
+        );
     }
 
     #[test]
@@ -7877,7 +8274,7 @@ mod tests {
             image: 7,
             generation: 3,
             col: 0,
-            row: 0,
+            line: LineIndex(0),
             cols: 1,
             rows: 1,
             x_offset: 0,

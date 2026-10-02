@@ -514,10 +514,29 @@ pub struct PixelRect {
     pub height: u32,
 }
 
+/// The most command blocks [`TermEvent::Blocks`] lists whole, the newest: a scrollbar a few
+/// hundred points tall shows no more distinct marks, and each is a few bytes on the wire.
+pub const MAX_BLOCKS: usize = 4096;
+
+/// A command block as the shell integration marked it (`OSC 133`): a prompt where a command
+/// was typed and its output started. What the scrollbar marks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct BlockMark {
+    /// The absolute line its prompt starts on.
+    pub prompt: LineIndex,
+    /// The status its `133;D` carried; `None` while it runs, or when the shell gave none.
+    pub exit: Option<u8>,
+}
+
+/// The most placements [`TermEvent::ImagesAbove`] carries, the nearest the screen: each is a
+/// few dozen bytes on the wire, and a program can place thousands of small images.
+pub const MAX_ABOVE: usize = 1024;
+
 /// One image the program placed on the grid (kitty graphics).
 ///
-/// Positions are cells of the viewport, sizes the cell pixels of `TermSize::metrics`, as the
-/// worker laid it out.
+/// Its row is an absolute line, so it stays with the text it was placed among as that
+/// scrolls into the history; its column a cell, and its sizes the cell pixels of
+/// `TermSize::metrics`, as the worker laid it out.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Placement {
     /// The image, as `TermEvent::Image` carried it.
@@ -526,8 +545,9 @@ pub struct Placement {
     pub generation: u64,
     /// Top-left cell column; negative when the placement starts left of the viewport.
     pub col: i32,
-    /// Top-left cell row; negative when it has scrolled partly above the viewport.
-    pub row: i32,
+    /// The absolute line of its top row: before the screen's first line when it has scrolled
+    /// partly or wholly into the history.
+    pub line: LineIndex,
     /// Cells covered.
     pub cols: u32,
     /// Rows covered.
@@ -730,6 +750,23 @@ pub enum TermEvent {
     DropConcluded {
         /// What it did.
         operation: DropOperation,
+    },
+    /// Every image placed wholly above the screen, in the history, as of the frame just before
+    /// it (at most [`MAX_ABOVE`] of them, the nearest the screen). It replaces what the client
+    /// holds. It follows a frame every viewer takes whole and one after the images changed;
+    /// between them, a client moves a placement up itself once a frame's screen starts below
+    /// it, and forgets one whose lines left the history.
+    ImagesAbove(Vec<Placement>),
+    /// The command blocks, as of the frame just before it. `whole`: every block the history
+    /// holds (at most [`MAX_BLOCKS`], the newest), replacing what the client holds; it follows
+    /// a frame every viewer takes whole. Otherwise only the blocks that started or ended since
+    /// the last frame, each replacing the one at its prompt. A client forgets a block whose
+    /// prompt left the history, and every block on a frame in another numbering.
+    Blocks {
+        /// The list replaces what the client holds.
+        whole: bool,
+        /// Oldest first.
+        marks: Vec<BlockMark>,
     },
 }
 

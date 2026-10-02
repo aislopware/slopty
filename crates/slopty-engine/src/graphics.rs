@@ -87,10 +87,10 @@ impl Ledger {
         self.shipped.get(&id).filter(|s| s.generation == generation).map(|s| s.shrink)
     }
 
-    /// Note `id` was placed by frame `seq`.
+    /// Note `id` was placed by frame `seq`; a later frame's note stands.
     pub fn touch(&mut self, id: u32, seq: u64) {
         if let Some(s) = self.shipped.get_mut(&id) {
-            s.last = seq;
+            s.last = s.last.max(seq);
         }
     }
 

@@ -24,6 +24,8 @@
 "engine.frame_cost.take_frame_unchanged.200x60" = 1022
 "engine.frame_cost.take_frame_unchanged.60x12" = 901
 "engine.frame_cost.write" = 795
+"engine.history_image_frame_cost.graphics_changed" = 67240
+"engine.history_image_frame_cost.scroll" = 100890
 "engine.osc_write_cost.per_osc" = 7090
 "engine.osc_write_cost.per_osc_raw_vt" = 6930
 "engine.png_decode_cost.rgb_1024x768" = 42560725

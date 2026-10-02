@@ -11,11 +11,14 @@ use std::time::Duration;
 use bytes::{Buf as _, Bytes, BytesMut};
 use slopty_core::{ClientId, SessionId};
 use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, TextSince};
-use slopty_engine::{Compression, EngineConfig, EngineEvent, GhosttyEngine, ImageUpload, Memory};
+use slopty_engine::{
+    Blocks, Compression, EngineConfig, EngineEvent, GhosttyEngine, ImageUpload, Memory,
+};
 use slopty_proto::codec;
 use slopty_proto::terminal::{
-    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, PointerShape,
-    Progress, ProgressState, Restored, TermColors, TermError, TermEvent, TermRequest, TermSize,
+    ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, Placement,
+    PointerShape, Progress, ProgressState, Restored, TermColors, TermError, TermEvent, TermRequest,
+    TermSize,
 };
 use slopty_pty::PtyMaster;
 use slopty_pty::protocol::OutputFrame;
@@ -324,6 +327,14 @@ fn drafts(req: &TermRequest) -> Option<bool> {
         TermRequest::PastePicture(_) => Some(true),
         _ => None,
     }
+}
+
+/// Every row for a viewer joining or catching up, encoded: the images before it, and the
+/// placements above its screen and the command blocks after.
+struct Whole {
+    frame: Outbound,
+    images: Vec<Outbound>,
+    after: Vec<Outbound>,
 }
 
 /// What the program's clipboard reads are answered from: the worker's clipboard, as far as a
@@ -1697,8 +1708,7 @@ impl Actor {
             self.owed = false;
             match self.engine.take_frame(self.ack_seq) {
                 Ok(Some(frame)) => {
-                    let images = self.engine.drain_images();
-                    self.send_frame(frame, images);
+                    self.send_frame(frame);
                     self.frame_sent();
                 }
                 Ok(None) => {}
@@ -1730,11 +1740,15 @@ impl Actor {
     }
 
     /// Hand a frame everyone takes (a diff, or every row after a resize) to each viewer that
-    /// follows the diffs, the images it places first. A viewer with no room for it misses it,
-    /// and is sent every row once it has.
-    fn send_frame(&mut self, frame: Frame, images: Vec<ImageUpload>) {
+    /// follows the diffs, the images it places first and the placements above its screen
+    /// after, when they are due. A viewer with no room for it misses it, and is sent every row
+    /// once it has.
+    fn send_frame(&mut self, frame: Frame) {
+        let images = self.engine.drain_images();
         let images: Vec<Outbound> =
             images.into_iter().filter_map(|u| self.encode(&image_event(u))).collect();
+        let (above, blocks) = (self.engine.drain_above(), self.engine.drain_blocks());
+        let after = self.after_frame(above, blocks);
         let echo = !frame.full && self.burst.open(tokio::time::Instant::now());
         let Some(mut frame) = self.encode(&TermEvent::Frame(frame)) else { return };
         frame.echo = echo;
@@ -1749,12 +1763,20 @@ impl Actor {
                 continue;
             }
             let open = images.iter().all(|image| self.deliver(i, image.clone()))
-                && self.deliver_frame(i, &frame);
+                && self.deliver_frame(i, &frame)
+                && after.iter().all(|event| self.deliver(i, event.clone()));
             if !open {
                 gone.push(i);
             }
         }
         self.remove(gone);
+    }
+
+    /// What follows a frame, encoded: the placements above its screen and the command blocks,
+    /// each when the engine has them for it.
+    fn after_frame(&self, above: Option<Vec<Placement>>, blocks: Option<Blocks>) -> Vec<Outbound> {
+        let above = above.map(TermEvent::ImagesAbove);
+        above.into_iter().chain(blocks.map(Blocks::event)).filter_map(|e| self.encode(&e)).collect()
     }
 
     /// Hand viewer `i` a frame, holding a place among its frames in flight, and a marker after
@@ -1794,9 +1816,7 @@ impl Actor {
             return;
         }
         let gone = match self.whole_frame() {
-            Ok((frame, images)) => {
-                owed.into_iter().filter(|&i| !self.deliver_whole(i, &frame, &images)).collect()
-            }
+            Ok(whole) => owed.into_iter().filter(|&i| !self.deliver_whole(i, &whole)).collect(),
             Err(error) => owed
                 .into_iter()
                 .filter(|&i| !error.as_ref().is_none_or(|out| self.deliver(i, out.clone())))
@@ -1808,28 +1828,33 @@ impl Actor {
     /// Every row for viewer `i`, with the images it needs. `false` when the viewer is gone.
     fn send_whole(&mut self, i: usize) -> bool {
         match self.whole_frame() {
-            Ok((frame, images)) => self.deliver_whole(i, &frame, &images),
+            Ok(whole) => self.deliver_whole(i, &whole),
             Err(error) => error.is_none_or(|out| self.deliver(i, out)),
         }
     }
 
     /// Every row and the images on them, encoded for whoever joins at the others' sequence
     /// number; the error to tell them when the rows could not be read.
-    fn whole_frame(&mut self) -> Result<(Outbound, Vec<Outbound>), Option<Outbound>> {
-        let (frame, images) = self.engine.join_frame(self.ack_seq).map_err(|e| {
+    fn whole_frame(&mut self) -> Result<Whole, Option<Outbound>> {
+        let joined = self.engine.join_frame(self.ack_seq).map_err(|e| {
             tracing::error!(session = %self.id, error = %e, "whole frame failed");
             self.encode(&TermEvent::Error(TermError::Engine(e.to_string())))
         })?;
-        let frame = self.encode(&TermEvent::Frame(frame)).ok_or(None)?;
-        let images = images.into_iter().filter_map(|u| self.encode(&image_event(u))).collect();
-        Ok((frame, images))
+        let frame = self.encode(&TermEvent::Frame(joined.frame)).ok_or(None)?;
+        let images =
+            joined.images.into_iter().filter_map(|u| self.encode(&image_event(u))).collect();
+        let after = self.after_frame(joined.above, joined.blocks);
+        Ok(Whole { frame, images, after })
     }
 
-    /// Hand viewer `i` a whole frame and the images before it. `false` when it is gone.
-    fn deliver_whole(&mut self, i: usize, frame: &Outbound, images: &[Outbound]) -> bool {
+    /// Hand viewer `i` a whole frame, the images before it and the placements above its
+    /// screen after. `false` when it is gone.
+    fn deliver_whole(&mut self, i: usize, whole: &Whole) -> bool {
         let Some(v) = self.viewers.get_mut(i) else { return true };
         v.stale = false;
-        images.iter().all(|image| self.deliver(i, image.clone())) && self.deliver_frame(i, frame)
+        whole.images.iter().all(|image| self.deliver(i, image.clone()))
+            && self.deliver_frame(i, &whole.frame)
+            && whole.after.iter().all(|event| self.deliver(i, event.clone()))
     }
 
     /// Drop the viewers at `gone` (ascending indices), whose sinks closed. A closed sink does
@@ -2049,8 +2074,7 @@ impl Actor {
         self.broadcast(&TermEvent::Resized { cols: size.cols, rows: size.rows });
         match self.engine.full_frame(self.ack_seq) {
             Ok(frame) => {
-                let images = self.engine.drain_images();
-                self.send_frame(frame, images);
+                self.send_frame(frame);
             }
             Err(e) => tracing::error!(session = %self.id, error = %e, "full frame failed"),
         }

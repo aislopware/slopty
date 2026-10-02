@@ -96,7 +96,7 @@ mod diffs {
 
     /// Someone joins: every row for them, nothing taken from the others.
     fn join(subject: &mut GhosttyEngine) -> Viewer {
-        let (frame, _) = subject.join_frame(0).unwrap();
+        let frame = subject.join_frame(0).unwrap().frame;
         let mut joiner = Viewer::default();
         joiner.apply(&frame);
         joiner
@@ -200,7 +200,7 @@ mod diffs {
         others.apply(&e.full_frame(0).unwrap());
         let _first = mirror.full_frame(0).unwrap();
         both(&mut e, &mut mirror, b"\x1b[2;1HB\x1b[4;3H");
-        let (join, _) = e.join_frame(0).unwrap();
+        let join = e.join_frame(0).unwrap().frame;
         let mut joiner = Viewer::default();
         joiner.apply(&join);
         both(&mut e, &mut mirror, b"\x1b[2;1HA\x1b[4;3H\r\n");
@@ -231,7 +231,7 @@ mod diffs {
         // Taken by the others, missed by `behind`.
         let _edit = e.take_frame(0).unwrap().expect("the edit");
         both(&mut e, &mut mirror, b"less\r\n\x1b[?1049h\x1b[Hpage");
-        let (join, _) = e.join_frame(0).unwrap();
+        let join = e.join_frame(0).unwrap().frame;
         let mut joiner = Viewer::default();
         joiner.apply(&join);
         behind.apply(&join);

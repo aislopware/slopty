@@ -3387,3 +3387,82 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Test: ui `a_file_drag_goes_to_a_program_that_asks_for_drops` covers a program not asking,
     per-cell moves, the drop and its URLs, a failed upload, a refusal, a new drag after one,
     and leaving the window.
+
+- ✅ **Images in the history reach every viewer** (2026-10-02). A kitty image that scrolled
+  above the screen was gone for good: a `Placement` named a viewport row, the engine skipped
+  every placement libghostty reported off the viewport, and a client scrolled back drew
+  nothing where a plot or a screenshot had been. Now a placement names the absolute line of
+  its top row (`Placement::line`, a `LineIndex`), so it stays with the text it was placed
+  among, on screen, scrolled back, and in the history.
+  - **Who holds what.** A frame still lists only what touches its screen. Placements wholly
+    above go out as `TermEvent::ImagesAbove`, right after a frame every viewer takes whole
+    (an attach, a resize, a change of numbering) and after a frame where the graphics
+    storage changed, with the pixels a viewer lacks queued ahead as for any placement.
+    Between those, a client moves a placement up itself once a frame's screen starts below
+    it, and forgets one whose lines left the history; a frame in another numbering, or over
+    a new link, empties the list until the worker sends the next. A plain scroll so sends no
+    extra byte, and a late joiner gets the whole list with its first frame.
+  - **Bounds.** At most `MAX_ABOVE` (1024) placements, the nearest the screen, which a scroll
+    back reaches first. They are stamped a frame older than the screen's in both caches
+    (worker ledger and client), so over `IMAGE_CACHE_BYTES` the history's pixels are dropped
+    before the screen's, on both sides alike. A list following a frame dropped as older (the
+    tail of a stream an attach replaced) is dropped with it.
+  - **Where libghostty says it is.** Off the viewport, `placement_render_info` still reports
+    the pin's row relative to the viewport (`computeViewportPos` in
+    `vendor/ghostty/src/terminal/c/kitty_graphics.zig`) unless the placement has no position
+    (virtual, pruned, or rooted at a virtual one), which it reports at row 0 and which is
+    never taken as above. A placeholder run's line is the frame's row, so a held frame's
+    images stay with its rows. No frame scans the history's cells, so a run that scrolls
+    above the screen is kept by the engine as each client keeps it, and listed with the rest.
+  - **Drawing.** The view adds the history's placements to the screen's only while scrolled
+    back, those that meet the rows shown; the element places every placement at its line
+    less the line at the view's top row.
+  - Tests: engine `an_image_scrolled_into_the_history_is_listed_above_the_screen`,
+    `a_placeholder_run_scrolled_into_the_history_is_listed_above`; client
+    `placements_scrolled_above_the_screen_are_kept_by_line`; worker
+    `an_image_in_the_history_reaches_every_viewer_above_the_screen` (a watcher and a late
+    joiner, with pixels); view `an_image_in_the_history_shows_when_scrolled_back_to`; element
+    `a_placement_is_painted_at_its_cell_in_the_workers_pixels`; goldens `worker_frame`,
+    `worker_term_images_above`. Cost: `history_image_frame_cost` (MEASUREMENTS).
+
+- ✅ **Blocks marked on the scrollbar, selected from the gutter** (2026-10-02). Warp's block
+  gestures, from the 2026-10-02 design plan's terminal row, in Slopty's calm.
+  - **Marks come from the worker.** The client's cache holds the prompts it saw, but a late
+    joiner (another device opening a running shell) holds none above its screen. So the engine's
+    command blocks (a prompt whose output started, the same list the CLI and the agents read)
+    go out as `TermEvent::Blocks`: whole after a frame every viewer takes whole, at most
+    `MAX_BLOCKS` (4096), the newest; otherwise only the blocks that started or ended since the
+    last frame, the last word for each. A client drops a block whose prompt left the history
+    and every block on a frame in another numbering, until the next whole list. A width change
+    renumbers the lines and the engine keeps only the open block, so the marks start over there,
+    as the command list does.
+  - **The marks.** While the overlay scrollbar shows (never at rest, so the grid stays quiet),
+    each block is a `stroke::MARK`-tall tick in the thumb's column at its prompt's place in the
+    whole, the place the thumb's top would have with that prompt at the view's top. The tick
+    is the text colour at `alpha::PRESSED`, or `error_fill` for a failed block. Blocks closer
+    than a tick share one, and a failure among them shows through. A click on a mark (half a
+    row of slack) scrolls its prompt to the top; elsewhere on the track still pages.
+  - **The gutter.** A click in the inset left of the first column, level with a block's row,
+    selects the block whole, its prompt to its last output row, the same as the menu's "Select
+    block"; ⌘C then copies command and output. The pointer turns to a hand there. Inside the
+    grid a click still selects text.
+  - **Palette commands** act on the block the selection starts in, else the last finished
+    one: "Copy block output", and "Attach block to agent", which hands the workspace the block
+    as Markdown (`block_context`: what ran, its status when it failed, the output in a fence no
+    backtick run inside closes).
+  - **Where an attached block goes.** To the agent running in that terminal, else to the agent
+    tile focused last on the same worker (`WorkspaceView::block_target`). That tile comes
+    forward on its face, and the block lands at the end of its draft, a blank line after what
+    was typed, with the keyboard (`Target::quote`, over the face's or the thread view's
+    composer). A thread view is only made while its face shows, so the text waits up to four
+    frames for the composer to exist. With no agent to take it, the block menu has no "Attach
+    to agent" and the palette no line, and a key bound to the action says there is no agent:
+    it is never offered to do nothing. The view asks a probe the workspace gives it
+    (`set_attach_probe`) when the menu opens and when the action runs, never while drawing: a
+    read of the workspace in the terminal's render tied the terminal's redraw to the strip's.
+    Test: workspace `a_block_from_a_shell_lands_in_the_last_agents_draft`.
+  - Tests: engine `blocks_go_out_as_news_and_whole`; client
+    `block_marks_follow_the_workers_list`; worker `command_blocks_reach_every_viewer`; element
+    `block_marks_sit_on_the_track_where_their_prompts_are`; view
+    `a_gutter_click_selects_a_block_and_the_palette_acts_on_it`,
+    `a_block_as_context_says_what_ran_and_how_it_ended`; golden `worker_term_blocks`.

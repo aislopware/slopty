@@ -6,6 +6,7 @@ use slopty_client::ItemChange;
 use slopty_client::layout::{Placement, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId, StreamId};
 use slopty_proto::ClientMsg;
+use slopty_proto::agent::AgentStatus;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemKind, ItemSync};
@@ -18,9 +19,52 @@ use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, Workspac
 use crate::file::{FileView, FileViewEvent};
 use crate::note::{NoteView, NoteViewEvent};
 use crate::screen::ScreenView;
-use crate::terminal::{TerminalView, TerminalViewEvent};
+use crate::terminal::{AttachProbe, TerminalView, TerminalViewEvent};
+
+/// Frames a block attached to an agent waits for the agent's composer to be made, its face
+/// having been brought up for it.
+const QUOTE_FRAMES: u8 = 4;
 
 impl WorkspaceView {
+    /// The agent a command block from `session`'s terminal goes to as context: the agent in
+    /// that terminal, else the agent tile last focused on the same worker. `None` hides the
+    /// offer to attach.
+    pub(super) fn block_target(&self, session: SessionId) -> Option<SessionId> {
+        let is_agent =
+            |s: SessionId| self.agent_state(s).is_some_and(|a| a.status != AgentStatus::None);
+        if is_agent(session) {
+            return Some(session);
+        }
+        let worker = self.worker_of_session(session)?;
+        self.recency.iter().rev().find_map(|id| {
+            let tile = self.tile_of(*id)?;
+            let ItemKind::Terminal { session: other } = self.item(tile)?.kind else { return None };
+            (tile.worker == worker && is_agent(other)).then_some(other)
+        })
+    }
+
+    /// A command block from `from`'s terminal, as Markdown, into the draft of the agent
+    /// [`Self::block_target`] picks: its tile is brought into view on its face, and the text
+    /// lands once the face's composer is there, with the keyboard.
+    fn attach_block(&mut self, from: SessionId, text: String, cx: &mut Context<Self>) {
+        let Some(agent) = self.block_target(from) else {
+            self.show_notice("No agent to attach the block to".to_owned(), cx);
+            return;
+        };
+        self.reveal_session(agent, cx);
+        self.show_face(agent, true, cx);
+        let workspace = cx.entity().downgrade();
+        // A popped-out tile's own window, else the one the person acted in.
+        let popped = self.tile_of_session(agent).and_then(|t| self.popouts.window(t.item));
+        cx.defer(move |cx| {
+            let window = popped.or_else(|| cx.active_window());
+            let Some(window) = window.or_else(|| cx.windows().first().copied()) else { return };
+            let _closed = window.update(cx, |_, window, cx| {
+                quote_when_shown(workspace, agent, text, QUOTE_FRAMES, window, cx);
+            });
+        });
+    }
+
     /// A worker this client has added, before its first connection: its tiles (from the
     /// saved layout) stay where they were, waiting.
     pub fn add_worker(&mut self, key: WorkerKey, name: String, cx: &mut Context<Self>) {
@@ -705,11 +749,16 @@ impl WorkspaceView {
         });
         let theme = self.theme.clone();
         let clip = self.clip_hook(key);
+        let workspace = cx.entity().downgrade();
+        let probe: AttachProbe = std::rc::Rc::new(move |cx: &App| {
+            workspace.upgrade().is_some_and(|w| w.read(cx).block_target(session).is_some())
+        });
         let view = cx.new(|cx| {
             let mut view = TerminalView::new(session, size, link.out.clone(), theme, cx);
             if let Some(clip) = clip {
                 view.set_clip_hook(clip);
             }
+            view.set_attach_probe(probe);
             view
         });
         let sid = session;
@@ -733,6 +782,7 @@ impl WorkspaceView {
                 this.chrome.notify(cx);
             }
             TerminalViewEvent::NoteBlock(text) => this.note_beside(sid, text.clone(), cx),
+            TerminalViewEvent::AttachBlock(text) => this.attach_block(sid, text.clone(), cx),
             TerminalViewEvent::ViewFile { path, line } => {
                 let path = this.absolute_in_session(sid, path);
                 if let Some(worker) = this.worker_of_session(sid) {
@@ -1364,4 +1414,32 @@ fn shown_rtt(
     live: Option<std::time::Duration>,
 ) -> Option<std::time::Duration> {
     live.map(|live| pinned.unwrap_or(live))
+}
+
+/// Put `text` in the draft of `agent`'s composer once its tile shows it, waiting up to `frames`
+/// frames for the face brought up for it to be made.
+fn quote_when_shown(
+    workspace: gpui::WeakEntity<WorkspaceView>,
+    agent: SessionId,
+    text: String,
+    frames: u8,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Ok(composer) = workspace.read_with(cx, |w, _| w.shown_composer(agent)) else { return };
+    match composer {
+        Some(composer) => composer.quote(&text, window, cx),
+        None if frames > 0 => {
+            window.on_next_frame(move |window, cx| {
+                quote_when_shown(workspace, agent, text, frames.saturating_sub(1), window, cx);
+            });
+            window.refresh();
+        }
+        None => {
+            tracing::warn!(session = %agent, "no composer showed; the block was not attached");
+            let _gone = workspace.update(cx, |w, cx| {
+                w.show_notice("The agent's composer did not open".to_owned(), cx);
+            });
+        }
+    }
 }

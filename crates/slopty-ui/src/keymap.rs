@@ -533,6 +533,8 @@ pub fn defaults() -> Vec<Command> {
         // ⌘⇧↩ is the workspace's maximize-column; "Rerun last command" is in the palette.
         c(Terminal, "rerun_last", t::RerunLast, &[], &[TERMINAL]),
         c(Terminal, "note_last_block", t::NoteLastBlock, &[], &[TERMINAL]),
+        c(Terminal, "copy_block_output", t::CopyBlockOutput, &[], &[TERMINAL]),
+        c(Terminal, "attach_block", t::AttachBlock, &[], &[TERMINAL]),
         c(Terminal, "clear_screen", t::ClearScreen, &["cmd-k"], &[TERMINAL]),
     ]);
     out.extend(crate::project::key_bindings());

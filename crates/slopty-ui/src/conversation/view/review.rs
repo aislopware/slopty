@@ -155,7 +155,7 @@ impl ConversationView {
 
     /// Put `text` at the end of the draft, a blank line after what is there, and give the
     /// composer the keyboard with the conversation on show.
-    pub(super) fn quote_into_draft(
+    pub(crate) fn quote_into_draft(
         &mut self,
         text: &str,
         window: &mut Window,

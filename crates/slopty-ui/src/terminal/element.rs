@@ -9,8 +9,8 @@
 //! another size (positions come from the cell grid, and a fixed-pitch font's advances scale
 //! with the size).
 
-use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -24,7 +24,9 @@ use gpui::{
     UnderlineStyle, Window, fill, point, px, quad, relative, size,
 };
 use rustc_hash::{FxHashMap, FxHasher};
-use slopty_grid::{Cell, CellWidth, CursorShape, Style as CellStyle, StyleFlags, Underline};
+use slopty_grid::{
+    Cell, CellWidth, CursorShape, LineIndex, Style as CellStyle, StyleFlags, Underline,
+};
 use slopty_predict::Prediction;
 use slopty_proto::terminal::{Placement, TermSize};
 use slopty_theme::{Colors, Rgb, Theme, alpha};
@@ -127,6 +129,8 @@ pub struct Prepared {
     link: Hsla,
     /// The scrollbar's thumb over the grid's right edge, while the bar shows.
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
+    /// The command blocks' marks on the scrollbar's track, under the thumb, while it shows.
+    block_ticks: Vec<(Bounds<Pixels>, Hsla)>,
     /// The rows each command was typed on, as `(top, height)` bands on the head surface, edge
     /// to edge ([`head_color`]).
     heads: Vec<(Pixels, Pixels)>,
@@ -1619,6 +1623,7 @@ impl Element for TerminalElement {
             let predicted = view.predictions();
             let cursor = predicted.map_or_else(|| state.cursor(), |guesses| guesses.cursor);
             let view_offset = state.view_offset();
+            let top_line = state.index_at_row(0);
             // Where the shell's own cursor stands, guesses aside: a prompt with nothing typed
             // yet ends there. Scrolled back, no row of the view is the cursor's.
             let shell_cursor = (view_offset == 0).then(|| state.cursor());
@@ -1637,6 +1642,26 @@ impl Element for TerminalElement {
                 let alpha = if held { alpha::PRESSED } else { alpha::TINT };
                 (hsla_alpha(palette.theme.fg, alpha * shown), state.history_len(), view_offset)
             });
+            // The alternate screen has no blocks; its numbering names none of the primary's.
+            let alt = modes.contains(slopty_grid::TermModes::ALT_SCREEN);
+            let block_ticks = if shown > 0.0 && !alt {
+                let (mark, failure) = (
+                    hsla_alpha(palette.theme.fg, alpha::PRESSED * shown),
+                    hsla_alpha(theme.surfaces.error_fill, shown),
+                );
+                block_ticks(
+                    &metrics,
+                    state.block_marks(),
+                    state.scrollback().oldest(),
+                    state.history_len(),
+                    px(slopty_theme::stroke::MARK * zoom),
+                )
+                .into_iter()
+                .map(|tick| (tick.bounds, if tick.failed { failure } else { mark }))
+                .collect()
+            } else {
+                Vec::new()
+            };
             let faces = cache.faces(&family, ligatures);
             let look = |blink_off| Look { faces: &faces, palette, blink_off };
 
@@ -2018,7 +2043,7 @@ impl Element for TerminalElement {
                 .iter()
                 .filter_map(|p| {
                     let (bounds, image_bounds) =
-                        placement_bounds(&metrics, &p.placement, (p.width, p.height), view_offset)?;
+                        placement_bounds(&metrics, &p.placement, (p.width, p.height), top_line)?;
                     Some(PreparedImage {
                         bounds: bounds.intersect(&grid_bounds),
                         image_bounds,
@@ -2042,6 +2067,7 @@ impl Element for TerminalElement {
                 scrollbar: scrollbar.and_then(|(color, history, offset)| {
                     scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
                 }),
+                block_ticks,
                 heads,
                 head: head_color(theme),
                 rules,
@@ -2374,6 +2400,9 @@ impl Element for TerminalElement {
                 tracing::debug!(error = %e, "paint overlay text");
             }
         }
+        for &(tick, color) in &prepared.block_ticks {
+            window.paint_quad(fill(tick, color));
+        }
         if let Some((thumb, color)) = prepared.scrollbar {
             let radius = thumb.size.width / 2.0;
             window.paint_quad(quad(
@@ -2415,16 +2444,16 @@ fn paint_placed(window: &mut Window, image: &PreparedImage) {
 /// The rectangle its shown part fills, and the rectangle the whole image (`image` pixels
 /// wide and high) would fill at that scale, so the renderer samples the placement's source
 /// rectangle. The worker lays placements out in its cell pixels (device pixels of the unzoomed
-/// grid, `pixel_scale` of them per point) and in viewport rows; a view scrolled
-/// `view_offset` rows into its history shows them that far down. `None` when nothing would
-/// show (an empty source or size).
+/// grid, `pixel_scale` of them per point) at absolute lines, painted that many rows below
+/// `top`, the line at the view's top row, whether it shows the screen or its history.
+/// `None` when nothing would show (an empty source or size).
 #[expect(clippy::cast_precision_loss, reason = "pixel counts and cell positions, far below 2^24")]
 #[must_use]
 pub(super) fn placement_bounds(
     metrics: &CellMetrics,
     placement: &Placement,
     image: (u32, u32),
-    view_offset: u64,
+    top: LineIndex,
 ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
     let (source, painted) = (placement.source, (placement.width, placement.height));
     if source.width == 0 || source.height == 0 || painted.0 == 0 || painted.1 == 0 {
@@ -2433,7 +2462,7 @@ pub(super) fn placement_bounds(
     let scale = metrics.pixel_scale;
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
     let pt = |v: u32| px(v as f32 / scale);
-    let row = i64::from(placement.row).checked_add(i64::try_from(view_offset).ok()?)?;
+    let row = i64::try_from(placement.line.0).ok()?.checked_sub(i64::try_from(top.0).ok()?)?;
     let left =
         metrics.origin.x + metrics.cell_width * (placement.col as f32) + pt(placement.x_offset);
     let top = metrics.origin.y + metrics.line_height * (row as f32) + pt(placement.y_offset);
@@ -2619,6 +2648,59 @@ pub(super) fn scrollbar_thumb(
     Some(Bounds::new(point(x, m.origin.y + y), size(width, h)))
 }
 
+/// A command block's mark on the scrollbar's track.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) struct Tick {
+    /// Where it is drawn: the thumb's column, at its prompt's place in the whole.
+    pub bounds: Bounds<Pixels>,
+    /// The prompt a click on it goes to.
+    pub prompt: LineIndex,
+    /// It, or a block sharing its mark, failed.
+    pub failed: bool,
+}
+
+/// The marks of the command blocks `marks` lists (prompt line and status) on the scrollbar's
+/// track, `height` tall, each at its prompt's place in the whole (the `history` lines from
+/// `oldest`, then the screen) as the thumb maps its top. Blocks closer than a mark share the
+/// first one, which shows a failure among them, and goes to the first failed.
+#[must_use]
+pub(super) fn block_ticks(
+    m: &CellMetrics,
+    marks: &BTreeMap<LineIndex, Option<u8>>,
+    oldest: LineIndex,
+    history: u64,
+    height: Pixels,
+) -> Vec<Tick> {
+    if history == 0 || m.rows == 0 {
+        return Vec::new();
+    }
+    #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
+    let whole = history.saturating_add(u64::from(m.rows)) as f64;
+    let track = f64::from(f32::from(m.line_height)) * f64::from(m.rows);
+    let width = m.cell_width * THUMB_CELLS;
+    let x = m.origin.x + m.cell_width * f32::from(m.cols) - width;
+    let lowest = m.origin.y + m.line_height * f32::from(m.rows) - height;
+    let mut out: Vec<Tick> = Vec::new();
+    for (&prompt, &exit) in marks.range(oldest..) {
+        #[expect(clippy::cast_precision_loss, reason = "line counts, far below 2^52")]
+        let along = prompt.0.saturating_sub(oldest.0) as f64 / whole;
+        #[expect(clippy::cast_possible_truncation, reason = "points, well inside f32")]
+        let y = (m.origin.y + px((track * along) as f32)).min(lowest);
+        let failed = exit.is_some_and(|code| code != 0);
+        if let Some(last) = out.last_mut()
+            && y < last.bounds.origin.y + height
+        {
+            if failed && !last.failed {
+                last.failed = true;
+                last.prompt = prompt;
+            }
+            continue;
+        }
+        out.push(Tick { bounds: Bounds::new(point(x, y), size(width, height)), prompt, failed });
+    }
+    out
+}
+
 /// Whether `at` is where the pointer brings the scrollbar up: level with the grid, within
 /// `SCROLLBAR_REACH_CELLS` of its right edge or anywhere right of it (the tile's inset).
 #[must_use]
@@ -2746,7 +2828,7 @@ mod tests {
             image: 1,
             generation: 1,
             col: 2,
-            row: 1,
+            line: LineIndex(1),
             cols: 1,
             rows: 1,
             x_offset: 4,
@@ -2756,21 +2838,30 @@ mod tests {
             source: PixelRect { x: 0, y: 0, width: 16, height: 32 },
             z: 0,
         };
-        let (bounds, whole) = placement_bounds(&m, &p, (16, 32), 0).expect("shown");
+        let (bounds, whole) = placement_bounds(&m, &p, (16, 32), LineIndex(0)).expect("shown");
         // Cell (2, 1) is at 10 + 2 × 4 = 18, 20 + 8.5; the offset adds 4 px = 2 pt.
         assert_eq!(bounds, Bounds::new(point(px(20.0), px(28.5)), size(px(8.0), px(16.0))));
         assert_eq!(whole, bounds, "the whole image is shown");
         // The right half of the image: the whole image starts one half-width to the left.
         let half = Placement { source: PixelRect { x: 8, y: 0, width: 8, height: 32 }, ..p };
-        let (bounds, whole) = placement_bounds(&m, &half, (16, 32), 0).expect("shown");
+        let (bounds, whole) = placement_bounds(&m, &half, (16, 32), LineIndex(0)).expect("shown");
         assert_eq!(bounds.size, size(px(8.0), px(16.0)));
         assert_eq!(whole, Bounds::new(point(px(12.0), px(28.5)), size(px(16.0), px(16.0))));
-        // Scrolled three rows into history: three rows further down.
-        let (scrolled, _) = placement_bounds(&m, &p, (16, 32), 3).expect("shown");
+        // The screen starts at line 10, and the placement is on its row 1. Scrolled three lines
+        // into history, the view starts at line 7: three rows further down. One in the history,
+        // above the screen, shows in the view the same way.
+        let on_screen = Placement { line: LineIndex(11), ..p };
+        let (live, _) = placement_bounds(&m, &on_screen, (16, 32), LineIndex(10)).expect("shown");
+        assert_eq!(live.origin.y, px(28.5));
+        let (scrolled, _) =
+            placement_bounds(&m, &on_screen, (16, 32), LineIndex(7)).expect("shown");
         assert_eq!(scrolled.origin.y, px(54.0));
+        let above = Placement { line: LineIndex(8), ..p };
+        let (back, _) = placement_bounds(&m, &above, (16, 32), LineIndex(7)).expect("shown");
+        assert_eq!(back.origin.y, px(28.5));
         // An empty source shows nothing.
         let none = Placement { source: PixelRect::default(), ..p };
-        assert_eq!(placement_bounds(&m, &none, (16, 32), 0), None);
+        assert_eq!(placement_bounds(&m, &none, (16, 32), LineIndex(0)), None);
     }
 
     /// The thumb is the screen's share of the whole, never thinner than a row and a half,
@@ -2806,6 +2897,45 @@ mod tests {
         assert_eq!(rows_past_edge(&m, m.origin.y - px(17.5)), 2);
         assert_eq!(rows_past_edge(&m, m.origin.y + px(17.0 * 24.0)), -1, "the first row below");
         assert_eq!(rows_past_edge(&m, m.origin.y + px(17.0 * 25.5)), -2);
+    }
+
+    /// A block's mark sits where the thumb's top would be with its prompt at the view's top;
+    /// marks closer than one share it, showing a failure among them; none without history.
+    #[test]
+    fn block_marks_sit_on_the_track_where_their_prompts_are() {
+        let m = metrics(1.0, 1.0);
+        let track = f32::from(m.line_height) * 24.0;
+        let h = px(2.0);
+        let marks: BTreeMap<LineIndex, Option<u8>> =
+            [(100, Some(0)), (110, None), (124, Some(1)), (130, Some(0)), (147, Some(2))]
+                .into_iter()
+                .map(|(line, exit)| (LineIndex(line), exit))
+                .collect();
+        // 24 lines of history from line 100, then the screen: 48 in the whole.
+        let ticks = block_ticks(&m, &marks, LineIndex(100), 24, h);
+        let at: Vec<(u64, bool, f32)> = ticks
+            .iter()
+            .map(|t| (t.prompt.0, t.failed, f32::from(t.bounds.origin.y - m.origin.y)))
+            .collect();
+        let y = |line: f32| track * (line - 100.0) / 48.0;
+        assert_eq!(at.len(), 5, "{at:?}");
+        assert_eq!(at[0], (100, false, 0.0));
+        assert!((at[1].2 - y(110.0)).abs() < 0.01 && !at[1].1, "running: {at:?}");
+        assert!((at[2].2 - y(124.0)).abs() < 0.01 && at[2].1, "{at:?}");
+        assert!((at[4].2 - y(147.0)).abs() < 0.01, "{at:?}");
+        let thumb = scrollbar_thumb(&m, 24, 0).expect("a thumb");
+        assert!((f32::from(thumb.origin.y - m.origin.y) - at[2].2).abs() < 0.01);
+        assert_eq!(ticks[0].bounds.size, size(thumb.size.width, h));
+        assert_eq!(ticks[0].bounds.origin.x, thumb.origin.x);
+
+        // A long history packs them: one mark, which a failure shows through.
+        let ticks = block_ticks(&m, &marks, LineIndex(100), 100_000, h);
+        assert_eq!(ticks.len(), 1);
+        assert_eq!((ticks[0].prompt, ticks[0].failed), (LineIndex(124), true));
+
+        assert!(block_ticks(&m, &marks, LineIndex(100), 0, h).is_empty(), "no history");
+        let later = block_ticks(&m, &marks, LineIndex(125), 24, h);
+        assert_eq!(later.first().map(|t| t.prompt), Some(LineIndex(130)), "left the history");
     }
 
     /// A pixel mouse report is in the units the worker measures in: device pixels of the *fitted*

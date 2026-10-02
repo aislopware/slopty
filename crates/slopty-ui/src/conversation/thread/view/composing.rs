@@ -267,6 +267,23 @@ impl ThreadView {
         self.set_draft(&written.0, written.1, window, cx);
     }
 
+    /// Put `text` at the end of the draft, a blank line after what is there, and give the
+    /// composer the keyboard: what a terminal block attached as context lands as.
+    pub(crate) fn quote_into_draft(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let joined = match self.draft(cx).trim_end() {
+            "" => text.to_owned(),
+            before => format!("{before}\n\n{text}"),
+        };
+        self.set_draft(&joined, joined.len(), window, cx);
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        cx.notify();
+    }
+
     /// Put `text` in the composer with the caret at byte `caret`, and bring the menus in step.
     pub(super) fn set_draft(
         &mut self,
