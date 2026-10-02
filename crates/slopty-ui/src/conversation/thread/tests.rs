@@ -9,7 +9,7 @@ use slopty_client::threads::{Cache, Cached};
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{Intent, ThreadFrame, ThreadRequest};
 use slopty_proto::thread::{
-    AskId, Choice, Cursor, Delivery, Effect, Request, RequestState, ThreadId, ThreadState,
+    AskId, Cap, Choice, Cursor, Delivery, Effect, Request, RequestState, ThreadId, ThreadState,
 };
 use slopty_theme::Theme;
 
@@ -159,6 +159,29 @@ fn return_sends_now_and_command_return_queues(cx: &mut TestAppContext) {
     );
     assert!(cx.debug_bounds(format!("queued-{}", queued.0).leak()).is_some(), "waits in the bar");
     assert!(!view.read_with(cx, |v, _| v.rows().contains(&Row::Sending { intent: queued.0 })));
+}
+
+/// An agent that takes no message mid-turn but keeps a queue (every ACP agent) has ↵ queue
+/// the message, which the worker sends at once while the agent rests: a steer to it would be
+/// refused. Its capabilities say so, not its name.
+#[gpui::test]
+fn return_queues_for_an_agent_that_takes_no_steer(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.agent = slopty_proto::thread::AgentId::named("acp:opencode");
+    state.meta.caps = vec![Cap::named(Cap::QUEUE), Cap::named(Cap::INTERRUPT)];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    cx.simulate_input("Run the tests");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        intents(&sent),
+        [Intent::Send { text: "Run the tests".to_owned(), delivery: Delivery::Queue }]
+    );
 }
 
 /// A thread the cache kept draws in the view's first frame, before any link: its rows are
@@ -363,4 +386,5 @@ fn timing_of_the_thread_s_frames(cx: &mut TestAppContext) {
 }
 
 mod composing;
+mod questions;
 mod steps;

@@ -30,14 +30,15 @@ use slopty_core::WallMs;
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::{Expanded, Intent};
 use slopty_proto::thread::{
-    AgentId, Clipped, Delivery, Effect, IntentId, Item, ItemBody, ItemId, Phase, Request, ThreadId,
-    ThreadState, ToolCall, ToolDetail, ToolState, TurnId, TurnState, kind,
+    AgentId, Cap, Clipped, Delivery, Effect, IntentId, Item, ItemBody, ItemId, Phase, Request,
+    ThreadId, ThreadState, ToolCall, ToolDetail, ToolState, TurnId, TurnState, kind,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use self::composing::Composing;
 use super::activity::{Activity, Asked, Edit, STEP_DONE};
 use super::hub::{HubEvent, ThreadHub};
+use super::questions;
 use super::rows::{self, Fold, Input, Row};
 use crate::colors::hsla;
 use crate::conversation::composer::Attach;
@@ -78,6 +79,7 @@ const BUBBLE: f32 = 0.85;
 const BUBBLE_LINES: usize = 8;
 const BUBBLE_CHARS: usize = 480;
 
+mod asking;
 mod composing;
 mod pictures;
 mod trail;
@@ -159,6 +161,8 @@ pub struct ThreadView {
     trail: Vec<trail::Above>,
     /// Pictures decoded once, by digest.
     pictures: RefCell<HashMap<String, Arc<gpui::Image>>>,
+    /// The questionnaire of the request on show, when it asks questions.
+    asking: Option<asking::Asking>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -205,7 +209,7 @@ impl ThreadView {
         let composing =
             cx.subscribe_in(&composer, window, |this, _input, event, window, cx| match event {
                 InputEvent::PressEnter { secondary, shift: false } => {
-                    let delivery = if *secondary { Delivery::Queue } else { Delivery::Steer };
+                    let delivery = if *secondary { Delivery::Queue } else { this.send_now(cx) };
                     this.submit(delivery, window, cx);
                 }
                 InputEvent::Change => this.composer_changed(cx),
@@ -258,6 +262,7 @@ impl ThreadView {
             composing: Composing::default(),
             trail: Vec::new(),
             pictures: RefCell::default(),
+            asking: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![composing, hearing, watching],
         };
@@ -473,6 +478,16 @@ impl ThreadView {
         self.hub.update(cx, |hub, cx| hub.intent(thread, intent, cx))
     }
 
+    /// How ↵ sends: into the turn under way, where the agent takes a message mid-turn; else
+    /// queued for the turn's end ([`Cap::QUEUE`]), which at rest goes at once. An agent that
+    /// says neither is sent a steer and its worker says what it can do.
+    fn send_now(&self, cx: &App) -> Delivery {
+        match self.state(cx).map(|st| &st.meta) {
+            Some(meta) if !meta.can(Cap::STEER) && meta.can(Cap::QUEUE) => Delivery::Queue,
+            _ => Delivery::Steer,
+        }
+    }
+
     /// Send the draft, led by what was attached: now, into the turn under way (↵), or once it
     /// ends (⌘↵). While a waiting message is being changed, either sends the change.
     fn submit(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
@@ -635,20 +650,21 @@ impl ThreadView {
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .cursor_pointer()
             .child(label);
+        // The kinds as `kit::button` draws them; the hairline is the solid's own or none, so a
+        // row of them keeps one height.
         let el = match kind {
-            ButtonKind::Primary => el
-                .border_color(hsla(s.accent_fill))
-                .bg(hsla(s.accent_fill))
-                .text_color(hsla(s.accent_ink)),
+            ButtonKind::Primary => kit::solid_pressable(el.border_color(hsla(s.solid)), theme),
             ButtonKind::Secondary => el
-                .border_color(hsla(s.border))
-                .bg(hsla(s.elevated))
+                .border_color(gpui::transparent_black())
+                .bg(hsla(s.raised))
                 .text_color(hsla(s.text))
-                .hover(move |el| el.bg(hsla(s.raised))),
+                .hover(move |el| el.bg(hsla(s.overlay)))
+                .active(move |el| el.bg(hsla(s.overlay))),
             ButtonKind::Ghost | ButtonKind::Link => el
                 .border_color(gpui::transparent_black())
                 .text_color(hsla(s.text_secondary))
-                .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text))),
+                .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                .active(move |el| el.bg(hsla(s.overlay))),
         };
         crate::a11y::tab_stop(el, s.accent)
     }
@@ -1445,7 +1461,7 @@ impl ThreadView {
                     .iter()
                     .find(|o| o.id == c)
                     .map(|o| o.label.clone())
-                    .or(Some(c))
+                    .or_else(|| Some(questions::words(&c)))
             })
             .unwrap_or_default();
         let id = asked.request.id.0.clone();
@@ -1462,12 +1478,20 @@ impl ThreadView {
                     .child(SharedString::from(asked.request.title.clone())),
             )
             .child(div().flex_1())
-            .child(div().flex_none().child(SharedString::from(label)))
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(label)),
+            )
             .into_any_element()
     }
 
     /// The request on show: what it asks, its answers, and "2 of 5" with the way to the
-    /// others. Only a press answers it: no key does, so a stray one cannot.
+    /// others. An approval is answered only by a press, so a stray key cannot answer it;
+    /// questions are a questionnaire, which the keyboard walks once it is in it.
     fn request_card(
         &self,
         request: &Request,
@@ -1479,53 +1503,50 @@ impl ThreadView {
         let s = theme.surfaces;
         let ask = request.id.clone();
         let mut answers: Vec<AnyElement> = Vec::new();
-        let mut primary = true;
-        for choice in &request.options {
-            let kind = match choice.effect {
-                Effect::Allow if primary => {
-                    primary = false;
-                    ButtonKind::Primary
-                }
-                _ => ButtonKind::Secondary,
-            };
+        for (choice, kind) in request.options.iter().zip(answer_kinds(&request.options)) {
             let (ask, id) = (ask.clone(), choice.id.clone());
             answers.push(
-                self.button(format!("answer-{}-{}", ask.0, choice.id), choice.label.clone(), kind)
+                self.button(format!("answer-{}-{}", ask.0, choice.id), answer_label(choice), kind)
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         this.answer(ask.clone(), id.clone(), cx);
                     }))
                     .into_any_element(),
             );
         }
-        if let Some(question) = request.questions.first().filter(|_| request.options.is_empty()) {
-            for offered in &question.options {
-                let (ask, label) = (ask.clone(), offered.label.clone());
-                answers.push(
-                    self.button(
-                        format!("answer-{}-{}", ask.0, offered.label),
-                        offered.label.clone(),
-                        ButtonKind::Secondary,
-                    )
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.answer(ask.clone(), label.clone(), cx);
-                    }))
-                    .into_any_element(),
-                );
-            }
-        }
-        let release = ask.clone();
-        answers.push(
-            self.button(format!("release-{}", ask.0), "Answer in the terminal", ButtonKind::Ghost)
+        // Only an agent whose own prompt runs in a terminal can take the request back there.
+        if self.state(cx).is_some_and(|st| st.meta.terminal.is_some()) {
+            let release = ask.clone();
+            answers.push(
+                self.button(
+                    format!("release-{}", ask.0),
+                    "Answer in the terminal",
+                    ButtonKind::Ghost,
+                )
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     let _id = this.intent(Intent::Release { ask: release.clone() }, cx);
                 }))
                 .into_any_element(),
-        );
-        let text = request
-            .text
-            .as_ref()
-            .map(|t| t.text.clone())
-            .or_else(|| request.questions.first().map(|q| q.text.clone()));
+            );
+        }
+        let asking = self.asking.as_ref().filter(|a| *a.ask() == request.id);
+        let (title, counter) = match asking {
+            Some(asking) => {
+                let header = asking.questions().current(cx).and_then(|q| q.header.clone());
+                let progress = asking.questions().state().read(cx).progress();
+                let counter = (progress.total() > 1)
+                    .then(|| format!("Question {} of {}", progress.current(), progress.total()));
+                (
+                    header
+                        .filter(|h| !h.trim().is_empty())
+                        .unwrap_or_else(|| "Question".to_owned()),
+                    counter,
+                )
+            }
+            None => (request.title.clone(), None),
+        };
+        let text = request.text.as_ref().map(|t| t.text.clone()).or_else(|| {
+            asking.is_none().then(|| request.questions.first().map(|q| q.text.clone())).flatten()
+        });
         let stepper = (of > 1).then(|| {
             div()
                 .flex_none()
@@ -1573,8 +1594,15 @@ impl ThreadView {
                             .text_size(self.z(theme.typography.small()))
                             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                             .text_color(hsla(s.text))
-                            .child(SharedString::from(request.title.clone())),
+                            .child(SharedString::from(title)),
                     )
+                    .children(counter.map(|c| {
+                        kit::tabular(div())
+                            .flex_none()
+                            .text_size(self.z(theme.typography.meta()))
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(c))
+                    }))
                     .children(stepper),
             )
             .children(text.map(|t| {
@@ -1590,7 +1618,15 @@ impl ThreadView {
                     .whitespace_normal()
                     .child(SharedString::from(tail(&t, PEEK_LINES)))
             }))
-            .child(div().flex().flex_wrap().gap(self.z(theme.spacing.xs)).children(answers))
+            .child(match asking {
+                Some(asking) => asking.questions().element(answers),
+                None => div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(self.z(theme.spacing.xs))
+                    .children(answers)
+                    .into_any_element(),
+            })
             .into_any_element()
     }
 
@@ -1857,10 +1893,93 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// Who holds the session, when the thread can move between Slopty and the agent's own
+    /// TUI ([`Cap::HANDOFF`]): `Some(true)` while the TUI does, `Some(false)` while Slopty
+    /// drives it.
+    fn tui_holds(&self, cx: &App) -> Option<bool> {
+        let meta = &self.state(cx)?.meta;
+        meta.can(Cap::HANDOFF).then_some(meta.terminal.is_some())
+    }
+
+    /// Whether this client's `intent` is on its way and not yet answered.
+    fn moving(&self, cx: &App, intent: &Intent) -> bool {
+        self.hub
+            .read(cx)
+            .threads()
+            .unshown(self.thread)
+            .any(|s| s.outcome.is_none() && s.intent == *intent)
+    }
+
+    /// In the composer's place while the agent's own TUI holds the session: where it is, and
+    /// the way to take it back once it rests.
+    fn held_strip(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let name = self.state(cx).map_or("the agent", |st| agent_name(&st.meta.agent));
+        let taking = self.moving(cx, &Intent::TakeBack);
+        div()
+            .id("thread-held")
+            .debug_selector(|| "thread-held".to_owned())
+            .role(Role::Status)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.md))
+            .py(self.z(theme.spacing.sm))
+            .rounded(self.z(theme.radii.lg))
+            .border_1()
+            .border_color(hsla(s.border))
+            .bg(hsla(s.elevated))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_secondary))
+            .child(self.icon(IconName::SquareTerminal, s.text_muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .child(SharedString::from(format!("In {name}'s own terminal now"))),
+            )
+            .child(if taking {
+                div()
+                    .flex_none()
+                    .text_color(hsla(s.text_muted))
+                    .child("Taking it back once it rests")
+                    .into_any_element()
+            } else {
+                self.button("thread-take-back", "Take back", ButtonKind::Secondary)
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        let _id = this.intent(Intent::TakeBack, cx);
+                    }))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    /// The composer's way to hand the session to the agent's own TUI, while Slopty drives it.
+    fn handoff_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.tui_holds(cx) != Some(false) {
+            return None;
+        }
+        if self.moving(cx, &Intent::Handoff) {
+            return Some(div().child("Handing over once it rests").into_any_element());
+        }
+        Some(
+            self.button("thread-handoff", "Continue in the terminal", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _ev, _w, cx| {
+                    let _id = this.intent(Intent::Handoff, cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The field, over it the menu, the chips of what is attached or the line saying a waiting
     /// message is being changed, and under it the way to attach, the model, and the way to
-    /// stop the turn.
+    /// stop the turn. While the agent's own TUI holds the session, where it is instead.
     fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
+        if self.tui_holds(cx) == Some(true) {
+            return self.held_strip(cx);
+        }
         let theme = &self.theme;
         let s = theme.surfaces;
         let working = self.working(cx);
@@ -1911,6 +2030,7 @@ impl ThreadView {
                     })
                     .children(model.map(|m| div().child(SharedString::from(m))))
                     .child(div().flex_1())
+                    .children(self.handoff_button(cx))
                     .when(working && !stopping, |el| {
                         el.child(
                             self.icon_button("thread-stop", IconName::Square, "Stop")
@@ -1962,6 +2082,7 @@ impl ThreadView {
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_edit(window, cx);
+        self.settle_questions(window, cx);
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let header = self.header_bar(cx);
@@ -2058,13 +2179,47 @@ fn splice(list: &ListState, old: &[(u64, u64)], keys: &[(u64, u64)]) {
 
 /// What the composer says before anything is typed, by the agent.
 fn placeholder(agent: &AgentId) -> String {
-    let name = match agent.0.as_str() {
+    format!("Message {}", agent_name(agent))
+}
+
+/// How each answer's button reads: the first plain allow leads; an answer that reaches beyond
+/// this once ("always", a rule) never does, and stands aside, quiet, for the person to choose.
+fn answer_kinds(options: &[slopty_proto::thread::Choice]) -> Vec<ButtonKind> {
+    let lead = options.iter().position(|c| c.effect == Effect::Allow && c.scope.is_none());
+    options
+        .iter()
+        .enumerate()
+        .map(|(ix, choice)| match &choice.scope {
+            Some(_) => ButtonKind::Ghost,
+            None if Some(ix) == lead => ButtonKind::Primary,
+            None => ButtonKind::Secondary,
+        })
+        .collect()
+}
+
+/// An answer's words on its button, with how far it reaches when its words do not say it
+/// already: "Always allow · Bash(cargo test:*)", but "Always allow" for an `always` scope.
+fn answer_label(choice: &slopty_proto::thread::Choice) -> String {
+    match choice.scope.as_deref().map(str::trim).filter(|scope| !scope.is_empty()) {
+        Some(scope) if !choice.label.to_lowercase().contains(&scope.to_lowercase()) => {
+            format!("{} \u{b7} {scope}", choice.label)
+        }
+        _ => choice.label.clone(),
+    }
+}
+
+/// What names an agent reached over ACP: `acp:<name>`, the worker's registry naming it
+/// (`slopty_agent::acp::AGENT_PREFIX`, which the client does not link).
+const ACP: &str = "acp:";
+
+/// An agent's name in a sentence: an ACP agent's is the one its registry gives it.
+fn agent_name(agent: &AgentId) -> &str {
+    match agent.0.as_str() {
         AgentId::CLAUDE_CODE => "Claude",
         AgentId::CODEX => "Codex",
         AgentId::PI => "pi",
-        _ => "the agent",
-    };
-    format!("Message {name}")
+        other => other.strip_prefix(ACP).filter(|name| !name.is_empty()).unwrap_or("the agent"),
+    }
 }
 
 /// The start of a message too long to show whole at first, cut at a word, with an ellipsis;
@@ -2089,7 +2244,7 @@ fn clamp(words: &str) -> Option<String> {
     Some(format!("{}\u{2026}", cut.trim_end()))
 }
 
-/// The glyph of an agent's kind.
+/// The glyph of an agent's kind: its own mark where Slopty has one, else a neutral one.
 fn agent_icon(agent: Option<&AgentId>) -> IconName {
     match agent.map(|a| a.0.as_str()) {
         Some(AgentId::CLAUDE_CODE) => IconName::Asterisk,
@@ -2168,4 +2323,62 @@ fn sentence(name: &str) -> String {
     let words = name.replace(['-', '_'], " ");
     let mut chars = words.chars();
     chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_proto::thread::{AgentId, Choice, Effect};
+
+    use super::{ACP, agent_name, answer_kinds, answer_label, placeholder};
+    use crate::kit::ButtonKind;
+
+    /// An ACP agent reads as the name its registry gives it, as the worker names its threads.
+    #[test]
+    fn an_acp_agent_reads_as_its_registry_name() {
+        assert_eq!(ACP, slopty_agent::acp::AGENT_PREFIX);
+        assert_eq!(placeholder(&slopty_agent::acp::agent_id("opencode")), "Message opencode");
+        assert_eq!(agent_name(&AgentId::named(AgentId::PI)), "pi");
+        assert_eq!(agent_name(&AgentId::named(ACP)), "the agent", "a nameless one");
+    }
+
+    /// An answer that reaches beyond this once says how far, unless its words already do.
+    #[test]
+    fn a_scoped_answer_says_how_far_it_reaches() {
+        let choice = |label: &str, scope: Option<&str>| Choice {
+            id: "a".to_owned(),
+            label: label.to_owned(),
+            effect: Effect::Allow,
+            scope: scope.map(str::to_owned),
+            stops: false,
+        };
+        assert_eq!(answer_label(&choice("Allow", None)), "Allow");
+        assert_eq!(
+            answer_label(&choice("Always allow", Some("Bash(cargo test:*)"))),
+            "Always allow \u{b7} Bash(cargo test:*)"
+        );
+        assert_eq!(answer_label(&choice("Always Allow", Some("always"))), "Always Allow");
+    }
+
+    /// An ACP agent may offer "always" first: the plain allow still leads, and the scoped
+    /// answers stand aside, so the card never leads the person to a standing grant.
+    #[test]
+    fn a_standing_grant_never_leads_the_card() {
+        let choice = |effect, scope: Option<&str>| Choice {
+            id: "a".to_owned(),
+            label: "a".to_owned(),
+            effect,
+            scope: scope.map(str::to_owned),
+            stops: false,
+        };
+        let offered = [
+            choice(Effect::Allow, Some("always")),
+            choice(Effect::Allow, None),
+            choice(Effect::Deny, Some("always")),
+            choice(Effect::Deny, None),
+        ];
+        assert_eq!(
+            answer_kinds(&offered),
+            [ButtonKind::Ghost, ButtonKind::Primary, ButtonKind::Ghost, ButtonKind::Secondary]
+        );
+    }
 }

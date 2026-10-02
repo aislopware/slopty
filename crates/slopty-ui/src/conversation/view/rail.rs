@@ -134,7 +134,7 @@ impl Render for Rail {
                         .rounded_full()
                         .bg(hsla(s.border))
                         .group_hover("tick", |el| {
-                            el.bg(hsla(s.accent_fill)).w(self.z(theme.spacing.md))
+                            el.bg(hsla(s.text_muted)).w(self.z(theme.spacing.md))
                         }),
                 )
                 .tooltip(move |_window, cx| {

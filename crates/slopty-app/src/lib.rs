@@ -2431,8 +2431,13 @@ impl Workspace {
             .rounded(px(self.theme.radii.sm))
             .text_size(px(if word { ty.small() } else { ty.title() }))
             .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-            .text_color(hsla(if lit { s.accent_ink } else { s.text }))
-            .bg(hsla(if lit { s.accent_fill } else { s.raised }))
+            .map(|el| {
+                if lit {
+                    kit::solid(el, &self.theme)
+                } else {
+                    el.text_color(hsla(s.text)).bg(hsla(s.raised))
+                }
+            })
             .when(!lit, |el| el.active(|el| el.bg(hsla(s.overlay))))
     }
 

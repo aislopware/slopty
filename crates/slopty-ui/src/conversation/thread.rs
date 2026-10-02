@@ -6,6 +6,7 @@
 //!   view's intents reach the worker.
 //! * [`rows`] — a thread as the list's rows: settled turns folded, the live one whole.
 //! * [`activity`] — what the bar over the composer stacks.
+//! * [`questions`] — an agent's questions as a questionnaire, and the answer that goes back.
 //! * [`view`] — the thread view itself.
 //!
 //! It stands beside the conversation face ([`super::ConversationView`]) until the old path
@@ -15,6 +16,7 @@ pub mod activity;
 #[cfg(test)]
 pub(crate) mod fixtures;
 pub mod hub;
+pub mod questions;
 pub mod rows;
 pub mod view;
 

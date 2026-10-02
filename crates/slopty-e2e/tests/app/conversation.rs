@@ -8,10 +8,10 @@
 //! What the model writes before the transcript has it comes from Slopty's Claude Code mod: its
 //! recorded events are posted to the worker's mod socket as the mod posts them.
 //!
-//! Goldens: the thread with a request over the composer, light and dark; a settled turn and a
-//! subagent's own thread; a file attached by a drop; the thread on a phone-width window; a step
-//! the model is still writing; and the work beyond words (a pasted picture, the plan, a build in
-//! the background), folded and with every step open.
+//! Goldens: the thread with a request over the composer, light and dark; its questions; a settled
+//! turn and a subagent's own thread; a file attached by a drop; the thread on a phone-width window;
+//! a step the model is still writing; and the work beyond words (a pasted picture, the plan, a
+//! build in the background), folded and with every step open.
 
 use std::path::{Path, PathBuf};
 
@@ -145,6 +145,82 @@ async fn an_agent_tile_opens_on_its_thread() {
     drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
     golden(drv, &dir, "thread-dark").await;
     stack.shutdown().await;
+}
+
+/// Claude Code asks two questions through `AskUserQuestion`: the request opens over the
+/// composer as a questionnaire, one question at a time under its header, each answer with
+/// what it means, a field for one's own. A pick and a word of one's own answer them, and the
+/// relay hands Claude Code the call's input with the answers keyed by each question's text,
+/// as its own dialog would. The questionnaire takes the keyboard from the empty composer.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn an_agents_questions_are_answered_in_the_thread() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    let session = dump.terminals[0].session.clone();
+    let transcript = start_recorded(&stack, &session, "edit").await;
+    stack
+        .driver
+        .wait_for("the thread, face-first", STEP, |d| thread_shows(d) && any_label(d, "Worked"))
+        .await
+        .unwrap();
+    let questions = json!([{
+        "question": "Which layout should the review use?", "header": "Layout",
+        "multiSelect": false,
+        "options": [
+            { "label": "Split", "description": "Old and new side by side" },
+            { "label": "Unified", "description": "One column, changes inline" }
+        ]
+    }, {
+        "question": "Which panes stay open?", "header": "Panes", "multiSelect": true,
+        "options": [{ "label": "Files" }, { "label": "Terminal" }]
+    }]);
+    let ask = json!({
+        "hook_event_name": "PermissionRequest", "session_id": "s1",
+        "transcript_path": transcript, "cwd": stack.path("home"),
+        "tool_name": "AskUserQuestion", "tool_input": { "questions": questions },
+    });
+    let held = stack.relay_hook(&session, &[], &ask).unwrap();
+    let drv = &mut stack.driver;
+    let dump = drv
+        .wait_for("the questions over the composer", STEP, |d| has(d, "RadioButton", "Unified"))
+        .await
+        .unwrap();
+    assert!(has(&dump, "TextInput", "Other"), "a field for one's own: {:#?}", dump.a11y);
+    let split = dump.a11y_node("RadioButton", Some("Split")).unwrap();
+    assert!(split.focused, "the first answer has the keyboard: {:#?}", dump.a11y);
+    golden(drv, &dir, "thread-questions").await;
+
+    click(drv, "RadioButton", "Unified").await;
+    // ⌘↵ goes on at once; a newer gpui-kit also goes on by itself a moment after the pick.
+    drv.keys("cmd-enter").await.unwrap();
+    drv.wait_for("the second question", STEP, |d| has(d, "CheckBox", "Terminal")).await.unwrap();
+    click(drv, "CheckBox", "Terminal").await;
+    click(drv, "TextInput", "Other").await;
+    drv.type_text("Logs").await.unwrap();
+    click(drv, "Button", "Submit").await;
+
+    let answered = tokio::time::timeout(STEP, held.wait_with_output()).await.unwrap().unwrap();
+    let decision: Value = serde_json::from_slice(&answered.stdout).unwrap();
+    assert_eq!(
+        decision["hookSpecificOutput"]["decision"]["updatedInput"]["answers"],
+        json!({
+            "Which layout should the review use?": "Unified",
+            "Which panes stay open?": "Terminal, Logs"
+        }),
+        "{decision:#}"
+    );
+    stack.shutdown().await;
+}
+
+/// Click the middle of the node with `role` and `label`.
+async fn click(drv: &mut Driver, role: &str, label: &str) {
+    let dump = drv.dump().await.unwrap();
+    let node = dump.a11y_node(role, Some(label)).unwrap_or_else(|| panic!("{role} {label}"));
+    let [x, y, w, h] = node.bounds;
+    drv.click(w.mul_add(0.5, x), h.mul_add(0.5, y)).await.unwrap();
 }
 
 /// A settled turn reads as its prompt, one line of what it did and its answer, with the files

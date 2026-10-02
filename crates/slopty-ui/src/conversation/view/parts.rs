@@ -581,13 +581,13 @@ impl ConversationView {
             .justify_center()
             .rounded_full()
             .cursor_pointer()
-            .map(|el| if lit { el.bg(hsla(s.accent_fill)) } else { el.bg(hsla(s.raised)) })
+            .map(|el| if lit { kit::solid(el, &theme) } else { el.bg(hsla(s.raised)) })
             .child(
                 crate::icons::icon(
                     &theme,
                     icon,
                     crate::icons::IconSize::Inline,
-                    hsla(if lit { s.accent_ink } else { s.text_muted }),
+                    hsla(if lit { s.solid_ink } else { s.text_muted }),
                 )
                 .size(self.z(theme.typography.icon())),
             );

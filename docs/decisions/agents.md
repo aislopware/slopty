@@ -744,6 +744,14 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     a lone question that offers nothing it is the words typed. Otherwise it is a JSON list of
     `detail::Answer`, one per question keyed by its text, with several picks of one question
     joined by `", "` and one's own words last, which is how Claude Code's own dialog joins them.
+  - **The card is gpui-kit's questionnaire** (`conversation/thread/questions.rs`,
+    `thread/view/asking.rs`; tests `thread::tests::questions::*`, e2e
+    `an_agents_questions_are_answered_in_the_thread`). One question at a time under its header,
+    each answer with its description, single or multiple choice, an "Other" field beside the
+    choices and a field alone when there are none; digits, arrows, ↵ and ⌘↵ walk it. A new
+    questionnaire takes the keyboard only from an empty composer, so a message being typed is
+    never read as answers, and gives it back when it goes. "Answer in the terminal" shows only
+    for a thread with a terminal.
   - **Claude Code** takes the list as `AskUserQuestion`'s answers as they are.
   - **Codex** asks with `item/tool/requestUserInput`. Its request now carries the questions,
     each with the answers Codex offers and their descriptions, and the answer goes back under

@@ -44,7 +44,7 @@ fn asked(
 fn state() -> ThreadState {
     let mut state = fixtures::empty();
     state.meta.cwd = ROOT.to_owned();
-    state.meta.caps = vec![Cap::named(Cap::QUEUE)];
+    state.meta.caps = vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)];
     state
 }
 
