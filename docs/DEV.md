@@ -213,8 +213,10 @@ in parallel lanes on `target/gate/*` target dirs. Several agents edit this one c
 once, so stage exactly the change you mean to land (`git add <paths>`), gate it, and commit it;
 the tree stays free to edit meanwhile. `--fix` runs the fixers on the tree first (stage what
 they changed); `--in-place` checks the tree itself; `--lane <name>` (repeat for several:
-`tools`, which carries fmt, `clippy-host`, `clippy-ios`, `tests`, `rustdoc`) runs only those
-lanes, and a lane that runs alone takes every core. Per-lane times are in the log.
+`tools`, which carries fmt, `clippy-host`, `clippy-ios`, `tests`, `rustdoc`, `linux`) runs only
+those lanes, and a lane that runs alone takes every core. The `linux` lane (the Linux worker
+built natively and its crates' tests) runs only on a Linux host, CI's Linux runner; here
+`cargo xtask linux e2e` runs that worker in Docker instead. Per-lane times are in the log.
 
 fmt and the tool checks (deny, hakari, shear, typos, taplo, `committed`) take seconds, so they
 run first, side by side, and a failure among them ends the gate before any compile. Then the
@@ -304,6 +306,10 @@ startup disk (any volume of its APFS container, symlinks followed).
   target dir), clone the guest if it does not exist yet, and run `slopty worker deploy` against
   it. This Mac's address is added to the guest's `[worker] allow`, other settings kept. The worker
   answers at `<guest ip>:45550` (`tart ip slopty-26-dev`, with `TART_HOME=/Volumes/Lacie/vms/tart`).
+  `--app` instead deploys as the app does, over the system `ssh`, into a fresh clone of the base
+  (one that never had a worker): it runs `slopty-deploy`'s `guest` test, which meets the guest's
+  unknown host key, trusts the fingerprint shown, installs, and pings the worker. `--keep` leaves
+  the guest. The QUIC leg needs the Local Network grant for the app the terminal runs under.
 - `cargo xtask vm live -p <crate> [--test <target>] -- <nextest filters>`: a fresh guest per run,
   `slopty-26-run-<pid>-<time>`, deleted when the run ends or on Ctrl-C, SIGTERM or SIGHUP.
   `--keep` names it `slopty-26-kept-<pid>-<time>` and leaves it. The run prints the clone, boot
