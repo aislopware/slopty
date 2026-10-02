@@ -514,7 +514,8 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   on two workers is one group. The grouping is `slopty_ui::repo_groups::group`, a pure
   function: clones join when their identities match or they share a path, transitively, and
   a group is keyed by its least origin, else its first commit, else its path, so a fold kept
-  under the key holds whatever order the tiles come in. The navigator is not wired to it yet.
+  under the key holds whatever order the tiles come in. The navigator's lens groups by it
+  (`docs/decisions/ui.md`, "The repository lens groups clones by what they are").
 - Tests: `an_origin_is_the_same_however_it_was_spelled`,
   `the_origin_is_read_from_the_config_worktrees_share`, `clones_share_their_first_commit`
   (real git), `a_repository_is_identified_once_and_its_sessions_told`,
@@ -961,9 +962,10 @@ Not built in Phase 1:
   - Each finding is structured (path, line, severity, blocking) and states what to do.
   - Only the top severity blocks, and the person can overrule it, with the overruling
     recorded.
-- The person turns it on per project with a brief: `slopty project create --review <brief>`, or
-  `project update --review` (an empty brief turns it off). Only the person sets it, as with the
-  verifier.
+- The person turns it on per project with a brief: on the board (the header's checks toggle, or
+  "Verifier and review…" in the palette, opens a panel that sets the verifier and the review
+  together), or `slopty project create --review <brief>` and `project update --review` (an
+  empty brief turns it off). Only the person sets it, as with the verifier.
 - Once the verifier passes (at once with no verifier), the task stays Verifying and the lane's
   next job is `Job::Review`:
   1. `Verb::ReviewCheckout` makes a detached checkout of the verified commit of its own
