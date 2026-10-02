@@ -19,6 +19,14 @@ e2e = [ "slopty-app/e2e" ]
 name = "slopty-app"
 path = "src/main.rs"
 
+# The app as `cargo xtask e2e` drives it, under a name a plain build never makes: a build of
+# the workspace's tests rebuilds `slopty-app` without the self-test (`tests/crash.rs` runs it),
+# and that app never opens the test socket.
+[[bin]]
+name = "slopty-app-e2e"
+path = "src/bin/slopty-app-e2e.rs"
+required-features = [ "e2e" ]
+
 [dependencies]
 anyhow.workspace = true
 gpui.workspace = true

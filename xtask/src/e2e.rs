@@ -300,9 +300,9 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         // Build every binary a suite may spawn up front, so a test never shells out to cargo.
         // `slopty-e2e` is in there for its own helper binaries (the idle window), and
         // `slopty-testkit` for the stand-in `claude` the agent and projects suites start.
-        // The app carries the `e2e` feature (renderer access for `Render`). `--bins`, not
-        // `--bin slopty-app`: a `--bin` filter applies to every selected package and would leave
-        // the daemons stale.
+        // The app carries the `e2e` feature (renderer access for `Render`), which also makes
+        // the `slopty-app-e2e` bin the tests start. `--bins`, not `--bin slopty-app-e2e`: a
+        // `--bin` filter applies to every selected package and would leave the daemons stale.
         step(
             "build daemons and app",
             &cmd!(

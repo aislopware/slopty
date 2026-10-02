@@ -1,0 +1,73 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Button │ studio
+Button │ New shell on studio
+Button │ Terminal
+Button │ Claude Code
+Button │ Claude Code 2
+Button │ Navigator
+Heading │ studio, 3 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Claude Code
+Heading │ terminal Claude Code
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Project board │ Needs you 2, Up next 3, Ready to merge 1, Merged 1 (focused)
+Heading
+Button │ Ask before each task starts
+Button │ Push after each merge
+Button │ Show the orchestrator's terminal
+ProgressIndicator │ Needs you 2, Up next 3, Ready to merge 1, Merged 1
+Group │ Needs you
+Heading │ Needs you
+TreeItem │ Draw the lanes, Which lanes come first?
+TabList │ Lens
+Tab │ Tree
+Tab │ Board
+Tab │ Timeline
+Tab │ Machines
+ListItem │ #6 Mirror the merge queue: Verifier passed at e5b0d17, now
+ListItem │ #6 Mirror the merge queue: Ready to merge, now
+ListItem │ #5 Check the wire goldens: Verifier failed at 9c1e2f3: error: could not compile `slopty-proto`, now
+ListItem │ #4 Write the decision: Merged, now
+ListItem │ #4 Write the decision: Verifier passed at 4a7aa6d, now
+ListItem │ #4 Write the decision: Ready to merge, now
+ListItem │ #7 Name the reviewer: You asked for changes at 3b8d2a1: Project.review has no golden, so a wire change would pass unseen., now
+ListItem │ #7 Name the reviewer: Verifier passed at 3b8d2a1, now
+ListItem │ #2 Draw the lanes: Needs you, now
+ListItem │ #1 Mirror the server's projects: On slopty/board/1, now
+ListItem │ #1 Mirror the server's projects: Working, now
+ListItem │ #1 Mirror the server's projects: Started on studio, now
+ListItem │ #7 Name the reviewer: Created, now
+ListItem │ #6 Mirror the merge queue: Created, now
+ListItem │ #5 Check the wire goldens: Created, now
+ListItem │ #4 Write the decision: Created, now
+ListItem │ #3 Hold it to goldens: Created, now
+ListItem │ #2 Draw the lanes: Created, now
+ListItem │ #1 Mirror the server's projects: Created, now
+ListItem │ Orchestrator on studio, now
+ListItem │ Project created, now
+TextInput │ Tell the orchestrator
+Group │ Claude Code 2
+Heading │ terminal Claude Code 2
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status │ Nothing here yet
+MultilineTextInput │ Message
+Button │ Attach files
+Group │ Status
+Status │ studio

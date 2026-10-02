@@ -1053,11 +1053,11 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `NEXTEST_RUN_ID`, which every later test of the run reads. Staging replaces a copy by
     renaming a new file over it, so a link keeps the file the run began with. A pin older than
     two hours is removed as a new one is made.
-  - The pin does not cover the gap between `cargo xtask e2e`'s app build and the run's first
-    test, which holds the suites' own test builds: minutes on a busy machine. A rerun of the
-    thread's frame-time test lost its app there at 13:06. Closing it takes a binary a plain
-    build never makes: an `e2e`-only bin target of `apps/slopty`
-    (`required-features = ["e2e"]`) that the harness starts. *Not done yet:* it touches the
-    app's manifest.
+  - The pin alone left the gap between `cargo xtask e2e`'s app build and the run's first test,
+    which holds the suites' own test builds: minutes on a busy machine, and a rerun of the
+    thread's frame-time test lost its app there at 13:06. So the tests now start
+    `slopty-app-e2e` (`harness::APP`), a second bin target of `apps/slopty` on the same
+    `main.rs` with `required-features = ["e2e"]`: only a build with the self-test makes it,
+    and a plain build of the workspace's tests never touches it.
   - Timeouts were not raised: 30 s already covers a cold start on a loaded machine many times.
   - Test: `harness::tests::a_run_keeps_the_binaries_its_first_test_pinned`.

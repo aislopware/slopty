@@ -148,7 +148,8 @@ fn window_options(cx: &gpui::App) -> WindowOptions {
     }
 }
 
-fn main() -> Result<()> {
+/// Run the app: the crash reporter, logging, the runtime, then the workspace window.
+pub fn main() -> Result<()> {
     slopty_crash::install(slopty_crash::Process::App, &slopty_platform::dirs::data_dir());
     tracing_subscriber::fmt()
         .with_env_filter(

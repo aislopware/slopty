@@ -831,17 +831,18 @@ mod tests {
         )?;
         let sock = dir.with_extension("sock");
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let mut app =
-            tokio::process::Command::new(slopty_e2e::harness::bin_dir()?.join("slopty-app"))
-                .env("RUST_LOG", log)
-                .env("SLOPTY_DATA_DIR", dir)
-                .env(slopty_e2e::SOCKET_ENV, &sock)
-                .env("SLOPTY_PREDICT", "never")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()?;
+        let mut app = tokio::process::Command::new(
+            slopty_e2e::harness::bin_dir()?.join(slopty_e2e::harness::APP),
+        )
+        .env("RUST_LOG", log)
+        .env("SLOPTY_DATA_DIR", dir)
+        .env(slopty_e2e::SOCKET_ENV, &sock)
+        .env("SLOPTY_PREDICT", "never")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()?;
         let deadline = tokio::time::Instant::now().checked_add(STEP);
         loop {
             if let Some(status) = app.try_wait()? {

@@ -255,6 +255,20 @@ fn pinned(cache: &Path, runs: &Path, run: &str) -> Option<PathBuf> {
     pin.is_dir().then_some(pin)
 }
 
+/// The app the tests start: `slopty-app` built with the self-test.
+///
+/// It goes under a name only that build makes (`apps/slopty`'s `slopty-app-e2e`, which requires
+/// the `e2e` feature). A plain build of the workspace's tests rebuilds `slopty-app` itself
+/// without it, and that app never opens the test socket.
+pub const APP: &str = "slopty-app-e2e";
+
+/// The Claude Code session id a played hook in terminal `session` carries: one per test's
+/// terminal, so no two tests' agents share a session the worker keeps state for.
+#[must_use]
+pub fn agent_session(session: &str) -> String {
+    format!("e2e-{session}")
+}
+
 /// Where the build put the binaries.
 fn built_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("SLOPTY_E2E_BIN_DIR") {
@@ -262,7 +276,7 @@ fn built_dir() -> Result<PathBuf> {
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = manifest.join("../../target/debug");
-    if dir.join("slopty-app").exists() {
+    if dir.join(APP).exists() {
         return Ok(dir);
     }
     bail!("no built binaries: run `cargo xtask e2e app` (builds them and sets SLOPTY_E2E_BIN_DIR)")
@@ -567,7 +581,7 @@ async fn spawn_app(
     let app_sock = root.join(format!("{name}.sock"));
     let tailnet = root.join("tailnet.json");
     std::fs::write(&tailnet, EMPTY_TAILNET)?;
-    let mut app = Command::new(bin("slopty-app")?)
+    let mut app = Command::new(bin(APP)?)
         .env("RUST_LOG", log)
         .env("SLOPTY_DATA_DIR", &app_dir)
         .env(crate::SOCKET_ENV, &app_sock)
@@ -1073,7 +1087,8 @@ impl Stack {
     /// for `session` as Claude Code runs it: `payload` on its stdin, the worker's control socket
     /// in its environment, a home and a Claude config directory of the run's own. It is
     /// returned running, since a `PermissionRequest`'s relay waits for the answer; dropping it
-    /// kills it.
+    /// kills it. Its stdout, what Claude Code would read back, is piped: a few hundred bytes,
+    /// which no pipe holds back.
     ///
     /// # Errors
     ///
@@ -1090,7 +1105,7 @@ impl Stack {
             .env("SLOPTY_WORKER_SOCKET", self.path("worker.sock"))
             .env("CLAUDE_CONFIG_DIR", self.path("claude-config"))
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
@@ -1150,7 +1165,8 @@ impl Stack {
         let transcript = self.transcript_path();
         std::fs::write(&transcript, TRANSCRIPT)?;
         let payload = format!(
-            r#"{{"hook_event_name":"{event}","session_id":"e2e","transcript_path":"{}"{fields}}}"#,
+            r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,
+            agent_session(session),
             transcript.display()
         );
         let request = json!({ "cmd": "hook", "session": session, "payload": payload });
@@ -1253,7 +1269,7 @@ pub fn page_store(root: &Path) -> Option<PathBuf> {
     let id = worker_id(root)?;
     let home = std::env::var_os("HOME")?;
     // An app run from its binary, as here, keeps its stores under the binary's name.
-    let stores = Path::new(&home).join("Library/WebKit/slopty-app/WebsiteDataStore");
+    let stores = Path::new(&home).join("Library/WebKit").join(APP).join("WebsiteDataStore");
     Some(stores.join(id.to_ascii_lowercase()))
 }
 
@@ -1745,7 +1761,8 @@ impl SecondWorker {
         let transcript = self.dir.path().join("agent.jsonl");
         std::fs::write(&transcript, TRANSCRIPT)?;
         let payload = format!(
-            r#"{{"hook_event_name":"{event}","session_id":"e2e","transcript_path":"{}"{fields}}}"#,
+            r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,
+            agent_session(session),
             transcript.display()
         );
         let mut hook = scrubbed(bin("slopty")?, &self.home)

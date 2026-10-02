@@ -1,0 +1,66 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Button │ studio
+Button │ New shell on studio
+Button │ Terminal
+Button │ Claude Code
+Button │ Claude Code 2
+Button │ Navigator
+Heading │ studio, 3 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Claude Code
+Heading │ terminal Claude Code
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Project board │ Needs you 2, Up next 3, Ready to merge 1, Merged 1 (focused)
+Heading
+Button │ Ask before each task starts
+Button │ Push after each merge
+Button │ Show the orchestrator's terminal
+ProgressIndicator │ Needs you 2, Up next 3, Ready to merge 1, Merged 1
+TabList │ Lens
+Tab │ Tree
+Tab │ Board
+Tab │ Timeline
+Tab │ Machines
+List │ Needs you
+ListItem │ Mirror the server's projects, Waiting, studio · macOS, Reading the snapshot parts · slopty/board/1
+Button │ Runs on studio, macOS. Branch slopty/board/1. Why: it has room, and nothing is preferred. Click to see the machines
+ListItem │ Draw the lanes, Needs you, Which lanes come first?
+List │ Up next
+ListItem │ Hold it to goldens, Planned, after #1 · reads only
+ListItem │ Check the wire goldens, Planned
+Log
+ListItem │ Name the reviewer, Planned
+List
+Button │ Retry #7
+Button │ Approve #7
+List │ Ready to merge
+ListItem │ Mirror the merge queue, Ready to merge
+Button │ Merge #6
+List │ Merged
+ListItem │ Write the decision, Merged
+TextInput │ Tell the orchestrator
+Group │ Claude Code 2
+Heading │ terminal Claude Code 2
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status │ Nothing here yet
+MultilineTextInput │ Message
+Button │ Attach files
+Group │ Status
+Status │ studio
