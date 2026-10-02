@@ -2292,7 +2292,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a note, a lit key on the key bar, the terminal's accent buttons and the regex toggle.
     `fill_fg` on `accent_fill` clears AA in both variants, where white on the light fill
     would not (3.7). With nothing left drawing text on the accent, `accent_fg` is gone.
-    `kit` `the_accent_text_tone_is_never_a_fill` holds it.
+    `kit` `the_accent_text_tone_is_never_a_fill` holds it. (Amended 2026-10-02: those
+    controls take the neutral solid, `kit::solid`, and the accent fill is a mark only.)
   - **One count of what waits.** The bell's badge is the only global count. The status bar
     counts only the agents at work, and a lone workspace's name carries no rollup dot, since
     with one workspace it only repeated the bell. ⌘⇧A still goes to the next one waiting.
@@ -2372,7 +2373,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `primary_foreground`, a ticked note box, a lit key cap, the terminal's accent buttons. Tests:
   the theme's fills test holds `accent_ink` on `accent_fill` and `fill_fg` on the rest to AA in
   both variants; `the_kit_theme_follows_the_tokens`. Amended 2026-09-27 (design direction): the
-  dark fill is now `346BF1` and carries white too, and light's is `1B4ED8`.
+  dark fill is now `346BF1` and carries white too, and light's is `1B4ED8`. Amended
+  2026-10-02 (design checkpoint 1): the accent fill is the brand's green and a mark only; a
+  primary, a ticked box and a lit key take the neutral solid (**MonoCode's calm, the brand's
+  green, a neutral primary**).
 
 - ✅ **The design review wave: say, don't ask; one place; every row an icon** (2026-09-27, a
   review of every golden against Warp, Zed and monocode).
@@ -2638,7 +2642,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Primary fill.** `accent_fill` is `346BF1` in dark and `1B4ED8` in light (T3 Code's
     primaries), and `accent_ink` is white in both: 4.65:1 and 6.71:1. Dark's `6AA1FF` with
     near-black words read as a disabled or foreign control. `346BF1` still stands 3:1 off
-    every surface in dark.
+    every surface in dark. (Amended 2026-10-02: the primary is the neutral solid; see
+    **MonoCode's calm, the brand's green, a neutral primary**.)
   - **Type, radius, motion.** `Typography::MEDIUM_WEIGHT` (500) says "this one": a button's
     words now, and the selected row, the focused title, the active tab and an approval's
     statement as their waves land. `STRONG_WEIGHT` narrows to titles (`kit::title`, the title
@@ -4632,7 +4637,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   3:1 of a control's edge (1.4.11). `Surfaces::control` is its own token, the chrome's ink laid
   on until it reads 3:1 on every surface it can sit on (3.75 under Increase Contrast, a level
   over the dividing hairline's 3:1 there), derived like the rest, so a custom background moves
-  it too. A ticked box keeps the accent fill.
+  it too. A ticked box takes the neutral solid (amended the same day).
   - Tests: `slopty_theme::tests::a_control_s_outline_reads_three_to_one_everywhere`,
     `markdown::tests::a_task_box_is_drawn_not_typed`.
 
@@ -4656,6 +4661,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::thread_face::a_thread_that_moves_away_hands_the_keyboard_back_to_its_tile`,
     `the_thread_view_takes_the_keyboard_from_the_face_it_replaces`.
 
+- ✅ **MonoCode's calm, the brand's green, a neutral primary** (2026-10-02, design checkpoint 1;
+  plan in `.research/design-2026-10-02/plan.md`). The user judged the UI less beautiful than
+  MonoCode and asked for the most beautiful reference element by element. MonoCode's tokens
+  (its `index.css`) set the overall calm; for any one element (diffs, tool cards, composer,
+  menus, motion) the best treatment among MonoCode, Zed, Warp, delta, zeron, T3 Code and Amp is
+  taken, judged on Slopty's own renders. Zed's app crates are GPL and Warp's client AGPL:
+  their values and ideas are used, never their code. This checkpoint is the tokens and the kit;
+  the thread, the frame and the tiles follow on top of them.
+  - **Neutrals.** Dark content `#171717`, text `#EBEBEB`. The chrome stays darker than the
+    content (bars 30 %, navigator 16 % toward black), as MonoCode's sidebar is; zeron's re-cut
+    to near-black is not taken.
+  - **Hairlines and fills** are the text over the content: dividers at 7 % in dark (a third
+    again on white, where the same share reads fainter), hover 5.5 %, selected 8.5 %, what
+    floats 3.5 %, under the hover step so a row's hover shows on a menu. `kit::selected` adds a
+    1 pt inset hairline ring for a selection on a surface near its tone.
+  - **Text tiers** are shares of the text over the content: 70 % and 57 % in dark, 78 % and 66 %
+    in light, then lifted until each reads AA on all six surfaces (AAA under Increase Contrast)
+    and a quarter again over the tier under it. MonoCode's most used `/50` and `/45` read 4.6:1
+    and 3.9:1 on `#171717` and 3.7:1 and under on the selected fill, short of AA, so the muted
+    tier stops at the least share that still reads AA there.
+  - **The brand's green is the interaction accent** (OKLCH 0.72 0.16 150 in dark; in light the
+    same hue at L 0.50 as text and L 0.65 as a mark), derived through `slopty_theme::Oklch`,
+    which cuts chroma, never lightness or hue, at sRGB's edge. Success is the same green, so
+    green means one thing: live, chosen, good. Words on the green mark are a near-black of its
+    hue. Blue leaves the chrome: the terminal's cursor is its text colour, its selection and a
+    field's caret and selection are neutral.
+  - **The primary is the neutral solid** (`Surfaces::solid`, the text as a fill, and
+    `solid_ink`): white on dark, near-black on light, as MonoCode's stop and Commit buttons
+    are. It draws the one primary of a surface, the send and stop disc, a ticked box, a switch
+    that is on and an armed key, through `kit::solid` and `kit::solid_pressable` (and gpui-kit's
+    `primary`). The accent is never a control: `kit` `the_accent_is_never_a_control` flags any
+    line that puts the green's ink on a fill, with the sites still to move named in its waiver.
+  - **Buttons** stand one control height (`Density::control`, 28 on the Mac, 44 by touch). A
+    secondary is a neutral fill with no hairline, a link is the text's own tone underlined
+    under the pointer.
+  - **Sizes.** Radii 4, 6 (the default), 8, 12 and full, with `Radii::nested` for a corner
+    inside a card; spacing adds 32 and 48; a row ends 6 in from its edge against 12 at its
+    start; headers are 40; type adds `heading` (20) and sets caption 11 and meta 12, MonoCode's
+    most used size.
+  - **Shadows** in dark drop to 10 % and 12.5 % from 40 % and 50 %, near Zed's quiet floor; the
+    lit top edge stays, since on near-black the edge and the hairline say where a sheet ends.
+  - **Motion** is 120 ms feedback, 160 ms reorder, 200 ms close, eased (0.22, 1, 0.36, 1).
+    Reduce Motion is GPUI's one flag: the app sets it from the system at launch and as the
+    setting changes, and `kit::motion` and the working marks read only it, so gpui-kit's
+    animations and Slopty's hold still together.
+  - **Tokens only at call sites.** Lint-as-tests in `kit` flag a colour literal
+    (`chrome_has_no_colour_literals`) and a text size or radius written as a number
+    (`chrome_sizes_come_from_the_scale`).
+  - Not taken: in-app backdrop blur (deferred; the system glass ruling stands), and shortcut
+    hints inside controls (keybindings stay in the palette).
+  - Tests: `slopty_theme::tests::the_primary_is_the_neutral_solid`,
+    `controls_and_the_words_on_fills_read_in_both_contrasts`,
+    `the_accent_is_the_brand_green_and_blue_is_gone`, `the_brand_in_oklch_is_the_brand`,
+    `the_hairlines_and_fills_are_monocode_s_shares`, `chrome_text_clears_wcag_aa`,
+    `increase_contrast_raises_text_and_hairlines`; `kit::tests::a_button_is_neutral_and_one_height`,
+    `the_kit_theme_follows_the_tokens`, `the_accent_is_never_a_control`,
+    `chrome_has_no_colour_literals`, `chrome_sizes_come_from_the_scale`,
+    `chrome_holds_still_under_reduce_motion`; `markdown::tests::a_task_box_is_drawn_not_typed`.
+
 - ✅ **Text at the weight it is set in** (2026-10-02, design checkpoint 0). macOS's font smoothing
   thickens a glyph by the luminance of its colour, and GPUI copied it, so the dark theme's light
   text inked up to 15 % more than the same text on light: nearly a whole CSS weight, and the
@@ -4667,3 +4731,52 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `fast::tests::text_smoothing::antialiased_text_is_never_dilated_and_shares_one_raster_across_colours`,
   `a_scoped_smoothing_overrides_the_applications`; `gpui_macos`
   `a_dilated_glyph_inks_more_than_an_antialiased_one`.
+
+- ✅ **The frame recedes: a breadcrumb, headers on their content, rows that nest** (2026-10-02,
+  design checkpoint 3; `.research/design-2026-10-02/plan.md`). The frame round the strip had
+  been drawn as bands and rules; MonoCode's and Zed's frame is felt, by tone and words.
+  - **Title bar.** It takes the navigator's tone with no rule under it. The workspace tabs
+    give way to a breadcrumb of where the focused work is, `workspace ▾ / checkout ▾ /
+    branch`, as Zed names its project and branch (`workspace/breadcrumb.rs`). The workspace's
+    menu lists every workspace with something on it and a new one, which is how the bar goes
+    between them; what waits in another workspace shows as its rollup's mark on that segment.
+    The checkout is the focused shell's repository (else its directory), with a menu of the same
+    repository's other checkouts in the layout on any worker (`RepoId::same`) when there are
+    some. A workspace takes its first shell's checkout for a name until it is named, so a
+    checkout with no menu that the workspace already goes by is left out rather than said
+    twice. The branch follows with its working tree's changes. A segment has a chevron only
+    when it opens something: no branch list reaches the client, so the branch is words.
+  - **Status bar.** No rule over it, and only ambient facts: the server's word while it is
+    down and which worker the focused tile runs on on the left; the checkout and branch are the
+    breadcrumb's and the directory the tile header's, so each is said once.
+  - **Tile headers** sit on their content in every state, with no band and no rule; only a
+    page's or a remote picture's header keeps a hairline, where two surfaces meet anyway. Focus
+    is the title's tone (`tile::title_ink`): primary at the medium weight, the rest muted. The
+    green line along the focused header goes; under Increase Contrast a line in the text's tone
+    says it as well. A tabbed column's tabs are row-tall objects on the header, the shown one on
+    the hover step's fill.
+  - **Navigator rows** lead with a status glyph (working, done, failed, away; one waiting on
+    the person keeps its kind, its word in the warn tone says it), the working tree's changes
+    sit right-aligned under the first line's end, and under the pointer that end gives way to
+    a close button, as Zed's thread rows swap their actions in.
+  - **Sheets nest their rows.** A menu, the palette and the inbox pad their rows by
+    `kit::sheet_pad` inside their hairline, and the rows (`kit::sheet_row`) round at 6 inside
+    the sheet's 12, so the corners share a centre.
+  - **Settings** set each group's rows in a card under its label, as System Settings and Zed's
+    settings do: the hover step in dark, the floating surface ringed by a hairline in light,
+    rows parted by the quiet hairline. Each row stays a child of the page, so the keyboard's
+    scrolling to a row still finds it.
+  - **The green stays a meaning.** Links read in the text's tone, underlined under the pointer,
+    their external-link glyph muted; a picker's tick is the text's; a notice's one action is
+    a ghost at the medium weight. Green there had read as "done" on things that only act.
+  - **Reduce Motion** reaches the strip's springs through GPUI's flag too: the workspace reads
+    it at each drawing instead of the system's setting.
+  - Tests: `workspace::tests::focus_line::the_headers_sit_on_their_content_and_focus_is_the_titles_tone`,
+    `under_increase_contrast_the_focused_header_carries_a_line`,
+    `tab_strip::the_breadcrumb_goes_between_workspaces`,
+    `bars::the_breadcrumb_names_the_checkout_and_its_branch`,
+    `bars::the_status_bar_says_where_the_shell_is_and_counts_what_is_shared`,
+    `chrome::the_workspace_in_view_carries_no_second_mark`,
+    `nav_rows::a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer`,
+    `overlays::a_sheets_rows_nest_in_its_corners`,
+    `settings_form::tests::a_groups_rows_are_one_card_under_its_label`.

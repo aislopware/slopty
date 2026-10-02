@@ -5,10 +5,14 @@ TextInput │ Filter
 Button │ studio
 Button │ New shell on studio
 Button │ Terminal
+Button │ Close tile
 Button │ Claude Code
+Button │ Close tile
 Button │ Claude Code 2
+Button │ Close tile
 Button │ Navigator
-Heading │ studio, 3 tiles
+Group │ Where
+Button │ studio
 Button │ New
 Button │ Inbox
 Button │ More

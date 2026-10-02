@@ -230,3 +230,59 @@ fn a_dismissed_palette_draws_its_way_out(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("palette").is_none(), "gone in the same frame");
 }
+
+/// What floats as a sheet nests its rows: a menu's, the palette's and the inbox's rows sit the
+/// sheet's hairline and pad in from its edge, so a row's 6 pt corner shares the 12 pt sheet's
+/// centre.
+#[gpui::test]
+fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let built = SessionId::new();
+    let _built = opens(&view, cx, &studio, built, studio.me, 1);
+    // Focus elsewhere, so the build finishes unwatched and the inbox lists it.
+    let _last = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    let theme = Theme::default();
+    // From the sheet's outer edge: its hairline and its pad, which with a row's radius make
+    // the sheet's.
+    let pad = crate::kit::sheet_pad(&theme) + crate::kit::SHEET_EDGE;
+    assert!((pad + theme.radii.sm - theme.radii.lg).abs() < f32::EPSILON, "concentric");
+    let inset = |cx: &mut VisualTestContext, sheet: &'static str, row: &'static str| {
+        let (sheet, row) = (
+            cx.debug_bounds(sheet).unwrap_or_else(|| panic!("{sheet}")),
+            cx.debug_bounds(row).unwrap_or_else(|| panic!("{row}")),
+        );
+        f32::from(row.left() - sheet.left())
+    };
+    let click = |cx: &mut VisualTestContext, selector: &'static str| {
+        let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}"));
+        cx.simulate_click(at.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+    };
+
+    click(cx, "more");
+    let at = inset(cx, "menu", "menu-Command palette");
+    assert!((at - pad).abs() < 0.5, "a menu's row: {at}");
+    click(cx, "more");
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.run_until_parked();
+    let at = inset(cx, "palette", "palette-item-0");
+    assert!((at - pad).abs() < 0.5, "the palette's row: {at}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    view.update_in(cx, |v, _w, cx| {
+        let done = Finished {
+            command: "cargo build".into(),
+            exit: Some(0),
+            elapsed: Duration::from_secs(40),
+        };
+        v.command_finished(built, done, cx);
+    });
+    cx.run_until_parked();
+    click(cx, "bell");
+    let row = Box::leak(format!("inbox-finished-{built}").into_boxed_str());
+    let at = inset(cx, "inbox", row);
+    assert!((at - pad).abs() < 0.5, "the inbox's row: {at}");
+}

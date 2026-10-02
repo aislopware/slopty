@@ -756,11 +756,13 @@ impl WorkspaceView {
             }
         }
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
-        // Which of several tiles has the keyboard wants saying; a lone tile's needs nothing, nor
-        // does the overview, which rings its workspace instead.
+        // Which of several tiles has the keyboard is said by its title's tone, and under
+        // Increase Contrast by a line as well; a lone tile's needs nothing, nor does the
+        // overview, which rings its workspace instead.
         let (w, h) = self.layout.viewport();
         let screen = Rect { x: 0.0, y: 0.0, w, h };
-        let focus_line = frame.overview <= 0.0
+        let focus_line = self.theme.contrast == slopty_theme::Contrast::Increased
+            && frame.overview <= 0.0
             && frame
                 .tiles
                 .iter()

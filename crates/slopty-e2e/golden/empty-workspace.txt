@@ -1,7 +1,8 @@
 Window │ Slopty
 Group │ Workspace (focused)
 Button │ Navigator
-Heading │ New workspace, 0 tiles
+Group │ Where
+Button │ New workspace
 Button │ New
 Button │ Inbox
 Button │ More

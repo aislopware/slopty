@@ -120,12 +120,8 @@ mod tests {
         let grid = dump.a11y_node("Terminal", None).unwrap_or_else(|| panic!("{:#?}", dump.a11y));
         assert!(grid.value.as_deref().is_some_and(|v| !v.is_empty()), "cursor row: {grid:?}");
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
-        // A lone workspace is its name, not a tab to press.
-        assert!(
-            dump.a11y_node("Heading", Some("e2e-worker, 1 tile")).is_some(),
-            "{:#?}",
-            dump.a11y
-        );
+        // The breadcrumb names the workspace.
+        assert!(dump.a11y_node("Button", Some("e2e-worker")).is_some(), "{:#?}", dump.a11y);
         for label in ["Navigator", "New", "Inbox", "More"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }

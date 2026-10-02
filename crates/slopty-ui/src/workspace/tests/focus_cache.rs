@@ -129,7 +129,7 @@ fn the_focused_face_is_replayed_while_a_neighbour_draws(cx: &mut TestAppContext)
 
     let lit = |cx: &mut VisualTestContext| {
         let send = cx.debug_bounds("composer-send").expect("the send button");
-        let fill = crate::colors::hsla(Theme::default().surfaces.accent_fill);
+        let fill = crate::colors::hsla(Theme::default().surfaces.solid);
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
         quads.iter().any(|q| {
             q.background == gpui::Background::from(fill)

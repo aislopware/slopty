@@ -135,7 +135,7 @@ pub(crate) fn line_height(theme: &Theme) -> f32 {
 /// The pad round a floating list's rows: their fills sit this far in from the sheet's edges, so
 /// a row's radius and the pad make the sheet's (6 + 6 = 12).
 pub(crate) fn list_pad(theme: &Theme) -> f32 {
-    theme.spacing.xs + theme.spacing.xxs
+    crate::kit::sheet_pad(theme)
 }
 
 /// The ink of the dot between the facts of a meta line: the muted tone at the pressed step,
@@ -1702,17 +1702,16 @@ impl CommandPalette {
                     .child(SharedString::from(text)),
             );
         }
-        let row = crate::kit::row(theme, crate::kit::Row::One)
+        let row = crate::kit::sheet_row(theme, crate::kit::Row::One)
             .id(ElementId::NamedInteger("palette-item".into(), u64::try_from(ix).unwrap_or(0)))
             .debug_selector(move || format!("palette-item-{ix}"))
             .role(gpui::accesskit::Role::ListBoxOption)
             .aria_label(SharedString::from(item.a11y_label()))
             .aria_selected(chosen)
             .h(px(line_height(theme)))
-            // The fill sits the list's pad in from the sheet's edges; the text on the edge grid.
+            // The fill sits the sheet's pad in from its edges, nested in its corners; the text
+            // on the edge grid.
             .mx(px(pad))
-            .px(px(spacing.inset() - pad))
-            .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .active(move |st| st.bg(hsla(overlay)))
             .on_mouse_move(cx.listener(move |this, _ev, _window, cx| this.point_at(ix, cx)))

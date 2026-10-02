@@ -1,7 +1,8 @@
 Window │ Slopty
 Group │ Workspace
 Button │ Navigator
-Heading │ e2e-worker, 1 tile
+Group │ Where
+Button │ e2e-worker
 Button │ New
 Button │ Inbox
 Button │ More
@@ -14,7 +15,6 @@ Group
 Terminal │ shell │ ~ %
 Group │ Status
 Status │ e2e-worker
-Status │ ~
 Dialog │ Settings
 TextInput │ Search settings (focused)
 TabList │ Sections

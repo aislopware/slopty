@@ -190,9 +190,9 @@ fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
     let row = cx.debug_bounds(leak(format!("nav-changes-{id}"))).expect("the row's changes");
     let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
     assert!(row.left() >= meta.right(), "after the words: {row:?} {meta:?}");
-    let bar = cx.debug_bounds("status-changes").expect("the bar's changes");
-    let branch = cx.debug_bounds("status-branch").expect("the branch");
-    assert!(bar.left() >= branch.right(), "after the branch");
+    let bar = cx.debug_bounds("crumb-changes").expect("the breadcrumb's changes");
+    let branch = cx.debug_bounds("crumb-branch").expect("the branch");
+    assert!(branch.contains(&bar.center()), "with the branch");
     let lines = navigator::line_changes(RepoChanges { files: 2, added: 12, removed: 3 });
     assert_eq!(lines, Some((12, 3)), "drawn by `kit::changes`");
     assert_eq!(navigator::line_changes(RepoChanges::default()), None, "clean");

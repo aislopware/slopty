@@ -613,18 +613,17 @@ impl WorkspaceView {
                     .child(SharedString::from(place)),
             )
             .children(answers);
-        let el = kit::row(theme, kit::Row::Two)
+        let el = kit::sheet_row(theme, kit::Row::Two)
             .id(ElementId::Name(row.id.clone().into()))
             .debug_selector(move || row.id)
             .group(group)
             .role(Role::Button)
             .aria_label(label)
-            // The fill a base unit in from the popover's edges; the mark on the edge grid.
-            .mx(px(spacing.xs))
-            .px(px(spacing.inset() - spacing.xs))
+            // The fill the sheet's pad in from the popover's edges, nested in its corners; the
+            // mark on the edge grid.
+            .mx(px(kit::sheet_pad(theme)))
             .gap(px(spacing.xs))
             .items_center()
-            .rounded(px(theme.radii.sm))
             .cursor_pointer()
             // The keyboard's row sits on the selection's fill, a step over the pointer's.
             .when(selected, |el| el.bg(hsla(s.overlay)))

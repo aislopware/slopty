@@ -99,7 +99,8 @@ fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
     assert_eq!(name, "studio", "a shell at home leaves it its worker's");
     shell_in_repo(&view, cx, &studio, "/x/slopty/crates", "/x/slopty", "main");
     assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "slopty");
-    assert!(labels(&view, cx).iter().any(|l| l == "slopty, 2 tiles"), "the bar says it");
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "slopty"), "the breadcrumb says it: {names:#?}");
     view.update(cx, |v, cx| {
         v.layout.set_workspace_name(0, Some("release".to_owned()));
         cx.notify();
@@ -107,10 +108,10 @@ fn a_workspace_is_named_by_where_its_first_shell_is(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.workspace_name()), "release", "a given name wins");
 }
 
-/// The left of the bar says where the focused shell is, as one path: its worker (with one
-/// worker too), the repository and the path within it, the branch, in that order. The right
-/// counts the ports forwarded here, which list them; the workers go uncounted while every one
-/// is up, and the frame time waits for the stream stats.
+/// The left of the status bar says which machine the focused shell is on (with one worker
+/// too) and nothing more: the checkout and branch are the breadcrumb's. The right counts the
+/// ports forwarded here, which list them; the workers go uncounted while every one is up, and
+/// the frame time waits for the stream stats.
 #[gpui::test]
 fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -125,15 +126,13 @@ fn the_status_bar_says_where_the_shell_is_and_counts_what_is_shared(cx: &mut Tes
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, forwards, cx));
     cx.run_until_parked();
     let names = labels(&view, cx);
-    for readout in ["studio", "slopty/crates/ui", "branch main", "2 ports"] {
+    for readout in ["studio", "2 ports"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
-    let at = |cx: &mut VisualTestContext, selector: &'static str| {
-        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
-    };
-    let (worker, cwd, branch) =
-        (at(cx, "status-worker"), at(cx, "status-cwd"), at(cx, "status-branch"));
-    assert!(worker.right() < cwd.left() && cwd.right() < branch.left(), "one path, in order");
+    let place = cx.debug_bounds("status-place").expect("the left");
+    assert!(cx.debug_bounds("status-worker").is_some_and(|w| place.contains(&w.center())));
+    assert!(cx.debug_bounds("status-cwd").is_none(), "the directory is the header's");
+    assert!(cx.debug_bounds("status-branch").is_none(), "the branch is the breadcrumb's");
     assert!(cx.debug_bounds("status-frame").is_none(), "no frame time without the stats");
     assert!(cx.debug_bounds("status-workers").is_none(), "a worker that is up says nothing");
 
@@ -189,38 +188,96 @@ fn a_quick_round_trip_waits_for_the_pointer_and_a_slow_one_stands(cx: &mut TestA
     assert_eq!(ports(cx), before, "{before:?}");
 }
 
-/// A tab's words sit on the bar's midline with its buttons, the active tab reaches down
-/// through the bar's edge to join the content, and every tab keeps the same box, so switching
-/// moves none.
+/// The breadcrumb says where the focused shell is, `workspace / checkout / branch`, in that
+/// order on the bar's midline with its buttons, the branch's changes after it. A workspace
+/// named after the checkout leaves the checkout unsaid; another repository's says its name. The
+/// checkout opens a menu only when the same repository is checked out elsewhere in the layout:
+/// then its rows name each checkout's worker and go to a shell in it.
 #[gpui::test]
-fn the_active_tab_joins_the_content_on_the_bars_midline(cx: &mut TestAppContext) {
+fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _shells = three_shells(&view, cx, &studio);
-    // A column moved down makes a second workspace worth a tab.
-    view.update_in(cx, |v, _w, cx| {
-        v.tick();
-        v.layout.move_column_to_workspace_down();
-        v.after_focus_moved(cx);
-        cx.notify();
+    let (session, tile) =
+        shell_in_repo(&view, cx, &studio, "/w/oss/slopty/crates", "/w/oss/slopty", "main");
+    let repo_id = slopty_proto::terminal::RepoId {
+        origin: Some("github.com/aislopware/slopty".to_owned()),
+        ..Default::default()
+    };
+    let key = studio.key;
+    let id = repo_id.clone();
+    view.update_in(cx, |v, _window, cx| {
+        let summary = SessionSummary {
+            repo: Some("/w/oss/slopty".to_owned()),
+            repo_id: Some(id),
+            branch: Some("main".to_owned()),
+            changes: Some(slopty_proto::terminal::RepoChanges { files: 2, added: 25, removed: 15 }),
+            ..summary(session, Some("/w/oss/slopty/crates"))
+        };
+        v.session_opened(key, summary, cx);
     });
     cx.run_until_parked();
     let at = |cx: &mut VisualTestContext, selector: &'static str| {
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
     };
-    let (bar, bell) = (at(cx, "titlebar"), at(cx, "bell"));
-    let active = view.read_with(cx, |v, _| v.layout.active_workspace());
-    for ix in [0, 1] {
-        let (tab, band) =
-            (at(cx, leak(format!("ws-tab-{ix}"))), at(cx, leak(format!("ws-tab-band-{ix}"))));
-        let off = f32::from(band.center().y - bell.center().y).abs();
-        assert!(off < 0.5, "tab {ix}'s words {off} pt off the buttons' midline");
-        assert!(tab.bottom() >= bar.bottom(), "tab {ix} reaches the edge: {tab:?} {bar:?}");
+    assert!(cx.debug_bounds("crumb-checkout").is_none(), "the workspace already says slopty");
+    let (ws, branch, changes, bell) = (
+        at(cx, "crumb-workspace"),
+        at(cx, "crumb-branch"),
+        at(cx, "crumb-changes"),
+        at(cx, "bell"),
+    );
+    assert!(ws.right() <= branch.left(), "in order");
+    assert!(branch.contains(&changes.center()), "the changes follow the branch");
+    for part in [ws, branch] {
+        let off = f32::from(part.center().y - bell.center().y).abs();
+        assert!(off < 0.5, "{off} pt off the buttons' midline");
     }
-    let before = (at(cx, "ws-tab-0"), at(cx, "ws-tab-1"));
-    click(cx, if active == 0 { "ws-tab-1" } else { "ws-tab-0" });
-    assert_ne!(view.read_with(cx, |v, _| v.layout.active_workspace()), active, "switched");
-    assert_eq!((at(cx, "ws-tab-0"), at(cx, "ws-tab-1")), before, "switching moved a tab");
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "branch main"), "{names:#?}");
+
+    // A shell in another repository says its checkout: words, with nothing to choose.
+    let mini = connect(&view, cx, 3, "mini");
+    let (_, notes) = shell_in_repo(&view, cx, &mini, "/w/notes", "/w/notes", "draft");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(notes, cx));
+    cx.run_until_parked();
+    let (ws, checkout, branch) =
+        (at(cx, "crumb-workspace"), at(cx, "crumb-checkout"), at(cx, "crumb-branch"));
+    assert!(ws.right() <= checkout.left() && checkout.right() <= branch.left(), "in order");
+    let padding = 2.0 * Theme::default().spacing.sm;
+    let width = f32::from(checkout.size.width);
+    assert!(width > padding + 10.0, "the checkout's name is drawn, not only its padding: {width}");
+    let roles = cx
+        .update(|window, _cx| crate::a11y::tree(window))
+        .into_iter()
+        .filter(|n| n.label.as_deref() == Some("notes"))
+        .map(|n| n.role)
+        .collect::<Vec<_>>();
+    assert!(roles.iter().any(|r| r == "Label"), "one checkout: words, no menu: {roles:?}");
+    click(cx, "crumb-checkout");
+    assert!(cx.debug_bounds("menu").is_none(), "nothing to choose, nothing opens");
+
+    // The same repository on another worker makes the checkout a menu of the two.
+    let laptop = connect(&view, cx, 2, "laptop");
+    let (far, far_tile) =
+        shell_in_repo(&view, cx, &laptop, "/home/me/slopty-wt", "/home/me/slopty-wt", "fix");
+    let laptop_key = laptop.key;
+    view.update_in(cx, |v, _window, cx| {
+        let summary = SessionSummary {
+            repo: Some("/home/me/slopty-wt".to_owned()),
+            repo_id: Some(repo_id),
+            branch: Some("fix".to_owned()),
+            ..summary(far, Some("/home/me/slopty-wt"))
+        };
+        v.session_opened(laptop_key, summary, cx);
+    });
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    click(cx, "crumb-checkout");
+    assert!(cx.debug_bounds("menu-slopty").is_some(), "this checkout");
+    click(cx, "menu-slopty-wt");
+    assert_eq!(focused(&view, cx), Some(far_tile), "a row goes to a shell in it");
+    let names = labels(&view, cx);
+    assert!(names.iter().any(|l| l == "branch fix"), "the crumbs follow: {names:#?}");
 }
 
 /// A worker's actions in the hosts popover wait for the pointer, and the keyboard brings

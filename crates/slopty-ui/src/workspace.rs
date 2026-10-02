@@ -32,6 +32,7 @@ pub mod actions;
 mod agents;
 mod ask;
 pub mod attention;
+mod breadcrumb;
 mod browsers;
 mod commands;
 mod desktop;
@@ -514,6 +515,8 @@ pub type MenuRun = Rc<dyn Fn(&mut Window, &mut App)>;
 /// The sections of the titlebar's menus, in their order, a hairline between each.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum MenuGroup {
+    /// The breadcrumb's: the workspaces, or a repository's checkouts.
+    Places,
     /// "+": the worker a new tile goes to, where there are several.
     Target,
     /// "+": what a new tile can be.
@@ -601,6 +604,9 @@ pub struct WorkspaceView {
     pinned_rtt: Option<Duration>,
     /// Whether moves animate. Off under the self-test, where a frame is a step.
     animate: bool,
+    /// GPUI's Reduce Motion flag as last read: on, nothing springs whatever [`Self::animate`]
+    /// says. Read at every drawing, so the flag alone decides.
+    reduced: bool,
     workers: BTreeMap<WorkerKey, Worker>,
     // Per-item views. Item and session ids are UUIDv7, unique across workers, so one map
     // each serves every worker.
@@ -723,8 +729,8 @@ pub struct WorkspaceView {
     /// The worker "+" chose for the next new tile, where there are several; the focused tile's
     /// worker otherwise.
     new_on: Option<WorkerKey>,
-    /// The workspaces' tabs as last drawn.
-    tabs: titlebar::Tabs,
+    /// Where the bar's buttons that hang a menu were last laid out.
+    anchors: titlebar::Anchors,
     /// The navigator's state for this run (its width and whether it docks are the layout's).
     nav: navigator::NavState,
     /// The status bar's own state: its readouts and the hosts popover.
@@ -837,13 +843,6 @@ impl Focusable for WorkspaceView {
     }
 }
 
-/// Whether the system asks for motion to be reduced, as `slopty_platform` keeps it (read again
-/// at most once a second, so a change shows within one). Always false under test: an assertion
-/// about a spring must not turn on the machine's setting.
-fn reduced_motion() -> bool {
-    !cfg!(test) && slopty_platform::reduce_motion()
-}
-
 impl WorkspaceView {
     /// An empty workspace, arranged as `saved` left it (the layout of the last run on this
     /// device), its tiles waiting for their workers.
@@ -878,6 +877,7 @@ impl WorkspaceView {
             held_clock: None,
             pinned_rtt: None,
             animate: true,
+            reduced: cx.reduce_motion(),
             workers: BTreeMap::new(),
             terminals: HashMap::new(),
             screens: HashMap::new(),
@@ -949,7 +949,7 @@ impl WorkspaceView {
             menu: None,
             menu_keyed: false,
             new_on: None,
-            tabs: titlebar::Tabs::default(),
+            anchors: titlebar::Anchors::default(),
             nav: navigator::NavState::default(),
             bar: statusbar::Bar::default(),
             inbox: inbox::Inbox::default(),
@@ -1164,11 +1164,12 @@ impl WorkspaceView {
     /// sees where things landed, not where they were passing through.
     pub fn set_animation(&mut self, on: bool) {
         self.animate = on;
-        self.layout.set_animate(on && !reduced_motion());
+        self.layout.set_animate(on && !self.reduced);
     }
 
-    /// The system's Reduce Motion setting changed: the springs, and every view, follow it.
+    /// GPUI's Reduce Motion flag changed: the springs, and every view, follow it.
     pub fn motion_setting_changed(&mut self, cx: &mut Context<Self>) {
+        self.reduced = cx.reduce_motion();
         self.set_animation(self.animate);
         cx.notify();
     }
@@ -1730,7 +1731,8 @@ impl gpui::Render for WorkspaceView {
         {
             self.renders = self.renders.saturating_add(1);
         }
-        let animate = self.animate && !reduced_motion();
+        self.reduced = cx.reduce_motion();
+        let animate = self.animate && !self.reduced;
         if self.layout.config().animate != animate {
             self.layout.set_animate(animate);
         }

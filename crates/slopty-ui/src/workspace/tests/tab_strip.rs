@@ -1,5 +1,5 @@
 //! The frame's top in the headless workspace: the navigator the window's height with the
-//! title bar from its edge, and the workspaces as tabs.
+//! title bar from its edge, and the breadcrumb's way between workspaces.
 
 use gpui::Modifiers;
 
@@ -39,31 +39,27 @@ fn the_navigator_is_the_windows_height_and_the_bar_starts_at_its_edge(cx: &mut T
     assert!(f32::from(toggle.left()) >= titlebar::LEADING_INSET, "past the traffic lights");
 }
 
-/// Each workspace with something in it is a tab, the active one too when empty; a lone one is
-/// its name. A tab is as wide as its name, within its bounds, switching tabs moves none, and
-/// "+" opens a new workspace. A tab ends in what its tiles want, a mark in a slot that opens
-/// for it; its name carries no chord.
+/// The breadcrumb's workspace segment is how the bar goes between workspaces: its menu lists
+/// each one with something on it (the active one ticked, an empty active one too) and a new
+/// one. What waits in another workspace shows as a mark on the segment, inside it, and its
+/// label says so; no chord is spelled on it.
 #[gpui::test]
-fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
+fn the_breadcrumb_goes_between_workspaces(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [(first, _), _, _] = three_shells(&view, cx, &studio);
-    assert!(cx.debug_bounds("ws-tab-0").is_some());
-    assert!(cx.debug_bounds("ws-tab-1").is_none(), "the empty workspace below has no tab");
+    assert!(cx.debug_bounds("crumb-workspace").is_some());
 
     new_workspace_from_the_bar(cx);
     assert_eq!(active(&view, cx), 1, "+ goes to a new, empty workspace");
-    let (zero, one) = (
-        cx.debug_bounds("ws-tab-0").expect("drawn"),
-        cx.debug_bounds("ws-tab-1").expect("the active one has a tab while empty"),
-    );
-    let sized = |tab: Bounds<Pixels>| (64.0..=180.5).contains(&f32::from(tab.size.width));
-    assert!(sized(zero) && sized(one), "each sized to its name: {zero:?} {one:?}");
-    click(cx, "ws-tab-0");
-    assert_eq!(active(&view, cx), 0);
-    assert!(cx.debug_bounds("ws-tab-1").is_none(), "left empty, it has no tab");
+    click(cx, "crumb-workspace");
+    assert!(cx.debug_bounds("menu-studio").is_some(), "the one with shells");
+    assert!(cx.debug_bounds("menu-New workspace").is_some(), "and a new one");
+    click(cx, "menu-studio");
+    assert_eq!(active(&view, cx), 0, "a row goes there");
+    assert!(cx.debug_bounds("menu").is_none(), "and closes the menu");
 
-    // A column moved down makes a second workspace worth a tab; switching moves no tab.
+    // A column moved down makes a second workspace with something in it.
     view.update_in(cx, |v, _w, cx| {
         v.tick();
         v.layout.move_column_to_workspace_down();
@@ -71,31 +67,31 @@ fn the_workspaces_are_tabs_in_the_title_bar(cx: &mut TestAppContext) {
         cx.notify();
     });
     cx.run_until_parked();
-    let before = (cx.debug_bounds("ws-tab-0").unwrap(), cx.debug_bounds("ws-tab-1").unwrap());
-    click(cx, "ws-tab-0");
-    let after = (cx.debug_bounds("ws-tab-0").unwrap(), cx.debug_bounds("ws-tab-1").unwrap());
-    assert_eq!(before, after, "switching moves no tab");
-
-    assert!(cx.debug_bounds("ws-rollup-0").is_none(), "at rest, an empty slot");
-    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(first), cx));
-    cx.run_until_parked();
     let first_ws =
         view.read_with(cx, |v, _| v.layout().position(v.tile_of_session(first).unwrap()).unwrap());
-    let rollup = if first_ws.workspace == 0 { "ws-rollup-0" } else { "ws-rollup-1" };
-    assert!(cx.debug_bounds(rollup).is_some(), "the warn mark on its workspace's tab");
-    let (tab, mark) = (
-        cx.debug_bounds(if first_ws.workspace == 0 { "ws-tab-0" } else { "ws-tab-1" }).unwrap(),
-        cx.debug_bounds(rollup).unwrap(),
+    let other = usize::from(first_ws.workspace == 0);
+    view.update_in(cx, |v, _w, cx| {
+        v.tick();
+        v.layout.focus_workspace(other);
+        v.after_focus_moved(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("crumb-elsewhere").is_none(), "at rest, no mark");
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(first), cx));
+    cx.run_until_parked();
+    let (segment, mark) = (
+        cx.debug_bounds("crumb-workspace").expect("drawn"),
+        cx.debug_bounds("crumb-elsewhere").expect("what waits elsewhere"),
     );
-    assert!(tab.contains(&mark.center()), "inside its own tab: {tab:?} {mark:?}");
-    assert_eq!(cx.debug_bounds("ws-tab-0").unwrap().left(), before.0.left(), "the first stays");
+    assert!(segment.contains(&mark.center()), "inside its segment: {segment:?} {mark:?}");
 
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    let tabs: Vec<String> =
-        tree.into_iter().filter(|n| n.role == "Tab").filter_map(|n| n.label).collect();
-    assert!(tabs.iter().any(|l| l.ends_with(", 1 needs you")), "{tabs:#?}");
-    assert!(tabs.iter().all(|l| !l.contains(['⌘', '⌥', '⌃'])), "no chords on tabs: {tabs:#?}");
+    let crumbs: Vec<String> =
+        tree.into_iter().filter(|n| n.role == "Button").filter_map(|n| n.label).collect();
+    assert!(crumbs.iter().any(|l| l.ends_with(", elsewhere 1 needs you")), "{crumbs:#?}");
+    assert!(crumbs.iter().all(|l| !l.contains(['⌘', '⌥', '⌃'])), "no chords: {crumbs:#?}");
 }

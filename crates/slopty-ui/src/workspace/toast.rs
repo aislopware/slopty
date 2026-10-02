@@ -248,8 +248,9 @@ impl WorkspaceView {
         self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
     }
 
-    /// One notice: a mark for what it is about, its line, and its one action. The action is
-    /// the only accent: a notice is not a primary action, only a way to one.
+    /// One notice: a mark for what it is about, its line, and its one action. The action is a
+    /// ghost in the medium weight, not the accent: a notice is not a primary action, only a
+    /// way to one, and the green means live or done.
     fn render_one(&self, shown: &Shown, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -264,7 +265,8 @@ impl WorkspaceView {
                 .px(px(theme.spacing.sm))
                 .py(px(theme.spacing.xxs))
                 .rounded(px(theme.radii.sm))
-                .text_color(hsla(s.accent))
+                .text_color(hsla(s.text))
+                .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .hover(move |el| el.bg(hsla(s.raised)))
                 .child(label);

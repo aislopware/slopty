@@ -512,31 +512,25 @@ fn the_handle_straddles_the_edge_and_a_double_click_resets_it(cx: &mut TestAppCo
     assert!((width - slopty_client::layout::Navigator::DEFAULT_WIDTH).abs() < 0.5, "{width}");
 }
 
-/// Workspaces of their own are tabs, a lone one only its name, with no rollup mark (the bell
-/// already counts what waits) and no count of what it holds, which the navigator and the
-/// overview give. The title bar has no second "+".
+/// What waits in the workspace in view is its own tiles' and the bell's to say: the
+/// breadcrumb's workspace carries no second mark for it, nor a count of what it holds, which
+/// the navigator and the overview give. Its name is whole, and "+" follows the breadcrumb.
 #[gpui::test]
-fn a_lone_workspace_is_its_name_alone(cx: &mut TestAppContext) {
+fn the_workspace_in_view_carries_no_second_mark(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [(asking, _), ..] = three_shells(&view, cx, &studio);
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(asking), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
-    assert!(cx.debug_bounds("ws-rollup-0").is_none(), "a lone name carries no second mark");
-    let remote = connect(&view, cx, 2, "remote");
-    let _far = opens(&view, cx, &remote, SessionId::new(), remote.me, 1);
+    assert!(cx.debug_bounds("crumb-elsewhere").is_none(), "no second mark");
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     // Its first shell is at home, which names nothing, so the workspace takes its worker's.
-    let heading = Some("studio, 4 tiles, 1 needs you");
-    assert!(tree.iter().any(|n| n.is("Heading", heading)), "{tree:#?}");
-    assert!(cx.debug_bounds("add").is_none(), "one \"+\", for a workspace");
-    // The name is whole beside what the workspace holds: a lone name is not held to a tab's
-    // width.
-    let name = cx.debug_bounds("ws-name-0").expect("the name");
+    assert!(tree.iter().any(|n| n.is("Button", Some("studio"))), "{tree:#?}");
+    let name = cx.debug_bounds("crumb-workspace").expect("the name");
     let whole = cx.update(|window, _cx| {
         let mut style = window.text_style();
         style.font_weight = gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT);
@@ -546,44 +540,10 @@ fn a_lone_workspace_is_its_name_alone(cx: &mut TestAppContext) {
         window.text_system().shape_line(text.into(), size, &[run], None).width
     });
     assert!(name.size.width + px(0.5) >= whole, "{name:?}, whole {whole:?}");
-
+    let crumbs = cx.debug_bounds("breadcrumb").expect("drawn");
     let new = cx.debug_bounds("new-menu").expect("+");
-    let gap = f32::from(new.left() - name.right());
-    assert!(gap <= Theme::default().spacing.md, "nothing between the name and +: {gap}");
-
-    new_workspace_from_the_bar(cx);
-    assert!(cx.debug_bounds("ws-tab-1").is_some(), "two tabs");
-}
-
-/// A tab that goes folds its width away where it stood, unless motion is reduced. (The last
-/// tab but one going leaves a lone name, which has no tabs to slide.)
-#[gpui::test]
-fn a_closing_tab_folds_away_unless_motion_is_reduced(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let _shells = three_shells(&view, cx, &studio);
-    // A second workspace with a column in it, so two tabs stay when a third goes.
-    view.update_in(cx, |v, _w, cx| {
-        v.tick();
-        v.layout.move_column_to_workspace_down();
-        v.after_focus_moved(cx);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    view.update(cx, |v, _| v.set_animation(true));
-    // Open an empty workspace, then leave it: its tab goes.
-    let leave_an_empty_one = |cx: &mut VisualTestContext| {
-        new_workspace_from_the_bar(cx);
-        let active = view.read_with(cx, |v, _| v.layout().active_workspace());
-        let id = view.read_with(cx, |v, _| {
-            v.layout().workspaces().get(active).map(slopty_client::layout::Workspace::id)
-        });
-        click_at(cx, "ws-tab-0");
-        cx.debug_bounds(leak(format!("ws-tab-closing-{}", id.unwrap_or_default()))).is_some()
-    };
-    assert!(leave_an_empty_one(cx), "the empty workspace's tab folds away");
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    assert!(!leave_an_empty_one(cx), "at once under Reduce Motion");
+    let gap = f32::from(new.left() - crumbs.right());
+    assert!((0.0..=Theme::default().spacing.md).contains(&gap), "+ follows it: {gap}");
 }
 
 /// While the phone's key bar shows, the status bar gives it its row, and takes it back after.

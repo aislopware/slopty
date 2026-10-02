@@ -1,7 +1,8 @@
 Window │ Slopty
 Group │ Workspace
 Button │ Navigator
-Heading │ e2e-worker, 2 tiles, 1 needs you
+Group │ Where
+Button │ e2e-worker
 Button │ New
 Button │ Inbox
 Status │ 1 new
@@ -19,11 +20,13 @@ MultilineTextInput │ Message
 Button │ Attach files
 Group │ Fix the login redirect
 Heading │ terminal Fix the login redirect
-Button │ Show conversation
+Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
-Group (focused)
-Terminal │ Fix the login redirect
+Group │ Thread
+Status │ Nothing here yet
+MultilineTextInput │ Message (focused)
+Button │ Attach files
 Group │ Status
 Status │ e2e-worker
 Status │ 1 blocked

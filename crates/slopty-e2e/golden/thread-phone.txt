@@ -17,7 +17,7 @@ Article │ done
 Group │ Activity
 Dialog │ Allow Bash?
 Button │ Allow
-Button │ Always allow
+Button │ Always allow · /work; mode acceptEdits
 Button │ Deny
 Button │ Deny and stop
 Button │ Answer in the terminal

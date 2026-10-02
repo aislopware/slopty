@@ -33,7 +33,11 @@ async fn a_hang_of_the_main_thread_is_filed_like_a_crash() {
     };
     assert!(stall_ms >= 550, "as long as the hold: {}", hang.headline());
     assert!(cause.contains("slopty-app/src/e2e.rs"), "the command's task: {}", hang.headline());
-    assert_eq!(hang.process, slopty_e2e::harness::APP);
+    assert_eq!(
+        hang.process,
+        slopty_crash::Process::App.name(),
+        "filed under the app, whatever its binary"
+    );
     eprintln!("MEASURE {} ({})", hang.headline(), hang.path.display());
     stack.shutdown().await;
 }

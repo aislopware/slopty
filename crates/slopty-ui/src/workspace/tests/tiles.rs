@@ -144,9 +144,9 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
         .collect()
 }
 
-/// Panes sit flush: no tile is rounded or framed, the focused one included. Focus is told by
-/// the header: the focused one is its body's surface with nothing under it, the other is the
-/// panel with a subtle hairline over its body.
+/// Panes sit flush: no tile is rounded or framed, the focused one included. Every header is
+/// its body's surface with nothing under it, focused or not: focus is the title's tone
+/// (`focus_line::the_headers_sit_on_their_content_and_focus_is_the_titles_tone`).
 #[gpui::test]
 fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -157,7 +157,7 @@ fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) 
     cx.run_until_parked();
     let theme = Theme::default();
     let fill = |c| gpui::Background::from(crate::colors::hsla(c));
-    let (panel, content) = (fill(theme.surfaces.panel), fill(theme.content()));
+    let content = fill(theme.content());
     for tile in [first, second] {
         let bounds = cx.debug_bounds(selector("item", tile.item)).expect("drawn");
         let quads = quads_at(cx, bounds);
@@ -179,21 +179,11 @@ fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) 
         let bounds = cx.debug_bounds(selector("title", tile.item)).expect("drawn");
         quads_at(cx, bounds)
     };
-    let on = header(cx, second);
-    assert!(on.iter().any(|q| q.background == content), "focused: the body's surface");
-    assert!(on.iter().all(|q| q.border_widths.bottom.0 == 0.0), "and nothing under it");
-    let off = header(cx, first);
-    assert!(off.iter().any(|q| q.background == panel), "unfocused: the panel");
-    let subtle = crate::colors::hsla(theme.surfaces.border_subtle);
-    assert!(
-        off.iter().any(|q| q.border_widths.bottom.0 > 0.0 && q.border_color == subtle),
-        "with the quiet hairline over its body"
-    );
-
-    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
-    cx.run_until_parked();
-    assert!(header(cx, first).iter().any(|q| q.background == content), "it follows the focus");
-    assert!(header(cx, second).iter().any(|q| q.background == panel));
+    for tile in [second, first] {
+        let quads = header(cx, tile);
+        assert!(quads.iter().any(|q| q.background == content), "{tile:?}: the body's surface");
+        assert!(quads.iter().all(|q| q.border_widths.bottom.0 == 0.0), "and nothing under it");
+    }
 }
 
 /// One divider between each pair of neighbours: a tile draws it on its right edge where a
@@ -748,7 +738,8 @@ fn a_tabbed_column_draws_a_tab_per_tile(cx: &mut TestAppContext) {
     let (a, b) = (tab(cx, first), tab(cx, second));
     assert_eq!(a.top(), b.top(), "side by side in one row");
     let slot = cx.debug_bounds(selector("tab-slot", first.item)).expect("the tab's slot");
-    let tabbed = f32::from(slot.left() - a.left());
+    let row = cx.debug_bounds(selector("title", second.item)).expect("the column's header");
+    let tabbed = f32::from(slot.left() - row.left());
     assert!((tabbed - single).abs() < 0.5, "a tab's slot on the same grid: {tabbed}");
     assert!(a.right() <= b.left(), "in the column's order");
     let tabs: Vec<_> = tree(cx).into_iter().filter(|n| n.role == "Tab").collect();
@@ -932,6 +923,7 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.debug_bounds("new-menu").is_none(), "no +");
     let name = cx.debug_bounds("ws-tab-0").expect("the name");
+    assert!(cx.debug_bounds("breadcrumb").is_none(), "the name alone, no breadcrumb");
     let theme = Theme::default();
     assert!(f32::from(name.size.height) >= theme.typography.title() + 2.0, "{name:?}");
     click(cx, "more");
@@ -944,24 +936,14 @@ fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     assert!(rows.iter().any(|r| r == "New workspace"), "{rows:?}");
 }
 
-/// Chrome moves where it may: a tab grows in, the active fill slides between tabs, a menu
-/// drops in, a notice rises in and fades when its time is up, and a closing tile fades where
-/// it stood. Under Reduce Motion each lands at once.
+/// Chrome moves where it may: a menu drops in, a notice rises in and fades when its time is
+/// up, and a closing tile fades where it stood. Under Reduce Motion each lands at once.
 #[gpui::test]
 fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &fake);
-    // The focused column goes down into a workspace of its own: two tabs.
-    cx.simulate_keystrokes("cmd-alt-shift-down");
-    cx.run_until_parked();
     view.update(cx, |v, _| v.set_animation(true));
-    let ws_id = |cx: &mut VisualTestContext, ix: usize| {
-        view.read_with(cx, |v, _| {
-            v.layout().workspaces().get(ix).map(slopty_client::layout::Workspace::id)
-        })
-        .expect("a workspace")
-    };
     let menu_top = |cx: &mut VisualTestContext| {
         click(cx, "more");
         let top = cx.debug_bounds("menu").expect("the menu").top();
@@ -974,13 +956,6 @@ fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
         cx.debug_bounds("said").expect("the notice").top()
     };
 
-    click(cx, "ws-tab-0");
-    assert!(cx.debug_bounds("ws-tab-fill").is_some(), "the fill slides to the tab");
-    new_workspace_from_the_bar(cx);
-    let opened = ws_id(cx, 2);
-    let opening = Box::leak(format!("ws-tab-opening-{opened}").into_boxed_str());
-    assert!(cx.debug_bounds(opening).is_some(), "the new tab grows in");
-    click(cx, "ws-tab-0");
     let (dropping, rising) = (menu_top(cx), notice_top(cx, "one"));
     cx.executor().advance_clock(SAY_FOR);
     cx.run_until_parked();
@@ -995,13 +970,6 @@ fn chrome_moves_and_holds_still_under_reduce_motion(cx: &mut TestAppContext) {
     let fading = Box::leak(format!("closing-{}", last.item.as_uuid()).into_boxed_str());
     assert!(cx.debug_bounds(fading).is_some(), "the closed tile fades where it stood");
     cx.update(|_w, cx| cx.set_reduce_motion(true));
-    click(cx, "ws-tab-1");
-    assert!(cx.debug_bounds("ws-tab-fill").is_none(), "the fill jumps");
-    new_workspace_from_the_bar(cx);
-    let third = ws_id(cx, 2);
-    let opening = Box::leak(format!("ws-tab-opening-{third}").into_boxed_str());
-    assert!(cx.debug_bounds(opening).is_none(), "the tab at its width at once");
-    click(cx, "ws-tab-0");
     let (still_menu, still_notice) = (menu_top(cx), notice_top(cx, "two"));
     assert!(dropping < still_menu - px(1.0), "the menu dropped in: {dropping:?} {still_menu:?}");
     assert!(rising > still_notice + px(1.0), "the notice rose in: {rising:?} {still_notice:?}");
@@ -1038,9 +1006,9 @@ fn the_servers_word_says_what_it_costs(cx: &mut TestAppContext) {
     let server = tree(cx).into_iter().find(|n| n.is("Status", Some("Server unreachable")));
     let server = server.expect("the server's word");
     assert_eq!(server.description.as_deref(), Some("direct links only"));
-    let place = cx.debug_bounds("status-place").expect("the path");
+    let place = cx.debug_bounds("status-place").expect("the left");
     let word = cx.debug_bounds("server-status").expect("drawn");
-    assert!(place.contains(&word.center()), "one path with the worker: {place:?} {word:?}");
+    assert!(place.contains(&word.center()), "one line with the worker: {place:?} {word:?}");
 }
 
 /// The empty workspace's quieter ways to begin say where they open.

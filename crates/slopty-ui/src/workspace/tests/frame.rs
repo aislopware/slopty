@@ -169,7 +169,6 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
         names.iter().any(|l| l == "Claude Code, Has a question"),
         "the waiting tile's row, in the state's own word: {names:#?}"
     );
-    assert!(names.iter().any(|l| l == "laptop, 2 tiles, 1 needs you"), "{names:#?}");
 
     click(cx, leak(format!("nav-worker-{}", laptop.key)));
     assert!(top(cx, "nav-needs-you") < top(cx, "nav-workers"), "folded away, it leads");
@@ -201,7 +200,8 @@ fn on_a_phone_the_navigator_is_a_drawer_that_closes_on_a_choice(cx: &mut TestApp
     assert!(view.read_with(cx, |v, _| v.layout().navigator().shown), "the desktop's setting");
 }
 
-/// A tile's row focuses its tile and hands it the keyboard; a workspace's tab goes there.
+/// A tile's row focuses its tile and hands it the keyboard; a workspace's row in the
+/// breadcrumb's menu goes there.
 #[gpui::test]
 fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -219,13 +219,16 @@ fn a_tile_row_focuses_its_tile(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 1);
-    click(cx, "ws-tab-0");
+    click(cx, "crumb-workspace");
+    let first_name = view.read_with(cx, |v, _| v.workspace_name_at(0));
+    click(cx, leak(format!("menu-{first_name}")));
     assert_eq!(view.read_with(cx, |v, _| v.layout().active_workspace()), 0);
     assert_eq!(focused(&view, cx), Some(first));
 }
 
-/// The status bar names the focused tile's worker and directory, the round trip there, and
-/// how every worker's agents stand. The bell counts the one blocked too, as its way there.
+/// The status bar names the focused tile's worker, the round trip there, and how every
+/// worker's agents stand; the breadcrumb names the directory. The bell counts the one blocked
+/// too, as its way there.
 #[gpui::test]
 fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -244,9 +247,9 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let names = labels(&view, cx);
-    // The same place the header names: the last two directories, a home as `~`.
+    // Outside a repository the checkout is the directory's own name.
     let agents = "studio: 1 working; laptop: 1 blocked";
-    for readout in ["studio", "oss/slopty", "Round trip 42 ms", agents] {
+    for readout in ["studio", "slopty", "Round trip 42 ms", agents] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
@@ -292,10 +295,10 @@ fn the_bell_counts_the_inbox_and_its_rows_go_there(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 1, "looked at, it is cleared");
 }
 
-/// The bar runs from the docked navigator's right edge: the toggle, the workspace's name and
-/// "+", each clear of the next and of the bell. A long name is cut at a tab's widest.
+/// The bar runs from the docked navigator's right edge: the toggle, the breadcrumb and "+",
+/// each clear of the next and of the bell, however long the workspace's name.
 #[gpui::test]
-fn the_bar_keeps_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext) {
+fn the_bar_keeps_clear_of_the_toggle_and_the_breadcrumb(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let _shells = three_shells(&view, cx, &fake);
@@ -308,19 +311,17 @@ fn the_bar_keeps_clear_of_the_toggle_and_the_tabs(cx: &mut TestAppContext) {
         cx.notify();
     });
     cx.run_until_parked();
-    let (navigator, toggle, tab, new, bell) = (
+    let (navigator, toggle, crumbs, new, bell) = (
         bounds(cx, "navigator"),
         bounds(cx, "navigator-toggle"),
-        bounds(cx, "ws-tab-0"),
+        bounds(cx, "breadcrumb"),
         bounds(cx, "new-menu"),
         bounds(cx, "bell"),
     );
     assert!(navigator.right() <= toggle.left(), "the bar starts at the navigator's edge");
-    assert!(toggle.right() <= tab.left(), "{toggle:?} {tab:?}");
-    assert!(tab.right() <= new.left(), "{tab:?} {new:?}");
+    assert!(toggle.right() <= crumbs.left(), "{toggle:?} {crumbs:?}");
+    assert!(crumbs.right() <= new.left(), "{crumbs:?} {new:?}");
     assert!(new.right() <= bell.left(), "+ covers the bell: {new:?} {bell:?}");
-    let name = bounds(cx, "ws-name-0");
-    assert!(f32::from(name.size.width) <= 180.5, "cut at a tab's widest: {name:?}");
 }
 
 /// Where the view is along the strip is a thumb on the strip's bottom edge, never in the title

@@ -1,7 +1,8 @@
 Window │ Slopty
 Group │ Workspace
 Button │ Navigator
-Heading │ drop-here, 2 tiles
+Group │ Where
+Button │ drop-here
 Button │ New
 Button │ Inbox
 Button │ More
@@ -23,6 +24,5 @@ Group
 Terminal │ shell
 Group │ Status
 Status │ e2e-worker
-Status │ ~/drop-here
 Button │ 1 port
 Status │ Port 47310 is taken here; forwarded on 47311

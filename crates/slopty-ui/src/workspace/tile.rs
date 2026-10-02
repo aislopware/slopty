@@ -28,7 +28,7 @@ use super::{Field, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::folder::FolderView;
 use crate::icons::{IconName, IconSize, Status};
@@ -900,20 +900,16 @@ impl WorkspaceView {
             ItemKind::Terminal { session } => self.agent_state(session).map(|a| (session, a)),
             _ => None,
         };
-        // The focused title leads at the medium weight in primary text; the rest step back to
-        // the secondary tone at the regular weight, so a wall of tiles reads as titles still.
-        let ink = if focused { s.text } else { s.text_secondary };
+        let ink = title_ink(theme, focused);
         let heading = SharedString::from(if kind == title {
             title.clone()
         } else {
             format!("{kind} {title}")
         });
-        // Focus is told by the header: the focused one is its body's surface in primary text,
-        // with nothing between them, so the tile reads as one piece; the others step down to
-        // the panel, muted, with a quiet hairline over their bodies. A page or a remote picture
-        // is another program's surface, never quite the content's, so its header keeps the
-        // hairline focused too. A tabbed column's header is its tab row, whose tabs draw their
-        // own edges.
+        // Every header sits on its body's surface with nothing between them, focused or not, so
+        // a tile reads as one piece and the strip as content, not as rows of bands. A page or a
+        // remote picture is another program's surface, never quite the content's, so a hairline
+        // parts its header from it: there the two surfaces meet anyway.
         let foreign = matches!(
             item.kind,
             ItemKind::Browser { .. } | ItemKind::Window { .. } | ItemKind::Display { .. }
@@ -936,12 +932,8 @@ impl WorkspaceView {
             .text_color(hsla(ink))
             .font_family(theme.typography.ui_family.clone())
             .cursor_grab()
-            .map(|el| {
-                if focused || shapes { el.bg(hsla(theme.content())) } else { el.bg(hsla(s.panel)) }
-            })
-            .when(!shapes && (!focused || foreign), |el| {
-                el.border_b_1().border_color(hsla(s.border_subtle))
-            })
+            .bg(hsla(theme.content()))
+            .when(!shapes && foreign, |el| el.border_b_1().border_color(hsla(s.border_subtle)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -1166,7 +1158,7 @@ impl WorkspaceView {
         let tabbed = placed.tabs.is_some();
         let header = if tabbed {
             let tabs = self.render_tabs(placed, chrome, cx);
-            // What the tabs leave is the bar's, hairline and all; the tile's controls end it.
+            // What the tabs leave is the header's; the tile's controls end it.
             let rest = div()
                 .flex_none()
                 .h_full()
@@ -1175,8 +1167,6 @@ impl WorkspaceView {
                 .justify_end()
                 .gap(px(theme.spacing.sm * k))
                 .pr(px(theme.spacing.inset() * k))
-                .border_b_1()
-                .border_color(hsla(s.border_subtle))
                 .children(branch)
                 .children(ports)
                 .when_some(upload, gpui::ParentElement::child)
@@ -1184,7 +1174,7 @@ impl WorkspaceView {
                 .child(actions)
                 .when_some(silenced, gpui::ParentElement::child)
                 .child(strip);
-            header.bg(hsla(s.panel)).border_b_0().child(tabs).child(rest)
+            header.border_b_0().child(tabs).child(rest)
         } else {
             let lead = self.leading_slot(tile, item, focused, k, cx);
             let name = self.header_name(tile, id, title, chrome);
@@ -1366,8 +1356,10 @@ impl WorkspaceView {
 
     /// A tabbed column's tab row: a tab per tile in the column, each with its leading slot,
     /// its title and a close button that shows on the tab's hover (always on the one shown).
-    /// The shown tab is its body's surface with no edge under it, as the focused header is;
-    /// the rest sit on the panel with the bar's hairline under them.
+    ///
+    /// The row sits on the content as a single header does. A tab is a row's height and
+    /// radius: the shown one rests on the hover step's fill, the rest are quiet words that take
+    /// it under the pointer, so the tabs read as objects on the header, not as boxes in a band.
     fn render_tabs(
         &self,
         placed: &Placed,
@@ -1389,11 +1381,7 @@ impl WorkspaceView {
             let item = self.item(tab)?;
             let id = item.id;
             let shown = tab == placed.tile;
-            let ink = match (shown, placed.focused) {
-                (true, true) => s.text,
-                (true, false) => s.text_secondary,
-                (false, _) => s.text_muted,
-            };
+            let ink = title_ink(theme, shown && placed.focused);
             let agent = match item.kind {
                 ItemKind::Terminal { session } => self.agent_state(session).is_some(),
                 _ => false,
@@ -1427,26 +1415,22 @@ impl WorkspaceView {
                     .flex_initial()
                     .min_w(px(TAB_MIN * k))
                     .max_w(px(TAB_MAX * k))
-                    .h_full()
+                    .h(px(theme.density.row * k))
                     .flex()
                     .items_center()
                     .gap(px(theme.spacing.xs * k))
-                    // On the edge grid, as a single header's slot is: the first tab's kind sits
-                    // where the tile above's or below's does.
-                    .pl(px(theme.spacing.inset() * k))
-                    .pr(px(theme.spacing.xs * k))
-                    .border_r_1()
+                    .pl(px(theme.spacing.xs * k))
+                    .pr(px(theme.spacing.xxs * k))
+                    .rounded(px(theme.radii.sm * k))
                     .text_color(hsla(ink))
                     .when(shown && placed.focused, |el| {
                         el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     })
                     .map(|el| {
                         if shown {
-                            el.border_color(hsla(s.border_subtle)).bg(hsla(theme.content()))
+                            el.bg(hsla(s.raised))
                         } else {
-                            el.border_b_1()
-                                .border_color(hsla(s.border_subtle))
-                                .hover(move |el| el.bg(hsla(s.raised)))
+                            el.hover(move |el| el.bg(hsla(s.raised)))
                         }
                     })
                     .on_mouse_down(
@@ -1468,15 +1452,17 @@ impl WorkspaceView {
                     .child(close),
             )
         });
-        // The tabs take their titles' widths and the bar after them the rest, so a few tabs
-        // keep their titles whole and the bar's hairline runs on from the last.
+        // The tabs take their titles' widths and the header after them the rest. The first
+        // tab's kind sits on the edge grid, where a single header's does: its pad round it.
         div()
             .flex_1()
             .min_w_0()
             .h_full()
             .flex()
+            .items_center()
+            .gap(px(theme.spacing.xxs * k))
+            .pl(px((theme.spacing.inset() - theme.spacing.xs) * k))
             .children(tabs)
-            .child(div().flex_1().h_full().border_b_1().border_color(hsla(s.border_subtle)))
             .into_any_element()
     }
 
@@ -2081,7 +2067,12 @@ impl WorkspaceView {
 
     /// Close `tile` as ⌘W closes the focused one: a shell asks first while its command runs,
     /// and the closing can be taken back.
-    fn close_tile(&mut self, tile: TileRef, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_tile(
+        &mut self,
+        tile: TileRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focus_tile(tile, cx);
         self.close_item(&CloseItem, window, cx);
     }
@@ -2698,9 +2689,17 @@ fn pill(
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 
+/// A header's title tone: focus is said by it. The focused tile's title leads in primary text
+/// (at the medium weight), every other steps back to the muted tone, so a wall of tiles reads
+/// as titles still and one of them as the one in hand. A tab row's tabs follow it too.
+pub(super) const fn title_ink(theme: &Theme, focused: bool) -> slopty_theme::Rgb {
+    if focused { theme.surfaces.text } else { theme.surfaces.text_muted }
+}
+
 /// The line along the top of the focused tile's header (or its column's shown tab) while
-/// several tiles are in view: the accent, set back, since only what needs the person spends
-/// the whole colour; Increase Contrast shows it whole.
+/// several tiles are in view, under Increase Contrast only: there a title's tone is too quiet
+/// a sign of focus on its own, so the line says it in the text's tone. Otherwise focus is the
+/// title's tone and weight, and nothing is drawn.
 fn focus_line(theme: &Theme, k: f32) -> Div {
     div()
         .debug_selector(|| "focus-line".to_owned())
@@ -2709,5 +2708,5 @@ fn focus_line(theme: &Theme, k: f32) -> Div {
         .left_0()
         .right_0()
         .h(px(slopty_theme::stroke::MARK * k))
-        .bg(hsla_alpha(theme.surfaces.accent, theme.set_back(slopty_theme::alpha::STRONG)))
+        .bg(hsla(theme.surfaces.text))
 }

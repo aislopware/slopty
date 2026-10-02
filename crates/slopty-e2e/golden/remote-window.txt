@@ -1,7 +1,8 @@
 Window │ Slopty
 Group │ Workspace (focused)
 Button │ Navigator
-Heading │ e2e-worker, 2 tiles, working
+Group │ Where
+Button │ e2e-worker
 Button │ New
 Button │ Inbox
 Button │ More

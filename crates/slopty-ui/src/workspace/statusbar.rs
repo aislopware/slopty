@@ -1,22 +1,21 @@
-//! The bar along the bottom: where the focused tile runs, and how things are going.
+//! The bar along the bottom: the ambient facts, thin and quiet, as `MonoCode`'s status line is.
 //!
-//! On the left, where the human is: the server's state while it does not answer, then the
-//! focused tile's worker (a warn dot before it while it is away), its directory (inside a
-//! repository, the repository's name and the path within it) and the branch checked out there
-//! with what the working tree changed, the steps a faint "·" apart. The worker leads in the
-//! secondary tone, the rest are muted. On the right, the link to the focused worker while it is
-//! worth a look (a round trip past [`RTT_SHOWN_FROM`], or a DERP relay) or while the pointer is
-//! over the bar, what is wrong with the link when something is, what the focused tile says of
-//! itself (a file's language and caret; a page's host is its header's), the ports forwarded
-//! here (which list them when clicked), the uploads in flight to tiles other than the focused
-//! one (whose header says its own), the count of workers only while one of them is not up
-//! (which opens the hosts popover: each worker's link, connect and forget), and each worker's
-//! agents: working, waiting, blocked and to review (a turn that ended unseen), each a faint "·"
-//! from the next. Who waits on
-//! the human is counted once, on the bell. The frame time shows only with the stream stats (⌘⇧I).
-//! Each readout is meta text with no icon, its figures tabular, and a state is a small dot of its
-//! fill beside quiet words: the tile and the bell carry the loud marks. A phone keeps the worker, a
-//! slow round trip and the agents.
+//! On the left, which machine the focused tile runs on: the server's state while it does not
+//! answer, then the focused tile's worker (a warn dot before it while it is away). Where on it
+//! (the checkout and the branch) is the title bar's breadcrumb's to say, and the directory the
+//! tile header's. On the right, the link to the focused worker while it is worth a look (a
+//! round trip past [`RTT_SHOWN_FROM`], or a DERP relay) or while the pointer is over the bar,
+//! what is wrong with the link when something is, what the focused tile says of itself (a
+//! file's language and caret; a page's host is its header's), the ports forwarded here (which
+//! list them when clicked), the uploads in flight to tiles other than the focused one (whose
+//! header says its own), the count of workers only while one of them is not up (which opens
+//! the hosts popover: each worker's link, connect and forget), and each worker's agents:
+//! working, waiting, blocked and to review (a turn that ended unseen), each a faint "·" from
+//! the next. Who waits on the human is counted once, on the bell. The frame time shows only
+//! with the stream stats (⌘⇧I). Each readout is meta text with no icon, its figures tabular,
+//! and a state is a small dot of its fill beside quiet words: the tile and the bell carry the
+//! loud marks. The bar sits on the navigator's tone with no rule over it. A phone keeps the
+//! worker, a slow round trip and the agents.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, nor
 //! does a round trip nobody would read.
@@ -42,7 +41,6 @@ use slopty_theme::Theme;
 
 use super::navigator::{Mode, RTT_SHOWN_FROM, host_line, path_label, rtt_label, worker_health};
 use super::rollup::{META_SEPARATOR, meta_line};
-use super::tile::repo_place;
 use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
@@ -421,15 +419,8 @@ impl WorkspaceView {
         let worker = self.status_worker();
         let link = worker.and_then(|k| self.workers.get(&k));
         let focused_item = (!phone).then(|| self.focused().and_then(|t| self.item(t))).flatten();
-        let session = focused_item.and_then(|item| match item.kind {
-            ItemKind::Terminal { session } => self.summary(session),
-            _ => None,
-        });
-        let cwd = focused_item
-            .filter(|item| matches!(item.kind, ItemKind::Terminal { .. } | ItemKind::File { .. }))
-            .and_then(|item| self.cwd_of(item));
-        // The worker leads the path in the secondary tone: with one worker too, since where a
-        // shell runs is the first thing a remote tool says.
+        // The worker, in the secondary tone: with one worker too, since which machine a tile
+        // runs on is the first thing a remote tool says.
         let name = link.map(|w| {
             let away = (!w.status.is_up()).then(|| {
                 state_dot(theme, s.text_muted).debug_selector(|| "status-worker-away".to_owned())
@@ -442,54 +433,18 @@ impl WorkspaceView {
                 .children(away)
                 .child(SharedString::from(w.name.clone()))
         });
-        let cwd = cwd.map(|cwd| {
-            let repo = session.and_then(|s| s.repo.as_deref());
-            SharedString::from(repo_place(&cwd, repo, worker.and_then(|k| self.home_of(k))))
-        });
-        let cwd = cwd.map(|cwd| {
-            readout("status-cwd", cwd.clone())
-                .flex_initial()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(cwd)
-        });
-        // The branch, then what the working tree changed, as every diff's size is drawn: only
-        // the signs in a diff's tones, so the bar holds no green or red words.
-        let changes = session.and_then(|s| s.changes).filter(|c| c.files > 0).and_then(|c| {
-            let size = kit::changes(theme, c.added, c.removed)?;
-            let label = kit::changes_text(c.added, c.removed).unwrap_or_default();
-            Some(readout("status-changes", SharedString::from(label)).child(size))
-        });
-        let branch = session.and_then(|s| s.branch.clone()).map(|branch| {
-            let branch = SharedString::from(branch);
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(spacing.sm))
-                .child(
-                    readout("status-branch", branch.clone())
-                        .aria_label(SharedString::from(format!("branch {branch}")))
-                        .child(branch),
-                )
-                .children(changes)
-        });
-        // The server's word while it is down, then worker · directory · branch: one path, its
-        // steps a faint dot apart, as the right's readouts are.
-        let step = || separator(theme);
+        // The server's word while it is down, then the worker, a faint dot apart as the
+        // right's readouts are.
         let mut place_parts: Vec<gpui::AnyElement> = Vec::new();
         for part in [
             server.map(gpui::IntoElement::into_any_element),
             name.map(gpui::IntoElement::into_any_element),
-            cwd.map(gpui::IntoElement::into_any_element),
-            branch.map(gpui::IntoElement::into_any_element),
         ]
         .into_iter()
         .flatten()
         {
             if !place_parts.is_empty() {
-                place_parts.push(step().into_any_element());
+                place_parts.push(separator(theme).into_any_element());
             }
             place_parts.push(part);
         }
@@ -618,8 +573,6 @@ impl WorkspaceView {
             .pl(px(spacing.inset()) + safe.left)
             .pr(px(spacing.inset()) + safe.right)
             .bg(hsla(s.canvas))
-            .border_t_1()
-            .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
             .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
                 if this.bar.hovered != *hovered {
@@ -1065,9 +1018,10 @@ mod tests {
         assert_eq!(sentence(""), "");
     }
 
-    /// Inside a repository the bar names it and the path within; elsewhere, the tail.
+    /// Inside a repository a place is named by it and the path within; elsewhere, the tail.
     #[test]
     fn a_place_in_a_repository_is_named_by_it() {
+        use crate::workspace::tile::repo_place;
         assert_eq!(repo_place("/w/oss/slopty", Some("/w/oss/slopty"), None), "slopty");
         assert_eq!(
             repo_place("/w/oss/slopty/crates/ui/", Some("/w/oss/slopty"), None),

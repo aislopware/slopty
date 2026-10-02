@@ -1490,6 +1490,7 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
 
 mod about;
 mod address;
+mod attach_block;
 mod away;
 mod bars;
 mod bodies;

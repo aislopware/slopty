@@ -120,6 +120,7 @@ impl WorkspaceView {
             );
         }
         items.extend(super::actions::palette_items());
+        items.extend(self.attach_line());
         items.push(self.lens_line());
         // What the focused remote tile can do beyond its header, only while one has the focus.
         items.extend(self.screen_lines(cx));

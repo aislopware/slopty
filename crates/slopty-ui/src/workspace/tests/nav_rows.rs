@@ -178,6 +178,9 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
 
     // Focus the other shell, so the waiting one's row is not the selected one.
     click(cx, selector("nav-tile", other.item));
+    // And take the pointer away: the waiting row moves up under it, where its end would give
+    // way to the close button.
+    cx.simulate_mouse_move(point(px(1.0), px(1.0)), None, Modifiers::default());
     let asks = AgentEvent {
         status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
         detail: Some("$ touch refused.txt".into()),
@@ -718,4 +721,54 @@ fn an_agents_subagents_at_work_fold_into_its_row_as_a_count(cx: &mut TestAppCont
     assert!(two.contains("2 subagents"), "{two}");
     let none = meta(vec![root.clone(), child(Phase::Done)], cx);
     assert!(!none.contains("subagent"), "a finished one is not counted: {none}");
+}
+
+/// A row leads with its status glyph (an agent at work turns the working mark in the kind's
+/// place), its working tree's changes sit right-aligned under the first line's end, and under
+/// the pointer that end gives way to a close button, which takes the tile off.
+#[gpui::test]
+fn a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let keep = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 2);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        let summary = SessionSummary {
+            repo: Some("/Users/me/oss/slopty".into()),
+            branch: Some("main".into()),
+            changes: Some(slopty_proto::terminal::RepoChanges { files: 2, added: 25, removed: 15 }),
+            ..summary(session, Some("/Users/me/oss/slopty"))
+        };
+        v.session_opened(key, summary, cx);
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+    });
+    click(cx, selector("nav-tile", keep.item));
+    cx.simulate_mouse_move(point(px(1.0), px(1.0)), None, Modifiers::default());
+    cx.run_until_parked();
+    let id = tile.item.as_uuid();
+    let kind = cx.debug_bounds(leak(format!("nav-kind-{id}"))).expect("the lead slot");
+    let working = tree(cx).into_iter().any(|n| n.is("Image", Some("Working")));
+    assert!(working, "the working mark leads the row");
+    let (lines, changes) = (
+        cx.debug_bounds(leak(format!("nav-lines-{id}"))).expect("the lines"),
+        cx.debug_bounds(leak(format!("nav-changes-{id}"))).expect("the changes"),
+    );
+    assert!((kind.left() - lines.left()).abs() < px(0.5), "the glyph leads: {kind:?}");
+    assert!((lines.right() - changes.right()).abs() < px(0.5), "right-aligned: {changes:?}");
+
+    let close = leak(format!("nav-close-{}", keep.item.as_uuid()));
+    assert!(!shown(cx, close), "the close waits for the pointer");
+    let row = cx.debug_bounds(selector("nav-tile", keep.item)).expect("the row");
+    cx.simulate_mouse_move(row.center(), None, Modifiers::default());
+    cx.run_until_parked();
+    assert!(shown(cx, close), "under the pointer it shows");
+    studio.drain();
+    click(cx, close);
+    let sent = studio.drain();
+    assert!(
+        sent.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Remove(i)) if *i == keep.item)),
+        "it takes the tile off: {sent:?}"
+    );
 }

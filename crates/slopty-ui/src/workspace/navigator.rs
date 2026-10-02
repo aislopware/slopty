@@ -2278,8 +2278,10 @@ impl WorkspaceView {
         .into_any_element()
     }
 
-    /// A tile's row: its kind, its title and at the end of that line its state in a word (or
-    /// the unseen dot, or its age), then the muted second line.
+    /// A tile's row: its status glyph (else its kind), its title and at the end of that line
+    /// its state in a word (or the unseen dot, or its age), then the muted second line with
+    /// the working tree's changes right-aligned under the line's end, as Zed's and `MonoCode`'s
+    /// thread rows have them. Under the pointer the line's end gives way to a close button.
     fn tile_row(
         &self,
         t: &NavTile,
@@ -2302,7 +2304,11 @@ impl WorkspaceView {
         let strength = row_strength(theme, t.mark, selected);
         let row_group = SharedString::from(format!("nav-tile-group-{id}"));
         let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
-        let lead = crate::palette::status_slot(theme, t.kind, None, faded(s.text_muted), 1.0)
+        // The status glyph, as Warp's agent rows lead with one: working, done, failed, away. One
+        // waiting on the human keeps its kind's glyph, since its word in the warn tone says it,
+        // and one at rest shows its kind.
+        let glyph = t.mark.filter(|m| !matches!(m, Status::NeedsYou | Status::Idle));
+        let lead = crate::palette::status_slot(theme, t.kind, glyph, faded(s.text_muted), 1.0)
             .debug_selector(move || format!("nav-kind-{id}"));
         // One mark at the line's end: the state while there is one, else the unseen dot, else
         // the clock of a command that runs, else the age.
@@ -2338,6 +2344,48 @@ impl WorkspaceView {
                     .into_any_element()
             }),
         };
+        // Under the pointer the line's end gives way to the row's action, in the same place, so
+        // nothing on the line moves.
+        let tile = t.tile;
+        let close = kit::icon_button_at(
+            theme,
+            format!("nav-close-{id}"),
+            IconName::X,
+            super::tile::CLOSE_TILE,
+            1.0,
+        )
+        .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _ev, window, cx| {
+            cx.stop_propagation();
+            this.close_tile(tile, window, cx);
+        }));
+        let end = div()
+            .relative()
+            .flex_none()
+            .min_w(px(theme.typography.icon_large()))
+            .h(px(first))
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .group_hover(row_group.clone(), gpui::Styled::invisible)
+                    .children(end),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .flex()
+                    .items_center()
+                    .invisible()
+                    .group_hover(row_group.clone(), gpui::Styled::visible)
+                    .child(close),
+            );
         let line1 = div()
             .h(px(first))
             .line_height(px(first))
@@ -2351,7 +2399,7 @@ impl WorkspaceView {
                         el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                     }),
             )
-            .children(end);
+            .child(end);
         // The working tree's changes end the line whole; the words before them give way.
         let changes = t
             .changes
@@ -2396,11 +2444,11 @@ impl WorkspaceView {
                         .child(crate::palette::dotted(theme, t.meta.clone())),
                 )
                 .children(restored)
+                .child(div().flex_1())
                 .children(changes)
                 .children(figure)
         });
         let lines = if line2.is_some() { kit::Row::Two } else { kit::Row::One };
-        let tile = t.tile;
         row(
             theme,
             lines,
