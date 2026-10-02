@@ -456,6 +456,7 @@ pub(super) const fn kind_icon(item: &Item, agent: bool) -> IconName {
         ItemKind::Folder { .. } => IconName::Folder,
         ItemKind::Browser { .. } => IconName::Globe,
         ItemKind::Review { .. } => IconName::FileDiff,
+        ItemKind::Thread { .. } => IconName::Bot,
     }
 }
 
@@ -483,6 +484,7 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
         ItemKind::Folder { .. } => "folder",
         ItemKind::Browser { .. } => "browser",
         ItemKind::Review { .. } => "review",
+        ItemKind::Thread { .. } => "thread",
     }
 }
 
@@ -511,7 +513,10 @@ impl WorkspaceView {
             ItemKind::Note { text } => {
                 self.note_progress_of(item.id, text).map(|(done, total)| note_done(done, total))
             }
-            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Review { .. } => None,
+            ItemKind::Window { .. }
+            | ItemKind::Display { .. }
+            | ItemKind::Review { .. }
+            | ItemKind::Thread { .. } => None,
         }
     }
 
@@ -534,6 +539,7 @@ impl WorkspaceView {
                 .page_facts(item.id)
                 .map_or_else(|| crate::browser::short_url(url).to_owned(), |p| p.title.clone()),
             ItemKind::Review { .. } => REVIEW.to_owned(),
+            ItemKind::Thread { thread } => self.thread_title(*thread),
         }
     }
 
@@ -553,17 +559,40 @@ impl WorkspaceView {
     }
 
     /// Unnamed tiles of one worker and one kind that would read alike ("Terminal" and
-    /// "Terminal") are told apart by a number after the first, in the order they were made: the
-    /// second is "Terminal 2". A named tile keeps the name it was given, and tiles of two kinds
-    /// are told apart by their icons: a shell and a folder at one directory both read as it.
+    /// "Terminal") are told apart: shells by the command each last ran, then any still alike by
+    /// a number after the first, in the order they were made: the second is "Terminal 2". A named
+    /// tile keeps the name it was given, and tiles of two kinds are told apart by their icons:
+    /// a shell and a folder at one directory both read as it.
     ///
     /// Worked out when a title may have changed ([`Self::titles_dirty`]), not once a frame: it
     /// derives every item's title. Every item's derived title and place are kept with the
     /// numbers, for every header, row and line to read, and so that a program's new title that
     /// leaves its tile's as it was is nobody's news ([`Self::retitled`]).
     pub(super) fn number_twins(&mut self) {
-        let derived: HashMap<ItemId, String> =
+        let mut derived: HashMap<ItemId, String> =
             self.items().map(|(_, item)| (item.id, self.derived_title(item))).collect();
+        // Shells that would read alike by their place ("atlas", "atlas 2", "atlas 3") are told
+        // apart first by the command each last ran, which says what each is for; a number
+        // tells apart only those that still read alike.
+        let mut alike: HashMap<(WorkerKey, &str), u32> = HashMap::new();
+        for (worker, item) in self.items().filter(|(_, i)| i.name.is_none()) {
+            if let (ItemKind::Terminal { .. }, Some(title)) = (&item.kind, derived.get(&item.id)) {
+                let count = alike.entry((worker, title.as_str())).or_insert(0);
+                *count = count.saturating_add(1);
+            }
+        }
+        let by_command: Vec<(ItemId, String)> = self
+            .items()
+            .filter(|(_, i)| i.name.is_none())
+            .filter_map(|(worker, item)| {
+                let ItemKind::Terminal { session } = item.kind else { return None };
+                let title = derived.get(&item.id)?;
+                let shared = alike.get(&(worker, title.as_str())).is_some_and(|n| *n > 1);
+                shared.then(|| self.last_command(session)).flatten().map(|c| (item.id, c))
+            })
+            .collect();
+        drop(alike);
+        derived.extend(by_command);
         let places = self
             .items()
             .map(|(_, item)| {
@@ -1874,7 +1903,10 @@ impl WorkspaceView {
                     );
                 }
             }
-            ItemKind::Note { .. } | ItemKind::File { .. } | ItemKind::Review { .. } => {}
+            ItemKind::Note { .. }
+            | ItemKind::File { .. }
+            | ItemKind::Review { .. }
+            | ItemKind::Thread { .. } => {}
         }
         actions
     }
@@ -2647,6 +2679,20 @@ impl WorkspaceView {
                 }
                 None if !worker_up => well(),
                 None => self.waiting_body(item, Wait::Loading(REVIEW.into()), k),
+            },
+            // The thread view, under the tile's header, which says its title already.
+            ItemKind::Thread { .. } => match self.thread_item(item.id).cloned() {
+                Some(view) => {
+                    let width = placed.target.w;
+                    let handed = Handed::Face { zoom: k, width };
+                    self.hand_over(cx, &view, handed, move |v, cx| {
+                        v.set_layout(k, width, cx);
+                        v.set_header(false, cx);
+                    });
+                    fixed(self.body_view(&view, placed, cx))
+                }
+                None if !worker_up => well(),
+                None => self.waiting_body(item, Wait::Loading(OPENING.into()), k),
             },
         }
     }

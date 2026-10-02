@@ -607,8 +607,9 @@ struct NavTile {
     tile: TileRef,
     kind: IconName,
     mark: Option<Status>,
-    /// The state's word at the end of the first line: [`agent_status_word`] for an agent that
-    /// waits ("Needs approval", "Has a question"), else the mark's own label.
+    /// The state's word, said in the row's accessible name (the row draws the state as its
+    /// glyph): [`agent_status_word`] for an agent that waits ("Needs approval", "Has a
+    /// question"), else the mark's own label.
     word: Option<String>,
     unseen: bool,
     title: String,
@@ -1054,6 +1055,8 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::Terminal { session } => {
                 let (doing, since) = self.shell_doing(*session);
+                // A shell named by its command ([`Self::number_twins`]) does not say it twice.
+                let doing = doing.filter(|d| self.derived.get(&item.id) != Some(d));
                 let doing = with_subagents(doing, self.live_subagents(*session, cx));
                 let branch = self.summary(*session).and_then(|s| s.branch.as_deref());
                 let place = self
@@ -1063,11 +1066,12 @@ impl WorkspaceView {
                 (meta, age_at(since, now))
             }
             // The header's place; a page named by its address says nothing more.
-            ItemKind::Browser { .. } | ItemKind::File { .. } | ItemKind::Folder { .. } => {
-                (self.tile_place(item).unwrap_or_default(), None)
-            }
+            ItemKind::Browser { .. }
+            | ItemKind::File { .. }
+            | ItemKind::Folder { .. }
+            | ItemKind::Review { .. }
+            | ItemKind::Thread { .. } => (self.tile_place(item).unwrap_or_default(), None),
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
-            ItemKind::Review { .. } => (self.tile_place(item).unwrap_or_default(), None),
             ItemKind::Note { text } => {
                 (note_meta(text, self.note_progress_of(item.id, text)), None)
             }
@@ -1137,7 +1141,7 @@ impl WorkspaceView {
 
     /// The command a shell runs now, else the last one it ran, else the one that finished
     /// unwatched: its first line.
-    fn last_command(&self, session: slopty_core::SessionId) -> Option<String> {
+    pub(super) fn last_command(&self, session: slopty_core::SessionId) -> Option<String> {
         let shell = self.shell(session);
         let typed = shell.and_then(|s| s.running.clone().or_else(|| s.last.clone()));
         let typed = typed.or_else(|| self.finished.get(&session).map(|f| f.command.clone()))?;
@@ -1365,7 +1369,9 @@ impl WorkspaceView {
     }
 
     /// The top row, the title bar's height: room for the traffic lights on a Mac, then the
-    /// filter's field, a raised well a row tall, the base unit in from the panel's edge. No
+    /// filter's field, a well a row tall on the selection's fill, the base unit in from the
+    /// panel's edge. The `raised` step sits a hundredth from the light panel's own tone, and the
+    /// field read as words on nothing; `MonoCode`'s sidebar search wears its selection fill. No
     /// hairline under it: the panel is one surface from the top to the bottom, as T3 Code's and
     /// Linear's sidebars are, and the rows under the field need no rule to start.
     fn navigator_header(&self, window: &Window, cx: &Draw<'_, Self>) -> Div {
@@ -1415,7 +1421,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.xs + spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.raised))
+            .bg(hsla(s.overlay))
             .child(icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)))
             .children(input)
             .children(clear);
@@ -2279,7 +2285,7 @@ impl WorkspaceView {
     }
 
     /// A tile's row: its status glyph (else its kind), its title and at the end of that line
-    /// its state in a word (or the unseen dot, or its age), then the muted second line with
+    /// the unseen dot, a running command's clock or its age, then the muted second line with
     /// the working tree's changes right-aligned under the line's end, as Zed's and `MonoCode`'s
     /// thread rows have them. Under the pointer the line's end gives way to a close button.
     fn tile_row(
@@ -2304,45 +2310,30 @@ impl WorkspaceView {
         let strength = row_strength(theme, t.mark, selected);
         let row_group = SharedString::from(format!("nav-tile-group-{id}"));
         let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
-        // The status glyph, as Warp's agent rows lead with one: working, done, failed, away. One
-        // waiting on the human keeps its kind's glyph, since its word in the warn tone says it,
-        // and one at rest shows its kind.
-        let glyph = t.mark.filter(|m| !matches!(m, Status::NeedsYou | Status::Idle));
+        // The status glyph, as Warp's agent rows lead with one: working, waiting on the person,
+        // done, failed, away; one at rest shows its kind. The state is the glyph and never a
+        // word on the title's line, where "Needs approval" took half a row's width from the
+        // title; the second line says what is asked.
+        let glyph = t.mark.filter(|m| *m != Status::Idle);
         let lead = crate::palette::status_slot(theme, t.kind, glyph, faded(s.text_muted), 1.0)
             .debug_selector(move || format!("nav-kind-{id}"));
-        // One mark at the line's end: the state while there is one, else the unseen dot, else
-        // the clock of a command that runs, else the age.
-        let end = match status_word(t.mark).zip(t.word.clone()) {
-            Some((state, word)) => {
-                let selector =
-                    if t.unseen { format!("nav-unseen-{id}") } else { format!("nav-status-{id}") };
-                Some(
-                    meta(div(), theme)
-                        .debug_selector(move || selector)
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_color(faded(state.tone(theme)))
-                        .group_hover(row_group.clone(), move |st| {
-                            st.text_color(hsla(state.tone(theme)))
-                        })
-                        .child(word)
-                        .into_any_element(),
-                )
-            }
-            None if t.unseen => {
-                Some(unseen_dot(theme, format!("nav-unseen-{id}"), true).into_any_element())
-            }
-            None if t.running.is_some() => t.running.clone().map(|ran| {
+        // One mark at the line's end: the unseen dot, else the clock of a command that runs,
+        // else the age.
+        let end = if t.unseen {
+            Some(unseen_dot(theme, format!("nav-unseen-{id}"), true).into_any_element())
+        } else if let Some(ran) = t.running.clone() {
+            Some(
                 readout(theme, ran)
                     .debug_selector(move || format!("nav-running-{id}"))
                     .text_color(hsla(s.text_secondary))
-                    .into_any_element()
-            }),
-            None => t.age.clone().map(|age| {
+                    .into_any_element(),
+            )
+        } else {
+            t.age.clone().map(|age| {
                 readout(theme, age)
                     .debug_selector(move || format!("nav-age-{id}"))
                     .into_any_element()
-            }),
+            })
         };
         // Under the pointer the line's end gives way to the row's action, in the same place, so
         // nothing on the line moves.

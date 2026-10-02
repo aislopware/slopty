@@ -1,6 +1,9 @@
 //! The title bar's breadcrumb: where the focused work is, `workspace ▾ / checkout ▾ / branch`,
 //! as Zed's title bar names its project and branch.
 //!
+//! When the workspace holds tiles on more than one worker, the focused tile's worker follows
+//! it, so a strip of several machines never reads as one.
+//!
 //! The workspace leads in the medium weight: its name, and a menu of every workspace with
 //! something on it and a new one, which is how the bar switches between them. What waits in
 //! another workspace shows as its rollup's mark on this segment, so it is not lost from view.
@@ -101,6 +104,14 @@ impl WorkspaceView {
         Crumbs { checkout: Some(checkout), checkouts, branch }
     }
 
+    /// The focused tile's worker, when the active workspace holds tiles on more than one.
+    fn crumb_worker(&self) -> Option<String> {
+        let focused = self.focused()?;
+        let ws = self.layout.workspaces().get(self.layout.active_workspace())?;
+        let mut tiles = ws.columns().iter().flat_map(Column::tiles).map(Tile::tile);
+        tiles.any(|t| t.worker != focused.worker).then(|| self.worker_name(focused.worker))
+    }
+
     /// What the workspaces other than the active one add up to: what waits out of view.
     fn elsewhere(&self) -> Rollup {
         let active = self.layout.active_workspace();
@@ -149,6 +160,19 @@ impl WorkspaceView {
                 })
                 .into_any_element(),
         ];
+        // A workspace that holds tiles on more than one worker names the focused tile's, so a
+        // strip of three machines' checkouts of one repository does not read as one machine.
+        if let Some(worker) = self.crumb_worker() {
+            let words = self
+                .words("crumb-worker", SharedString::from(format!("on {worker}")))
+                .gap(px(spacing.xs))
+                .child(
+                    icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
+                        .size(px(theme.typography.icon())),
+                )
+                .child(SharedString::from(worker));
+            parts.extend([step(), words.into_any_element()]);
+        }
         // A workspace is named after its first shell's checkout until it is named otherwise,
         // and that name said twice in a row is noise; a menu of checkouts keeps its segment.
         let more = crumbs.checkouts.len() > 1;

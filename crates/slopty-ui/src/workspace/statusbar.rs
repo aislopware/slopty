@@ -348,7 +348,8 @@ impl WorkspaceView {
             | ItemKind::Note { .. }
             | ItemKind::Browser { .. }
             | ItemKind::Folder { .. }
-            | ItemKind::Review { .. } => None,
+            | ItemKind::Review { .. }
+            | ItemKind::Thread { .. } => None,
         }
     }
 
@@ -369,8 +370,9 @@ impl WorkspaceView {
         window: &Window,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
-        if self.workers.is_empty() {
-            return gpui::Empty.into_any_element();
+        if self.workers.is_empty() || self.key_bar_shown {
+            // Up for a notice alone: the bar holds it and nothing else.
+            return self.notices_bar(window, cx);
         }
         let phone = matches!(self.nav.drawn, Some(Mode::Drawer))
             || self.width(window) < self.layout.config().phone_below;
@@ -580,7 +582,35 @@ impl WorkspaceView {
                     App::notify(cx, statusbar);
                 }
             }));
-        meta(bar, theme).child(left).child(right).children(hosts).into_any_element()
+        // The notices take the lane between the two, which no tile draws in.
+        let notices = self.render_notices(cx);
+        meta(bar, theme)
+            .child(left)
+            .children(notices)
+            .child(right)
+            .children(hosts)
+            .into_any_element()
+    }
+
+    /// The bar with only the notices, right-aligned where the readouts would end.
+    fn notices_bar(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let safe = window.insets().effective();
+        let bar = div()
+            .id("statusbar")
+            .debug_selector(|| "statusbar".to_owned())
+            .role(Role::Group)
+            .aria_label("Status")
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_end()
+            .pl(px(theme.spacing.inset()) + safe.left)
+            .pr(px(theme.spacing.inset()) + safe.right)
+            .bg(hsla(theme.surfaces.canvas))
+            .font_family(theme.typography.ui_family.clone())
+            .children(self.render_notices(cx));
+        meta(bar, theme).into_any_element()
     }
 
     /// The link to the focused worker: how the tailnet carries it (a DERP relay in the

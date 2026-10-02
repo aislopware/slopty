@@ -1,4 +1,5 @@
-//! The notices in the corner: one being read is never taken away under the pointer.
+//! The notices in the status bar: over no tile, and one being read is never taken away
+//! under the pointer.
 
 use super::*;
 use crate::workspace::toast::{SAY_AFTER_HOVER, SAY_FOR};
@@ -26,4 +27,30 @@ fn a_notice_under_the_pointer_stays_until_the_pointer_leaves(cx: &mut TestAppCon
     cx.executor().advance_clock(SAY_AFTER_HOVER.saturating_add(crate::kit::Pace::Fade.duration()));
     cx.run_until_parked();
     assert!(up(cx).is_empty(), "then it goes");
+}
+
+/// A notice sits in the status bar, over no tile: with a shell open it lies inside the bar,
+/// clear of the strip; with no worker yet the bar comes up to hold it.
+#[gpui::test]
+fn a_notice_sits_in_the_status_bar_over_no_tile(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    view.update_in(cx, |v, _w, cx| v.show_notice("Settings did not parse".to_owned(), cx));
+    cx.run_until_parked();
+    let (bar, notice) = (
+        cx.debug_bounds("statusbar").expect("up for the notice"),
+        cx.debug_bounds("said").expect("the notice"),
+    );
+    assert!(bar.contains(&notice.center()), "{notice:?} in {bar:?}");
+
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    view.update_in(cx, |v, _w, cx| v.show_notice("Copied the address".to_owned(), cx));
+    cx.run_until_parked();
+    let (bar, tile) = (
+        cx.debug_bounds("statusbar").expect("the bar"),
+        cx.debug_bounds(selector("item", shell.item)).expect("the tile"),
+    );
+    let notice = cx.debug_bounds("said").expect("the notice");
+    assert!(bar.contains(&notice.center()), "{notice:?} in {bar:?}");
+    assert!(notice.top() >= tile.bottom(), "under the tile, not over it: {notice:?} {tile:?}");
 }

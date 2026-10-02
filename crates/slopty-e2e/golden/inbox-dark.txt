@@ -27,6 +27,8 @@ Group │ Thread
 Status │ Nothing here yet
 MultilineTextInput │ Message
 Button │ Attach files
+Button │ Model, Claude
+Button │ Send
 Group │ Status
 Status │ e2e-worker
 Status │ 1 blocked

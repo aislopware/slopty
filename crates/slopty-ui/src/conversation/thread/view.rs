@@ -1034,7 +1034,7 @@ impl ThreadView {
         let fold = Fold::of(figures, self.turn_items(ix, turn, cx));
         let theme = &self.theme;
         let s = theme.surfaces;
-        let changes = kit::changes_at(theme, fold.added, fold.removed, self.zoom);
+        let changes = kit::changes(theme, fold.added, fold.removed);
         let (line, when, label) = (fold.line(), fold.when(), fold.label());
         div()
             .id(ElementId::Name(format!("fold-{}", turn.0).into()))

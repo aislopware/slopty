@@ -752,6 +752,10 @@ pub struct Surfaces {
     pub warn_fill: Rgb,
     /// Error as a mark: a failed block's wash, a dot, a badge.
     pub error_fill: Rgb,
+    /// The agent's own mark, as `MonoCode` spends its orange: the agent's glyph where it acts
+    /// and the file types it touched. Read as text, so it clears AA where a glyph's words
+    /// would; never a state (green is live, amber is waiting) nor a control.
+    pub agent: Rgb,
     /// Text on the success, warn and error fills: a badge's count.
     pub fill_fg: Rgb,
     /// Text on the accent fill: a badge's count on the green. A near-black green in both
@@ -818,12 +822,18 @@ struct Tones {
     warn_fill: Rgb,
     error_fill: Rgb,
     fill_fg: Rgb,
+    /// The agent's orange, before it is lifted.
+    agent: Oklch,
     /// The solid's ink: the far end of the ladder from the text.
     solid_ink: Step,
 }
 
 /// Slopty's green in OKLCH (`docs/decisions/brand.md`): [`BRAND`] is its sRGB.
 pub const BRAND_OKLCH: Oklch = Oklch { l: 0.72, c: 0.16, h: 150.0 };
+
+/// The agent's orange in OKLCH: `MonoCode`'s agent mark, a hue the brand's green and the
+/// waiting amber stay clear of.
+const AGENT_OKLCH: Oklch = Oklch { l: 0.72, c: 0.15, h: 45.0 };
 
 /// A near-black of the brand's hue: words on a green mark, in both variants.
 const ON_GREEN: Oklch = Oklch { l: 0.22, c: 0.04, h: BRAND_OKLCH.h };
@@ -861,6 +871,7 @@ const DARK_TONES: Tones = Tones {
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
     fill_fg: Rgb::hex(0x0a0b0e),
+    agent: AGENT_OKLCH,
     solid_ink: Step { toward: Toward::Black, share: 0.30 },
 };
 
@@ -892,6 +903,8 @@ const LIGHT_TONES: Tones = Tones {
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
     fill_fg: Rgb::hex(0x0a0b0e),
+    // The orange at the lightness that reads AA on white.
+    agent: Oklch { l: 0.56, c: 0.15, h: AGENT_OKLCH.h },
     solid_ink: Step { toward: Toward::White, share: 1.0 },
 };
 
@@ -1030,6 +1043,7 @@ impl Surfaces {
             success_fill: green_fill,
             warn_fill: t.warn_fill,
             error_fill: t.error_fill,
+            agent: lift(t.agent.rgb(), &under, t.pole, floor),
             fill_fg: t.fill_fg,
             accent_ink: t.accent_ink.rgb(),
             solid: text,
@@ -2208,6 +2222,37 @@ mod tests {
         assert!((1.25..=1.45).contains(&ratio), "light is a third again: {ratio:.2}");
         assert!((0.045..=0.06).contains(&DARK_TONES.raised.share), "hover");
         assert!((0.08..=0.10).contains(&DARK_TONES.overlay.share), "selection");
+    }
+
+    /// The agent's orange reads as text on every surface in both variants and contrasts, and
+    /// stays its own hue: apart from the green's and the amber's.
+    #[test]
+    fn the_agents_orange_reads_and_is_its_own() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            for (contrast, floor) in [(Contrast::Standard, AA), (Contrast::Increased, AAA)] {
+                let s = Surfaces::derive(content, contrast);
+                for (surface, under) in under_text(&s, content) {
+                    let seen = s.agent.contrast(under);
+                    assert!(seen >= floor, "{name} {contrast:?}: on {surface} {seen:.2}");
+                }
+                assert!(s.agent != s.warn && s.agent != s.accent, "{name}: its own tone");
+            }
+        }
+    }
+
+    /// A well on the chrome (the navigator's filter) wears the selection's fill, which stands
+    /// off the chrome in both variants; the hover step does not on light, where it sits a
+    /// hundredth from the chrome's own tone.
+    #[test]
+    fn a_well_on_the_chrome_stands_off_it() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let s = Theme::new(variant).surfaces;
+            let step = s.overlay.contrast(s.canvas);
+            assert!(step >= 1.07, "{variant:?}: the well is {step:.3} off the chrome");
+        }
+        let light = Theme::new(Variant::Light).surfaces;
+        assert!(light.raised.contrast(light.canvas) < 1.03, "why the hover step will not do");
     }
 
     /// A curve starts at rest and lands, and CSS's named curves read as CSS draws them: the

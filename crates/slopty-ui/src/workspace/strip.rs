@@ -847,9 +847,7 @@ impl WorkspaceView {
             .children(handles)
             .children(hint)
             .children(empty)
-            .children(self.render_marks())
-            // The notices sit in the strip's corner, over the tiles and their pages.
-            .children(self.render_toast(cx));
+            .children(self.render_marks());
         self.chrome_due.set(false);
         strip.into_any_element()
     }
@@ -1019,6 +1017,69 @@ impl WorkspaceView {
             out.push(block.into_any_element());
             let words = SharedString::from(format!("overview-words-{ix}"));
             out.extend(overview_words(label, words, opening, moves));
+            out.extend(self.overview_more(ix, r, pad, cx));
+        }
+        out
+    }
+
+    /// Where a workspace's block runs past the window's edge in the overview, a button on
+    /// that edge says there is more and steps its columns into view, as the strip's swipe
+    /// does: a strip of nine tiles was four miniatures cut off at the edge, with nothing to
+    /// say the rest was there.
+    fn overview_more(
+        &self,
+        ix: usize,
+        r: Rect,
+        pad: f32,
+        cx: &Draw<'_, Self>,
+    ) -> Vec<gpui::AnyElement> {
+        if !self.layout.overview_open() {
+            return Vec::new();
+        }
+        let theme = &self.theme;
+        let width = self.layout.viewport().0;
+        let side = kit::icon_button_side(theme);
+        let top = r.y + (r.h - side) / 2.0;
+        let edge = theme.spacing.sm;
+        let mut out = Vec::new();
+        for (right, past) in [(false, r.x - pad < 0.0), (true, r.right() + pad > width)] {
+            if !past {
+                continue;
+            }
+            let (icon, words, id) = if right {
+                (
+                    IconName::ChevronRight,
+                    "Show the next columns",
+                    format!("overview-more-right-{ix}"),
+                )
+            } else {
+                (
+                    IconName::ChevronLeft,
+                    "Show the columns before",
+                    format!("overview-more-left-{ix}"),
+                )
+            };
+            let button = kit::elevate(kit::icon_button_at(theme, id, icon, words, 1.0), theme)
+                .rounded(px(theme.radii.full))
+                .absolute()
+                .top(px(top))
+                .map(|el| if right { el.right(px(edge)) } else { el.left(px(edge)) })
+                .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    if this.layout.active_workspace() != ix {
+                        this.layout.focus_workspace(ix);
+                    }
+                    if right {
+                        this.layout.focus_column_right();
+                    } else {
+                        this.layout.focus_column_left();
+                    }
+                    this.after_focus_moved(cx);
+                    this.layout_touched(cx);
+                    cx.notify();
+                }));
+            out.push(button.into_any_element());
         }
         out
     }

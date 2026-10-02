@@ -195,3 +195,21 @@ fn a_long_open_thread_survives_hard_scrolling(cx: &mut TestAppContext) {
     let at_end = view.read_with(cx, |v, _| v.following());
     assert_eq!(cx.debug_bounds("thread-down").is_some(), !at_end, "the way down tells the truth");
 }
+
+/// At the overview's small zoom the composer, its field's words included, shrinks with the
+/// rest of the thread rather than keeping its full size.
+#[gpui::test]
+fn the_composer_shrinks_with_the_zoom(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let state = fixtures::empty();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let tall = cx.debug_bounds("thread-composer").expect("the composer").size.height;
+    view.update(cx, |v, cx| v.set_layout(0.25, 800.0, cx));
+    cx.run_until_parked();
+    let small = cx.debug_bounds("thread-composer").expect("the composer").size.height;
+    assert!(small <= tall * 0.3, "{small:?} against {tall:?} at a quarter");
+}

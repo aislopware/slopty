@@ -506,7 +506,7 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
         cx.debug_bounds(dot).expect("the dot"),
     );
     assert!(lane.right() >= at.right() && at.left() > lane.center().x, "on the lane's edge");
-    assert!(labels(&view, cx).iter().any(|l| l == "Terminal, Failed, unseen"));
+    assert!(labels(&view, cx).iter().any(|l| l == "make, Failed, unseen"), "named by what it ran");
 
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(built) }, cx);

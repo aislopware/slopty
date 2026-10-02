@@ -95,6 +95,12 @@ pub struct SettingsEditor {
     error: Option<String>,
     /// How many lines the field shows: [`rows_for`] the text, kept as it is typed.
     rows: u16,
+    /// The file's text as the dialog last knew it: given, applied or followed. The field
+    /// holding just this has nothing of the person's own to keep.
+    file: String,
+    /// The file's text as it changed outside the dialog, taken in at the next frame, which
+    /// has the window the fields are set in.
+    changed_file: Option<String>,
     theme: Theme,
     _subscriptions: [Subscription; 2],
 }
@@ -142,6 +148,8 @@ impl SettingsEditor {
             external,
             error: None,
             rows: rows_for(text),
+            file: text.to_owned(),
+            changed_file: None,
             theme,
             _subscriptions: [typed, set],
         }
@@ -241,7 +249,31 @@ impl SettingsEditor {
     fn apply(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.text.update(cx, |state, cx| state.set_value(text, window, cx));
         self.text_changed(text, cx);
+        text.clone_into(&mut self.file);
         cx.emit(SettingsEditorEvent::Apply(text.to_owned()));
+    }
+
+    /// The file changed outside the dialog (another editor, the appearance written to it): the
+    /// form and the field follow it, so neither shows a value the file no longer holds, nor
+    /// writes it back over the file. What the person is changing here is kept: the form's
+    /// change on its way, or a field edited away from the file.
+    pub fn follow_file(&mut self, text: String, cx: &mut Context<Self>) {
+        if text != self.file {
+            self.changed_file = Some(text);
+            cx.notify();
+        }
+    }
+
+    /// Take in the file's text that changed outside, now that there is a window.
+    fn take_changed_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = self.changed_file.take() else { return };
+        let edited = self.text(cx) != self.file;
+        let followed = self.form.update(cx, |form, cx| form.follow_file(&text, window, cx));
+        if followed && !edited {
+            self.text.update(cx, |state, cx| state.set_value(&text, window, cx));
+            self.text_changed(&text, cx);
+            self.file = text;
+        }
     }
 
     fn save(&self, cx: &mut Context<Self>) {
@@ -306,6 +338,7 @@ impl Focusable for SettingsEditor {
 
 impl Render for SettingsEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.take_changed_file(window, cx);
         let theme = self.theme.clone();
         let (s, spacing) = (theme.surfaces, theme.spacing);
         // A button says what it does; the keys (Esc, ⌘↩) are the palette's to list.
@@ -1079,4 +1112,38 @@ mod tests {
         assert_eq!(rows(cx), MAX_ROWS, "a long file stops at the most");
         assert!(height(cx) <= viewport, "and fits the window");
     }
+
+    /// The file written outside while the dialog is open (the appearance switched to dark):
+    /// the form and the field show what it holds now, and closing writes nothing back over it.
+    #[gpui::test]
+    fn the_dialog_follows_the_file_and_writes_nothing_back(cx: &mut TestAppContext) {
+        let (light, dark) = (LIGHT_FILE, DARK_FILE);
+        let (view, events, cx) = editor(cx, light, false, Mode::Form);
+        view.update(cx, |v, cx| v.follow_file(dark.to_owned(), cx));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, SettingsEditor::text), dark, "the field follows");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let applied: Vec<_> = events
+            .borrow()
+            .iter()
+            .filter(|e| matches!(e, SettingsEditorEvent::Apply(_)))
+            .cloned()
+            .collect();
+        assert!(applied.is_empty(), "nothing written back: {applied:?}");
+    }
+
+    /// A field the person edited keeps their text when the file changes outside.
+    #[gpui::test]
+    fn an_edited_field_keeps_its_text_when_the_file_changes(cx: &mut TestAppContext) {
+        let (view, _events, cx) = editor(cx, LIGHT_FILE, false, Mode::Toml);
+        cx.simulate_input("# mine\n");
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.follow_file(DARK_FILE.to_owned(), cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, SettingsEditor::text).contains("# mine"), "typed text stays");
+    }
+
+    const LIGHT_FILE: &str = "[theme]\nappearance = \"light\"\n";
+    const DARK_FILE: &str = "[theme]\nappearance = \"dark\"\n";
 }

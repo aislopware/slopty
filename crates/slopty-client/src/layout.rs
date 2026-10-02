@@ -2339,6 +2339,11 @@ impl Layout {
         let Some(ws) = self.workspaces.get_mut(ws_idx) else { return };
         let before = ws.view_rects(&ctx);
         let at = (!activate_tile).then_some(ws.columns.len());
+        // A tile opened beside a full-width column comes into view with it: the column gives
+        // up its full width, or the camera following the new one would leave it half off.
+        if activate_tile && let Some(col) = ws.columns.get_mut(ws.active) {
+            col.full_width = false;
+        }
         let loose = Loose { tile: new, width: ctx.new_width, full_width: false };
         ws.add_tile(&ctx, at, loose, activate_tile);
         ws.flip(&ctx, &before);

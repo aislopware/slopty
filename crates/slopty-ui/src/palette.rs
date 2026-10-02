@@ -61,7 +61,8 @@ pub enum Layer {
     Submenu,
     /// Modal over the window and its scrim: the palette, the picker, the settings.
     Dialog,
-    /// A notice: it is seen whatever else is up.
+    /// A notice in the status bar: laid out in the bar, painted over whatever else is up, so
+    /// the inbox's "Undo" is pressed through an open popover's click-away.
     Toast,
 }
 
@@ -161,8 +162,9 @@ pub(crate) fn dotted(theme: &Theme, text: impl Into<SharedString>) -> gpui::Styl
     gpui::StyledText::new(text).with_highlights(dots)
 }
 
-/// A floating list's field row: the query bare at the title size, the text on the rows' edge,
-/// a quiet hairline under it. The field wears no frame and no fill: the sheet is its frame.
+/// A floating list's field row: the query bare at the title size, the text on the rows' edge.
+/// The field wears no frame, no fill and no rule under it: the sheet is its frame, and the
+/// list's first heading parts it from the rows by space alone, as `MonoCode`'s and Raycast's do.
 pub(crate) fn field_row(
     theme: &Theme,
     input: &Entity<InputState>,
@@ -173,8 +175,6 @@ pub(crate) fn field_row(
         .h(px(theme.density.row + theme.spacing.lg))
         .flex()
         .items_center()
-        .border_b_1()
-        .border_color(hsla(theme.surfaces.border_subtle))
         .child(
             Input::new(input)
                 .appearance(false)
@@ -1365,6 +1365,9 @@ pub struct CommandPalette {
     /// An empty field lists the tiles, the workers and a few commands ([`brief`]), not every
     /// line: the workspace's own palette. A list of workers, ports or hits shows all of it.
     brief: bool,
+    /// Its lines are the workspace's own list ([`Self::set_live`]), so they follow it while
+    /// it is open; a find or a list of workers keeps the lines it was opened with.
+    live: bool,
     /// A window narrower than this (a phone's) gets the palette as a sheet from the top.
     sheet_below: f32,
     /// The last frame drew it as a phone's sheet.
@@ -1464,6 +1467,7 @@ impl CommandPalette {
             finding,
             chords: true,
             brief: false,
+            live: false,
             sheet_below: 0.0,
             sheet: false,
             fades_in: false,
@@ -1481,6 +1485,39 @@ impl CommandPalette {
     pub fn set_brief(&mut self, brief: bool, cx: &App) {
         self.brief = brief;
         self.refresh(cx);
+    }
+
+    /// Whether its lines are the workspace's own list, which [`Self::set_items`] refreshes
+    /// while it is open.
+    pub const fn set_live(&mut self, live: bool) {
+        self.live = live;
+    }
+
+    /// Whether its lines follow the workspace's.
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// Replace the lines it lists, as what they are drawn from changes while it is open (a
+    /// worker's agents arriving): the field keeps what was typed, and the selected line stays
+    /// selected wherever it lands.
+    pub fn set_items(&mut self, items: Vec<PaletteItem>, cx: &mut Context<Self>) {
+        let chosen = self
+            .matched
+            .get(self.selected(self.matched.len()))
+            .and_then(|at| self.at(*at))
+            .map(|item| item.label.clone());
+        self.hay = items.iter().map(haystack).collect();
+        self.items = items;
+        self.refresh(cx);
+        if let Some(label) = chosen
+            && let Some(ix) =
+                self.matched.iter().position(|at| self.at(*at).is_some_and(|i| i.label == label))
+        {
+            self.selected = ix;
+        }
+        cx.notify();
     }
 
     /// Whether it fades in as it arrives: opened by the pointer. Opened by a key it arrives

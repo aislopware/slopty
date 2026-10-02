@@ -408,7 +408,7 @@ mod tests {
             titles("edit"),
             [
                 "Read | notes.txt | 4 lines | Done",
-                "Edited | notes.txt | +1 \u{2212}1 | Done",
+                "Edited | notes.txt | +1\u{2009}\u{2012}1 | Done",
                 "Wrote | notes.txt | +1 | Done",
                 "Read | notes.txt | lines 1\u{2013}2 | Done",
                 "Read | notes.txt | lines 2\u{2013}3 | Done",

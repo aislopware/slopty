@@ -580,7 +580,7 @@ impl ConversationView {
 
     /// `+a −r` as chrome draws it everywhere ([`crate::kit::changes`]), at the face's zoom.
     pub(super) fn changes_label(&self, added: u32, removed: u32) -> AnyElement {
-        crate::kit::changes_at(&self.theme, added, removed, self.zoom)
+        crate::kit::changes(&self.theme, added, removed)
             .map_or_else(|| div().into_any_element(), gpui::IntoElement::into_any_element)
     }
 

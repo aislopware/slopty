@@ -1,10 +1,13 @@
-//! The notices in the strip's bottom-right corner: another client's pointing, a closed tile to
-//! take back, a word to this client. Each is one line, marked with what it is about when it is
-//! about something, with at most one action; they stay [`SAY_FOR`] and no more than [`SHOWN`]
-//! are up at once. One whose time comes while the pointer is over the stack stays until the
-//! pointer leaves, then [`SAY_AFTER_HOVER`] more, so a notice being read is never taken away. They
-//! stack over every other layer, dialogs included. A notice rises 4 pt into place as it fades in,
-//! and fades where it stands when its time is up; under Reduce Motion it comes and goes at once.
+//! The notices: another client's pointing, a closed tile to take back, a word to this client.
+//! They sit in the status bar, between where the focused tile runs and the bar's readouts: a
+//! lane no tile draws in, so a notice never lies over a composer's send button or a shell's
+//! last rows, as one floating in the strip's corner did. Each is one line, marked with what it
+//! is about when it is about something, with at most its actions; they stay [`SAY_FOR`] and no
+//! more than [`SHOWN`] are up at once, side by side, the newest nearest the readouts. One whose
+//! time comes while the pointer is over them stays until the pointer leaves, then
+//! [`SAY_AFTER_HOVER`] more, so a notice being read is never taken away. A notice rises a
+//! hair into place as it fades in, and fades where it stands when its time is up; under Reduce
+//! Motion it comes and goes at once.
 
 use std::time::Duration;
 
@@ -262,13 +265,12 @@ impl WorkspaceView {
                 .role(Role::Button)
                 .aria_label(label)
                 .flex_none()
-                .px(px(theme.spacing.sm))
-                .py(px(theme.spacing.xxs))
-                .rounded(px(theme.radii.sm))
+                .px(px(theme.spacing.xs))
+                .rounded(px(theme.radii.xs))
                 .text_color(hsla(s.text))
                 .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
+                .hover(gpui::Styled::underline)
                 .child(label);
             tab_stop(el, s.accent)
         };
@@ -334,7 +336,7 @@ impl WorkspaceView {
             }
         };
         let line = SharedString::from(line);
-        let notice = crate::kit::elevate(div(), theme)
+        let notice = div()
             .id(("toast", shown.seq))
             .debug_selector(move || part.to_owned())
             .role(Role::Status)
@@ -346,16 +348,17 @@ impl WorkspaceView {
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
+            .h(px(theme.spacing.xxs.mul_add(-2.0, super::statusbar::STATUSBAR_H)))
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
-            .pl(px(theme.spacing.inset()))
-            .pr(px(if actions.is_empty() { theme.spacing.inset() } else { theme.spacing.xs }))
-            .py(px(theme.spacing.xs))
-            .rounded(px(theme.radii.lg))
+            .pl(px(theme.spacing.sm))
+            .pr(px(if actions.is_empty() { theme.spacing.sm } else { theme.spacing.xxs }))
+            // The selection's fill, which stands off the bar in both variants: a notice is
+            // a thing on the bar, not one more of its readouts.
+            .bg(hsla(s.overlay))
+            .rounded(px(theme.radii.sm))
             .text_color(hsla(s.text))
-            .text_size(px(theme.typography.small()))
-            .font_family(theme.typography.ui_family.clone())
             .children(icon.map(|icon| {
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_secondary))
             }))
@@ -383,7 +386,7 @@ impl WorkspaceView {
                     .into_any_element(),
             );
         }
-        let rise = theme.spacing.xs;
+        let rise = theme.spacing.xxs;
         Some(crate::kit::slide_fade(
             notice,
             ("toast-in", shown.seq),
@@ -431,10 +434,13 @@ impl WorkspaceView {
         );
     }
 
-    /// The notices, stacked up from the strip's bottom-right corner, the newest lowest. In the
-    /// corner because the top of the strip is where the tiles' headers are, and the middle of
-    /// its foot is where a tile's own state pill sits.
-    pub(super) fn render_toast(&self, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
+    /// Whether a notice is up, which keeps the status bar up to hold it.
+    pub(super) fn notices_up(&self) -> bool {
+        self.toast.as_ref().is_some_and(|t| !t.shown.is_empty())
+    }
+
+    /// The notices up now, side by side for the status bar, the newest nearest its readouts.
+    pub(super) fn render_notices(&self, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let toast = self.toast.as_ref()?;
         let notices: Vec<gpui::AnyElement> =
@@ -442,18 +448,19 @@ impl WorkspaceView {
         if notices.is_empty() {
             return None;
         }
-        let stack = div()
-            .absolute()
-            .bottom(px(theme.spacing.lg))
-            .right(px(theme.spacing.lg))
-            .max_w(px(TOAST_MAX_W))
+        let row = div()
+            .debug_selector(|| "notices".to_owned())
+            .flex_initial()
+            .min_w_0()
+            .overflow_hidden()
             .flex()
-            .flex_col()
-            .items_end()
-            .gap(px(theme.spacing.sm))
+            .items_center()
+            .gap(px(theme.spacing.xs))
             .children(notices);
+        // Laid out in the bar, painted over whatever is up there, a popover's click-away
+        // included.
         Some(
-            gpui::deferred(stack)
+            gpui::deferred(row)
                 .with_priority(crate::palette::Layer::Toast.priority())
                 .into_any_element(),
         )

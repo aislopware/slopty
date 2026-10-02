@@ -407,9 +407,11 @@ fn the_status_mark_follows_the_agent_the_last_exit_and_the_link(cx: &mut TestApp
         v.term_event(shell, marked_frame(1, &rows, 0), cx);
     });
     let drawn = marks(cx);
-    // A waiting agent's news is its header's chip; its slot keeps the agent's glyph.
+    // A waiting agent's news is its header's chip; its slot keeps the agent's glyph, and only
+    // its navigator row leads with the waiting mark.
     assert!(cx.debug_bounds(selector("agent", agent_tile.item)).is_some(), "the agent waits");
-    assert!(drawn.iter().all(|m| m != "Needs you"), "said once, by the chip: {drawn:?}");
+    let waiting = drawn.iter().filter(|m| *m == "Needs you").count();
+    assert_eq!(waiting, 1, "the chip in the header, the glyph in the row: {drawn:?}");
     assert!(drawn.iter().any(|m| m == "Failed"), "the shell's last command failed: {drawn:?}");
 
     let key = fake.key;
@@ -1046,4 +1048,30 @@ fn an_opening_window_turns_its_mark_in_the_body(cx: &mut TestAppContext) {
     assert!(!nodes.iter().any(|n| in_slot(n) && n.is("Image", Some(working))), "no header mark");
     assert!(body.size.height > px(40.0), "a mark and two lines: {body:?}");
     assert!(nodes.iter().any(|n| n.is("Status", Some("Opening Window 7 on studio…"))));
+}
+
+/// Shells of one worker that would read alike are told apart by the command each last ran
+/// before a number is needed: "make", "cargo test" and the one that ran nothing, which needs
+/// no number once it is alone. The second line does not say the command again.
+#[gpui::test]
+fn shells_that_read_alike_are_named_by_their_last_command(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let sessions = [SessionId::new(), SessionId::new(), SessionId::new()];
+    let tiles = [
+        opens(&view, cx, &studio, sessions[0], studio.me, 1),
+        opens(&view, cx, &studio, sessions[1], studio.me, 2),
+        opens(&view, cx, &studio, sessions[2], studio.me, 3),
+    ];
+    for (session, command) in [(sessions[0], "make"), (sessions[1], "cargo test")] {
+        let done =
+            Finished { command: command.into(), exit: Some(0), elapsed: Duration::from_secs(40) };
+        view.update_in(cx, |v, _w, cx| v.command_finished(session, done, cx));
+    }
+    cx.run_until_parked();
+    let titles = view.read_with(cx, |v, _| tiles.map(|t| v.tile_title(v.item(t).unwrap())));
+    assert_eq!(titles, ["make", "cargo test", "Terminal"]);
+    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
+    let make = lines.iter().find(|(title, ..)| title == "make").expect("its row");
+    assert!(!make.1.contains("make"), "said once: {make:?}");
 }

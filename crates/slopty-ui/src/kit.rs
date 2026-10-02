@@ -293,7 +293,14 @@ impl gpui::Element for PaintedWhile {
     }
 }
 
-/// A diff's size as words, `+12 −3`: the side that is zero left out, and nothing for no
+/// The sign of lines taken away: the figure dash, as wide as a digit, so a column of sizes
+/// keeps its figures on one grid, as `MonoCode` sets `+25 ‒15`.
+pub const REMOVED_SIGN: &str = "\u{2012}";
+
+/// What parts the two sides of a size: a thin space, closer than a word's.
+pub const SIDES_APART: &str = "\u{2009}";
+
+/// A diff's size as words, `+12 ‒3`: the side that is zero left out, and nothing for no
 /// change. For a line of plain text (a fold's summary, a tool's facts); a readout draws
 /// [`changes`].
 #[must_use]
@@ -301,25 +308,23 @@ pub fn changes_text(added: u32, removed: u32) -> Option<String> {
     match (added, removed) {
         (0, 0) => None,
         (a, 0) => Some(format!("+{a}")),
-        (0, r) => Some(format!("\u{2212}{r}")),
-        (a, r) => Some(format!("+{a} \u{2212}{r}")),
+        (0, r) => Some(format!("{REMOVED_SIGN}{r}")),
+        (a, r) => Some(format!("+{a}{SIDES_APART}{REMOVED_SIGN}{r}")),
     }
 }
 
-/// A diff's size, `+12 −3`: only the signs in the diff's tones, the figures in
-/// `text_secondary` and tabular, the side that is zero left out. `None` for no change.
+/// A diff's size, `+12 ‒3`: only the signs in the diff's tones, the figures in
+/// `text_secondary` and tabular, the side that is zero left out, the two sides a thin space
+/// apart. `None` for no change.
 ///
 /// The one way a count of changed lines is drawn: in a tile's header, a diff's head, a fold, a
-/// navigator row and the status bar. A figure all in red read as an error, and a red "−0" as
+/// navigator row and the status bar. A figure all in red read as an error, and a red "‒0" as
 /// an error about nothing. The caller sets the size and adds an identity and a spoken label.
+///
+/// Its parts are text, the thin space between the sides included, so they take the chrome's
+/// zoom from the size the caller sets.
 #[must_use]
 pub fn changes(theme: &Theme, added: u32, removed: u32) -> Option<Div> {
-    changes_at(theme, added, removed, 1.0)
-}
-
-/// [`changes`] at the chrome's zoom `k`.
-#[must_use]
-pub fn changes_at(theme: &Theme, added: u32, removed: u32, k: f32) -> Option<Div> {
     let s = &theme.surfaces;
     let side = |sign: &'static str, tone: Rgb, n: u32| {
         (n > 0).then(|| {
@@ -334,11 +339,11 @@ pub fn changes_at(theme: &Theme, added: u32, removed: u32, k: f32) -> Option<Div
             .flex_none()
             .flex()
             .items_center()
-            .gap(px(theme.spacing.xs * k))
             .whitespace_nowrap()
             .text_color(hsla(s.text_secondary))
             .children(side("+", s.success, added))
-            .children(side("\u{2212}", s.error, removed))
+            .when(added > 0 && removed > 0, |el| el.child(SIDES_APART))
+            .children(side(REMOVED_SIGN, s.error, removed))
     })
 }
 
@@ -625,14 +630,19 @@ fn solid_states(theme: &Theme) -> (Rgb, Rgb) {
 /// The ring lets a selection read on a surface whose tone sits near the fill (a menu, a
 /// selected row on the bars) and hold its shape on any background. A hover is the fill alone.
 pub fn selected<E: Styled>(el: E, theme: &Theme) -> E {
-    let s = theme.surfaces;
-    el.bg(hsla(s.overlay)).shadow(vec![BoxShadow {
-        color: hsla(s.border),
+    el.bg(hsla(theme.surfaces.overlay)).shadow(vec![ring_inside(theme)])
+}
+
+/// A hairline ring just inside an element's edge, in the border's tone: it holds a shape on a
+/// surface whose tone sits near its fill, and takes no room.
+fn ring_inside(theme: &Theme) -> BoxShadow {
+    BoxShadow {
+        color: hsla(theme.surfaces.border),
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
-        spread_radius: px(1.0),
+        spread_radius: px(SHEET_EDGE),
         inset: true,
-    }])
+    }
 }
 
 /// A text button, the one every dialog, panel and empty state draws.
@@ -668,8 +678,12 @@ pub fn button(
         .child(label);
     let el = match kind {
         ButtonKind::Primary => solid_pressable(el, theme),
+        // A hairline just inside its edge, as a selected row has: on a raised card (this Mac's
+        // checklist, a settings card) the fill alone is the card's own tone, and the button
+        // read as words.
         ButtonKind::Secondary => el
             .bg(hsla(s.raised))
+            .shadow(vec![ring_inside(theme)])
             .text_color(hsla(s.text))
             .hover(move |el| el.bg(hsla(s.overlay)))
             .active(move |el| el.bg(hsla(s.overlay))),
@@ -1374,8 +1388,13 @@ mod tests {
     /// apart from its figure. A diff's own sign column (`"\u{2212}"` beside its tone) is not a
     /// size, and neither is a comment.
     fn hand_rolled_changes(line: &str) -> Option<&'static str> {
-        let signed = literals(line).iter().any(|l| l.contains("\\u{2212}{") || l.contains("−{"));
-        let apart = [".child(\"\\u{2212}\")", ".child(\"−\")"].iter().any(|c| line.contains(c));
+        let signed = literals(line)
+            .iter()
+            .any(|l| ["\\u{2212}{", "−{", "\\u{2012}{", "‒{"].iter().any(|sign| l.contains(sign)));
+        let apart =
+            [".child(\"\\u{2212}\")", ".child(\"−\")", ".child(\"\\u{2012}\")", ".child(\"‒\")"]
+                .iter()
+                .any(|c| line.contains(c));
         (signed || apart).then_some("a diff's size by hand, not `kit::changes`")
     }
 
@@ -1782,14 +1801,13 @@ mod tests {
     /// hint and a pill keep their control's radius: at 12 a 20 pt hint is a lozenge.
     #[test]
     fn a_floating_surface_is_rounded_lg() {
-        const SHEETS: [(&str, &str); 8] = [
+        const SHEETS: [(&str, &str); 7] = [
             ("slopty-ui/src/kit.rs", "pub fn dialog("),
             ("slopty-ui/src/conversation/view/parts.rs", "\"composer-shell\""),
             ("slopty-ui/src/conversation/view/parts.rs", ".id(\"conversation-find\")"),
             ("slopty-ui/src/workspace/titlebar.rs", "fn menu_panel("),
             ("slopty-ui/src/workspace/statusbar.rs", ".id(\"hosts\")"),
             ("slopty-ui/src/workspace/inbox.rs", ".id(\"inbox\")"),
-            ("slopty-ui/src/workspace/toast.rs", ".id((\"toast\""),
             ("slopty-app/src/lib.rs", ".id(\"add-worker\")"),
         ];
         let lines: Vec<_> =
@@ -2193,9 +2211,9 @@ mod tests {
     /// A diff's size leaves out the side that is zero, and says nothing for no change.
     #[test]
     fn a_diff_size_drops_its_zero_side() {
-        assert_eq!(changes_text(2, 1).as_deref(), Some("+2 \u{2212}1"));
+        assert_eq!(changes_text(2, 1).as_deref(), Some("+2\u{2009}\u{2012}1"), "a figure dash");
         assert_eq!(changes_text(2, 0).as_deref(), Some("+2"), "no red zero");
-        assert_eq!(changes_text(0, 3).as_deref(), Some("\u{2212}3"));
+        assert_eq!(changes_text(0, 3).as_deref(), Some("\u{2012}3"));
         assert_eq!(changes_text(0, 0), None);
         let theme = Theme::default();
         assert!(changes(&theme, 0, 0).is_none(), "nothing drawn for no change");

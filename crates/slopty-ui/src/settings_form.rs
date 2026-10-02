@@ -270,6 +270,18 @@ impl SettingsForm {
         cx.notify();
     }
 
+    /// The file changed outside the form (another editor, the system's appearance written to
+    /// it): show what it holds now, unless the person's own change is on its way to it, which
+    /// lands next and wins. `true` when the form took the file's text.
+    pub fn follow_file(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.pending.is_some() || self.text != self.applied || !self.typed.is_empty() {
+            return false;
+        }
+        self.set_text(text, window, cx);
+        text.clone_into(&mut self.applied);
+        true
+    }
+
     /// Write what is still waiting for a pause now, and hand back the text to apply if it
     /// changed since the last one: the dialog is closing or turning to the file's face.
     pub fn flush(&mut self, cx: &mut Context<Self>) -> Option<String> {

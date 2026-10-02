@@ -286,3 +286,26 @@ fn a_sheets_rows_nest_in_its_corners(cx: &mut TestAppContext) {
     let at = inset(cx, "inbox", row);
     assert!((at - pad).abs() < 0.5, "the inbox's row: {at}");
 }
+
+/// A bar menu closes on Esc, which the shell under it never gets, and on a second press of
+/// its button.
+#[gpui::test]
+fn a_bar_menu_closes_on_escape_and_a_second_press(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    click(cx, "more");
+    assert!(cx.debug_bounds("menu").is_some(), "open");
+    fake.drain();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("menu").is_none(), "Esc closes it");
+    let typed = fake
+        .drain()
+        .into_iter()
+        .any(|m| matches!(m, ClientMsg::Term { req: TermRequest::Key(_), .. }));
+    assert!(!typed, "the shell does not get the Esc");
+    click(cx, "more");
+    click(cx, "more");
+    assert!(cx.debug_bounds("menu").is_none(), "a second press closes it");
+}

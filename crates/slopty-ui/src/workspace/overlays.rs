@@ -9,7 +9,7 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::terminal::TermRequest;
 
-use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenFolder, OpenPalette};
+use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenFolder, OpenPalette, StartThread};
 use super::agents::{agent_status_text, needs_human};
 use super::tile::kind_icon;
 use super::{AGENT_COMMAND, WorkspaceView};
@@ -107,6 +107,7 @@ impl WorkspaceView {
                 .placed(self.tile_place(item));
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
+        items.extend(self.start_lines());
         items.extend(self.project_lines());
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
@@ -126,6 +127,23 @@ impl WorkspaceView {
         items.extend(self.screen_lines(cx));
         items.extend(self.palette_extra.iter().cloned());
         items
+    }
+
+    /// "New `agent` thread", for each agent the worker the palette is about can start, in the
+    /// folder the focused tile is about there (its home when none is).
+    fn start_lines(&self) -> Vec<PaletteItem> {
+        let Some(worker) = self.context_worker() else { return Vec::new() };
+        let cwd = self.search_root(worker);
+        self.agents_on(worker)
+            .iter()
+            .map(|agent| {
+                let label = format!("New {} thread", super::projects::agent_label(agent));
+                let action = StartThread { worker, agent: agent.clone(), cwd: cwd.clone() };
+                PaletteItem::new(&label, crate::icons::IconName::Bot, Box::new(action), &[])
+                    .on_worker(self.worker_label(worker))
+                    .in_dir(Some(cwd.clone()))
+            })
+            .collect()
     }
 
     /// What an agent's session is about, for the palette to find it by: its first prompt and
@@ -163,11 +181,15 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return;
         }
+        // The agents a worker offers come with its facts, which change as it installs or
+        // loses one: the next palette shows what this asks.
+        self.ask_agents(cx);
         let items = self.palette_lines(cx);
         let theme = self.theme.clone();
         let palette = cx.new(|cx| {
             let mut p = CommandPalette::new(items, theme, window, cx);
             p.set_brief(true, cx);
+            p.set_live(true);
             p
         });
         self.show_palette(palette, window, cx);
@@ -211,6 +233,7 @@ impl WorkspaceView {
         let palette = cx.new(|cx| {
             let mut p = CommandPalette::new(items, theme, window, cx);
             p.set_brief(true, cx);
+            p.set_live(true);
             p.seed(&seed, window, cx);
             p
         });
@@ -270,7 +293,8 @@ impl WorkspaceView {
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
             | ItemKind::Folder { .. }
-            | ItemKind::Review { .. } => None,
+            | ItemKind::Review { .. }
+            | ItemKind::Thread { .. } => None,
         };
         needle.unwrap_or_default()
     }
@@ -330,7 +354,13 @@ impl WorkspaceView {
             this.find_hits.clear();
             match event {
                 PaletteEvent::Run(PaletteRun::Action(action)) => {
-                    this.palette_action = Some(action.boxed_clone());
+                    // The keyboard goes back where it was until the thread's tile opens.
+                    if let Some(start) = action.as_any().downcast_ref::<StartThread>() {
+                        let StartThread { worker, agent, cwd } = start.clone();
+                        this.start_thread(worker, agent, cwd, cx);
+                    } else {
+                        this.palette_action = Some(action.boxed_clone());
+                    }
                 }
                 PaletteEvent::Run(PaletteRun::Session(session)) => {
                     // The terminal takes the keyboard, not whoever had it before.
@@ -415,6 +445,17 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// What the palette's lines are drawn from changed: an open palette over the workspace's
+    /// own list takes the new one, so what arrives while it is open is there to choose.
+    pub(super) fn refresh_palette(&self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.clone() else { return };
+        if !palette.read(cx).is_live() {
+            return;
+        }
+        let items = self.palette_lines(cx);
+        palette.update(cx, |p, cx| p.set_items(items, cx));
+    }
+
     /// The find-everywhere field changed: every live shell is asked for the needle (one hit
     /// each is enough: the count is what the line says); the notes and file tiles are counted
     /// here, where their text is.
@@ -460,7 +501,8 @@ impl WorkspaceView {
                 | ItemKind::Display { .. }
                 | ItemKind::Browser { .. }
                 | ItemKind::Folder { .. }
-                | ItemKind::Review { .. } => {
+                | ItemKind::Review { .. }
+                | ItemKind::Thread { .. } => {
                     continue;
                 }
             };

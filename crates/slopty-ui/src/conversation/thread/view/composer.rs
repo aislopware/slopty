@@ -13,6 +13,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use gpui_kit::component::input::Textarea;
+use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::Cap;
 use slopty_proto::thread::wire::Intent;
 
@@ -209,7 +210,7 @@ impl ThreadView {
             return None;
         }
         let thread = self.thread;
-        let changes = kit::changes_at(theme, here.added, here.removed, self.zoom).map(|counts| {
+        let changes = kit::changes(theme, here.added, here.removed).map(|counts| {
             div()
                 .id("thread-changes")
                 .debug_selector(|| "thread-changes".to_owned())
@@ -395,14 +396,22 @@ impl ThreadView {
                     .children(self.editing_strip(cx))
                     .children(self.attachment_chips(cx))
                     .child(
-                        Textarea::new(&self.composer)
-                            .appearance(false)
-                            .bordered(false)
-                            .aria_label("Message")
-                            .on_paste(move |item, _window, cx| {
-                                view.update(cx, |v, cx| v.paste_attachment(item, cx))
-                                    .unwrap_or(false)
-                            }),
+                        // The kit sizes a field in fixed points (its pads, its line): the
+                        // least of them, and the words and lines at the zoom, so a miniature
+                        // in the overview draws the field as small as the rest.
+                        div().py(self.z(theme.spacing.xs)).child(
+                            Textarea::new(&self.composer)
+                                .with_size(Size::XSmall)
+                                .appearance(false)
+                                .bordered(false)
+                                .text_size(self.z(theme.typography.prose()))
+                                .line_height(gpui::relative(theme.typography.prose_line_height))
+                                .aria_label("Message")
+                                .on_paste(move |item, _window, cx| {
+                                    view.update(cx, |v, cx| v.paste_attachment(item, cx))
+                                        .unwrap_or(false)
+                                }),
+                        ),
                     ),
             )
             .child(

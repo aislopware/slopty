@@ -197,11 +197,18 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
         )),
         "what it asks, not its state again: {lines:#?}"
     );
-    assert!(cx.debug_bounds(leak(format!("nav-age-{id}"))).is_none(), "the state takes its place");
-    let word = cx.debug_bounds(leak(format!("nav-status-{id}"))).expect("the state's word");
+    // The state is the glyph that leads the row, not a word that takes the title's room: the
+    // line's end keeps the age, and the row's name still says the state.
+    let age = cx.debug_bounds(leak(format!("nav-age-{id}"))).expect("the age stays");
     let meta = cx.debug_bounds(leak(format!("nav-meta-{id}"))).expect("the second line");
-    assert!(word.bottom() <= meta.top() + px(0.5), "on the first line: {word:?} {meta:?}");
-    assert!(word.right() <= row.right(), "{word:?} {row:?}");
+    assert!(age.bottom() <= meta.top() + px(0.5), "on the first line: {age:?} {meta:?}");
+    assert!(cx.debug_bounds(leak(format!("nav-status-{id}"))).is_none(), "no state word");
+    let nodes = tree(cx);
+    assert!(nodes.iter().any(|n| n.is("Image", Some("Needs you"))), "the glyph: {nodes:#?}");
+    assert!(
+        nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("Needs approval"))),
+        "the row's name says it"
+    );
     let wash = gpui::Background::from(crate::colors::hsla_alpha(
         Theme::default().surfaces.warn_fill,
         slopty_theme::alpha::FAINT,

@@ -220,6 +220,7 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
         cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not drawn"))
     };
     assert!(cx.debug_bounds("crumb-checkout").is_none(), "the workspace already says slopty");
+    assert!(cx.debug_bounds("crumb-worker").is_none(), "one machine: no worker to name");
     let (ws, branch, changes, bell) = (
         at(cx, "crumb-workspace"),
         at(cx, "crumb-branch"),
@@ -240,9 +241,19 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     let (_, notes) = shell_in_repo(&view, cx, &mini, "/w/notes", "/w/notes", "draft");
     view.update_in(cx, |v, _w, cx| v.focus_tile(notes, cx));
     cx.run_until_parked();
-    let (ws, checkout, branch) =
-        (at(cx, "crumb-workspace"), at(cx, "crumb-checkout"), at(cx, "crumb-branch"));
-    assert!(ws.right() <= checkout.left() && checkout.right() <= branch.left(), "in order");
+    let (ws, worker, checkout, branch) = (
+        at(cx, "crumb-workspace"),
+        at(cx, "crumb-worker"),
+        at(cx, "crumb-checkout"),
+        at(cx, "crumb-branch"),
+    );
+    assert!(
+        ws.right() <= worker.left()
+            && worker.right() <= checkout.left()
+            && checkout.right() <= branch.left(),
+        "two machines in the workspace: the focused tile's is named, in order"
+    );
+    assert!(labels(&view, cx).iter().any(|l| l == "on mini"), "the worker's name");
     let padding = 2.0 * Theme::default().spacing.sm;
     let width = f32::from(checkout.size.width);
     assert!(width > padding + 10.0, "the checkout's name is drawn, not only its padding: {width}");

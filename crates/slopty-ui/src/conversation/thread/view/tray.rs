@@ -611,7 +611,7 @@ impl ThreadView {
                     .child(SharedString::from(words)),
             )
             .when(added > 0 || removed > 0, |el| el.child(kit::separator(theme)))
-            .children(kit::changes_at(theme, added, removed, self.zoom))
+            .children(kit::changes(theme, added, removed))
             .child(div().flex_1())
             .child(self.button("thread-review", "Review", ButtonKind::Ghost).on_click(cx.listener(
                 move |_this, _ev, _w, cx| {

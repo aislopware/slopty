@@ -1571,6 +1571,16 @@ impl WorkspaceView {
         }
     }
 
+    /// Esc closes the bar's open menu before the key reaches the tile that has the keyboard
+    /// (a shell would take it as its own), as a menu bar's menu closes on it.
+    fn menu_key(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.is_some() && ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified()
+        {
+            cx.stop_propagation();
+            self.close_menu(window, cx);
+        }
+    }
+
     /// After a ring step: a remote window with no tab stop around it kept the keys, so the
     /// workspace itself takes them — ⌃Tab is always the way out of a window, whose chords are
     /// all the worker's while it has the focus.
@@ -1787,6 +1797,7 @@ impl gpui::Render for WorkspaceView {
             .role(gpui::accesskit::Role::Group)
             .aria_label("Workspace")
             .on_key_down(cx.listener(Self::key_down))
+            .capture_key_down(cx.listener(Self::menu_key))
             .relative()
             .size_full()
             .flex()
@@ -1916,7 +1927,9 @@ impl WorkspaceView {
                 .flex_none()
                 .h(px(titlebar_height(&self.theme)) + safe.top),
         );
-        let statusbar = (!self.workers.is_empty() && !self.key_bar_shown).then(|| {
+        // A notice is the bar's to show, so the bar is up while one is, the keys' bar or no.
+        let bar_up = self.notices_up() || (!self.workers.is_empty() && !self.key_bar_shown);
+        let statusbar = bar_up.then(|| {
             self.chrome.statusbar.clone().cached(
                 StyleRefinement::default().w_full().flex_none().h(px(statusbar::STATUSBAR_H)),
             )

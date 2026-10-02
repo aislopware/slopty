@@ -17,8 +17,10 @@ use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, RunOn, TaskChange, TaskId,
+    Fact, Facts, LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, RunOn,
+    TaskChange, TaskId,
 };
+use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
 use super::actions::ToggleProjectBoard;
@@ -66,6 +68,10 @@ pub(super) struct ProjectsState {
     pub machines: Vec<Machine>,
     /// A question about the workers is out: another waits for its answer.
     pub machines_asked: bool,
+    /// The agents each worker can start a thread of, as the server last said its facts are.
+    pub agents: HashMap<WorkerKey, Vec<AgentId>>,
+    /// A question about the agents is out: another waits for its answer.
+    pub agents_asked: bool,
     /// The "Run on" picker open on a task, per project.
     pub run_on: HashMap<ProjectId, RunOnPicker>,
     /// How far this client read each project's timeline, as its board last hid.
@@ -81,6 +87,38 @@ pub(super) struct ProjectsState {
 /// The last entry of `board`'s timeline, 0 for an empty one.
 fn last_seq(board: &Board) -> u64 {
     board.timeline.back().map_or(0, |e| e.seq)
+}
+
+/// The agents a worker's `facts` say it can start a thread of: Claude Code, Codex and pi as
+/// `agents` lists them found, then each ACP agent `acp` names, in its order. Other programs
+/// in `agents` (aider) have no thread to start.
+#[must_use]
+pub fn offered(facts: &Facts) -> Vec<AgentId> {
+    let installed = |name: &str| match facts.get("agents") {
+        Some(Fact::Map(agents)) => agents.contains_key(name),
+        _ => false,
+    };
+    let own = [("claude", AgentId::CLAUDE_CODE), ("codex", AgentId::CODEX), ("pi", AgentId::PI)];
+    let mut out: Vec<AgentId> = own
+        .iter()
+        .filter(|(program, _)| installed(program))
+        .map(|(_, id)| AgentId::named(id))
+        .collect();
+    if let Some(Fact::Map(acp)) = facts.get("acp") {
+        out.extend(acp.keys().map(|name| AgentId::acp(name)));
+    }
+    out
+}
+
+/// What the palette calls `agent`: its own name, an ACP agent by the registry's.
+#[must_use]
+pub fn agent_label(agent: &AgentId) -> String {
+    match agent.0.as_str() {
+        AgentId::CLAUDE_CODE => "Claude Code".to_owned(),
+        AgentId::CODEX => "Codex".to_owned(),
+        AgentId::PI => "pi".to_owned(),
+        other => agent.acp_name().unwrap_or(other).to_owned(),
+    }
 }
 
 /// `id` as the workspace keys workers: the one the app gives the server's worker ids.
@@ -731,6 +769,37 @@ impl WorkspaceView {
                 }
             }
         });
+    }
+
+    /// Ask the server which agents each worker can start a thread of, from the workers' facts,
+    /// for the palette's "New … thread" lines: one question at a time, and none with no server.
+    pub(super) fn ask_agents(&mut self, cx: &Context<Self>) {
+        let Some(caller) = self.projects.caller.clone() else { return };
+        if self.projects.agents_asked {
+            return;
+        }
+        self.projects.agents_asked = true;
+        cx.spawn(async move |this, cx| {
+            let outcome = caller.call(Verb::WorkerFacts { worker: None }).await;
+            this.update(cx, |this, cx| {
+                this.projects.agents_asked = false;
+                if let Outcome::Facts(facts) = outcome {
+                    let agents: HashMap<WorkerKey, Vec<AgentId>> =
+                        facts.iter().map(|f| (worker_key(f.worker), offered(&f.facts))).collect();
+                    if agents != this.projects.agents {
+                        this.projects.agents = agents;
+                        this.refresh_palette(cx);
+                    }
+                    cx.notify();
+                }
+            })
+        })
+        .detach();
+    }
+
+    /// The agents `key` can start a thread of, as the server last said.
+    pub(super) fn agents_on(&self, key: WorkerKey) -> &[AgentId] {
+        self.projects.agents.get(&key).map_or(&[], Vec::as_slice)
     }
 
     /// Send `verb` and hand whatever the server answers to `then`; with no server, say so.

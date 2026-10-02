@@ -1371,7 +1371,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     unreachable or gone), `Exited · code N` with Restart and Close, or `Session ended` with
     Close. Restart reruns the session's command in its cwd on the same worker. The Exited pill
     shows only for a round trip today, because the client closes an exited session at once.
-  - **Toasts.** They stack in the strip's corner, two at most, 6 s each, with Go or Undo.
+  - **Toasts.** They stack in the strip's corner, two at most, 6 s each, with Go or Undo. (Moved
+    into the status bar on 2026-10-02: "What the showcase showed".)
 
   Not built: a "lines below · back to live" pill, because the terminal view tracks only its
   offset. Tests (`workspace/tests/tiles.rs`):
@@ -4755,9 +4756,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     green line along the focused header goes; under Increase Contrast a line in the text's tone
     says it as well. A tabbed column's tabs are row-tall objects on the header, the shown one on
     the hover step's fill.
-  - **Navigator rows** lead with a status glyph (working, done, failed, away; one waiting on
-    the person keeps its kind, its word in the warn tone says it), the working tree's changes
-    sit right-aligned under the first line's end, and under the pointer that end gives way to
+  - **Navigator rows** lead with a status glyph (working, waiting on the person, done,
+    failed, away; at rest, the kind), the working tree's changes sit right-aligned under the
+    first line's end, and under the pointer that end gives way to
     a close button, as Zed's thread rows swap their actions in.
   - **Sheets nest their rows.** A menu, the palette and the inbox pad their rows by
     `kit::sheet_pad` inside their hairline, and the rows (`kit::sheet_row`) round at 6 inside
@@ -4769,6 +4770,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The green stays a meaning.** Links read in the text's tone, underlined under the pointer,
     their external-link glyph muted; a picker's tick is the text's; a notice's one action is
     a ghost at the medium weight. Green there had read as "done" on things that only act.
+  - **Fields.** A floating list's field has no rule under it: the first heading parts it from
+    the rows by space alone, as MonoCode's and Raycast's do. The navigator's filter is a well
+    on the selection's fill, not the hover step, which on light sits a hundredth from the
+    chrome's own tone (`a_well_on_the_chrome_stands_off_it`).
   - **Reduce Motion** reaches the strip's springs through GPUI's flag too: the workspace reads
     it at each drawing instead of the system's setting.
   - Tests: `workspace::tests::focus_line::the_headers_sit_on_their_content_and_focus_is_the_titles_tone`,
@@ -4780,3 +4785,62 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `nav_rows::a_tile_row_leads_with_its_state_and_closes_from_under_the_pointer`,
     `overlays::a_sheets_rows_nest_in_its_corners`,
     `settings_form::tests::a_groups_rows_are_one_card_under_its_label`.
+- ✅ **What the showcase showed: say each thing once, where it fits** (2026-10-02, design
+  review of the showcase renders, `target/lanes/showcase-notes.md`). A dense workspace with
+  three workers and agents at work showed where the chrome still crowded or lied.
+  - **A state is a glyph, not a word on the title's line.** "Needs approval" took half of a
+    240 pt navigator row and cut "Harden the session refresh" to "Harden the s…". The row leads
+    with the state's glyph (the waiting mark in the warn tone), its second line says what is
+    asked, and the row's accessible name keeps the word. The title has the row to itself.
+  - **An agent's words are plain in the chrome.** Its detail and a followed conversation's
+    summary are Markdown as the agent writes it; every place that says them draws one plain
+    line, so they are said as plain words once on the way in (`markdown::plain_line`):
+    `**1.48.0**` reads 1.48.0, a code span its code, a link its words, and `snake_case` stays.
+  - **Shells that read alike are named by what they ran.** Three shells in one checkout were
+    `atlas`, `atlas 2`, `atlas 3`. Before a number, each is named by the command it last ran
+    (`cargo test`, `docker compose logs`), and its second line no longer says it again. A
+    number tells apart only those still alike.
+  - **Notices live in the status bar.** A notice floating in the strip's corner lay over a
+    composer's send button and a shell's last rows. They sit in the bar between where the
+    focused tile runs and its readouts, on the selection's fill, one line each (a held-back
+    page's why and age follow its host on the line, the address in its hint), two at most,
+    the newest nearest the readouts. They are painted at the notice layer so the inbox's Undo
+    is pressed through an open popover, and the bar comes up for a notice when it would be
+    hidden (no worker yet, the keys' bar up).
+  - **The machine is named where several meet.** A workspace is the person's grouping and is
+    named after its first shell's checkout; it is never grouped by repository behind their
+    back. When it holds tiles on more than one worker, the breadcrumb names the focused
+    tile's worker after the workspace (`atlas ▾ / devbox / main`), so three machines'
+    checkouts of one repository no longer read as one machine.
+  - **The overview shows that a strip goes on.** A workspace whose block runs past the
+    window's edge gets a round button on that edge that steps its columns into view, as the
+    strip's swipe does; nine tiles had been four miniatures cut off with nothing to say so.
+  - **Bar menus close on Esc**, which the shell under them never gets, as well as on a second
+    press of their button.
+  - **The settings follow their file.** A file changed outside while the dialog is open (an
+    editor, the appearance switched by writing it) is taken into the form and the field, so
+    neither shows a value the file no longer holds nor writes it back; a change the person
+    is making there is kept and lands.
+  - **Secondary buttons carry a hairline** just inside their edge: on a raised card (this
+    Mac's checklist) their fill was the card's tone and "Open settings" read as words. A
+    project row's Merge, Retry and Approve are ghosts, as a tile header's actions are.
+  - **A remote window fits its tile.** The synthetic window's picture is fitted to the tile's
+    width with the tile's own surface above and below; the dark band and the small page in
+    the showcase's render are the synthetic desktop the test worker draws around its page.
+  - Tests: `markdown::tests::a_line_of_markdown_reads_as_its_words`,
+    `nav_rows::a_tile_row_reads_its_age_or_its_state_then_its_place`,
+    `tiles::shells_that_read_alike_are_named_by_their_last_command`,
+    `toasts::a_notice_sits_in_the_status_bar_over_no_tile`,
+    `bars::the_breadcrumb_names_the_checkout_and_its_branch`,
+    `overlays::a_bar_menu_closes_on_escape_and_a_second_press`,
+    `settings_editor::tests::the_dialog_follows_the_file_and_writes_nothing_back`,
+    `thread_start::an_open_palette_takes_the_agents_as_they_arrive`.
+
+- ✅ **A request is answered where it was asked** (2026-10-02, design checkpoint 2,
+  `conversation/thread/view/tray.rs`; tests in `thread/tests/face.rs`). While the call that asks
+  is on screen, its answers sit on that call's card. Once it scrolls away, a tray on the
+  composer's top edge carries the request with the way back to the call (Scroll ↑/↓), so the
+  person never answers blind and never hunts for the question. The request stays whole in the
+  tray; the plan and edits above it scroll past 30 % of the window, so the conversation keeps
+  its rows. The plain allow is the one white button; "always" and rules are quiet buttons of
+  their own that never lead.

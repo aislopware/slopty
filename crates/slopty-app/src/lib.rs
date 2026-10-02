@@ -2282,12 +2282,13 @@ impl Workspace {
             .aria_label(check.title())
             .aria_description(SharedString::from(line.detail.clone()))
             .flex()
-            .items_center()
+            .items_start()
             .gap(px(theme.spacing.sm))
             .min_h(px(kit::Row::Two.height(theme)))
             .py(px(theme.spacing.xs))
             .child(status_mark(theme, Some(status), 1.0))
             .child(
+                // The fix sits on the title's row, so the detail below takes the full width.
                 div()
                     .flex_1()
                     .min_w_0()
@@ -2295,14 +2296,22 @@ impl Workspace {
                     .flex_col()
                     .child(
                         div()
-                            .text_size(px(theme.typography.ui_size))
-                            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-                            .text_color(hsla(if muted { s.text_secondary } else { s.text }))
-                            .child(check.title()),
+                            .flex()
+                            .items_start()
+                            .justify_between()
+                            .gap(px(theme.spacing.sm))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(theme.typography.ui_size))
+                                    .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
+                                    .text_color(hsla(if muted { s.text_secondary } else { s.text }))
+                                    .child(check.title()),
+                            )
+                            .children(fix),
                     )
                     .child(kit::meta(div(), theme).child(SharedString::from(line.detail))),
             )
-            .children(fix)
     }
 
     /// Esc, Tab, sticky Control, arrows and the shell symbols a phone keyboard hides; shown
@@ -3497,6 +3506,11 @@ fn watch_settings(workspace: Entity<Workspace>, cx: &App) {
                     tracing::info!(path = %ws.settings_path.display(), "settings changed; reloading");
                     let loaded = Settings::load(&ws.settings_path);
                     ws.apply_loaded(loaded, cx);
+                    // An open dialog follows the file, so it never writes a value back over it.
+                    if let Some(editor) = ws.settings_editor.clone() {
+                        let text = settings::editable_text(&ws.settings_path);
+                        editor.update(cx, |e, cx| e.follow_file(text, cx));
+                    }
                 }
             });
         }

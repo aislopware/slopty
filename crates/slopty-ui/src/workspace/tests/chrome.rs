@@ -329,7 +329,7 @@ fn a_command_that_starts_draws_the_navigator_alone(cx: &mut TestAppContext) {
     assert!(after[0] > before[0], "the navigator draws the new command: {before:?} → {after:?}");
     assert_eq!(after[1..], before[1..], "the bars do not");
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
-    assert!(lines.iter().any(|(_, meta, _)| meta.contains("make")), "{lines:#?}");
+    assert!(lines.iter().any(|(title, ..)| title == "make"), "its title: {lines:#?}");
 }
 
 /// A key typed into a focused shell holds the working marks' steps for its echo, for the round

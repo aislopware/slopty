@@ -20,6 +20,8 @@ Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
+Article │ You: The header clips its chips on a narrow window, as here.
+Image │ Picture, 640 × 400
 Button │ Thought
 Button │ 2 steps
 Button │ Read /work/shots/header.png

@@ -20,6 +20,8 @@ Group │ Thread
 Status │ Nothing here yet
 MultilineTextInput │ Message (focused)
 Button │ Attach files
+Button │ Model, Opus 5.5
+Button │ Send
 Group │ Status
 Status │ e2e-worker
 Status │ 1 waiting

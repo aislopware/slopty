@@ -907,7 +907,7 @@ impl ConversationView {
                         .cursor_pointer()
                         .when(open, |el| el.bg(hsla(s.raised)))
                         .hover(move |el| el.bg(hsla(s.raised)))
-                        .children(kit::changes_at(theme, added, removed, k)),
+                        .children(kit::changes(theme, added, removed)),
                     s.accent,
                 )
                 .on_click(move |_ev, _window, cx| {

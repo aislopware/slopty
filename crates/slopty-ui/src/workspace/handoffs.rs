@@ -21,7 +21,6 @@ use std::time::Instant;
 use gpui::{
     AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
 };
 use slopty_client::handoff::Todo;
 use slopty_client::layout::WorkerKey;
@@ -373,8 +372,8 @@ impl WorkspaceView {
     }
 
     /// The notice of a held-back page: who asks to open which host, the host loudest when the
-    /// address was built to deceive, and under it why it was held back and when it was asked.
-    /// The whole address is in its hint, in the monospace face.
+    /// address was built to deceive, then why it was held back and when it was asked. The
+    /// whole address is in its hint, in the monospace face.
     pub(super) fn offer_body(&self, offer: &Offer) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -385,49 +384,49 @@ impl WorkspaceView {
         };
         let url = SharedString::from(offer.url.clone());
         let hint_theme = Rc::new(theme.clone());
+        // One line, as the status bar holds it: who asks, the host whole, then why it was held
+        // back, which gives way first. The whole address is the tooltip's.
         div()
             .id("offer-body")
             .flex_1()
             .min_w_0()
             .flex()
-            .flex_col()
+            .items_center()
+            .whitespace_nowrap()
             .tooltip(move |_window, cx| {
                 cx.new(|_| crate::kit::Hint::new(url.clone(), "", Rc::clone(&hint_theme)).mono())
                     .into()
             })
             .child(
+                // The asker is a shell's title, as long as a program likes: it gives way, cut
+                // short, and the host always shows whole.
                 div()
-                    .flex()
+                    .flex_initial()
                     .min_w_0()
-                    .whitespace_nowrap()
-                    .child(
-                        // The asker is a shell's title, as long as a program likes: it gives
-                        // way, cut short, and the host always shows whole.
-                        div()
-                            .flex_initial()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(SharedString::from(offer.asker.clone())),
-                    )
-                    .child(div().flex_none().child("\u{a0}wants to open\u{a0}"))
-                    .child(
-                        div()
-                            .debug_selector(|| "offer-host".to_owned())
-                            .flex_none()
-                            .text_color(hsla(host_ink))
-                            .font_weight(host_weight)
-                            .child(SharedString::from(offer.host.clone())),
-                    ),
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(SharedString::from(offer.asker.clone())),
+            )
+            .child(div().flex_none().child("\u{a0}wants to open\u{a0}"))
+            .child(
+                div()
+                    .debug_selector(|| "offer-host".to_owned())
+                    .flex_none()
+                    .text_color(hsla(host_ink))
+                    .font_weight(host_weight)
+                    .child(SharedString::from(offer.host.clone())),
             )
             .child(
                 div()
-                    .whitespace_nowrap()
+                    .flex_initial()
+                    .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
-                    .text_size(px(theme.typography.meta()))
                     .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(offer.detail(Instant::now()))),
+                    .child(SharedString::from(format!(
+                        "\u{a0}\u{b7} {}",
+                        offer.detail(Instant::now())
+                    ))),
             )
             .into_any_element()
     }

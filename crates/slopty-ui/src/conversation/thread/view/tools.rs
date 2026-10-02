@@ -181,8 +181,7 @@ impl ThreadView {
             let (name, dir) = lines::name_first(path);
             (name.to_owned(), tidy(&format!("{dir}/"), &cwd).trim_end_matches('/').to_owned())
         });
-        let changes =
-            patch_of(call).and_then(|p| kit::changes_at(theme, p.added, p.removed, self.zoom));
+        let changes = patch_of(call).and_then(|p| kit::changes(theme, p.added, p.removed));
         let quiet = look == Look::Line;
         let ink = if quiet { s.text_muted } else { s.text_secondary };
         let group: SharedString = format!("call-{}", id.0).into();

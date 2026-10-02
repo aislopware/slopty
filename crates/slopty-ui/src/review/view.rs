@@ -574,12 +574,7 @@ impl ReviewView {
                                 .text_color(hsla(tone))
                                 .child(SharedString::from(name)),
                         )
-                        .children(kit::changes_at(
-                            theme,
-                            file.patch.added,
-                            file.patch.removed,
-                            self.zoom,
-                        ))
+                        .children(kit::changes(theme, file.patch.added, file.patch.removed))
                         .on_click(cx.listener(move |this, _ev, _w, _cx| this.reveal(at))),
                 )
             }))
@@ -702,12 +697,7 @@ impl ReviewView {
                     .children(
                         status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)),
                     )
-                    .children(kit::changes_at(
-                        theme,
-                        file.patch.added,
-                        file.patch.removed,
-                        self.zoom,
-                    ))
+                    .children(kit::changes(theme, file.patch.added, file.patch.removed))
                     .child(div().flex_1())
                     .child(self.picks(at, None, "file", cx)),
             )

@@ -606,6 +606,16 @@ fn full_width_maximises_and_comes_back() {
 }
 
 #[test]
+fn a_tile_opened_beside_a_full_width_column_shows_both() {
+    let mut l = columns(1);
+    l.toggle_full_width();
+    l.open(t(2), Placement::Local);
+    assert!(!l.workspaces()[0].columns()[0].is_full_width());
+    assert!(rect(&l, t(1)).x >= 0.0, "the first stays in view: {:?}", rect(&l, t(1)));
+    assert!(rect(&l, t(2)).x + width_of(&l, t(2)) <= 1280.0 + 0.5, "{:?}", rect(&l, t(2)));
+}
+
+#[test]
 fn fullscreen_fills_the_viewport_and_restores_the_view() {
     let mut l = columns(2);
     l.consume_or_expel_window_left();

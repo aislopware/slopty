@@ -223,7 +223,11 @@ fn ask_subject<'a>(tool: &str, line: &'a str) -> &'a str {
 
 impl WorkspaceView {
     /// A worker observed a coding agent's state in a session.
-    pub fn agent_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
+    ///
+    /// Its detail is the agent's own words, Markdown as the agent writes it, and every place
+    /// that says it draws one plain line: it is said as plain words here, once.
+    pub fn agent_event(&mut self, mut event: AgentEvent, cx: &mut Context<Self>) {
+        event.detail = event.detail.map(|d| crate::markdown::plain_line(&d));
         let session = event.session;
         if let Some(view) = self.terminals.get(&session) {
             let status = (event.status != AgentStatus::None).then(|| event.status.clone());

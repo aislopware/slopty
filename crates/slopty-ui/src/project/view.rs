@@ -1063,11 +1063,12 @@ impl ProjectView {
                 .debug_selector(move || selector)
                 .role(Role::Button)
                 .aria_label(SharedString::from(format!("{} #{task}", action.label())))
+                // A ghost, as a tile header's actions are: its words in the text's tone and a
+                // fill only under the pointer. Boxed, a row's Retry and Approve read as two
+                // more chips beside its state.
                 .flex_none()
                 .px(self.z(sp.xs))
                 .rounded(self.z(theme.radii.sm))
-                .border_1()
-                .border_color(hsla(s.border))
                 .text_size(self.z(theme.typography.meta()))
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .text_color(hsla(s.text))
