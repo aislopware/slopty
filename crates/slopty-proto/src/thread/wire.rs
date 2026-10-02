@@ -138,7 +138,16 @@ pub enum Intent {
     Answer {
         /// The request.
         ask: AskId,
-        /// The choice taken ([`Choice::id`]), or what was written for a question.
+        /// The choice taken ([`Choice::id`]), or the answers to a request's questions.
+        ///
+        /// One answer answers all of a request's questions
+        /// ([`detail::Answer::choice`](super::detail::Answer::choice)): the words typed, for
+        /// a lone question that offers nothing; otherwise a JSON list of
+        /// [`detail::Answer`](super::detail::Answer), one per question keyed by its text,
+        /// several picks of one question joined with `", "` and the words of one's own last
+        /// ([`detail::Answer::JOIN`](super::detail::Answer::JOIN)). Claude Code takes the list
+        /// as `AskUserQuestion`'s answers as they are; an adapter whose agent takes picks apart
+        /// splits them again ([`detail::Answer::parts`](super::detail::Answer::parts)).
         choice: String,
         /// Words to go with it, where the agent takes them.
         message: Option<String>,

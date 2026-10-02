@@ -394,3 +394,30 @@ fn a_claude_code_with_no_session_id_is_named_by_its_terminal() {
     assert_ne!(terminal_thread(terminal), terminal_thread(SessionId::nil()));
     assert!(!self::observed().is_provisional(), "a session's own thread is not provisional");
 }
+
+/// The questionnaire's one answer to an `AskUserQuestion` (`detail::Answer::choice`) is read
+/// as the answers Claude Code takes, each keyed by its question, picks joined as they came.
+#[test]
+fn a_questionnaires_answer_is_the_answers_claude_code_takes() {
+    use slopty_proto::thread::detail::{Answer, Offered, Question};
+    let ask = |text: &str, labels: &[&str]| Question {
+        text: text.to_owned(),
+        header: None,
+        options: labels
+            .iter()
+            .map(|l| Offered { label: (*l).to_owned(), description: None })
+            .collect(),
+        multi_select: true,
+    };
+    let questions = [ask("Which layout?", &["Split", "Tabs"]), ask("Which panes?", &["Files"])];
+    let given = [
+        Answer { question: "Which layout?".to_owned(), answer: "Split".to_owned() },
+        Answer { question: "Which panes?".to_owned(), answer: "Files, Logs".to_owned() },
+    ];
+    let choice = Answer::choice(&questions, &given);
+    let Some(Verdict::Answer { answers }) = verdict(&choice, None) else { panic!("{choice}") };
+    let read: Vec<(&str, &str)> =
+        answers.iter().map(|a| (a.question.as_str(), a.answer.as_str())).collect();
+    assert_eq!(read, [("Which layout?", "Split"), ("Which panes?", "Files, Logs")]);
+    assert_eq!(choice_of(&Verdict::Answer { answers }), choice, "and said back the same");
+}

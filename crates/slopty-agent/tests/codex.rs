@@ -327,4 +327,84 @@ mod tests {
         let (started, _) = mapped("a", None);
         assert_eq!(texts(&state), texts(&started), "the first turn came back with the resume");
     }
+
+    /// Codex's questions (`tests/fixtures/codex/question.jsonl`, written from the pinned
+    /// schema): a request carrying them, each with the answers Codex offers, answered by the one
+    /// choice the questionnaire makes for them all, which goes back under each question's id;
+    /// an answer that leaves one out goes nowhere, and a question for a secret is left to
+    /// Codex's own terminal.
+    #[test]
+    fn codex_questions_are_carried_and_answered_by_their_ids() {
+        use slopty_proto::thread::detail::Answer;
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex/question.jsonl");
+        let lines: Vec<Value> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["msg"].clone())
+            .collect();
+        let started = approval()
+            .into_iter()
+            .find(|l| l.client == "a" && l.msg["result"].get("thread").is_some())
+            .unwrap();
+        let thread: p::Thread =
+            serde_json::from_value(started.msg["result"]["thread"].clone()).unwrap();
+        let (mut shared, begun) = Shared::new(&thread, None);
+        let mut state = ThreadState::new(shared.meta().clone());
+        for action in &begun {
+            state.apply(action);
+        }
+        let now = WallMs::from_millis(1);
+        let heard = |shared: &mut Shared, state: &mut ThreadState, msg: &Value| {
+            let Incoming::Request { id, request, .. } = rpc::read(&msg.to_string()).unwrap() else {
+                panic!("a request: {msg}")
+            };
+            for action in &shared.request(&id, &request, now) {
+                state.apply(action);
+            }
+            id
+        };
+        reads_back::<p::ToolRequestUserInputParams>("the questions", &lines[0]["params"]);
+        reads_back::<p::ToolRequestUserInputResponse>("the answers", &lines[1]["result"]);
+
+        let id = heard(&mut shared, &mut state, &lines[0]);
+        let request = state.requests.last().unwrap().clone();
+        assert_eq!(request.kind, Request::QUESTION);
+        assert_eq!(request.title, "2 questions");
+        let asked: Vec<(&str, Option<&str>, Vec<&str>)> = request
+            .questions
+            .iter()
+            .map(|q| {
+                let labels = q.options.iter().map(|o| o.label.as_str()).collect();
+                (q.text.as_str(), q.header.as_deref(), labels)
+            })
+            .collect();
+        let want = [
+            ("Which layout?", Some("Layout"), vec!["Split", "Tabs"]),
+            ("What should the file be called?", Some("Name"), vec!["notes.md"]),
+        ];
+        assert_eq!(asked, want);
+        assert_eq!(
+            request.questions[0].options[0].description.as_deref(),
+            Some("Two panes side by side.")
+        );
+        assert_eq!(request.questions[1].options[0].description, None, "an empty one is none");
+
+        let by = Answerer { client: None, name: "Slopty".to_owned() };
+        let ask = shared::ask_of(&id);
+        let answer = |q: &str, a: &str| Answer { question: q.to_owned(), answer: a.to_owned() };
+        let partial = Answer::choice(&request.questions, &[answer("Which layout?", "Split")]);
+        assert_eq!(shared.answer(&ask, &partial, by.clone()), None, "every question is answered");
+        let given = [
+            answer("Which layout?", "Split"),
+            answer("What should the file be called?", "plans.md"),
+        ];
+        let choice = Answer::choice(&request.questions, &given);
+        let (to, result) = shared.answer(&ask, &choice, by).unwrap();
+        assert_eq!((to, result), (id, lines[1]["result"].clone()), "as Codex takes it");
+
+        heard(&mut shared, &mut state, &lines[2]);
+        let secret = state.requests.last().unwrap();
+        assert!(secret.questions.is_empty() && secret.options.is_empty(), "nothing to answer here");
+        assert!(secret.text.as_ref().is_some_and(|t| t.text.contains("Codex's own terminal")));
+    }
 }

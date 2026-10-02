@@ -401,6 +401,66 @@ pub struct Answer {
     pub answer: String,
 }
 
+impl Answer {
+    /// How several picks of one question, and the words of one's own, make one answer: in the
+    /// order given, one's own words last, as Claude Code's own dialog joins them.
+    pub const JOIN: &'static str = ", ";
+
+    /// The choice of an [`Intent::Answer`](super::wire::Intent::Answer) that answers
+    /// `questions` with `answers`: the words alone for one question that offers nothing,
+    /// otherwise the answers as a JSON list, each keyed by its question's text.
+    #[must_use]
+    pub fn choice(questions: &[Question], answers: &[Self]) -> String {
+        match (questions, answers) {
+            ([question], [answer]) if question.options.is_empty() => answer.answer.clone(),
+            _ => serde_json::to_string(answers).unwrap_or_default(),
+        }
+    }
+
+    /// The answers a [`choice`](Self::choice) gives `questions`, one per question in their
+    /// order; `None` when it does not answer each of them, or answers one not asked.
+    #[must_use]
+    pub fn read(questions: &[Question], choice: &str) -> Option<Vec<Self>> {
+        if let [question] = questions
+            && question.options.is_empty()
+        {
+            return Some(vec![Self { question: question.text.clone(), answer: choice.to_owned() }]);
+        }
+        let given: Vec<Self> = serde_json::from_str(choice).ok()?;
+        if given.iter().any(|a| !questions.iter().any(|q| q.text == a.question)) {
+            return None;
+        }
+        questions.iter().map(|q| given.iter().find(|a| a.question == q.text).cloned()).collect()
+    }
+
+    /// The picks of `question` this answer holds, then the words of one's own when there are
+    /// any: the labels it offers that the answer starts with, in order, and what follows them.
+    #[must_use]
+    pub fn parts(&self, question: &Question) -> Vec<String> {
+        let mut parts = Vec::new();
+        let mut rest = self.answer.as_str();
+        while !rest.is_empty() {
+            let labels = || question.options.iter().map(|o| o.label.as_str());
+            // A label that is the whole of what is left, else the longest one a join follows.
+            let picked = labels().find(|label| rest == *label).or_else(|| {
+                labels()
+                    .filter(|label| {
+                        rest.strip_prefix(label).is_some_and(|after| after.starts_with(Self::JOIN))
+                    })
+                    .max_by_key(|label| label.len())
+            });
+            let Some(label) = picked else { break };
+            parts.push(label.to_owned());
+            rest = rest.get(label.len()..).unwrap_or_default();
+            rest = rest.strip_prefix(Self::JOIN).unwrap_or(rest);
+        }
+        if !rest.is_empty() {
+            parts.push(rest.to_owned());
+        }
+        parts
+    }
+}
+
 /// An MCP server's tool.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpDetail {

@@ -17,12 +17,18 @@
 //!   `serverRequest/resolved` says so, answered by this worker's client when it answered first,
 //!   else by the Codex TUI beside it. Its answers are Codex's `availableDecisions`, in Codex's
 //!   order.
+//! - **Questions.** A `request_user_input` is a request carrying its questions, each with the
+//!   answers Codex offers, answered by one choice for them all (`detail::Answer`); each answer goes
+//!   back under its question's id. A question for a secret is left to Codex's own terminal, since
+//!   an answer given here is kept in the thread's log.
 
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::detail::{Clip, EditDetail, ExecDetail, ExecStatus, Hunk, McpDetail};
+use slopty_proto::thread::detail::{
+    Answer, Clip, EditDetail, ExecDetail, ExecStatus, Hunk, McpDetail, Offered, Question,
+};
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
     Effect, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Notice, PartKey, Patch, Phase,
@@ -73,6 +79,8 @@ struct Open {
     title: String,
     /// What each choice answers, by its id: the decision as Codex takes it.
     answers: BTreeMap<String, Value>,
+    /// The questions it asks, each with Codex's id for it, which its answer is keyed by.
+    questions: Vec<(String, Question)>,
     /// Who answered from here, and with what, before Codex said it was settled.
     answered: Option<(Answerer, String)>,
 }
@@ -331,15 +339,20 @@ impl Shared {
                 )
             }
             ServerRequest::ItemToolRequestUserInput(asked) => {
-                let title = asked
-                    .questions
-                    .first()
-                    .map_or_else(|| "A question".to_owned(), |q| q.question.clone());
+                let title = match asked.questions.as_slice() {
+                    [one] => one.question.clone(),
+                    [] => "A question".to_owned(),
+                    many => format!("{} questions", many.len()),
+                };
+                let text =
+                    asked.questions.iter().any(|q| q.is_secret == Some(true)).then(|| {
+                        "It asks for a secret: answer it in Codex's own terminal.".to_owned()
+                    });
                 (
                     Some(asked.item_id.clone()),
                     Request::QUESTION,
                     title,
-                    None,
+                    text,
                     Vec::new(),
                     BTreeMap::new(),
                 )
@@ -350,11 +363,22 @@ impl Shared {
             }
         };
         let item = item.map(ItemId);
+        // A secret is never asked here: an answer is kept in the thread's log, so the person
+        // gives it in Codex's own terminal, which keeps it out of sight.
+        let questions = match request {
+            ServerRequest::ItemToolRequestUserInput(asked)
+                if !asked.questions.iter().any(|q| q.is_secret == Some(true)) =>
+            {
+                asked.questions.iter().map(|q| (q.id.clone(), question(q))).collect()
+            }
+            _ => Vec::new(),
+        };
         let open = Open {
             id: id.clone(),
             item: item.clone(),
             title: title.clone(),
             answers,
+            questions: questions.clone(),
             answered: None,
         };
         self.open.insert(ask.clone(), open);
@@ -369,7 +393,7 @@ impl Shared {
             title,
             text: text.as_deref().map(Clipped::whole),
             options,
-            questions: Vec::new(),
+            questions: questions.into_iter().map(|(_, q)| q).collect(),
             proposed: None,
             schema_json: None,
             url: None,
@@ -385,8 +409,11 @@ impl Shared {
     }
 
     /// The answer to request `ask` with choice `choice`, given by `by`: the app-server's
-    /// request id and the result to send it. `None` when no such request is open here or it
-    /// offers no such choice.
+    /// request id and the result to send it. `None` when no such request is open here, or it
+    /// offers no such choice, or the choice does not answer each of its questions.
+    ///
+    /// A question's choice is one answer to them all ([`Answer::read`]); each goes to Codex
+    /// under its question's id, its picks and one's own words apart ([`Answer::parts`]).
     pub fn answer(
         &mut self,
         ask: &AskId,
@@ -394,9 +421,23 @@ impl Shared {
         by: Answerer,
     ) -> Option<(RequestId, Value)> {
         let open = self.open.get_mut(ask)?;
-        let decision = open.answers.get(choice)?.clone();
+        let result = if open.questions.is_empty() {
+            serde_json::json!({ "decision": open.answers.get(choice)?.clone() })
+        } else {
+            let asked: Vec<Question> = open.questions.iter().map(|(_, q)| q.clone()).collect();
+            let given = Answer::read(&asked, choice)?;
+            let answers = open
+                .questions
+                .iter()
+                .zip(given)
+                .map(|((id, q), a)| {
+                    (id.clone(), p::ToolRequestUserInputAnswer { answers: a.parts(q) })
+                })
+                .collect();
+            serde_json::to_value(p::ToolRequestUserInputResponse { answers }).ok()?
+        };
         open.answered = Some((by, choice.to_owned()));
-        Some((open.id.clone(), serde_json::json!({ "decision": decision })))
+        Some((open.id.clone(), result))
     }
 
     /// What goes to the app-server for `text`, sent as intent `intent` with `delivery`: into
@@ -927,4 +968,19 @@ fn range(text: &str) -> (u32, u32) {
     let start = parts.next().and_then(|s| s.parse().ok()).unwrap_or_default();
     let lines = parts.next().map_or(1, |s| s.parse().unwrap_or_default());
     (start, lines)
+}
+
+/// A Codex question as the thread asks it. Codex offers one answer of those it lists, and an
+/// answer of one's own beside them where it says so; the card always has a field for one's own.
+fn question(asked: &p::ToolRequestUserInputQuestion) -> Question {
+    let options = asked.options.iter().flatten().map(|o| Offered {
+        label: o.label.clone(),
+        description: Some(o.description.clone()).filter(|d| !d.is_empty()),
+    });
+    Question {
+        text: asked.question.clone(),
+        header: Some(asked.header.clone()).filter(|h| !h.is_empty()),
+        options: options.collect(),
+        multi_select: false,
+    }
 }

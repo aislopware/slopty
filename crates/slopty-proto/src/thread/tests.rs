@@ -319,3 +319,47 @@ proptest! {
         prop_assert_eq!(follower, run(&actions));
     }
 }
+
+/// One answer answers every question: a lone question that offers nothing in its words, else
+/// a JSON list keyed by each question's text, read back only when it answers each question
+/// asked and none other; several picks and one's own words come apart again as they went.
+#[test]
+fn one_answer_answers_every_question() {
+    use detail::{Answer, Offered, Question};
+    let ask = |text: &str, labels: &[&str], multi_select: bool| Question {
+        text: text.to_owned(),
+        header: None,
+        options: labels
+            .iter()
+            .map(|l| Offered { label: (*l).to_owned(), description: None })
+            .collect(),
+        multi_select,
+    };
+    let answer = |q: &str, a: &str| Answer { question: q.to_owned(), answer: a.to_owned() };
+
+    let free = [ask("Name it?", &[], false)];
+    let named = [answer("Name it?", "Split, then join")];
+    assert_eq!(Answer::choice(&free, &named), "Split, then join", "the words as they are");
+    assert_eq!(Answer::read(&free, "Split, then join").unwrap(), named);
+
+    let panes = ["Files", "Files, Terminal", "Terminal", "Editor"];
+    let asked =
+        [ask("Which layout?", &["Split", "Tabs"], false), ask("Which panes?", &panes, true)];
+    let given =
+        [answer("Which layout?", "Split"), answer("Which panes?", "Terminal, Editor, Logs")];
+    let choice = Answer::choice(&asked, &given);
+    assert_eq!(
+        choice,
+        r#"[{"question":"Which layout?","answer":"Split"},{"question":"Which panes?","answer":"Terminal, Editor, Logs"}]"#
+    );
+    assert_eq!(Answer::read(&asked, &choice).unwrap(), given);
+    assert_eq!(given[1].parts(&asked[1]), ["Terminal", "Editor", "Logs"], "one's own words last");
+    assert_eq!(answer("Which panes?", "Files, Terminal").parts(&asked[1]), ["Files, Terminal"]);
+    assert_eq!(answer("Which panes?", "Files, Editor").parts(&asked[1]), ["Files", "Editor"]);
+    assert!(answer("Which panes?", "").parts(&asked[1]).is_empty());
+
+    assert_eq!(Answer::read(&asked, &Answer::choice(&asked, &given[..1])), None, "one unanswered");
+    let stray = [given[0].clone(), given[1].clone(), answer("Why?", "No")];
+    assert_eq!(Answer::read(&asked, &Answer::choice(&asked, &stray)), None, "one not asked");
+    assert_eq!(Answer::read(&asked, "Split"), None, "words for questions that offer answers");
+}
