@@ -381,6 +381,9 @@ pub struct ThreadRow {
     pub requests: Vec<RequestCard>,
     /// The last line the agent wrote.
     pub last_line: Option<String>,
+    /// What it is doing now: the title of its newest tool call that runs or waits on the
+    /// person ("Edit src/main.rs").
+    pub doing: Option<String>,
     /// Lines added and removed over the turns the worker holds.
     pub changed: Changed,
     /// The terminal its TUI runs in.

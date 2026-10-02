@@ -29,6 +29,7 @@ fn row(phase: Phase, since: u64, terminal: Option<SessionId>) -> ThreadRow {
         },
         requests: Vec::new(),
         last_line: Some("Done.".to_owned()),
+        doing: None,
         changed: Changed::default(),
         terminal,
         parent: None,

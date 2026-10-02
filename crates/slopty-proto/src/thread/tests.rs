@@ -239,6 +239,22 @@ fn the_table_takes_snapshots_and_deltas() {
     assert_eq!(table.rows.into_values().collect::<Vec<_>>(), [other]);
 }
 
+/// A row says what the agent is doing while a call of its runs or waits on the person, and
+/// nothing once the call is over.
+#[test]
+fn a_row_says_what_runs_now() {
+    let running = run(&[Action::ItemStarted(tool("t1", ToolState::Running))]);
+    assert_eq!(running.row(WallMs::ZERO).doing.as_deref(), Some("Run cargo test"));
+    let pending = ToolState::Pending { ask: AskId("a".to_owned()) };
+    let asking = run(&[Action::ItemStarted(tool("t1", pending))]);
+    assert_eq!(asking.row(WallMs::ZERO).doing.as_deref(), Some("Run cargo test"));
+    let done = run(&[
+        Action::ItemStarted(tool("t1", ToolState::Running)),
+        Action::ItemCompleted(tool("t1", ToolState::Completed)),
+    ]);
+    assert_eq!(done.row(WallMs::ZERO).doing, None);
+}
+
 /// Appends split one text at chosen char boundaries.
 fn chunked(id: &str, words: &str, cuts: &[usize]) -> Vec<Action> {
     let chars: Vec<char> = words.chars().collect();

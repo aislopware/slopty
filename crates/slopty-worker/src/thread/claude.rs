@@ -8,11 +8,14 @@
 //! on the blocking pool, at once after a hook and on a [`TICK`] between, and puts what the codec
 //! makes of it all into the [`Host`]: a thread per Claude Code session, one per subagent.
 //!
-//! A thread is begun when the session's own id is known (its first hook, or the transcript
-//! file's name), since that id names the thread. A thread the host holds from before (a worker
-//! restart) starts over and is read again from the transcript, under a new epoch. When the
-//! terminal moves to another Claude Code session (`/clear`, `/resume`), the old thread is left
-//! exited and resumable, and the new one begins.
+//! A session's thread is begun when its own id is known (its first hook, or the transcript
+//! file's name), since that id names the thread. Until then, a Claude Code the tracker sees in
+//! the terminal (one started by hand, idle at its prompt) has a provisional thread named by the
+//! terminal, removed once the session's own begins or the agent goes, since it never was a
+//! session. A thread the host holds from before (a worker restart) starts over and is read
+//! again from the transcript, under a new epoch. When the terminal moves to another Claude Code
+//! session (`/clear`, `/resume`), the old thread is left exited and resumable, and the new one
+//! begins. A thread declares `approvals` once a hook has been heard in its terminal.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,7 +26,7 @@ use slopty_agent::conversation::{Part, Transcripts};
 use slopty_agent::observed::{self, Observed, Out};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
-use slopty_proto::agent::{AgentEvent, AgentKind};
+use slopty_proto::agent::{AgentEvent, AgentKind, AgentStatus};
 use slopty_proto::conversation::PermissionEvent;
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
 use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadState};
@@ -188,7 +191,10 @@ async fn observe(
     loop {
         tokio::select! {
             input = inputs.recv() => match input {
-                None => return,
+                None => {
+                    on.forget_provisional();
+                    return;
+                }
                 Some(Input::Status(event)) => on.status(*event).await,
                 Some(Input::Cwd(cwd)) => {
                     if let Some(observed) = on.observed.as_mut() {
@@ -249,8 +255,14 @@ struct Session {
 impl Session {
     async fn status(&mut self, event: AgentEvent) {
         let native = event.agent_session.clone().or_else(|| self.native_from_file());
-        if let Some(native) = native {
-            self.begin(&native);
+        match native {
+            Some(native) => self.begin(&native),
+            None if event.status == AgentStatus::None => self.forget_provisional(),
+            None if self.observed.is_none() => {
+                let observed = Observed::provisional("", self.terminal, &self.cwd, WallMs::now());
+                self.start(observed);
+            }
+            None => {}
         }
         if let Some(observed) = self.observed.as_mut() {
             take(&self.host, observed.status(&event));
@@ -261,6 +273,9 @@ impl Session {
 
     async fn seen(&mut self, seen: &Seen) {
         if let Some(observed) = self.observed.as_mut() {
+            if seen.hooks > 0 {
+                take(&self.host, observed.hooked());
+            }
             if let Some(meters) = &seen.meters {
                 take(&self.host, observed.meters(meters));
             }
@@ -283,6 +298,7 @@ impl Session {
         if self.observed.as_ref().is_some_and(|o| o.meta().native == native) {
             return;
         }
+        self.forget_provisional();
         if let Some(old) = self.observed.take() {
             let exited = Status {
                 phase: Phase::Idle,
@@ -292,21 +308,37 @@ impl Session {
             };
             self.host.apply(old.main(), vec![Action::Status(exited)]);
         }
-        let mut observed = Observed::new(native, "", Some(self.terminal), &self.cwd, WallMs::now());
+        let observed = Observed::new(native, "", Some(self.terminal), &self.cwd, WallMs::now());
+        self.start(observed);
+        self.transcripts = Some(Transcripts::default());
+    }
+
+    /// Put `observed` in the host, told what the session has heard so far.
+    fn start(&mut self, mut observed: Observed) {
         take(&self.host, observed.drain());
         take(&self.host, observed.title(&self.title));
+        if self.hooks > 0 {
+            take(&self.host, observed.hooked());
+        }
         if let Some(status) = &self.status {
             take(&self.host, observed.status(status));
         }
         self.observed = Some(observed);
-        self.transcripts = Some(Transcripts::default());
+    }
+
+    /// Remove the provisional thread, if that is what is observed: it never was a session.
+    fn forget_provisional(&mut self) {
+        let Some(old) = self.observed.take_if(|o| o.is_provisional()) else { return };
+        if let Err(e) = self.host.remove(old.main()) {
+            tracing::warn!(thread = %old.main(), "a provisional thread could not go: {e}");
+        }
     }
 
     /// Read what the transcripts gained, on the blocking pool, and take it in.
     async fn read(&mut self) {
         let sources = self.sources.sources(self.terminal);
         let Some(main) = sources.main else { return };
-        if self.observed.is_none()
+        if self.observed.as_ref().is_none_or(Observed::is_provisional)
             && let Some(native) = stem(&main)
         {
             self.begin(&native);

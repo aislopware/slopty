@@ -173,7 +173,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     from the session id (and for a subagent, from that and its agent id). So the same session
     is the same thread across a worker restart, and across a `claude --resume` in another
     terminal. The thread begins once the session id is known, from a hook or from the
-    transcript's file name. A thread held from before starts over under a new epoch and is
+    transcript's file name (before that, a provisional thread stands for it; see the entry on
+    what a row carries). A thread held from before starts over under a new epoch and is
     read again, as the ruling has it: the log is a cache of the native session. When a
     terminal moves to another session (`/clear`, `/resume`), the old thread is left exited and
     resumable.
@@ -310,6 +311,30 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   thread started from a shell is named at once, and renamed as that name changes. The bare
   `Claude Code` names nothing. The first prompt that is not a command then names it, and
   keeps it.
+
+- ✅ **A row carries what the client read from the old agent status** (2026-10-02,
+  `ThreadState::row`, `observed::Observed`,
+  `crates/slopty-worker/src/thread/claude.rs`; tests `a_row_says_what_runs_now`,
+  `approvals_come_with_the_hooks`, and
+  `a_claude_code_before_its_id_has_its_terminals_thread_until_the_id_comes` in
+  `claude_threads.rs`). The client's reads of `AgentEvent`, `SessionAgent` and the permission
+  prompts were listed, so that each could go to the thread table before the old path goes.
+  Three had nothing to read from, and each is closed by one field or one adapter behaviour:
+  - **What it is doing now.** `ThreadRow.doing` is the title of the newest tool call that runs
+    or waits on a request ("Edit src/main.rs"), worked out by the reducer. Every adapter gets
+    it with no work of its own, since the title is already its wording.
+  - **Whether the hooks have spoken.** No new field. Claude Code's prompts are held only
+    through the `PermissionRequest` hook, so the observed thread declares `approvals` once a
+    hook is heard in its terminal (a status from a hook, a held prompt, or a hook the session's
+    board counted). A Claude Code row without `approvals` is the one that offers to install
+    the hooks. That follows the rule that a client shows a control only where the capability
+    is.
+  - **A Claude Code before its session id.** No new field. One started by hand and idle at its
+    prompt has neither hook nor transcript yet, so the tracker sees it but nothing names a
+    session. Its terminal names a provisional thread (`observed::terminal_thread`, an empty
+    `native`). When the id comes, the session's own thread takes over and the provisional one
+    is removed, not left exited, since it never was a session. It is removed too when the
+    agent goes or the terminal closes first. Every agent tile so has a row.
 
 - ✅ **The server ranks every thread on one ladder, and a notice goes where the person is**
   (2026-10-02, `crates/slopty-proto/src/thread/attention.rs`,

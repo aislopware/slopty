@@ -9,7 +9,7 @@ use slopty_core::WallMs;
 use super::wire::{Page, RequestCard, TableFrame, ThreadRow};
 use super::{
     Action, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Item, ItemBody, ItemId,
-    Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta, Turn, TurnId,
+    Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta, ToolState, Turn, TurnId,
 };
 
 /// Settled requests a thread keeps, newest last, so a client that comes back still sees who
@@ -236,6 +236,7 @@ impl ThreadState {
                 })
                 .collect(),
             last_line: self.last_line(),
+            doing: self.doing(),
             changed,
             terminal: self.meta.terminal,
             parent: self.meta.parent.clone(),
@@ -246,6 +247,17 @@ impl ThreadState {
             meters: self.meters.clone(),
             updated_ms,
         }
+    }
+
+    fn doing(&self) -> Option<String> {
+        self.items.iter().rev().find_map(|item| match &item.body {
+            ItemBody::Tool(call)
+                if matches!(call.state, ToolState::Running | ToolState::Pending { .. }) =>
+            {
+                Some(call.title.clone())
+            }
+            _ => None,
+        })
     }
 
     fn last_line(&self) -> Option<String> {

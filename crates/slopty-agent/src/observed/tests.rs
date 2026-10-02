@@ -351,3 +351,46 @@ fn a_thread_is_named_by_the_session_until_its_first_prompt() {
     host.take(observed.title("✳ Something else"));
     assert_eq!(host.thread(observed.main()).meta.title, titled, "and keeps it");
 }
+
+/// A thread declares approvals once a hook has been heard, since only the hook holds a prompt,
+/// and says so once; before that its row is the one that offers to install the hooks.
+#[test]
+fn approvals_come_with_the_hooks() {
+    let approvals = Cap::named(Cap::APPROVALS);
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    assert!(!host.thread(observed.main()).meta.caps.contains(&approvals), "no hook heard");
+    let titled = AgentEvent {
+        session: SessionId::nil(),
+        kind: AgentKind::ClaudeCode,
+        status: AgentStatus::Working,
+        agent_session: None,
+        detail: None,
+        attention: false,
+        source: AgentSource::Title,
+        since_ms: WallMs::from_millis(3),
+        mode: None,
+    };
+    host.take(observed.status(&titled));
+    assert!(!host.thread(observed.main()).meta.caps.contains(&approvals), "a title is no hook");
+    host.take(observed.status(&AgentEvent { source: AgentSource::Hook, ..titled }));
+    let caps = &host.thread(observed.main()).meta.caps;
+    assert!(caps.contains(&approvals), "{caps:?}");
+    assert!(caps.is_sorted(), "{caps:?}");
+    assert!(observed.hooked().is_empty(), "and only once");
+}
+
+/// A Claude Code with no session id yet has a thread named by its terminal, apart from every
+/// other terminal's, and with no native id.
+#[test]
+fn a_claude_code_with_no_session_id_is_named_by_its_terminal() {
+    let terminal = SessionId::from_uuid(uuid::Uuid::from_u128(9));
+    let mut observed = Observed::provisional("", terminal, "/work", WallMs::ZERO);
+    let outs = observed.drain();
+    let [Out::Begin(meta)] = outs.as_slice() else { panic!("{outs:?}") };
+    assert!(observed.is_provisional() && meta.native.is_empty());
+    assert_eq!((meta.id, meta.terminal), (terminal_thread(terminal), Some(terminal)));
+    assert_ne!(terminal_thread(terminal), terminal_thread(SessionId::nil()));
+    assert!(!self::observed().is_provisional(), "a session's own thread is not provisional");
+}

@@ -12,13 +12,13 @@ mod claude_threads {
 
     use slopty_agent::conversation::{Conversation, ThreadId as ConvThread};
     use slopty_agent::live::{Batch, Board, ModEvent};
-    use slopty_agent::observed::{subagent_of, thread_of};
+    use slopty_agent::observed::{subagent_of, terminal_thread, thread_of};
     use slopty_agent::transcript::Tail;
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
     use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
     use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, ToolDetail};
-    use slopty_proto::thread::{Phase, ThreadId, ThreadState};
+    use slopty_proto::thread::{Cap, Phase, ThreadId, ThreadState};
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
     use slopty_worker::thread::Host;
@@ -40,13 +40,14 @@ mod claude_threads {
     }
 
     struct Fake {
-        main: PathBuf,
+        /// The main transcript, once the agent has written one.
+        main: watch::Sender<Option<PathBuf>>,
         seen: watch::Sender<Seen>,
     }
 
     impl Sources for Fake {
         fn sources(&self, _session: SessionId) -> orchestrate::Sources {
-            orchestrate::Sources { main: Some(self.main.clone()), ..Default::default() }
+            orchestrate::Sources { main: self.main.borrow().clone(), ..Default::default() }
         }
 
         fn seen(&self, _session: SessionId) -> watch::Receiver<Seen> {
@@ -68,8 +69,10 @@ mod claude_threads {
             let main = dir.path().join("projects").join(format!("{NATIVE}.jsonl"));
             std::fs::create_dir_all(main.parent().unwrap()).unwrap();
             std::fs::write(&main, "").unwrap();
-            let seen =
-                Arc::new(Fake { main: main.clone(), seen: watch::Sender::new(Seen::default()) });
+            let seen = Arc::new(Fake {
+                main: watch::Sender::new(Some(main.clone())),
+                seen: watch::Sender::new(Seen::default()),
+            });
             Self { dir, main, terminal: SessionId::new(), events: broadcast::Sender::new(64), seen }
         }
 
@@ -83,15 +86,21 @@ mod claude_threads {
             (claude::spawn(host.clone(), self.events.subscribe(), sources, asks), driver)
         }
 
+        /// A hook says the status of session [`NATIVE`].
         fn status(&self, status: AgentStatus) {
+            self.tracked(status, Some(NATIVE), AgentSource::Hook);
+        }
+
+        /// The tracker says `status`, heard from `source`, with the session id it knows.
+        fn tracked(&self, status: AgentStatus, native: Option<&str>, source: AgentSource) {
             let event = AgentEvent {
                 session: self.terminal,
                 kind: AgentKind::ClaudeCode,
                 status,
-                agent_session: Some(NATIVE.to_owned()),
+                agent_session: native.map(str::to_owned),
                 detail: None,
                 attention: false,
-                source: AgentSource::Hook,
+                source,
                 since_ms: WallMs::from_millis(1),
                 mode: None,
             };
@@ -154,6 +163,17 @@ mod claude_threads {
             }
         });
         waited.await.expect("the thread came to the state awaited")
+    }
+
+    /// Wait until `host` no longer holds `thread`.
+    async fn gone(host: &Host, thread: ThreadId) {
+        let mut table = host.table_watch();
+        let waited = tokio::time::timeout(BOUND, async {
+            while host.holds(thread) {
+                table.changed().await.unwrap();
+            }
+        });
+        waited.await.expect("the thread went");
     }
 
     /// The entries the decoder reads from `scenario`'s main transcript.
@@ -338,5 +358,44 @@ mod claude_threads {
         rig.seen.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
         let state = until(&host, thread, |s| live(s) == 0 && !s.items.is_empty()).await;
         assert!(state.items.iter().all(|i| !i.id.0.starts_with("live:")));
+    }
+
+    /// A Claude Code started by hand, idle at its prompt with no session id yet, has a thread
+    /// named by its terminal, without approvals while no hook has spoken. When the id comes,
+    /// the session's own thread takes over, declares approvals for the hook heard, and the
+    /// provisional one is removed, not left behind; one whose agent goes first is removed too.
+    #[tokio::test]
+    async fn a_claude_code_before_its_id_has_its_terminals_thread_until_the_id_comes() {
+        let approvals = Cap::named(Cap::APPROVALS);
+        let rig = Rig::new();
+        rig.seen.main.send_replace(None);
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let provisional = terminal_thread(rig.terminal);
+        rig.tracked(AgentStatus::Idle, None, AgentSource::Process);
+        let state = until(&host, provisional, |s| s.status.phase == Phase::Idle).await;
+        assert!(state.meta.native.is_empty());
+        assert_eq!(state.meta.terminal, Some(rig.terminal));
+        assert!(!state.meta.caps.contains(&approvals), "no hook has spoken");
+
+        rig.seen.main.send_replace(Some(rig.main.clone()));
+        rig.status(AgentStatus::Working);
+        let thread = thread_of(NATIVE);
+        let state = until(&host, thread, |s| {
+            s.status.phase == Phase::Working && s.meta.caps.contains(&approvals)
+        })
+        .await;
+        assert_eq!(state.meta.native, NATIVE);
+        gone(&host, provisional).await;
+
+        let other = Rig::new();
+        other.seen.main.send_replace(None);
+        let host = other.host();
+        let _observer = other.observe(&host);
+        let provisional = terminal_thread(other.terminal);
+        other.tracked(AgentStatus::Idle, None, AgentSource::Process);
+        until(&host, provisional, |_| true).await;
+        other.tracked(AgentStatus::None, None, AgentSource::Process);
+        gone(&host, provisional).await;
     }
 }

@@ -20,13 +20,19 @@
 //!   live block takes the call's own id, so the transcript's entry replaces it.
 //! - **Requests.** A permission prompt the worker holds is a request with the answers Claude Code
 //!   takes: allow, allow always (with what the suggestions grant), deny, and deny and stop.
-//!   [`verdict`] maps a chosen answer back.
+//!   [`verdict`] maps a chosen answer back. A prompt is held only through the `PermissionRequest`
+//!   hook, so the thread declares `approvals` once a hook has been heard and not before: a Claude
+//!   Code thread without it is one whose hooks are not installed.
+//! - **Before the session id.** A Claude Code started by hand and idle at its prompt has no session
+//!   id yet (no hook, no transcript). Its terminal names a provisional thread
+//!   ([`Observed::provisional`], [`terminal_thread`]), which gives way to the session's own once
+//!   the id is known.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
 
 use slopty_core::{ClientId, SessionId, WallMs};
-use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
+use slopty_proto::agent::{AgentEvent, AgentSource, AgentStatus, BlockReason};
 use slopty_proto::conversation::{
     self as conv, Body, Change, Grant, Live, LiveId, LiveKind, NoteKind, PermissionEvent,
     PermissionPrompt, ResultStatus, Settled, TextRef, Verdict,
@@ -50,9 +56,9 @@ pub enum Out {
     Actions(ThreadId, Vec<Action>),
 }
 
-/// The capabilities an observed Claude Code has through Slopty.
-pub const CAPS: [&str; 8] = [
-    Cap::APPROVALS,
+/// The capabilities an observed Claude Code has through Slopty before its hooks are heard;
+/// [`Cap::APPROVALS`] joins them once they are.
+pub const CAPS: [&str; 7] = [
     Cap::INTERRUPT,
     Cap::LIVE_TEXT,
     Cap::LIVE_TUI,
@@ -77,6 +83,13 @@ pub fn thread_of(native: &str) -> ThreadId {
 #[must_use]
 pub fn subagent_of(main: ThreadId, agent: &str) -> ThreadId {
     derived(&["claude-code subagent", &main.to_string(), agent])
+}
+
+/// The provisional thread of the Claude Code in terminal `terminal`, before its session id is
+/// known.
+#[must_use]
+pub fn terminal_thread(terminal: SessionId) -> ThreadId {
+    derived(&["claude-code terminal", &terminal.to_string()])
 }
 
 fn derived(parts: &[&str]) -> ThreadId {
@@ -196,6 +209,8 @@ pub struct Observed {
     out: Vec<Out>,
     /// The title is the session's own name, which its first prompt replaces.
     named: bool,
+    /// A hook has been heard, so prompts are held and `approvals` is declared.
+    hooked: bool,
 }
 
 impl Observed {
@@ -209,7 +224,24 @@ impl Observed {
         cwd: &str,
         now: WallMs,
     ) -> Self {
-        let id = thread_of(native);
+        Self::begun(thread_of(native), native, version, terminal, cwd, now)
+    }
+
+    /// The Claude Code in terminal `terminal` whose session id is not known yet: a thread
+    /// named by the terminal, with no native id, until [`Observed::new`] takes over.
+    #[must_use]
+    pub fn provisional(version: &str, terminal: SessionId, cwd: &str, now: WallMs) -> Self {
+        Self::begun(terminal_thread(terminal), "", version, Some(terminal), cwd, now)
+    }
+
+    fn begun(
+        id: ThreadId,
+        native: &str,
+        version: &str,
+        terminal: Option<SessionId>,
+        cwd: &str,
+        now: WallMs,
+    ) -> Self {
         let mut caps: Vec<Cap> = CAPS.iter().map(|c| Cap::named(c)).collect();
         caps.sort();
         let meta = ThreadMeta {
@@ -245,7 +277,33 @@ impl Observed {
             status: None,
             open: Vec::new(),
             named: false,
+            hooked: false,
         }
+    }
+
+    /// Whether the session id is still unknown ([`Observed::provisional`]).
+    #[must_use]
+    pub const fn is_provisional(&self) -> bool {
+        self.meta.native.is_empty()
+    }
+
+    /// A hook spoke for the session: prompts are held from now on, so the thread declares
+    /// `approvals`.
+    pub fn hooked(&mut self) -> Vec<Out> {
+        self.hear_hook();
+        self.drain()
+    }
+
+    fn hear_hook(&mut self) {
+        if self.hooked {
+            return;
+        }
+        self.hooked = true;
+        let approvals = Cap::named(Cap::APPROVALS);
+        if let Err(at) = self.meta.caps.binary_search(&approvals) {
+            self.meta.caps.insert(at, approvals);
+        }
+        self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
     }
 
     /// The session's own thread.
@@ -312,6 +370,9 @@ impl Observed {
 
     /// The agent's status, as the worker's tracker merged it from every signal.
     pub fn status(&mut self, event: &AgentEvent) -> Vec<Out> {
+        if event.source == AgentSource::Hook {
+            self.hear_hook();
+        }
         let (phase, wait, liveness) = match &event.status {
             AgentStatus::None => (Phase::Idle, None, Liveness::Exited { resumable: true }),
             AgentStatus::Idle => (Phase::Idle, None, Liveness::Live),
@@ -415,6 +476,7 @@ impl Observed {
     pub fn permission(&mut self, event: &PermissionEvent) -> Vec<Out> {
         let action = match event {
             PermissionEvent::Asked(prompt) => {
+                self.hear_hook();
                 let request = request(prompt);
                 self.open.push(request.clone());
                 Action::RequestOpened(Box::new(request))

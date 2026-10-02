@@ -77,6 +77,7 @@ mod tests {
             },
             requests: Vec::new(),
             last_line: None,
+            doing: None,
             changed: Changed::default(),
             terminal: Some(terminal),
             parent: None,
