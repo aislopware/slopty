@@ -1247,7 +1247,7 @@ impl ConversationView {
                 theme,
                 Status::Working,
                 self.z(theme.typography.icon()),
-                hsla(s.accent),
+                hsla(s.text_muted),
             ),
             Mark::Icon(icon) => self.icon(icon, s.text_muted),
         };
@@ -1414,7 +1414,7 @@ impl ConversationView {
                         theme,
                         Status::Working,
                         self.z(theme.typography.icon()),
-                        hsla(s.accent),
+                        hsla(s.text_muted),
                     )))
                     .child(
                         div()
@@ -1470,7 +1470,7 @@ impl ConversationView {
                 theme,
                 Status::Working,
                 self.z(theme.typography.icon()),
-                hsla(s.accent),
+                hsla(s.text_muted),
             )))
             .child(div().text_color(hsla(s.text_secondary)).child(word))
             .when(!facts.is_empty(), |el| {

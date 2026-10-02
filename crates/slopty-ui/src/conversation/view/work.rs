@@ -216,7 +216,7 @@ impl ConversationView {
                 theme,
                 Status::Working,
                 self.z(theme.typography.icon()),
-                hsla(s.accent),
+                hsla(s.text_muted),
             )
         } else {
             self.icon(IconName::Brain, s.text_muted)
@@ -459,7 +459,7 @@ impl ConversationView {
                 .children(tasks.iter().map(|t| {
                     let tone = match t.status.as_str() {
                         "completed" => hsla(s.success),
-                        "in_progress" => hsla(s.accent_fill),
+                        "in_progress" => hsla(s.text_muted),
                         _ => hsla(s.border),
                     };
                     div().flex_1().min_w_0().h(px(3.0)).rounded_full().bg(tone)
@@ -529,7 +529,7 @@ impl ConversationView {
                 .children(tasks.iter().map(|task| {
                     let (icon, tone, ink) = match task.status.as_str() {
                         "completed" => (IconName::CircleCheck, s.success, s.text_muted),
-                        "in_progress" => (IconName::CircleDot, s.accent, s.text),
+                        "in_progress" => (IconName::CircleDot, s.text_secondary, s.text),
                         _ => (IconName::Circle, s.text_muted, s.text_secondary),
                     };
                     let (started, ended) = times.get(&task.id).copied().unwrap_or_default();
@@ -701,7 +701,7 @@ impl ConversationView {
                 theme,
                 Status::Working,
                 self.z(theme.typography.icon()),
-                hsla(s.accent),
+                hsla(s.text_muted),
             ),
             (Standing::Stopped, _) => self.icon(IconName::CirclePause, s.text_muted),
             (_, Some(_)) => self.icon(IconName::Bot, s.text_muted),
