@@ -1,0 +1,106 @@
+//! What every adapter that drives its agent over a protocol (pi's RPC mode, ACP) maps the same way.
+//!
+//! How much of a text a thread keeps, a thread's title, its capabilities, an answer offered, and
+//! what a thread is left as when its agent ends unheard.
+
+use slopty_core::WallMs;
+use slopty_proto::thread::detail::Clip;
+use slopty_proto::thread::{
+    Action, Cap, Choice, Effect, Item, ItemBody, Liveness, Phase, RequestState, Status,
+    ThreadState, ToolCall, ToolState, TurnState,
+};
+
+/// Prose: answers, thinking.
+pub const PROSE: Clip = Clip { lines: 400, chars: 32_000 };
+/// A call's input or output.
+pub const OUTPUT: Clip = Clip { lines: 40, chars: 4_000 };
+/// A thread's title, from its first message, in characters.
+const TITLE_CHARS: usize = 80;
+
+/// `names` as a thread's capabilities, sorted.
+#[must_use]
+pub fn caps(names: &[&str]) -> Vec<Cap> {
+    let mut caps: Vec<Cap> = names.iter().map(|c| Cap::named(c)).collect();
+    caps.sort();
+    caps.dedup();
+    caps
+}
+
+/// An answer the agent offers.
+#[must_use]
+pub fn choice(id: &str, label: &str, effect: Effect, stops: bool) -> Choice {
+    Choice { id: id.to_owned(), label: label.to_owned(), effect, scope: None, stops }
+}
+
+/// A tool call as an item's body.
+#[must_use]
+pub fn tool(call: ToolCall) -> ItemBody {
+    ItemBody::Tool(Box::new(call))
+}
+
+/// A thread's title from the first thing the person said: its first line, cut to a length.
+#[must_use]
+pub fn title_of(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
+    match line.char_indices().nth(TITLE_CHARS) {
+        Some((at, _)) => format!("{}…", line.get(..at).unwrap_or(line).trim_end()),
+        None => line.to_owned(),
+    }
+}
+
+/// Dollars as millionths of one, rounded; nothing below zero.
+#[must_use]
+pub fn micro_usd(dollars: f64) -> u64 {
+    let micro = (dollars * 1_000_000.0).round();
+    if micro.is_finite() && micro > 0.0 {
+        // In range by the check above; a cost past u64 is no cost an agent reports.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked finite and positive; saturates past u64"
+        )]
+        let micro = micro as u64;
+        micro
+    } else {
+        0
+    }
+}
+
+/// The thread `state` of an agent that ended unheard, as when the worker that ran it stopped.
+///
+/// Its requests are no longer asked, its calls are cancelled, the turn under way ends stopped,
+/// and it is exited, `resumable` when its session can be taken up again.
+#[must_use]
+pub fn cut_short(state: &ThreadState, resumable: bool, now: WallMs) -> Vec<Action> {
+    let mut actions: Vec<Action> = state
+        .open_requests()
+        .map(|r| Action::RequestResolved { id: r.id.clone(), state: RequestState::Withdrawn })
+        .collect();
+    for item in &state.items {
+        let ItemBody::Tool(call) = &item.body else { continue };
+        if call.state.is_final() || !call.state.may_become(&ToolState::Cancelled) {
+            continue;
+        }
+        let mut call = call.clone();
+        call.state = ToolState::Cancelled;
+        call.ended_ms = Some(now);
+        actions.push(Action::ItemCompleted(Item { body: tool(*call), ..item.clone() }));
+    }
+    let cut = state.last_turn().filter(|t| t.state == TurnState::Active);
+    if let Some(turn) = cut {
+        actions.push(Action::TurnEnded {
+            turn: turn.id,
+            state: TurnState::Interrupted,
+            usage: turn.usage.clone(),
+            ended_ms: now,
+        });
+    }
+    let phase = match state.status.phase {
+        _ if cut.is_some() => Phase::Stopped,
+        Phase::Working | Phase::NeedsYou | Phase::Waiting => Phase::Idle,
+        other => other,
+    };
+    let liveness = Liveness::Exited { resumable };
+    actions.push(Action::Status(Status { phase, wait: None, liveness, since_ms: now }));
+    actions
+}

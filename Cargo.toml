@@ -85,6 +85,10 @@ url = "2.5.8"
 rmcp = { version = "3.5.0", default-features = false, features = [ "server", "macros" ] }
 # The MCP tools' input schemas; the major rmcp builds on.
 schemars = { version = "1.2.2", features = [ "uuid1" ] }
+# ACP's wire types (protocol v1), for the generic ACP adapter (`slopty_agent::acp`). The types
+# alone: the SDK (`agent-client-protocol`) brings its own async runtime beside tokio and pins an
+# older schema, and the adapter is a sans-IO codec over the worker's own pipes.
+agent-client-protocol-schema = { version = "1.10.2", default-features = false }
 # The server's MCP listener (HTTP/1.1 connections served one task each, admitted by peer address)
 # and the LocalAPI client (`slopty_tailnet`), which adds `client`.
 hyper = { version = "1.11.1", features = [ "server", "http1" ] }

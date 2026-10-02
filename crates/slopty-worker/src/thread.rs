@@ -9,8 +9,10 @@
 //! nothing. Every intent is acted on once per id ([`intents`], [`Host::intent`]); what an
 //! observed agent is sent is typed into its terminal by the [`Composer`]. A Codex thread is
 //! followed over the person's Codex daemon instead ([`codex`]), and what it is sent goes there.
-//! A pi thread is started here and driven over pi's RPC mode ([`pi`]).
+//! A pi thread is started here and driven over pi's RPC mode ([`pi`]), and the thread of any other
+//! agent that speaks the Agent Client Protocol over ACP ([`acp`]).
 
+pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod compose;

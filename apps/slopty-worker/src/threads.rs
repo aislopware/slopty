@@ -1,9 +1,9 @@
 //! The thread host on the daemon (`slopty_worker::thread`).
 //!
 //! Every Claude Code session the daemon sees is observed into the agent-neutral thread model,
-//! beside today's conversation path, every Codex thread is followed, and a pi thread is started
-//! and driven here. They are served to clients: the table on the control stream, a stream per
-//! followed thread, and intents answered once each.
+//! beside today's conversation path, every Codex thread is followed, and a pi thread or the thread
+//! of any ACP agent is started and driven here. They are served to clients: the table on the
+//! control stream, a stream per followed thread, and intents answered once each.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,7 @@ use slopty_worker::conversation::Seen;
 use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Agents, Conversations as _};
 use slopty_worker::session::SessionHandle;
+use slopty_worker::thread::acp::{self, Acp};
 use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
@@ -82,6 +83,7 @@ pub struct Threads {
     claude: Driver,
     codex: Codex,
     pi: Pi,
+    acp: Acp,
     composer: Composer,
     snapshots: Snapshots,
 }
@@ -102,6 +104,7 @@ pub fn open(
             let (claude, asks) = Driver::channel();
             let (codex, codex_asks) = Codex::channel();
             let (pi, pi_asks) = Pi::channel();
+            let (acp, acp_asks) = Acp::channel();
             let terminals = Arc::new(PiTerminals(worker.clone()));
             let typing = Typing { worker, agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
@@ -109,9 +112,15 @@ pub fn open(
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
             // The threads live under the data directory, where pi's gate is written too.
             let data = dir.parent().unwrap_or(dir).to_path_buf();
-            let observing =
-                Observing { claude: asks, codex: codex_asks, pi: pi_asks, data, terminals };
-            Some((Threads { host, claude, codex, pi, composer, snapshots }, observing))
+            let observing = Observing {
+                claude: asks,
+                codex: codex_asks,
+                pi: pi_asks,
+                acp: acp_asks,
+                data,
+                terminals,
+            };
+            Some((Threads { host, claude, codex, pi, acp, composer, snapshots }, observing))
         }
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "the thread host did not open: {e}");
@@ -172,6 +181,7 @@ pub struct Observing {
     claude: claude::Asks,
     codex: codex::Asks,
     pi: pi::Asks,
+    acp: acp::Asks,
     /// The daemon's data directory.
     data: PathBuf,
     /// The terminals pi's TUI runs in.
@@ -179,7 +189,7 @@ pub struct Observing {
 }
 
 /// Observe every Claude Code session and follow every Codex thread into the daemon's
-/// threads, serve the pi threads it starts, and snapshot each turn.
+/// threads, serve the pi and ACP threads it starts, and snapshot each turn.
 pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
@@ -190,6 +200,9 @@ pub fn start(daemon: &Daemon, asks: Observing) {
         drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), asks.codex));
     }
     drop(pi::spawn(threads.host.clone(), asks.data, None, asks.terminals, asks.pi));
+    // The registry's agents; the person's own come with `[worker.acp]` in the settings.
+    let own: acp::Own = Arc::new(std::collections::BTreeMap::new);
+    drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
 }
 
 /// What a request needs of the connection it came on.
@@ -345,6 +358,17 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // An ACP agent is looked for and starts: on a task of its own.
+            ThreadRequest::Start { id, start }
+                if slopty_agent::acp::name_of(&start.agent).is_some() =>
+            {
+                tracing::info!(client = %at.client, %id, agent = %start.agent.0, cwd = start.cwd, "start");
+                let (acp, out) = (threads.acp, at.out.clone());
+                at.tasks.spawn(async move {
+                    let outcome = acp.start(id, start).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             ThreadRequest::Start { id, start } => {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, "start refused");
                 let reason = format!("starting {} from here is not built yet", start.agent.0);
@@ -404,6 +428,10 @@ fn decide(
     if pi::is_pi(state) {
         let by = slopty_proto::thread::Answerer { client: Some(at.client), name: "Slopty".into() };
         return (threads.pi.decide(state, id, intent, by), Vec::new());
+    }
+    if acp::is_acp(state) {
+        let by = slopty_proto::thread::Answerer { client: Some(at.client), name: "Slopty".into() };
+        return (threads.acp.decide(state, id, intent, by), Vec::new());
     }
     let Some(session) = state.meta.terminal else {
         let reason = "the thread's agent runs in no terminal here".to_owned();

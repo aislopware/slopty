@@ -982,7 +982,7 @@ pub fn proposed(name: &str, input: &Value) -> ToolDetail {
 
 /// A patch of replacements without line numbers (the file is not read): each is one hunk, the
 /// lines it keeps at either end as context around the lines it removes and adds.
-fn proposed_patch(replacements: &[(String, String)]) -> Patch {
+pub(crate) fn proposed_patch(replacements: &[(String, String)]) -> Patch {
     let mut patch = Patch::default();
     let mut room = PATCH_LINES;
     for (old, new) in replacements {

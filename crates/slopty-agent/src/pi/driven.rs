@@ -33,12 +33,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde_json::Value;
 use slopty_core::WallMs;
-use slopty_proto::thread::detail::{
-    Clip, ExecDetail, ExecStatus, Question, ReadDetail, SearchDetail,
-};
+use slopty_proto::thread::detail::{ExecDetail, ExecStatus, Question, ReadDetail, SearchDetail};
 use slopty_proto::thread::{
-    self, Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Drive,
-    Effect, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Phase,
+    self, Action, AgentId, Answerer, AskId, Cap, Changed, Clipped, Compaction, Drive, Effect,
+    IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Phase,
     Request as Ask, RequestState, Status, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail,
     ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
@@ -47,6 +45,7 @@ use super::rpc::{
     self, AssistantEvent, Command, Content, Entries, GateAsk, Incoming, Message, Request, State,
     Stats, StreamingBehavior, ToolOutput, UiMethod, UiRequest,
 };
+use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
 
 /// What a driven pi can do through Slopty.
 pub const CAPS: [&str; 7] = [
@@ -90,12 +89,6 @@ pub const NO: &str = "no";
 /// pi records as the error of an interrupted turn (`stopReason: "error"`), so a session read
 /// again knows the turn was stopped, not failed.
 const ABORTED: &str = "This operation was aborted";
-/// Prose: answers, thinking.
-const PROSE: Clip = Clip { lines: 400, chars: 32_000 };
-/// A call's input or output.
-const OUTPUT: Clip = Clip { lines: 40, chars: 4_000 };
-/// A thread's title, from its first message.
-const TITLE_CHARS: usize = 80;
 
 /// The thread of pi session `session`.
 #[must_use]
@@ -154,37 +147,7 @@ impl Open {
 /// it was doing is cut short as [`Driven::exited`] cuts it, from what the thread holds.
 #[must_use]
 pub fn gone(state: &ThreadState, now: WallMs) -> Vec<Action> {
-    let mut actions: Vec<Action> = state
-        .open_requests()
-        .map(|r| Action::RequestResolved { id: r.id.clone(), state: RequestState::Withdrawn })
-        .collect();
-    for item in &state.items {
-        let ItemBody::Tool(call) = &item.body else { continue };
-        if call.state.is_final() || !call.state.may_become(&ToolState::Cancelled) {
-            continue;
-        }
-        let mut call = call.clone();
-        call.state = ToolState::Cancelled;
-        call.ended_ms = Some(now);
-        actions.push(Action::ItemCompleted(Item { body: tool(*call), ..item.clone() }));
-    }
-    let cut = state.last_turn().filter(|t| t.state == TurnState::Active);
-    if let Some(turn) = cut {
-        actions.push(Action::TurnEnded {
-            turn: turn.id,
-            state: TurnState::Interrupted,
-            usage: turn.usage.clone(),
-            ended_ms: now,
-        });
-    }
-    let phase = match state.status.phase {
-        _ if cut.is_some() => Phase::Stopped,
-        Phase::Working | Phase::NeedsYou | Phase::Waiting => Phase::Idle,
-        other => other,
-    };
-    let liveness = Liveness::Exited { resumable: true };
-    actions.push(Action::Status(Status { phase, wait: None, liveness, since_ms: now }));
-    actions
+    crate::driven::cut_short(state, true, now)
 }
 
 /// What a person's answer to a gate ask comes to.
@@ -1138,13 +1101,6 @@ fn branch(entries: &Entries) -> Vec<&rpc::Entry> {
     branch
 }
 
-/// `names` as a thread's capabilities, sorted.
-fn caps(names: &[&str]) -> Vec<Cap> {
-    let mut caps: Vec<Cap> = names.iter().map(|c| Cap::named(c)).collect();
-    caps.sort();
-    caps
-}
-
 /// The item of block `index` of message `message`.
 fn block_id(message: u32, index: u32) -> ItemId {
     ItemId(format!("msg-{message}.{index}"))
@@ -1153,14 +1109,6 @@ fn block_id(message: u32, index: u32) -> ItemId {
 /// A model's id as Slopty names it: `provider/id`, which [`Driven::set_model`] takes apart.
 fn model_id(provider: &str, id: &str) -> String {
     format!("{provider}/{id}")
-}
-
-fn choice(id: &str, label: &str, effect: Effect, stops: bool) -> Choice {
-    Choice { id: id.to_owned(), label: label.to_owned(), effect, scope: None, stops }
-}
-
-fn tool(call: ToolCall) -> ItemBody {
-    ItemBody::Tool(Box::new(call))
 }
 
 /// What a gate ask asks, in a line.
@@ -1241,15 +1189,6 @@ fn tool_call(name: &str, arguments: &Value, state: ToolState) -> ToolCall {
     }
 }
 
-/// A thread's title from the first thing the person said: its first line, cut to a length.
-fn title_of(text: &str) -> String {
-    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
-    match line.char_indices().nth(TITLE_CHARS) {
-        Some((at, _)) => format!("{}…", line.get(..at).unwrap_or(line).trim_end()),
-        None => line.to_owned(),
-    }
-}
-
 fn usage_of(usage: &rpc::Usage) -> thread::Usage {
     let mut tokens = BTreeMap::new();
     let mut put = |kind: &str, n: u64| {
@@ -1263,21 +1202,4 @@ fn usage_of(usage: &rpc::Usage) -> thread::Usage {
     put(thread::Usage::OUTPUT, usage.output);
     put(thread::Usage::REASONING, usage.reasoning.unwrap_or_default());
     thread::Usage(tokens)
-}
-
-/// Dollars as millionths of one, rounded; nothing below zero.
-fn micro_usd(dollars: f64) -> u64 {
-    let micro = (dollars * 1_000_000.0).round();
-    if micro.is_finite() && micro > 0.0 {
-        // In range by the check above; a cost past u64 is no cost pi reports.
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "checked finite and positive; saturates past u64"
-        )]
-        let micro = micro as u64;
-        micro
-    } else {
-        0
-    }
 }

@@ -41,12 +41,14 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
+pub mod acp;
 pub mod claude_mod;
 pub mod codex;
 pub mod commands;
 pub mod conversation;
 pub mod detect;
 pub mod discover;
+pub mod driven;
 pub mod hooks;
 pub mod live;
 pub mod loosening;

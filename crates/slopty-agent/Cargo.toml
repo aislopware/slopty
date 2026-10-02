@@ -11,6 +11,8 @@ description = "Slopty agent tracking: Claude Code hook events → per-session ag
 workspace = true
 
 [dependencies]
+# ACP's wire types, for any agent driven over ACP (`acp`).
+agent-client-protocol-schema.workspace = true
 # The Claude mod's directory is named by its files' digest (`claude_mod`).
 blake3.workspace = true
 # The pictures in a transcript are base64; the worker sends their bytes.

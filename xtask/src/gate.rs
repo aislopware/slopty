@@ -467,7 +467,7 @@ fn tools_lane(
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
 /// `slopty_testkit::bins::NAMES`, each after its `--bin`.
-const SPAWNED_BINS: [&str; 12] = [
+const SPAWNED_BINS: [&str; 14] = [
     "--bin",
     "slopty-ptyd",
     "--bin",
@@ -480,6 +480,8 @@ const SPAWNED_BINS: [&str; 12] = [
     "slopty-stub-claude",
     "--bin",
     "slopty-stub-pi",
+    "--bin",
+    "slopty-stub-acp",
 ];
 
 /// `slopty_testkit::bins::BUILT`: where nextest's setup script built them.

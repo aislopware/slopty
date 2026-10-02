@@ -41,7 +41,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       and `codex` in a PTY attaches to the same thread beside the face.
     - *pi, driven,* over `pi --mode rpc`, with Slopty's permission-gate extension, which fails
       closed, because pi has no permission system of its own. Handoff to its TUI at idle.
-    - *Any ACP agent, driven,* through the `agent-client-protocol` crate.
+    - *Any ACP agent, driven,* over its stdio with the protocol's own types (see "Any ACP agent
+      is driven by one adapter" below).
     - *Any other program:* status only, through `slopty hook report`.
   - **Why Claude stays observed by default.** Driving gives a far richer face (token deltas,
     mode and model in place, `rewind_files`, `stop_task`). But Zed reports that Agent SDK use
@@ -335,6 +336,19 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `native`). When the id comes, the session's own thread takes over and the provisional one
     is removed, not left exited, since it never was a session. It is removed too when the
     agent goes or the terminal closes first. Every agent tile so has a row.
+  - **A first hook that asks.** A Claude Code whose first word is a `PermissionRequest` (no
+    session start before it, its transcript still empty) had no thread to carry the prompt, so
+    the person saw an empty tile and no card. The held prompt now opens the thread itself: the
+    session's own when the hook names the id, else the terminal's provisional one. Every
+    prompt held and not yet settled is told again to whichever thread begins after it, so the
+    card survives the provisional thread giving way to the session's (test
+    `a_first_hook_that_asks_opens_a_thread_with_its_request` in
+    `apps/slopty-worker/tests/threads.rs`).
+  - **One session id in two terminals.** A `--resume` of a session still running elsewhere
+    puts two live Claude Codes on one id. The first terminal to claim it keeps the session's
+    thread until its agent goes. The other observes a thread of its own
+    (`observed::thread_in`), so no thread moves between terminals and each prompt lands on the
+    terminal that asked it (test `two_terminals_on_one_session_id_keep_a_thread_each`).
 
 - ✅ **The server ranks every thread on one ladder, and a notice goes where the person is**
   (2026-10-02, `crates/slopty-proto/src/thread/attention.rs`,
@@ -636,6 +650,68 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Rejected:** reading the TUI's screen to know when it rests (the session file says so, and
     Slopty never reads a screen to steer an agent), and sending `/quit` into it (keys go into an
     agent's TUI only on the person's word).
+
+- ✅ **Any ACP agent is driven by one adapter, as the person's own program, asking before it
+  acts** (2026-10-02, ACP v1 through `agent-client-protocol-schema` 1.10.2;
+  `crates/slopty-agent/src/acp/`, `crates/slopty-worker/src/thread/acp.rs`; the tests in
+  `crates/slopty-agent/tests/acp.rs` and `crates/slopty-worker/tests/acp.rs`).
+  - **The types, not the SDK.** The `agent-client-protocol` crate brings an async runtime of its
+    own beside tokio and pins an older schema. Slopty takes the schema crate alone, with no
+    default features (no `schemars`, no unstable methods), and writes the framing itself: one
+    JSON-RPC message a line, read as JSON first and classed by its members, so a method it does
+    not know is answered or passed over, never a parse error that stalls the agent. The codec is
+    sans-IO, like pi's, and the worker carries the lines.
+  - **Which agents.** An open registry (`acp::registry`): the public ACP registry's agents, each
+    with the command line that serves ACP on stdio, run as the person's installed program,
+    never fetched. The person adds their own or replaces a known one by name and command line,
+    and an empty command line takes one away. Claude Code, Codex and pi are left out, since each
+    has an adapter of its own over a richer protocol. A thread's agent is `acp:<name>`, and
+    `ThreadRequest::Start` for it starts the program found as the person's terminal finds it,
+    in the thread's folder, with the daemon's environment. A start's own arguments are refused:
+    the command line comes from the registry or the settings, never from a client.
+  - **Slopty is a bare client.** `initialize` offers no file system and no terminal, so the agent
+    works with its own tools. Its `session/request_permission` is a request on the call, with
+    exactly the answers it offers (allow and reject, once or always, with the scope shown), and
+    only one of those goes back. A request of any other method is refused with
+    `method_not_found`. A cancel answers every open request as cancelled, as the protocol asks.
+    An agent that answers that it needs signing in is left as it is, with a notice saying to
+    sign in with the agent's own command in a terminal: Slopty never signs an agent in.
+  - **Turns and items.** A prompt is a turn, opened by the person's message and ended by the
+    prompt's stop reason (cancelled is stopped; refusal fails; the token and request limits end
+    it with a notice). Streams are cut into items where the kind or the message id changes, and
+    a tool call keeps the agent's id. A diff in a call's content is an edit or a write, with its
+    patch. Plans, commands, modes, config options, usage and the session's title map to the
+    thread's own fields. Anything else is kept as an `Extra` item rather than dropped.
+  - **One message at a time.** ACP takes no message while a prompt runs, so the adapter declares
+    `queue` and not `steer`: a message sent during a turn waits on the worker, can be withdrawn
+    or edited there, and goes once the turn ends. A steer is refused as unsupported.
+  - **Resumed by loading.** Whether the agent can load a session (`loadSession`) is kept as the
+    thread's `acp-load-session` fact. A thread whose agent is gone is exited, resumable when that
+    fact holds. The next message starts the agent again and sends `session/load`, and the
+    agent's replay rebuilds the thread from nothing before the message goes. The replay is held
+    until the load is answered, so a load that fails leaves the thread as it was, with a notice.
+    A thread whose agent cannot load sessions refuses a message once it is gone.
+  - **The stand-in.** `slopty-stub-acp` replays a recording against what it is sent, as
+    `slopty-stub-pi` does: a request is the next step's by its method (a prompt by its words),
+    an answer to one of the agent's own requests by that request's id and what it answers, and
+    the agent's answers go out under the ids the client chose. It saves what it heard before it
+    answers, so a test that sees the answer finds it said. The worker tests start
+    `acp:opencode` with the stand-in on the `PATH` as `opencode`: a turn, an allow, a message
+    queued behind an ask, a reject, an interrupt while the agent asks, a resume by loading, an
+    agent that asks to be signed in, and the starts that are refused, each asserting what
+    reached the agent.
+  - **A failed agent is not started again on its own.** Messages held for an agent that failed
+    (it could not open its session, or ended with an error) are dropped with the thread saying
+    why, rather than handed to a fresh start that would fail the same way, over and over. The
+    person's next message tries again.
+  - **The fixtures.** `initialize`, `session/new` and the commands are OpenCode 1.18.34's own
+    answers, taken from a run in a scratch home with nothing signed in and no model called. The
+    turns after them are written from the protocol's schema, since recording them needs a model
+    behind the agent; `tests/acp.rs` holds every line to the schema's types and every message
+    Slopty sends to the very JSON in the fixture.
+  - **Not carried yet:** the person's own agents from the settings (`[worker.acp]`, which the
+    settings crate does not read yet), offering the installed ACP agents in the client, pictures
+    and files in a prompt, and the unstable methods (forking, subagents, session notices).
 
 - ✅ **The thread view carries what the conversation face showed, and its e2e moved with it**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/`;

@@ -13,11 +13,12 @@
 //! - [`live`]: how a live test that cannot run here skips, and why it fails instead in the VM live
 //!   lane.
 //!
-//! And two doubles, binaries, so tests start agents without spending anyone's plan:
+//! And three doubles, binaries, so tests start agents without spending anyone's plan:
 //! `slopty-stub-claude`, a stand-in for `claude` that speaks the hook protocol, calls Slopty's
-//! tools through the `slopty mcp` it is handed, and records what it was given; and
+//! tools through the `slopty mcp` it is handed, and records what it was given;
 //! `slopty-stub-pi`, a stand-in for `pi --mode rpc` that replays a recording of pi's RPC mode
-//! against what it is sent.
+//! against what it is sent; and `slopty-stub-acp`, a stand-in for any ACP agent that replays a
+//! recording of an ACP session the same way.
 
 #![warn(unreachable_pub)]
 #![allow(
