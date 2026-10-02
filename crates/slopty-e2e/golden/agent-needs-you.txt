@@ -16,6 +16,9 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
 Status │ Nothing here yet
+Group │ Activity
+Dialog │ Bash
+Button │ Answer in the terminal
 MultilineTextInput │ Message
 Button │ Attach files
 Button │ Model, Claude

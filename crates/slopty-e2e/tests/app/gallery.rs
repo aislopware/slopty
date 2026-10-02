@@ -461,6 +461,14 @@ async fn the_empty_workspace_says_how_to_begin() {
     stack.shutdown().await;
 }
 
+/// The blocked agent's thread holds what it asks: the tray naming the tool, with the way to
+/// answer in the terminal. The worker puts it there a grace after the hook, so a golden taken
+/// before it would hold a thread that has not caught up.
+fn asked_in_its_thread(d: &Dump) -> bool {
+    d.a11y_node("Dialog", Some("Bash")).is_some()
+        && d.a11y_node("Button", Some("Answer in the terminal")).is_some()
+}
+
 /// The title the second agent's TUI gives itself, as Claude Code titles a session by its task.
 const TITLED_AGENT: &str = "Fix the login redirect";
 
@@ -503,6 +511,7 @@ async fn an_agent_that_needs_you_says_so_on_its_tile_and_in_the_bar() {
             d.terminal(&session)
                 .is_some_and(|t| t.agent.as_deref() == Some("blocked:permission:Bash"))
                 && d.a11y_node("Status", Some("1 new")).is_some()
+                && asked_in_its_thread(d)
         })
         .await
         .unwrap();
@@ -715,7 +724,7 @@ async fn the_inbox_lists_what_waits_and_what_finished() {
     let drv = &mut stack.driver;
     let dump = drv
         .wait_for("the agent blocked", STEP, |d| {
-            d.workers.iter().map(|w| w.needs_you).sum::<usize>() == 1
+            d.workers.iter().map(|w| w.needs_you).sum::<usize>() == 1 && asked_in_its_thread(d)
         })
         .await
         .unwrap();
