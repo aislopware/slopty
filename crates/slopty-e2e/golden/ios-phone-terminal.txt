@@ -1,0 +1,26 @@
+Window
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-ios-worker, 1 tile
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Close tile
+Group (focused)
+Terminal │ shell │ ~ %
+Button │ Escape
+Button │ Tab
+Button │ Control
+Button │ Left arrow
+Button │ Up arrow
+Button │ Down arrow
+Button │ Right arrow
+Button │ Paste
+Button │ Tilde
+Button │ Pipe
+Button │ Slash
+Button │ Minus
+Button │ Command
+Button │ Find

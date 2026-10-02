@@ -1,0 +1,37 @@
+Window
+Group │ Workspace
+Button │ Navigator
+Group │ Where
+Button │ e2e-ios-worker
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ scratch
+Heading │ note scratch
+Button │ Fullscreen tile
+Button │ Close tile
+MultilineTextInput │ Note
+Group │ Status
+Status │ e2e-ios-worker
+Dialog │ Commands
+TextInput │ Command (focused)
+Button │ Cancel
+ListBox │ Commands
+Heading │ Tiles
+ListBoxOption │ Terminal ~
+ListBoxOption │ scratch
+Heading │ Workers
+ListBoxOption │ e2e-ios-worker
+Heading │ Recent
+ListBoxOption │ Name this tile ⌘E
+ListBoxOption │ Open settings ⌘,
+ListBoxOption │ New note ⇧⌘N
+Heading │ Commands
+ListBoxOption │ New terminal ⌘T

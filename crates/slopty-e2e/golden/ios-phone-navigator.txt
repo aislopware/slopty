@@ -1,0 +1,30 @@
+Window
+Group │ Workspace (focused)
+Button │ Navigator
+Heading │ e2e-ios-worker, 2 tiles
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ scratch
+Heading │ note scratch
+Button │ Close tile
+MultilineTextInput │ Note
+Group │ Status
+Status │ e2e-ios-worker
+Navigation │ Navigator
+TextInput │ Filter
+Heading │ Workspaces
+Button │ e2e-ios-worker, 2 tiles
+Button │ New workspace
+Heading │ Workers
+Button │ e2e-ios-worker
+Button │ New shell on e2e-ios-worker
+Button │ Terminal
+Button │ Close tile
+Button │ scratch
+Button │ Close tile
