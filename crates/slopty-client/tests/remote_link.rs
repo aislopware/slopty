@@ -422,16 +422,20 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "the prefetch lands");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // No time to wait is given, so only a picture already in memory can answer: that, not a
+        // clock that a loaded runner stretches, is what shows the paste came from memory.
         let mut took = Vec::new();
         for _ in 0..20 {
             let started = std::time::Instant::now();
-            let got = remote.clip_fetch(&rep, None, WAIT);
+            let got = remote.clip_fetch(&rep, None, Duration::ZERO);
             took.push(started.elapsed());
-            assert!(matches!(&got, Fetched::Data(bytes) if *bytes == png), "the picture, whole");
+            assert!(
+                matches!(&got, Fetched::Data(bytes) if *bytes == png),
+                "the picture, whole, from memory"
+            );
         }
         took.sort();
         println!("prefetched paste of 300 kB, 20 pastes: p50 {:?} max {:?}", took[10], took[19]);
-        assert!(took[19] < Duration::from_millis(5), "from memory: {:?}", took[19]);
         assert!(
             !matches!(
                 tokio::time::timeout(Duration::from_millis(300), client.rx.recv()).await,
