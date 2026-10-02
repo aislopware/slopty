@@ -155,7 +155,8 @@ impl WorkspaceView {
             ItemKind::Note { .. }
             | ItemKind::Window { .. }
             | ItemKind::Display { .. }
-            | ItemKind::Browser { .. } => None,
+            | ItemKind::Browser { .. }
+            | ItemKind::Review { .. } => None,
         });
         from_tile
             .or_else(|| {

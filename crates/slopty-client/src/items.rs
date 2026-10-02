@@ -296,4 +296,21 @@ mod tests {
         assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
         assert_eq!(doc.get(shell.id), Some(&shell));
     }
+
+    /// A review item comes in with the registry's snapshot and stays through the next one,
+    /// so its tile is restored where the layout keeps it.
+    #[test]
+    fn a_review_is_restored_from_the_snapshot() {
+        let me = ClientId::new();
+        let mut doc = ItemDoc::default();
+        let thread = slopty_proto::thread::ThreadId::new();
+        let review = Item { kind: ItemKind::Review { thread }, ..term() };
+        let items = vec![review.clone()];
+        let first = ItemSync::Snapshot { version: 1, items: items.clone() };
+        assert_eq!(doc.apply_sync(first, me), ItemChange::Reset);
+        assert_eq!(doc.get(review.id), Some(&review));
+        let again = ItemSync::Snapshot { version: 2, items };
+        doc.apply_sync(again, me);
+        assert_eq!(doc.get(review.id).map(|i| i.kind.clone()), Some(ItemKind::Review { thread }));
+    }
 }

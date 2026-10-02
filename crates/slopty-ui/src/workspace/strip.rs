@@ -148,6 +148,7 @@ pub(super) enum Handed {
     Shell { zoom: f32, covered: bool, zooming: bool },
     Face { zoom: f32, width: f32 },
     Board { zoom: f32, width: f32 },
+    Review { zoom: f32, width: f32 },
     Stream { painted: f32 },
     Text { zoom: f32, pad: f32, size: f32 },
     Folder { zoom: f32 },

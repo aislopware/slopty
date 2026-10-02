@@ -552,6 +552,15 @@ fn apply(
 ) -> Reply {
     match command {
         Command::Ping => Reply::Ok,
+        Command::Contrast { increased } => {
+            let contrast = if increased {
+                slopty_theme::Contrast::Increased
+            } else {
+                slopty_theme::Contrast::Standard
+            };
+            workspace.update(cx, |ws, cx| ws.set_contrast(contrast, cx));
+            Reply::Ok
+        }
         Command::Resume { what } => match slopty_platform::resume::Resume::named(&what) {
             Some(resume) => {
                 workspace.read(cx).resume(resume);
@@ -1097,6 +1106,7 @@ impl Workspace {
                 ItemKind::File { .. } => ("file", None),
                 ItemKind::Folder { .. } => ("folder", None),
                 ItemKind::Browser { .. } => ("browser", None),
+                ItemKind::Review { .. } => ("review", None),
             };
             let note = match &item.kind {
                 ItemKind::Note { text } => Some(text.clone()),

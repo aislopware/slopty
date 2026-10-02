@@ -111,6 +111,54 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
     assert_eq!(posted[1].id, c.session.to_string());
 }
 
+/// Led by the server, the look posts no agent moment of its own: only what the server sends
+/// does, and only while the app is away. The look still gives a wait's note its approval
+/// buttons and takes it back once answered; a shell's command still notifies here.
+#[test]
+fn led_by_the_server_only_its_notices_post_for_agents() {
+    let (mut attention, memory) = attention();
+    let a = route(1);
+    attention.set_server_led(true);
+    attention.set_active(false);
+    let turn = Turn { route: route(2), title: "api".into(), body: "Done".into() };
+    attention.look(&Look {
+        asking: vec![asking(a, "Run cargo test")],
+        turns: vec![turn],
+        unread: 2,
+    });
+    assert!(memory.posted().is_empty(), "the look decides nothing: {:?}", memory.posted());
+
+    let heard = Heard {
+        route: a,
+        kind: NoticeKind::NeedsYou,
+        title: "Fix the build".into(),
+        body: "Run cargo test".into(),
+    };
+    attention.notice(&heard);
+    let posted = memory.posted();
+    assert_eq!(posted.len(), 1);
+    assert_eq!((posted[0].title.as_str(), posted[0].category), ("Fix the build", None));
+
+    let held = Asking { approval: Some(7), ..asking(a, "Run cargo test") };
+    attention.look(&Look { asking: vec![held], turns: Vec::new(), unread: 2 });
+    let posted = memory.posted();
+    assert_eq!(posted.len(), 2, "the note again, now with the buttons");
+    assert_eq!(posted[1].category, Some(APPROVAL));
+    assert!(posted[1].silent, "replaced without a second sound");
+
+    attention.look(&Look::default());
+    assert_eq!(memory.withdrawn(), [a.session.to_string()], "answered, its note goes");
+
+    let done =
+        Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(60) };
+    attention.command_finished(route(3), "build".into(), &done, Duration::from_secs(5));
+    assert_eq!(memory.posted().len(), 3, "a shell's moment is this client's own");
+
+    attention.set_active(true);
+    attention.notice(&heard);
+    assert_eq!(memory.posted().len(), 3, "in front, the inbox says it");
+}
+
 #[test]
 fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
     let (mut attention, memory) = attention();
@@ -294,6 +342,40 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
         assert_eq!(Some(asks.title.clone()), title, "titled as its tile's header");
         assert_eq!(asks.body, "Run cargo test", "the ask line");
     });
+}
+
+/// The server's notice becomes a note that leads to the thread's tile, says the subagent it
+/// came from, and is dropped for a turn shorter than the slow-command time.
+#[gpui::test]
+fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppContext) {
+    use slopty_proto::thread::ThreadId;
+    use slopty_proto::thread::attention::{ThreadAt, Via};
+
+    let (view, cx) = workspace(cx);
+    let session = SessionId::new();
+    let id = slopty_core::WorkerId::new();
+    let key = crate::workspace::projects::worker_key(id);
+    let (tiles, _link) = worker(&view, cx, key, "mini", &[session]);
+    let mut notice = Notice {
+        kind: NoticeKind::NeedsYou,
+        thread: ThreadAt { worker: id, thread: ThreadId::new() },
+        tile: Some(session),
+        title: "Fix the build".into(),
+        text: "Run cargo test".into(),
+        worked_ms: None,
+        via: Some(Via { thread: ThreadId::new(), title: "Explore the tests".into() }),
+    };
+    view.update(cx, |v, _| {
+        let heard = v.heard(&notice).expect("a note");
+        assert_eq!(heard.route, Route { worker: key, item: Some(tiles[0].item), session });
+        assert_eq!(heard.title, "Fix the build");
+        assert_eq!(heard.body, "Explore the tests: Run cargo test", "the subagent named");
+    });
+    notice.kind = NoticeKind::Finished;
+    notice.worked_ms = Some(1_000);
+    assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_none(), "a short turn says nothing");
+    notice.worked_ms = Some(600_000);
+    assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_some(), "a long one does");
 }
 
 #[gpui::test]

@@ -137,6 +137,9 @@ pub const READING: &str = crate::file::READING;
 /// A note whose editor is not made yet.
 pub const NOTE: &str = "Note";
 
+/// What a review tile's header says, and its body while the review is on its way.
+pub const REVIEW: &str = "Review";
+
 /// How much of a note's first line the header shows.
 pub const NOTE_TITLE_CHARS: usize = 40;
 
@@ -452,6 +455,7 @@ pub(super) const fn kind_icon(item: &Item, agent: bool) -> IconName {
         ItemKind::File { .. } => IconName::FileText,
         ItemKind::Folder { .. } => IconName::Folder,
         ItemKind::Browser { .. } => IconName::Globe,
+        ItemKind::Review { .. } => IconName::FileDiff,
     }
 }
 
@@ -467,7 +471,8 @@ pub(super) fn note_done(done: usize, total: usize) -> String {
     format!("{done} of {total} done")
 }
 
-/// The word for what an item is: `terminal`, `window`, `display`, `note`, `file`, `browser`.
+/// The word for what an item is: `terminal`, `window`, `display`, `note`, `file`, `folder`,
+/// `browser`, `review`.
 pub(super) const fn kind_name(item: &Item) -> &'static str {
     match item.kind {
         ItemKind::Terminal { .. } => "terminal",
@@ -477,6 +482,7 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
         ItemKind::File { .. } => "file",
         ItemKind::Folder { .. } => "folder",
         ItemKind::Browser { .. } => "browser",
+        ItemKind::Review { .. } => "review",
     }
 }
 
@@ -505,7 +511,7 @@ impl WorkspaceView {
             ItemKind::Note { text } => {
                 self.note_progress_of(item.id, text).map(|(done, total)| note_done(done, total))
             }
-            ItemKind::Window { .. } | ItemKind::Display { .. } => None,
+            ItemKind::Window { .. } | ItemKind::Display { .. } | ItemKind::Review { .. } => None,
         }
     }
 
@@ -527,6 +533,7 @@ impl WorkspaceView {
             ItemKind::Browser { url } => self
                 .page_facts(item.id)
                 .map_or_else(|| crate::browser::short_url(url).to_owned(), |p| p.title.clone()),
+            ItemKind::Review { .. } => REVIEW.to_owned(),
         }
     }
 
@@ -1881,7 +1888,7 @@ impl WorkspaceView {
                     );
                 }
             }
-            ItemKind::Note { .. } | ItemKind::File { .. } => {}
+            ItemKind::Note { .. } | ItemKind::File { .. } | ItemKind::Review { .. } => {}
         }
         actions
     }
@@ -2639,6 +2646,16 @@ impl WorkspaceView {
                 }
                 None if !worker_up => well(),
                 None => self.waiting_body(item, Wait::Loading(READING.into()), k),
+            },
+            ItemKind::Review { thread } => match self.review_of(*thread).cloned() {
+                Some(view) => {
+                    let width = placed.target.w;
+                    let handed = Handed::Review { zoom: k, width };
+                    self.hand_over(cx, &view, handed, move |v, cx| v.set_layout(k, width, cx));
+                    fixed(self.body_view(&view, placed, cx))
+                }
+                None if !worker_up => well(),
+                None => self.waiting_body(item, Wait::Loading(REVIEW.into()), k),
             },
         }
     }

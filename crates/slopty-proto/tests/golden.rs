@@ -903,6 +903,21 @@ mod golden {
         );
         snap("client_list_folder", &ClientMsg::ListFolder { path: "~/src".to_owned() });
         snap(
+            "worker_item_review",
+            &WorkerMsg::Items(ItemSync::Delta {
+                version: 13,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: ItemOp::Add(Item {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7d)),
+                    kind: ItemKind::Review {
+                        thread: slopty_proto::thread::ThreadId::from_uuid(Uuid::from_u128(0x7417)),
+                    },
+                    sleeping: false,
+                    name: None,
+                }),
+            }),
+        );
+        snap(
             "worker_folder_listed",
             &WorkerMsg::Folder {
                 path: "~/src".to_owned(),

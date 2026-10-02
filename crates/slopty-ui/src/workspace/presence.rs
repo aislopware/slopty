@@ -5,40 +5,15 @@
 //! window is in front, the workspace there, the terminals on screen and the one with the
 //! keyboard. The app sends it on every change, and lowers `active` once the person has been
 //! away from the machine a while, which only the app can measure.
-//!
-//! The shape is `slopty_proto::thread::attention::Presence`'s, kept here until that lands.
 
 use gpui::Window;
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::WorkerId;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::TermRef;
+use slopty_proto::thread::attention::{Presence, Seat};
 
 use super::WorkspaceView;
-
-/// Which kind of seat a client is, for where a notice goes.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Seat {
-    /// A machine the person sits at: a Mac, an iPad on its keyboard.
-    Desk,
-    /// One they carry: a phone, an iPad in hand.
-    Handheld,
-}
-
-/// Where the person is on this client.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Presence {
-    /// What kind of client it is.
-    pub seat: Seat,
-    /// Whether the person is at it: the window in front.
-    pub active: bool,
-    /// The workspace in front, by its name here.
-    pub workspace: Option<String>,
-    /// The terminals on screen, by worker and session, in that order.
-    pub showing: Vec<TermRef>,
-    /// The terminal with the keyboard.
-    pub focus: Option<TermRef>,
-}
 
 impl WorkspaceView {
     /// Where the person is on this client, as the server is to be told.

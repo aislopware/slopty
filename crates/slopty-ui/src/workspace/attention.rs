@@ -22,6 +22,13 @@
 //! ([`Attention::set_present_elsewhere`]): at the Mac, the phone in their pocket stays quiet, and
 //! what it had up is taken back, since the Mac in front of them says it.
 //!
+//! Linked to a server, the server decides ([`Attention::set_server_led`]): it ranks every
+//! thread on one ladder and picks the clients a moment goes to by where the person is, so two
+//! devices never both say it. Its notices are then the only agent moments that post here
+//! ([`Attention::notice`], made by [`WorkspaceView::heard`]); the workspace's own look still
+//! adds the approval buttons to a note up, takes back what was answered, and keeps the badge.
+//! A shell's moments are this client's own and post as before.
+//!
 //! [`Attention`] decides and hands what it decided to a [`Notifier`]; the app owns one and
 //! feeds it a [`Look`] after every change of the workspace, and each finished command.
 
@@ -35,6 +42,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::{self, APPROVAL, Note, Notifier, Tap};
 use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
+use slopty_proto::thread::attention::{Notice, NoticeKind};
 
 use super::agents::{agent_ask_line, agent_status_word};
 use super::{Finished, WorkspaceView};
@@ -143,6 +151,19 @@ pub struct Look {
     pub unread: usize,
 }
 
+/// A notice the server picked this client for, as its note says it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Heard {
+    /// Where it leads.
+    pub route: Route,
+    /// Why it was sent.
+    pub kind: NoticeKind,
+    /// The thread's title, else the tile's name.
+    pub title: String,
+    /// What it wants or said, named by the subagent it came from.
+    pub body: String,
+}
+
 /// Why a note is up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Why {
@@ -159,6 +180,8 @@ pub struct Attention {
     active: bool,
     /// The person is at another of their devices.
     elsewhere: bool,
+    /// The server's notices decide which agent moments post.
+    server_led: bool,
     /// The sessions whose agent was waiting at the last look.
     asking: HashSet<SessionId>,
     /// The sessions whose agent's finished turn was unread at the last look.
@@ -190,6 +213,7 @@ impl Attention {
             notifier,
             active: true,
             elsewhere: false,
+            server_led: false,
             asking: HashSet::new(),
             turns: HashSet::new(),
             posted: HashMap::new(),
@@ -221,6 +245,37 @@ impl Attention {
         self.elsewhere = elsewhere;
     }
 
+    /// A server's notices reach this client, or stopped: while they do, they are the only agent
+    /// moments that post, the server having chosen this client by where the person is.
+    pub const fn set_server_led(&mut self, led: bool) {
+        self.server_led = led;
+    }
+
+    /// The server picked this client to say `heard`: posted while the app is not in front,
+    /// where the inbox already says it. A wait's note gets its approval buttons from the next
+    /// [`Self::look`].
+    pub fn notice(&mut self, heard: &Heard) {
+        if self.active {
+            return;
+        }
+        let session = heard.route.session;
+        let note = Note {
+            id: session.to_string(),
+            title: heard.title.clone(),
+            body: heard.body.clone(),
+            info: heard.route.info(),
+            ..Note::default()
+        };
+        let why = match heard.kind {
+            NoticeKind::NeedsYou => Why::Asks,
+            NoticeKind::Failed | NoticeKind::Finished => Why::Finished,
+        };
+        self.post(session, why, note);
+        if why == Why::Asks {
+            self.answers.insert(session, None);
+        }
+    }
+
     /// Whether a moment is worth a note now: the app is not in front, and the person is not
     /// at another device.
     const fn away(&self) -> bool {
@@ -243,7 +298,7 @@ impl Attention {
                 let session = asking.route.session;
                 let up = self.posted.get(&session) == Some(&Why::Asks);
                 let was = self.answers.get(&session).copied().flatten();
-                if !self.asking.contains(&session) {
+                if !self.asking.contains(&session) && !self.server_led {
                     self.post(session, Why::Asks, asking.note(false));
                 } else if up && asking.approval.is_none() && was.is_some() && was == asking.answered
                 {
@@ -269,7 +324,7 @@ impl Attention {
         }
         self.asking = now;
         let turns: HashSet<SessionId> = look.turns.iter().map(|t| t.route.session).collect();
-        if self.away() {
+        if self.away() && !self.server_led {
             let fresh: Vec<&Turn> =
                 look.turns.iter().filter(|t| !self.turns.contains(&t.route.session)).collect();
             for turn in fresh {
@@ -389,6 +444,30 @@ impl WorkspaceView {
             })
             .collect();
         Look { asking, turns, unread: self.inbox_count() }
+    }
+
+    /// The note the server's `notice` makes here; `None` for a finished turn shorter than the
+    /// slow-command time, and for a thread with no terminal to lead to.
+    #[must_use]
+    pub fn heard(&self, notice: &Notice) -> Option<Heard> {
+        if notice.kind == NoticeKind::Finished
+            && notice.worked_ms.is_some_and(|ms| Duration::from_millis(ms) < self.slow_command)
+        {
+            return None;
+        }
+        let session = notice.tile?;
+        let worker = super::projects::worker_key(notice.thread.worker);
+        let item = self.tile_of_session(session).map(|t| t.item);
+        let route = Route { worker, item, session };
+        let title = Some(notice.title.trim())
+            .filter(|t| !t.is_empty())
+            .map_or_else(|| self.route_title(route), str::to_owned);
+        let body = match &notice.via {
+            Some(via) if !notice.text.is_empty() => format!("{}: {}", via.title, notice.text),
+            Some(via) => via.title.clone(),
+            None => notice.text.clone(),
+        };
+        Some(Heard { route, kind: notice.kind, title, body })
     }
 
     /// Where a note about `session` leads, and the name its title says; `None` for a session

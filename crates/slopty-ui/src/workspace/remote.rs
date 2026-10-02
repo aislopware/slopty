@@ -569,7 +569,12 @@ impl WorkspaceView {
             Some(ItemKind::Terminal { session }) => Upload::to_shell(tile, *session),
             Some(ItemKind::Window { .. } | ItemKind::Display { .. }) => Upload::to_staging(tile),
             Some(ItemKind::Folder { path }) => Upload::to_folder(tile, path.clone()),
-            Some(ItemKind::Note { .. } | ItemKind::File { .. } | ItemKind::Browser { .. })
+            Some(
+                ItemKind::Note { .. }
+                | ItemKind::File { .. }
+                | ItemKind::Browser { .. }
+                | ItemKind::Review { .. },
+            )
             | None => {
                 Self::discard_landing(landing, cx);
                 return;

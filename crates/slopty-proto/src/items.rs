@@ -1,5 +1,6 @@
 //! The worker's item registry: what exists on a worker for its clients to show (terminals, streamed
-//! windows and displays, notes, files, folders and pages). Worker-authoritative, snapshot + deltas.
+//! windows and displays, notes, files, folders, pages and reviews). Worker-authoritative, snapshot
+//! + deltas.
 //!
 //! Where an item is shown is not here: each client arranges the items of every worker it reaches
 //! in a layout of its own (`slopty_client::layout`), so a phone and a Mac share the set and not
@@ -50,6 +51,12 @@ pub enum ItemKind {
     Folder {
         /// Absolute path on the worker, or `~/…` in its home.
         path: String,
+    },
+    /// The review of a thread's changes: what is in it comes from the thread's review frames
+    /// (`crate::thread::wire::ThreadRequest::Review`), not the registry.
+    Review {
+        /// The thread.
+        thread: crate::thread::ThreadId,
     },
 }
 

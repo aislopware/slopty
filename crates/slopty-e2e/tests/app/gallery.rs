@@ -3,7 +3,7 @@
 //! the overview, the palette, the settings, the "…" menu, the empty workspace, an agent that
 //! needs the human (on its tile and in the navigator), a remote tile, an upload and a forwarded
 //! port, the inbox, and a failed command block; the first run, the navigator, the inbox and the
-//! failed block dark as well.
+//! failed block dark as well, and the navigator once under Increase Contrast.
 //!
 //! A golden passes or fails on its numbers. The tolerance is blind to a word of chrome text
 //! (`docs/decisions/ui.md`), so each scenario also asserts the chrome it shows through the
@@ -367,6 +367,10 @@ async fn a_workspace_of_columns_in_both_themes() {
     .await
     .unwrap();
     golden(drv, &dir, "workspace-navigator").await;
+    // Increase Contrast as the app's own setting stands it in: this Mac's is never touched.
+    drv.ok(&Command::Contrast { increased: true }).await.unwrap();
+    golden(drv, &dir, "workspace-navigator-contrast").await;
+    drv.ok(&Command::Contrast { increased: false }).await.unwrap();
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.wait_for("the navigator gone again", STEP, |d| {
         d.a11y_node("Navigation", Some("Navigator")).is_none()

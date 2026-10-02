@@ -4604,3 +4604,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty_theme::tests::increase_contrast_raises_text_and_hairlines`,
     `the_chrome_follows_the_theme_s_contrast`, and in the app
     `settings::tests::increase_contrast_derives_the_chrome_for_it`.
+
+- ✅ **A review is a tile of its own, and the server's notices lead** (2026-10-02, GUI-first
+  plan §4.3 and item 8).
+  - **The review tile.** A thread view's "Review" adds an `ItemKind::Review { thread }` item on
+    the worker whose agent runs the thread, so the review sits in the strip beside the agent,
+    is kept with the layout and restored, and closes like any tile. Asked again while it is
+    open, it goes to that tile. It takes the keyboard when focused, its header leads with the
+    file-diff glyph and says "Review", and comments sent from it take the keyboard back to the
+    agent's tile, where the answer shows. Its tile gone, here or on another client, lets the
+    thread go. A tile restored before its thread view has asked waits on "Review" until the
+    faces can open a review for it themselves.
+  - **Notices.** Linked to a server, the server's `Notice` is the only agent moment that posts
+    a note (`Attention::set_server_led`, `WorkspaceView::heard`): it has already picked this
+    client by where the person is, so two devices never both say it. The note says the
+    subagent it came from, and a finished turn shorter than the slow-command time is dropped
+    here. The workspace's own look still adds a held prompt's approval buttons to the note up,
+    takes back what was answered and keeps the badge. A shell's long command and a program's
+    own notification stay this client's.
+  - Tests: `workspace::tests::review_tile::a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it`,
+    `attention::tests::led_by_the_server_only_its_notices_post_for_agents` and
+    `a_server_notice_leads_to_its_tile_and_names_the_subagent`.

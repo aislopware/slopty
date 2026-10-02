@@ -1043,6 +1043,7 @@ impl WorkspaceView {
                 (self.tile_place(item).unwrap_or_default(), None)
             }
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
+            ItemKind::Review { .. } => (self.tile_place(item).unwrap_or_default(), None),
             ItemKind::Note { text } => {
                 (note_meta(text, self.note_progress_of(item.id, text)), None)
             }

@@ -349,7 +349,8 @@ impl WorkspaceView {
             ItemKind::Terminal { .. }
             | ItemKind::Note { .. }
             | ItemKind::Browser { .. }
-            | ItemKind::Folder { .. } => None,
+            | ItemKind::Folder { .. }
+            | ItemKind::Review { .. } => None,
         }
     }
 

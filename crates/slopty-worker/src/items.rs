@@ -267,7 +267,8 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         | ItemKind::Display { .. }
         | ItemKind::File { .. }
         | ItemKind::Folder { .. }
-        | ItemKind::Browser { .. } => Ok(()),
+        | ItemKind::Browser { .. }
+        | ItemKind::Review { .. } => Ok(()),
     }
 }
 
@@ -507,6 +508,25 @@ mod tests {
         let reopened = ItemStore::open(&file).unwrap();
         let path = "/w/src".to_owned();
         assert_eq!(reopened.get(folder.id).map(|i| i.kind), Some(ItemKind::Folder { path }));
+    }
+
+    /// A thread's review is an item like any other: added, and reopened as it was.
+    #[test]
+    fn a_review_is_kept_and_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("items.json");
+        let store = ItemStore::open(&file).unwrap();
+        let thread = slopty_proto::thread::ThreadId::new();
+        let review = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Review { thread },
+            sleeping: false,
+            name: None,
+        };
+        let _added = store.apply(ItemOp::Add(review.clone()), ClientId::new()).unwrap();
+        drop(store);
+        let reopened = ItemStore::open(&file).unwrap();
+        assert_eq!(reopened.get(review.id), Some(review));
     }
 
     /// A note's text is set only on a note, is bounded like a new note's, and an unknown item

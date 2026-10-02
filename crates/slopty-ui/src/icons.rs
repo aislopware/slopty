@@ -71,6 +71,7 @@ gpui_kit::assets::icon_assets!(
         Expand,
         ExternalLink,
         File,
+        FileDiff,
         FilePen,
         FilePlus,
         FileText,

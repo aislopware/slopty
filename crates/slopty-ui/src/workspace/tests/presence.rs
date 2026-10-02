@@ -2,9 +2,9 @@
 //! and the one with the keyboard.
 
 use slopty_proto::orchestration::TermRef;
+use slopty_proto::thread::attention::Seat;
 
 use super::*;
-use crate::workspace::presence::Seat;
 
 /// A Mac is a desk; what it says is on screen are the terminals the strip drew, and the focus
 /// is the focused tile's terminal. A phone-sized window is carried.

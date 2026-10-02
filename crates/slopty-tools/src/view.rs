@@ -1170,6 +1170,8 @@ pub struct ItemView<'a> {
     path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread: Option<String>,
 }
 
 /// A new item, for JSON.
@@ -1216,6 +1218,7 @@ const fn kind_word(kind: &ItemKind) -> &'static str {
         ItemKind::File { .. } => "file",
         ItemKind::Folder { .. } => "folder",
         ItemKind::Browser { .. } => "browser",
+        ItemKind::Review { .. } => "review",
     }
 }
 
@@ -1235,6 +1238,7 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 text: None,
                 path: None,
                 url: None,
+                thread: None,
             };
             match &i.kind {
                 ItemKind::Terminal { session } => {
@@ -1245,6 +1249,7 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 ItemKind::Note { text } => view.text = Some(text),
                 ItemKind::File { path } | ItemKind::Folder { path } => view.path = Some(path),
                 ItemKind::Browser { url } => view.url = Some(url),
+                ItemKind::Review { thread } => view.thread = Some(thread.to_string()),
             }
             view
         })
@@ -1268,6 +1273,7 @@ pub fn items_text(worker: WorkerId, items: &[Item]) -> String {
                 ItemKind::Note { text } => text.lines().next().unwrap_or_default().to_owned(),
                 ItemKind::File { path } | ItemKind::Folder { path } => path.clone(),
                 ItemKind::Browser { url } => url.clone(),
+                ItemKind::Review { thread } => thread.to_string(),
             };
             vec![
                 i.id.to_string(),

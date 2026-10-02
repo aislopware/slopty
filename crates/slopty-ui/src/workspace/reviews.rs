@@ -1,0 +1,131 @@
+//! Review tiles: a thread's changes, opened from its thread view as a tile of their own beside
+//! the agent's (`ItemKind::Review`).
+//!
+//! A thread view asks for its review; the faces make the review's view
+//! ([`WorkspaceView::take_review`]) and this side opens it as an item on the agent's worker, or
+//! goes to the one already open, so a review tile is placed, restored and closed like any other. A
+//! tile gone, closed here or by another client, lets the thread go
+//! ([`WorkspaceView::review_closed`]). Comments sent from it go to the agent, so the keyboard goes
+//! back to the agent's tile, where the answer shows.
+
+use std::collections::{HashMap, HashSet};
+
+use gpui::{Context, Subscription, Window};
+use slopty_client::layout::WorkerKey;
+use slopty_core::{ItemId, SessionId};
+use slopty_proto::items::{Item, ItemKind, ItemOp};
+use slopty_proto::thread::ThreadId;
+
+use super::WorkspaceView;
+use crate::review::{ReviewEvent, ReviewView};
+
+/// What the strip keeps of review tiles.
+#[derive(Default)]
+pub(super) struct Reviews {
+    /// The threads with a review item, as the registries said last.
+    shown: HashSet<ThreadId>,
+    /// The threads whose review item this client proposed and the registry has not yet sent.
+    opening: HashSet<ThreadId>,
+    /// Each hosted review view's events, heard while its tile is there.
+    hearing: HashMap<ThreadId, Subscription>,
+}
+
+impl WorkspaceView {
+    /// Open the review a thread view asked for since the last frame: go to its tile when one is
+    /// open, else add one on the worker whose agent runs the thread.
+    pub(super) fn settle_reviews(&mut self, cx: &mut Context<Self>) {
+        let Some((thread, view)) = self.take_review() else { return };
+        self.hear_review(thread, &view, cx);
+        if let Some(id) = self.review_item(thread) {
+            self.go_to(id, cx);
+            return;
+        }
+        let Some(key) = self.thread_worker(thread, cx) else { return };
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Review { thread },
+            sleeping: false,
+            name: None,
+        };
+        tracing::info!(id = %item.id, %thread, "open review");
+        self.reviews.opening.insert(thread);
+        self.propose(key, ItemOp::Add(item), cx);
+        cx.notify();
+    }
+
+    /// Follow the registries: a review whose item is gone lets its thread go.
+    pub(super) fn reconcile_reviews(&mut self) {
+        let shown: HashSet<ThreadId> = self
+            .items()
+            .filter_map(|(_, item)| match item.kind {
+                ItemKind::Review { thread } => Some(thread),
+                _ => None,
+            })
+            .collect();
+        self.reviews.opening.retain(|t| !shown.contains(t));
+        let gone: Vec<ThreadId> = self
+            .reviews
+            .shown
+            .iter()
+            .filter(|t| !shown.contains(t) && !self.reviews.opening.contains(t))
+            .copied()
+            .collect();
+        for thread in gone {
+            self.reviews.hearing.remove(&thread);
+            self.review_closed(thread);
+        }
+        self.reviews.shown = shown;
+    }
+
+    /// Give the keyboard to the review tile `item` shows, when its view is there.
+    pub(super) fn focus_review(
+        &self,
+        thread: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(view) = self.review_of(thread) {
+            let handle = gpui::Focusable::focus_handle(view.read(cx), cx);
+            window.focus(&handle, cx);
+        }
+    }
+
+    /// The review item of `thread`, on whichever worker.
+    fn review_item(&self, thread: ThreadId) -> Option<ItemId> {
+        self.items().find_map(|(_, item)| match item.kind {
+            ItemKind::Review { thread: t } if t == thread => Some(item.id),
+            _ => None,
+        })
+    }
+
+    /// The agent tile whose thread view shows `thread`.
+    fn thread_session(&self, thread: ThreadId, cx: &gpui::App) -> Option<SessionId> {
+        self.workers
+            .values()
+            .flat_map(|w| w.sessions.keys())
+            .copied()
+            .find(|s| self.thread_face(*s).is_some_and(|v| v.read(cx).thread() == thread))
+    }
+
+    /// The worker whose agent runs `thread`.
+    fn thread_worker(&self, thread: ThreadId, cx: &gpui::App) -> Option<WorkerKey> {
+        self.thread_session(thread, cx).and_then(|s| self.worker_of_session(s))
+    }
+
+    /// Hear the review of `thread`: comments sent take the keyboard to the agent's tile.
+    fn hear_review(
+        &mut self,
+        thread: ThreadId,
+        view: &gpui::Entity<ReviewView>,
+        cx: &mut Context<Self>,
+    ) {
+        let hearing = cx.subscribe(view, |this, _view, event: &ReviewEvent, cx| match event {
+            ReviewEvent::CommentsSent { thread } => {
+                if let Some(session) = this.thread_session(*thread, cx) {
+                    this.reveal_session(session, cx);
+                }
+            }
+        });
+        self.reviews.hearing.insert(thread, hearing);
+    }
+}

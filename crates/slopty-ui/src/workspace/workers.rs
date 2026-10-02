@@ -849,7 +849,8 @@ impl WorkspaceView {
                     | ItemKind::Note { .. }
                     | ItemKind::File { .. }
                     | ItemKind::Folder { .. }
-                    | ItemKind::Browser { .. } => None,
+                    | ItemKind::Browser { .. }
+                    | ItemKind::Review { .. } => None,
                 })
                 .collect();
             for &(id, target) in &wanted {

@@ -45,11 +45,12 @@ mod miniature;
 mod navigator;
 mod overlays;
 mod popout;
-pub mod presence;
+mod presence;
 mod project_search;
 mod projects;
 pub mod remote;
 mod restore;
+mod reviews;
 mod rollup;
 mod statusbar;
 mod strip;
@@ -757,6 +758,10 @@ pub struct WorkspaceView {
     pending_focus_file: Option<ItemId>,
     /// A folder tile that takes the keyboard on the next frame.
     pending_focus_folder: Option<ItemId>,
+    /// A review tile, by its thread, that takes the keyboard on the next frame.
+    pending_focus_review: Option<slopty_proto::thread::ThreadId>,
+    /// The review tiles: which are open, which this client asked for.
+    reviews: reviews::Reviews,
     pending_focus_picker: bool,
     pending_focus_self: bool,
     /// Where the layout is saved (`layout.json` in the client's data directory), if anywhere.
@@ -971,6 +976,8 @@ impl WorkspaceView {
             next_open: std::cell::Cell::new(1),
             pending_focus_file: None,
             pending_focus_folder: None,
+            pending_focus_review: None,
+            reviews: reviews::Reviews::default(),
             pending_focus_picker: false,
             pending_focus_self: false,
             layout_path: None,
@@ -1604,6 +1611,7 @@ impl WorkspaceView {
             || self.pending_focus_note.is_some()
             || self.pending_focus_file.is_some()
             || self.pending_focus_folder.is_some()
+            || self.pending_focus_review.is_some()
     }
 
     /// [`Self::apply_pending_focus`]'s work.
@@ -1699,6 +1707,9 @@ impl WorkspaceView {
         {
             view.update(cx, |v, cx| v.focus(window, cx));
         }
+        if let Some(thread) = self.pending_focus_review.take() {
+            self.focus_review(thread, window, cx);
+        }
     }
 }
 
@@ -1721,8 +1732,10 @@ impl gpui::Render for WorkspaceView {
         if std::mem::take(&mut self.items_dirty) {
             self.reconcile_notes_and_files(window, cx);
             self.reconcile_browsers(cx);
+            self.reconcile_reviews();
         }
         let face_focused = std::mem::take(&mut self.faces_dirty) && self.sync_faces(window, cx);
+        self.settle_reviews(cx);
         let board_focused = self.sync_projects(window, cx);
         self.apply_pending_focus(face_focused || board_focused, window, cx);
         // One clock for everything this frame draws: the bar's column marks and the strip,

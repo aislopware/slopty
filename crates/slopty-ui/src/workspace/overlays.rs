@@ -268,7 +268,8 @@ impl WorkspaceView {
             | ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
-            | ItemKind::Folder { .. } => None,
+            | ItemKind::Folder { .. }
+            | ItemKind::Review { .. } => None,
         };
         needle.unwrap_or_default()
     }
@@ -457,7 +458,8 @@ impl WorkspaceView {
                 ItemKind::Window { .. }
                 | ItemKind::Display { .. }
                 | ItemKind::Browser { .. }
-                | ItemKind::Folder { .. } => {
+                | ItemKind::Folder { .. }
+                | ItemKind::Review { .. } => {
                     continue;
                 }
             };
