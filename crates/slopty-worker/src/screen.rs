@@ -4998,8 +4998,8 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
         shared.unstick(now);
         // The beat itself counts as traffic even when the transport refused it, so a refusal is
         // retried a period later instead of spun on.
-        let last_out = shared.last_push_us.load(Ordering::Relaxed).max(last_beat_us.unwrap_or(0));
-        if let Some(wait) = beat_due_in(now.saturating_sub(last_out), heartbeat_after_us) {
+        let silence = silence_us(now, shared.last_push_us.load(Ordering::Relaxed), last_beat_us);
+        if let Some(wait) = beat_due_in(silence, heartbeat_after_us) {
             tokio::time::sleep(wait).await;
             continue;
         }
@@ -5011,7 +5011,6 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
         // late beat when none was due. The first beat's is the stream's opening, which no
         // receiver waits through.
         if last_beat_us.is_some() {
-            let silence = now.saturating_sub(last_out);
             shared.counters.beat_gap.lock().push(silence);
             shared.counters.beat_gap_worst_us.fetch_max(silence, Ordering::Relaxed);
             if silence >= late_beat_us {
@@ -5078,6 +5077,16 @@ async fn lane_loop<P: Platform>(shared: Arc<Shared<P>>) {
         let mut lane = shared.lane.lock();
         shared.pump(&mut lane, now::<P>());
     }
+}
+
+/// The silence at `now`: since whatever left last, video (`last_push_us`) or a beat.
+const fn silence_us(now: u64, last_push_us: u64, last_beat_us: Option<u64>) -> u64 {
+    let last_beat = match last_beat_us {
+        Some(at) => at,
+        None => 0,
+    };
+    let last_out = if last_push_us > last_beat { last_push_us } else { last_beat };
+    now.saturating_sub(last_out)
 }
 
 /// How long until a heartbeat is due after `silence_us` of nothing sent; `None` when it is due.
@@ -5642,28 +5651,13 @@ mod tests {
 
     /// A beat is held to the silence it ends, not to the time since the beat before: a third of
     /// a second of video between two beats is no late beat.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn video_between_two_beats_is_not_a_late_beat() {
-        let (shared, wire) = shared_for_frames();
-        let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        let video = Bytes::from_static(&[0; 64]);
-        for _ in 0..30 {
-            shared.send(std::slice::from_ref(&video));
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        beat.abort();
-
-        let seen = shared.stats();
-        let beats =
-            wire.drain().iter().filter(|d| d.len() == slopty_proto::media::HEADER_BYTES).count();
-        assert!(beats >= 3, "beats before and after the video: {beats}");
-        assert!(
-            seen.beat_gap_worst_us < 100_000,
-            "the video was counted as silence: {} µs",
-            seen.beat_gap_worst_us
-        );
+    #[test]
+    fn video_between_two_beats_is_not_a_late_beat() {
+        let (beat, video_until) = (10_000, 350_000);
+        assert_eq!(silence_us(370_000, video_until, Some(beat)), 20_000, "since the video");
+        assert_eq!(silence_us(40_000, 0, Some(beat)), 30_000, "since the beat, with no video");
+        assert_eq!(silence_us(5_000, 0, None), 5_000, "since the stream opened");
+        assert_eq!(silence_us(1_000, 2_000, Some(beat)), 0, "a clock that steps back");
     }
 
     /// The beat waits exactly as long as the silence has left to run, and never polls.
