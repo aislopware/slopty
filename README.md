@@ -51,16 +51,20 @@ address without a server.
 
 ## Agents
 
-Give Claude Code the same tools the app has (list workers, open terminals, type, read screens,
-wait on commands, read and write files):
+Claude Code started in a Slopty terminal, whether from the app or typed as `claude` in a shell,
+gets Slopty's tools (list workers, open terminals, type, read screens, wait on commands, read and
+write files) and reports whether it is working, waiting or blocked, with nothing to set up. Your
+own `claude` runs unmodified, with your flags; `SLOPTY_NO_CLAUDE_MOD=1` leaves it alone.
+
+For Claude Code started elsewhere, add the tools yourself:
 
 ```sh
 claude mcp add slopty -- slopty mcp                          # stdio, through the CLI
 claude mcp add --transport http slopty http://<server-host>:45561/mcp
 ```
 
-`slopty hook install` registers the hook that reports whether an agent in a Slopty terminal is
-working, waiting or blocked.
+and `slopty hook install` registers the hooks that report whether it is working, waiting or
+blocked.
 
 ## The CLI
 
