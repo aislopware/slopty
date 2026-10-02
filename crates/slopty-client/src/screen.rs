@@ -9,7 +9,7 @@
 //! frame and cursor position on `watch` channels the UI polls at paint time.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -114,17 +114,43 @@ type Arrival = (Instant, Bytes);
 
 #[derive(Debug, Default)]
 struct Routes {
-    attached: HashMap<StreamId, mpsc::Sender<Arrival>>,
-    pending: HashMap<StreamId, VecDeque<Arrival>>,
+    attached: HashMap<StreamId, Route>,
+    pending: HashMap<StreamId, Backlog>,
     /// Streams let go of, newest last ([`TOMBSTONES`] at most).
     detached: VecDeque<StreamId>,
 }
 
+/// An attached stream's queue, and the count of what did not fit in it.
+#[derive(Debug)]
+struct Route {
+    tx: mpsc::Sender<Arrival>,
+    dropped: Arc<AtomicU64>,
+}
+
+/// What a stream nobody has attached yet brought, and how much of it the bound let go.
+#[derive(Debug, Default)]
+struct Backlog {
+    arrivals: VecDeque<Arrival>,
+    dropped: u64,
+}
+
+/// An attached stream's datagrams, as the router hands them over.
+#[derive(Debug)]
+struct Attached {
+    datagrams: mpsc::Receiver<Arrival>,
+    /// Datagrams of the stream the router dropped before its task read them: a full queue, or
+    /// a backlog past its bound before the stream attached ([`ScreenStats::datagrams_dropped`]).
+    dropped: Arc<AtomicU64>,
+}
+
 impl Routes {
     fn deliver(&mut self, stream: StreamId, arrival: Arrival) {
-        if let Some(tx) = self.attached.get(&stream) {
-            // A full queue means the stream task is behind; dropping is the right call.
-            let _dropped = tx.try_send(arrival);
+        if let Some(route) = self.attached.get(&stream) {
+            // A full queue means the stream task is behind; dropping is the right call, and
+            // counting it is what tells that apart from a datagram the link lost.
+            if let Err(mpsc::error::TrySendError::Full(_)) = route.tx.try_send(arrival) {
+                route.dropped.fetch_add(1, Ordering::Relaxed);
+            }
             return;
         }
         if self.detached.contains(&stream) {
@@ -134,17 +160,18 @@ impl Routes {
             let stalest = self
                 .pending
                 .iter()
-                .min_by_key(|(_, backlog)| backlog.back().map(|(at, _)| *at))
+                .min_by_key(|(_, backlog)| backlog.arrivals.back().map(|(at, _)| *at))
                 .map(|(id, _)| *id);
             if let Some(id) = stalest {
                 self.pending.remove(&id);
             }
         }
         let backlog = self.pending.entry(stream).or_default();
-        if backlog.len() >= PENDING_DEPTH {
-            backlog.pop_front();
+        if backlog.arrivals.len() >= PENDING_DEPTH {
+            backlog.arrivals.pop_front();
+            backlog.dropped = backlog.dropped.saturating_add(1);
         }
-        backlog.push_back(arrival);
+        backlog.arrivals.push_back(arrival);
     }
 }
 
@@ -223,16 +250,27 @@ impl ScreenRouter {
     /// Start receiving `stream`'s datagrams, backlog first.
     #[must_use]
     pub fn attach(&self, stream: StreamId) -> mpsc::Receiver<Arrival> {
-        let (tx, rx) = mpsc::channel(STREAM_DEPTH);
+        self.attach_counted(stream).datagrams
+    }
+
+    /// [`Self::attach`], with the count of the stream's datagrams the router drops.
+    fn attach_counted(&self, stream: StreamId) -> Attached {
+        let (tx, datagrams) = mpsc::channel(STREAM_DEPTH);
         let mut routes = self.inner.lock();
         routes.detached.retain(|id| *id != stream);
+        let mut dropped = 0_u64;
         if let Some(backlog) = routes.pending.remove(&stream) {
-            for datagram in backlog {
-                let _full = tx.try_send(datagram);
+            dropped = backlog.dropped;
+            for datagram in backlog.arrivals {
+                if tx.try_send(datagram).is_err() {
+                    dropped = dropped.saturating_add(1);
+                }
             }
         }
-        routes.attached.insert(stream, tx);
-        rx
+        let dropped = Arc::new(AtomicU64::new(dropped));
+        routes.attached.insert(stream, Route { tx, dropped: Arc::clone(&dropped) });
+        drop(routes);
+        Attached { datagrams, dropped }
     }
 
     /// The worker's sound, started on `runtime` when no stream holds it, reporting on
@@ -347,8 +385,8 @@ struct Parked {
     coded: Coded,
 }
 
-/// What the decoder callback leaves for the stream worker: the frames it is working on, the
-/// long-term references it really decoded, and whether it failed on anything.
+/// What the decoder leaves for the stream worker: the frames it is working on, the long-term
+/// references it really decoded, and whether it failed or refused anything.
 #[derive(Debug, Default)]
 struct Inflight {
     parked: VecDeque<Parked>,
@@ -357,9 +395,19 @@ struct Inflight {
     failed: Option<Failed>,
     /// Failures on frames nothing refers to, which need no refresh.
     failed_discardable: u64,
-    /// VideoToolbox's status for the newest failure, until the worker takes it.
-    status: Option<i32>,
+    /// Frames refused as they were submitted, since the worker last looked.
+    refused: u64,
+    /// The refresh those refusals ask for, `Some(keyframe)`: a keyframe if any of them asks
+    /// for one ([`refresh_after_refusal`]).
+    refusal_refresh: Option<bool>,
+    /// The newest failure's status, until the worker takes it.
+    status: Option<Status>,
 }
+
+/// A failure's status, as [`ScreenStats::decode_failure`] gives it: VideoToolbox's, or `None`
+/// for a refusal that was not VideoToolbox's.
+#[derive(Clone, Copy, Debug)]
+struct Status(Option<i32>);
 
 /// Failures since the worker last looked, folded into one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -388,6 +436,14 @@ impl Inflight {
         self.parked.drain(..=at).next_back()
     }
 
+    /// Forget the frame with this timestamp alone: it never reached the decoder, so the frames
+    /// parked before it are still in there.
+    fn unpark(&mut self, pts_us: u64) {
+        if let Some(at) = self.parked.iter().rposition(|p| p.pts_us == pts_us) {
+            let _gone = self.parked.remove(at);
+        }
+    }
+
     /// The decoder returned this frame's picture: its arrival and how it was coded, and its
     /// token is now held.
     fn decoded(&mut self, pts_us: u64) -> Option<(Instant, Coded)> {
@@ -400,7 +456,7 @@ impl Inflight {
     /// nothing refers to, failed with the session intact, took no reference with it, so it asks
     /// for nothing.
     fn failed(&mut self, failure: DecodeFailure) {
-        self.status = Some(failure.status);
+        self.status = Some(Status(Some(failure.status)));
         let parked = self.take(failure.pts_us);
         if parked.is_some_and(|p| p.discardable) && !failure.session_lost() {
             self.failed_discardable = self.failed_discardable.saturating_add(1);
@@ -419,6 +475,18 @@ impl Inflight {
             restart: before.restart || restarts,
             count: before.count.saturating_add(1),
         });
+    }
+
+    /// The frame with this timestamp was refused as it was submitted, with VideoToolbox's
+    /// `status` when the refusal was VideoToolbox's: it is forgotten, and `refresh` is what it
+    /// asks for.
+    fn refused(&mut self, pts_us: u64, status: Option<i32>, refresh: Option<bool>) {
+        let _gone = self.take(pts_us);
+        self.status = Some(Status(status));
+        self.refused = self.refused.saturating_add(1);
+        if let Some(keyframe) = refresh {
+            self.refusal_refresh = Some(self.refusal_refresh.unwrap_or(false) || keyframe);
+        }
     }
 }
 
@@ -448,6 +516,11 @@ pub struct ScreenStats {
     pub frames_skipped: u64,
     /// Data fragments that never arrived (counted as each frame resolves).
     pub datagrams_lost: u64,
+    /// Datagrams that arrived and were dropped before this stream read them: its queue was full
+    /// (`STREAM_DEPTH` behind), or, before it attached, its backlog was (`PENDING_DEPTH`).
+    /// Not in [`Self::datagrams_lost`], which counts fragments of the frames the reassembler saw
+    /// and cannot count a frame that went whole.
+    pub datagrams_dropped: u64,
     /// Parity the worker is sending, in thousandths of the data fragments, as observed on the
     /// wire: the receiver's view of what the redundancy controller settled on.
     pub parity_permille: u16,
@@ -461,14 +534,18 @@ pub struct ScreenStats {
     pub nacks: u64,
     /// Refresh requests sent.
     pub refreshes: u64,
-    /// Decoder rejections.
+    /// Decoder rejections, and frames dropped for a decoder a whole queue behind.
     pub decode_errors: u64,
-    /// VideoToolbox's status for the newest of them (zero for a frame it dropped without naming
-    /// an error); `None` before the first, and for a failure that was not VideoToolbox's (no
-    /// parameter sets yet, a malformed unit).
+    /// VideoToolbox's status for the newest rejection (zero for a frame it dropped without
+    /// naming an error); `None` before the first, and for a failure that was not VideoToolbox's
+    /// (no parameter sets yet, a malformed unit).
     pub decode_failure: Option<i32>,
     /// Frames in the decoders now: handed to them, and neither a picture nor a failure back.
     pub decoding: u64,
+    /// Decoders given up on and built anew: one whose submission stayed inside VideoToolbox
+    /// past `DECODE_STUCK` (doubled for each in a row that brought no picture), or whose
+    /// thread was gone.
+    pub decoders_replaced: u64,
     /// Datagrams seen.
     pub datagrams: u64,
     /// The stream is coded as two stripes now ([`Stitched`]).
@@ -532,6 +609,9 @@ pub struct ScreenStats {
     /// The worker's capture clock placed on this one by the stream's clock probes; `None` until
     /// one has come back.
     pub clock: Option<ClockEstimate>,
+    /// When the stream's task published these counters; `None` before its first report. Its
+    /// age says whether the task still runs: it reports every `REPORT_EVERY` while it does.
+    pub reported_at: Option<Instant>,
 }
 
 /// A live client-side stream. Dropping it stops the task and unroutes the stream; the caller
@@ -696,7 +776,7 @@ pub fn spawn_screen(
     uplink: Uplink,
 ) -> ScreenHandle {
     let sound = router.sound(runtime, &uplink.control);
-    let datagrams = router.attach(stream);
+    let Attached { datagrams, dropped } = router.attach_counted(stream);
     let (frames_tx, frames) = watch::channel(None);
     let (cursor_tx, cursor) = watch::channel(CursorState::default());
     let (stats_tx, stats) = watch::channel(ScreenStats::default());
@@ -717,6 +797,7 @@ pub fn spawn_screen(
         stream,
         codec,
         datagrams,
+        dropped,
         top,
         lower: None,
         top_whole: false,
@@ -736,6 +817,7 @@ pub fn spawn_screen(
         capture_clock: CaptureClock::new(),
         clock: ClockSync::new(Instant::now()),
         reports: 0,
+        unstuck_at: Instant::now(),
     };
     let task = runtime.spawn(worker.run());
     let task = Some(task);
@@ -991,19 +1073,221 @@ impl<F: Clone> Stitch<F> {
     }
 }
 
+/// Frames a lane's decode thread may have waiting before the lane drops the next itself. A
+/// submission returns in about a tenth of a millisecond (MEASUREMENTS.md, "HEVC travels
+/// length-prefixed"), so the queue holds a frame at most; one this deep is a decoder that has
+/// stopped, and [`DECODE_STUCK`] is what gives it up. Until then the lane asks for nothing: a
+/// refresh could not reach the decoder either, and every one answered would be dropped and
+/// asked for again.
+const DECODE_QUEUE: usize = 32;
+
+/// How long one submission may stay inside VideoToolbox before its decoder is given up on and
+/// another built for a keyframe. A submission returns in a fraction of a millisecond and a
+/// session is built in a few, 150 ms cold. On a hosted virtual Mac one never returned after the
+/// decoder had failed a frame (MEASUREMENTS.md, "a decode submission that never returned").
+const DECODE_STUCK: Duration = Duration::from_secs(2);
+/// The most of a submission's time inside VideoToolbox one report charges it: two report
+/// periods. A report later than that found the worker itself held up.
+const STUCK_CREDIT: Duration = Duration::from_millis(100);
+/// The longest [`DECODE_STUCK`] grows to as decoders in a row are given up on without a
+/// picture: each one given up on leaves a thread waiting inside VideoToolbox.
+const DECODE_STUCK_MAX: Duration = Duration::from_secs(32);
+
+/// A complete frame on its way to the decode thread.
+struct Submit {
+    data: Bytes,
+    pts_us: u64,
+    /// Its number on the wire, for the log.
+    frame: u32,
+    discardable: bool,
+    restarts: bool,
+}
+
+/// Where a lane's decoder leaves what it made of each frame, for the stream worker to take.
+#[derive(Clone)]
+struct Outcomes {
+    /// The coder the lane decodes for: 0 for the whole picture or the top stripe.
+    index: usize,
+    /// Frames parked for the decoder, and what it left behind.
+    inflight: Arc<Mutex<Inflight>>,
+    /// Set once the decoder has left something in [`Self::inflight`], so a wake with nothing
+    /// back from the decoder does not take the lock the decoder takes.
+    news: Arc<AtomicBool>,
+    /// Wakes the worker for a failure.
+    wake: Arc<Notify>,
+    output: Arc<Output>,
+}
+
+impl Outcomes {
+    /// Something was left in [`Self::inflight`] that asks for an answer: the worker wakes for it.
+    fn failed(&self) {
+        self.news.store(true, Ordering::Release);
+        self.wake.notify_one();
+    }
+}
+
+/// What a lane's decode thread shares with the stream worker.
+#[derive(Debug)]
+struct DecodeState {
+    /// The number of the submission inside VideoToolbox now, counting from one; zero while
+    /// none is.
+    submitting: AtomicU64,
+    /// Frames handed to the thread and not yet taken by it.
+    queued: AtomicUsize,
+    /// The decoder has a session ([`Decoder::ready`]), as of its last submission.
+    ready: AtomicBool,
+    /// Given up on: nothing more is submitted to it, and what it returns is not shown.
+    abandoned: AtomicBool,
+    /// Pictures it returned.
+    pictures: AtomicU64,
+}
+
+/// A lane's decoder, on a thread of its own: the stream worker only hands it complete frames.
+///
+/// A VideoToolbox call can block its caller. On a hosted virtual Mac, after the decoder had
+/// failed a frame, the stream's task stopped as if one had for good, and took the runtime
+/// thread it ran on with it: it read no more datagrams, sent no reports, asked for no refresh,
+/// and its counters stopped where they were. The worker's encoders run on threads of their own
+/// for the same reason. Dropping it lets the thread end, which invalidates the session there,
+/// since that waits for the session's callbacks.
+struct DecodeThread {
+    submits: std::sync::mpsc::SyncSender<Submit>,
+    state: Arc<DecodeState>,
+}
+
+impl DecodeThread {
+    /// A decoder for `media`'s frames, leaving what it makes of each in `outcomes`. A thread the
+    /// system will not start leaves a decoder that refuses everything as gone, which the lane
+    /// replaces ([`Lane::replace_decoder`]).
+    fn start(media: StreamId, codec: VideoCodec, outcomes: &Outcomes) -> Self {
+        let state = Arc::new(DecodeState {
+            submitting: AtomicU64::new(0),
+            queued: AtomicUsize::new(0),
+            ready: AtomicBool::new(false),
+            abandoned: AtomicBool::new(false),
+            pictures: AtomicU64::new(0),
+        });
+        let decoder = {
+            let state = Arc::clone(&state);
+            let Outcomes { index, inflight, news, wake, output } = outcomes.clone();
+            Decoder::with_outcomes(codec, move |outcome| {
+                if state.abandoned.load(Ordering::Acquire) {
+                    return;
+                }
+                let frame = match outcome {
+                    Ok(frame) => frame,
+                    Err(failure) => {
+                        inflight.lock().failed(failure);
+                        news.store(true, Ordering::Release);
+                        wake.notify_one();
+                        return;
+                    }
+                };
+                state.pictures.fetch_add(1, Ordering::Relaxed);
+                // A picture whose arrival is no longer parked (a duplicate from the decoder, or
+                // one that outlived the ring) is still shown; its timing simply does not enter
+                // the ring.
+                let parked = inflight.lock().decoded(frame.pts_us);
+                news.store(true, Ordering::Release);
+                let (arrived, coded) = parked.unwrap_or_else(|| (Instant::now(), Coded::default()));
+                output.decoded(index, frame, arrived, coded);
+            })
+        };
+        let (submits, queue) = std::sync::mpsc::sync_channel::<Submit>(DECODE_QUEUE);
+        let thread = Arc::clone(&state);
+        let outcomes = outcomes.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("slopty-decode-{}", media.0))
+            .spawn(move || decode_thread(media, decoder, &queue, &thread, &outcomes));
+        if let Err(e) = spawned {
+            tracing::warn!(stream = %media, error = %e, "no thread to decode on");
+        }
+        Self { submits, state }
+    }
+
+    /// Hand `submit` to the thread: the frame back when its queue is full, or the thread gone.
+    fn submit(&self, submit: Submit) -> Result<(), std::sync::mpsc::TrySendError<Submit>> {
+        self.state.queued.fetch_add(1, Ordering::AcqRel);
+        let sent = self.submits.try_send(submit);
+        if sent.is_err() {
+            self.state.queued.fetch_sub(1, Ordering::AcqRel);
+        }
+        sent
+    }
+
+    /// The thread has taken all but a few of what it was handed.
+    fn has_room(&self) -> bool {
+        self.state.queued.load(Ordering::Acquire) < DECODE_QUEUE / 2
+    }
+
+    fn ready(&self) -> bool {
+        self.state.ready.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for DecodeThread {
+    fn drop(&mut self) {
+        self.state.abandoned.store(true, Ordering::Release);
+    }
+}
+
+/// The decode thread's loop: submit each frame `queue` brings, and leave a refusal in
+/// `outcomes` for the worker. It ends once its [`DecodeThread`] is dropped or given up on.
+fn decode_thread(
+    media: StreamId,
+    mut decoder: Decoder,
+    queue: &std::sync::mpsc::Receiver<Submit>,
+    state: &DecodeState,
+    outcomes: &Outcomes,
+) {
+    slopty_platform::user_interactive_thread();
+    let mut submissions = 0_u64;
+    while let Ok(submit) = queue.recv() {
+        state.queued.fetch_sub(1, Ordering::AcqRel);
+        if state.abandoned.load(Ordering::Acquire) {
+            break;
+        }
+        submissions = submissions.saturating_add(1);
+        state.submitting.store(submissions, Ordering::Release);
+        #[cfg(test)]
+        worker_tests::hold::wait(media);
+        let result = decoder.decode(&submit.data, submit.pts_us);
+        state.submitting.store(0, Ordering::Release);
+        let ready = decoder.ready();
+        state.ready.store(ready, Ordering::Release);
+        if state.abandoned.load(Ordering::Acquire) {
+            break;
+        }
+        let Err(e) = result else { continue };
+        let status =
+            if let slopty_codec::CodecError::Os { status, .. } = &e { Some(*status) } else { None };
+        let refresh = refresh_after_refusal(submit.discardable, ready, submit.restarts);
+        tracing::debug!(stream = %media, frame = submit.frame, error = %e, ?refresh, "decode refused");
+        outcomes.inflight.lock().refused(submit.pts_us, status, refresh);
+        outcomes.failed();
+    }
+}
+
 /// One coded picture's way in: the whole picture, or one stripe of it, on its media stream.
 struct Lane {
     media: StreamId,
+    codec: VideoCodec,
     reassembler: Reassembler,
-    decoder: Decoder,
-    /// Frames parked for the decoder callback, and what the callback left behind.
-    inflight: Arc<Mutex<Inflight>>,
-    /// Set by the decoder callback once it has left something in [`Self::inflight`], so a wake
-    /// with nothing back from the decoder does not take the lock the callback takes.
-    news: Arc<AtomicBool>,
+    decoder: DecodeThread,
+    /// Where the decoder leaves what it made of each frame.
+    outcomes: Outcomes,
     /// Timestamp of the last frame that restarts decoding (a keyframe or an LTR refresh). A
     /// failure older than it was already answered by it.
     restart_pts: Option<u64>,
+    /// How long a submission may stay inside VideoToolbox before the decoder in place is given
+    /// up on: [`DECODE_STUCK`], doubled for each decoder in a row given up on without a picture.
+    stuck_after: Duration,
+    /// The submission seen inside VideoToolbox at the last report, and how long the worker has
+    /// run on time since it went in ([`Worker::unstick`]).
+    stuck: Option<(u64, Duration)>,
+    /// A frame was dropped for a full decode queue ([`DECODE_QUEUE`]): what is predicted from it
+    /// is dropped too, until a restart reaches the decoder or one is asked for once it has room.
+    backed_up: bool,
 }
 
 impl Lane {
@@ -1016,31 +1300,16 @@ impl Lane {
         output: &Arc<Output>,
         failed: &Arc<Notify>,
     ) -> Self {
-        let inflight = Arc::new(Mutex::new(Inflight::default()));
-        let parked = Arc::clone(&inflight);
-        let news = Arc::new(AtomicBool::new(false));
-        let left = Arc::clone(&news);
-        let wake = Arc::clone(failed);
-        let output = Arc::clone(output);
-        let decoder = Decoder::with_outcomes(codec, move |outcome| {
-            let frame = match outcome {
-                Ok(frame) => frame,
-                Err(failure) => {
-                    parked.lock().failed(failure);
-                    left.store(true, Ordering::Release);
-                    wake.notify_one();
-                    return;
-                }
-            };
-            // A picture whose arrival is no longer parked (a duplicate from the decoder, or one
-            // that outlived the ring) is still shown; its timing simply does not enter the ring.
-            let parked = parked.lock().decoded(frame.pts_us);
-            left.store(true, Ordering::Release);
-            let (arrived, coded) = parked.unwrap_or_else(|| (Instant::now(), Coded::default()));
-            output.decoded(index, frame, arrived, coded);
-        });
+        let outcomes = Outcomes {
+            index,
+            inflight: Arc::default(),
+            news: Arc::default(),
+            wake: Arc::clone(failed),
+            output: Arc::clone(output),
+        };
         Self {
             media,
+            codec,
             // The loop ticks after every branch, so the longest it goes without one is the idle
             // sleep; the reassembler needs that number to tell a link that held datagrams from
             // a runtime that did not run this task.
@@ -1053,11 +1322,30 @@ impl Lane {
                 },
                 Instant::now(),
             ),
-            decoder,
-            inflight,
-            news,
+            decoder: DecodeThread::start(media, codec, &outcomes),
+            outcomes,
             restart_pts: None,
+            stuck_after: DECODE_STUCK,
+            stuck: None,
+            backed_up: false,
         }
+    }
+
+    /// Give the decoder in place up and start another, which waits for a keyframe: what the
+    /// old one was working on never comes back, and a picture it returns after all is not
+    /// shown. The old thread ends once its call into VideoToolbox returns, if it ever does.
+    fn replace_decoder(&mut self, now: Instant) {
+        self.stuck_after = if self.decoder.state.pictures.load(Ordering::Relaxed) > 0 {
+            DECODE_STUCK
+        } else {
+            self.stuck_after.saturating_mul(2).min(DECODE_STUCK_MAX)
+        };
+        self.decoder = DecodeThread::start(self.media, self.codec, &self.outcomes);
+        self.outcomes.inflight.lock().parked.clear();
+        self.restart_pts = None;
+        self.stuck = None;
+        self.backed_up = false;
+        self.reassembler.force_refresh(now, true);
     }
 
     /// Frames waiting behind a missing one, or a refresh asked for and not yet answered.
@@ -1070,6 +1358,8 @@ struct Worker {
     stream: StreamId,
     codec: VideoCodec,
     datagrams: mpsc::Receiver<Arrival>,
+    /// The stream's datagrams the router dropped before this worker read them.
+    dropped: Arc<AtomicU64>,
     /// The whole picture, or the top stripe: the stream's own media stream, which also carries
     /// its cursor, heartbeats and clock echoes.
     top: Lane,
@@ -1078,7 +1368,7 @@ struct Worker {
     /// The top lane's newest frame was of the whole picture.
     top_whole: bool,
     output: Arc<Output>,
-    /// A decoder callback failed on a frame.
+    /// A decoder failed or refused a frame.
     failed: Arc<Notify>,
     out: mpsc::Sender<ClientMsg>,
     feedback: Box<dyn Fn(Bytes) -> bool + Send>,
@@ -1104,6 +1394,8 @@ struct Worker {
     clock: ClockSync,
     /// Reports sent so far: the probes ride on their schedule.
     reports: u64,
+    /// When the decoders were last looked at for a stuck submission ([`Self::unstick`]).
+    unstuck_at: Instant,
 }
 
 impl Worker {
@@ -1269,7 +1561,7 @@ impl Worker {
             // before `decode` returns. Its token is acknowledged only once a picture comes back.
             let restarts = frame.info.keyframe || frame.info.ltr_refresh;
             let discardable = frame.info.discardable;
-            lane.inflight.lock().park(Parked {
+            lane.outcomes.inflight.lock().park(Parked {
                 pts_us: pts,
                 arrived: frame.arrived,
                 ltr_token: frame.info.ltr_token,
@@ -1280,22 +1572,33 @@ impl Worker {
             if restarts {
                 lane.restart_pts = Some(pts);
             }
-            if let Err(e) = lane.decoder.decode(&frame.data, pts) {
-                let _gone = lane.inflight.lock().take(pts);
+            if lane.backed_up && !restarts {
+                lane.outcomes.inflight.lock().unpark(pts);
                 counters.decode_errors = counters.decode_errors.saturating_add(1);
-                counters.decode_failure = if let slopty_codec::CodecError::Os { status, .. } = &e {
-                    Some(*status)
-                } else {
-                    None
-                };
-                let Some(keyframe) =
-                    refresh_after_refusal(discardable, lane.decoder.ready(), restarts)
-                else {
-                    tracing::debug!(stream = %lane.media, frame = frame.info.frame, error = %e, "decode of a frame nothing refers to");
-                    continue;
-                };
-                tracing::debug!(stream = %lane.media, frame = frame.info.frame, error = %e, keyframe, "decode");
-                lane.reassembler.force_refresh(Instant::now(), keyframe);
+                continue;
+            }
+            let submit = Submit {
+                data: frame.data,
+                pts_us: pts,
+                frame: frame.info.frame,
+                discardable,
+                restarts,
+            };
+            match lane.decoder.submit(submit) {
+                Ok(()) => lane.backed_up = false,
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    if !lane.backed_up {
+                        tracing::debug!(stream = %lane.media, frame = frame.info.frame, "the decoder is a queue behind: frames dropped");
+                    }
+                    lane.outcomes.inflight.lock().unpark(pts);
+                    counters.decode_errors = counters.decode_errors.saturating_add(1);
+                    lane.backed_up = true;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    tracing::warn!(stream = %lane.media, "the decode thread is gone: a new decoder");
+                    lane.replace_decoder(Instant::now());
+                    counters.decoders_replaced = counters.decoders_replaced.saturating_add(1);
+                }
             }
         }
         if index == 0 && frame_seen {
@@ -1315,25 +1618,32 @@ impl Worker {
             let Some(lane) = (if index == 0 { Some(top) } else { lower.as_mut() }) else {
                 continue;
             };
-            if !lane.news.swap(false, Ordering::Acquire) {
+            if !lane.outcomes.news.swap(false, Ordering::Acquire) {
                 continue;
             }
-            let (acks, failed, failed_discardable, status) = {
-                let mut inflight = lane.inflight.lock();
+            let (acks, failed, failed_discardable, status, refused, refusal_refresh) = {
+                let mut inflight = lane.outcomes.inflight.lock();
                 (
                     std::mem::take(&mut inflight.acks),
                     inflight.failed.take(),
                     std::mem::take(&mut inflight.failed_discardable),
                     inflight.status.take(),
+                    std::mem::take(&mut inflight.refused),
+                    inflight.refusal_refresh.take(),
                 )
             };
             for token in acks {
                 lane.reassembler.ack_ltr(token);
             }
-            if status.is_some() {
+            if let Some(Status(status)) = status {
                 counters.decode_failure = status;
             }
-            counters.decode_errors = counters.decode_errors.saturating_add(failed_discardable);
+            counters.decode_errors =
+                counters.decode_errors.saturating_add(failed_discardable).saturating_add(refused);
+            if let Some(keyframe) = refusal_refresh {
+                tracing::debug!(stream = %lane.media, refused, keyframe, "the decoder refused frames");
+                lane.reassembler.force_refresh(Instant::now(), keyframe);
+            }
             let Some(failed) = failed else { continue };
             counters.decode_errors = counters.decode_errors.saturating_add(failed.count);
             let Some(keyframe) = refresh_for(failed, lane.restart_pts, lane.decoder.ready()) else {
@@ -1384,6 +1694,7 @@ impl Worker {
         self.outcomes();
         self.rtt = (self.path_rtt)().unwrap_or(DEFAULT_RTT);
         let now = Instant::now();
+        self.unstick(now);
         let report = self.top.reassembler.take_report(now, 0);
         let stats = self.top.reassembler.stats();
         if let Some(lower) = &self.lower {
@@ -1410,8 +1721,12 @@ impl Worker {
         self.counters.decoding = [Some(&self.top), self.lower.as_ref()]
             .into_iter()
             .flatten()
-            .map(|lane| u64::try_from(lane.inflight.lock().parked.len()).unwrap_or(u64::MAX))
+            .map(|lane| {
+                u64::try_from(lane.outcomes.inflight.lock().parked.len()).unwrap_or(u64::MAX)
+            })
             .sum();
+        self.counters.datagrams_dropped = self.dropped.load(Ordering::Relaxed);
+        self.counters.reported_at = Some(now);
         self.counters.first_decoded_at = *self.output.first_decoded.lock();
         self.counters.seam_tears = self.output.stitch.lock().tears;
         self.counters.clock = self.clock.estimate();
@@ -1432,6 +1747,41 @@ impl Worker {
         }
         // The connection going is the feedback's to notice: the next NACK or refresh sees it.
         let _connected = self.probe();
+    }
+
+    /// Give up on a decoder whose submission has stayed inside VideoToolbox past its lane's
+    /// patience, and start another for a keyframe ([`Lane::replace_decoder`]). A decoder that
+    /// dropped frames for a full queue and has room again is asked a refresh for.
+    ///
+    /// The patience is spent only while this worker runs on time: a report later than
+    /// [`STUCK_CREDIT`] says the process itself was held, as a starved machine holds it for
+    /// seconds, and a submission that waited out the same hold has not stopped.
+    fn unstick(&mut self, now: Instant) {
+        let ran = now.saturating_duration_since(self.unstuck_at).min(STUCK_CREDIT);
+        self.unstuck_at = now;
+        for index in 0..Stripe::MAX {
+            let Self { top, lower, counters, .. } = self;
+            let Some(lane) = (if index == 0 { Some(top) } else { lower.as_mut() }) else {
+                continue;
+            };
+            let inside = lane.decoder.state.submitting.load(Ordering::Acquire);
+            lane.stuck = (inside != 0).then(|| match lane.stuck {
+                Some((seen, stuck)) if seen == inside => (inside, stuck.saturating_add(ran)),
+                _ => (inside, Duration::ZERO),
+            });
+            let stuck = lane.stuck.map(|(_, stuck)| stuck);
+            let Some(stuck) = stuck.filter(|stuck| *stuck >= lane.stuck_after) else {
+                if lane.backed_up && lane.decoder.has_room() {
+                    tracing::debug!(stream = %lane.media, "the decoder caught up: a refresh");
+                    lane.backed_up = false;
+                    lane.reassembler.force_refresh(now, !lane.decoder.ready());
+                }
+                continue;
+            };
+            tracing::warn!(stream = %lane.media, ?stuck, "a decode submission has not returned: a new decoder");
+            lane.replace_decoder(now);
+            counters.decoders_replaced = counters.decoders_replaced.saturating_add(1);
+        }
     }
 
     /// Hand the control stream `report` for `media`: `false` when it was full, for the caller to
@@ -1897,9 +2247,10 @@ mod tests {
         for frame in 0..sent {
             router.route(datagram(7, frame), now);
         }
-        let mut rx = router.attach(StreamId(7));
+        let Attached { datagrams: mut rx, dropped } = router.attach_counted(StreamId(7));
         let first = rx.try_recv().ok();
         assert_eq!(first.as_ref().map(frame_of), Some(100), "the oldest 100 were dropped");
+        assert_eq!(dropped.load(Ordering::Relaxed), 100, "and counted");
         let mut got = 1;
         while rx.try_recv().is_ok() {
             got += 1;
@@ -1908,6 +2259,28 @@ mod tests {
         // Attached now: a datagram goes straight through.
         router.route(datagram(7, 9_999), now);
         assert_eq!(rx.try_recv().ok().as_ref().map(frame_of), Some(9_999));
+    }
+
+    /// A stream whose task is a whole queue behind loses what does not fit, and the count says
+    /// how much: the reassembler cannot, for a frame that went whole.
+    #[test]
+    fn what_a_full_queue_drops_is_counted() {
+        let router = ScreenRouter::with_loss(0);
+        let now = Instant::now();
+        let Attached { datagrams: mut rx, dropped } = router.attach_counted(StreamId(3));
+        let sent = u32::try_from(STREAM_DEPTH).unwrap_or(u32::MAX).saturating_add(5);
+        for frame in 0..sent {
+            router.route(datagram(3, frame), now);
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 5);
+        let mut got = 0;
+        while rx.try_recv().is_ok() {
+            got += 1;
+        }
+        assert_eq!(got, STREAM_DEPTH, "the queue kept the oldest");
+        router.route(datagram(3, sent), now);
+        assert_eq!(rx.try_recv().ok().as_ref().map(frame_of), Some(sent), "room again");
+        assert_eq!(dropped.load(Ordering::Relaxed), 5);
     }
 
     /// A detached stream keeps nothing: the datagrams still in flight after its view let go
@@ -2019,6 +2392,33 @@ mod worker_tests {
 
     const STREAM: StreamId = StreamId(5);
 
+    /// Streams whose decode threads hold every submission until a test lets them go, as
+    /// VideoToolbox held one on a hosted virtual Mac.
+    pub(super) mod hold {
+        use parking_lot::{Condvar, Mutex};
+        use slopty_core::StreamId;
+
+        static HELD: Mutex<Vec<StreamId>> = Mutex::new(Vec::new());
+        static LET_GO: Condvar = Condvar::new();
+
+        pub(in super::super) fn close(stream: StreamId) {
+            HELD.lock().push(stream);
+        }
+
+        pub(in super::super) fn open(stream: StreamId) {
+            HELD.lock().retain(|held| *held != stream);
+            LET_GO.notify_all();
+        }
+
+        /// Called by a decode thread before each submission.
+        pub(in super::super) fn wait(stream: StreamId) {
+            let mut held = HELD.lock();
+            while held.contains(&stream) {
+                LET_GO.wait(&mut held);
+            }
+        }
+    }
+
     /// Seconds to wait on the system frameworks (`VideoToolbox`'s decoder, `CoreAudio` opening a
     /// player): nothing here measures them, and on a machine busy with a parallel test run
     /// they take tens of seconds (`docs/decisions/testing.md`). A bound only so a stuck
@@ -2031,6 +2431,7 @@ mod worker_tests {
         router: ScreenRouter,
         handle: ScreenHandle,
         control: mpsc::Receiver<ClientMsg>,
+        stream: StreamId,
         feedback: Arc<Mutex<Vec<Feedback>>>,
         /// When each NACK left, by frame.
         nacked: Arc<Mutex<Vec<(u32, Instant)>>>,
@@ -2044,6 +2445,10 @@ mod worker_tests {
 
     impl Harness {
         fn start() -> Self {
+            Self::start_on(STREAM)
+        }
+
+        fn start_on(stream: StreamId) -> Self {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -2071,12 +2476,13 @@ mod worker_tests {
                 }),
                 rtt: Box::new(|| Some(Duration::from_millis(10))),
             };
-            let handle = spawn_screen(rt.handle(), &router, STREAM, VideoCodec::Hevc, uplink);
+            let handle = spawn_screen(rt.handle(), &router, stream, VideoCodec::Hevc, uplink);
             Self {
                 rt,
                 router,
                 handle,
                 control,
+                stream,
                 feedback,
                 nacked,
                 alive,
@@ -2096,7 +2502,7 @@ mod worker_tests {
                         else {
                             panic!("{msg:?}");
                         };
-                        assert_eq!(stream, STREAM);
+                        assert_eq!(stream, self.stream);
                         let len = usize::from(report.acked_ltr_len);
                         self.acked.extend_from_slice(&report.acked_ltr[..len]);
                     }
@@ -2189,6 +2595,71 @@ mod worker_tests {
             handle.stats().first_frame_at.is_some_and(|t| t.elapsed() > REPORT_EVERY * 4)
         });
         assert!(h.acked.is_empty(), "nothing decoded, nothing acknowledged: {:?}", h.acked);
+    }
+
+    /// A submission that does not return holds up neither the stream nor its counters: the
+    /// worker goes on reading and reporting, counts what waits on the decoder, drops what does
+    /// not fit in its queue without asking for refreshes it could not decode either, gives the
+    /// decoder up after [`DECODE_STUCK`], and asks for a keyframe for the one it starts. What
+    /// the one given up on returns once it is let go is not counted.
+    #[test]
+    fn a_decoder_stuck_in_a_submission_is_replaced_and_the_stream_runs_on() {
+        const HELD: StreamId = StreamId(0x51);
+        const OVER: u64 = 4;
+        hold::close(HELD);
+        let mut h = Harness::start_on(HELD);
+        let mut packetizer = Packetizer::new(HELD);
+        packetizer.set_parity_permille(0);
+        for d in packetize(&mut packetizer, true, 1_000) {
+            h.route(d);
+        }
+        h.wait_for("the keyframe inside the decoder", FOR_THE_MACHINE, |handle| {
+            handle.stats().decoding == 1
+        });
+        let held_at = Instant::now();
+        let refreshes = h.handle.stats().refreshes;
+        let queue = u64::try_from(DECODE_QUEUE).unwrap_or(u64::MAX);
+        for n in 0..queue + OVER {
+            let at = u32::try_from(n).unwrap_or(0).saturating_mul(16_667).saturating_add(2_000);
+            for d in packetize(&mut packetizer, false, at) {
+                h.route(d);
+            }
+        }
+        let settled = h.settle();
+        assert_eq!(settled.frames, 1 + queue + OVER, "every frame read: {settled:?}");
+        assert_eq!(settled.decoding, 1 + queue, "in hand and queued: {settled:?}");
+        assert_eq!(settled.decode_errors, OVER, "what did not fit is dropped: {settled:?}");
+        assert_eq!(settled.refreshes, refreshes, "and nothing asked for: {settled:?}");
+        assert_eq!(settled.decoders_replaced, 0, "{settled:?}");
+        let reported = settled.reported_at;
+        h.wait_for("a report after the hold", 3, |handle| handle.stats().reported_at > reported);
+        h.wait_for("the decoder given up on", FOR_THE_MACHINE, |handle| {
+            handle.stats().decoders_replaced == 1
+        });
+        let given_up = held_at.elapsed();
+        assert!(given_up >= DECODE_STUCK.saturating_sub(REPORT_EVERY), "after {given_up:?}");
+        let stats = h.handle.stats();
+        assert_eq!(stats.decoding, 0, "what the old decoder held is forgotten: {stats:?}");
+        let feedback = Arc::clone(&h.feedback);
+        h.wait_for("a keyframe asked for the new decoder", 3, |_| {
+            feedback.lock().iter().any(|fb| {
+                matches!(fb, Feedback::Refresh { stream, keyframe: true, .. } if *stream == HELD)
+            })
+        });
+        hold::open(HELD);
+        for d in packetize(&mut packetizer, true, 3_000_000) {
+            h.route(d);
+        }
+        h.wait_for("the new decoder's answer", FOR_THE_MACHINE, |handle| {
+            handle.stats().decode_errors > OVER
+        });
+        h.wait_for("a report with nothing in the decoder", 3, |handle| {
+            handle.stats().reported_at.is_some_and(|at| at.elapsed() < REPORT_EVERY)
+                && handle.stats().decoding == 0
+        });
+        let stats = h.settle();
+        assert_eq!(stats.decode_errors, OVER + 1, "only the new decoder's refusal: {stats:?}");
+        assert_eq!(stats.decoders_replaced, 1, "{stats:?}");
     }
 
     /// How late a lost tail fragment is asked for: each NACK's send against the instant the
@@ -2332,6 +2803,67 @@ mod worker_tests {
             q(99).unwrap_or(0.0),
             submitted.last().copied().unwrap_or(0.0),
         );
+    }
+
+    /// What handing a frame to its lane's decode thread costs the frame: the time from the
+    /// stream's task leaving it on the queue to the thread, parked since the last frame, having
+    /// it in hand, at 60 frames a second. Beside it, the wake every frame already paid before
+    /// the thread: a datagram handed to a stream task parked on a user-interactive runtime, as
+    /// the router hands one over. A measurement, run by hand: `docs/MEASUREMENTS.md`, "a decode
+    /// submission that never returned".
+    #[test]
+    #[ignore = "a measurement; run with --run-ignored only --no-capture"]
+    fn decode_hop_cost() {
+        const FRAMES: usize = 1_200;
+        const EVERY: Duration = Duration::from_micros(16_667);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let (submits, queue) = std::sync::mpsc::sync_channel::<Instant>(DECODE_QUEUE);
+        let (took_tx, took) = std::sync::mpsc::channel::<Duration>();
+        let to_task = took_tx.clone();
+        let thread = std::thread::spawn(move || {
+            slopty_platform::user_interactive_thread();
+            while let Ok(sent) = queue.recv() {
+                let _gone = took_tx.send(sent.elapsed());
+            }
+        });
+        let (datagrams, mut arrivals) = mpsc::channel::<Instant>(STREAM_DEPTH);
+        let task = rt.spawn(async move {
+            while let Some(sent) = arrivals.recv().await {
+                let _gone = to_task.send(sent.elapsed());
+            }
+        });
+        let (mut hops, mut wakes) = (Vec::with_capacity(FRAMES), Vec::with_capacity(FRAMES));
+        for _ in 0..FRAMES {
+            let started = Instant::now();
+            submits.try_send(Instant::now()).unwrap();
+            hops.push(took.recv().unwrap().as_secs_f64() * 1e6);
+            datagrams.try_send(Instant::now()).unwrap();
+            wakes.push(took.recv().unwrap().as_secs_f64() * 1e6);
+            #[expect(clippy::disallowed_methods, reason = "the frame clock of a measurement")]
+            std::thread::sleep(EVERY.saturating_sub(started.elapsed()));
+        }
+        drop((submits, datagrams));
+        thread.join().unwrap();
+        rt.block_on(task).unwrap();
+        for (what, samples) in [("decode thread hop", &mut hops), ("stream task wake", &mut wakes)]
+        {
+            samples.sort_by(f64::total_cmp);
+            let q = |p: usize| {
+                samples.get(samples.len().saturating_sub(1).saturating_mul(p) / 100).copied()
+            };
+            eprintln!(
+                "MEASURE {what} over {FRAMES} frames at 60 a second: p50 {:.1} / p90 {:.1} / p99 {:.1} / max {:.1} µs",
+                q(50).unwrap_or(0.0),
+                q(90).unwrap_or(0.0),
+                q(99).unwrap_or(0.0),
+                samples.last().copied().unwrap_or(0.0),
+            );
+        }
     }
 
     /// What the worker's loop pays on each wake for its timer: a sleep made anew, registered

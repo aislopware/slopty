@@ -13127,3 +13127,102 @@ frame for a long thread.
 ```sh
 cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_thread_path --no-capture
 ```
+
+## 2026-10-02 — a decode submission that never returned
+
+The clock test failed on CI (run 36940096068, log `target/logs/ci-tests-36940096068.log`) with
+"no picture for 10s after 24 … both sides running and none inside VideoToolbox". The figures
+both sides gave at the panic:
+
+| | client | worker |
+| --- | --- | --- |
+| frames | 25 | 244 encoded |
+| datagrams | 211 | 1335 |
+| refreshes | 9 | 9 |
+| decode errors | 1, status -19092 | |
+| `datagrams_lost` | 0 | |
+| `reader_lag_max` | 1.17 s | |
+| longest gap, stalls | 68 ms, 0, not stalled | |
+| LTR | | 3 offered, 0 acknowledged |
+
+The client's figures stop partway through the stream. It had 211 datagrams of the worker's
+1335, yet it saw no stall and no gap over 68 ms across 10 s without a picture. The clock
+estimate had last moved 2.66 s after the first datagram. The process took 170 s past the panic
+to exit, until the runner's 180 s limit. A runtime thread was held for good. The stream's task
+made every VideoToolbox call itself (`Decoder::decode` in `deliver`), so a call that does not
+return stops the task. It then reads, reports and refreshes nothing more. `next_or_stopped`
+counted the task as running anyway, because a report published just after the last picture
+moved its datagram count.
+
+**Reproduced here** in a copy of the tree (`target/scratch-layers/tree`). The copy forced a
+-19092 on the 24th frame and then held the stream's task for 40 s, standing in for the call
+that does not return. Under `taskpolicy -b`, the 5 ms case panicked with the CI message
+(`target/scratch-screen/block40.log`). The client's counters were frozen at 106 datagrams,
+`decoding` 0, not stalled, no gap, while the worker went on to 2083 datagrams. The test then
+took 81.8 s to finish. A one-off failure with no hang recovered every time, in the submit or
+in the callback, at frames 10, 24 or 25. So did a failure followed by a 1.2 s or 3 s hold.
+60 of 60 plain runs passed under 6 concurrent instances. Recovering from the failure was never
+the problem.
+
+**After**: each lane decodes on a thread of its own (`DecodeThread`). A submission held up
+past `DECODE_STUCK` loses its decoder, as `docs/decisions/video.md` records ("The client
+decodes on a thread per coded picture"). Time is charged only while the worker runs on time.
+The same scenario, a -19092 on submission 24 and then submission 25 held for 40 s inside the
+decode thread (`SCRATCH_HANG_AT`):
+
+| run | result | time | client after the 0 ms case |
+| --- | --- | --- | --- |
+| hold at 25 (0 ms case) | passed | 4.3 s | 1 decoder replaced, 2 refreshes, 0 lost |
+| hold at 100 (5 ms case) | passed | 4.4 s | 1 decoder replaced, 2 refreshes, 0 lost |
+| 4 instances × 5, `taskpolicy -b`, hold at 25 | 20 of 20 passed | 9.4–60 s | |
+
+The process exits at once, with the held thread still asleep in it. Before a full decode
+queue went quiet, every refresh answered by an IDR met the same full queue and was asked for
+again: 108 refreshes and 108 refusals in the 2 s. Now the frames that don't fit are dropped and
+counted, 83–89 of them, and the replacement's keyframe is the one refresh.
+
+**Under load, base against fix**: 4 instances of each binary ran at once under
+`taskpolicy -b`, 6 runs each, load average 50–57 (`target/scratch-screen/ab-*.log`).
+
+| | passed | failed |
+| --- | --- | --- |
+| before | 17 | 7, every one the p50 clock accuracy (1.2–20.5 ms against 1 ms) |
+| after | 20 | 4, every one the p50 clock accuracy (2.2–3.3 ms) |
+
+Neither build stalled. The p50 assertion fails on both when the machine starves the test, a
+failure of its own. An earlier batch that charged the wall clock replaced a decoder twice in
+one run at load 85–110 while the worker's encoder was 24 s behind. That run then panicked
+"both sides running" waiting on the keyframe, which is why only time the worker ran is charged
+now. In the batch above, four runs had one replacement each, all in the first round at the
+highest load. Their streams went on to 60 pictures and then failed the p50 assertion, as three
+base runs of the same round did.
+
+**The hop's cost.** `decode_hop_cost` takes a frame onto the decode thread at 60 frames a
+second, beside the wake every frame already paid: a datagram handed to a stream task parked
+on a user-interactive runtime. Three runs, load average 27–51, µs:
+
+| | p50 | p90 | p99 | max |
+| --- | --- | --- | --- | --- |
+| decode thread hop | 7.6–15.8 | 86–730 | 1302–7636 | 5906–36059 |
+| stream task wake | 17.5–21.5 | 43–270 | 760–4448 | 1792–29540 |
+
+A `parking_lot` mutex and condvar in place of the bounded `std::sync::mpsc` channel was no
+better (p50 17.8–21.0, p99 1.9–8.6 ms), so the channel stays. End to end, from the glass test
+(`capture_and_input_to_glass`, both builds alternated, 6 runs each with 2 cases a run, load
+20–111), arrival → decoded:
+
+| | p50, median of 12 | p50 range | p95, median of 12 | p95 range |
+| --- | --- | --- | --- | --- |
+| before | 1.30 ms | 1.16–1.43 | 6.9 ms | 1.9–11.9 |
+| after | 1.35 ms | 1.20–1.48 | 7.6 ms | 2.3–11.5 |
+
+The 0.05 ms is within either build's spread. Decoded → painted swings between about 4 and
+about 13 ms from run to run in both builds, with the paint timer's phase. It is not the
+decoder's.
+
+```sh
+cargo nextest run -p slopty-client -E 'test(stuck_in_a_submission) | test(full_queue_drops)'
+cargo nextest run -p slopty-client --run-ignored only -E 'test(decode_hop_cost)' --no-capture
+cargo test -p slopty-worker --lib --no-run   # copy the binary to /tmp, as for the glass test
+./slopty_worker --ignored --exact screen::synthetic::tests::capture_and_input_to_glass --nocapture
+```

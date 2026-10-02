@@ -2484,3 +2484,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `the_rate_is_the_pictures_painted_in_the_last_second_and_misses_apart` (client),
     `a_streams_rate_is_one_number_in_the_overlay_and_the_status_bar` (workspace),
     `the_plain_line_leads_with_the_human_numbers_and_flags_trouble` (health).
+
+- ✅ **The client decodes on a thread per lane, and gives up a decoder that does not return**
+  (2026-10-02). The clock test failed on CI (run 36940096068) with "both sides running"
+  after a frame failed to decode with status -19092 (not named in the SDK's headers). The
+  client's counters had stopped mid-stream: 211 datagrams to the worker's 1335, no stall and a
+  68 ms longest gap across 10 s without a picture. The process then took 170 s to exit after
+  the panic. The stream's task had stopped inside a VideoToolbox call it made itself,
+  and taken its runtime thread with it, so it read, reported and refreshed nothing more. A
+  report sent just before it stopped still counted as the task running. Holding the task the
+  same way here reproduced the panic and its frozen counters (MEASUREMENTS.md, "a decode
+  submission that never returned").
+  - *A decode thread per lane.* The stream's task parks a complete frame and hands it over
+    a bounded queue (`DECODE_QUEUE`, 32). It never calls VideoToolbox, as the worker's encoders
+    never did on the runtime. Refusals come back through `Inflight` the way the callback's
+    failures do. A dropped lane ends its thread, which invalidates the session there, since
+    that waits for the session's callbacks.
+  - *Stuck is given up on.* A submission still inside VideoToolbox after `DECODE_STUCK` (2 s)
+    loses its decoder. A new one is started and asks for a keyframe, and anything the old one
+    returns afterwards is not shown. A decoder given up on without a picture doubles the wait
+    for the next, up to 32 s, so a machine that blocks every submission does not leave a
+    thread a second. The count is `ScreenStats::decoders_replaced`.
+  - *Only time the stream task ran counts.* Each report charges the submission inside VideoToolbox
+    the time since the last report, at most `STUCK_CREDIT` (100 ms). A starved machine holds
+    the whole process for seconds: a stress run under background QoS stalled the worker's
+    capture beat for 24 s. A submission that waited out the same hold has not stopped. Charged
+    by the wall clock, it lost its decoder twice in one run, and each keyframe asked for went
+    to an encoder already 24 s behind.
+  - *A full queue asks for nothing.* What does not fit is dropped and counted, and so is what
+    is predicted from it. One refresh goes out once the queue has room again, or the keyframe
+    of the replacement goes out. Asked for at once, every refresh answered went into the same
+    full queue and was asked for again: 108 refreshes in 2 s.
+  - *Drops are counted where they happen.* The router's full stream queue and the backlog
+    bound used to drop silently. They now count into `ScreenStats::datagrams_dropped`, apart
+    from `datagrams_lost`, which counts only the fragments of frames the reassembler saw.
+  - *A task runs if it reported lately.* `next_or_stopped` takes the client to have run only
+    if its counters moved and `ScreenStats::reported_at` is under a second old.
+  - Tests: `a_decoder_stuck_in_a_submission_is_replaced_and_the_stream_runs_on`,
+    `what_a_full_queue_drops_is_counted`,
+    `a_stream_backlogs_until_attached_and_the_backlog_keeps_the_newest` (client).

@@ -995,8 +995,10 @@ mod tests {
     /// was), unless the machine is what held the picture up. That is a frame inside
     /// VideoToolbox, being coded on the worker or decoded on the client (on a starved machine
     /// one keyframe at 756 × 492 has taken 12 s there), or a side that did not run at all over
-    /// the wait: a worker that captured nothing, or a client task that reported nothing, which
-    /// a heartbeat every quarter second makes it do while it runs. Waiting on the machine is
+    /// the wait: a worker that captured nothing, or a client task that read nothing or has not
+    /// reported lately (`ScreenStats::reported_at`), which
+    /// it does every 50 ms while it runs: a task that stopped just after a report still counts
+    /// the datagrams it read before it. Waiting on the machine is
     /// the runner's to time out; a stream whose two sides ran and still sent no picture has
     /// stopped. `false` once the client's stream has ended.
     async fn next_or_stopped<P: Platform>(
@@ -1016,7 +1018,8 @@ mod tests {
                     let coding = stream.shared.held.try_lock().is_none();
                     let client = handle.stats();
                     let now = ran(stream);
-                    let (captured, reported) = (now.0 > since.0, now.1 > since.1);
+                    let lately = client.reported_at.is_some_and(|at| at.elapsed() < Duration::from_secs(1));
+                    let (captured, reported) = (now.0 > since.0, now.1 > since.1 && lately);
                     since = now;
                     let held = if coding {
                         "a frame being coded in VideoToolbox"
