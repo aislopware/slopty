@@ -13751,3 +13751,37 @@ measurable on the frame path.
 # A: the tree at 9434a068 (Cargo.lock pinning gpui-fast 448d3dac); B: this change
 cargo xtask e2e smooth --filter 'test(/frame_time::the_thread/)'
 ```
+
+## 2026-10-03 — a typed claude's wiring
+
+A `claude` typed in a Slopty shell first asks `slopty hook wire` for its words and environment
+(`docs/decisions/claude-code.md`, "A `claude` typed in a Slopty shell is wired as one Slopty
+starts"). That call is the whole cost the wiring adds to a launch. A release `slopty` on this Mac
+(M1 Max), with a session, a server and the mod named in its environment and `HOME` an empty
+directory, 100 calls in a row: 10.6 ms a call, against 2.4 ms for `/usr/bin/true` started the same
+way, so about 8 ms of its own (p50 9.6 ms over 100 calls timed one by one). Claude Code itself
+takes hundreds of milliseconds to start, so the wiring is not felt.
+
+```sh
+cargo build --release -p slopty-cli
+export HOME=$(mktemp -d) SLOPTY_SESSION=$(uuidgen | tr A-Z a-z) SLOPTY_SERVER=127.0.0.1:1 \
+  SLOPTY_CLAUDE_MOD=$HOME/mod SLOPTY_MOD_SOCKET=$HOME/mod.sock
+time (for i in {1..100}; do
+  target/release/slopty hook wire -- --model opus 'fix it' >/dev/null; done)
+time (for i in {1..100}; do /usr/bin/true; done)
+```
+
+## 2026-10-03 — a download across a relink
+
+A download whose link goes waits on its worker's line for the next link and fetches again over
+it, naming the bytes it holds (`docs/decisions/transport.md`, "A download outlives its link").
+From the moment the next link is on the line to the worker reading that `Fetch`, in the scripted
+worker's test (the link closed 1.5 MB into a 4 MB file), three runs: 6.0, 7.3 and 4.7 ms (5.1 to
+7.1 ms in three earlier runs). Most of it is the fsync of the partial, so its claim names only
+bytes on disk; the rest is opening the control stream on the new link. The bytes already held
+are not sent again.
+
+```sh
+cargo test -p slopty-client --test remote_link -- \
+  a_download_cut_by_a_lost_link_goes_on_over_the_next_link --nocapture
+```

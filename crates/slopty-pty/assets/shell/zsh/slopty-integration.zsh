@@ -120,20 +120,36 @@ if [[ -n "${TERMINFO-}" ]]; then
     }
 fi
 
-# `claude` loads Slopty's Claude Code mod (SLOPTY_CLAUDE_MOD, set by the worker), so an agent
-# started by hand streams what the model writes to the conversation face, as one Slopty starts
-# does. The flag goes in its `=` form (the spaced one swallows the words after it), and not
-# twice. A `claude` of the user's own (an alias or a function) is left alone, and
-# SLOPTY_NO_CLAUDE_MOD=1 passes every call through untouched.
-if [[ -n "${SLOPTY_CLAUDE_MOD-}" ]] && (( ! $+functions[claude] && ! $+aliases[claude] )); then
+# `claude` starts the user's own Claude Code wired as an agent Slopty starts: its hooks reach
+# the worker (status, permission prompts), it has Slopty's tools when the worker has a server,
+# and it loads Slopty's mod. `slopty hook wire` says how, as NUL-ended words: the variables to
+# set, an empty word, then the arguments, the user's own among them. Without that answer (an
+# older CLI, an error) the call goes through as typed. A `claude` of the user's own (an alias
+# or a function) is left alone, and SLOPTY_NO_CLAUDE_MOD=1 passes every call through untouched.
+if [[ -n "${SLOPTY_CLI-}" && -x "$SLOPTY_CLI" ]] && (( ! $+functions[claude] && ! $+aliases[claude] )); then
     function claude {
-        'builtin' 'local' _slopty_flag="--plugin-dir=${SLOPTY_CLAUDE_MOD-}"
-        if [[ -n "${SLOPTY_NO_CLAUDE_MOD-}" && "$SLOPTY_NO_CLAUDE_MOD" != 0 ]] \
-            || [[ ! -d "${SLOPTY_CLAUDE_MOD-}" ]] || (( ${argv[(Ie)$_slopty_flag]} )); then
+        if [[ -n "${SLOPTY_NO_CLAUDE_MOD-}" && "$SLOPTY_NO_CLAUDE_MOD" != 0 ]]; then
             'builtin' 'command' claude "$@"
-        else
-            CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 'builtin' 'command' claude "$_slopty_flag" "$@"
+            return
         fi
+        'builtin' 'local' _slopty_word
+        'builtin' 'local' -i _slopty_args=0
+        'builtin' 'local' -a _slopty_env _slopty_argv
+        while IFS= 'builtin' 'read' -r -d '' _slopty_word; do
+            if (( _slopty_args )); then
+                _slopty_argv+=("$_slopty_word")
+            elif [[ -z "$_slopty_word" ]]; then
+                _slopty_args=1
+            else
+                _slopty_env+=("$_slopty_word")
+            fi
+        done < <("$SLOPTY_CLI" hook wire -- "$@" 2>/dev/null)
+        if (( ! _slopty_args )); then
+            'builtin' 'command' claude "$@"
+            return
+        fi
+        (( ${#_slopty_env} )) && 'builtin' 'local' -x "${_slopty_env[@]}"
+        'builtin' 'command' claude "${_slopty_argv[@]}"
     }
 fi
 

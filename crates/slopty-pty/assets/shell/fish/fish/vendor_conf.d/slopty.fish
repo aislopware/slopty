@@ -114,20 +114,34 @@ if status is-interactive; and test -n "$TERMINFO"; and test file = (type -t sudo
     end
 end
 
-# `claude` loads Slopty's Claude Code mod (SLOPTY_CLAUDE_MOD, set by the worker), so an agent
-# started by hand streams what the model writes to the conversation face, as one Slopty starts
-# does. The flag goes in its `=` form (the spaced one swallows the words after it), and not
-# twice. A `claude` of the user's own (a function, an alias, an autoloaded file) is left alone,
-# and SLOPTY_NO_CLAUDE_MOD=1 passes every call through untouched.
-if status is-interactive; and set -q SLOPTY_CLAUDE_MOD; and not functions -q claude
-    function claude --wraps claude -d "claude, with Slopty's mod"
-        set -l flag "--plugin-dir=$SLOPTY_CLAUDE_MOD"
+# `claude` starts the user's own Claude Code wired as an agent Slopty starts: its hooks reach
+# the worker (status, permission prompts), it has Slopty's tools when the worker has a server,
+# and it loads Slopty's mod. `slopty hook wire` says how, as NUL-ended words: the variables to
+# set, an empty word, then the arguments, the user's own among them. Without that answer (an
+# older CLI, an error) the call goes through as typed. A `claude` of the user's own (a
+# function, an alias, an autoloaded file) is left alone, and SLOPTY_NO_CLAUDE_MOD=1 passes
+# every call through untouched.
+if status is-interactive; and set -q SLOPTY_CLI; and test -x "$SLOPTY_CLI"; and not functions -q claude
+    function claude --wraps claude -d "claude, wired to Slopty"
         if test -n "$SLOPTY_NO_CLAUDE_MOD"; and test "$SLOPTY_NO_CLAUDE_MOD" != 0
             command claude $argv
-        else if not test -d "$SLOPTY_CLAUDE_MOD"; or contains -- $flag $argv
+            return
+        end
+        set -l words ($SLOPTY_CLI hook wire -- $argv 2>/dev/null | string split0)
+        set -l split (contains -i -- "" $words)
+        if test -z "$split"
             command claude $argv
+            return
+        end
+        set -l vars $words[1..$split]
+        set -e vars[-1]
+        set -e words[1..$split]
+        # `env` sets them for this one run in every fish 3: a `set -lx` would end with the loop
+        # that made it, and `set -f` needs fish 3.4. It hands over to claude as typing it does.
+        if set -q vars[1]
+            command env $vars claude $words
         else
-            CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 command claude $flag $argv
+            command claude $words
         end
     end
 end

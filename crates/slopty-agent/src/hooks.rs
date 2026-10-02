@@ -113,6 +113,26 @@ fn with_relay_for(args: Vec<String>, command: &str, cwd: &Path, user: &Path) -> 
     })
 }
 
+/// `claude` arguments that start a person's own Claude Code wired as an agent the worker starts.
+///
+/// That is a conversation pinned to a fresh id ([`crate::resume::with_session_id`]), the relay
+/// at `relay` ([`with_relay`]), and Slopty's tools when the session has a server (`served`,
+/// [`with_mcp`]). The person's own flags and prompt are kept. `None` for a run that is wired
+/// already, or that prints and exits (`--print`): it stays as it was given.
+///
+/// One rule for every door: a tile opened on `claude`, ⌘⇧T, and a `claude` typed in a Slopty
+/// shell (`slopty hook wire`).
+#[must_use]
+pub fn wired(args: Vec<String>, relay: &str, cwd: &Path, served: bool) -> Option<Vec<String>> {
+    let given = crate::resume::invocation(&args);
+    if given.relay || given.print {
+        return None;
+    }
+    let (args, _conversation) = crate::resume::with_session_id(args);
+    let args = with_relay(args, relay, cwd);
+    Some(if served { with_mcp(args, relay) } else { args })
+}
+
 /// The setting that keeps a session out of the mode that asks no permission at all, whatever
 /// its flags or the person's settings say
 /// (<https://code.claude.com/docs/en/settings-reference>, `permissions`).
@@ -448,6 +468,28 @@ mod tests {
         assert_eq!(server["args"], json!(["mcp"]));
         assert_eq!(server["type"], "stdio");
         assert!(server.get("env").is_none(), "the session's own environment names the server");
+    }
+
+    /// A person's `claude` gets a pinned conversation, the relay and, with a server, Slopty's
+    /// tools, its own words last; a run wired already, or one that prints and exits, is left
+    /// as it was given, and one that picks its conversation keeps it.
+    #[test]
+    fn a_persons_claude_is_wired_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        let relay = "/opt/Slopty/slopty";
+        let out =
+            wired(words(&["--model", "opus", "fix it"]), relay, dir.path(), true).expect("wired");
+        assert!(out.ends_with(&words(&["--model", "opus", "fix it"])), "{out:?}");
+        assert!(out.iter().any(|a| a.starts_with("--mcp-config=")), "tools with a server");
+        assert_eq!(out.iter().filter(|a| *a == "--session-id").count(), 1);
+        let started = crate::resume::invocation(&out);
+        assert!(started.relay && started.mcp, "{out:?}");
+        assert_eq!(wired(out, relay, dir.path(), true), None, "wired once");
+        let alone = wired(words(&["--resume", "abc"]), relay, dir.path(), false).expect("wired");
+        assert!(!alone.iter().any(|a| a == "--session-id" || a.starts_with("--mcp-config")));
+        assert!(alone.ends_with(&words(&["--resume", "abc"])), "{alone:?}");
+        assert_eq!(wired(words(&["-p", "hi"]), relay, dir.path(), true), None, "a print run");
     }
 
     #[test]

@@ -423,22 +423,18 @@ impl Worker {
             return unchanged;
         }
         let args = req.command.get(1..).unwrap_or_default().to_vec();
-        let started = slopty_agent::resume::invocation(&args);
         let launch = self.agent_launch();
-        let Some(relay) = launch.relay.filter(|_| !started.relay && !started.print) else {
-            return unchanged;
-        };
+        let Some(relay) = launch.relay.clone() else { return unchanged };
         let served = self.served();
         let cwd = req.cwd.as_deref().map_or_else(slopty_platform::dirs::home, |cwd| {
             crate::file::expand_home(Path::new(cwd))
         });
+        // Reads the person's settings files for their status line: blocking I/O.
         let wired = tokio::task::spawn_blocking(move || {
-            let (args, _conversation) = slopty_agent::resume::with_session_id(args);
-            let args = slopty_agent::hooks::with_relay(args, &relay, &cwd);
-            if served { slopty_agent::hooks::with_mcp(args, &relay) } else { args }
+            slopty_agent::hooks::wired(args, &relay, &cwd, served)
         })
         .await;
-        let Ok(args) = wired else { return unchanged };
+        let Ok(Some(args)) = wired else { return unchanged };
         let (args, env) = match &launch.claude_mod {
             Some(installed) => (
                 installed.args(args),

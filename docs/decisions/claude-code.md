@@ -1263,10 +1263,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       in a session it spawns, and Claude Code reads empty as unset: the recorder runs with it
       so, which pins that.
     The caller's own variables go last and win. Every session has `SLOPTY_CLAUDE_MOD` and
-    `SLOPTY_MOD_SOCKET`, and the shell integration (zsh, bash, fish) defines a `claude`
-    function that adds the flag and the hooks switch to a `claude` typed by hand. It adds them
-    once (not when the flag is already there, as in an agent the worker started through a login
-    shell), never over a `claude` alias or function of the person's own, and not at all with
+    `SLOPTY_MOD_SOCKET`, and the shell integration's `claude` function gives a `claude` typed
+    by hand the flag and the hooks switch, through `slopty hook wire` ("A `claude` typed in a
+    Slopty shell is wired as one Slopty starts", below). It adds them once (not when the flag
+    is already there, as in an agent the worker started through a login shell), never over a
+    `claude` alias or function of the person's own, and not at all with
     `SLOPTY_NO_CLAUDE_MOD=1`. An inherited nonessential-traffic switch is left alone there: the
     person set it.
   - **The mod socket: hyper, not a parser of our own.** The mod can only `fetch`, so it posts
@@ -1306,8 +1307,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - the mod on disk and on the command line: `the_mod_is_written_under_its_digest`,
       `an_agent_loads_the_mod_once`, `an_agents_environment_enables_the_mod`;
     - the board's gate: `the_mod_is_heard_after_its_hello_passes`;
-    - the shells: `a_typed_claude_loads_the_mod_once` (zsh, both bashes and fish: the flag and
-      switch once, not when opted out, not over the person's alias);
+    - the shells: `a_typed_claude_runs_as_the_cli_wires_it` and
+      `a_typed_claude_is_wired_as_one_slopty_starts` (zsh, both bashes and fish);
     - the spawn: `a_spawned_agent_reports_through_the_relay_it_was_handed`, whose daemons
       inherit `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and whose stand-in `claude` finds
       it empty, the mod's flag and files, the hooks switch and the socket;
@@ -1971,3 +1972,47 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `a_block_with_no_prompt_held_asks_in_the_terminal`,
     `always_allow_says_a_mode_in_words`, `a_question_asked_in_the_terminal_is_shown_on_the_thread`
     and `a_hooks_folder_outranks_the_terminals_from_the_first_hook`.
+
+- ✅ **A `claude` typed in a Slopty shell is wired as one Slopty starts** (2026-10-03, readiness
+  audit A7). An agent opened with ⌘⇧T or the palette got the relay's hooks, Slopty's tools and
+  a pinned conversation (`Worker::as_agent`), but one typed in a shell got only the mod: its
+  permission prompts reached the app only once the hooks were installed in the person's
+  settings, and it had no `project_*` or `task_*` tools.
+  - **One rule.** `slopty_agent::hooks::wired` is what both doors run: a conversation pinned to
+    a fresh id, the relay on the one `--settings` (the person's own merged in, the status-line
+    wrapper in front of their line), and `--mcp-config` serving `slopty mcp` when the session
+    has a server. A run wired already, or one that prints and exits, stays as it was given.
+  - **The shell asks the CLI, not the worker.** The integration's `claude` function (zsh,
+    bash, fish) runs `slopty hook wire -- <words>`, which answers from the session's own
+    variables: `SLOPTY_SESSION` (the relay reports to it), `SLOPTY_SERVER` (tools only with a
+    server, since `slopty mcp` finds it there) and the mod's directory and socket. Everything
+    the wiring needs is in the session already, so a round trip to the worker would only add
+    latency to every start. The CLI is the relay itself, so the hooks name this binary.
+  - **How the words travel.** The answer is NUL-ended words: the variables to set, an empty
+    word, then the arguments. A prompt with spaces, newlines or an empty word passes through
+    whole. bash 3.2 (macOS's) drops NULs from a command substitution, so zsh and bash read the
+    words with `read -d ''` from a process substitution, and fish with `string split0`. fish
+    sets the variables through `env`, since a `set -lx` in a loop ends with the loop and
+    `set -f` needs fish 3.4 (Ubuntu 22.04 has 3.3). No answer (no separator: an older CLI, an
+    error) runs the words as typed.
+  - **The person's own binary, unmodified.** The shell still runs `command claude` with the
+    words: nothing wraps the process, the foreground program is Claude Code itself, and every
+    flag Slopty adds is one Claude Code publishes (`--settings`, `--mcp-config`,
+    `--session-id`, `--plugin-dir`). Options before a subcommand are taken by its root
+    (`claude --session-id … --settings … mcp --help` prints the subcommand's help, checked with
+    2.1.287), so `claude mcp list` and the rest still work wired.
+  - **What it costs.** `slopty hook wire` takes about 8 ms over a process start
+    (`docs/MEASUREMENTS.md`, "a typed claude's wiring"), against the hundreds Claude Code takes
+    to start.
+  - A typed `claude` that a reboot brings back (`claude --resume <id> …` typed at the shell's
+    first prompt) goes through the same function, so it comes back wired too.
+  - Tests: `a_persons_claude_is_wired_once` (slopty-agent),
+    `a_typed_claude_is_wired_by_what_its_session_holds` (slopty-cli: outside a session, without a
+    server, the person's own mod flag, no mod on disk), `a_typed_claude_runs_as_the_cli_wires_it`
+    (slopty-pty: every shell runs the CLI's words exactly, an empty word and a space kept, falls
+    back when the CLI refuses, the opt-out, the person's alias),
+    `a_typed_claude_is_wired_as_one_slopty_starts` and `a_typed_print_run_gets_only_the_mod`
+    (slopty-cli, end to end: the real CLI in zsh, both bashes and fish on a terminal as ptyd
+    starts them, a stand-in `claude` writing down its arguments), and
+    `claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents` and
+    `a_claude_code_conversation_comes_back_resumed` for the worker's side.

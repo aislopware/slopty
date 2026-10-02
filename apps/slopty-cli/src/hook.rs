@@ -64,6 +64,14 @@ pub enum HookCmd {
     /// Hand the reports waiting for this session's agent over to it, as Claude Code's hook
     /// for a session's start, a prompt and a turn's end (registered with the relay).
     Reports,
+    /// The words that start Claude Code in this session wired to Slopty (its hooks, its tools
+    /// and its mod), for the shell integration's `claude`: the variables to set, an empty word,
+    /// then the arguments, each word ended by a NUL.
+    Wire {
+        /// Claude Code's arguments, as typed (after `--`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Report this session's agent status yourself (any program, from inside the session).
     Report {
         /// What the agent is doing.
@@ -276,6 +284,22 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
             post(&workerctl::socket(data_dir), session, report_payload(status, &message)).await
         }
         HookCmd::Statusline { command } => statusline::run(data_dir, command).await,
+        HookCmd::Wire { args } => {
+            let cwd = std::env::current_dir().context("current directory")?;
+            let var = |name: &str| std::env::var(name).ok();
+            let (env, args) = wire(args, &relay_command()?, &cwd, var);
+            let mut out = Vec::new();
+            for word in env.iter().map(|(k, v)| format!("{k}={v}")).chain([String::new()]) {
+                out.extend_from_slice(word.as_bytes());
+                out.push(0);
+            }
+            for word in &args {
+                out.extend_from_slice(word.as_bytes());
+                out.push(0);
+            }
+            std::io::Write::write_all(&mut std::io::stdout().lock(), &out)
+                .context("write the words")
+        }
         HookCmd::Install { settings } => {
             let path = settings.unwrap_or_else(default_settings);
             let outcome = hooks::install_at(&path, &relay_command()?)
@@ -318,6 +342,40 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
     }
 }
 
+/// What a `claude` typed in a Slopty shell runs with: the variables to set and its arguments,
+/// for the arguments `args` given in `cwd`, where `var` reads the session's environment and
+/// `relay` is this binary.
+///
+/// Inside a session it is wired as an agent the worker starts ([`hooks::wired`]): the relay's
+/// hooks and status line, Slopty's tools when the session has a server, and a pinned
+/// conversation. Wherever the worker named its mod, it also loads the mod, with the switch that
+/// lets it run, unless the person loads it already. An inherited switch that silences the
+/// mod's traffic is the person's, and is left alone.
+fn wire(
+    args: Vec<String>,
+    relay: &str,
+    cwd: &Path,
+    var: impl Fn(&str) -> Option<String>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    use slopty_agent::claude_mod::{self, Installed};
+    let set = |name: &str| var(name).filter(|v| !v.is_empty());
+    let served = set(slopty_proto::project::SERVER_ENV).is_some();
+    let args = match set(SESSION_ENV) {
+        Some(_session) => hooks::wired(args.clone(), relay, cwd, served).unwrap_or(args),
+        None => args,
+    };
+    let installed = set(claude_mod::DIR_ENV)
+        .zip(set(claude_mod::SOCKET_ENV))
+        .map(|(dir, socket)| Installed { dir: PathBuf::from(dir), socket: PathBuf::from(socket) })
+        .filter(|installed| installed.dir.is_dir());
+    let Some(installed) = installed else { return (Vec::new(), args) };
+    let with_mod = installed.args(args.clone());
+    if with_mod == args {
+        return (Vec::new(), args);
+    }
+    (vec![(claude_mod::FUNCTION_HOOKS_ENV.to_owned(), "1".to_owned())], with_mod)
+}
+
 fn default_settings() -> PathBuf {
     hooks::settings_path(&slopty_platform::dirs::home())
 }
@@ -339,6 +397,48 @@ mod tests {
     use tokio::net::UnixListener;
 
     use super::*;
+
+    fn words(args: &[&str]) -> Vec<String> {
+        args.iter().map(|&a| a.to_owned()).collect()
+    }
+
+    /// Outside a session only the mod is added; inside one without a server, no tools; the
+    /// person's own mod flag gets no switch; no mod named, or none on disk, adds none.
+    #[test]
+    fn a_typed_claude_is_wired_by_what_its_session_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let module = dir.path().join("mod");
+        std::fs::create_dir_all(&module).expect("mod dir");
+        let flag = format!("--plugin-dir={}", module.display());
+        let session = SessionId::new().to_string();
+        let vars = |with: &[(&str, &str)]| {
+            let owned: Vec<(String, String)> =
+                with.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+            move |name: &str| owned.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+        };
+        let module_str = module.to_string_lossy().into_owned();
+        let modded = [
+            (slopty_agent::claude_mod::DIR_ENV, module_str.as_str()),
+            (slopty_agent::claude_mod::SOCKET_ENV, "/tmp/mod.sock"),
+        ];
+        let switch = vec![("CLAUDE_CODE_ENABLE_FUNCTION_HOOKS".to_owned(), "1".to_owned())];
+
+        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&modded));
+        assert_eq!((env, args), (switch.clone(), words(&[&flag, "x"])), "outside a session");
+
+        let inside = [modded[0], modded[1], (SESSION_ENV, session.as_str())];
+        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&inside));
+        assert_eq!(env, switch);
+        assert!(args.iter().any(|a| a == "--settings") && args.ends_with(&words(&["x"])));
+        assert!(!args.iter().any(|a| a.starts_with("--mcp-config")), "no server: {args:?}");
+
+        let (env, args) = wire(words(&[&flag, "x"]), "/s/slopty", dir.path(), vars(&modded));
+        assert_eq!((env, args), (Vec::new(), words(&[&flag, "x"])), "the person's own flag");
+
+        let gone = [(slopty_agent::claude_mod::DIR_ENV, "/nowhere"), modded[1]];
+        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&gone));
+        assert_eq!((env, args), (Vec::new(), words(&["x"])), "no mod on disk");
+    }
 
     /// A tool's output of several megabytes is cut, not into invalid JSON: what goes on reads
     /// as the same hook with the response's head.

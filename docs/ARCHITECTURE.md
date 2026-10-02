@@ -773,9 +773,13 @@ sent at −1: above files, below video.
     parks the promises and keeps them on request (`Command::KeepDragged`). The client writes `name.partial`,
     syncs it every 8 MiB, checks it against the digest in the worker's `Done` and renames it.
     A cut attempt is called off (`Cancel`) and fetched again under a new transfer whose `held`
-    names the durable bytes of each partial and each file already landed. The worker resumes a
-    held file only when it sent that same version (size and modification time) before, and
-    otherwise sends it from 0 (`Transfers::resume_points`).
+    names the durable bytes of each partial and each file already landed, each with the version
+    (size and modification time) its header said (`transfer::Held`). The worker resumes a held
+    file only while it is still that version, and otherwise sends it from 0
+    (`slopty_worker::xfer::resume_points`). A download outlives its link: when the link goes it
+    waits on its worker's `slopty_client::xfer::Line` for the next link (the app's redial, the
+    File Provider domain's own) and goes on over it from what it holds, its progress in Finder
+    unbroken and its cancel still answered.
   - Files that apps promise rather than name (Mail, Photos) are received by a view beneath
     the web pages that registers only the promise types (`slopty_platform::file_drop`), and
     on iPad every drop comes through a `UIDropInteraction`. Each drop lands in a temporary
@@ -1196,7 +1200,9 @@ transcript has it. The mod posts its events over HTTP to the worker's mod socket
 names a recorded Claude Code (`slopty_agent::live::gate`, `MOD_CLAUDE_VERSIONS`), and they go
 to the followers as live blocks (`ConversationEvent::Live`), each cleared right after the
 transcript change that settles it. Agents the worker starts load the mod, and so does a
-`claude` typed in a Slopty shell (the shell integration's `claude` function). Everywhere else,
+`claude` typed in a Slopty shell: the shell integration's `claude` function asks `slopty hook
+wire` for the words, which wire it as the worker wires its own (the relay, the tools with a
+server, a pinned conversation, the mod). Everywhere else,
 the hooks, the transcript and the status line are the whole face (decisions, "Slopty's Claude
 Code mod is the live channel"). The decoder, the relay, the wrapper, the wire, the worker, the mod and the face are
 built. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
