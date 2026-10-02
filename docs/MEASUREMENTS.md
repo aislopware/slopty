@@ -13280,3 +13280,59 @@ cargo nextest run -p slopty-client --run-ignored only -E 'test(decode_hop_cost)'
 cargo test -p slopty-worker --lib --no-run   # copy the binary to /tmp, as for the glass test
 ./slopty_worker --ignored --exact screen::synthetic::tests::capture_and_input_to_glass --nocapture
 ```
+
+## 2026-10-02 — the thread view against its latency budgets
+
+The GUI-first plan's interaction and wire budgets (`.research/gui-first-2026-10-01/plan.md`
+§4.4), held against the thread view: a cached thread paints in the first frame, a send shows as
+its pending bubble in the frame of its ↵, a keystroke reacts in under 50 ms, and an agent's word
+reaches its glyph within one round trip plus 20 ms at p50.
+
+Mac Studio M1 Max, macOS 26, load average 16 to 94 from other sessions' builds.
+
+**The view's frames, headless** (`timing_of_the_thread_s_frames`, release, medians of 11 views
+and 21 keystrokes). The thread is a snapshot's worth of a long one: `SNAPSHOT_TURNS` (20) turns
+of 40 commands each, 840 items, 1.8 MB cached. The headless window lays out and paints but
+rasterizes nothing, so these are the UI thread's share of a frame.
+
+| What | Median | Budget |
+| --- | --- | --- |
+| The view made, its cache read and decoded | 1.0 ms | |
+| The first frame of a cached thread: view made, laid out and painted | 2.8 ms | the first frame |
+| A send drawn as its pending bubble in the frame of its ↵ | 1.3 ms | the same frame |
+| Every step opened or folded by ⌃O | 0.79 ms | 50 ms a keystroke |
+
+The path under those frames is unchanged from this morning's section (the cache read 516 µs, a
+streamed word applied in 0.17 µs, the rows built in 3.4 µs folded and 17 µs open).
+
+**The app's frames while an answer streams** (`frame_time::the_thread_draws_a_streaming_answer_within_a_frame`,
+debug build with optimisation, a 1000×720 window at 60 Hz, 5 s each, draw time p50 / p95 / p99
+/ max). The answer grows by a word every 16 ms, as the Claude Code mod reports it.
+
+| Scenario | Draw | Frame interval p50 / p99 | Over 16.7 ms | Dropped |
+| --- | --- | --- | --- | --- |
+| (h) following a streaming answer | 1.5 / 1.8 / 2.7 / 5.4 ms | 16.7 / 17.6 ms | 0 of 298 | 0 |
+| (i) panning at 120 events/s while it streams | 2.1 / 3.8 / 5.5 / 5.8 ms | 16.7 / 17.5 ms | 0 of 300 | 0 |
+| (j) every step open, panning, nothing streaming | 1.7 / 3.3 / 3.5 / 4.7 ms | 16.7 / 17.5 ms | 0 of 300 | 0 |
+
+**A streamed word to the frame that shows it** ((k), the same test, 60 words). Each word is a
+token of its own, posted to the worker's mod socket and timed until the first dump whose
+accessibility tree holds it. A dump waits for the next frame, so the dump's own round trip is
+in every sample, and is timed alone beside it.
+
+| What | p50 | p95 | max |
+| --- | --- | --- | --- |
+| Post to a frame that shows the word | 32.3 ms | 48.6 ms | 50.1 ms |
+| A dump alone (the next frame and the tree) | 16.6 ms | 18.1 ms | |
+
+Over loopback the round trip is near nothing, so the word costs about 16 ms past the dump's own
+frame at p50: the worker's 16 ms delta coalescing, then the frame. That meets one round trip plus
+20 ms at p50; the p95 adds a second frame, where the word landed just after a frame began.
+
+Every figure is inside its budget, and with a wide margin: the first frame of a long cached
+thread costs a third of a 120 Hz frame, and no streaming or panning frame came near 16.7 ms.
+
+```sh
+cargo nextest run -p slopty-ui --release --run-ignored only -E 'test(/timing_of_the_thread/)' --no-capture
+cargo xtask e2e smooth --filter 'test(/frame_time::the_thread/)'
+```
