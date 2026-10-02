@@ -191,7 +191,10 @@ doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is spli
   about to be made too, and leaves it in `target/gate/COMMIT_MSG` for `git commit -F`. It ends
   by printing the next step.
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
-  makes: the commits on main not yet on `origin/main`, pushed with a lease. Runs on that branch
+  makes: the commits on main not yet on `origin/main`, pushed with a lease. The tests lane runs
+  as three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
+  `xtask/src/gate.rs`), rustdoc runs after host clippy on its runner, and the tools lane runs on
+  Linux, which keeps the run within five Macs. Runs on that branch
   form one concurrency group. A newer push waits behind the run in progress rather than
   cancelling it, and GitHub keeps only the newest push pending, whose green covers every commit
   under it; a pull request's run is still cancelled by its next push. When every lane passed,

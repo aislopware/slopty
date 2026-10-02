@@ -29,13 +29,27 @@ jobs:
   # `cargo gate --full`, one lane per runner. A hosted Mac has three cores and 7 GB: the five lanes
   # side by side on one of them took 80 minutes cold, each lane compiling the world on its own
   # target dir while swapping. Here each lane takes the whole runner (docs/decisions/tooling.md).
+  # The tests lane, whose CPU-bound build bounded every run, runs as three shards of packages
+  # (`xtask gate --shard`, whose test checks that this matrix lists each). That keeps the Free
+  # plan's five concurrent macOS jobs: rustdoc runs after host clippy on its runner, and the tools
+  # lane, which reads only text, runs on Linux.
   gate:
-    name: gate (${{ matrix.lane }})
-    runs-on: macos-26
+    name: gate (${{ matrix.lane }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        lane: [ tools, clippy-host, clippy-ios, tests, rustdoc ]
+        include:
+          # The gate's free-space floor is sized for this Mac's full gate; the tools lane builds
+          # xtask alone.
+          - { lane: tools, os: ubuntu-24.04, disk-floor-gb: 5 }
+          - { lane: clippy-host, os: macos-26 }
+          - { lane: clippy-ios, os: macos-26 }
+          - { lane: tests, shard: ui, os: macos-26 }
+          - { lane: tests, shard: worker, os: macos-26 }
+          - { lane: tests, shard: rest, os: macos-26 }
+    env:
+      SLOPTY_DISK_FLOOR_GB: ${{ matrix.disk-floor-gb }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -55,34 +69,46 @@ jobs:
           components: rustfmt
       # sccache holds the compiled units; this keeps only the registry, git checkouts and the
       # installed tools, so the two do not store every unit twice in the repository's cache
-      # quota. One entry serves every lane, saved by the tools lane on `gate`: its
-      # `cargo metadata` fetches every package and it installs the most tools. A cache is read
-      # by its own branch and the ones based on main, so the Deep workflow saves its own on main. The toolchains are left out of the
-      # key, since none of this depends on them. A key per lane saved 5 × 270 MB on each lockfile
-      # change and filled the 10 GB quota the compile cache lives in (MEASUREMENTS 2026-10-01).
-      # Saved on failure too: a red lane is no reason to download it all again.
+      # quota. The action keys an entry by the runner's OS, so there are two: the Linux tools
+      # lane saves its own, and host clippy saves the one every Mac lane reads, after
+      # `cargo fetch` (below) has every package in it. A cache is read by its own branch and the
+      # ones based on main, so the Deep workflow saves its own on main. The toolchains are left
+      # out of the key, since none of this depends on them. A key per lane saved 5 × 270 MB on
+      # each lockfile change and filled the 10 GB quota the compile cache lives in (MEASUREMENTS
+      # 2026-10-01). Saved on failure too: a red lane is no reason to download it all again.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: gate
           add-rust-environment-hash-key: false
           cache-targets: false
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/gate' && matrix.lane == 'tools' }}
+          save-if: >-
+            ${{ github.ref == 'refs/heads/gate'
+            && (matrix.lane == 'tools' || matrix.lane == 'clippy-host') }}
       - uses: cargo-bins/cargo-binstall@main
       # libghostty-vt-sys builds its library with zig in every lane that compiles.
       - if: matrix.lane != 'tools'
         run: brew install zig
+      # Every package of every platform, for the Mac lanes' cache entry this lane saves.
+      - if: matrix.lane == 'clippy-host'
+        run: cargo fetch --locked
       - run: cargo xtask setup --lane ${{ matrix.lane }}
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
       # and fails on a leak, on more than its budget, or on running out.
-      - run: cargo xtask gate --ci --lane ${{ matrix.lane }}
+      - run: >-
+          cargo xtask gate --ci --lane ${{ matrix.lane }}
+          ${{ matrix.shard && format('--shard {0}', matrix.shard) || '' }}
+      # rustdoc on host clippy's runner, after it, and even when clippy failed, so one run names
+      # both. Its dependencies' metadata comes from sccache, which clippy has just filled.
+      - if: ${{ !cancelled() && matrix.lane == 'clippy-host' }}
+        run: cargo xtask gate --ci --lane rustdoc
       # What a slow run is read from afterwards: each test's time, each unit of the build's, how
       # much of the build the compile cache served, and the pseudo-terminals held every 200 ms.
       - if: always() && matrix.lane == 'tests'
         uses: actions/upload-artifact@v4
         with:
-          name: timings
+          name: timings-${{ matrix.shard }}
           path: |
             target/**/nextest/ci/junit.xml
             target/**/nextest/ci/ptys.log

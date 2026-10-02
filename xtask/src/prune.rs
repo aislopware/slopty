@@ -87,18 +87,24 @@ pub struct Limits {
 impl Limits {
     /// The defaults, or `SLOPTY_TARGET_BUDGET_GB` and `SLOPTY_DISK_FLOOR_GB`.
     pub fn from_env() -> Result<Self> {
-        let gb = |var: &str, default: u64| -> Result<u64> {
-            let value = match std::env::var(var) {
-                Ok(v) => v.trim().parse().with_context(|| format!("{var}={v} is not a number"))?,
-                Err(_) => default,
-            };
-            Ok(value.saturating_mul(GB))
-        };
+        let var = |name: &str| std::env::var(name).ok();
         Ok(Self {
-            budget: gb("SLOPTY_TARGET_BUDGET_GB", DEFAULT_BUDGET_GB)?,
-            floor: gb("SLOPTY_DISK_FLOOR_GB", DEFAULT_FLOOR_GB)?,
+            budget: gigabytes("SLOPTY_TARGET_BUDGET_GB", var, DEFAULT_BUDGET_GB)?,
+            floor: gigabytes("SLOPTY_DISK_FLOOR_GB", var, DEFAULT_FLOOR_GB)?,
         })
     }
+}
+
+/// Bytes from the GB variable `name` as `var` reads it, else `default` GB. An empty value is
+/// unset: CI's matrix sets the floor for one job and leaves it empty on the others.
+fn gigabytes(name: &str, var: impl Fn(&str) -> Option<String>, default: u64) -> Result<u64> {
+    let value = match var(name) {
+        Some(v) if !v.trim().is_empty() => {
+            v.trim().parse().with_context(|| format!("{name}={v} is not a number"))?
+        }
+        _ => default,
+    };
+    Ok(value.saturating_mul(GB))
 }
 
 /// Prune options.

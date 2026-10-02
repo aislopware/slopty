@@ -33,7 +33,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pass::{Inputs, Plan, Scope};
 use xshell::{Shell, cmd};
 
-use crate::tools::{LINUX_CRATES, TRIPLES, has, host_only_present, quiet_step, repo_root};
+use crate::tools::{
+    LINUX_CRATES, TRIPLES, WORKSPACE_HACK, has, host_only_present, quiet_step, repo_root,
+    workspace_packages,
+};
 
 /// Gate options.
 #[derive(Clone, Debug, Default)]
@@ -107,6 +110,83 @@ impl LaneId {
     }
 }
 
+/// A share of the tests lane, as `--shard` names it. The lane's build bounds every CI run and is
+/// CPU-bound on a three-core runner, so CI runs it as one job per shard, each building and testing
+/// its own packages (`docs/decisions/tooling.md`, "The tests lane runs in three shards").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Shard {
+    /// The client: the UI, the apps over it, and what only they use.
+    Ui,
+    /// The worker daemon and what it stands on: sessions, capture, codecs, input, files.
+    Worker,
+    /// The rest: the server, the CLI, the wire, the client core, the terminal engine, xtask.
+    Rest,
+}
+
+impl Shard {
+    /// Its name in the lane's name and CI's matrix.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Ui => "ui",
+            Self::Worker => "worker",
+            Self::Rest => "rest",
+        }
+    }
+
+    /// Its packages. Every workspace member is in exactly one shard
+    /// (`tests::every_member_is_in_exactly_one_shard`), except [`WORKSPACE_HACK`], which each
+    /// builds beside its own so the third-party crates resolve as in every other build. The split
+    /// evens out the build's CPU per package (the tests lane's `cargo-timing.html`), since the
+    /// tests themselves take a fraction of it.
+    const fn packages(self) -> &'static [&'static str] {
+        match self {
+            Self::Ui => &[
+                "slopty-ui",
+                "slopty-app",
+                "slopty",
+                "slopty-e2e",
+                "slopty-settings",
+                "slopty-tools",
+                "slopty-theme",
+                "slopty-ios",
+            ],
+            Self::Worker => &[
+                "slopty-workerd",
+                "slopty-worker",
+                "slopty-ptyd",
+                "slopty-pty",
+                "slopty-capture",
+                "slopty-codec",
+                "slopty-media",
+                "slopty-dnd",
+                "slopty-input",
+                "slopty-vdisplay",
+                "slopty-files",
+            ],
+            Self::Rest => &[
+                "slopty-server",
+                "slopty-serverd",
+                "slopty-cli",
+                "slopty-proto",
+                "slopty-agent",
+                "slopty-client",
+                "slopty-net",
+                "slopty-engine",
+                "slopty-grid",
+                "slopty-predict",
+                "slopty-shape",
+                "slopty-tailnet",
+                "slopty-deploy",
+                "slopty-crash",
+                "slopty-core",
+                "slopty-platform",
+                "slopty-testkit",
+                "xtask",
+            ],
+        }
+    }
+}
+
 /// Which lanes a gate runs, and where.
 #[derive(Clone, Debug, Default)]
 pub struct Only {
@@ -114,12 +194,14 @@ pub struct Only {
     pub lanes: Vec<LaneId>,
     /// On a hosted runner: the tests lane uses [`NEXTEST_CI_PROFILE`].
     pub ci: bool,
+    /// The tests lane on this shard's packages only.
+    pub shard: Option<Shard>,
 }
 
 impl Only {
     /// The lanes run here before a commit ([`QUICK`]).
     pub fn quick() -> Self {
-        Self { lanes: QUICK.to_vec(), ci: false }
+        Self { lanes: QUICK.to_vec(), ci: false, shard: None }
     }
 
     fn wants(&self, lane: LaneId) -> bool {
@@ -156,6 +238,12 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
     crate::prune::ensure_room(&root.join("target"))?;
     if opts.in_place && opts.since_pass {
         bail!("--since-pass compares snapshots of the index; it cannot check the tree in place");
+    }
+    if only.shard.is_some() {
+        ensure!(
+            only.lanes == [LaneId::Tests] && !opts.since_pass,
+            "--shard splits the tests lane: give it with `--lane tests` alone, without --since-pass"
+        );
     }
     if opts.fix {
         // Fixers write to the working tree; the snapshot reads the index, so stage their edits.
@@ -227,6 +315,9 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
     report(&first, started, &junit)?;
 
     let build = |name| Lane { name, scope: Scope::Build, extra: String::new(), since_pass: false };
+    // A shard builds other packages than the whole lane: a target dir and a pass record of its own.
+    let tests_name: &str =
+        &only.shard.map_or_else(|| "tests".to_owned(), |s| format!("tests {}", s.name()));
     let second: Vec<(&str, Result<()>)> = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         if only.wants(LaneId::ClippyHost) {
@@ -253,16 +344,17 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
         }
         if only.wants(LaneId::Tests) {
             handles.push((
-                "tests",
+                tests_name,
                 scope.spawn(|| {
                     let tests = Lane {
-                        name: "tests",
+                        name: tests_name,
                         scope: Scope::Build,
                         extra: pass::tool_id("cargo-nextest"),
                         since_pass: opts.since_pass,
                     };
                     cached(inputs, &tree, &tests, |packages| {
-                        test_lane(&lane("tests")?, lane("tests")?, profile, packages)
+                        let (sh, doc_sh) = (lane(tests_name)?, lane(tests_name)?);
+                        test_lane(&sh, doc_sh, profile, packages, only.shard)
                     })
                 }),
             ));
@@ -332,7 +424,7 @@ fn summary_of(failed: &[(&str, String)], tests: &[String]) -> String {
     let mut text = String::new();
     for (lane, error) in failed {
         let _written = writeln!(text, "### ✘ gate lane failed: {lane}\n\n{error}\n");
-        if *lane == "tests" {
+        if lane.starts_with("tests") {
             for test in tests {
                 let _written = writeln!(text, "- `{test}`");
             }
@@ -466,23 +558,26 @@ fn tools_lane(
 /// `slopty_testkit::bins::FRESH`: set once every binary a test spawns is built.
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
-/// `slopty_testkit::bins::NAMES`, each after its `--bin`.
-const SPAWNED_BINS: [&str; 14] = [
-    "--bin",
-    "slopty-ptyd",
-    "--bin",
-    "slopty-worker",
-    "--bin",
-    "slopty-server",
-    "--bin",
-    "slopty",
-    "--bin",
-    "slopty-stub-claude",
-    "--bin",
-    "slopty-stub-pi",
-    "--bin",
-    "slopty-stub-acp",
+/// `slopty_testkit::bins::NAMES`, each with the package that builds it.
+const SPAWNED_BINS: [(&str, &str); 7] = [
+    ("slopty-ptyd", "slopty-ptyd"),
+    ("slopty-worker", "slopty-workerd"),
+    ("slopty-server", "slopty-serverd"),
+    ("slopty", "slopty-cli"),
+    ("slopty-stub-claude", "slopty-testkit"),
+    ("slopty-stub-pi", "slopty-testkit"),
+    ("slopty-stub-acp", "slopty-testkit"),
 ];
+
+/// `--bin <name>` for each of [`SPAWNED_BINS`].
+fn spawned_bin_args() -> Vec<String> {
+    SPAWNED_BINS.iter().flat_map(|(bin, _)| ["--bin".to_owned(), (*bin).to_owned()]).collect()
+}
+
+/// `-p <name>` for each name.
+fn selected<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    names.into_iter().flat_map(|name| ["-p".to_owned(), name.to_owned()]).collect()
+}
 
 /// `slopty_testkit::bins::BUILT`: where nextest's setup script built them.
 pub const BINS_BUILT: &str = "SLOPTY_BINS_BUILT";
@@ -497,34 +592,49 @@ pub fn spawned_bins(sh: &Shell) -> Result<()> {
     }
     let env =
         std::env::var_os("NEXTEST_ENV").context("nextest runs this and names $NEXTEST_ENV")?;
-    cmd!(sh, "cargo build --profile test --workspace --tests {SPAWNED_BINS...}").run()?;
+    let bins = spawned_bin_args();
+    cmd!(sh, "cargo build --profile test --workspace --tests {bins...}").run()?;
     let built = crate::tools::target_dir(sh)?.join("debug");
     std::fs::write(&env, format!("{BINS_BUILT}={built}\n"))
         .with_context(|| format!("write {}", std::path::Path::new(&env).display()))?;
     Ok(())
 }
 
-/// The gate's tests: build every test binary, then run nextest's `profile` (on `only`'s
-/// packages when given) and the doctests side by side. Cargo holds the target dir's lock only
-/// while it builds, and the build is done, so neither waits for the other. Meanwhile
-/// [`crate::ptys`] counts the pseudo-terminals they hold: the lane fails on a leak, on more than
-/// its budget at once, or on the system running out, naming the tests.
-fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) -> Result<()> {
+/// The gate's tests: build every test binary (of the workspace, or of `shard`'s packages), then
+/// run nextest's `profile` (on `only`'s packages when given) and the doctests side by side. Cargo
+/// holds the target dir's lock only while it builds, and the build is done, so neither waits for
+/// the other. Meanwhile [`crate::ptys`] counts the pseudo-terminals they hold: the lane fails on
+/// a leak, on more than its budget at once, or on the system running out, naming the tests.
+fn test_lane(
+    sh: &Shell,
+    doc_sh: Shell,
+    profile: &str,
+    only: Option<&[String]>,
+    shard: Option<Shard>,
+) -> Result<()> {
+    let packages = shard.map_or_else(
+        || vec!["--workspace".to_owned()],
+        |s| selected(s.packages().iter().copied().chain([WORKSPACE_HACK])),
+    );
+    let p = &packages;
     // On a runner, `--timings` leaves `cargo-timing.html` in the target dir for CI to keep: what
     // each unit of the build cost. Here it would pile up a report per gate.
     let timings: &[&str] = if profile == NEXTEST_CI_PROFILE { &["--timings"] } else { &[] };
-    quiet_step("nextest build", cmd!(sh, "cargo nextest run --workspace --no-run {timings...}"))?;
+    quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} --no-run {timings...}"))?;
     // Every binary a test spawns, so no test shells out to cargo and waits on its locks while
-    // another build on the machine holds them. With the workspace's tests selected, all built
-    // just now, cargo resolves features with every member's dev-dependencies as that build did
+    // another build on the machine holds them. With the tests selected that were built just now,
+    // cargo resolves features with their dev-dependencies as that build did
     // (`slopty-tailnet/fake`, `slopty-codec/experiments`), so each crate is the unit the tests
     // already have. Without them a dozen workspace crates compiled a second time, differently.
     // In the tests' own profile too: plain `cargo build` is `dev`, which optimises the workspace
     // crates that `test` leaves at opt-level 0, and would compile all of them again.
-    quiet_step(
-        "spawned binaries",
-        cmd!(sh, "cargo build --profile test --workspace --tests {SPAWNED_BINS...}"),
-    )?;
+    if let Some(spawned) = spawned_selection(shard.map(Shard::packages)) {
+        let bins = spawned_bin_args();
+        quiet_step(
+            "spawned binaries",
+            cmd!(sh, "cargo build --profile test {spawned...} {bins...}"),
+        )?;
+    }
     let _fresh = sh.push_env(BINS_FRESH, "1");
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
@@ -537,12 +647,13 @@ fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) 
     // Beside the JUnit report, which CI keeps.
     let log = tree.join("target").join("nextest").join(profile).join("ptys.log");
     let ptys = crate::ptys::Sampler::start(std::process::id(), &tree, Some(log));
+    let libs = shard.map_or_else(|| Ok(packages.clone()), shard_libs)?;
     let (tests, doctests) = std::thread::scope(|scope| {
-        let doctests = scope
-            .spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test --workspace --doc")));
+        let doctests =
+            scope.spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test {libs...} --doc")));
         let tests = quiet_step(
             "nextest",
-            cmd!(sh, "cargo nextest run --workspace --profile {profile} {filter...}")
+            cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
                 .env(crate::runner::RUNNER_VAR, &runner),
         );
         (tests, join(doctests))
@@ -550,6 +661,47 @@ fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) 
     let ptys = ptys.finish();
     print!("{}", ptys.report());
     both(both(tests, doctests), ptys.verdict())
+}
+
+/// The packages whose tests spawn [`SPAWNED_BINS`] (`slopty_testkit::bins::bin`), as
+/// `tests::the_packages_whose_tests_spawn_binaries_are_listed` reads them from the sources.
+const SPAWNING: [&str; 5] =
+    ["slopty-workerd", "slopty-worker", "slopty-files", "slopty-cli", "slopty-client"];
+
+/// What the build of [`SPAWNED_BINS`] selects besides `--bin`: the workspace with its tests, or
+/// a shard's packages and those that build the binaries, or nothing when none of the shard's
+/// tests spawns one. A shard leaves the others' tests unbuilt: `--tests` would build the
+/// binaries' packages' tests too, so `--examples` stands in for it. No member has an example,
+/// and selecting them is what makes cargo resolve features with the selected packages'
+/// dev-dependencies, as their test build did.
+fn spawned_selection(packages: Option<&[&str]>) -> Option<Vec<String>> {
+    let Some(packages) = packages else {
+        return Some(vec!["--workspace".to_owned(), "--tests".to_owned()]);
+    };
+    if !packages.iter().any(|p| SPAWNING.contains(p)) {
+        return None;
+    }
+    let mut names: Vec<&str> = packages.to_vec();
+    names.push(WORKSPACE_HACK);
+    for (_, package) in SPAWNED_BINS {
+        if !names.contains(&package) {
+            names.push(package);
+        }
+    }
+    let mut args = selected(names);
+    args.push("--examples".to_owned());
+    Some(args)
+}
+
+/// `-p <name>` for `shard`'s packages that have a library, and so doctests, and for
+/// [`WORKSPACE_HACK`].
+fn shard_libs(shard: Shard) -> Result<Vec<String>> {
+    let libs: Vec<String> = workspace_packages()?
+        .into_iter()
+        .filter(|p| p.lib && shard.packages().contains(&p.name.as_str()))
+        .map(|p| p.name)
+        .collect();
+    Ok(selected(libs.iter().map(String::as_str).chain([WORKSPACE_HACK])))
 }
 
 /// Sync the **index** (what `git commit` would record, not the working tree) into
@@ -945,9 +1097,13 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use clap::ValueEnum as _;
+
     use super::{
-        BINS_BUILT, BINS_FRESH, SPAWNED_BINS, failed_tests, next_step, one_gpui, summary_of,
+        BINS_BUILT, BINS_FRESH, SPAWNED_BINS, Shard, failed_tests, next_step, one_gpui,
+        spawned_selection, summary_of,
     };
+    use crate::tools::{WORKSPACE_HACK, repo_root, workspace_packages};
 
     /// The gate builds what the tests look for, under the variables they read.
     #[test]
@@ -955,11 +1111,106 @@ mod tests {
         let testkit = include_str!("../../crates/slopty-testkit/src/bins.rs");
         assert!(testkit.contains(&format!("pub const FRESH: &str = \"{BINS_FRESH}\";")));
         assert!(testkit.contains(&format!("pub const BUILT: &str = \"{BINS_BUILT}\";")));
-        let names: Vec<&str> = SPAWNED_BINS.iter().copied().filter(|a| *a != "--bin").collect();
+        let names: Vec<&str> = SPAWNED_BINS.iter().map(|(bin, _)| *bin).collect();
         let count = format!("NAMES: [&str; {}]", names.len());
         assert!(testkit.contains(&count), "bins::NAMES is not {} long", names.len());
         for name in names {
             assert!(testkit.contains(&format!("\"{name}\"")), "{name} is not in bins::NAMES");
+        }
+    }
+
+    /// A member in no shard would have its tests run by no CI job; one in two, by both.
+    #[test]
+    fn every_member_is_in_exactly_one_shard() {
+        let members = workspace_packages().expect("the workspace's packages");
+        for member in &members {
+            let shards: Vec<&str> = Shard::value_variants()
+                .iter()
+                .filter(|s| s.packages().contains(&member.name.as_str()))
+                .map(|s| s.name())
+                .collect();
+            assert_eq!(shards.len(), 1, "{} is in the shards {shards:?}", member.name);
+        }
+        for shard in Shard::value_variants() {
+            for package in shard.packages() {
+                assert!(
+                    members.iter().any(|m| m.name == *package),
+                    "shard {} names {package}, which is no member",
+                    shard.name()
+                );
+                assert_ne!(*package, WORKSPACE_HACK, "every shard builds it already");
+            }
+        }
+    }
+
+    /// CI runs one job per shard: a shard missing from its matrix would run no tests at all.
+    #[test]
+    fn ci_runs_every_shard() {
+        let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
+        let workflow = std::fs::read_to_string(&path).expect("ci.yml");
+        let listed = workflow.matches("shard: ").count();
+        assert_eq!(listed, Shard::value_variants().len(), "one matrix entry a shard");
+        for shard in Shard::value_variants() {
+            let entry = format!("lane: tests, shard: {}, ", shard.name());
+            assert!(workflow.contains(&entry), "ci.yml's matrix has no `{entry}`");
+        }
+    }
+
+    /// A shard builds the spawned binaries beside its own packages without the others' tests,
+    /// and not at all when none of its tests spawns one.
+    #[test]
+    fn a_shard_builds_the_spawned_binaries_without_their_packages_tests() {
+        let args = spawned_selection(Some(Shard::Rest.packages())).unwrap_or_default().join(" ");
+        for (_, package) in SPAWNED_BINS {
+            assert!(args.contains(&format!("-p {package}")), "{args}");
+        }
+        assert!(args.contains("-p slopty-cli") && args.contains("-p workspace-hack"), "{args}");
+        assert!(args.ends_with("--examples") && !args.contains("--tests"), "{args}");
+        assert_eq!(args.matches("-p slopty-testkit").count(), 1, "named once: {args}");
+        assert_eq!(
+            spawned_selection(Some(Shard::Ui.packages())),
+            None,
+            "the UI's tests spawn none"
+        );
+        assert_eq!(
+            spawned_selection(None).unwrap_or_default(),
+            ["--workspace", "--tests"],
+            "the whole lane builds them as before"
+        );
+    }
+
+    /// A package whose tests spawn a binary and is missing from [`SPAWNING`] would run them where
+    /// nothing built it.
+    #[test]
+    fn the_packages_whose_tests_spawn_binaries_are_listed() {
+        let packages = workspace_packages().expect("the workspace's packages");
+        let mut spawning = std::collections::BTreeSet::new();
+        for package in &packages {
+            let mut sources = Vec::new();
+            for dir in ["src", "tests"] {
+                rust_sources(&package.dir.join(dir).into_std_path_buf(), &mut sources);
+            }
+            let spawns = sources.iter().any(|file| {
+                std::fs::read_to_string(file).is_ok_and(|text| text.contains("bins::bin("))
+            });
+            // The one defines it, and this one names it.
+            if spawns && !["slopty-testkit", "xtask"].contains(&package.name.as_str()) {
+                spawning.insert(package.name.as_str());
+            }
+        }
+        let listed: std::collections::BTreeSet<&str> = super::SPAWNING.into_iter().collect();
+        assert_eq!(spawning, listed, "the packages whose tests call `slopty_testkit::bins::bin`");
+    }
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
         }
     }
 

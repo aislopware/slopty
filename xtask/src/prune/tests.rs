@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-use super::{Limits, Options, Report, check_room, prune, size, tally};
+use super::{GB, Limits, Options, Report, check_room, gigabytes, prune, size, tally};
 
 const HOUR: u64 = 3600;
 const MIB: usize = 1 << 20;
@@ -635,4 +635,18 @@ fn a_read_stamps_an_access_time_set_back_to_the_epoch() {
     let mut text = String::new();
     File::open(&file).unwrap().read_to_string(&mut text).unwrap();
     assert!(accessed(&file) > fx.ago(60), "the read stamped it");
+}
+
+/// A limit's variable: unset or empty takes the default, a number its GB, anything else fails.
+#[test]
+fn a_limit_reads_its_variable_and_an_empty_one_is_unset() {
+    let read = |value: Option<&str>| {
+        let owned = value.map(str::to_owned);
+        gigabytes("SLOPTY_DISK_FLOOR_GB", move |_| owned.clone(), 50)
+    };
+    assert_eq!(read(None).ok(), Some(50 * GB));
+    assert_eq!(read(Some("")).ok(), Some(50 * GB), "CI's matrix leaves it empty");
+    assert_eq!(read(Some(" 5 ")).ok(), Some(5 * GB));
+    let error = read(Some("five")).map_err(|e| e.to_string()).err().unwrap_or_default();
+    assert!(error.contains("is not a number"), "{error}");
 }

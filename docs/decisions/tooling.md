@@ -893,3 +893,31 @@ more full-window layer.
   keeps one run in progress and one pending per group, and a newer push replaces the pending
   one, so the queue never holds more than the newest commit. A pending run replaced that way
   ends as cancelled, which `land --wait` reports as such.
+
+- ✅ **The tests lane runs in three shards** (2026-10-02). After the test profile, the lane's
+  build is still the longest job, and it is CPU-bound, so it is split by package across three
+  runners. `xtask gate --lane tests --shard ui|worker|rest` builds and tests one shard's
+  packages, with `workspace-hack` beside them so third-party crates resolve as in every other
+  build (`xtask check -p` builds the same way, so each crate's tests already pass resolved
+  alone). The shards even out the build's CPU per package from the lane's `cargo-timing.html`:
+  `ui` (the UI and the apps over it), `worker` (the daemon, sessions, capture, codecs, input,
+  files) and `rest` (the server, the CLI, the wire, the client core, the engine, xtask). A test
+  fails when a member is in no shard or two, and when `ci.yml`'s matrix leaves a shard out.
+  - **The spawned binaries in a shard.** Building them `--workspace --tests` would build every
+    package's tests, so a shard selects its packages and the binaries' own, with `--examples`
+    for `--tests`: no member has an example, and either makes cargo resolve features with the
+    selected packages' dev-dependencies, as the test build did. A shard none of whose tests
+    spawns one (`ui`) builds none; a test checks the list of the packages whose tests do
+    against the sources.
+  - **Five Macs.** The Free plan runs five macOS jobs at once. The three shards and the two
+    clippy lanes take them; rustdoc runs after host clippy on its runner (even when clippy
+    failed), with its dependencies from sccache; the tools lane runs on `ubuntu-24.04`. Every
+    tool there reads text alone: fmt, taplo, typos and `committed`; `cargo deny` with the
+    targets in `deny.toml`; hakari with the platforms in `.config/hakari.toml`; shear. Its
+    free-space floor is 5 GB (`SLOPTY_DISK_FLOOR_GB`), as it builds xtask alone.
+  - **The cache.** rust-cache keys an entry by the runner's OS, so the Linux lane saves its own
+    and host clippy saves the Macs' after `cargo fetch`, which gets every platform's packages.
+  - `promote` still needs every job of the matrix. Each shard uploads `timings-<shard>`: its
+    JUnit report, its `cargo-timing.html` and its pseudo-terminal samples.
+  - Rejected: nextest's `--partition`, which splits only the run (7 of the lane's 33 minutes)
+    and leaves every shard the whole build.

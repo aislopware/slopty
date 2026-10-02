@@ -113,6 +113,9 @@ enum Cmd {
         /// Run only this lane; repeat for several. The tools lane carries the fmt check.
         #[arg(long = "lane", value_enum)]
         lanes: Vec<gate::LaneId>,
+        /// With `--lane tests` alone: only this shard's packages (CI runs a job per shard).
+        #[arg(long, value_enum)]
+        shard: Option<gate::Shard>,
     },
     /// After a commit on main: push it to the `gate` branch, where CI runs every gate lane and
     /// fast-forwards main to it once all pass.
@@ -317,12 +320,12 @@ fn main() -> Result<()> {
             prune::auto();
             checked
         }
-        Cmd::Gate { fix, full, message, in_place, since_pass, ci, lanes } => {
+        Cmd::Gate { fix, full, message, in_place, since_pass, ci, lanes, shard } => {
             let lanes = if lanes.is_empty() && !full && !ci { gate::QUICK.to_vec() } else { lanes };
             let in_place = in_place || ci;
             let next = gate::next_step(message.is_some());
             let opts = gate::Options { fix, in_place, since_pass, message };
-            let gated = gate::run_only(&sh, &opts, &gate::Only { lanes, ci });
+            let gated = gate::run_only(&sh, &opts, &gate::Only { lanes, ci, shard });
             prune::auto();
             if gated.is_ok() && !in_place {
                 print!("{next}");
