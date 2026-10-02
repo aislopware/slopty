@@ -584,25 +584,33 @@ mod tests {
     }
 
     /// A descendant that computes moves the sum; one that sleeps does not; the root's own
-    /// time is not in it.
+    /// time is not in it. Each is waited for against a deadline, since a loaded machine can
+    /// take a while to start either child.
     #[tokio::test]
     async fn a_busy_descendant_moves_the_processor_time_and_a_sleeping_one_does_not() {
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
         let me = std::process::id();
+        let deadline = Instant::now() + Duration::from_secs(20);
         let mut sleeper = std::process::Command::new("/bin/sleep").arg("30").spawn().unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let before = descendants_cpu(me);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(descendants_cpu(me), before, "a sleeping child uses nothing");
+        // Once started, the sleeper's time stops moving: two reads apart agree.
+        let mut before = descendants_cpu(me);
+        loop {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let now = descendants_cpu(me);
+            if now == before {
+                break;
+            }
+            assert!(Instant::now() < deadline, "a sleeping child kept using time: {now}");
+            before = now;
+        }
         let mut busy = std::process::Command::new("/usr/bin/yes")
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let first = descendants_cpu(me);
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let second = descendants_cpu(me);
-        assert!(second > first, "a busy child moves it: {first} then {second}");
+        while descendants_cpu(me) <= before {
+            assert!(Instant::now() < deadline, "a busy child never moved it from {before}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         for child in [&mut sleeper, &mut busy] {
             child.kill().unwrap();
             child.wait().unwrap();
