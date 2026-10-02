@@ -1922,3 +1922,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`crates/slopty-net/tests/sim.rs`) runs a dial on a simulated path that delivers every
     datagram twice. Its seed 7 failed with "reset by peer" before the fix, and so did 25 of
     300 seeds; 0 of 1 000 fail after it. The nightly sweep runs it on 200 seeds.
+
+- ✅ **The receive assembler's chunks are bounded: quinn's RUSTSEC-2026-0185 fix as noq-proto
+  patch 18** (2026-10-02). quinn-proto 0.11.15 to 0.11.18 bound how many chunks a stream's or
+  CRYPTO's `Assembler` holds. Without the bound, a peer that sends small frames with gaps keeps
+  every one of them in memory while the reader waits for the gap. noq-proto 1.3.0 forked before
+  the fix, and its new name hides it from `cargo audit`. n0-computer/noq#828, a draft, ports the
+  three quinn commits unchanged. Slopty takes its diff as it stands rather than waiting for a
+  release (`vendor/noq-proto/SLOPTY.md`, patch 18).
+  - *Why it applies here.* Every worker is reached over the tailnet, but a compromised or buggy
+    host is still a peer that could grow a client's memory without limit, and so is a client
+    to a worker. The wire adds no encryption or pairing of its own, so the transport
+    has to bound what any peer can make it hold.
+  - *What it costs.* A peer past 1024 chunks after defragmenting is closed with
+    `INTERNAL_ERROR`. Slopty's streams are read as they arrive, so no legitimate stream comes
+    near that. Coalescing contiguous chunks keeps a slow reader on a large window from being
+    refused.
+  - Tests: quinn's assembler tests, in `assembler.rs` (noq-proto, 453 of its tests pass with
+    the patch).

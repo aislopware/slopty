@@ -1,4 +1,4 @@
-# noq-proto, vendored with seventeen patches
+# noq-proto, vendored with eighteen patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -189,6 +189,18 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    reset"). Only a short-header packet is compared now. Tests:
    `a_long_header_packet_ending_in_the_token_is_no_stateless_reset` and
    `a_short_header_packet_ending_in_the_token_is_a_stateless_reset`.
+
+18. `fix(proto): Bound the assembler's chunk count` (n0-computer/noq#828, open)
+
+   RUSTSEC-2026-0185 (CVE-2026-25800): a peer that sends small STREAM or CRYPTO frames with gaps
+   between them makes the `Assembler` keep every chunk while the reader waits for the missing
+   prefix, without bound. noq-proto 1.3.0 predates quinn's fix, and `cargo audit` cannot flag
+   it under the crate's new name. The pull request ports quinn-proto 0.11.18's assembler as
+   three commits, one per quinn fix (quinn-rs/quinn#2694, #2789, #2814). `insert` refuses with
+   `TooManyChunks` past 1024 chunks left after defragmenting, which closes the connection with
+   `INTERNAL_ERROR`. The cap is checked whatever the over-allocation, and small contiguous
+   chunks are coalesced while defragmenting, so a slow reader on a large receive window is not
+   refused. Applied as the pull request's diff, unchanged. Tests: quinn's, in `assembler.rs`.
 
 A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
 app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a
