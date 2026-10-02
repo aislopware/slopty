@@ -1405,6 +1405,10 @@ struct Shared<P: Platform = Native> {
     /// Frames the stream's encoder sessions dropped, all sessions together; the encode keeps it
     /// ([`Self::tell`]), since only an encode may ask the session.
     encoder_dropped: AtomicU64,
+    /// Frames a replaced session gave back after the new one was put in, and so dropped
+    /// ([`Self::on_session_packet`]). An aligned session codes inside the submit and has none
+    /// in flight when it is replaced; a session that codes after its submit returns may.
+    replaced_dropped: AtomicU64,
     /// [`Self::encoder_dropped`] at the last receiver report.
     dropped_reported: AtomicU64,
     /// Whether the stream carries 4:4:4 or 4:2:0, following the rate's decisions; the pipeline
@@ -1539,6 +1543,7 @@ impl<P: Platform> Shared<P> {
             layers: Mutex::new(LayerGate::default()),
             layers_wanted: AtomicBool::new(false),
             encoder_dropped: AtomicU64::new(0),
+            replaced_dropped: AtomicU64::new(0),
             dropped_reported: AtomicU64::new(0),
             chroma: Mutex::new(ChromaGate::new(Chroma::Subsampled, (0, 0), 0)),
             last_push_us: AtomicU64::new(now::<P>()),
@@ -2439,10 +2444,12 @@ impl<P: Platform> Shared<P> {
     /// given a frame, so every packet of the new session finds it set.
     fn on_session_packet(&self, index: usize, session: u64, packet: &EncodedPacket) {
         if self.coder(index).session.load(Ordering::Relaxed) != session {
+            let replaced = self.replaced_dropped.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
                 stream = %self.id,
                 index,
                 session,
+                replaced,
                 pts_us = packet.pts_us,
                 keyframe = packet.keyframe,
                 "a replaced encoder session's frame dropped"
@@ -6997,6 +7004,13 @@ mod tests {
     /// writer) made the three wait on each other for good: five runs in five before the fix.
     /// Real VideoToolbox sessions. Every frame is back late by the encode's clock, so the twelfth
     /// ends a run and moves the rung, while the last rebuild waits on that frame's encode.
+    ///
+    /// Every frame is accounted for: it came out, or it was still in a session the rebuild
+    /// replaced and was dropped as that session's. On this Mac's encoder the second never
+    /// happens, since an aligned session codes inside the submit. The hosted runner's virtual
+    /// Mac returns some frames after the submit: one there was still in a replaced session
+    /// (by design, [`Shared::install`]) or not yet back when the encodes ended, and a count of
+    /// the frames out read 15 of 16 (run 36974916865).
     #[test]
     fn a_rebuild_beside_a_cadence_change_finishes() {
         use synthetic::Synthetic;
@@ -7071,8 +7085,19 @@ mod tests {
             let finished = done.recv_timeout(Duration::from_secs(30));
             assert!(finished.is_ok(), "the rebuilds and the encodes wait on each other");
         }
+        // A session that codes after its submit returns may still hold the last frame.
+        let accounted = || {
+            let out = shared.stats().encoded;
+            let replaced = shared.replaced_dropped.load(Ordering::Relaxed);
+            (out, replaced, out.saturating_add(replaced) == u64::try_from(FRAMES).unwrap())
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !accounted().2 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let (out, replaced, every) = accounted();
+        assert!(every, "every frame came out or was a replaced session's: {out} and {replaced}");
         assert_eq!(shared.fps_ceiling.load(Ordering::Relaxed), 30, "the rung moved");
-        assert_eq!(shared.stats().encoded, u64::try_from(FRAMES).unwrap(), "every frame came out");
     }
 
     /// Nothing the stream's owner, its runtime tasks or the capture's queue call waits on an
