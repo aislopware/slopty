@@ -262,6 +262,38 @@ fn a_long_diff_keeps_its_counts() {
     assert!(whole.ends_with("@@ -2000,1 +3000,0 @@\n-gone\n"));
 }
 
+/// An edit's hunks are headed from the file as it was, as git heads them, in the clipped hunks
+/// and in the whole patch alike.
+#[test]
+fn an_edits_hunks_name_what_they_are_in() {
+    let original = "use std::io;\n\nimpl Client {\n    fn send(&self) {\n        a();\n        b();\n        c();\n    }\n}\n";
+    let structured = json!({"filePath": "/w/client.rs", "originalFile": original, "structuredPatch": [
+        {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": ["-use std::io;", "+use std::fmt;"]},
+        {"oldStart": 5, "oldLines": 3, "newStart": 5, "newLines": 3, "lines": ["         a();", "-        b();", "+        d();", "         c();"]},
+    ]});
+    let jsonl = [
+        line(&call(
+            "a1",
+            None,
+            "t1",
+            "Edit",
+            &json!({"file_path": "/w/client.rs", "old_string": "b();", "new_string": "d();"}),
+        )),
+        line(&result("u1", Some("a1"), "t1", "updated", &structured)),
+    ]
+    .concat();
+    let mut c = Conversation::default();
+    c.ingest_jsonl(&MAIN, &jsonl);
+    let ToolDetail::Edit(edit) = &tool(&c, &MAIN, "t1").detail else { panic!("edit") };
+    let headings: Vec<Option<&str>> =
+        edit.patch.hunks.iter().map(|h| h.heading.as_deref()).collect();
+    assert_eq!(headings, [None, Some("impl Client {")], "{:#?}", edit.patch);
+    let whole =
+        full_text(&jsonl, &TextRef { record: "u1".to_owned(), part: Part::Patch }).expect("patch");
+    assert!(whole.contains("@@ -1,1 +1,1 @@\n-use"), "{whole}");
+    assert!(whole.contains("@@ -5,3 +5,3 @@ impl Client {\n"), "{whole}");
+}
+
 /// Records of kinds the decoder does not know, fields it has never seen, lines that are not
 /// JSON and tools it has no detail for are all passed over or kept generically.
 #[test]

@@ -145,6 +145,8 @@ pub struct AskId(pub String);
 pub struct AgentId(pub String);
 
 impl AgentId {
+    /// What names an agent reached over ACP: `acp:<name>`, `<name>` its registry's.
+    pub const ACP_PREFIX: &'static str = "acp:";
     /// Claude Code.
     pub const CLAUDE_CODE: &'static str = "claude-code";
     /// Codex.
@@ -156,6 +158,18 @@ impl AgentId {
     #[must_use]
     pub fn named(name: &str) -> Self {
         Self(name.to_owned())
+    }
+
+    /// The ACP agent the registry names `name`.
+    #[must_use]
+    pub fn acp(name: &str) -> Self {
+        Self(format!("{}{name}", Self::ACP_PREFIX))
+    }
+
+    /// The registry's name of the ACP agent this is, when it is one.
+    #[must_use]
+    pub fn acp_name(&self) -> Option<&str> {
+        self.0.strip_prefix(Self::ACP_PREFIX).filter(|name| !name.is_empty())
     }
 
     /// Whether this is the agent named `name`.
@@ -447,8 +461,12 @@ pub struct Changed {
     pub removed: u32,
 }
 
-/// Tokens counted, by kind. Open: each agent counts its own (Claude Code reads and writes a
-/// cache, Codex counts reasoning), so the kinds are keys, with the common ones named here.
+/// What a turn used, by kind: the tokens, and what they cost where the agent says it.
+///
+/// Open: each agent counts its own (Claude Code reads and writes a cache, Codex counts
+/// reasoning), so the kinds are keys, with the common ones named here.
+/// [`Usage::COST_MICRO_USD`] is not a token count, so a sum of tokens leaves it out
+/// ([`Usage::tokens`]).
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Usage(pub BTreeMap<String, u64>);
 
@@ -457,6 +475,8 @@ impl Usage {
     pub const CACHE_READ: &'static str = "cache-read";
     /// Input tokens written to the prompt cache.
     pub const CACHE_WRITE: &'static str = "cache-write";
+    /// What the turn cost, in millionths of a US dollar.
+    pub const COST_MICRO_USD: &'static str = "cost-micro-usd";
     /// Tokens read as input.
     pub const INPUT: &'static str = "input";
     /// Tokens written.
@@ -468,6 +488,15 @@ impl Usage {
     #[must_use]
     pub fn get(&self, kind: &str) -> u64 {
         self.0.get(kind).copied().unwrap_or(0)
+    }
+
+    /// The tokens counted, of every kind: everything but the cost.
+    #[must_use]
+    pub fn tokens(&self) -> u64 {
+        self.0
+            .iter()
+            .filter(|(kind, _)| kind.as_str() != Self::COST_MICRO_USD)
+            .fold(0, |sum, (_, n)| sum.saturating_add(*n))
     }
 
     /// Add `other`'s counts to these.
@@ -570,6 +599,19 @@ pub struct Notice {
     pub kind: String,
     /// What it says.
     pub text: Clipped,
+    /// For a failure the agent tries again: which attempt comes next and when.
+    pub retry: Option<Retry>,
+}
+
+/// An agent trying a failed request again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Retry {
+    /// The attempt that comes next, from 1.
+    pub attempt: u32,
+    /// How many attempts it makes before it gives up, when it says.
+    pub max: Option<u32>,
+    /// How long it waits before that attempt, in ms, when it says.
+    pub in_ms: Option<u64>,
 }
 
 impl Notice {
@@ -585,6 +627,12 @@ impl Notice {
     pub const INTERRUPTED: &'static str = "interrupted";
     /// The person went back to an earlier message; what came after it is gone.
     pub const REWOUND: &'static str = "rewound";
+
+    /// A notice of `kind` saying `text`, with no retry.
+    #[must_use]
+    pub fn new(kind: &str, text: Clipped) -> Self {
+        Self { kind: kind.to_owned(), text, retry: None }
+    }
 }
 
 /// A tool call.
@@ -845,11 +893,13 @@ pub struct Step {
     pub status: String,
 }
 
-/// Work the agent runs in the background.
+/// Work the agent runs in the background, past the call that started it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BackgroundTask {
     /// Its id, as the agent knows it.
     pub id: String,
+    /// What kind of work it is. Open: [`BackgroundTask::SHELL`], [`BackgroundTask::AGENT`].
+    pub kind: String,
     /// What it is.
     pub title: String,
     /// Open, as the agent says: `running`, `completed`, `failed`, `killed`.
@@ -858,6 +908,31 @@ pub struct BackgroundTask {
     pub item: Option<ItemId>,
     /// The end of what it printed.
     pub output: Option<Clipped>,
+    /// When it began.
+    pub started_ms: WallMs,
+    /// When it ended, once it has and the agent says when.
+    pub ended_ms: Option<WallMs>,
+}
+
+impl BackgroundTask {
+    /// A subagent left running.
+    pub const AGENT: &'static str = "agent";
+    /// It finished.
+    pub const COMPLETED: &'static str = "completed";
+    /// It failed.
+    pub const FAILED: &'static str = "failed";
+    /// It was stopped.
+    pub const KILLED: &'static str = "killed";
+    /// It runs.
+    pub const RUNNING: &'static str = "running";
+    /// A command left running.
+    pub const SHELL: &'static str = "shell";
+
+    /// Whether it still runs.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.state == Self::RUNNING
+    }
 }
 
 /// A thread's meters: its model, context and spend.
@@ -869,6 +944,9 @@ pub struct Meters {
     pub model_id: Option<String>,
     /// The permission mode, as the agent names it, shown and never set by typing keys.
     pub mode: Option<String>,
+    /// How hard the model thinks, as the agent names it (Codex's reasoning effort, pi's thinking
+    /// level, an ACP agent's thought level).
+    pub effort: Option<String>,
     /// Tokens in the context.
     pub context_tokens: Option<u64>,
     /// The context window.

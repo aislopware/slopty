@@ -18,7 +18,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use similar::{Algorithm, DiffOp, DiffTag};
-use slopty_proto::thread::detail::Hunk;
+use slopty_proto::thread::detail::{Hunk, heading};
 use slopty_proto::thread::wire::{FileDiff, Pick};
 use slopty_proto::thread::{Edge, Patch, ThreadId, TreeRef, TurnId};
 use tokio::io::AsyncWriteExt as _;
@@ -452,11 +452,13 @@ pub fn diff(old: &str, new: &str) -> Patch {
             u32::try_from(r.start.saturating_add(usize::from(!r.is_empty()))).unwrap_or(u32::MAX)
         };
         let count = |r: &Range<usize>| u32::try_from(r.len()).unwrap_or(u32::MAX);
+        let above = old_lines.get(..old_span.start).unwrap_or_default();
         patch.hunks.push(Hunk {
             old_start: number(&old_span),
             old_lines: count(&old_span),
             new_start: number(&new_span),
             new_lines: count(&new_span),
+            heading: heading(above.iter().map(|l| l.trim_end_matches('\n'))),
             lines: text,
         });
     }
@@ -548,6 +550,47 @@ mod tests {
         assert!(swap(OLD, &new, &[2], Side::Old).is_err(), "no third hunk");
         let no_end = swap("a\nb", "a\nc", &[0], Side::Old).unwrap();
         assert_eq!(no_end, "a\nb", "a last line without its end stays so");
+    }
+
+    /// Each hunk is headed as git heads it with no diff driver: the same file pair through
+    /// `git diff --no-index` names the same enclosing lines, the first hunk with none above it.
+    #[test]
+    fn hunks_are_headed_as_git_heads_them() {
+        let Some(git) = crate::changes::git() else { return };
+        let body = |n: usize| {
+            (0..n).map(|i| format!("    let v{i} = {i};\n")).collect::<Vec<_>>().concat()
+        };
+        let long = format!("fn {}(x: u32) {{   ", "very_long_name_".repeat(6));
+        let old = format!(
+            "use std::io;\nstruct S;\n\nimpl S {{\n    fn one(&self) {{\n{}    }}\n}}\n\n{long}\n{}}}\n",
+            body(8),
+            body(8)
+        );
+        let new = old
+            .replace("let v4 = 4;", "let v4 = 40;")
+            .replacen("let v6 = 6;", "", 2)
+            .replace("io", "fmt");
+        let ours = diff(&old, &new);
+        let tmp = tempfile::tempdir().expect("temp");
+        std::fs::write(tmp.path().join("old.txt"), &old).expect("write");
+        std::fs::write(tmp.path().join("new.txt"), &new).expect("write");
+        let out = std::process::Command::new(git)
+            .current_dir(tmp.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["diff", "--no-index", "--no-color", "-U3", "old.txt", "new.txt"])
+            .output()
+            .expect("git diff");
+        let theirs: Vec<Option<String>> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.starts_with("@@ "))
+            .map(slopty_proto::thread::detail::header_heading)
+            .collect();
+        let headed: Vec<Option<String>> = ours.hunks.iter().map(|h| h.heading.clone()).collect();
+        assert_eq!(headed, theirs, "{ours:#?}");
+        assert_eq!(theirs.len(), 3, "the pair makes three hunks");
+        assert_eq!(theirs.first(), Some(&None), "nothing is above the first");
+        assert!(theirs.iter().any(|h| h.as_deref().is_some_and(|h| h.len() == 80)), "{theirs:?}");
     }
 
     #[test]

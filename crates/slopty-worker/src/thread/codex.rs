@@ -33,8 +33,8 @@ use slopty_agent::codex::shared::{Send, Shared};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Outcome, Start};
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Delivery, Drive, IntentId, Liveness, Phase, Status, ThreadId,
-    ThreadState,
+    Action, AgentId, Answerer, AskId, Delivery, Drive, IntentId, ItemBody, Link, Liveness, Phase,
+    Status, ThreadId, ThreadState,
 };
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -246,6 +246,12 @@ struct Session {
     held: Vec<Ask>,
     /// Who waits on each start Codex has not answered yet.
     starting: HashMap<IntentId, Vec<oneshot::Sender<Outcome>>>,
+    /// The account's rate-limit windows as Codex last said them, for each thread followed
+    /// from now on.
+    limits: Option<p::RateLimitSnapshot>,
+    /// The call that started each subagent's thread, by the subagent's thread, whether or not
+    /// it is followed yet.
+    parents: HashMap<ThreadId, Link>,
 }
 
 impl Session {
@@ -261,6 +267,8 @@ impl Session {
             ready: false,
             held: Vec::new(),
             starting: HashMap::new(),
+            limits: None,
+            parents: HashMap::new(),
         }
     }
 
@@ -400,7 +408,10 @@ impl Session {
             (Waiting::Resume { native }, Ok(result)) => {
                 self.resuming.remove(&native);
                 match rpc::response::<p::ThreadResumeParams>(result) {
-                    Ok(resumed) => self.follow(&resumed.thread),
+                    Ok(resumed) => {
+                        self.follow(&resumed.thread);
+                        self.settled(&resumed.thread.id, resumed.approval_policy, &resumed.sandbox);
+                    }
                     Err(e) => tracing::debug!(%native, "a Codex thread's resume did not read: {e}"),
                 }
             }
@@ -418,6 +429,7 @@ impl Session {
                         if !self.threads.contains_key(&started.thread.id) {
                             self.follow(&started.thread);
                         }
+                        self.settled(&started.thread.id, started.approval_policy, &started.sandbox);
                         match self.threads.get(&started.thread.id) {
                             Some(followed) => Outcome::Started { thread: followed.id },
                             None => refused("Codex's thread could not be kept here".to_owned()),
@@ -464,9 +476,59 @@ impl Session {
             tracing::warn!(thread = %id, "a Codex thread could not begin: {e}");
             return;
         }
-        self.host.apply(id, actions);
         self.native.insert(id, thread.id.clone());
+        self.adopt(id, &actions);
+        self.host.apply(id, actions);
         self.threads.insert(thread.id.clone(), Followed { id, shared });
+        let mut late = Vec::new();
+        if let Some(followed) = self.threads.get_mut(&thread.id) {
+            if let Some(limits) = &self.limits {
+                late.extend(followed.shared.rate_limits(limits));
+            }
+            if let Some(link) = self.parents.get(&id) {
+                late.extend(followed.shared.adopted(link.clone()));
+            }
+        }
+        if !late.is_empty() {
+            self.host.apply(id, late);
+        }
+    }
+
+    /// Codex's thread `native` runs under `approval` in `sandbox`, as its start or resume said.
+    fn settled(&mut self, native: &str, approval: p::AskForApproval, sandbox: &p::SandboxPolicy) {
+        if let Some(followed) = self.threads.get_mut(native) {
+            let actions = followed.shared.settings(approval, sandbox);
+            if !actions.is_empty() {
+                self.host.apply(followed.id, actions);
+            }
+        }
+    }
+
+    /// The subagents `parent`'s `actions` started: each child thread is linked to its call,
+    /// now if it is followed, else once it is.
+    fn adopt(&mut self, parent: ThreadId, actions: &[Action]) {
+        for action in actions {
+            let (Action::ItemStarted(item)
+            | Action::ItemUpdated(item)
+            | Action::ItemCompleted(item)) = action
+            else {
+                continue;
+            };
+            let ItemBody::Tool(call) = &item.body else { continue };
+            let Some(child) = call.child else { continue };
+            let link = Link { thread: parent, item: item.id.clone() };
+            if self.parents.get(&child) == Some(&link) {
+                continue;
+            }
+            self.parents.insert(child, link.clone());
+            let Some(native) = self.native.get(&child) else { continue };
+            if let Some(followed) = self.threads.get_mut(native) {
+                let adopted = followed.shared.adopted(link);
+                if !adopted.is_empty() {
+                    self.host.apply(child, adopted);
+                }
+            }
+        }
     }
 
     async fn note(
@@ -478,12 +540,25 @@ impl Session {
         if let ServerNotification::ThreadStarted(started) = note {
             return self.resume(started.thread.id.clone()).await;
         }
+        if let ServerNotification::AccountRateLimitsUpdated(updated) = note {
+            // The account's, not a thread's: every thread on it hears it.
+            self.limits = Some(updated.rate_limits.clone());
+            for followed in self.threads.values_mut() {
+                let actions = followed.shared.rate_limits(&updated.rate_limits);
+                if !actions.is_empty() {
+                    self.host.apply(followed.id, actions);
+                }
+            }
+            return Ok(());
+        }
         let Some(native) = thread else { return Ok(()) };
         match self.threads.get_mut(&native) {
             Some(followed) => {
+                let id = followed.id;
                 let actions = followed.shared.notification(note, now);
+                self.adopt(id, &actions);
                 if !actions.is_empty() {
-                    self.host.apply(followed.id, actions);
+                    self.host.apply(id, actions);
                 }
             }
             None if matches!(note, ServerNotification::ThreadStatusChanged(_)) => {

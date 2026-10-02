@@ -267,6 +267,8 @@ pub struct Seen {
     pub hooks: u64,
     /// The status line's latest meters.
     pub meters: Option<Meters>,
+    /// The agent's own working directory, as its latest hook said it.
+    pub cwd: Option<String>,
     /// Subagent transcripts the hooks named (`SubagentStop`'s `agent_transcript_path`).
     pub subagents: BTreeSet<PathBuf>,
     /// The blocks the mod reports, once it is trusted.
@@ -390,6 +392,9 @@ impl Board {
             seen.hooks = seen.hooks.wrapping_add(1);
             if let Some(meters) = &hook.meters {
                 seen.meters = Some(meters.clone());
+            }
+            if let Some(cwd) = hook.cwd.as_ref().filter(|c| !c.is_empty()) {
+                seen.cwd = Some(cwd.clone());
             }
             // Claude Code's own agents (a compaction's summary, a prompt suggestion) are not
             // the model's subagents, and get no thread.

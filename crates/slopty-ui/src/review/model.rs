@@ -274,6 +274,7 @@ mod tests {
                     old_lines: 2,
                     new_start: 1,
                     new_lines: 2,
+                    heading: None,
                     lines: vec![" keep".to_owned(), "-old line".to_owned(), "+new line".to_owned()],
                 }],
                 added,

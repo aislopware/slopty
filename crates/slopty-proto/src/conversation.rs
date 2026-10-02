@@ -425,6 +425,9 @@ pub struct Hunk {
     pub new_start: u32,
     /// Lines of the new file the hunk spans.
     pub new_lines: u32,
+    /// What it is in, as git's `@@ … @@` line names it: the enclosing function or block, when
+    /// one is known (`crate::thread::detail::heading`).
+    pub heading: Option<String>,
     /// The lines, each starting with ` `, `-` or `+` (or `\` for "no newline at end").
     pub lines: Vec<String>,
 }

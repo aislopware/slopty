@@ -274,6 +274,9 @@ pub enum Incoming {
         /// Why it failed, when it did.
         #[serde(default, rename = "errorMessage")]
         error_message: Option<String>,
+        /// What it came to, when it worked.
+        #[serde(default)]
+        result: Option<Compacted>,
     },
     /// A failed model call is retried.
     AutoRetryStart {
@@ -282,6 +285,9 @@ pub enum Incoming {
         /// Out of how many.
         #[serde(rename = "maxAttempts")]
         max_attempts: u32,
+        /// How long pi waits before it, in ms.
+        #[serde(default, rename = "delayMs")]
+        delay_ms: Option<u64>,
         /// What failed.
         #[serde(rename = "errorMessage")]
         error_message: String,
@@ -729,6 +735,20 @@ pub struct Usage {
     /// What they cost, in dollars.
     #[serde(default)]
     pub cost: Cost,
+}
+
+/// What a compaction came to.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Deserialize)]
+pub struct Compacted {
+    /// The summary the session goes on from.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Context tokens before.
+    #[serde(default, rename = "tokensBefore")]
+    pub tokens_before: Option<u64>,
+    /// Context tokens after, as pi estimates them.
+    #[serde(default, rename = "estimatedTokensAfter")]
+    pub estimated_tokens_after: Option<u64>,
 }
 
 /// What a response cost, in dollars.

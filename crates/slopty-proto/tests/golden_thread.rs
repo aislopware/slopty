@@ -21,9 +21,9 @@ mod golden_thread {
         Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
         Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Fork, Image, IntentId, Item,
         ItemBody, ItemId, Limit, Link, Liveness, Meters, Model, Notice, PartKey, Patch, Pending,
-        PendingState, Phase, Plan, Request, RequestState, Status, Step, ThreadId, ThreadMeta,
-        ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId, TurnState, Usage,
-        UserMessage, Wait, kind,
+        PendingState, Phase, Plan, Request, RequestState, Retry, Status, Step, ThreadId,
+        ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId, TurnState,
+        Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -121,6 +121,7 @@ mod golden_thread {
                 old_lines: 1,
                 new_start: 1,
                 new_lines: 1,
+                heading: Some("fn main() {".to_owned()),
                 lines: vec!["-a".to_owned(), "+b".to_owned()],
             }],
             added: 1,
@@ -218,6 +219,7 @@ mod golden_thread {
             model: Some("Opus 5.5".to_owned()),
             model_id: Some("claude-opus-5-5".to_owned()),
             mode: Some("default".to_owned()),
+            effort: Some("high".to_owned()),
             context_tokens: Some(42_000),
             context_window: Some(200_000),
             cost_micro_usd: Some(250_000),
@@ -456,9 +458,14 @@ mod golden_thread {
             )),
             Action::ItemCompleted(item(
                 "n1",
+                ItemBody::Notice(Notice::new(Notice::INTERRUPTED, clip("Stopped"))),
+            )),
+            Action::ItemCompleted(item(
+                "n2",
                 ItemBody::Notice(Notice {
-                    kind: Notice::INTERRUPTED.to_owned(),
-                    text: clip("Stopped"),
+                    kind: Notice::API_ERROR.to_owned(),
+                    text: clip("Overloaded"),
+                    retry: Some(Retry { attempt: 2, max: Some(10), in_ms: Some(1_200) }),
                 }),
             )),
             Action::ItemCompleted(item("v1", ItemBody::Review { entered: true })),
@@ -499,10 +506,13 @@ mod golden_thread {
             Action::PlanSet(None),
             Action::TasksSet(vec![BackgroundTask {
                 id: "b1".to_owned(),
+                kind: BackgroundTask::SHELL.to_owned(),
                 title: "cargo watch".to_owned(),
-                state: "running".to_owned(),
+                state: BackgroundTask::RUNNING.to_owned(),
                 item: Some(ItemId("toolu_3".to_owned())),
                 output: Some(clip("watching")),
+                started_ms: WallMs::from_millis(1_727_000_000_000),
+                ended_ms: None,
             }]),
             Action::MetersSet(meters()),
             Action::CommandsSet(vec![Command {
@@ -639,6 +649,7 @@ mod golden_thread {
             old_lines: 1,
             new_start: 3,
             new_lines: 2,
+            heading: None,
             lines: vec!["-a".to_owned(), "+b".to_owned(), "+c".to_owned()],
         };
         let patch = Patch { hunks: vec![hunk], added: 2, removed: 1, clipped_lines: 0, full: None };

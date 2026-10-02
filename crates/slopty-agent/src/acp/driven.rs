@@ -375,11 +375,13 @@ impl Session {
             SessionUpdate::ToolCall(call) => {
                 let mut actions = self.close(now);
                 actions.extend(self.tool_call(call, now));
+                actions.extend(self.tally());
                 actions
             }
             SessionUpdate::ToolCallUpdate(update) => {
                 let mut actions = self.close(now);
                 actions.extend(self.tool_update(update, now));
+                actions.extend(self.tally());
                 actions
             }
             SessionUpdate::Plan(plan) => {
@@ -467,34 +469,40 @@ impl Session {
         let mut actions = self.close(now);
         let end = match outcome {
             Ok(result) => match serde_json::from_value::<acp::PromptResponse>(result.clone()) {
-                Ok(response) => match response.stop_reason {
-                    acp::StopReason::Cancelled => TurnState::Interrupted,
-                    acp::StopReason::Refusal => {
-                        actions.extend(self.notice(
-                            Notice::INFO,
-                            "The agent refused to go on.",
-                            now,
-                        ));
-                        TurnState::Failed { error: "refused".to_owned() }
+                Ok(response) => {
+                    // The turn's tokens, when the agent counts them with its answer.
+                    if let (Some(usage), Some(begun)) = (&response.usage, self.begun.as_mut()) {
+                        begun.usage = usage_of(usage);
                     }
-                    acp::StopReason::MaxTokens => {
-                        actions.extend(self.notice(
-                            Notice::INFO,
-                            "The agent stopped at its token limit.",
-                            now,
-                        ));
-                        TurnState::Complete
+                    match response.stop_reason {
+                        acp::StopReason::Cancelled => TurnState::Interrupted,
+                        acp::StopReason::Refusal => {
+                            actions.extend(self.notice(
+                                Notice::INFO,
+                                "The agent refused to go on.",
+                                now,
+                            ));
+                            TurnState::Failed { error: "refused".to_owned() }
+                        }
+                        acp::StopReason::MaxTokens => {
+                            actions.extend(self.notice(
+                                Notice::INFO,
+                                "The agent stopped at its token limit.",
+                                now,
+                            ));
+                            TurnState::Complete
+                        }
+                        acp::StopReason::MaxTurnRequests => {
+                            actions.extend(self.notice(
+                                Notice::INFO,
+                                "The agent stopped at its limit of model requests for a turn.",
+                                now,
+                            ));
+                            TurnState::Complete
+                        }
+                        _ => TurnState::Complete,
                     }
-                    acp::StopReason::MaxTurnRequests => {
-                        actions.extend(self.notice(
-                            Notice::INFO,
-                            "The agent stopped at its limit of model requests for a turn.",
-                            now,
-                        ));
-                        TurnState::Complete
-                    }
-                    _ => TurnState::Complete,
-                },
+                }
                 Err(e) => {
                     let why = format!("The agent's answer did not read: {e}");
                     actions.extend(self.notice(Notice::INFO, &why, now));
@@ -759,6 +767,27 @@ impl Session {
 
     const fn turn(&self) -> TurnId {
         TurnId(self.turns)
+    }
+
+    /// The turn under way told again when the lines its calls' diffs change moved.
+    fn tally(&mut self) -> Option<Action> {
+        let turn = self.turn();
+        let changed = self
+            .calls
+            .values()
+            .filter(|(t, ..)| *t == turn)
+            .filter_map(|(_, _, call)| match &call.detail {
+                Some(ToolDetail::Edit(edit)) => Some(&edit.patch),
+                Some(ToolDetail::Write(write)) => Some(&write.patch),
+                _ => None,
+            })
+            .fold(Changed::default(), |sum, patch| Changed {
+                added: sum.added.saturating_add(patch.added),
+                removed: sum.removed.saturating_add(patch.removed),
+            });
+        let begun = self.begun.as_mut().filter(|b| b.changed != changed)?;
+        begun.changed = changed;
+        Some(Action::TurnStarted(begun.clone()))
     }
 
     fn open_turn(&mut self, now: WallMs) -> Vec<Action> {
@@ -1074,7 +1103,7 @@ impl Session {
 
     fn notice(&mut self, kind: &str, text: &str, now: WallMs) -> Vec<Action> {
         let id = self.next_item();
-        let body = ItemBody::Notice(Notice { kind: kind.to_owned(), text: Clipped::whole(text) });
+        let body = ItemBody::Notice(Notice::new(kind, Clipped::whole(text)));
         vec![Action::ItemCompleted(Item { id, turn: self.turn(), at_ms: now, body })]
     }
 
@@ -1112,6 +1141,14 @@ impl Session {
         let mut meters = self.meters.clone();
         let model = self.option_of(&acp::SessionConfigOptionCategory::Model).cloned();
         let mode = self.option_of(&acp::SessionConfigOptionCategory::Mode).cloned();
+        meters.effort =
+            self.option_of(&acp::SessionConfigOptionCategory::ThoughtLevel).and_then(|option| {
+                let current = select_current(option);
+                select_choices(option)
+                    .into_iter()
+                    .find(|(id, _)| Some(id) == current.as_ref())
+                    .map(|(_, label)| label)
+            });
         meta.models = model
             .as_ref()
             .map(|o| select_choices(o).into_iter().map(|(id, label)| Model { id, label }).collect())
@@ -1248,6 +1285,7 @@ fn patch_of(old: &str, new: &str) -> Patch {
                 old_lines: h.old_lines,
                 new_start: h.new_start,
                 new_lines: h.new_lines,
+                heading: h.heading,
                 lines: h.lines,
             })
             .collect(),
@@ -1436,4 +1474,21 @@ const fn finish(call: &mut ToolCall, now: WallMs) {
             _ => ExecStatus::Failed,
         };
     }
+}
+
+/// The tokens a turn took, as the agent's answer to its prompt counts them.
+fn usage_of(usage: &acp::Usage) -> thread::Usage {
+    let counts = [
+        (thread::Usage::INPUT, Some(usage.input_tokens)),
+        (thread::Usage::OUTPUT, Some(usage.output_tokens)),
+        (thread::Usage::REASONING, usage.thought_tokens),
+        (thread::Usage::CACHE_READ, usage.cached_read_tokens),
+        (thread::Usage::CACHE_WRITE, usage.cached_write_tokens),
+    ];
+    thread::Usage(
+        counts
+            .into_iter()
+            .filter_map(|(kind, n)| Some((kind.to_owned(), n.filter(|n| *n > 0)?)))
+            .collect(),
+    )
 }

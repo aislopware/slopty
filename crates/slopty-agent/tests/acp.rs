@@ -12,7 +12,7 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::thread::{
         Action, Answerer, AskId, Cap, IntentId, ItemBody, Liveness, Phase, RequestState,
-        ThreadState, ToolDetail, ToolState, TurnState,
+        ThreadState, ToolDetail, ToolState, TurnState, Usage,
     };
 
     const SESSION: &str = "ses_00000000000000000000000001";
@@ -305,6 +305,48 @@ mod tests {
         assert_eq!(offered, [("once", None), ("always", Some("always")), ("reject", None)]);
         assert_eq!(state.status.phase, Phase::Stopped);
         assert_eq!(state.status.liveness, Liveness::Live);
+
+        // What each turn took, as the agent counts it with its answer, and what it changed.
+        let first = &state.turns[0];
+        assert_eq!(first.usage.get(Usage::INPUT), 12);
+        assert_eq!(first.usage.get(Usage::OUTPUT), 20);
+        let wrote = state
+            .items
+            .iter()
+            .find(|i| i.id.0 == "toolu_1")
+            .map(|i| i.turn)
+            .expect("the write's turn");
+        let turn = state.turns.iter().find(|t| t.id == wrote).unwrap();
+        assert_eq!((turn.changed.added, turn.changed.removed), (1, 0), "the file it wrote");
+    }
+
+    /// An agent's thought-level option is the meters' effort, by the name it gives its value.
+    #[test]
+    fn a_thought_level_option_is_the_effort() {
+        let line = fixture("turns.jsonl")
+            .into_iter()
+            .find(|l| !l.sent && l.msg["result"].get("configOptions").is_some())
+            .expect("the new session's answer");
+        let mut result = line.msg["result"].clone();
+        let level = serde_json::json!({"category": "thought_level", "currentValue": "hi",
+            "id": "effort", "name": "Effort", "type": "select",
+            "options": [{"name": "Low", "value": "lo"}, {"name": "High", "value": "hi"}]});
+        result["configOptions"].as_array_mut().unwrap().push(level);
+        let new: acp::NewSessionResponse = serde_json::from_value(result).unwrap();
+        let agent = slopty_agent::acp::agent_id("opencode");
+        let (mut session, begun) =
+            Session::new(agent, driven::thread_of(intent(0)), "/work", WallMs::ZERO);
+        let mut state = ThreadState::new(session.meta().clone());
+        let opened = session.opened(
+            Some(&new.session_id),
+            new.modes.as_ref(),
+            new.config_options.as_deref(),
+            WallMs::ZERO,
+        );
+        for action in begun.iter().chain(&opened) {
+            state.apply(action);
+        }
+        assert_eq!(state.meters.effort.as_deref(), Some("High"));
     }
 
     /// A session loaded again is the thread it was: the person's messages open its turns, and

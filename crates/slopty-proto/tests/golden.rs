@@ -920,6 +920,21 @@ mod golden {
             }),
         );
         snap(
+            "worker_item_thread",
+            &WorkerMsg::Items(ItemSync::Delta {
+                version: 14,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: ItemOp::Add(Item {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7e)),
+                    kind: ItemKind::Thread {
+                        thread: slopty_proto::thread::ThreadId::from_uuid(Uuid::from_u128(0x7418)),
+                    },
+                    sleeping: false,
+                    name: None,
+                }),
+            }),
+        );
+        snap(
             "worker_folder_listed",
             &WorkerMsg::Folder {
                 path: "~/src".to_owned(),
@@ -2363,6 +2378,7 @@ mod conversation {
                 old_lines: 1,
                 new_start: 3,
                 new_lines: 1,
+                heading: Some("impl Client {".to_owned()),
                 lines: vec!["-a".to_owned(), "+b".to_owned()],
             }],
             added: 1,

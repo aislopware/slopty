@@ -305,6 +305,16 @@ impl Following {
             }
             return;
         };
+        // A start's folder may be spelled from the home, as a client that knows no better
+        // spells it: every adapter takes it whole.
+        let req = match req {
+            ThreadRequest::Start { id, mut start } => {
+                let cwd = slopty_worker::file::expand_home(Path::new(&start.cwd));
+                start.cwd = cwd.to_string_lossy().into_owned();
+                ThreadRequest::Start { id, start }
+            }
+            other => other,
+        };
         match req {
             ThreadRequest::Table { have } => {
                 if let Some(old) = self.table.take() {

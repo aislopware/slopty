@@ -30,6 +30,7 @@ fn file(path: &str, lines: &[&str], added: u32, removed: u32) -> FileDiff {
                 old_lines: 3,
                 new_start: 10,
                 new_lines: 3,
+                heading: None,
                 lines: lines.iter().map(|l| (*l).to_owned()).collect(),
             }],
             added,

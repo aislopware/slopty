@@ -82,6 +82,7 @@ expression: "decode(\"edit\").snapshot()"
                     old_lines: 3
                     new_start: 1
                     new_lines: 3
+                    heading: ~
                     lines:
                       - " alpha"
                       - "-beta"
@@ -128,6 +129,7 @@ expression: "decode(\"edit\").snapshot()"
                     old_lines: 3
                     new_start: 1
                     new_lines: 4
+                    heading: ~
                     lines:
                       - " alpha"
                       - " BETA"

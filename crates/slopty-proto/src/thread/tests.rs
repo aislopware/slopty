@@ -363,3 +363,39 @@ fn one_answer_answers_every_question() {
     assert_eq!(Answer::read(&asked, &Answer::choice(&asked, &stray)), None, "one not asked");
     assert_eq!(Answer::read(&asked, "Split"), None, "words for questions that offer answers");
 }
+
+#[test]
+fn a_hunk_is_headed_by_the_nearest_line_git_would_name() {
+    let above =
+        ["use std::io;", "", "impl Client {   ", "    fn send(&self) {", "        let x = 1;"];
+    assert_eq!(detail::heading(above.into_iter()).as_deref(), Some("impl Client {"));
+    assert_eq!(
+        detail::heading(["$var = 1", "\tindented"].into_iter()).as_deref(),
+        Some("$var = 1")
+    );
+    assert_eq!(detail::heading(["_private:", " x"].into_iter()).as_deref(), Some("_private:"));
+    assert_eq!(detail::heading(["    fn f() {", "// note", "}"].into_iter()), None);
+    assert_eq!(detail::heading(["été", "1 + 2"].into_iter()), None);
+    assert_eq!(detail::heading(std::iter::empty()), None);
+}
+
+#[test]
+fn a_long_heading_is_cut_at_80_bytes_then_trimmed() {
+    let long = format!("fn f{} {}", "a".repeat(75), "b".repeat(20));
+    let cut = detail::heading([long.as_str()].into_iter());
+    assert_eq!(cut.as_deref(), long.get(..79));
+    let wide = format!("fn {}", "é".repeat(60));
+    let cut = detail::heading([wide.as_str()].into_iter()).unwrap_or_default();
+    assert_eq!(cut.len(), 79, "a cut never splits a character");
+}
+
+#[test]
+fn a_unified_header_gives_its_heading() {
+    assert_eq!(
+        detail::header_heading("@@ -10,3 +10,4 @@ impl Client {").as_deref(),
+        Some("impl Client {")
+    );
+    assert_eq!(detail::header_heading("@@ -1 +1 @@"), None);
+    assert_eq!(detail::header_heading("@@ -1,2 +1,2 @@   "), None);
+    assert_eq!(detail::header_heading(" keep"), None);
+}

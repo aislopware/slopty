@@ -396,6 +396,7 @@ mod tests {
                 old_lines: 3,
                 new_start: 10,
                 new_lines: 3,
+                heading: None,
                 lines: lines.iter().map(|l| (*l).to_owned()).collect(),
             }],
             added: 1,

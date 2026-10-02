@@ -109,6 +109,10 @@ mod codex {
                 break;
             }
         }
+        // The account's windows, which name no thread, as Codex 0.160.0's schema shapes them.
+        let limits = json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+            "primary": {"usedPercent": 30, "windowDurationMins": 300, "resetsAt": null}}}});
+        say(&mut ws, &limits).await;
         while next(&mut ws, &heard).await.is_some() {}
     }
 
@@ -195,6 +199,13 @@ mod codex {
         assert_eq!(users, [("Say hello.".to_owned(), Some(id))]);
         assert!(state.meta.agent.is(AgentId::CODEX));
         assert_eq!(handle.start(id, start(&work, "Say hello.")).await, outcome, "started once");
+        // What Codex's answer and the account say of the thread: its policy, its sandbox, and
+        // the account's window, which names no thread.
+        let state = until(&host, thread, |s| !s.meters.limits.is_empty()).await;
+        assert_eq!(state.meters.mode.as_deref(), Some("on-request"));
+        assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("readOnly"));
+        assert_eq!(state.meters.limits[0].name, "five-hour");
+        assert_eq!(state.meters.limits[0].used_bp, 3_000);
 
         served.abort();
         let _done = tokio::time::timeout(BOUND, server).await;

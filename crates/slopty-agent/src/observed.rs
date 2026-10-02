@@ -41,10 +41,11 @@ use slopty_proto::conversation::{
     PermissionPrompt, ResultStatus, Settled, TextRef, Verdict,
 };
 use slopty_proto::thread::{
-    self, Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, ContentRef,
-    Drive, Effect, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Model, Notice, PartKey,
-    Phase, Plan, Request, RequestState, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolState,
-    Turn, TurnId, TurnState, Usage, UserMessage, Wait, detail, kind,
+    self, Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped,
+    Compaction, ContentRef, Drive, Effect, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters,
+    Model, Notice, PartKey, Phase, Plan, Request, RequestState, Retry, Status, Step, ThreadId,
+    ThreadMeta, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, UserMessage, Wait, detail,
+    kind,
 };
 
 use crate::live;
@@ -168,6 +169,9 @@ struct Mapped {
     turns: HashMap<TurnId, Turn>,
     /// Background commands as last sent, for their output to land on.
     background: HashMap<String, Item>,
+    /// The work left running in the background, by the call that started it, in the order
+    /// the calls came, as last sent.
+    tasks: Vec<BackgroundTask>,
 }
 
 impl Mapped {
@@ -181,6 +185,31 @@ impl Mapped {
             ended: HashSet::new(),
             turns: HashMap::new(),
             background: HashMap::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Put `task` in the list in place of the one its call started before, or drop that one
+    /// when the call starts none now; whether the list changed.
+    fn set_task(&mut self, call: &str, task: Option<BackgroundTask>) -> bool {
+        let at = self.tasks.iter().position(|t| t.item.as_ref().is_some_and(|i| i.0 == call));
+        match (at, task) {
+            (Some(at), Some(task)) => match self.tasks.get_mut(at) {
+                Some(have) if *have != task => {
+                    *have = task;
+                    true
+                }
+                _ => false,
+            },
+            (Some(at), None) => {
+                self.tasks.remove(at);
+                true
+            }
+            (None, Some(task)) => {
+                self.tasks.push(task);
+                true
+            }
+            (None, None) => false,
         }
     }
 
@@ -221,6 +250,8 @@ pub struct Observed {
     named: bool,
     /// A hook has been heard, so prompts are held and `approvals` is declared.
     hooked: bool,
+    /// The slash commands as last told.
+    commands: Vec<thread::Command>,
 }
 
 impl Observed {
@@ -301,6 +332,7 @@ impl Observed {
             open: Vec::new(),
             named: false,
             hooked: false,
+            commands: Vec::new(),
         }
     }
 
@@ -461,6 +493,31 @@ impl Observed {
         self.drain()
     }
 
+    /// The slash commands Claude Code takes in this session's folder
+    /// (`crate::commands::all`), for the composer to offer.
+    pub fn commands(&mut self, listed: &[conv::SlashCommand]) -> Vec<Out> {
+        let commands: Vec<thread::Command> = listed
+            .iter()
+            .map(|c| thread::Command {
+                name: c.name.clone(),
+                description: c.description.clone(),
+                argument_hint: c.argument_hint.clone(),
+                source: match c.source {
+                    conv::CommandSource::BuiltIn => "built-in",
+                    conv::CommandSource::Personal => "personal",
+                    conv::CommandSource::Project => "project",
+                    conv::CommandSource::Plugin => "plugin",
+                }
+                .to_owned(),
+            })
+            .collect();
+        if commands != self.commands {
+            self.commands.clone_from(&commands);
+            self.push(self.meta.id, Action::CommandsSet(commands));
+        }
+        self.drain()
+    }
+
     /// The status line's meters.
     pub fn meters(&mut self, meters: &conv::Meters) -> Vec<Out> {
         let limits = [("five-hour", meters.five_hour), ("seven-day", meters.seven_day)];
@@ -468,6 +525,7 @@ impl Observed {
             model: meters.model.clone(),
             model_id: meters.model_id.clone(),
             mode: self.meters.mode.clone(),
+            effort: self.meters.effort.clone(),
             context_tokens: meters
                 .context_used_pct
                 .zip(meters.context_window)
@@ -593,6 +651,9 @@ impl Observed {
             actions.push(Action::MetersSet(self.meters.clone()));
         }
         actions.extend(self.open.iter().cloned().map(|r| Action::RequestOpened(Box::new(r))));
+        if !self.commands.is_empty() {
+            actions.push(Action::CommandsSet(self.commands.clone()));
+        }
         for action in actions {
             self.push(self.meta.id, action);
         }
@@ -653,6 +714,10 @@ impl Observed {
         if background {
             mapped.background.insert(entry.id.clone(), item.clone());
         }
+        let task = task_of(entry, &item);
+        if mapped.set_task(&entry.id, task) {
+            actions.push(Action::TasksSet(mapped.tasks.clone()));
+        }
         let open = matches!(&item.body, ItemBody::Tool(call) if !call.state.is_final());
         actions.push(if open { Action::ItemUpdated(item) } else { Action::ItemCompleted(item) });
         if had.unwrap_or_default() != changed
@@ -673,6 +738,9 @@ impl Observed {
         let mut actions = vec![Action::ItemRemoved { item: ItemId(entry.to_owned()) }];
         mapped.items.remove(entry);
         mapped.background.remove(entry);
+        if mapped.set_task(entry, None) {
+            actions.push(Action::TasksSet(mapped.tasks.clone()));
+        }
         if let Some(turn) = mapped.prompts.remove(entry) {
             let after = TurnId(turn.0.saturating_sub(1));
             mapped.turn = after;
@@ -736,11 +804,24 @@ impl Observed {
         let id = self.ensure(&output.thread);
         let Some(mapped) = self.threads.get_mut(&output.thread) else { return };
         let Some(item) = mapped.background.get_mut(&output.call) else { return };
+        let tail = clipped(&output.thread, &output.tail);
         if let ItemBody::Tool(call) = &mut item.body {
-            call.output = Some(clipped(&output.thread, &output.tail));
+            call.output = Some(tail.clone());
         }
         let item = item.clone();
+        let tasks = if let Some(task) =
+            mapped.tasks.iter_mut().find(|t| t.item.as_ref() == Some(&item.id))
+            && task.output.as_ref() != Some(&tail)
+        {
+            task.output = Some(tail);
+            Some(mapped.tasks.clone())
+        } else {
+            None
+        };
         self.push(id, Action::ItemUpdated(item));
+        if let Some(tasks) = tasks {
+            self.push(id, Action::TasksSet(tasks));
+        }
     }
 
     fn live_start(&mut self, thread: &conv::ThreadId, id: LiveId, kind: &LiveKind) {
@@ -807,14 +888,14 @@ impl Observed {
                 after_tokens: compact.post_tokens,
                 summary: compact.summary.as_ref().map(clip),
             }),
-            Body::Interrupted { during_tool } => ItemBody::Notice(Notice {
-                kind: Notice::INTERRUPTED.to_owned(),
-                text: Clipped::whole(if *during_tool {
+            Body::Interrupted { during_tool } => ItemBody::Notice(Notice::new(
+                Notice::INTERRUPTED,
+                Clipped::whole(if *during_tool {
                     "Interrupted during a tool call"
                 } else {
                     "Interrupted"
                 }),
-            }),
+            )),
             Body::Note(note) => ItemBody::Notice(Notice {
                 kind: match note.kind {
                     NoteKind::ApiError => Notice::API_ERROR,
@@ -824,13 +905,18 @@ impl Observed {
                 }
                 .to_owned(),
                 text: clip(&note.text),
+                retry: note.retry.map(|r| Retry {
+                    attempt: r.attempt,
+                    max: Some(r.max),
+                    in_ms: Some(r.in_ms),
+                }),
             }),
-            Body::Rewound { dropped } => ItemBody::Notice(Notice {
-                kind: Notice::REWOUND.to_owned(),
-                text: Clipped::whole(&format!(
+            Body::Rewound { dropped } => ItemBody::Notice(Notice::new(
+                Notice::REWOUND,
+                Clipped::whole(&format!(
                     "Went back to an earlier message; {dropped} later entries left"
                 )),
-            }),
+            )),
         }
     }
 
@@ -1073,6 +1159,53 @@ fn kind_of_name(name: &str) -> &'static str {
     }
 }
 
+/// The work `entry` left running in the background, as its mapped `item` says it: a command
+/// run in the background, by its task id once Claude Code gave one, or a subagent run in the
+/// background. Neither is one once it was asked to run in the foreground.
+fn task_of(entry: &conv::Entry, item: &Item) -> Option<BackgroundTask> {
+    let Body::Tool(call) = &entry.body else { return None };
+    let ItemBody::Tool(mapped) = &item.body else { return None };
+    let (id, kind, state, ended_ms) = match &call.detail {
+        conv::ToolDetail::Bash(b) if b.background => {
+            let state = match b.status {
+                conv::ShellStatus::Running => BackgroundTask::RUNNING,
+                conv::ShellStatus::Done => BackgroundTask::COMPLETED,
+                conv::ShellStatus::Failed => BackgroundTask::FAILED,
+                conv::ShellStatus::Interrupted | conv::ShellStatus::Killed => {
+                    BackgroundTask::KILLED
+                }
+            };
+            let id = b.task_id.clone().unwrap_or_else(|| entry.id.clone());
+            (id, BackgroundTask::SHELL, state, b.finished_ms)
+        }
+        conv::ToolDetail::Agent(a) if a.background => {
+            let state = match a.status {
+                conv::AgentRun::Running => BackgroundTask::RUNNING,
+                conv::AgentRun::Completed => BackgroundTask::COMPLETED,
+                conv::AgentRun::Failed => BackgroundTask::FAILED,
+                conv::AgentRun::Killed => BackgroundTask::KILLED,
+            };
+            let ended = a
+                .duration_ms
+                .filter(|_| state != BackgroundTask::RUNNING)
+                .map(|ms| WallMs::from_millis(entry.at_ms.as_millis().saturating_add(ms)));
+            let id = a.agent_id.clone().unwrap_or_else(|| entry.id.clone());
+            (id, BackgroundTask::AGENT, state, ended)
+        }
+        _ => return None,
+    };
+    Some(BackgroundTask {
+        id,
+        kind: kind.to_owned(),
+        title: mapped.title.clone(),
+        state: state.to_owned(),
+        item: Some(item.id.clone()),
+        output: mapped.output.clone().filter(|_| kind == BackgroundTask::SHELL),
+        started_ms: entry.at_ms,
+        ended_ms,
+    })
+}
+
 /// The lines an entry changed: an edit's or a write's diff.
 fn changed_by(body: &Body) -> Changed {
     let Body::Tool(call) = body else { return Changed::default() };
@@ -1164,6 +1297,7 @@ fn patch(thread: &conv::ThreadId, p: &conv::Patch) -> thread::Patch {
                 old_lines: h.old_lines,
                 new_start: h.new_start,
                 new_lines: h.new_lines,
+                heading: h.heading.clone(),
                 lines: h.lines.clone(),
             })
             .collect(),

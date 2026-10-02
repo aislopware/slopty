@@ -619,6 +619,36 @@ mod threads {
         }
     }
 
+    /// What the stand-in recorded of how it was started, once it has.
+    async fn recorded(record: &Path) -> serde_json::Value {
+        tokio::time::timeout(STEP, async {
+            loop {
+                if let Some(seen) =
+                    std::fs::read(record).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the stand-in started")
+    }
+
+    /// The person's `claude` and the stand-in's record of how it started, first on the
+    /// `PATH` of a worker whose home is `root`.
+    async fn with_claude(root: &Path) -> (Daemons, PathBuf) {
+        let programs = root.join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        let record = root.join("record.json");
+        let env = [
+            ("PATH", slopty_testkit::env::path_with(&programs)),
+            ("STUB_RECORD", record.clone().into_os_string()),
+        ];
+        (daemons_with(root, &env).await, record)
+    }
+
     /// A Claude Code thread started from a client opens the person's own `claude` (the
     /// stand-in, first on the worker's `PATH`) in one of the worker's terminals, wired as the
     /// worker wires any `claude` it opens, on a session id chosen for it and with the first
@@ -629,15 +659,7 @@ mod threads {
     async fn a_claude_code_start_opens_claude_in_a_terminal_and_names_its_thread() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
-        let programs = root.join("programs");
-        std::fs::create_dir_all(&programs).unwrap();
-        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
-        let record = root.join("record.json");
-        let env = [
-            ("PATH", slopty_testkit::env::path_with(&programs)),
-            ("STUB_RECORD", record.clone().into_os_string()),
-        ];
-        let daemons = daemons_with(&root, &env).await;
+        let (daemons, record) = with_claude(&root).await;
         let mut a = Client::connect(&daemons, ClientId::new()).await;
         let id = IntentId::new();
         let start = Start {
@@ -659,19 +681,7 @@ mod threads {
             .await;
         let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
 
-        let seen: serde_json::Value = tokio::time::timeout(STEP, async {
-            loop {
-                if let Some(seen) = std::fs::read(&record)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                {
-                    return seen;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("the stand-in started");
+        let seen = recorded(&record).await;
         let argv: Vec<&str> =
             seen["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
         let at = argv.iter().position(|a| *a == "--session-id").expect("a session id");
@@ -686,5 +696,73 @@ mod threads {
         let hooked = |s: &ThreadState| s.meta.terminal.is_some() && s.meta.can(Cap::APPROVALS);
         a.until(|c| c.thread.as_ref().is_some_and(hooked)).await;
         assert_eq!(a.state().meta.native, native);
+    }
+
+    /// The palette's start: no first message and a folder under the worker's home spelled
+    /// with `~`, as a client that knows no home writes it. Claude Code opens in the home with
+    /// nothing on its command line after its own flags, waiting for the person.
+    #[tokio::test]
+    async fn a_claude_code_start_with_no_prompt_opens_in_the_home_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (daemons, record) = with_claude(&root).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let id = IntentId::new();
+        let start = Start {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: "~".to_owned(),
+            drive: None,
+            prompt: None,
+            model: None,
+            args: Vec::new(),
+        };
+        a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
+        let outcome = a
+            .heard(|msg| match msg {
+                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await;
+        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
+        let seen = recorded(&record).await;
+        assert_eq!(seen["cwd"], root.to_string_lossy().as_ref(), "`~` is the worker's home");
+        let argv: Vec<&str> =
+            seen["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+        assert!(!argv.contains(&"--"), "no first message: {argv:?}");
+    }
+
+    /// A Claude Code session works where its hooks say, whatever folder its terminal reports:
+    /// its thread's folder is the agent's own, known before any transcript is, and the slash
+    /// commands the composer offers are those Claude Code takes there.
+    #[tokio::test]
+    async fn a_session_works_where_its_hooks_say() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let work = std::fs::canonicalize(dir.path()).unwrap().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        // Claude Code has written nothing to its transcript yet.
+        let transcript = daemons.dir.join("projects").join("h1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "").unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "h1",
+            "transcript_path": transcript, "cwd": work,
+        });
+        assert_eq!(printed(relay(dir.path(), session, &start)).await, "");
+        let thread = slopty_agent::observed::thread_of("h1");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.contains_key(&thread)).await;
+        a.follow(thread).await;
+        let cwd = work.to_string_lossy().into_owned();
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.meta.cwd == cwd)).await;
+        // The commands Claude Code takes there, its own among them.
+        a.until(|c| {
+            c.thread.as_ref().is_some_and(|s| s.commands.iter().any(|c| c.name == "compact"))
+        })
+        .await;
     }
 }

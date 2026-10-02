@@ -549,6 +549,83 @@ mod tests {
             assert!(driven.answer(&p, "main", None, slopty(), at).is_none(), "pi gave up on it");
         }
 
+        /// A failed model call pi tries again is a notice that says which attempt comes next,
+        /// out of how many and after how long, as pi publishes it (`auto_retry_start`).
+        #[test]
+        fn a_retry_says_its_attempt_and_its_wait() {
+            let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let retry = r#"{"type":"auto_retry_start","attempt":2,"maxAttempts":3,"delayMs":4000,"errorMessage":"529 overloaded"}"#;
+            let heard = heard(&mut driven, retry, 1_000);
+            let notice = heard.iter().find_map(|a| match a {
+                Action::ItemCompleted(i) => match &i.body {
+                    ItemBody::Notice(n) => Some(n.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            let notice = notice.unwrap_or_else(|| panic!("a notice: {heard:?}"));
+            assert_eq!(notice.kind, slopty_proto::thread::Notice::API_ERROR);
+            assert_eq!(notice.text.text, "529 overloaded");
+            let retry =
+                slopty_proto::thread::Retry { attempt: 2, max: Some(3), in_ms: Some(4_000) };
+            assert_eq!(notice.retry, Some(retry));
+        }
+
+        /// Each turn names the model that answered in it, as pi's messages say it.
+        #[test]
+        fn each_turn_names_the_model_that_answered() {
+            let (state, ..) = replayed();
+            assert!(!state.turns.is_empty());
+            for turn in &state.turns {
+                assert_eq!(turn.models, ["canned-1"], "turn {}", turn.id.0);
+            }
+        }
+
+        /// pi's thinking level is the meters' effort, from its state and as it changes; a
+        /// compaction says what it came to, a failed one says why; a message's cost is its
+        /// turn's.
+        #[test]
+        fn effort_compaction_and_cost_are_carried() {
+            let (mut driven, begun) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let mut state = ThreadState::new(driven.meta().clone());
+            let lines = [
+                r#"{"type":"thinking_level_changed","level":"high"}"#,
+                r#"{"type":"compaction_end","reason":"threshold","aborted":false,"willRetry":false,"result":{"summary":"So far","firstKeptEntryId":"e9","tokensBefore":150000,"estimatedTokensAfter":32000,"usage":{},"details":{}}}"#,
+                r#"{"type":"compaction_end","reason":"overflow","aborted":false,"willRetry":false,"errorMessage":"no model"}"#,
+                r#"{"type":"agent_start"}"#,
+                r#"{"type":"message_start","message":{"role":"user","content":"Go"}}"#,
+                r#"{"type":"message_end","message":{"role":"user","content":"Go"}}"#,
+                r#"{"type":"message_start","message":{"role":"assistant","content":[]}}"#,
+                r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"model":"canned-1","provider":"canned","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15,"cost":{"total":0.0125}},"stopReason":"stop"}}"#,
+                r#"{"type":"agent_settled"}"#,
+            ];
+            let mut actions = begun;
+            for line in lines {
+                actions.extend(heard(&mut driven, line, 1_000));
+            }
+            for action in &actions {
+                state.apply(action);
+            }
+            assert_eq!(state.meters.effort.as_deref(), Some("high"));
+            let compaction = state.items.iter().find_map(|i| match &i.body {
+                ItemBody::Compaction(c) => Some(c.clone()),
+                _ => None,
+            });
+            let compaction = compaction.expect("a compaction");
+            assert_eq!(compaction.trigger.as_deref(), Some("threshold"));
+            assert_eq!(
+                (compaction.before_tokens, compaction.after_tokens),
+                (Some(150_000), Some(32_000))
+            );
+            assert_eq!(compaction.summary.map(|s| s.text).as_deref(), Some("So far"));
+            assert!(state.items.iter().any(|i| matches!(&i.body,
+                ItemBody::Notice(n) if n.text.text.contains("no model"))));
+            let last = state.turns.last().expect("a turn");
+            assert_eq!(last.usage.get(slopty_proto::thread::Usage::COST_MICRO_USD), 12_500);
+            assert_eq!(last.usage.tokens(), 15, "the cost is no token");
+            assert_eq!(last.models, ["canned-1"]);
+        }
+
         /// The recording heard up to the first gate ask, as the worker hears it: the codec and
         /// the thread.
         fn at_first_ask() -> (Driven, ThreadState) {

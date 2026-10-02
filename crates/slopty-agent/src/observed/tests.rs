@@ -421,3 +421,95 @@ fn a_questionnaires_answer_is_the_answers_claude_code_takes() {
     assert_eq!(read, [("Which layout?", "Split"), ("Which panes?", "Files, Logs")]);
     assert_eq!(choice_of(&Verdict::Answer { answers }), choice, "and said back the same");
 }
+
+/// An API error Claude Code retries is a notice that says which attempt comes next, out of how
+/// many and when, as its transcript says them.
+#[test]
+fn an_api_error_it_retries_says_the_attempt() {
+    let records = [
+        serde_json::json!({"type": "user", "uuid": "p1", "parentUuid": null,
+            "timestamp": "2026-09-27T03:15:25.849Z",
+            "message": {"role": "user", "content": "Fix the build"}}),
+        serde_json::json!({"type": "system", "subtype": "api_error", "uuid": "e1",
+            "parentUuid": "p1", "timestamp": "2026-09-27T03:15:40.000Z",
+            "error": {"error": {"type": "overloaded_error", "message": "Overloaded"}},
+            "retryInMs": 1_084.6, "retryAttempt": 2, "maxRetries": 10}),
+    ];
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let path = scratch.path().join("s.jsonl");
+    let text: String = records.iter().map(|r| format!("{r}\n")).collect::<Vec<_>>().concat();
+    std::fs::write(&path, text).expect("written");
+    let changes = Transcripts::default().read(&path, &[]);
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    host.take(observed.transcript(&changes, &[]));
+    let thread = host.thread(observed.main());
+    let notice = thread.items.iter().find_map(|i| match &i.body {
+        ItemBody::Notice(n) => Some(n),
+        _ => None,
+    });
+    let notice = notice.unwrap_or_else(|| panic!("a notice: {:#?}", thread.items));
+    assert_eq!(notice.kind, Notice::API_ERROR);
+    assert_eq!(notice.text.text, "Overloaded");
+    assert_eq!(notice.retry, Some(Retry { attempt: 2, max: Some(10), in_ms: Some(1_085) }));
+}
+
+/// A command Claude Code runs in the background is in the thread's background work, by the
+/// task id Claude Code gave it, from its call to its end, which its queued notice stamps.
+#[test]
+fn background_commands_are_the_threads_background_work() {
+    let (observed, host, _) = replay(&dir("conversation", "background"));
+    let thread = host.thread(observed.main());
+    let [task] = thread.tasks.as_slice() else { panic!("one task: {:#?}", thread.tasks) };
+    assert_eq!(task.id, "b00000001");
+    assert_eq!(task.kind, BackgroundTask::SHELL);
+    let call = task.item.as_ref().expect("the call that started it");
+    let started = thread.items.iter().find(|i| i.id == *call).expect("the call is in the thread");
+    assert_eq!(task.started_ms, started.at_ms);
+    assert!(!task.title.is_empty());
+    assert_eq!(task.state, BackgroundTask::COMPLETED, "its notice came: {task:#?}");
+    assert!(task.ended_ms.is_some_and(|end| end >= task.started_ms), "{task:#?}");
+}
+
+/// Only the scenarios that ran something in the background have background work. Read a line
+/// at a time it ends the same (`read_a_line_at_a_time_it_ends_the_same` compares whole states).
+#[test]
+fn only_what_ran_in_the_background_is_background_work() {
+    for scenario in CONVERSATIONS {
+        let (observed, host, _) = replay(&dir("conversation", scenario));
+        let tasks = &host.thread(observed.main()).tasks;
+        let foreground = !matches!(scenario, "background" | "tools");
+        assert_eq!(tasks.is_empty(), foreground, "{scenario}: {tasks:#?}");
+    }
+}
+
+/// The slash commands Claude Code takes are the thread's, each by where it comes from, told
+/// once, and told again when the thread begins anew from its transcript.
+#[test]
+fn slash_commands_are_the_threads() {
+    let listed = vec![
+        conv::SlashCommand {
+            name: "compact".to_owned(),
+            description: "Compact the conversation".to_owned(),
+            argument_hint: None,
+            source: conv::CommandSource::BuiltIn,
+        },
+        conv::SlashCommand {
+            name: "ship".to_owned(),
+            description: "Ship it".to_owned(),
+            argument_hint: Some("<branch>".to_owned()),
+            source: conv::CommandSource::Project,
+        },
+    ];
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    host.take(observed.commands(&listed));
+    let thread = host.thread(observed.main());
+    let named: Vec<(&str, &str)> =
+        thread.commands.iter().map(|c| (c.name.as_str(), c.source.as_str())).collect();
+    assert_eq!(named, [("compact", "built-in"), ("ship", "project")]);
+    assert_eq!(thread.commands[1].argument_hint.as_deref(), Some("<branch>"));
+    assert!(observed.commands(&listed).is_empty(), "told once");
+}

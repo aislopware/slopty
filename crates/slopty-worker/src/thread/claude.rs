@@ -30,7 +30,7 @@
 //! a thread of its own ([`observed::thread_in`]), so no thread moves between terminals.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -225,9 +225,17 @@ async fn observe(
         transcripts: Some(Transcripts::default()),
         status: None,
         cwd: String::new(),
+        hooked_cwd: false,
+        commands_for: None,
         title: String::new(),
         hooks: 0,
     };
+    // The hook that brought the session here was heard before this watched for changes.
+    let heard = seen.borrow().cwd.clone();
+    if let Some(cwd) = heard {
+        on.cwd = cwd;
+        on.hooked_cwd = true;
+    }
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -239,12 +247,15 @@ async fn observe(
                     return;
                 }
                 Some(Input::Status(event)) => on.status(*event).await,
-                Some(Input::Cwd(cwd)) => {
+                // The agent's own word on where it works, once a hook said it, outranks the
+                // terminal's.
+                Some(Input::Cwd(cwd)) if !on.hooked_cwd => {
                     if let Some(observed) = on.observed.as_mut() {
                         take(&on.host, observed.cwd(&cwd));
                     }
                     on.cwd = cwd;
                 }
+                Some(Input::Cwd(_)) => {}
                 Some(Input::Title(title)) => {
                     if let Some(observed) = on.observed.as_mut() {
                         take(&on.host, observed.title(&title));
@@ -294,8 +305,12 @@ struct Session {
     transcripts: Option<Transcripts>,
     /// The last status, to tell a thread begun after it.
     status: Option<AgentEvent>,
-    /// The terminal's working directory.
+    /// The agent's working directory: its hooks', else the terminal's.
     cwd: String,
+    /// A hook said the working directory.
+    hooked_cwd: bool,
+    /// The thread and folder the slash commands were last read for.
+    commands_for: Option<(ThreadId, String)>,
     /// The terminal's title.
     title: String,
     hooks: u64,
@@ -327,6 +342,13 @@ impl Session {
     }
 
     async fn seen(&mut self, seen: &Seen) {
+        if let Some(cwd) = seen.cwd.as_ref().filter(|c| **c != self.cwd) {
+            cwd.clone_into(&mut self.cwd);
+            self.hooked_cwd = true;
+            if let Some(observed) = self.observed.as_mut() {
+                take(&self.host, observed.cwd(cwd));
+            }
+        }
         if let Some(observed) = self.observed.as_mut() {
             if seen.hooks > 0 {
                 take(&self.host, observed.hooked());
@@ -450,8 +472,34 @@ impl Session {
         }
     }
 
+    /// Tell the thread the slash commands Claude Code takes in its folder, read on the blocking
+    /// pool once for each thread and folder: its own, the person's and the project's.
+    async fn offer_commands(&mut self) {
+        let Some(main) = self.observed.as_ref().map(Observed::main) else { return };
+        let wanted = (main, self.cwd.clone());
+        if self.commands_for.as_ref() == Some(&wanted) {
+            return;
+        }
+        self.commands_for = Some(wanted);
+        let cwd = PathBuf::from(&self.cwd);
+        let home = slopty_platform::dirs::home();
+        let listed = tokio::task::spawn_blocking(move || {
+            if cwd.as_os_str().is_empty() {
+                slopty_agent::commands::built_in().collect()
+            } else {
+                slopty_agent::commands::all(&home, &cwd)
+            }
+        })
+        .await;
+        let Ok(listed) = listed else { return };
+        if let Some(observed) = self.observed.as_mut().filter(|o| o.main() == main) {
+            take(&self.host, observed.commands(&listed));
+        }
+    }
+
     /// Read what the transcripts gained, on the blocking pool, and take it in.
     async fn read(&mut self) {
+        self.offer_commands().await;
         let sources = self.sources.sources(self.terminal);
         let Some(main) = sources.main else { return };
         if self.observed.as_ref().is_none_or(Observed::is_provisional)

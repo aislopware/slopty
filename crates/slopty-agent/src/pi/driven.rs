@@ -37,8 +37,8 @@ use slopty_proto::thread::detail::{ExecDetail, ExecStatus, Question, ReadDetail,
 use slopty_proto::thread::{
     self, Action, AgentId, Answerer, AskId, Cap, Changed, Clipped, Compaction, Drive, Effect,
     IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Phase,
-    Request as Ask, RequestState, Status, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail,
-    ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
+    Request as Ask, RequestState, Retry, Status, ThreadId, ThreadMeta, ThreadState, ToolCall,
+    ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
 
 use super::rpc::{
@@ -336,16 +336,38 @@ impl Driven {
                     .unwrap_or_else(|| self.meta.title.clone());
                 vec![Action::Meta(Box::new(self.meta.clone()))]
             }
-            Incoming::CompactionEnd { reason, aborted: false, error_message: None } => {
+            Incoming::CompactionEnd { reason, aborted: false, error_message: None, result } => {
                 let item = Item {
                     id: ItemId(format!("compaction:{}", self.messages)),
                     turn: self.turn(),
                     at_ms: now,
                     body: ItemBody::Compaction(Compaction {
                         trigger: Some(reason.clone()),
-                        before_tokens: None,
-                        after_tokens: None,
-                        summary: None,
+                        before_tokens: result.as_ref().and_then(|r| r.tokens_before),
+                        after_tokens: result.as_ref().and_then(|r| r.estimated_tokens_after),
+                        summary: result
+                            .as_ref()
+                            .and_then(|r| r.summary.as_deref())
+                            .map(|s| Clipped::head(s, PROSE, None)),
+                    }),
+                };
+                vec![Action::ItemCompleted(item)]
+            }
+            Incoming::CompactionEnd { error_message: Some(error), .. } => {
+                self.notice(Notice::INFO, &format!("Compacting the context failed: {error}"), now)
+            }
+            Incoming::ThinkingLevelChanged { level } => self.effort(level),
+            Incoming::AutoRetryStart { attempt, max_attempts, delay_ms, error_message } => {
+                let retry = Retry { attempt: *attempt, max: Some(*max_attempts), in_ms: *delay_ms };
+                self.notices = self.notices.saturating_add(1);
+                let item = Item {
+                    id: ItemId(format!("notice:{}", self.notices)),
+                    turn: self.turn(),
+                    at_ms: now,
+                    body: ItemBody::Notice(Notice {
+                        kind: Notice::API_ERROR.to_owned(),
+                        text: Clipped::whole(error_message),
+                        retry: Some(retry),
                     }),
                 };
                 vec![Action::ItemCompleted(item)]
@@ -430,9 +452,22 @@ impl Driven {
         actions
     }
 
+    /// The thinking level is `level`, as pi names it.
+    fn effort(&mut self, level: &str) -> Vec<Action> {
+        let effort = Some(level.to_owned()).filter(|l| !l.is_empty());
+        if effort == self.meters.effort {
+            return Vec::new();
+        }
+        self.meters.effort = effort;
+        vec![Action::MetersSet(self.meters.clone())]
+    }
+
     /// The session's state, from `get_state`.
     pub fn state(&mut self, state: &State) -> Vec<Action> {
         let mut actions = Vec::new();
+        if let Some(level) = &state.thinking_level {
+            actions.extend(self.effort(level));
+        }
         if let Some(model) = &state.model {
             self.meters.model = Some(model.name.clone().unwrap_or_else(|| model.id.clone()));
             self.meters.model_id = Some(model_id(&model.provider, &model.id));
@@ -800,10 +835,23 @@ impl Driven {
                 }));
                 actions
             }
-            Message::Assistant { content, usage, stop_reason, error_message, .. } => {
+            Message::Assistant { content, usage, stop_reason, error_message, model, .. } => {
                 let number = self.streaming.take().map_or(self.messages, |(n, _)| n);
                 let turn = self.turn();
                 let mut actions = Vec::new();
+                // The model that wrote it: the turn's own, in place of the session's it began
+                // with, and beside another that answered in it before.
+                if let Some(model) = model.as_ref().filter(|m| !m.is_empty())
+                    && let Some(begun) = self.begun.as_mut()
+                    && !begun.models.contains(model)
+                {
+                    let seeded = begun.models.iter().eq(self.meters.model.iter());
+                    if seeded {
+                        begun.models.clear();
+                    }
+                    begun.models.push(model.clone());
+                    actions.push(Action::TurnStarted(begun.clone()));
+                }
                 for (index, block) in (0_u32..).zip(content) {
                     let body = match block {
                         Content::Text { text } => ItemBody::Text(Clipped::head(text, PROSE, None)),
@@ -1039,7 +1087,7 @@ impl Driven {
             id: ItemId(format!("notice:{}", self.notices)),
             turn: self.turn(),
             at_ms: now,
-            body: ItemBody::Notice(Notice { kind: kind.to_owned(), text: Clipped::whole(text) }),
+            body: ItemBody::Notice(Notice::new(kind, Clipped::whole(text))),
         };
         vec![Action::ItemCompleted(item)]
     }
@@ -1201,5 +1249,6 @@ fn usage_of(usage: &rpc::Usage) -> thread::Usage {
     put(thread::Usage::CACHE_WRITE, usage.cache_write);
     put(thread::Usage::OUTPUT, usage.output);
     put(thread::Usage::REASONING, usage.reasoning.unwrap_or_default());
+    put(thread::Usage::COST_MICRO_USD, micro_usd(usage.cost.total));
     thread::Usage(tokens)
 }

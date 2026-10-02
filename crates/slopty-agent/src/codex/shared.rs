@@ -27,13 +27,14 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::detail::{
-    Answer, Clip, EditDetail, ExecDetail, ExecStatus, Hunk, McpDetail, Offered, Question,
+    AgentDetail, Answer, Clip, EditDetail, ExecDetail, ExecStatus, Hunk, McpDetail, Offered,
+    Question, header_heading,
 };
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
-    Effect, IntentId, Item, ItemBody, ItemId, Liveness, Meters, Notice, PartKey, Patch, Phase,
-    Plan, Request, RequestState, Status, Step, ThreadId, ThreadMeta, ToolCall, ToolDetail,
-    ToolState, Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
+    Effect, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Notice, PartKey,
+    Patch, Phase, Plan, Request, RequestState, Retry, Status, Step, ThreadId, ThreadMeta, ToolCall,
+    ToolDetail, ToolState, Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
 };
 
 use super::protocol::{
@@ -125,6 +126,8 @@ pub struct Shared {
     last_end: Option<TurnState>,
     /// Errors noted so far, which number their items.
     errors: u32,
+    /// The retries Codex said it makes in the turn under way.
+    retries: u32,
     /// The thread's status as Codex last said it, and since when.
     said: Option<(ThreadStatus, WallMs)>,
     /// Each turn as it began, told again once its input is known.
@@ -146,6 +149,18 @@ impl Shared {
         {
             facts.insert("branch".to_owned(), branch.clone());
         }
+        for (fact, value) in
+            [("agent-nickname", &thread.agent_nickname), ("agent-role", &thread.agent_role)]
+        {
+            if let Some(value) = value.clone().filter(|v| !v.is_empty()) {
+                facts.insert(fact.to_owned(), value);
+            }
+        }
+        let origin = if thread.parent_thread_id.is_some() {
+            ThreadMeta::SUBAGENT
+        } else {
+            ThreadMeta::PERSON
+        };
         let meta = ThreadMeta {
             id,
             agent: AgentId::named(AgentId::CODEX),
@@ -155,7 +170,7 @@ impl Shared {
             title: title_of(thread),
             terminal,
             parent: None,
-            origin: ThreadMeta::PERSON.to_owned(),
+            origin: origin.to_owned(),
             forked_from: None,
             drive: Drive::named(Drive::SHARED),
             caps,
@@ -171,11 +186,13 @@ impl Shared {
             meters: Meters {
                 model: thread.model.clone(),
                 model_id: thread.model.clone(),
+                effort: thread.reasoning_effort.as_ref().map(wire).filter(|e| !e.is_empty()),
                 ..Meters::default()
             },
             usage: Usage::default(),
             last_end: None,
             errors: 0,
+            retries: 0,
             said: None,
             begun: HashMap::new(),
         };
@@ -230,6 +247,7 @@ impl Shared {
             }
             ServerNotification::TurnStarted(started) => {
                 self.usage = Usage::default();
+                self.retries = 0;
                 self.turn_started(&started.turn)
             }
             ServerNotification::TurnCompleted(done) => self.turn_completed(&done.turn),
@@ -279,8 +297,39 @@ impl Shared {
             ServerNotification::ServerRequestResolved(resolved) => {
                 self.resolved(&resolved.request_id)
             }
-            ServerNotification::Error(error) if !error.will_retry => {
+            ServerNotification::TurnDiffUpdated(diff) => self.turn_diff(&diff.turn_id, &diff.diff),
+            ServerNotification::ModelRerouted(rerouted) => {
+                let turn = self.turn(&rerouted.turn_id);
+                let mut actions = Vec::new();
+                if let Some(begun) = self.begun.get_mut(&turn)
+                    && !begun.models.contains(&rerouted.to_model)
+                {
+                    begun.models.push(rerouted.to_model.clone());
+                    actions.push(Action::TurnStarted(begun.clone()));
+                }
+                let text = format!(
+                    "Codex moved this turn from {} to {} ({})",
+                    rerouted.from_model,
+                    rerouted.to_model,
+                    wire(&rerouted.reason)
+                );
+                actions.extend(self.notice(turn, Notice::INFO, &text, now));
+                actions
+            }
+            ServerNotification::Warning(warning) => {
+                let turn = self.current.clone().map_or(TurnId::BEFORE, |t| self.turn(&t));
+                self.notice(turn, Notice::INFO, &warning.message, now)
+            }
+            ServerNotification::AccountRateLimitsUpdated(updated) => {
+                self.rate_limits(&updated.rate_limits)
+            }
+            ServerNotification::Error(error) => {
                 self.errors = self.errors.saturating_add(1);
+                // Codex numbers no attempt and says no wait: the count is the turn's own.
+                let retry = error.will_retry.then(|| {
+                    self.retries = self.retries.saturating_add(1);
+                    Retry { attempt: self.retries.saturating_add(1), max: None, in_ms: None }
+                });
                 let item = Item {
                     id: ItemId(format!("error:{}", self.errors)),
                     turn: self.turn(&error.turn_id),
@@ -288,12 +337,99 @@ impl Shared {
                     body: ItemBody::Notice(Notice {
                         kind: Notice::API_ERROR.to_owned(),
                         text: Clipped::whole(&error.error.message),
+                        retry,
                     }),
                 };
                 vec![Action::ItemCompleted(item)]
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The thread's approval policy and sandbox, as Codex's answer to starting or resuming it
+    /// says them: the policy is the thread's mode, the sandbox one of its facts.
+    pub fn settings(
+        &mut self,
+        approval: p::AskForApproval,
+        sandbox: &p::SandboxPolicy,
+    ) -> Vec<Action> {
+        let mode = match serde_json::to_value(approval) {
+            Ok(Value::String(name)) => name,
+            Ok(Value::Object(tagged)) => tagged.keys().next().cloned().unwrap_or_default(),
+            _ => String::new(),
+        };
+        let sandbox = serde_json::to_value(sandbox)
+            .ok()
+            .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_default();
+        let mut actions = Vec::new();
+        if !sandbox.is_empty() && self.meta.facts.get("sandbox") != Some(&sandbox) {
+            self.meta.facts.insert("sandbox".to_owned(), sandbox);
+            actions.push(Action::Meta(Box::new(self.meta.clone())));
+        }
+        let mode = Some(mode).filter(|m| !m.is_empty());
+        if mode != self.meters.mode {
+            self.meters.mode = mode;
+            actions.push(Action::MetersSet(self.meters.clone()));
+        }
+        actions
+    }
+
+    /// The account's rate-limit windows, which hold for every thread on it: Codex's primary
+    /// and secondary windows, named by their length as Claude Code's are.
+    pub fn rate_limits(&mut self, snapshot: &p::RateLimitSnapshot) -> Vec<Action> {
+        let limits: Vec<Limit> = [snapshot.primary, snapshot.secondary]
+            .into_iter()
+            .flatten()
+            .map(|window| Limit {
+                name: window.window_duration_mins.map_or_else(|| "window".to_owned(), window_name),
+                used_bp: u32::try_from(window.used_percent.clamp(0, 100))
+                    .unwrap_or_default()
+                    .saturating_mul(100),
+                resets_ms: window.resets_at.map(seconds),
+            })
+            .collect();
+        if limits == self.meters.limits {
+            return Vec::new();
+        }
+        self.meters.limits = limits;
+        vec![Action::MetersSet(self.meters.clone())]
+    }
+
+    /// The thread is a subagent started by the call `link` names.
+    pub fn adopted(&mut self, link: Link) -> Vec<Action> {
+        if self.meta.parent.as_ref() == Some(&link) {
+            return Vec::new();
+        }
+        self.meta.parent = Some(link);
+        ThreadMeta::SUBAGENT.clone_into(&mut self.meta.origin);
+        vec![Action::Meta(Box::new(self.meta.clone()))]
+    }
+
+    /// The whole of what turn `codex` has changed so far, as Codex diffs it: the lines it
+    /// added and removed.
+    fn turn_diff(&mut self, codex: &str, diff: &str) -> Vec<Action> {
+        let turn = self.turn(codex);
+        let patch = patch_of(diff);
+        let changed = Changed { added: patch.added, removed: patch.removed };
+        match self.begun.get_mut(&turn) {
+            Some(begun) if begun.changed != changed => {
+                begun.changed = changed;
+                vec![Action::TurnStarted(begun.clone())]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn notice(&mut self, turn: TurnId, kind: &str, text: &str, now: WallMs) -> Vec<Action> {
+        self.errors = self.errors.saturating_add(1);
+        let item = Item {
+            id: ItemId(format!("notice:{}", self.errors)),
+            turn,
+            at_ms: now,
+            body: ItemBody::Notice(Notice::new(kind, Clipped::whole(text))),
+        };
+        vec![Action::ItemCompleted(item)]
     }
 
     /// The app-server's request `id` about this thread, heard at `now`.
@@ -797,6 +933,70 @@ impl Shared {
                 };
                 (id, ItemBody::Compaction(compaction))
             }
+            ThreadItem::CollabAgentToolCall {
+                agents_states,
+                id,
+                model,
+                prompt,
+                receiver_thread_ids,
+                status,
+                tool,
+                ..
+            } => {
+                let state = self.pending(id).unwrap_or(match status {
+                    p::CollabAgentToolCallStatus::InProgress => ToolState::Running,
+                    p::CollabAgentToolCallStatus::Completed => ToolState::Completed,
+                    p::CollabAgentToolCallStatus::Failed => ToolState::Failed,
+                    p::CollabAgentToolCallStatus::Interrupted => ToolState::Cancelled,
+                });
+                let title = match tool {
+                    p::CollabAgentTool::SpawnAgent => "Start a subagent",
+                    p::CollabAgentTool::SendInput | p::CollabAgentTool::SendMessage => {
+                        "Message a subagent"
+                    }
+                    p::CollabAgentTool::FollowupTask => "Give a subagent more to do",
+                    p::CollabAgentTool::ResumeAgent => "Resume a subagent",
+                    p::CollabAgentTool::Wait => "Wait for subagents",
+                    p::CollabAgentTool::InterruptAgent => "Interrupt a subagent",
+                    p::CollabAgentTool::CloseAgent => "Close a subagent",
+                    p::CollabAgentTool::ListAgents => "List the subagents",
+                };
+                // What the subagents said, by thread, as the call last knew it.
+                let said: Vec<&str> =
+                    agents_states.values().filter_map(|s| s.message.as_deref()).collect();
+                let report =
+                    (!said.is_empty()).then(|| Clipped::head(&said.join("\n\n"), PROSE, None));
+                let prompt = prompt.as_deref().unwrap_or_default();
+                let call = ToolCall {
+                    name: format!("collabAgentToolCall.{}", wire(tool)),
+                    kind: kind::AGENT.to_owned(),
+                    title: title.to_owned(),
+                    input: Clipped::head(
+                        &serde_json::json!({ "prompt": prompt, "model": model }).to_string(),
+                        OUTPUT,
+                        None,
+                    ),
+                    state,
+                    output: None,
+                    images: Vec::new(),
+                    detail: Some(ToolDetail::Agent(AgentDetail {
+                        agent_type: model.clone(),
+                        description: None,
+                        prompt: Clipped::head(prompt, PROSE, None),
+                        background: false,
+                        report,
+                        tokens: None,
+                        tool_uses: None,
+                        duration_ms: None,
+                    })),
+                    child: receiver_thread_ids
+                        .first()
+                        .filter(|_| *tool == p::CollabAgentTool::SpawnAgent)
+                        .map(|native| thread_of(native)),
+                    ended_ms: None,
+                };
+                (id, ItemBody::Tool(Box::new(call)))
+            }
             ThreadItem::EnteredReviewMode { id, .. } => (id, ItemBody::Review { entered: true }),
             ThreadItem::ExitedReviewMode { id, .. } => (id, ItemBody::Review { entered: false }),
             other => {
@@ -958,6 +1158,7 @@ fn patch_of(diff: &str) -> Patch {
                 old_lines,
                 new_start,
                 new_lines,
+                heading: header_heading(line),
                 lines: Vec::new(),
             });
             continue;
@@ -974,6 +1175,17 @@ fn patch_of(diff: &str) -> Patch {
         hunk.lines.push(line.to_owned());
     }
     patch
+}
+
+/// A rate-limit window's name by its length: `five-hour`, `seven-day`, else in minutes.
+fn window_name(minutes: i64) -> String {
+    match minutes {
+        300 => "five-hour".to_owned(),
+        10_080 => "seven-day".to_owned(),
+        m if m % 1_440 == 0 => format!("{}-day", m / 1_440),
+        m if m % 60 == 0 => format!("{}-hour", m / 60),
+        m => format!("{m}-minute"),
+    }
 }
 
 /// `start,lines` of a hunk header; one line when it says no count.

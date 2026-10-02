@@ -331,6 +331,9 @@ pub struct Hook {
 /// Characters a forwarded hook keeps of a background task's description or a scheduled prompt.
 const PENDING_TEXT_MAX: usize = 200;
 
+/// The tool Claude Code asks the person a question with.
+const ASK_USER_QUESTION: &str = "AskUserQuestion";
+
 /// One entry of a `Stop` hook's `background_tasks`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct BackgroundTask {
@@ -490,6 +493,12 @@ impl Hook {
             _ => None,
         };
         Some(truncate(&text.unwrap_or_else(|| tool.to_owned())))
+    }
+
+    /// Whether the call is `AskUserQuestion`: a question to the person, whichever hook (its
+    /// `PreToolUse`, or the `PermissionRequest` it is answered through) brings it.
+    fn asks(&self) -> bool {
+        self.tool_name.as_deref() == Some(ASK_USER_QUESTION)
     }
 
     /// The first question of an `AskUserQuestion` call.
@@ -1072,7 +1081,7 @@ impl Tracker {
             HookEvent::PermissionRequest => {
                 self.blocks.insert(id.clone());
             }
-            HookEvent::PreToolUse if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
+            HookEvent::PreToolUse if hook.asks() => {
                 self.blocks.insert(id.clone());
             }
             HookEvent::PreToolUse
@@ -1092,7 +1101,7 @@ impl Tracker {
             HookEvent::SessionStart => (AgentStatus::Idle, None),
             HookEvent::SessionEnd => (AgentStatus::None, None),
             HookEvent::UserPromptSubmit => (AgentStatus::Working, hook.prompt_detail()),
-            HookEvent::PreToolUse if hook.tool_name.as_deref() == Some("AskUserQuestion") => {
+            HookEvent::PreToolUse | HookEvent::PermissionRequest if hook.asks() => {
                 (AgentStatus::Blocked(BlockReason::Question), hook.question())
             }
             HookEvent::PreToolUse => (AgentStatus::Tool { tool: tool() }, hook.tool_detail()),
@@ -1110,22 +1119,28 @@ impl Tracker {
             HookEvent::Notification => match hook.notification_type.as_deref()? {
                 // Follows a `PermissionRequest` a few seconds later and, as of Claude Code
                 // 2.1.261, says only "Claude needs your permission": when the request already
-                // put the tool and its arguments on the badge, keep them.
-                "permission_prompt" => match tool_from_message(hook.message.as_deref()) {
-                    None if matches!(
-                        self.status,
-                        AgentStatus::Blocked(BlockReason::Permission { .. })
-                    ) =>
-                    {
-                        return None;
+                // put the tool and its arguments (or its question) on the badge, keep them.
+                // A question is answered through the permission hook, so its prompt is the
+                // question's, never a permission for `AskUserQuestion`.
+                "permission_prompt" => {
+                    let tool = tool_from_message(hook.message.as_deref());
+                    let asks = tool.as_deref() == Some(ASK_USER_QUESTION);
+                    match &self.status {
+                        AgentStatus::Blocked(BlockReason::Question) if asks || tool.is_none() => {
+                            return None;
+                        }
+                        AgentStatus::Blocked(BlockReason::Permission { .. }) if tool.is_none() => {
+                            return None;
+                        }
+                        _ if asks => (AgentStatus::Blocked(BlockReason::Question), None),
+                        _ => (
+                            AgentStatus::Blocked(BlockReason::Permission {
+                                tool: tool.unwrap_or_default(),
+                            }),
+                            None,
+                        ),
                     }
-                    tool => (
-                        AgentStatus::Blocked(BlockReason::Permission {
-                            tool: tool.unwrap_or_default(),
-                        }),
-                        None,
-                    ),
-                },
+                }
                 // Claude Code says its prompt has sat idle for a minute. A turn paused on
                 // background work sits at that prompt by design; it stays paused.
                 "idle_prompt" if matches!(self.status, AgentStatus::Waiting { .. }) => {
@@ -1763,6 +1778,40 @@ mod tests {
             .expect("resumes");
         assert_eq!(e.status, AgentStatus::Working);
         assert!(!e.attention);
+    }
+
+    /// `AskUserQuestion` is answered through the permission hook, so its `PermissionRequest`
+    /// and the permission prompt after it are the question, never a permission to use it.
+    #[test]
+    fn a_question_asked_through_the_permission_hook_stays_a_question() {
+        let ask = r#"{"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which framework?"}]},"tool_use_id":"q1""#;
+        let prompt = r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission to use AskUserQuestion"}"#;
+        let bare = r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"Claude needs your permission"}"#;
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        let e = t
+            .apply(sid, &hook(&format!(r#"{ask},"hook_event_name":"PreToolUse"}}"#)))
+            .expect("a question");
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Question));
+        assert!(e.attention);
+        let e = t.apply(sid, &hook(&format!(r#"{ask},"hook_event_name":"PermissionRequest"}}"#)));
+        assert!(
+            e.is_none_or(
+                |e| e.status == AgentStatus::Blocked(BlockReason::Question) && !e.attention
+            ),
+            "still the question, no second alert"
+        );
+        assert_eq!(t.apply(sid, &hook(prompt)), None);
+        assert_eq!(t.apply(sid, &hook(bare)), None);
+        assert_eq!(t.status(), &AgentStatus::Blocked(BlockReason::Question));
+
+        let e = Tracker::default()
+            .apply(sid, &hook(&format!(r#"{ask},"hook_event_name":"PermissionRequest"}}"#)))
+            .expect("a question by its permission request alone");
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Question));
+        assert_eq!(e.detail.as_deref(), Some("Which framework?"));
+        let e = Tracker::default().apply(sid, &hook(prompt)).expect("a prompt alone");
+        assert_eq!(e.status, AgentStatus::Blocked(BlockReason::Question));
     }
 
     #[test]

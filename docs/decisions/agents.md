@@ -771,6 +771,36 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     started a thread (`approval.jsonl`), replayed, with the person's message marked by the id the
     turn named, as Codex marks it.
 
+- ✅ **Any agent a worker offers starts from the palette, and its thread opens as a tile of its
+  own** (2026-10-02, `ItemKind::Thread` in `slopty-proto`; the client in
+  `crates/slopty-ui/src/workspace/{faces,overlays,projects}.rs`; tests
+  `the_palette_starts_each_agent_the_worker_offers` in `workspace/tests/thread_start.rs`,
+  `a_claude_code_start_with_no_prompt_opens_in_the_home_it_names` in
+  `apps/slopty-worker/tests/threads.rs`, the `worker_item_thread` golden, and the app e2e
+  `crates/slopty-e2e/tests/app/threads_start.rs`).
+  - **What a worker offers comes from its facts.** The client asks the server for every
+    worker's facts (`Verb::WorkerFacts`) when a worker links and each time the palette opens,
+    and maps the server's worker ids to its own keys. Claude Code, Codex and pi are offered when
+    `agents` lists `claude`, `codex` and `pi`. Each ACP agent `acp` names is offered too. A
+    program with no thread to start (`aider`) is not. With no server, nothing is offered, since
+    only the server holds the facts. The `acp:<name>` naming moved into `AgentId` so the client
+    builds it without linking the adapters.
+  - **One line per agent, for the focused tile's worker and folder.** "New <agent> thread"
+    starts it on that worker, in the folder a search from there would use: the focused shell's
+    repository or directory, a file's or folder's own, else the worker's home as `~`. The
+    worker expands `~` against its own home, since a client does not always know that home.
+  - **No prompt.** A start from the palette carries no first message. Claude Code opens
+    waiting for the person, and Codex, pi and ACP agents start a thread with no turn yet. What
+    to ask is typed into the thread's own composer.
+  - **The thread tile is the default and the terminal is one action away.** The started
+    thread opens as an `ItemKind::Thread` tile drawing the thread view as an agent's tile does,
+    and it takes the keyboard. A Claude Code thread's terminal does not open a second tile
+    beside it. The view's "terminal" action reveals that terminal's tile, or adds one for the
+    session when it has none. This follows the GUI-first direction: the person directs and
+    reviews in the GUI, and the TUI stays able to take the session over.
+  - **Refusals are said, never opened.** A worker that refuses a start (a missing binary, a
+    Codex daemon not running) answers in words, shown as a notice, and no tile is added.
+
 - ✅ **One answer answers all of a request's questions, and each adapter reads it as its agent
   takes it** (2026-10-02, `detail::Answer::{choice, read, parts}` and the doc of
   `Intent::Answer` in `slopty-proto`; tests `one_answer_answers_every_question`,
@@ -816,3 +846,50 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   while the agent says it works: a turn whose end was never written is not under way once the
   agent is idle. Every behaviour the old face's e2e covered is now a thread-view e2e of the
   same behaviour, with the goldens renamed `thread-*`. The old face's code waits for S2.
+
+- ✅ **The thread model carries what each agent's door publishes** (2026-10-02, audit in
+  `.research/thread-completeness-2026-10-02.md`). The person wants the agent GUI as complete
+  as T3 Code and Amp, for every agent. The audit lists each fact against each agent as carried,
+  published but not carried, or not published; this pass carried the published rows that matter
+  most to someone watching.
+  - **A retry is said** (`Notice.retry`: attempt, max, wait). Claude Code, Codex
+    (`willRetry`) and pi (`auto_retry_start`) say when they retry an API error. Without it an
+    overloaded agent looked hung. Tests: `an_api_error_it_retries_says_the_attempt`,
+    `an_error_codex_retries_counts_its_attempts`, `a_retry_says_its_attempt_and_its_wait`.
+  - **Background work is listed** (`BackgroundTask` gained `kind`, `started_ms`, `ended_ms`).
+    Claude Code's background shells and agents become `TasksSet`, keyed by the agent's own
+    task id, closed by their end and dropped when the transcript drops them. Test:
+    `background_commands_are_the_threads_background_work`.
+  - **Per-turn cost is a usage key, not a field.** `Usage::COST_MICRO_USD` sits in the turn's
+    open usage map, and `Usage::tokens()` leaves it out of the token sum. A new `Turn` field
+    would have changed every literal of it for one number only some agents give.
+  - **Effort is a meter** (`Meters.effort`): Codex's reasoning effort, pi's thinking level, ACP's
+    thought-level option, each as the agent names it.
+  - **Codex.** The turn's diff (`turn/diff/updated`) is the turn's changed lines. A reroute adds
+    the model to the turn with a notice. Approval policy and sandbox are the thread's mode and
+    a fact. A collab agent call is a subagent call that opens its child thread, and the child
+    names its parent. Account rate limits carry no thread id, so the worker gives them to every
+    Codex thread it follows and to each one it follows later. Tests in
+    `crates/slopty-agent/tests/codex.rs` and the worker's `tests/codex.rs` stand-in.
+  - **ACP** turn tokens come from `PromptResponse.usage`, behind the schema's
+    `unstable_end_turn_token_usage` feature, which this crate enables. It is an unstable part
+    of the protocol, taken because it is the only door to a turn's tokens.
+  - **A hook's folder outranks the terminal's.** A hook-only Claude Code thread had no folder,
+    so its review said "not in a git repository" and its paths were absolute. The worker now
+    takes `cwd` from `SessionStart` and every later hook, ahead of the terminal's process
+    folder, and offers the folder's slash commands (`CommandsSet`). Test:
+    `a_session_works_where_its_hooks_say`.
+  - **A hunk is headed as git heads it** (`Hunk.heading` in both patch types). The rule is
+    git's default for a file with no diff driver: the nearest line above the hunk that starts
+    with an ASCII letter, `_` or `$`, cut at 80 bytes and then trimmed. It comes from the old
+    file for the worker's snapshots and Claude Code's edits (`originalFile`), and from the
+    `@@ … @@` line Codex writes. Test: `hunks_are_headed_as_git_heads_them` compares with
+    `git diff --no-index`.
+  - **An `AskUserQuestion` is a question, whichever hook brings it.** Claude Code answers it
+    through the permission hook, so its `PermissionRequest`, and the permission prompt that
+    follows, said "Wants to use AskUserQuestion". The tracker now reads both as
+    `Blocked(Question)` with the question as detail. Test:
+    `a_question_asked_through_the_permission_hook_stays_a_question`.
+  - **Left:** Codex background terminals, hooks, MCP startup and rewind (not in the generated
+    protocol yet), Claude Code `StopFailure` as failed and its per-turn cost, MCP servers as
+    model state, pi commands and edit diffs, and ACP subagents and compaction.

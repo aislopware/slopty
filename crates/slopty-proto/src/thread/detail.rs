@@ -170,8 +170,40 @@ pub struct Hunk {
     pub new_start: u32,
     /// Lines of the new file it covers.
     pub new_lines: u32,
+    /// What it is in, as git's `@@ … @@` line names it after the ranges: the enclosing
+    /// function or block, when one is known ([`heading`]).
+    pub heading: Option<String>,
     /// Its lines, each with its ` `, `-` or `+`.
     pub lines: Vec<String>,
+}
+
+/// The longest heading git writes, in bytes.
+const HEADING_BYTES: usize = 80;
+
+/// A hunk's heading as git's diff finds one with no diff driver set.
+///
+/// It is the nearest of the lines above the hunk's first line, `before` (read from the top),
+/// that starts with an ASCII letter, `_` or `$`, cut at 80 bytes (on a character boundary) and
+/// then trimmed of trailing space, in that order, as git does it.
+#[must_use]
+pub fn heading<'a>(before: impl DoubleEndedIterator<Item = &'a str>) -> Option<String> {
+    let line = before.rev().find(|line| {
+        line.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b == b'$')
+    })?;
+    let mut end = line.len().min(HEADING_BYTES);
+    while !line.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    line.get(..end).map(|cut| cut.trim_end().to_owned())
+}
+
+/// A unified diff's hunk header, `@@ -a,b +c,d @@ heading`, read: the heading git wrote after
+/// the ranges, when it wrote one.
+#[must_use]
+pub fn header_heading(header: &str) -> Option<String> {
+    let rest = header.strip_prefix("@@ ")?;
+    let (_, heading) = rest.split_once(" @@")?;
+    Some(heading.trim().to_owned()).filter(|h| !h.is_empty())
 }
 
 /// A tool call's typed body, by the kind of call it is rather than by any agent's tool names:

@@ -1021,6 +1021,8 @@ pub(crate) fn proposed_patch(replacements: &[(String, String)]) -> Patch {
                 old_lines: to_u32(old.len()),
                 new_start: 0,
                 new_lines: to_u32(new.len()),
+                // Only the text replaced is known, not where in the file it is.
+                heading: None,
                 lines: lines.into_iter().take(kept).collect(),
             });
         }
@@ -1363,10 +1365,12 @@ fn apply_result(
     }
 }
 
-/// The diff in a result's `structuredPatch`.
+/// The diff in a result's `structuredPatch`, each hunk headed as git heads it from the file as
+/// it was (`originalFile`).
 fn patch(result: &Value, uuid: &str) -> Patch {
     let mut out = Patch::default();
     let Some(hunks) = result.get("structuredPatch").and_then(Value::as_array) else { return out };
+    let original = original_lines(result);
     let mut kept = 0_usize;
     for hunk in hunks {
         let lines: Vec<&str> = hunk
@@ -1393,6 +1397,7 @@ fn patch(result: &Value, uuid: &str) -> Patch {
                 old_lines: at("oldLines"),
                 new_start: at("newStart"),
                 new_lines: at("newLines"),
+                heading: heading_above(&original, hunk),
                 lines: shown,
             });
         }
@@ -1401,6 +1406,23 @@ fn patch(result: &Value, uuid: &str) -> Patch {
         out.full = Some(TextRef { record: uuid.to_owned(), part: Part::Patch });
     }
     out
+}
+
+/// The file an edit result changed, as it was, by line (`originalFile`; empty when unsaid).
+fn original_lines(result: &Value) -> Vec<&str> {
+    result
+        .get("originalFile")
+        .and_then(Value::as_str)
+        .map(|f| f.lines().collect())
+        .unwrap_or_default()
+}
+
+/// A `structuredPatch` hunk's heading, from the lines of `original` above its `oldStart`.
+fn heading_above(original: &[&str], hunk: &Value) -> Option<String> {
+    let first = usize::try_from(u64_at(hunk, "oldStart").unwrap_or(0)).unwrap_or(usize::MAX);
+    slopty_proto::thread::detail::heading(
+        original.get(..first.saturating_sub(1)).unwrap_or_default().iter().copied(),
+    )
 }
 
 /// How a result changes the task list.
@@ -1735,11 +1757,13 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
         Part::Stdout => result.and_then(|r| string_at(r, "stdout")),
         Part::Stderr => result.and_then(|r| string_at(r, "stderr")),
         Part::Patch => {
-            let hunks = result?.get("structuredPatch")?.as_array()?;
+            let result = result?;
+            let hunks = result.get("structuredPatch")?.as_array()?;
+            let original = original_lines(result);
             let mut out = String::new();
             for hunk in hunks {
                 let n = |key: &str| u64_at(hunk, key).unwrap_or(0);
-                let _written = writeln!(
+                let _written = write!(
                     out,
                     "@@ -{},{} +{},{} @@",
                     n("oldStart"),
@@ -1747,6 +1771,11 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
                     n("newStart"),
                     n("newLines")
                 );
+                if let Some(heading) = heading_above(&original, hunk) {
+                    out.push(' ');
+                    out.push_str(&heading);
+                }
+                out.push('\n');
                 for line in hunk
                     .get("lines")
                     .and_then(Value::as_array)

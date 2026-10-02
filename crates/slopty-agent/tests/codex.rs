@@ -274,6 +274,7 @@ mod tests {
                 ItemBody::User(message) => format!("user: {}", message.text.text),
                 ItemBody::Text(text) => format!("text: {}", text.text),
                 ItemBody::Tool(call) => format!("{} {:?}: {}", call.kind, call.state, call.title),
+                ItemBody::Notice(notice) => format!("{}: {}", notice.kind, notice.text.text),
                 other => format!("{other:?}"),
             })
             .collect()
@@ -287,11 +288,15 @@ mod tests {
         assert_eq!(state.meta.drive, Drive::named(Drive::SHARED));
         assert_eq!(state.meta.agent, AgentId::named(AgentId::CODEX));
         assert_eq!(state.meta.agent_version, "0.160.0");
+        let warned = "info: Model metadata for `mock-model` not found. Defaulting to fallback \
+                      metadata; this can degrade performance and cause issues.";
         assert_eq!(
             texts(&state),
             [
+                warned,
                 "user: Say hello.",
                 "text: Hello.",
+                warned,
                 "user: Make a file called made-by-codex.",
                 "exec Completed: /bin/zsh -lc 'touch made-by-codex'",
                 "text: Made it.",
@@ -340,7 +345,11 @@ mod tests {
         let by = Answerer { client: None, name: "Slopty".to_owned() };
         assert_eq!(request.state, RequestState::Answered { by, choice: "accept".to_owned() });
         let (started, _) = mapped("a", None);
-        assert_eq!(texts(&state), texts(&started), "the first turn came back with the resume");
+        // Codex's warnings are said once, to whoever is there: a resume does not bring them back.
+        let kept = |state: &ThreadState| -> Vec<String> {
+            texts(state).into_iter().filter(|t| !t.starts_with("info: ")).collect()
+        };
+        assert_eq!(kept(&state), kept(&started), "the first turn came back with the resume");
     }
 
     /// Codex's questions, as the pinned build asked them in Plan mode
@@ -466,5 +475,244 @@ mod tests {
         let secret = state.requests.last().unwrap();
         assert!(secret.questions.is_empty() && secret.options.is_empty(), "nothing to answer here");
         assert!(secret.text.as_ref().is_some_and(|t| t.text.contains("Codex's own terminal")));
+    }
+
+    /// The recorded thread, begun, with a state that mirrors it.
+    fn begun() -> (Shared, ThreadState) {
+        let lines = fixture("question.jsonl");
+        let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
+        let thread: p::Thread =
+            serde_json::from_value(started.msg["result"]["thread"].clone()).unwrap();
+        let (shared, actions) = Shared::new(&thread, None);
+        let mut state = ThreadState::new(shared.meta().clone());
+        for action in &actions {
+            state.apply(action);
+        }
+        (shared, state)
+    }
+
+    /// The notification `method` with `params`, heard by `shared` and applied to `state`.
+    fn hear(shared: &mut Shared, state: &mut ThreadState, method: &str, params: &Value) {
+        let msg = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        let Incoming::Notification { note, .. } = rpc::read(&msg.to_string()).unwrap() else {
+            panic!("a notification: {msg}")
+        };
+        for action in &shared.notification(&note, WallMs::from_millis(1)) {
+            state.apply(action);
+        }
+    }
+
+    fn notices(state: &ThreadState) -> Vec<slopty_proto::thread::Notice> {
+        state
+            .items
+            .iter()
+            .filter_map(|i| match &i.body {
+                ItemBody::Notice(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An error Codex will retry is a notice counting the turn's attempts, since Codex numbers
+    /// none and says no wait; the error it gives up on is a plain one.
+    #[test]
+    fn an_error_codex_retries_counts_its_attempts() {
+        let (mut shared, mut state) = begun();
+        let thread = shared.meta().native.clone();
+        let error = |retry: bool, message: &str| {
+            json!({"threadId": thread, "turnId": "t1", "willRetry": retry,
+                "error": {"message": message}})
+        };
+        hear(&mut shared, &mut state, "error", &error(true, "stream disconnected"));
+        hear(&mut shared, &mut state, "error", &error(true, "stream disconnected"));
+        hear(&mut shared, &mut state, "error", &error(false, "gave up"));
+        let said: Vec<(String, Option<u32>)> = notices(&state)
+            .into_iter()
+            .map(|n| (n.text.text, n.retry.map(|r| r.attempt)))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("stream disconnected".to_owned(), Some(2)),
+                ("stream disconnected".to_owned(), Some(3)),
+                ("gave up".to_owned(), None),
+            ]
+        );
+        let retry = notices(&state)[0].retry.unwrap();
+        assert_eq!((retry.max, retry.in_ms), (None, None), "Codex says neither");
+    }
+
+    /// A turn begun on the recorded thread, as Codex says it.
+    fn turn_begun(shared: &mut Shared, state: &mut ThreadState) -> String {
+        let thread = shared.meta().native.clone();
+        let turn = "00000000-0000-7000-8000-0000000000aa".to_owned();
+        let params = json!({"threadId": thread, "turn": {"completedAt": null, "durationMs": null,
+            "error": null, "id": turn, "items": [], "itemsView": "notLoaded", "startedAt": 0,
+            "status": "inProgress"}});
+        hear(shared, state, "turn/started", &params);
+        turn
+    }
+
+    /// What a turn changed is the whole turn's diff as Codex sends it, counted again each time
+    /// it moves, across files.
+    #[test]
+    fn a_turns_diff_is_what_it_changed() {
+        let (mut shared, mut state) = begun();
+        let turn = turn_begun(&mut shared, &mut state);
+        let thread = shared.meta().native.clone();
+        let diff = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,2 +1,3 @@\n one\n-two\n+2\n+three\n\
+                    diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -4 +4 @@\n-x\n+y\n";
+        hear(
+            &mut shared,
+            &mut state,
+            "turn/diff/updated",
+            &json!({"threadId": thread, "turnId": turn, "diff": diff}),
+        );
+        let last = state.turns.last().unwrap();
+        assert_eq!((last.changed.added, last.changed.removed), (3, 2));
+    }
+
+    /// An edit's hunks keep the heading Codex's diff names after their ranges.
+    #[test]
+    fn an_edits_hunks_keep_their_heading() {
+        let (mut shared, mut state) = begun();
+        let turn = turn_begun(&mut shared, &mut state);
+        let thread = shared.meta().native.clone();
+        let diff = "@@ -1 +1 @@\n-use std::io;\n+use std::fmt;\n@@ -9,3 +9,3 @@ impl Client {\n a\n-b\n+c\n d\n";
+        let item = json!({"type": "fileChange", "id": "f1", "status": "completed",
+            "changes": [{"path": "/w/client.rs", "kind": {"type": "update"}, "diff": diff}]});
+        hear(
+            &mut shared,
+            &mut state,
+            "item/completed",
+            &json!({"threadId": thread, "turnId": turn, "item": item, "completedAtMs": 5}),
+        );
+        let edit = state
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                ItemBody::Tool(call) => match &call.detail {
+                    Some(slopty_proto::thread::ToolDetail::Edit(edit)) => Some(edit.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("the edit");
+        let headings: Vec<Option<&str>> =
+            edit.patch.hunks.iter().map(|h| h.heading.as_deref()).collect();
+        assert_eq!(headings, [None, Some("impl Client {")]);
+        assert_eq!(edit.patch.hunks[1].lines, [" a", "-b", "+c", " d"]);
+    }
+
+    /// The account's windows are the thread's limits, named by their length; a turn Codex moves
+    /// to another model counts that model and says why; a warning is a notice.
+    #[test]
+    fn limits_reroutes_and_warnings_are_carried() {
+        let (mut shared, mut state) = begun();
+        let turn = turn_begun(&mut shared, &mut state);
+        let thread = shared.meta().native.clone();
+        hear(
+            &mut shared,
+            &mut state,
+            "account/rateLimits/updated",
+            &json!({"rateLimits": {
+            "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+            "secondary": {"usedPercent": 7, "windowDurationMins": 10_080, "resetsAt": null}}}),
+        );
+        let limits: Vec<(String, u32)> =
+            state.meters.limits.iter().map(|l| (l.name.clone(), l.used_bp)).collect();
+        assert_eq!(limits, [("five-hour".to_owned(), 4_200), ("seven-day".to_owned(), 700)]);
+        assert_eq!(state.meters.limits[0].resets_ms, Some(WallMs::from_millis(1_800_000_000_000)));
+
+        hear(
+            &mut shared,
+            &mut state,
+            "model/rerouted",
+            &json!({"threadId": thread,
+            "turnId": turn, "fromModel": "gpt-6", "toModel": "gpt-6-safe",
+            "reason": "highRiskCyberActivity"}),
+        );
+        assert!(state.turns.last().unwrap().models.contains(&"gpt-6-safe".to_owned()));
+        hear(
+            &mut shared,
+            &mut state,
+            "warning",
+            &json!({"threadId": thread, "message": "Config is deprecated"}),
+        );
+        let said: Vec<String> = notices(&state).into_iter().map(|n| n.text.text).collect();
+        assert!(said[0].contains("gpt-6-safe"), "{said:?}");
+        assert_eq!(said[1], "Config is deprecated");
+    }
+
+    /// A spawn call starts a subagent's thread: the call names the child it started, with what
+    /// it was told; a thread Codex says has a parent is a subagent's.
+    #[test]
+    fn a_spawn_call_names_its_subagents_thread() {
+        let (mut shared, mut state) = begun();
+        let turn = turn_begun(&mut shared, &mut state);
+        let thread = shared.meta().native.clone();
+        let child = "00000000-0000-7000-8000-0000000000cc";
+        let item = json!({"type": "collabAgentToolCall", "id": "c1", "tool": "spawnAgent",
+            "status": "completed", "senderThreadId": thread, "receiverThreadIds": [child],
+            "prompt": "Read the tests", "agentsStates": {child: {"status": "running"}}});
+        hear(
+            &mut shared,
+            &mut state,
+            "item/completed",
+            &json!({"threadId": thread,
+            "turnId": turn, "item": item, "completedAtMs": 5}),
+        );
+        let call = state
+            .items
+            .iter()
+            .find_map(|i| match &i.body {
+                ItemBody::Tool(call) => Some(call.clone()),
+                _ => None,
+            })
+            .expect("the call");
+        assert_eq!(call.kind, slopty_proto::thread::kind::AGENT);
+        assert_eq!(call.child, Some(shared::thread_of(child)));
+        let Some(slopty_proto::thread::ToolDetail::Agent(agent)) = &call.detail else {
+            panic!("{call:?}")
+        };
+        assert_eq!(agent.prompt.text, "Read the tests");
+
+        let link = slopty_proto::thread::Link {
+            thread: shared.meta().id,
+            item: slopty_proto::thread::ItemId("c1".to_owned()),
+        };
+        let mut sub = begun().0;
+        let adopted = sub.adopted(link.clone());
+        assert!(
+            matches!(adopted.as_slice(), [Action::Meta(meta)] if meta.parent == Some(link.clone()))
+        );
+        assert!(sub.adopted(link).is_empty(), "once");
+        assert_eq!(sub.meta().origin, slopty_proto::thread::ThreadMeta::SUBAGENT);
+    }
+
+    /// Codex's approval policy is the thread's mode and its sandbox a fact; its reasoning
+    /// effort is the meters' effort.
+    #[test]
+    fn the_threads_settings_are_its_mode_and_effort() {
+        let lines = fixture("question.jsonl");
+        let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
+        let mut thread = started.msg["result"]["thread"].clone();
+        thread["reasoningEffort"] = json!("high");
+        let thread: p::Thread = serde_json::from_value(thread).unwrap();
+        let (mut shared, actions) = Shared::new(&thread, None);
+        let mut state = ThreadState::new(shared.meta().clone());
+        for action in &actions {
+            state.apply(action);
+        }
+        assert_eq!(state.meters.effort.as_deref(), Some("high"));
+        let approval: p::AskForApproval = serde_json::from_value(json!("on-request")).unwrap();
+        let sandbox: p::SandboxPolicy =
+            serde_json::from_value(json!({"type": "workspaceWrite"})).unwrap();
+        for action in &shared.settings(approval, &sandbox) {
+            state.apply(action);
+        }
+        assert_eq!(state.meters.mode.as_deref(), Some("on-request"));
+        assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("workspaceWrite"));
+        assert!(shared.settings(approval, &sandbox).is_empty(), "nothing moved");
     }
 }

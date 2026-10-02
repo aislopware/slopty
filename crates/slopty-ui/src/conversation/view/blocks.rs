@@ -1058,6 +1058,7 @@ pub(super) fn parse_patch(text: &str) -> Patch {
                 old_lines,
                 new_start,
                 new_lines,
+                heading: slopty_proto::thread::detail::header_heading(line),
                 lines: Vec::new(),
             });
             continue;

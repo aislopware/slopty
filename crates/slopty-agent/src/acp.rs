@@ -22,16 +22,16 @@ pub use agent_client_protocol_schema::v1 as schema;
 use slopty_proto::thread::AgentId;
 
 /// What names an ACP agent's threads: `acp:<name>`.
-pub const AGENT_PREFIX: &str = "acp:";
+pub const AGENT_PREFIX: &str = AgentId::ACP_PREFIX;
 
 /// The agent of an ACP agent named `name`.
 #[must_use]
 pub fn agent_id(name: &str) -> AgentId {
-    AgentId(format!("{AGENT_PREFIX}{name}"))
+    AgentId::acp(name)
 }
 
 /// The name of the ACP agent `agent` is, when it is one.
 #[must_use]
 pub fn name_of(agent: &AgentId) -> Option<&str> {
-    agent.0.strip_prefix(AGENT_PREFIX).filter(|name| !name.is_empty())
+    agent.acp_name()
 }
