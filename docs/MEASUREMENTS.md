@@ -13630,3 +13630,33 @@ echo.
 A resize with nobody following the diffs no longer builds a frame that nobody receives. The
 viewers waiting are sent the baseline when they have room. The echo test attaches both at the
 session's size and at a size the attach resizes it to.
+
+## 2026-10-02 — the thread's frames on gpui-fast bb5991c (zed 23d10a47), and a two-state Mac
+
+gpui-fast bb5991c imports zed 23d10a47, whose frame requests carry when the platform asked for
+them (zed#64958). The thread's frame test (`frame_time::the_thread_draws_a_streaming_answer_within_a_frame`,
+the scenarios of "hold the thread view to its latency budgets" above) ran four times on the same
+tree, alternating the lock file before the sync (A, gpui-fast 6a4dd6f) and after it (B), with
+load averages of 8 to 11 from other work on this Mac. Draw time p50 / p95 / p99 / max:
+
+| Scenario | A1 | B1 | A2 | B2 |
+| --- | --- | --- | --- | --- |
+| (h) following | 3.4 / 7.0 / 8.2 / 9.0 ms | 2.5 / 5.5 / 7.3 / 9.3 ms | 3.4 / 6.5 / 8.9 / 13.9 ms | 3.1 / 5.8 / 12.5 / 16.6 ms |
+| (i) panning, streaming | 3.4 / 7.4 / 9.8 / 10.3 ms | 2.8 / 6.2 / 7.7 / 8.1 ms | 3.3 / 7.0 / 10.3 / 12.9 ms | 3.1 / 6.3 / 8.1 / 8.6 ms |
+| (j) every step open | 2.4 / 5.7 / 6.9 / 8.9 ms | 3.3 / 7.3 / 9.1 / 20.8 ms | 2.1 / 5.9 / 8.4 / 11.4 ms | 2.8 / 6.5 / 9.8 / 15.0 ms |
+| (k) word to its frame p50 / p95 | 32.6 / 49.3 ms | 32.6 / 49.4 ms | 32.7 / 44.9 ms | 32.4 / 49.9 ms |
+
+The sync moves nothing: A and B overlap in every scenario.
+
+Every run sat about twice above that section's figures, and panning drew 257 to 283 frames in its
+5 s with a p99 interval of 33 ms where that section had 300 and 17.5 ms. The commit that recorded
+those figures (2adfd2af), measured twice more now, gave both states back to back: 3.3 / 5.8 /
+8.1 ms with 271 and 255 panning frames, then 1.6 / 1.9 / 2.4 ms with 298 and 300, the second at
+the higher load average (13). So the code since then is not the cause: this Mac draws in one of
+two states, independent of the load average, most likely the GPU's or WindowServer's. A frame
+comparison on this Mac is made A/B in alternation, as here, never against an older table.
+
+```sh
+# A: git show 08cbf9a4:Cargo.lock > Cargo.lock; B: the lock file at 767e0502
+cargo xtask e2e smooth --filter 'test(/frame_time::the_thread/)'
+```
