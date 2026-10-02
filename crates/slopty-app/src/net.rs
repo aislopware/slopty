@@ -255,6 +255,9 @@ fn server_role() -> Role {
 pub async fn link_server(address: &HostAddr) -> Result<ServerLink> {
     let endpoint = endpoint().map_err(anyhow::Error::msg)?;
     slopty_net::server::connect(&endpoint, address, server_role()).await.map_err(|e| match e {
+        DialError::Refused(Refusal::NotGranted) => {
+            anyhow!("{}. {}", crate::server::NOT_GRANTED, crate::server::GRANT_WHERE)
+        }
         DialError::Refused(why) => anyhow!(why.text()),
         DialError::Net(e) => anyhow::Error::new(e).context(format!("connect to {address}")),
     })

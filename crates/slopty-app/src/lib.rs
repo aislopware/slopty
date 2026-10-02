@@ -67,7 +67,7 @@ pub use ssh::actions::InstallOverSsh;
 pub use this_mac::actions::UseThisMac;
 pub use window::actions::{Minimize, OpenHelp, ShowWindow, Zoom};
 pub use window::{HELP_URL, show as show_main_window};
-pub use workers::actions::{AddWorker, ConnectServer, DisconnectServer};
+pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant, DisconnectServer};
 use workers::{Hearing, Tick, WorkerSlot};
 
 /// A finger drives this build: the key bar the soft keyboard lacks (Esc, Tab, Control, arrows,
@@ -2781,6 +2781,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &DisconnectServer, window, cx| {
                 this.disconnect_server(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &CopyTailnetGrant, _window, cx| this.copy_grant(cx)))
             .on_action(cx.listener(|this, _: &UseThisMac, window, cx| {
                 this.use_this_mac(window, cx);
             }))
@@ -3085,6 +3086,7 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
         app_command("add_worker", AddWorker, &["cmd-shift-h"]),
         app_command("connect_server", ConnectServer, &[]),
         app_command("disconnect_server", DisconnectServer, &[]),
+        app_command("copy_tailnet_grant", CopyTailnetGrant, &[]),
     ];
     if this_mac::OFFERED {
         commands.push(app_command("use_this_mac", UseThisMac, &[]));
@@ -3120,6 +3122,7 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
         item("Open settings", IconName::Settings, Box::new(OpenSettings)),
         item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
         item("Disconnect from the server", IconName::Unplug, Box::new(DisconnectServer)),
+        item(server::COPY_GRANT, IconName::Copy, Box::new(CopyTailnetGrant)),
         item("Add a worker", IconName::Plus, Box::new(AddWorker)),
     ];
     if this_mac::OFFERED {

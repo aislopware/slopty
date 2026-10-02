@@ -26,6 +26,9 @@ pub mod actions {
             ConnectServer,
             /// Stop using the server: its workers leave, the ones added by address stay.
             DisconnectServer,
+            /// Copy the tailnet policy grant that lets the tailnet's devices in as the server's
+            /// clients.
+            CopyTailnetGrant,
         ]
     );
 }

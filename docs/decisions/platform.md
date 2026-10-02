@@ -635,12 +635,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   carrying the client role (`docs/decisions/topology.md`, "Admission asks whois; roles come from
   grants"). The status bar said only that the policy did not grant it.
   - The status bar now reads "Server needs a tailnet grant for this device", and the first
-    refusal, not each redial's, shows the notice "Add a grant for this device in Tailscale's
-    Access controls": the admin console's policy file, or Headscale's. Both fit a notice's single
-    line.
-  - The log carries the grant to paste (`slopty_app::server::client_grant`):
+    refusal, not each redial's, shows the notice "Copy the tailnet grant from the palette into
+    Tailscale's Access controls": the admin console's policy file, or Headscale's. Both fit a
+    notice's single line. The server panel's Connect, refused the same way, says both.
+  - The palette's "Copy the tailnet grant for this server's clients" puts the grant on the
+    clipboard (`slopty_app::server::client_grant`), as the policy file's `grants` takes it:
     `{"src": ["autogroup:member"], "dst": ["tag:slopty-server"], "ip": ["*"], "app":
-    {"github.com/aislopware/slopty": [{"roles": ["client"]}]}}`, the tag discovery prefers.
-  - Not yet: a way to copy that grant from the app (a palette command in `slopty-app/src/lib.rs`),
-    and the same words where the server panel's Connect is refused (`net.rs`).
-  - Test: `server::tests::a_refused_device_is_told_where_to_grant_it_once`.
+    {"github.com/aislopware/slopty": [{"roles": ["client"]}]}}`, the tag discovery prefers. It
+    is always in the palette, since the grant is the tailnet's, not this device's: whoever runs
+    the policy copies it from any client. It was first only in the log, where nobody reads.
+  - Tests: `server::tests::a_refused_device_is_told_where_to_grant_it_once` and
+    `the_grant_is_copied_for_the_policy_file`.

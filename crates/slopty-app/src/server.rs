@@ -29,9 +29,14 @@ pub(crate) const UNREACHABLE: &str = "Server unreachable";
 /// The status bar's line while the server turns this app away: the tailnet policy grants this
 /// device no client role there.
 pub(crate) const NOT_GRANTED: &str = "Server needs a tailnet grant for this device";
-/// Said once as the server starts turning this app away: where a grant is added. Headscale
-/// keeps the same grants in its policy file.
-pub(crate) const GRANT_WHERE: &str = "Add a grant for this device in Tailscale's Access controls";
+/// Said once as the server starts turning this app away: where a grant is added, and where it
+/// is copied from. Headscale keeps the same grants in its policy file.
+pub(crate) const GRANT_WHERE: &str =
+    "Copy the tailnet grant from the palette into Tailscale's Access controls";
+/// The palette's line that copies [`client_grant`].
+pub(crate) const COPY_GRANT: &str = "Copy the tailnet grant for this server's clients";
+/// Said once the grant is on the clipboard.
+const GRANT_COPIED: &str = "Copied: paste it into the grants of Tailscale's Access controls";
 
 /// The grant that lets the tailnet's members in as clients of a server tagged as discovery
 /// prefers one (`docs/decisions/topology.md`), as the policy file's `grants` takes it.
@@ -242,6 +247,12 @@ impl Workspace {
         }
     }
 
+    /// Puts [`client_grant`] on the clipboard, for the tailnet's policy file.
+    pub(crate) fn copy_grant(&self, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(client_grant()));
+        self.show_notice(GRANT_COPIED.to_owned(), cx);
+    }
+
     /// One thing the server link said.
     fn server_event(&mut self, event: ServerEvent, cx: &mut Context<Self>) {
         match event {
@@ -258,7 +269,6 @@ impl Workspace {
                 if why == Refusal::NotGranted && self.view.read(cx).server_status() != Some(status)
                 {
                     tracing::warn!(
-                        grant = %client_grant(),
                         "the server's tailnet policy grants this device no client role; add the grant"
                     );
                     self.show_notice(GRANT_WHERE.to_owned(), cx);
@@ -565,6 +575,21 @@ mod tests {
         let grant: serde_json::Value = serde_json::from_str(&client_grant()).unwrap();
         assert_eq!(grant["dst"][0], slopty_net::discover::SERVER_TAG);
         assert_eq!(grant["app"][slopty_tailnet::policy::CAP][0]["roles"][0], "client");
+    }
+
+    /// The palette's command puts the grant on the clipboard, as the policy file takes it, and
+    /// says so.
+    #[gpui::test]
+    fn the_grant_is_copied_for_the_policy_file(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = crate::tests::shell(cx, &runtime, &dir, true);
+        cx.dispatch_action(crate::CopyTailnetGrant);
+        cx.run_until_parked();
+        let copied = cx.read_from_clipboard().and_then(|item| item.text());
+        assert_eq!(copied, Some(client_grant()));
+        let said = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
+        assert_eq!(said.as_deref(), Some(GRANT_COPIED));
     }
 
     /// A wake names the machine that sent it, and a refusal says why.
