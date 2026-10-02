@@ -108,6 +108,9 @@ anyhow.workspace = true
 # A drop's files, as the worker's record of its release names them (`tests/app/dnd.rs`).
 blake3.workspace = true
 data-encoding.workspace = true
+# The showcase's stand-in for the person's Codex daemon, a WebSocket on a Unix socket
+# (`tests/app/showcase.rs`).
+futures-util.workspace = true
 slopty-agent.workspace = true
 # The Linux worker test reaches its worker as the app does (`tests/linux.rs`).
 slopty-client.workspace = true
@@ -122,3 +125,4 @@ slopty-testkit.workspace = true
 image.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = [ "process" ] }
+tokio-tungstenite.workspace = true

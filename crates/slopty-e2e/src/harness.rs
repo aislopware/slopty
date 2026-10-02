@@ -1726,6 +1726,23 @@ impl SecondWorker {
         pasteboard_name(self.dir.path(), "worker")
     }
 
+    /// Where to put a file for this worker's run: its root, which holds its `home` and the
+    /// `zsh` configuration its shells start with.
+    #[must_use]
+    pub fn path(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+
+    /// One request over the worker's control socket (`{"cmd": …}`), and its reply, as
+    /// [`Stack::ctl`] sends it.
+    ///
+    /// # Errors
+    ///
+    /// When the worker cannot be reached or answers something that is not JSON.
+    pub async fn ctl(&self, request: &Value) -> Result<Value> {
+        ctl(&self.worker.ctl_socket(), request).await
+    }
+
     /// What the relay has carried and dropped each way so far.
     pub async fn carried(&self) -> slopty_shape::relay::Carried {
         self.relay.carried().await
@@ -2154,6 +2171,20 @@ impl ProjectStack {
     /// When a binary is missing, a daemon dies, the worker never comes online or the app does
     /// not reach it.
     pub async fn launch(worker_name: &str) -> Result<Self> {
+        Self::launch_with(worker_name, &[], &[]).await
+    }
+
+    /// [`Self::launch`] with `more_programs` (a name, and what it links to) beside the stand-in
+    /// `claude` on the worker's `PATH`, and `more_env` added to the worker's environment.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::launch`].
+    pub async fn launch_with(
+        worker_name: &str,
+        more_programs: &[(&str, &Path)],
+        more_env: &[(&str, &str)],
+    ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-projects-")?;
         let root = dir.path();
         let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
@@ -2163,6 +2194,9 @@ impl ProjectStack {
         let programs = root.join("programs");
         std::fs::create_dir_all(&programs)?;
         std::os::unix::fs::symlink(stub_claude().await?, programs.join("claude"))?;
+        for (name, target) in more_programs {
+            std::os::unix::fs::symlink(target, programs.join(name))?;
+        }
         let home = root.join("home");
         std::fs::create_dir_all(&home)?;
         // By its real path, as `scrubbed` gives it: the shell's prompt then says `~`.
@@ -2170,12 +2204,13 @@ impl ProjectStack {
         std::fs::create_dir_all(root.join("repo"))?;
         let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", programs.display());
         let (home, path) = (home.to_string_lossy().into_owned(), path);
-        let env = [
+        let mut env = vec![
             ("HOME", home.as_str()),
             ("PATH", path.as_str()),
             ("SLOPTY_BIND", "127.0.0.1"),
             ("BASH_SILENCE_DEPRECATION_WARNING", "1"),
         ];
+        env.extend_from_slice(more_env);
         let worker =
             Worker::start(&root.join("worker"), worker_name, Some(server.address()), &log, &env)
                 .await?;

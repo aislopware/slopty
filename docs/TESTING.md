@@ -63,7 +63,10 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    (`snapshot::luma_distance`), so the chrome, the overlay and the still parts of the picture are
    compared pixel for pixel while the page moves. Its `frame_time` case, under
    `cargo xtask e2e smooth`, times drawn frames from their capture stamp to the paint that
-   shows them.
+   shows them. Its `showcase` module, under `cargo xtask e2e showcase` only, renders every
+   surface with a busy day's data (stand-in programs and agents, light and dark) into
+   `target/e2e/artifacts/showcase/` for a person's design review; nothing in it passes or fails
+   on pixels.
    A drag from this Mac onto a remote tile is driven the same way. `drag_over`, `drag_drop` and
    `drag_leave` hand the workspace each step as the platform's drop destination would
    (`DropSink`), with the files on a pasteboard of the command's own, so no system drag runs

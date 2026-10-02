@@ -48,6 +48,9 @@ pub enum Case {
     /// conversation face under a streaming answer; prints the percentiles and fails when
     /// panning is over budget. No permissions needed for the shell scenarios.
     Smooth,
+    /// Renders of every surface with a busy day's data, for a person's review: no golden is
+    /// compared; the pictures land in `target/e2e/artifacts/showcase/`.
+    Showcase,
     /// The same frame-time scenarios with the app in the simulator (`--sim iphone|ipad`);
     /// indicative only, the simulator has no GPU-backed display link.
     SmoothIos,
@@ -184,8 +187,13 @@ impl Suite {
 const SCREEN_RECORDING: &str = "test(~screen_recording::)";
 /// The module holding the app target's frame-time measurements, which run alone under `smooth`.
 const FRAME_TIME: &str = "test(~frame_time::)";
+/// The module holding the app target's showcase renders, which run only as their own case.
+const SHOWCASE: &str = "test(~showcase::)";
 
-const APP: &[Suite] = &[Suite::live("slopty-e2e", "app").only("not test(~frame_time::)")];
+const APP: &[Suite] =
+    &[Suite::live("slopty-e2e", "app").only("not test(~frame_time::) and not test(~showcase::)")];
+
+const SHOWCASE_APP: &[Suite] = &[Suite::live("slopty-e2e", "app").only(SHOWCASE)];
 
 const WORKER: &[Suite] = &[Suite {
     kept: Kept::No,
@@ -234,6 +242,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
         Case::Smooth => SMOOTH.iter().collect(),
+        Case::Showcase => SHOWCASE_APP.iter().collect(),
         Case::SmoothIos => SMOOTH_IOS.iter().collect(),
         Case::Pair => PAIR.iter().collect(),
         Case::PairIos => PAIR_IOS.iter().collect(),

@@ -38,6 +38,10 @@ mod resume;
 mod settings;
 
 #[cfg(test)]
+#[path = "app/showcase.rs"]
+mod showcase;
+
+#[cfg(test)]
 #[path = "app/stream.rs"]
 mod stream;
 
