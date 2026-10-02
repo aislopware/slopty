@@ -164,6 +164,7 @@ enum Cmd {
     Probe { reply: oneshot::Sender<Probe> },
     Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
     ShareClipboard { clip: Arc<dyn ForSessions> },
+    Dnd { client: ClientId, act: dnd::Act },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
     Launch { line: String },
@@ -191,6 +192,8 @@ pub struct Snapshot {
     pub progress: Option<Progress>,
     /// Whether the session was reopened after its shell was lost.
     pub restored: Option<Restored>,
+    /// The program asks for drops (Kitty drag and drop, OSC 72).
+    pub drop_target: bool,
 }
 
 /// What the worker can see of a session without asking anything running in it: the program in
@@ -342,6 +345,7 @@ impl std::fmt::Debug for Cmd {
             Self::Probe { .. } => "Probe",
             Self::Memory { .. } => "Memory",
             Self::ShareClipboard { .. } => "ShareClipboard",
+            Self::Dnd { .. } => "Dnd",
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
             Self::Launch { .. } => "Launch",
@@ -909,6 +913,8 @@ struct Actor {
     /// A paste event waiting for the paster's copy, and the viewers' input behind it.
     pasting: Option<paste::Pasting>,
     held: VecDeque<(ClientId, TermRequest, tokio::time::Instant)>,
+    /// The program asks for drops (Kitty drag and drop), and the drag or drop under way.
+    drops: dnd::Drops,
 }
 
 /// A session's output is looked at for a local server's address at most this often once it
@@ -993,6 +999,7 @@ impl Actor {
         // the shell's own, at a prompt since.
         let (mut title, mut cwd, mut program_colors) = (None, None, ColorOverrides::default());
         let (mut progress, mut pointer) = (Progress::default(), PointerShape::default());
+        let mut drop_target = false;
         let prompted = events.iter().skip(replayed).any(|ev| matches!(ev, EngineEvent::Cwd(_)));
         for ev in events {
             match ev {
@@ -1001,9 +1008,12 @@ impl Actor {
                 EngineEvent::Colors(c) => program_colors = c,
                 EngineEvent::Progress(p) => progress = p,
                 EngineEvent::Pointer(p) => pointer = p,
+                EngineEvent::DropTarget { accepts } => drop_target = accepts,
                 EngineEvent::PtyWrite(_)
                 | EngineEvent::Bell
                 | EngineEvent::Notification { .. }
+                | EngineEvent::DropAccepted { .. }
+                | EngineEvent::DropConcluded { .. }
                 | EngineEvent::ClipboardWrite { .. } => {}
             }
         }
@@ -1074,6 +1084,7 @@ impl Actor {
             arrivals: None,
             pasting: None,
             held: VecDeque::new(),
+            drops: dnd::Drops::new(drop_target),
         })
     }
 
@@ -1561,6 +1572,11 @@ impl Actor {
                     self.place_due = true;
                     self.prompted = true;
                 }
+                EngineEvent::DropTarget { accepts } => self.drops.target(accepts),
+                EngineEvent::DropAccepted { operation, mimes } => {
+                    self.drops.accepted(operation, mimes);
+                }
+                EngineEvent::DropConcluded { operation } => self.drops.concluded(operation),
                 EngineEvent::ClipboardWrite { text } => {
                     // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
                     // that would sit ahead of every frame on the session stream.
@@ -2089,6 +2105,7 @@ impl Actor {
                     exited: self.exited,
                     progress: (self.progress.state != ProgressState::None).then_some(self.progress),
                     restored: self.restored.clone(),
+                    drop_target: self.drops.accepts(),
                 });
             }
             Cmd::ResizeUnviewed { size, reply } => {
@@ -2101,6 +2118,7 @@ impl Actor {
             Cmd::Memory { reply } => {
                 let _ignored = reply.send(self.engine.memory().map_err(WorkerError::from));
             }
+            Cmd::Dnd { client, act } => self.dnd(client, act),
             Cmd::ShareClipboard { clip } => {
                 let reads = Arc::clone(&clip);
                 self.engine.share_clipboard(Some(Box::new(move || reads.shared_text())));
@@ -2367,7 +2385,10 @@ fn premultiplied_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
     pixels
 }
 
+mod dnd;
 mod paste;
+
+pub use dnd::Dropped;
 
 #[cfg(test)]
 mod tests {

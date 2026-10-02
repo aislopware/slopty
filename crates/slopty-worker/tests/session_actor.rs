@@ -2451,4 +2451,93 @@ exec sleep 60"#;
         session.close();
         let _killed = child.kill().await;
     }
+
+    /// A file dropped on a program that asks for drops (Kitty drag and drop, OSC 72) reaches it
+    /// as the worker's copy: the program accepts the drag, asks for the file list on the drop,
+    /// waits while the upload finishes, gets the worker path, opens it itself and concludes.
+    #[tokio::test]
+    async fn a_dropped_file_reaches_a_program_asking_for_drops_as_the_workers_copy() {
+        use std::time::Instant;
+
+        use slopty_engine::{DropOperation, DropPoint, DropRep};
+        use slopty_worker::session::Dropped;
+
+        // Ask for file lists; accept the drag; on the drop ask for the list, open the file it
+        // names and keep its bytes; then say the copy is done.
+        let script = r#"stty -echo -icanon
+printf '\033]72;t=a;text/uri-list\033\\ready\n'
+IFS= read -r -d '\' moved; printf '%s\n' "$moved" > "$0/moved"
+printf '\033]72;t=m:o=1;text/uri-list\033\\'
+IFS= read -r -d '\' dropped; printf '%s\n' "$dropped" > "$0/dropped"
+printf '\033]72;t=r:x=1\033\\'
+data=''
+while IFS= read -r -d '\' x; do
+  x=$(printf '%s' "$x" | tr -d '\033')
+  case $x in *\;*\;*) data="$data${x##*;}";; *) break;; esac
+done
+path=$(printf '%s' "$data" | base64 -d | tr -d '\r' | head -n 1)
+cat "${path#file://}" > "$0/got"
+printf '\033]72;t=r:o=1\033\\'
+: > "$0/done"
+exec sleep 60"#;
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name);
+        let (session, mut child) =
+            start(&["/bin/bash", "-c", script, dir.path().to_str().unwrap()]);
+        let until = |name: &str| {
+            let path = at(name);
+            async move {
+                let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+                while !path.exists() {
+                    assert!(Instant::now() < deadline, "never wrote {}", path.display());
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        let (tx, mut rx) = viewer(256);
+        let client = ClientId::new();
+        session.attach(client, size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        assert!(session.snapshot().await.unwrap().drop_target, "the program asks for drops");
+
+        let point = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        let uris = "text/uri-list".to_owned();
+        session.drag_over(client, point, vec![uris.clone()]).unwrap();
+        until("moved").await;
+        let deadline = Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        while session.drop_heard(client).await.unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the program never answered the drag");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            session.drop_heard(client).await.unwrap(),
+            [Dropped::Accepted { operation: DropOperation::Copy, mimes: vec![uris.clone()] }]
+        );
+
+        // The drop goes at once; its list comes when the upload has landed on the worker.
+        session.drop_on(client, point, vec![DropRep { mime: uris.clone(), data: None }]).unwrap();
+        until("dropped").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!at("got").exists(), "the program waits for the upload");
+        let landed = dir.path().join("landed.txt");
+        std::fs::write(&landed, b"uploaded bytes").unwrap();
+        let list = format!("file://{}\r\n", landed.display());
+        session.drop_data(client, uris, Some(list.into_bytes())).unwrap();
+        until("done").await;
+
+        assert!(std::fs::read_to_string(at("moved")).unwrap().contains("t=m:x=2:y=1"));
+        assert!(std::fs::read_to_string(at("dropped")).unwrap().contains("t=M:x=2:y=1"));
+        assert_eq!(std::fs::read(at("got")).unwrap(), b"uploaded bytes");
+        let deadline = Instant::now().checked_add(Duration::from_secs(10)).unwrap();
+        loop {
+            let heard = session.drop_heard(client).await.unwrap();
+            if heard.last() == Some(&Dropped::Concluded { operation: DropOperation::Copy }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "never concluded: {heard:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        session.close();
+        let _killed = child.kill().await;
+    }
 }

@@ -28,7 +28,10 @@ pub mod osc133;
 pub mod placeholder;
 pub mod search;
 
-pub use ghostty::{ClipboardSource, Compression, GhosttyEngine, Memory, PasteRep, TEXT_MIME};
+pub use ghostty::{
+    ClipboardSource, Compression, DropOperation, DropPoint, DropRep, GhosttyEngine, Memory,
+    PasteRep, TEXT_MIME,
+};
 pub use graphics::ImageUpload;
 use slopty_proto::terminal::{ColorOverrides, PointerShape, Progress, TermSize};
 
@@ -59,6 +62,24 @@ pub enum EngineEvent {
     Title(String),
     /// Working directory reported (OSC 7).
     Cwd(String),
+    /// The program started or stopped asking for drops (Kitty drag and drop, OSC 72): a
+    /// viewer's drag over the tile goes to it while it asks.
+    DropTarget {
+        /// It asks now.
+        accepts: bool,
+    },
+    /// The program answered the drag over the terminal, for the drag's feedback.
+    DropAccepted {
+        /// What a drop would do.
+        operation: DropOperation,
+        /// The MIME types it wants of the drag, most wanted first; empty when it did not say.
+        mimes: Vec<String>,
+    },
+    /// The drop ended: the program concluded it, or another drag replaced it.
+    DropConcluded {
+        /// What the program did with the data.
+        operation: DropOperation,
+    },
     /// The program wrote to the clipboard (OSC 52). Text representation only.
     ClipboardWrite {
         /// The text.

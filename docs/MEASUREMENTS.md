@@ -13039,6 +13039,42 @@ more than 2 000 lines did (2.16 MB): pruning is by whole pages (`scrollback_memo
 No frame or fetch series moved against a copy of the tree without the change: `take_frame_unchanged`
 901 and 997, `write` 813, `fetch_lines_cost.4096_rows` 104.21 M.
 
+## 2026-10-02 — ghostty sync to 83edd491e, Kitty drag and drop, and a frame series that moves with the heap
+
+Release, mac-studio, other sessions building beside it; each pass ran only with the 1-minute load
+under 20, and the load is given beside it. The same engine and binding code were built against
+three ghostty trees: the old pin (5439e2b), the sync onto upstream 83edd491e with #14508 and
+#14509 (3e0c377), and that plus Kitty drag and drop (#14511 at a36d3f5, 497a316). Each build
+went to its own target directory with `GHOSTTY_SOURCE_DIR` pointing at its tree, and the
+prebuilt `*_cost` binaries ran back to back, interleaved.
+
+```sh
+GHOSTTY_SOURCE_DIR=<tree> CARGO_TARGET_DIR=target/bench-<name> cargo test --release -p slopty-engine --tests --no-run
+cd crates/slopty-engine && SLOPTY_BENCH_OUT=<out>.jsonl <binary> --ignored _cost --test-threads=1
+```
+
+**The sync moves nothing.** At a load of 15 to 17, `frame_cost.write` was 813 in all three trees,
+`take_frame_unchanged` 901 (60×12) and 997 (200×60), `take_frame` 18 963 to 18 985 (60×12) and
+44 910 to 44 934 (200×60). `encode_cost.echo` was 4 148 and `full_200x60` 1 084 187 in all
+three. The checkpoint series agree within 0.6 % (`format` 50.95 M to 51.01 M). A first pass at a
+load of 19 to 33 showed moves of about 50 instructions either way, which reruns did not repeat.
+
+**The engine's drag and drop costs the write path nothing measurable.** Against the 497a316 tree
+without the engine's wiring, at a load of 8 to 19, over eight interleaved rounds: `write` median
+813 unwired and 830 wired, with both spreading from about 690 to 920 round to round. A write
+the program did no drag and drop in reads one flag and branches (`after_dnd` is inlined, the
+work behind it is not). Every other series stays within its own spread.
+
+**One frame series moves with the heap, not with the code.** `scroll_frame_cost.80x24` is
+123 460 to 123 530 in every unwired run (30 of 30). With the wiring it is either that or
+124 200 to 124 330 (+0.6 %), about 40 % of the time (6 of 16, then 6 of 14). `take_frame` runs
+no drag and drop code. A build that registers a callback capturing nothing (no allocation) is
+never high (0 of 14), and one that makes the wiring's allocations without registering is never
+high (0 of 14). So what moves it is the callback's 16-byte box shifting the heap. `MallocNanoZone=0`
+moves both builds' counts (unwired 123 290 to 123 360) and makes the high level more common (10 of
+12 wired), so `take_frame` at 80×24 has a cost that depends on where its buffers fall. That is
+`take_frame`'s own, and finding it is a follow-up.
+
 ## 2026-10-02 — a turn snapshot of this repository
 
 What a turn's snapshot costs the worker (`repo::snapshot::Repo::take`: `git add -A` and

@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub use clipboard::{ClipboardSource, PasteRep, TEXT_MIME};
+pub use dnd::{DropOperation, DropPoint, DropRep};
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIteration, RowIterator};
@@ -39,6 +40,7 @@ use crate::{EngineConfig, EngineError, EngineEvent, convert, osc133, search};
 
 mod carried;
 mod clipboard;
+mod dnd;
 mod memory;
 mod read;
 mod redraw;
@@ -204,6 +206,8 @@ pub struct GhosttyEngine {
     pointer: PointerShape,
     /// What the program's clipboard reads are answered from, shared with libghostty's callback.
     clipboard: clipboard::Shared,
+    /// The drop a program reads through the Kitty drag and drop protocol, and what it did.
+    drops: dnd::Shared,
     /// Nothing was written yet: a checkpoint written first brings its marks back (see
     /// [`carried`]).
     fresh: bool,
@@ -441,6 +445,7 @@ impl GhosttyEngine {
         install_marks(&mut term, &marks)?;
         let clipboard = Rc::new(RefCell::new(clipboard::Reads::default()));
         clipboard::install(&mut term, &clipboard)?;
+        let drops = dnd::install(&mut term)?;
 
         let mut engine = Self {
             anchor: None,
@@ -498,6 +503,7 @@ impl GhosttyEngine {
             reported,
             pointer: PointerShape::Text,
             clipboard,
+            drops,
             fresh: true,
             restoring: false,
         };
@@ -2375,6 +2381,7 @@ impl GhosttyEngine {
         } else {
             self.feed(bytes);
         }
+        self.after_dnd();
         // libghostty has no colour-change or pointer-change callback. The current colours
         // against the defaults are eight reads and two palette copies, so they and the pointer
         // are looked at only after a write that could have changed them, and once more after

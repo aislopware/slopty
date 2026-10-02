@@ -3178,3 +3178,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     bash that turns the mode on, is pasted to while the picture is still on the client, and gets
     the event once the picture arrives, with a key typed after the paste arriving after it. It
     then reads the rich text and the picture with the password.
+
+- ✅ **A file dropped on a program that asks for drops reaches it as the worker's copy**
+  (2026-10-02). Kitty's drag and drop protocol (OSC 72) lets a program register for drops. The
+  terminal then tells it of a drag over its window, the program says whether it accepts and
+  which MIME types it wants, and on the drop it asks for each type in turn. yazi and iTerm2 3.7
+  speak it. Upstream ghostty's core implementation is still an open pull request (#14511); the
+  fork carries it (aislopware/ghostty `kitty-dnd`, merged into main) and reconciles when it
+  lands. The fork of libghostty-rs binds it (`kitty::dnd`).
+  - **Sound for Slopty, because the engine is on the worker.** The protocol has a way to carry
+    files from a terminal on another machine (a machine id beside the URLs). libghostty
+    leaves that out, so every client is local to it. Here that is right: the engine runs where
+    the program runs, so the URLs it gives are of files on that machine.
+  - **Files go as the uploaded copies.** A drop on a tile already uploads its files to the
+    worker. When the program asks for drops, the drop no longer types the paths: the program
+    is told of it, with `text/uri-list` still coming. Its request for the list waits until
+    the upload lands. The client then gives the `file://` URLs of the copies on the worker
+    (`SessionHandle::drop_data`), never of its own files. An upload that fails answers the
+    request with EIO, and a type the drop did not offer with ENOENT.
+  - **One viewer at a time.** The drag's feedback (accepted, the types, concluded) goes to the
+    viewer dragging. A drag by another viewer replaces it, and a drop still open is concluded
+    as nothing.
+  - **Not yet.** A drag the program starts (dragging out of yazi) is not carried to the
+    clients. The registration is the program's state in the engine, so a worker restart loses
+    it until the program registers again. The wire messages and the tile's side
+    (`slopty-proto`, the worker's connection, `drop_in.rs`) come next.
+  - Tests: engine `a_drag_over_a_program_that_did_not_ask_tells_nothing`,
+    `a_drop_waits_for_its_files_and_answers_the_program`, `a_failed_upload_fails_the_request`;
+    worker `a_dropped_file_reaches_a_program_asking_for_drops_as_the_workers_copy`. That last one
+    runs a bash stand-in that registers, accepts the drag, asks for the list on the drop, and
+    is shown to wait for the upload before it opens the worker's copy and concludes.
