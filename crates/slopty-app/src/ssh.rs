@@ -25,7 +25,7 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_core::WorkerId;
 pub use slopty_deploy::Target;
-use slopty_deploy::{Deployed, Event, Failure, Served, Server, Step};
+use slopty_deploy::{Deployed, Event, Failure, HostKey, Served, Server, Step};
 use slopty_net::HostAddr;
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_net::server::ServerLink;
@@ -107,11 +107,13 @@ pub trait Deployer: std::fmt::Debug {
         _to: &Target,
         _events: mpsc::UnboundedSender<Event>,
     ) -> Pending<Result<Served, Failure>> {
-        let none = Failure {
-            title: "This build sets up no server".to_owned(),
-            hint: None,
-            lines: Vec::new(),
-        };
+        let none = Failure::new("This build sets up no server".to_owned(), None, Vec::new());
+        Box::pin(std::future::ready(Err(none)))
+    }
+    /// Trust `key` for its machine from now on, as the person said after checking it.
+    fn trust(&self, key: &HostKey) -> Pending<Result<(), Failure>> {
+        let none =
+            Failure::new(format!("This build trusts no key for {}", key.target), None, Vec::new());
         Box::pin(std::future::ready(Err(none)))
     }
     /// Link to the server at `address`, as the panel's Connect does.
@@ -389,6 +391,8 @@ impl Sheet {
 #[derive(Debug)]
 struct Run {
     id: u64,
+    /// The machine as the fields named it; `None` for this Mac.
+    target: Option<Target>,
     progress: Progress,
     /// Owns the deploy; `None` once it ended.
     task: Option<gpui::Task<()>>,
@@ -404,6 +408,20 @@ impl Sheet {
     /// A run is under way.
     fn running(&self) -> bool {
         self.run.as_ref().is_some_and(|r| r.task.is_some())
+    }
+
+    /// The fields as `ssh` takes them.
+    fn target(&self, cx: &gpui::App) -> Result<Target, String> {
+        let read = |input: &Entity<InputState>| input.read(cx).value().to_string();
+        Target::read(&read(&self.host), &read(&self.user), &read(&self.port))
+    }
+
+    /// The host key the last run stopped at, while the fields still name its machine: the
+    /// person may trust it and go on.
+    fn offered(&self, cx: &gpui::App) -> Option<&HostKey> {
+        let run = self.run.as_ref().filter(|r| r.task.is_none())?;
+        let key = run.progress.failure()?.trust.as_deref()?;
+        (run.target.as_ref() == self.target(cx).ok().as_ref()).then_some(key)
     }
 }
 
@@ -439,11 +457,14 @@ impl Workspace {
         if adding.ssh.is_none() {
             let field = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
                 let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-                let enter = cx.subscribe(&input, |this: &mut Self, _input, event, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.install_over_ssh(cx);
-                    }
-                });
+                let enter =
+                    cx.subscribe(&input, |this: &mut Self, _input, event, cx| match event {
+                        InputEvent::PressEnter { .. } => this.install_over_ssh(cx),
+                        // A host key offered is for the machine the fields named: the button says
+                        // so only while they still do.
+                        InputEvent::Change => cx.notify(),
+                        InputEvent::Focus | InputEvent::Blur => {}
+                    });
                 (input, enter)
             };
             let (host, a) = field("mac-mini or 100.64.0.7", window, cx);
@@ -493,6 +514,31 @@ impl Workspace {
         self.adding.as_mut()?.ssh.as_mut()?.run.as_mut().filter(|r| r.id == id)
     }
 
+    /// Trust the host key the last run stopped at, as offered, then run again.
+    fn trust_and_retry(&mut self, cx: &mut Context<Self>) {
+        let Some(deployer) = self.deployer.clone() else { return };
+        let Some(sheet) = self.adding.as_ref().and_then(|a| a.ssh.as_ref()) else { return };
+        let Some(key) = sheet.offered(cx).cloned() else { return self.install_over_ssh(cx) };
+        let id = sheet.run.as_ref().map(|r| r.id);
+        let trusted = deployer.trust(&key);
+        let task = cx.spawn(async move |this, cx| {
+            let done = trusted.await;
+            let _gone = this.update(cx, |ws, cx| match done {
+                Ok(()) => {
+                    tracing::info!(host = %key.target, "trusted its host key");
+                    ws.install_over_ssh(cx);
+                }
+                Err(failure) => {
+                    if let Some(run) = id.and_then(|id| ws.ssh_run(id)) {
+                        run.progress.failed(failure);
+                        cx.notify();
+                    }
+                }
+            });
+        });
+        task.detach();
+    }
+
     /// Install on the machine the fields name: deploy, then add it.
     pub(crate) fn install_over_ssh(&mut self, cx: &mut Context<Self>) {
         let Some(deployer) = self.deployer.clone() else { return };
@@ -500,9 +546,7 @@ impl Workspace {
         if sheet.running() {
             return;
         }
-        let read = |input: &Entity<InputState>| input.read(cx).value().to_string();
-        let target = match Target::read(&read(&sheet.host), &read(&sheet.user), &read(&sheet.port))
-        {
+        let target = match sheet.target(cx) {
             Ok(target) => target,
             Err(why) => {
                 sheet.note = Some((why, true));
@@ -520,6 +564,7 @@ impl Workspace {
         let (tx, events) = mpsc::unbounded_channel();
         let deploy = deployer.deploy(&target, self.register_with(), tx);
         let progress = Progress::new(target.host.clone(), Kind::Install);
+        let target_kept = target.clone();
         let task = cx.spawn(async move |this, cx| {
             let apply = |ws: &mut Self, event: Event, cx: &mut Context<Self>| {
                 if let Some(run) = ws.ssh_run(id) {
@@ -556,15 +601,15 @@ impl Workspace {
                     Err(e) => why = e,
                 }
             }
-            let failure = Failure {
-                title: format!("The worker runs on {}, and Slopty could not add it", target.host),
-                hint: Some("Add it by an address this Mac reaches.".to_owned()),
-                lines: vec![why],
-            };
+            let failure = Failure::new(
+                format!("The worker runs on {}, and Slopty could not add it", target.host),
+                Some("Add it by an address this Mac reaches.".to_owned()),
+                vec![why],
+            );
             let _gone = this.update(cx, |ws, cx| ws.ssh_ended(id, Some(failure), cx));
         });
         if let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) {
-            sheet.run = Some(Run { id, progress, task: Some(task) });
+            sheet.run = Some(Run { id, target: Some(target_kept), progress, task: Some(task) });
         }
         cx.notify();
     }
@@ -663,7 +708,7 @@ impl Workspace {
                 let worker = run.worker;
                 self.connect_now(worker);
             }
-            Err(failure) => run.progress.failed(failure),
+            Err(failure) => run.progress.failed(on_a_tile(failure)),
         }
         self.publish_updates(cx);
     }
@@ -684,11 +729,11 @@ impl Workspace {
             .values_mut()
             .find(|run| run.worker == worker && run.task.is_none() && run.progress.running());
         let Some(run) = joining else { return };
-        run.progress.failed(Failure {
-            title: "It still runs a different build".to_owned(),
-            hint: Some("The machine kept its old worker; see its install log there.".to_owned()),
-            lines: Vec::new(),
-        });
+        run.progress.failed(Failure::new(
+            "It still runs a different build".to_owned(),
+            Some("The machine kept its old worker; see its install log there.".to_owned()),
+            Vec::new(),
+        ));
         self.publish_updates(cx);
     }
 
@@ -748,10 +793,16 @@ impl Workspace {
                             .child(Input::new(input).appearance(false).aria_label(label)),
                     )
             };
-        let go = if failed.is_some() { "Try again" } else { "Install" };
+        let trusting = sheet.offered(cx).is_some();
+        let go = match (trusting, sheet.role, failed.is_some()) {
+            (true, Sets::Worker, _) => "Trust and install",
+            (true, Sets::Server, _) => "Trust and set up",
+            (false, _, true) => "Try again",
+            (false, _, false) => "Install",
+        };
         let install = kit::button(theme, "ssh-install", go, ButtonKind::Primary)
             .h(px(FIELD_H))
-            .on_click(cx.listener(|this, _ev, _window, cx| this.install_over_ssh(cx)));
+            .on_click(cx.listener(|this, _ev, _window, cx| this.trust_and_retry(cx)));
         let note = sheet.note.as_ref().map(|(text, wrong)| {
             kit::meta(div(), theme)
                 .id("ssh-note")
@@ -841,6 +892,7 @@ impl Workspace {
     /// Put the server on `target` (shown as `label`), then connect to it at the first address
     /// that answers.
     fn start_serve(&mut self, target: &Target, label: String, cx: &mut Context<Self>) {
+        let typed = (label != THIS_MAC).then(|| target.clone());
         let Some(deployer) = self.deployer.clone() else { return };
         let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) else { return };
         if sheet.running() {
@@ -892,15 +944,15 @@ impl Workspace {
                     Err(e) => why = e,
                 }
             }
-            let failure = Failure {
-                title: format!("The server runs on {label}, and Slopty could not connect to it"),
-                hint: Some(format!("Check that UDP {SERVER_PORT} reaches it from this Mac.")),
-                lines: vec![why],
-            };
+            let failure = Failure::new(
+                format!("The server runs on {label}, and Slopty could not connect to it"),
+                Some(format!("Check that UDP {SERVER_PORT} reaches it from this Mac.")),
+                vec![why],
+            );
             let _gone = this.update(cx, |ws, cx| ws.ssh_ended(id, Some(failure), cx));
         });
         if let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) {
-            sheet.run = Some(Run { id, progress, task: Some(task) });
+            sheet.run = Some(Run { id, target: typed, progress, task: Some(task) });
         }
         cx.notify();
     }
@@ -915,11 +967,11 @@ impl Workspace {
         }
         if let Err(e) = self.save_server(Some(&address)) {
             link.close();
-            let failure = Failure {
-                title: "The server runs, and Slopty could not save it".to_owned(),
-                hint: None,
-                lines: vec![e],
-            };
+            let failure = Failure::new(
+                "The server runs, and Slopty could not save it".to_owned(),
+                None,
+                vec![e],
+            );
             return self.ssh_ended(id, Some(failure), cx);
         }
         if let Some(deployer) = &self.deployer {
@@ -932,6 +984,17 @@ impl Workspace {
         self.refresh_menu(cx);
         cx.notify();
     }
+}
+
+/// `failure` as a tile's pill says it: a tile has no fingerprint to show or key to trust, so a
+/// machine new to this Mac sends the person to the sheet, which has both.
+fn on_a_tile(failure: Failure) -> Failure {
+    let Some(key) = &failure.trust else { return failure };
+    Failure::new(
+        format!("{}'s host key is not trusted yet", key.target),
+        Some(format!("Check and trust it from {TITLE}.")),
+        Vec::new(),
+    )
 }
 
 /// Await `deploy`, handing each event to `apply` on the workspace as it comes; what it ended
@@ -983,7 +1046,8 @@ mod mac {
 
     use slopty_core::WorkerId;
     use slopty_deploy::{
-        Deployed, Event, Failure, Local, Plan, Remembered, Runner, Served, Server, Ssh,
+        DeployError, Deployed, Event, Failure, HostKey, Local, Plan, Remembered, Served, Server,
+        Ssh,
     };
     use slopty_net::HostAddr;
     use slopty_net::server::ServerLink;
@@ -1028,21 +1092,20 @@ mod mac {
             let to = to.clone();
             let task = self.runtime.spawn(async move {
                 let source = here()?;
-                let runner = runner(&to).await;
                 let mut on = |event| {
                     let _gone = events.send(event);
                 };
                 let plan = Plan { sources: slopty_deploy::bundled(&source), update: true, server };
-                slopty_deploy::deploy(runner.as_ref(), &plan, &mut on).await.map_err(|e| {
-                    tracing::warn!(host = %to.host, error = %e, "deploy");
-                    e.failure()
-                })
+                let done = match runner(&to).await {
+                    Runner::Here(local) => slopty_deploy::deploy(&local, &plan, &mut on).await,
+                    Runner::Ssh(ssh) => {
+                        let done = slopty_deploy::deploy(&ssh, &plan, &mut on).await;
+                        return explained(&ssh, &to, "deploy", done).await;
+                    }
+                };
+                explained_here(&to, "deploy", done)
             });
-            let died = Err(Failure {
-                title: "The install stopped".to_owned(),
-                hint: None,
-                lines: Vec::new(),
-            });
+            let died = Err(Failure::new("The install stopped".to_owned(), None, Vec::new()));
             Aborting(task).pending(died)
         }
 
@@ -1073,20 +1136,35 @@ mod mac {
             let to = to.clone();
             let task = self.runtime.spawn(async move {
                 let sources = slopty_deploy::bundled(&here()?);
-                let runner = runner(&to).await;
                 let mut on = |event| {
                     let _gone = events.send(event);
                 };
-                slopty_deploy::serve(runner.as_ref(), &sources, &mut on).await.map_err(|e| {
-                    tracing::warn!(host = %to.host, error = %e, "serve");
-                    e.failure()
+                let done = match runner(&to).await {
+                    Runner::Here(local) => slopty_deploy::serve(&local, &sources, &mut on).await,
+                    Runner::Ssh(ssh) => {
+                        let done = slopty_deploy::serve(&ssh, &sources, &mut on).await;
+                        return explained(&ssh, &to, "serve", done).await;
+                    }
+                };
+                explained_here(&to, "serve", done)
+            });
+            let died = Err(Failure::new("The install stopped".to_owned(), None, Vec::new()));
+            Aborting(task).pending(died)
+        }
+
+        fn trust(&self, key: &HostKey) -> Pending<Result<(), Failure>> {
+            let key = key.clone();
+            let task = self.runtime.spawn(async move {
+                key.trust().await.map_err(|e| {
+                    tracing::warn!(host = %key.target, error = %e, "trust its host key");
+                    Failure::new(
+                        format!("Could not trust {}'s key", key.target),
+                        None,
+                        vec![e.to_string()],
+                    )
                 })
             });
-            let died = Err(Failure {
-                title: "The install stopped".to_owned(),
-                hint: None,
-                lines: Vec::new(),
-            });
+            let died = Err(Failure::new("Trusting the key stopped".to_owned(), None, Vec::new()));
             Aborting(task).pending(died)
         }
 
@@ -1122,20 +1200,58 @@ mod mac {
 
     /// Where Slopty's own binaries are: beside the app.
     fn here() -> Result<PathBuf, Failure> {
-        slopty_platform::service::sibling_dir().map_err(|e| Failure {
-            title: "Could not find the worker inside Slopty".to_owned(),
-            hint: None,
-            lines: vec![e.to_string()],
+        slopty_platform::service::sibling_dir().map_err(|e| {
+            Failure::new(
+                "Could not find the worker inside Slopty".to_owned(),
+                None,
+                vec![e.to_string()],
+            )
         })
     }
 
-    /// What runs a plan against `to`: this Mac itself when it names this Mac, which needs no
-    /// Remote Login and installs in place, else the system `ssh`.
-    async fn runner(to: &Target) -> Box<dyn Runner> {
+    /// What runs a plan against a machine.
+    enum Runner {
+        /// This Mac itself, which needs no Remote Login and installs in place.
+        Here(Local),
+        /// The system `ssh`.
+        Ssh(Ssh),
+    }
+
+    /// What runs a plan against `to`: this Mac when it names this Mac, else the system `ssh`.
+    async fn runner(to: &Target) -> Runner {
         if to.is_this_machine().await {
-            Box::new(Local::here())
+            Runner::Here(Local::here())
         } else {
-            Box::new(Ssh::unattended(to))
+            Runner::Ssh(Ssh::unattended(to))
+        }
+    }
+
+    /// A run on this Mac as a window says it.
+    fn explained_here<T>(
+        to: &Target,
+        what: &str,
+        done: Result<T, DeployError>,
+    ) -> Result<T, Failure> {
+        done.map_err(|e| {
+            tracing::warn!(host = %to.host, error = %e, "{what}");
+            e.failure()
+        })
+    }
+
+    /// A run over `ssh` as a window says it: a host key `ssh` does not know yet comes with the
+    /// key, for the person to check and trust.
+    async fn explained<T>(
+        ssh: &Ssh,
+        to: &Target,
+        what: &str,
+        done: Result<T, DeployError>,
+    ) -> Result<T, Failure> {
+        match done {
+            Ok(done) => Ok(done),
+            Err(e) => {
+                tracing::warn!(host = %to.host, error = %e, "{what}");
+                Err(ssh.explain(&e).await)
+            }
         }
     }
 }

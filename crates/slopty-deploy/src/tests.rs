@@ -3,6 +3,7 @@
 //! through a runner the test drives, for the steps, the bytes and the failures.
 
 use std::os::unix::process::ExitStatusExt as _;
+use std::process::Stdio;
 
 use slopty_proto::ctl::Tailscale;
 use slopty_proto::server::{Os as WorkerOs, WorkerCaps};
@@ -703,4 +704,153 @@ async fn a_server_is_put_on_a_machine_and_named_where_it_is_reached() {
     let workers_only = binaries(mac_arm64);
     let refused = serve(&runner, &[workers_only.path().to_path_buf()], &mut |_| {}).await;
     assert!(matches!(refused, Err(DeployError::Mismatch { built: None, .. })), "{refused:?}");
+}
+
+/// `ssh-keygen -l`'s lines are read as each key's type and fingerprint, a key named by both
+/// its name and its address once.
+#[test]
+fn fingerprints_read_as_ssh_keygen_prints_them() {
+    let said = "256 SHA256:xaI/Xz1JNrch [mini]:2222 (ED25519)\n\
+                256 SHA256:xaI/Xz1JNrch 100.64.0.7 (ED25519)\n\
+                3072 SHA256:Rsa0Key |1|salt=|hash= (RSA)\n\
+                not a key line\n";
+    let keys = Fingerprint::read(said);
+    let named: Vec<(&str, &str)> =
+        keys.iter().map(|k| (k.kind.as_str(), k.sha256.as_str())).collect();
+    assert_eq!(named, [("ED25519", "SHA256:xaI/Xz1JNrch"), ("RSA", "SHA256:Rsa0Key")]);
+    assert_eq!(keys[0].public_file(), "/etc/ssh/ssh_host_ed25519_key.pub");
+}
+
+/// A real `sshd` of this user's on a loopback port, with a host key and a client key of its
+/// own; the `ssh` that reaches it reads a known-hosts file of the test's, never the person's,
+/// and no config or agent of theirs.
+struct Sshd {
+    dir: tempfile::TempDir,
+    port: u16,
+    _daemon: tokio::process::Child,
+}
+
+impl Sshd {
+    const PROGRAM: &str = "/usr/sbin/sshd";
+
+    /// Started and answering, or `None` where there is no `sshd` (a Linux box without it).
+    async fn start() -> Option<Self> {
+        // macOS ships it, so there a missing one fails the start below.
+        if cfg!(not(target_os = "macos")) && !Path::new(Self::PROGRAM).exists() {
+            eprintln!("skipped: no {}", Self::PROGRAM);
+            return None;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name);
+        for key in ["host", "client", "other"] {
+            keygen(&["-q", "-t", "ed25519", "-N", "", "-C", key, "-f"], &at(key)).await;
+        }
+        std::fs::copy(at("client.pub"), at("authorized_keys")).unwrap();
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let config = format!(
+            "Port {port}\nListenAddress 127.0.0.1\nHostKey {host}\nAuthorizedKeysFile {keys}\n\
+             PasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\n\
+             StrictModes no\nPerSourcePenalties no\nPidFile {pid}\n",
+            host = at("host").display(),
+            keys = at("authorized_keys").display(),
+            pid = at("sshd.pid").display(),
+        );
+        std::fs::write(at("sshd_config"), config).unwrap();
+        let sshd = tokio::process::Command::new(Self::PROGRAM)
+            .arg("-D")
+            .arg("-f")
+            .arg(at("sshd_config"))
+            .arg("-E")
+            .arg(at("sshd.log"))
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let deadline =
+            tokio::time::Instant::now().checked_add(std::time::Duration::from_secs(10)).unwrap();
+        while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+            assert!(tokio::time::Instant::now() < deadline, "sshd listens on {port}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        Some(Self { dir, port, _daemon: sshd })
+    }
+
+    fn known_hosts(&self) -> PathBuf {
+        self.dir.path().join("known_hosts")
+    }
+
+    /// The app's `ssh`, with the test's own key, config and known hosts.
+    fn ssh(&self) -> Ssh {
+        let mut ssh = Ssh::unattended(&Target {
+            host: "127.0.0.1".to_owned(),
+            user: None,
+            port: Some(self.port),
+        });
+        let key = self.dir.path().join("client");
+        let known = format!("UserKnownHostsFile={}", self.known_hosts().display());
+        // No config, no agent: nothing of the person's is read, and nothing can ask them.
+        let key = key.display().to_string();
+        let mine = ["-F", "/dev/null", "-i", &key, "-o", "IdentitiesOnly=yes"];
+        let hosts =
+            ["-o", "IdentityAgent=none", "-o", &known, "-o", "GlobalKnownHostsFile=/dev/null"];
+        ssh.options.splice(0..0, mine.into_iter().chain(hosts).map(str::to_owned));
+        ssh
+    }
+}
+
+/// `ssh-keygen <args> <file>`; what it printed.
+async fn keygen(args: &[&str], file: &Path) -> String {
+    let out =
+        tokio::process::Command::new("ssh-keygen").args(args).arg(file).output().await.unwrap();
+    assert!(out.status.success(), "ssh-keygen: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// Against a real `sshd`: a host key `ssh` does not know stops the app's deploy at its first
+/// step, which offers the key by the fingerprint the machine's own key file has, with nothing
+/// trusted yet. Trusting it adds the line `ssh` wrote to the known-hosts file `ssh -G` names,
+/// after a last line with no end, and the machine is reached. A key that changed is never
+/// offered, and says so.
+#[tokio::test]
+async fn an_unknown_host_key_is_offered_by_its_fingerprint_and_trusted_as_shown() {
+    let Some(sshd) = Sshd::start().await else { return };
+    let ssh = sshd.ssh();
+    let other = std::fs::read_to_string(sshd.dir.path().join("other.pub")).unwrap();
+    let other = other.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    let elsewhere = format!("elsewhere.example {other}");
+    std::fs::write(sshd.known_hosts(), &elsewhere).unwrap();
+    let source = binaries(mac_arm64);
+
+    let (done, events) = run(&ssh, &plan(&source, false)).await;
+    let failed = done.unwrap_err();
+    assert!(failed.unknown_host_key(), "{failed}");
+    assert_eq!(events, [Event::Step(Step::Reach)], "nothing went up");
+    let offer = ssh.explain(&failed).await;
+    let own = Fingerprint::read(&keygen(&["-l", "-f"], &sshd.dir.path().join("host.pub")).await);
+    let key = *offer.trust.clone().expect("the key, to trust");
+    assert_eq!(key.keys, own, "the machine's own key");
+    assert_eq!(offer.title, "127.0.0.1 is new to this Mac");
+    assert_eq!(offer.lines, [format!("ED25519 {}", own[0].sha256)]);
+    assert!(
+        offer.hint.is_some_and(|h| h.contains("ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"))
+    );
+    assert_eq!(key.file, sshd.known_hosts(), "where ssh reads known hosts for it");
+    assert_eq!(std::fs::read_to_string(sshd.known_hosts()).unwrap(), elsewhere, "nothing yet");
+
+    key.trust().await.unwrap();
+    let known = std::fs::read_to_string(sshd.known_hosts()).unwrap();
+    assert_eq!(known, format!("{elsewhere}\n{}\n", key.lines.trim_end()));
+    let job = Job { script: "uname -sm", input: None, watch: false };
+    let ran = ssh.run(job, &mut |_| {}).await.unwrap();
+    assert!(ran.status.success(), "reached once trusted: {}", ran.stderr);
+    assert!(Platform::from_uname(&ran.stdout).is_ok(), "{}", ran.stdout);
+
+    let changed = format!("[127.0.0.1]:{} {other}\n", sshd.port);
+    std::fs::write(sshd.known_hosts(), &changed).unwrap();
+    let (done, _) = run(&ssh, &plan(&source, false)).await;
+    let failed = done.unwrap_err();
+    assert!(!failed.unknown_host_key(), "a changed key is not a new one");
+    let said = ssh.explain(&failed).await;
+    assert_eq!((said.title.as_str(), said.trust), ("127.0.0.1's host key has changed", None));
+    assert_eq!(std::fs::read_to_string(sshd.known_hosts()).unwrap(), changed, "left as it was");
 }

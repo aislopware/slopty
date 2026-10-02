@@ -23,12 +23,16 @@
 //! Every step goes through a [`Runner`], so a test drives the plan with no machine. [`Local`]
 //! runs the same plan on this machine with no `ssh` and no upload: it installs the binaries
 //! where they are, which is how the app updates its own Mac's worker without Remote Login.
+//!
+//! A machine whose host key `ssh` does not know yet is offered to the person by its fingerprint
+//! ([`Ssh::explain`], [`HostKey`]), since the app's `ssh` never asks.
 
 #![forbid(unsafe_code)]
 
 mod platform;
 mod ssh;
 mod target;
+mod trust;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -39,6 +43,7 @@ use slopty_platform::service::WORKER_BINARIES;
 use slopty_proto::ctl::Health;
 pub use ssh::{Echo, Job, Local, OnEvent, Pending, Ran, Runner, Ssh};
 pub use target::{REMEMBERED, Remembered, Server, Target};
+pub use trust::{Fingerprint, HostKey, TrustError};
 
 /// Where the binaries land on the remote host, relative to its home (where `ssh` starts).
 pub const STAGE: &str = ".slopty/deploy";
@@ -239,23 +244,42 @@ pub struct Failure {
     pub hint: Option<String>,
     /// The last lines it printed, oldest first.
     pub lines: Vec<String>,
+    /// The machine's host key, new to this machine's `ssh`, which the person may trust to go
+    /// on ([`HostKey::offer`]).
+    pub trust: Option<Box<HostKey>>,
+}
+
+impl Failure {
+    /// A failure with nothing to trust.
+    #[must_use]
+    pub const fn new(title: String, hint: Option<String>, lines: Vec<String>) -> Self {
+        Self { title, hint, lines, trust: None }
+    }
 }
 
 /// `ssh`'s own exit status when it could not connect or sign in.
 const SSH_FAILED: i32 = 255;
 
+/// What `ssh` prints when a host key it knows no longer matches, or a known address shows
+/// another key (`CheckHostIP`): never a key to trust from here.
+const KEY_CHANGED: [&str; 3] = [
+    "REMOTE HOST IDENTIFICATION HAS CHANGED",
+    "has changed and you have requested",
+    "DNS SPOOFING",
+];
+
 impl DeployError {
     /// This failure as a window says it.
     #[must_use]
     pub fn failure(&self) -> Failure {
-        let plain = |title: String, lines: Vec<String>| Failure { title, hint: None, lines };
+        let plain = |title: String, lines: Vec<String>| Failure::new(title, None, lines);
         match self {
             Self::NotATarget(target) => plain(format!("{target} is not a host name"), Vec::new()),
-            Self::Run { program, source } => Failure {
-                title: format!("Could not start {program}"),
-                hint: Some("Slopty uses the ssh on this Mac's PATH.".to_owned()),
-                lines: vec![source.to_string()],
-            },
+            Self::Run { program, source } => Failure::new(
+                format!("Could not start {program}"),
+                Some("Slopty uses the ssh on this Mac's PATH.".to_owned()),
+                vec![source.to_string()],
+            ),
             Self::Failed { target, status, stderr, .. } => {
                 ssh_failure(target, *status, stderr, || format!("A step failed on {target}"))
             }
@@ -264,35 +288,49 @@ impl DeployError {
                     format!("Could not copy {name} to {target}")
                 })
             }
-            Self::Machine { target, source } => Failure {
-                title: format!("No worker runs on {target}"),
-                hint: Some("Workers run on macOS and Linux, on arm64 or x86_64.".to_owned()),
-                lines: vec![source.to_string()],
-            },
-            Self::Path { path } => Failure {
-                title: "Slopty is in a folder the install cannot name".to_owned(),
-                hint: Some("Move Slopty to a folder whose name has no quotes, $ or \\.".to_owned()),
-                lines: vec![path.display().to_string()],
-            },
-            Self::Read { path, source } | Self::Open { path, source } => Failure {
-                title: "Could not read the worker to send".to_owned(),
-                hint: None,
-                lines: vec![format!("{}: {source}", path.display())],
-            },
-            Self::Mismatch { built, target, platform, .. } => Failure {
-                title: format!("This build has no worker for {platform}"),
-                hint: Some(format!(
+            Self::Machine { target, source } => Failure::new(
+                format!("No worker runs on {target}"),
+                Some("Workers run on macOS and Linux, on arm64 or x86_64.".to_owned()),
+                vec![source.to_string()],
+            ),
+            Self::Path { path } => Failure::new(
+                "Slopty is in a folder the install cannot name".to_owned(),
+                Some("Move Slopty to a folder whose name has no quotes, $ or \\.".to_owned()),
+                vec![path.display().to_string()],
+            ),
+            Self::Read { path, source } | Self::Open { path, source } => Failure::new(
+                "Could not read the worker to send".to_owned(),
+                None,
+                vec![format!("{}: {source}", path.display())],
+            ),
+            Self::Mismatch { built, target, platform, .. } => Failure::new(
+                format!("This build has no worker for {platform}"),
+                Some(format!(
                     "{target} runs {platform}; this app carries a worker for {}.",
                     built_for(built.as_ref())
                 )),
-                lines: Vec::new(),
-            },
+                Vec::new(),
+            ),
             Self::Install { target, tail, .. } => {
                 plain(format!("The install on {target} failed"), tail.clone())
             }
             Self::Doctor { said, .. } => {
                 plain("The new worker did not report back".to_owned(), last_lines(said))
             }
+        }
+    }
+
+    /// Whether `ssh` stopped at a host key it does not know yet: one the person may check and
+    /// trust ([`Ssh::explain`]). A key that changed is not one.
+    #[must_use]
+    pub fn unknown_host_key(&self) -> bool {
+        match self {
+            Self::Failed { status, stderr, .. } | Self::Upload { status, stderr, .. } => {
+                status.code() == Some(SSH_FAILED)
+                    && stderr.contains("Host key verification failed")
+                    && !KEY_CHANGED.iter().any(|said| stderr.contains(said))
+            }
+            _ => false,
         }
     }
 }
@@ -307,10 +345,18 @@ fn ssh_failure(
 ) -> Failure {
     let lines = last_lines(stderr);
     if status.code() != Some(SSH_FAILED) {
-        return Failure { title: other(), hint: None, lines };
+        return Failure::new(other(), None, lines);
     }
     let has = |words: &str| stderr.contains(words);
-    let (title, hint) = if has("Host key verification failed") {
+    let (title, hint) = if KEY_CHANGED.iter().any(|said| has(said)) {
+        (
+            format!("{target}'s host key has changed"),
+            Some(
+                "Someone may be in between. If the machine was set up again, remove its old key \
+                 with ssh-keygen -R in a terminal, then try again.",
+            ),
+        )
+    } else if has("Host key verification failed") {
         (
             format!("{target}'s host key is not trusted yet"),
             Some("Connect once with ssh in a terminal to trust it, then try again."),
@@ -338,7 +384,7 @@ fn ssh_failure(
     } else {
         (format!("Could not reach {target} over SSH"), None)
     };
-    Failure { title, hint: hint.map(str::to_owned), lines }
+    Failure::new(title, hint.map(str::to_owned), lines)
 }
 
 /// The last [`TAIL`] lines of `text` with something on them, oldest first.

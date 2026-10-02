@@ -3,6 +3,7 @@
 //! test says it happened, and no machine is reached.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -34,6 +35,8 @@ struct StandIn {
     finish: RefCell<Option<oneshot::Sender<Result<Deployed, Failure>>>>,
     served: RefCell<Option<oneshot::Sender<Result<Served, Failure>>>>,
     dropped: Arc<AtomicBool>,
+    /// The machines whose host keys the person trusted.
+    trusted: RefCell<Vec<String>>,
     /// The one address that answers an add, and the worker it adds.
     answers: String,
     worker: WorkerId,
@@ -120,10 +123,15 @@ impl Deployer for StandIn {
     fn register_here(&self, server: &HostAddr) {
         self.asked.borrow_mut().push(format!("register {server}"));
     }
+
+    fn trust(&self, key: &HostKey) -> Pending<Result<(), Failure>> {
+        self.trusted.borrow_mut().push(key.target.clone());
+        Box::pin(std::future::ready(Ok(())))
+    }
 }
 
 fn failure(title: &str) -> Failure {
-    Failure { title: title.to_owned(), hint: None, lines: Vec::new() }
+    Failure::new(title.to_owned(), None, Vec::new())
 }
 
 fn deployed() -> Deployed {
@@ -349,11 +357,11 @@ fn a_run_can_be_cancelled_and_a_failure_says_why(cx: &mut TestAppContext) {
     deployer.asked();
     deployer.end(
         cx,
-        Err(Failure {
-            title: "mini did not accept your SSH key".to_owned(),
-            hint: Some("Add your key to your ssh agent, or to its authorized_keys.".to_owned()),
-            lines: vec!["me@mini: Permission denied (publickey).".to_owned()],
-        }),
+        Err(Failure::new(
+            "mini did not accept your SSH key".to_owned(),
+            Some("Add your key to your ssh agent, or to its authorized_keys.".to_owned()),
+            vec!["me@mini: Permission denied (publickey).".to_owned()],
+        )),
     );
     assert!(cx.debug_bounds("install-failure").is_some(), "why");
     assert!(cx.debug_bounds("install-output").is_some(), "the machine's last lines");
@@ -363,6 +371,73 @@ fn a_run_can_be_cancelled_and_a_failure_says_why(cx: &mut TestAppContext) {
     click(cx, "ssh-install");
     assert_eq!(deployer.asked().len(), 1, "Try again runs it again");
     assert!(ws.read_with(cx, |ws, _| ws.workers.len()) == 1, "nothing added");
+}
+
+/// A machine whose host key this Mac's `ssh` does not know yet stops the install with the key's
+/// fingerprint and an offer to trust it. The offer holds while the fields name that machine:
+/// trusted, the key is kept and the install runs again.
+#[gpui::test]
+fn a_new_machine_s_key_is_offered_and_trusted_from_the_sheet(cx: &mut TestAppContext) {
+    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
+    cx.simulate_resize(size(px(900.0), px(800.0)));
+    let deployer = StandIn::new("mini");
+    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
+    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
+    cx.dispatch_action(actions::InstallOverSsh);
+    cx.run_until_parked();
+    type_host(&ws, cx, "mini");
+    click(cx, "ssh-install");
+    assert_eq!(deployer.asked(), ["deploy mini None None server=None"]);
+    let key = HostKey {
+        target: "mini".to_owned(),
+        keys: vec![slopty_deploy::Fingerprint {
+            kind: "ED25519".to_owned(),
+            sha256: "SHA256:xaI/Xz1JNrchRfup".to_owned(),
+        }],
+        lines: "mini ssh-ed25519 AAAA".to_owned(),
+        file: dir.path().join("known_hosts"),
+    };
+    deployer.end(cx, Err(key.offer()));
+    assert!(cx.debug_bounds("install-failure").is_some(), "why it stopped");
+    assert!(cx.debug_bounds("install-output").is_some(), "the fingerprint");
+    let shown = sheet_progress(&ws, cx).and_then(|p| p.view().failed).expect("the failure");
+    assert_eq!(shown.title, "mini is new to this Mac");
+    assert_eq!(shown.lines, ["ED25519 SHA256:xaI/Xz1JNrchRfup"]);
+    let offered = |ws: &Entity<Workspace>, cx: &mut VisualTestContext| {
+        ws.read_with(cx, |ws, cx| {
+            ws.adding.as_ref()?.ssh.as_ref()?.offered(cx).map(|k| k.target.clone())
+        })
+    };
+    assert_eq!(offered(&ws, cx).as_deref(), Some("mini"));
+
+    type_host(&ws, cx, "studio");
+    assert_eq!(offered(&ws, cx), None, "not for another machine");
+    type_host(&ws, cx, "mini");
+    assert_eq!(offered(&ws, cx).as_deref(), Some("mini"));
+    click(cx, "ssh-install");
+    assert_eq!(*deployer.trusted.borrow(), ["mini"], "trusted as offered");
+    assert_eq!(deployer.asked(), ["deploy mini None None server=None"], "and run again");
+}
+
+/// A tile has no fingerprint to show: a machine new to this Mac sends the person to the sheet.
+#[test]
+fn a_tile_sends_a_new_machine_s_key_to_the_sheet() {
+    let key = HostKey {
+        target: "mini".to_owned(),
+        keys: Vec::new(),
+        lines: String::new(),
+        file: PathBuf::from("/nowhere/known_hosts"),
+    };
+    let said = on_a_tile(key.offer());
+    assert_eq!(said.title, "mini's host key is not trusted yet");
+    assert_eq!(
+        said.hint.as_deref(),
+        Some("Check and trust it from Install on a machine over SSH.")
+    );
+    assert!(said.trust.is_none());
+    assert_eq!(on_a_tile(failure("other")), failure("other"));
 }
 
 /// A tile of a worker on a different build offers "Update" beside "Copy command": it deploys

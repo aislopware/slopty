@@ -565,11 +565,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     recording launchd and a fake control socket: `--fresh`, `--update`, the port carried
     over, and the previous worker put back when the new one answers as another version or
     was already up.
-  - **Pending: a live deploy.** Remote Login is on here, but `localhost` fails its host key
-    check in `~/.ssh/known_hosts`, which is the user's to fix. A deploy to this Mac would
-    also replace its own worker: the launchd labels are fixed, and this Mac has the worker's
-    agents installed. The live proof waits for a second machine or a label of its own for
-    tests in `slopty-platform`.
+  - **Live since.** The CLI's deploy runs into a macOS guest in every `cargo xtask vm live` and
+    `vm e2e` (2026-09-30), and into a systemd container in `cargo xtask linux deploy`; the app's
+    own path is below, "The app's deploy ran live into a fresh macOS guest".
 - ✅ **A sleeping worker is woken from its own LAN** (2026-09-29, product gaps #3). A Mac asleep
   is off the tailnet, so nothing reaches it through Tailscale. What still reaches it is an
   Ethernet frame on its own segment: the magic packet, six `0xFF` bytes and then its MAC sixteen
@@ -717,8 +715,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     tile's Update deploying with `--update`, redialling at once, failing on a second wrong
     build, and ending when the worker links. `slopty-ui` `add_worker::tests` cover the current
     step and the button words.
-  - **Pending.** No deploy to a real machine was run from the app: the tests never reach a
-    host. The empty workspace's line ("Add a worker from the command palette", `strip.rs`)
+  - **Pending.** The empty workspace's line ("Add a worker from the command palette", `strip.rs`)
     could become a button that opens the panel.
 
 - ✅ **A worker installed from elsewhere registers with the server, and its Update reaches the
@@ -810,3 +807,71 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     active user units and answer from this Mac, and a second deploy updates the worker in
     place.
 
+
+- ✅ **A machine's unknown host key is shown by its fingerprint and trusted on the person's word**
+  (2026-10-03, readiness audit D6). The app's `ssh` never asks (`BatchMode`), so a machine this
+  Mac had never reached failed with "connect once in a terminal", and the sheet had no way on.
+  - **The key `ssh` saw, not a second look.** On that failure (`DeployError::unknown_host_key`:
+    `ssh`'s 255 and "Host key verification failed" without a changed-key warning),
+    `Ssh::explain` connects once more with the person's config and options, ahead of them
+    `StrictHostKeyChecking=accept-new` into a private known-hosts file,
+    `GlobalKnownHostsFile=/dev/null` and `PreferredAuthentications=none`. `ssh` writes the key
+    itself, as it would into `~/.ssh/known_hosts` (hashed under `HashKnownHosts`, `[host]:port`
+    off port 22, under `HostKeyAlias`), and signs nothing in, so nothing runs there and no agent
+    or security key is asked. `ssh-keygen -l` gives each key's fingerprint. Trusting appends
+    exactly those lines to the first `UserKnownHostsFile` that `ssh -G` names for the target
+    (made `0600` in a `0700` directory when absent, on a line of its own after a last line with
+    no end), so the key trusted is the key shown, with no connection in between to swap it.
+    - Rejected: `ssh-keyscan`, which reads no `ssh_config` (`HostName`, `ProxyJump`,
+      `HostKeyAlias`) and writes lines its own way; and a second `accept-new` run once the
+      person agrees, which would trust whatever key that second connection met.
+  - **A changed key is never offered.** "REMOTE HOST IDENTIFICATION HAS CHANGED", "has changed
+    and you have requested strict checking" and "DNS SPOOFING" read as "<host>'s host key has
+    changed", with the hint that someone may be in between and that a machine set up again
+    needs its old key removed with `ssh-keygen -R` in a terminal.
+  - **The sheet.** The failure reads "<host> is new to this Mac", its lines each key's type and
+    fingerprint (`ED25519 SHA256:…`), and its hint says to trust the key only if it is the one
+    `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints on that machine. The button reads
+    "Trust and install" ("Trust and set up" on the server's sheet) while the fields still name
+    that machine; an edit to them takes the offer back. Pressing it writes the key
+    (`Deployer::trust`, on the networking runtime) and runs the install again. A tile's Update
+    has no room for a fingerprint, so its pill says the key is not trusted yet and to check and
+    trust it from "Install on a machine over SSH". The CLI's `ssh` asks at the terminal itself.
+  - Tests: `slopty-deploy`
+    `an_unknown_host_key_is_offered_by_its_fingerprint_and_trusted_as_shown`, against a real
+    `sshd` the test starts on loopback as this user with keys and a known-hosts file of its own,
+    no config and no agent: the deploy stops at its first step, the offered fingerprint is the
+    server's own key file's, nothing is written until it is trusted, the line lands after an
+    unterminated last line, the machine is reached after, and a changed key is refused and left
+    as it was. `fingerprints_read_as_ssh_keygen_prints_them`. App
+    `ssh::tests::a_new_machine_s_key_is_offered_and_trusted_from_the_sheet` and
+    `a_tile_sends_a_new_machine_s_key_to_the_sheet`.
+
+- ✅ **The app's deploy ran live into a fresh macOS guest** (2026-10-03, readiness audit C4). The
+  CLI's deploy had run into guests and containers, always through xtask standing in for `ssh`
+  with host keys switched off; the app's own path, `Ssh::unattended` over the system `ssh`, had
+  never met a real machine.
+  - **`cargo xtask vm deploy --app`** clones a guest from the base (one that never had a
+    worker), boots it, admits this Mac's address in its `[worker] allow`, reads the fingerprint
+    of its `ssh_host_ed25519_key` through the guest agent (`tart exec`, no SSH between), and runs
+    `slopty-deploy`'s `guest` test from this Mac. The test's `ssh` reads no config and no agent,
+    with the guest's key and a known-hosts file of its own, so nothing of the person's is read,
+    written or asked. `--keep` leaves the guest.
+  - **What it proved** (2026-10-03, guest macOS 26.6.2): the deploy stopped at its first step on
+    the unknown host key, with nothing uploaded; the offered fingerprint was the guest's own;
+    trusted, the same deploy uploaded 76.8 MB, installed and checked this build's worker (its
+    doctor: this version, the installed `slopty-worker`, Screen Recording and Accessibility
+    already granted in the base); and the worker answered QUIC there (`slopty ping` through the
+    staged CLI, 0.59 to 1.98 ms). Numbers: `docs/MEASUREMENTS.md`, 2026-10-03.
+  - **Not proved from this Mac yet: the QUIC leg.** Every UDP send from the test's process tree
+    to the guest's address fails with `EHOSTUNREACH`, from the test, the `slopty` CLI and
+    Homebrew's Python alike, while `nc` and `ssh`, system binaries, get through: macOS's Local
+    Network privacy, which the app this session's terminal runs under has not been granted. The
+    test checks for exactly that before it dials and fails naming the switch (System Settings,
+    Privacy & Security, Local Network). The app itself declares
+    `NSLocalNetworkUsageDescription` and asks on first use; tailnet addresses do not go through
+    this check. The `vm e2e` of 2026-09-30 dialled the guest from here, so the grant was given
+    then to whatever ran it.
+  - Tests: `slopty-deploy` `tests/guest.rs`
+    (`the_app_s_deploy_trusts_a_new_guest_as_shown_and_puts_this_build_there`, live) and xtask
+    `vm::tests::deploying_as_the_app_takes_a_fresh_guest`.
