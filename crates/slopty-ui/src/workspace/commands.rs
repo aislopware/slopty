@@ -1,7 +1,9 @@
 //! What the actions do: opening things, closing and taking back, naming, moving the focus and
 //! the columns, the terminal text size.
 
-use gpui::{AppContext as _, Context, Entity, Window};
+use std::time::Duration;
+
+use gpui::{App, AppContext as _, Context, Entity, Window};
 use gpui_kit::component::input::{InputEvent, InputState};
 use slopty_client::layout::{DropTarget, TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
@@ -23,7 +25,12 @@ use super::actions::{
     ToggleTabbed, UndoClose, WidenColumn,
 };
 use super::toast::ToastKind;
-use super::{AGENT_COMMAND, ClosedTile, Field, KeyTarget, Rename, UNDO_CLOSE, WorkspaceView};
+use super::{
+    AGENT_COMMAND, CLOSED_KEPT, ClosedTile, Field, IDLE_SHELL_KEPT, KeyTarget, Rename, Reshell,
+    UNDO_CLOSE, WorkspaceView,
+};
+use crate::file::FileView;
+use crate::palette::PaletteItem;
 use crate::screen::ScreenView;
 use crate::terminal::TerminalView;
 
@@ -847,7 +854,7 @@ impl WorkspaceView {
             // A program waiting on the file is answered as "Done" would: saved, then told.
             ItemKind::File { .. } => {
                 if let Some(view) = self.files.get(&tile.item).cloned() {
-                    view.update(cx, crate::file::FileView::finish_edit);
+                    view.update(cx, FileView::finish_edit);
                 }
                 self.remember_closed(tile, item, None, cx);
             }
@@ -855,9 +862,9 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Take a live shell off, its session kept for [`UNDO_CLOSE`]. A shell without a view has
-    /// nothing to keep and closes at once, unless its worker is out of reach: then the tile
-    /// goes now, and the session is closed when the worker is back.
+    /// Take a live shell off, its session kept for a while ([`Self::session_kept_for`]). A
+    /// shell without a view has nothing to keep and closes at once, unless its worker is out of
+    /// reach: then the tile goes now, and the session is closed when the worker is back.
     pub(super) fn close_shell(&mut self, session: SessionId, cx: &mut Context<Self>) {
         let tile = self.tile_of_session(session);
         let item = tile.and_then(|t| self.item(t)).cloned();
@@ -871,7 +878,30 @@ impl WorkspaceView {
         self.remember_closed(tile, item, Some(session), cx);
     }
 
-    /// Take a tile off and offer it back for [`UNDO_CLOSE`].
+    /// How long closed shell `session` keeps running for ⌘Z to bring it back whole: a plain
+    /// shell idle at its prompt runs nothing, so [`IDLE_SHELL_KEPT`]; one running a command, a
+    /// program or an agent, only while its notice is up ([`UNDO_CLOSE`]), so what the person
+    /// closed stops as they meant it to. An exited one has nothing left to keep.
+    fn session_kept_for(&self, session: SessionId, cx: &App) -> Duration {
+        let idle = self.plain_shell(session)
+            && self.terminals.get(&session).is_some_and(|v| {
+                let state = v.read(cx).state();
+                state.exited().is_none() && !state.command_running()
+            });
+        if idle { IDLE_SHELL_KEPT } else { UNDO_CLOSE }
+    }
+
+    /// Whether `session` is the login shell and no agent: one that, once ended, a new shell in
+    /// its directory stands in for.
+    fn plain_shell(&self, session: SessionId) -> bool {
+        self.summary(session).is_some_and(|s| s.command.is_empty() && s.agent.is_none())
+            && self.session_agent(session).is_none()
+    }
+
+    /// Take a tile off, offer it back in a notice for [`UNDO_CLOSE`], and keep it among the
+    /// last [`CLOSED_KEPT`] closed, for ⌘Z and the palette's "Reopen" to bring back with no
+    /// clock running. A live shell's session runs on for [`Self::session_kept_for`]; after
+    /// that a plain shell comes back as a new shell in its directory.
     pub(super) fn remember_closed(
         &mut self,
         tile: TileRef,
@@ -885,53 +915,129 @@ impl WorkspaceView {
         let at = self.layout.position(tile);
         // A file tile's editor goes with it before the tile leaves, so its going is a close.
         let file = self.files.get(&tile.item).cloned();
-        self.closed.push(ClosedTile { tile, item, at, session, file, seq });
+        let shell = session.filter(|s| self.plain_shell(*s)).map(|s| Reshell {
+            cwd: self.summary(s).and_then(|summary| summary.cwd.clone()),
+            name: item.name.clone(),
+        });
+        let kept = session.map(|s| self.session_kept_for(s, cx));
+        self.closed.push(ClosedTile {
+            tile,
+            item,
+            at,
+            session,
+            file,
+            seq,
+            title: title.clone(),
+            offered: true,
+            shell,
+        });
+        while self.closed.len() > CLOSED_KEPT {
+            let oldest = self.closed.remove(0);
+            self.let_go_closed(&oldest, cx);
+        }
         self.propose(tile.worker, ItemOp::Remove(tile.item), cx);
         self.show_toast_for(ToastKind::Closed { seq, title }, UNDO_CLOSE, cx);
-        Self::forget_closed_after(seq, cx);
+        Self::after_closing(seq, UNDO_CLOSE, Self::notice_passed, cx);
+        if let Some(kept) = kept {
+            Self::after_closing(seq, kept, Self::session_ends, cx);
+        }
     }
 
-    /// Forget closing `seq` once [`UNDO_CLOSE`] has passed.
-    fn forget_closed_after(seq: u64, cx: &Context<Self>) {
+    /// Run `then` on closing `seq` once `wait` has passed.
+    fn after_closing(
+        seq: u64,
+        wait: Duration,
+        then: fn(&mut Self, u64, &mut Context<Self>),
+        cx: &Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(UNDO_CLOSE).await;
-            let _gone = this.update(cx, |this, cx| this.forget_closed(seq, cx));
+            cx.background_executor().timer(wait).await;
+            let _gone = this.update(cx, |this, cx| then(this, seq, cx));
         })
         .detach();
     }
 
-    /// [`UNDO_CLOSE`] passed: a shell's session is closed by the worker and its view goes; a
-    /// file tile's edit goes with it. A file tile a program waits on stays while its save is
-    /// out, so the program hears how that ended; one whose save did not land (refused,
-    /// failed, its link lost) tells the program it was given up and keeps its edit here.
-    fn forget_closed(&mut self, seq: u64, cx: &mut Context<Self>) {
+    /// Closing `seq`'s notice is gone: ⌘Z no longer means it alone, and a file tile's editor
+    /// goes, its edit with it, as it did when the tile closed for good. A file tile a program
+    /// waits on stays while its save is out, so the program hears how that ended; one whose
+    /// save did not land (refused, failed, its link lost) tells the program it was given up and
+    /// keeps its edit here. The tile itself stays on the list, its file read again when it
+    /// comes back.
+    fn notice_passed(&mut self, seq: u64, cx: &mut Context<Self>) {
         let Some(ix) = self.closed.iter().position(|c| c.seq == seq) else { return };
-        let waits = |v: &crate::file::FileView| v.waiting().is_some();
+        let waits = |v: &FileView| v.waiting().is_some();
         if self
             .closed
             .get(ix)
             .and_then(|c| c.file.as_ref())
             .is_some_and(|f| waits(f.read(cx)) && f.read(cx).saving())
         {
-            Self::forget_closed_after(seq, cx);
+            Self::after_closing(seq, UNDO_CLOSE, Self::notice_passed, cx);
             return;
         }
-        let closed = self.closed.remove(ix);
-        if let Some(view) = &closed.file {
-            if waits(view.read(cx)) {
-                self.file_tile_gone(view, cx);
-            } else {
-                self.let_go_unsaved(view, cx);
-            }
-        }
-        if let Some(session) = closed.session {
-            if self.summary(session).is_some() {
-                self.close_session_on(closed.tile.worker, session);
-            }
-            self.terminals.remove(&session);
+        let Some(closed) = self.closed.get_mut(ix) else { return };
+        closed.offered = false;
+        if let Some(view) = closed.file.take() {
+            self.let_go_closed_file(&view, cx);
         }
         self.dismiss_closed_toast(Some(seq));
         cx.notify();
+    }
+
+    /// Closing `seq`'s session has run as long as it is kept: the worker closes it and its view
+    /// goes. A plain shell stays on the list, to come back as a new shell in its directory;
+    /// anything else ran a program that cannot come back, and leaves the list.
+    fn session_ends(&mut self, seq: u64, cx: &mut Context<Self>) {
+        let Some(ix) = self.closed.iter().position(|c| c.seq == seq) else { return };
+        let Some(closed) = self.closed.get_mut(ix) else { return };
+        let (tile, session) = (closed.tile, closed.session.take());
+        if closed.shell.is_none() {
+            let gone = self.closed.remove(ix);
+            self.let_go_closed(&gone, cx);
+        }
+        if let Some(session) = session {
+            self.end_closed_session(tile.worker, session);
+        }
+        cx.notify();
+    }
+
+    /// A closed shell's session is closed by its worker, and its view goes.
+    fn end_closed_session(&mut self, worker: WorkerKey, session: SessionId) {
+        if self.summary(session).is_some() {
+            self.close_session_on(worker, session);
+        }
+        self.terminals.remove(&session);
+    }
+
+    /// A file tile's editor kept for a closed tile goes: a program waiting on it is told it was
+    /// given up, and an unsaved edit is let go.
+    fn let_go_closed_file(&mut self, view: &Entity<FileView>, cx: &mut Context<Self>) {
+        if view.read(cx).waiting().is_some() {
+            self.file_tile_gone(view, cx);
+        } else {
+            self.let_go_unsaved(view, cx);
+        }
+    }
+
+    /// `closed` leaves the list for good: what it still holds goes.
+    fn let_go_closed(&mut self, closed: &ClosedTile, cx: &mut Context<Self>) {
+        if let Some(view) = &closed.file {
+            self.let_go_closed_file(view, cx);
+        }
+        if let Some(session) = closed.session {
+            self.end_closed_session(closed.tile.worker, session);
+        }
+        self.dismiss_closed_toast(Some(closed.seq));
+    }
+
+    /// The palette's "Reopen" line for each tile on the list, the latest first.
+    pub(super) fn closed_lines(&self) -> Vec<PaletteItem> {
+        self.closed.iter().rev().map(|c| PaletteItem::reopen(&c.title, c.seq)).collect()
+    }
+
+    /// Whether a closing's notice is up: ⌘Z then takes that tile back.
+    pub(super) fn closing_offered(&self) -> bool {
+        self.closed.iter().any(|c| c.offered)
     }
 
     /// ⌘Z: the tile closed last comes back where it was.
@@ -939,7 +1045,8 @@ impl WorkspaceView {
         self.take_back(None, cx);
     }
 
-    /// Put back the closing `seq` (the toast's), or the latest.
+    /// Put back the closing `seq` (the toast's, a palette line's), or the latest. A shell whose
+    /// session has ended comes back as a new shell in its directory, under its name.
     pub(super) fn take_back(&mut self, seq: Option<u64>, cx: &mut Context<Self>) {
         let ix = match seq {
             Some(seq) => self.closed.iter().position(|c| c.seq == seq),
@@ -951,6 +1058,12 @@ impl WorkspaceView {
         self.dismiss_closed_toast(Some(closed.seq));
         tracing::debug!(item = %closed.item.id, session = ?closed.session, "tile taken back");
         let tile = closed.tile;
+        if let (ItemKind::Terminal { .. }, None, Some(shell)) =
+            (&closed.item.kind, closed.session, closed.shell)
+        {
+            self.open_session_on(tile.worker, shell.cwd, Vec::new(), shell.name, cx);
+            return;
+        }
         // The editor the file tile closed with, edit and all, is its view again; it reads the
         // file once more, and weighs its edit against what the disk has now.
         if let Some(file) = closed.file {

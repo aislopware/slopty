@@ -1086,15 +1086,85 @@ fn a_closed_shell_can_be_taken_back(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     fake.drain();
+    let closed = |sent: &[ClientMsg]| {
+        sent.iter().any(
+            |m| matches!(m, ClientMsg::Term { session, req: TermRequest::Close } if *session == s2),
+        )
+    };
     cx.executor().advance_clock(UNDO_CLOSE);
+    cx.run_until_parked();
+    assert!(!closed(&fake.drain()), "an idle shell runs on past its notice");
+    assert!(cx.debug_bounds("closed").is_none(), "the notice is gone");
+    cx.executor().advance_clock(IDLE_SHELL_KEPT);
+    cx.run_until_parked();
+    assert!(closed(&fake.drain()), "then the worker closes it");
+}
+
+/// A closed tile stays on a list long after its notice: the palette's "Reopen" line brings it
+/// back. A plain shell whose session has ended comes back as a new shell in its directory, and
+/// only the last [`CLOSED_KEPT`] closings are kept, the oldest one's session ending as it
+/// leaves the list.
+#[gpui::test]
+fn a_closed_tile_waits_in_the_palette_to_be_reopened(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens_in(&view, cx, &fake, session, fake.me, 1, Some("/w/src"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    cx.executor().advance_clock(UNDO_CLOSE);
+    cx.executor().advance_clock(IDLE_SHELL_KEPT);
     cx.run_until_parked();
     let sent = fake.drain();
     assert!(
-        sent.iter().any(
-            |m| matches!(m, ClientMsg::Term { session, req: TermRequest::Close } if *session == s2)
-        ),
-        "{sent:?}"
+        sent.iter().any(|m| matches!(m, ClientMsg::Term { session: s, req: TermRequest::Close } if *s == session)),
+        "the session has ended: {sent:?}"
     );
+    let lines = view.read_with(cx, |v, _| v.closed_lines().len());
+    assert_eq!(lines, 1, "the tile is still on the list");
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("r e o p e n enter");
+    cx.run_until_parked();
+    let sent = fake.drain();
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            ClientMsg::OpenSession { spec, .. }
+                if spec.cwd.as_deref() == Some("/w/src") && spec.command.is_empty()
+        )),
+        "a new shell where it was: {sent:?}"
+    );
+    assert_eq!(view.read_with(cx, |v, _| v.closed_lines().len()), 0, "and off the list");
+
+    let shells: Vec<SessionId> = (2..)
+        .take(CLOSED_KEPT.saturating_add(1))
+        .map(|version| {
+            let session = SessionId::new();
+            opens(&view, cx, &fake, session, fake.me, version);
+            session
+        })
+        .collect();
+    fake.drain();
+    view.update_in(cx, |v, _w, cx| {
+        for session in &shells {
+            v.close_shell(*session, cx);
+        }
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.closed_lines().len()), CLOSED_KEPT);
+    let ended: Vec<SessionId> = fake
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Term { session, req: TermRequest::Close } => Some(session),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ended, shells[..1], "the oldest leaves the list and its session ends");
 }
 
 // ----- the palette, names, notes -----------------------------------------------------------

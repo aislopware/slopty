@@ -119,6 +119,7 @@ fn a_shell_closed_while_its_worker_is_away_is_closed_when_it_is_back(cx: &mut Te
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.layout().contains(second)), "off the strip");
     cx.executor().advance_clock(UNDO_CLOSE);
+    cx.executor().advance_clock(IDLE_SHELL_KEPT);
     cx.run_until_parked();
     assert!(studio.drain().is_empty(), "nothing can reach the worker yet");
 

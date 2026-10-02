@@ -526,6 +526,8 @@ pub enum PaletteRun {
     },
     /// Show this project's board in its orchestrator's tile.
     Project(slopty_proto::project::ProjectId),
+    /// Open again the tile closed as this closing (the workspace's count of them).
+    Reopen(u64),
 }
 
 impl PaletteRun {
@@ -546,6 +548,7 @@ impl PaletteRun {
             | Self::OpenAgent { .. }
             | Self::OpenUrl(_)
             | Self::OpenInTile(_) => "Open",
+            Self::Reopen(_) => "Reopen",
         }
     }
 }
@@ -567,6 +570,7 @@ impl Clone for PaletteRun {
             Self::OpenUrl(url) => Self::OpenUrl(url.clone()),
             Self::OpenInTile(url) => Self::OpenInTile(url.clone()),
             Self::Project(project) => Self::Project(project.clone()),
+            Self::Reopen(closing) => Self::Reopen(*closing),
             Self::FindIn { session, needle } => {
                 Self::FindIn { session: *session, needle: needle.clone() }
             }
@@ -609,6 +613,7 @@ impl std::fmt::Debug for PaletteRun {
                 f.debug_struct("FindInFile").field("item", item).field("needle", needle).finish()
             }
             Self::Project(project) => f.debug_tuple("Project").field(project).finish(),
+            Self::Reopen(closing) => f.debug_tuple("Reopen").field(closing).finish(),
         }
     }
 }
@@ -755,6 +760,19 @@ impl PaletteItem {
         )
     }
 
+    /// `Reopen <title>` for a tile closed as closing `seq`, the latest first.
+    #[must_use]
+    pub fn reopen(title: &str, seq: u64) -> Self {
+        let run = PaletteRun::Reopen(seq);
+        Self::line(
+            format!("Reopen {title}"),
+            String::new(),
+            run,
+            IconName::Undo2,
+            Section::Commands,
+        )
+    }
+
     /// `Wake <worker>` for a worker that sleeps.
     #[must_use]
     pub fn wake(name: &str, worker: slopty_client::layout::WorkerKey) -> Self {
@@ -852,6 +870,7 @@ impl PaletteItem {
             PaletteRun::Item(_) => IconName::StickyNote.into(),
             PaletteRun::OpenFolder { .. } => IconName::Folder.into(),
             PaletteRun::Project(_) => IconName::Workflow.into(),
+            PaletteRun::Reopen(_) => IconName::Undo2.into(),
             PaletteRun::Action(_)
             | PaletteRun::Worker(_)
             | PaletteRun::Wake(_)

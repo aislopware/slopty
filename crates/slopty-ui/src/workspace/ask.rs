@@ -84,7 +84,7 @@ impl WorkspaceView {
         self.ask.shown = showing;
         // A tile just closed leaves ⌘Z to take it back, which the field would take as its own.
         if arrived
-            && self.closed.is_empty()
+            && !self.closing_offered()
             && self.focus.is_focused(window)
             && let Some(input) = &self.ask.input
         {

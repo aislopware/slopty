@@ -679,8 +679,14 @@ impl WorkspaceView {
     /// streams open for the remote tiles that are on screen (or were, within the grace).
     pub(super) fn reconcile(&mut self, cx: &mut Context<Self>) {
         let workers = &self.workers;
-        self.closed.retain(|c| {
-            c.session.is_none_or(|s| workers.values().any(|w| w.sessions.contains_key(&s)))
+        // A closed tile whose session ended elsewhere: a plain shell stays on the list, to come
+        // back as a new shell; anything else ran what cannot come back.
+        self.closed.retain_mut(|c| {
+            if c.session.is_some_and(|s| !workers.values().any(|w| w.sessions.contains_key(&s))) {
+                c.session = None;
+                return c.shell.is_some();
+            }
+            true
         });
         let wanted: Vec<(WorkerKey, SessionId)> = self
             .workers

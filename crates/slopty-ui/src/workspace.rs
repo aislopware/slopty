@@ -127,8 +127,16 @@ pub const SLOW_COMMAND: Duration = Duration::from_secs(5);
 /// mark would be read, and a mark that flickers on for it is noise.
 pub const RUNNING_AFTER: Duration = Duration::from_secs(3);
 
-/// How long a closed tile can be taken back (⌘Z) before a shell's session is closed for good.
+/// How long a closed tile's notice offers it back, and how long a closed shell that was
+/// running something (a command, a program, an agent) keeps its session for ⌘Z.
 const UNDO_CLOSE: Duration = Duration::from_secs(5);
+
+/// How long a closed shell idle at its prompt keeps its session, to come back whole: it runs
+/// nothing meanwhile.
+const IDLE_SHELL_KEPT: Duration = Duration::from_mins(10);
+
+/// How many closed tiles ⌘Z and the palette's "Reopen" can bring back, the latest first.
+const CLOSED_KEPT: usize = 20;
 
 /// How long a remote window or display may sit off screen before its stream is let go: long
 /// enough for a glance at the next column and back, short enough that a stream nobody sees
@@ -569,8 +577,8 @@ struct Rename {
     _subscription: Subscription,
 }
 
-/// A tile taken off, until [`UNDO_CLOSE`] passes or ⌘Z puts it back where it was. A live
-/// shell's session runs on through the wait, so its rows come back untouched.
+/// A tile taken off, one of the last [`CLOSED_KEPT`], until ⌘Z or the palette puts it back
+/// where it was. A live shell's session runs on for a while, so its rows come back untouched.
 struct ClosedTile {
     tile: TileRef,
     item: Item,
@@ -578,10 +586,32 @@ struct ClosedTile {
     at: Option<slopty_client::layout::Pos>,
     /// The session kept alive for the wait, for a live shell.
     session: Option<SessionId>,
-    /// A file tile's editor, kept for the wait: its edit is not on the worker's disk, so a
-    /// tile taken back must come back with the buffer it closed with, not the file's text.
+    /// A file tile's editor, kept while the notice is up: its edit is not on the worker's
+    /// disk, so a tile taken back then comes back with the buffer it closed with.
     file: Option<Entity<FileView>>,
     seq: u64,
+    /// What its header said, for the palette's "Reopen" line.
+    title: String,
+    /// Its notice is up.
+    offered: bool,
+    /// For a plain shell: what a new shell takes once its session has ended.
+    shell: Option<Reshell>,
+}
+
+impl ClosedTile {
+    /// Whether it still holds a live thing: a running session or an editor.
+    #[cfg(test)]
+    const fn holds(&self) -> bool {
+        self.session.is_some() || self.file.is_some()
+    }
+}
+
+/// A closed plain shell, as a new shell stands in for it once its session has ended.
+struct Reshell {
+    /// Its directory when it closed.
+    cwd: Option<String>,
+    /// The name the person gave it.
+    name: Option<String>,
 }
 
 /// The workspace.
@@ -1484,7 +1514,9 @@ impl WorkspaceView {
             ("find_hits", self.find_hits.len()),
             ("palette_extra", self.palette_extra.len()),
             ("more_entries", self.more_entries.len()),
-            ("closed", self.closed.len()),
+            // The closed list itself is kept on purpose, up to `CLOSED_KEPT`; what must not
+            // outlive the closing is what an entry still holds.
+            ("closed_holding", self.closed.iter().filter(|c| c.holds()).count()),
             ("placed", self.drawn.placed.borrow().len()),
             ("given_shell", self.given_shell.len()),
             ("handed", self.drawn.handed.borrow().len()),

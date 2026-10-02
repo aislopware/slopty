@@ -5119,3 +5119,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   The tile's header keeps its failed glyph and "Exit n". Test:
   `terminal::view::tests::a_failed_blocks_output_keeps_its_background`; goldens retaken.
 
+
+- ✅ **A closed tile waits on a list, and the palette reopens it** (2026-10-03, readiness
+  A20). ⌘Z could take a closed tile back for 5 s, and then a closed shell's session was gone
+  with no way back. Now the notice still shows for 5 s (`UNDO_CLOSE`), but the last 20
+  closed tiles (`CLOSED_KEPT`) stay on a list. The palette has a "Reopen …" line for each,
+  latest first, and ⌘Z takes back the latest at any time. So there is no clock to beat.
+  - **A shell idle at its prompt keeps running for 10 minutes** (`IDLE_SHELL_KEPT`): a
+    plain shell (the login shell, no command, no agent) with nothing running and not exited.
+    Taken back then, it comes back whole, scrollback and all. A shell running a command, a
+    program or an agent stops once the notice is gone, as before, so what the person closed
+    stops as they meant it to.
+  - **An ended plain shell comes back as a new shell** in the directory it had, under its
+    name. That covers a shell whose session ended after the wait, or one closed by its worker
+    meanwhile. Anything else whose session has ended leaves the list, since what ran in it
+    cannot come back.
+  - **A file tile lets its editor go when the notice ends**, as it did when it closed for
+    good: its unsaved edit goes with it, and a waiting program is answered (or, if its save
+    did not land, told it was given up, the edit kept). Reopened later, it reads the file
+    again. Keeping every editor for the whole list was rejected: twenty buffers held for tiles
+    the person may never want back.
+  - **The list holds data, not views.** Leaving it, the oldest entry ends anything it still
+    holds. The leak checks count entries that still hold a session or an editor, and expect
+    none.
+  - Tests: `workspace::tests::a_closed_tile_waits_in_the_palette_to_be_reopened` (the
+    palette line after the session ended, a new shell in `/w/src`, the twenty-first closing
+    ending the oldest's session); `a_closed_shell_can_be_taken_back` (an idle shell runs on
+    past its notice, then is closed); `tiles::an_exited_shell_stays_until_it_is_closed`.

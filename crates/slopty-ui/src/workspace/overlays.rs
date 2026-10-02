@@ -111,6 +111,7 @@ impl WorkspaceView {
         items.extend(self.project_lines());
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
+        items.extend(self.closed_lines());
         // The shell a "run" would go to: its last few commands, to run again.
         if let Some(shell) = self.run_target()
             && let Some(view) = self.terminals.get(&shell)
@@ -473,6 +474,10 @@ impl WorkspaceView {
                         let command = command.clone();
                         view.update(cx, |v, cx| v.run_text(command, cx));
                     }
+                }
+                PaletteEvent::Run(PaletteRun::Reopen(closing)) => {
+                    this.palette_return = None;
+                    this.take_back(Some(*closing), cx);
                 }
                 PaletteEvent::Run(PaletteRun::Project(project)) => {
                     this.palette_return = None;
