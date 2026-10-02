@@ -2208,9 +2208,6 @@ mod tests {
             .collect();
         let (palette, cx) = cx
             .add_window_view(|window, cx| CommandPalette::new(items, Theme::default(), window, cx));
-        // The fade reads the list's extent as the list lays out, so it lands in the frame the
-        // first one asks for.
-        cx.update(crate::retained::settle);
         let rows = cx.debug_bounds("palette-rows").expect("the rows");
         let faded = |cx: &mut VisualTestContext| {
             cx.update(|window, _| crate::retained::faded_edges(window, rows))

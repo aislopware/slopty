@@ -24,26 +24,6 @@ pub fn painted(window: &Window) -> Vec<String> {
     lines
 }
 
-/// How many frames [`settle`] draws at most: a fade settles in one.
-#[cfg(any(test, feature = "e2e"))]
-const SETTLE_FRAMES: usize = 4;
-
-/// Draws the frames the window asked for as it drew its last one, until it asks for none.
-///
-/// What the window shows once it stops on its own. A list's edge fade reads the list's extent
-/// before the list lays out, so a list just narrowed draws one frame with its old fade and asks for
-/// the next (`gpui::EdgeFadeElement`); that frame is not the state the window settles in. A view
-/// changed without a notify is not drawn again by this, so [`stale`] still catches it.
-#[cfg(any(test, feature = "e2e"))]
-pub fn settle(window: &mut Window, cx: &mut App) {
-    for _ in 0..SETTLE_FRAMES {
-        if window.simulate_next_frame(cx) == 0 {
-            return;
-        }
-        window.draw(cx).clear(cx);
-    }
-}
-
 /// Where the frame the window shows differs from the same state drawn from scratch.
 ///
 /// Gives the lines only one of them painted, at most `limit` of each, or `None` when they

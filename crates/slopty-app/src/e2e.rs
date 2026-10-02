@@ -830,10 +830,8 @@ const STALE_LINES: usize = 12;
 /// (`<path>.scratch.png`) for the review.
 #[cfg(feature = "e2e")]
 fn render(window: &mut Window, cx: &mut App, path: &str) -> Reply {
-    // Next-frame callbacks run before the frame is drawn: draw it as the app would, and the
-    // frames it asks for after it.
+    // Next-frame callbacks run before the frame is drawn: draw it as the app would.
     window.draw(cx).clear(cx);
-    slopty_ui::retained::settle(window, cx);
     let image = match window.render_to_image() {
         Ok(image) => image,
         Err(e) => return Reply::Error { message: format!("render: {e:#}") },
@@ -883,7 +881,6 @@ fn render(_window: &mut Window, _cx: &mut App, _path: &str) -> Reply {
 fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dump {
     let frames = frame_info(slopty_ui::frames::stats(cx));
     window.draw(cx).clear(cx);
-    slopty_ui::retained::settle(window, cx);
     let stale = slopty_ui::retained::stale(window, cx, STALE_LINES);
     window.set_a11y_active(true);
     window.draw(cx).clear(cx);
