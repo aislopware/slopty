@@ -329,6 +329,19 @@ objc2-io-kit = { version = "=0.3.2", default-features = false, features = [
     "hidsystem",
     "libc",
 ] }
+# A worker's home in Finder, the File Provider extension (`apps/slopty-files`). Features are
+# per crate.
+objc2-file-provider = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+# The File Provider switch-on: System Settings at its extensions, which Finder Sync's controller
+# opens (`slopty_platform::files`).
+objc2-finder-sync = { version = "=0.3.2", default-features = false, features = [ "std" ] }
+# What a worker's file is to Finder, by its name (`apps/slopty-files`).
+objc2-uniform-type-identifiers = { version = "=0.3.2", default-features = false, features = [
+    "std",
+] }
+# Whether this build is signed by the team its shared container is named for, before it is
+# touched (`slopty_platform::files::container`). Features are per crate.
+objc2-security = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 block2 = "=0.6.2"
 dispatch2 = "=0.3.1"
 

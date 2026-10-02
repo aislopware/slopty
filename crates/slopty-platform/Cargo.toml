@@ -55,6 +55,8 @@ objc2-foundation = { workspace = true, features = [
     "NSDistributedNotificationCenter",
     # A worker's pages keep their own data store, named by the worker (`web`).
     "NSUUID",
+    # The container the app shares with its File Provider extension (`files`).
+    "NSFileManager",
 ] }
 # Local notifications, their taps and the icon badge (`notify`).
 objc2-user-notifications = { workspace = true, features = [
@@ -121,6 +123,21 @@ objc2-web-kit = { workspace = true, features = [
     "WKWebViewConfiguration",
     "WKWebsiteDataStore",
 ] }
+# Each worker's home in Finder, the app's half (`files`): the domains, their switch-on, and
+# the directory the extension reads.
+objc2-file-provider = { workspace = true, features = [
+    "block2",
+    "Extension",
+    "NSFileProviderDomain",
+    "NSFileProviderItem",
+] }
+objc2-finder-sync.workspace = true
+# The signing team, which the shared container is named for (`files`).
+objc2-security = { workspace = true, features = [ "CSCommon", "SecCode" ] }
+serde.workspace = true
+serde_json.workspace = true
+slopty-core.workspace = true
+thiserror.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true

@@ -291,8 +291,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_silence_gate_is_not_an_underrun`.
 
 - ⏸ **Worker files paste into Finder through a File Provider domain, not a pasteboard promise**
-  (2026-09-25, ruling only; nothing built yet). Finder enables Paste only for a file URL that
-  already exists on disk, so neither `NSFilePromiseProvider` nor the Carbon
+  (2026-09-25, ruling only; the domain is built since 2026-10-02, `docs/decisions/platform.md`,
+  "Each worker's home is a place in Finder", and the paste follows it). Finder enables Paste
+  only for a file URL already on disk, so neither `NSFilePromiseProvider` nor the Carbon
   `promised-file-url` pair gets a Paste on the general pasteboard. No shipping client uses them:
   Microsoft's Windows App and Devolutions RDM hand out pre-made temporary files, RustDesk an
   empty decoy it swaps after the paste, and every placeholder-and-swap scheme races the reader

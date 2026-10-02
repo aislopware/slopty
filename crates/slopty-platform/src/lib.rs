@@ -28,6 +28,8 @@ pub mod dock;
 pub mod drag;
 #[cfg(target_vendor = "apple")]
 pub mod file_drop;
+#[cfg(target_os = "macos")]
+pub mod files;
 pub mod fs;
 #[cfg(target_os = "macos")]
 pub mod idle;

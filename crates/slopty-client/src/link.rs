@@ -33,7 +33,7 @@ use crate::remote::{LinkRemote, Remote};
 #[cfg(target_vendor = "apple")]
 use crate::screen::{ScreenHandle, ScreenRouter, Uplink as ScreenUplink, spawn_screen};
 use crate::tunnel::{Forward, Forwards};
-use crate::xfer::{Table, Uplink};
+use crate::xfer::{Table, Uplink, XferError};
 
 mod files;
 
@@ -73,7 +73,7 @@ pub enum LinkEvent {
         /// The transfer.
         xfer: XferId,
         /// Why.
-        error: crate::xfer::XferError,
+        error: XferError,
     },
     /// An event of a conversation this client follows, in the order the worker sent it. The
     /// stream ending (an unfollow, the session gone) sends nothing more.
@@ -118,6 +118,8 @@ pub struct WorkerLink {
     #[cfg(target_vendor = "apple")]
     runtime: tokio::runtime::Handle,
     remote: Arc<dyn Remote>,
+    /// What a transfer needs of the link, for [`Self::download`].
+    up: Uplink,
     /// The link's transfers, for [`Self::hold_uploads`].
     xfers: Arc<Table>,
     /// Closed with the link, so a paste waiting on it stops at once.
@@ -338,7 +340,7 @@ impl WorkerLink {
         let xfers = Arc::clone(&table);
         let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table };
         let remote = Arc::new(LinkRemote::new(
-            up,
+            up.clone(),
             Arc::clone(&clips),
             events_tx,
             tokio::runtime::Handle::current(),
@@ -356,10 +358,32 @@ impl WorkerLink {
             #[cfg(target_vendor = "apple")]
             runtime: tokio::runtime::Handle::current(),
             remote,
+            up,
             xfers,
             clips,
             copies_taken,
             tasks,
+        }
+    }
+
+    /// Bring the worker's `path` (a file, or a directory as its files) into the directory
+    /// `into` as transfer `xfer`, for a caller that awaits it rather than blocking on it. It
+    /// stops with the link, or when `self.remote().cancel(xfer)` is called: a File Provider's
+    /// fetch, which Finder may cancel.
+    ///
+    /// # Errors
+    ///
+    /// As [`crate::xfer::download`], and [`XferError::LinkClosed`] once the link is gone.
+    pub async fn download(
+        &self,
+        xfer: XferId,
+        path: String,
+        into: std::path::PathBuf,
+    ) -> Result<Vec<std::path::PathBuf>, XferError> {
+        let conn = self.conn.clone();
+        tokio::select! {
+            landed = crate::xfer::download(&self.up, xfer, path, into, None) => landed,
+            () = async { conn.closed().await; } => Err(XferError::LinkClosed),
         }
     }
 

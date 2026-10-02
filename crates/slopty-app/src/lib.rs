@@ -21,6 +21,7 @@
     )
 )]
 mod e2e;
+pub mod finder;
 mod hangs;
 pub mod net;
 mod presence;
@@ -33,6 +34,7 @@ pub mod workers;
 
 use std::rc::Rc;
 
+pub use finder::actions::ShowWorkersInFinder;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -2779,6 +2781,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &InstallOverSsh, window, cx| {
                 this.open_ssh(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &ShowWorkersInFinder, _window, cx| {
+                this.show_workers_in_finder(cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
@@ -3081,6 +3086,9 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
     if ssh::OFFERED {
         commands.push(app_command("install_over_ssh", InstallOverSsh, &[]));
     }
+    if finder::OFFERED {
+        commands.push(app_command("show_workers_in_finder", ShowWorkersInFinder, &[]));
+    }
     commands
 }
 
@@ -3113,6 +3121,9 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     }
     if ssh::OFFERED {
         items.push(item(ssh::TITLE, IconName::Terminal, Box::new(InstallOverSsh)));
+    }
+    if finder::OFFERED {
+        items.push(item(finder::TITLE, IconName::FolderOpen, Box::new(ShowWorkersInFinder)));
     }
     items
 }
@@ -3265,6 +3276,11 @@ pub fn open_workspace(
         view
     });
     let (directory_cache, cache_writes) = tokio::sync::watch::channel(server::Cache::Remove);
+    // The self-test's workers are its own, never the system's.
+    #[cfg(target_os = "macos")]
+    if !self_test() {
+        handle.spawn(finder::follow(cache_writes.clone()));
+    }
     handle.spawn(server::write_cache(server::cache_path(), cache_writes));
     let mut tapped = slopty_platform::notify::taps();
     let notifier = notifier();
@@ -4381,6 +4397,15 @@ mod tests {
     fn the_palette_offers_this_mac_on_a_mac() {
         let offered = app_palette_items().iter().any(|item| item.label == this_mac::TITLE);
         assert_eq!(offered, this_mac::OFFERED);
+    }
+
+    /// The palette offers the workers in Finder on a Mac, under a command the keymap can bind.
+    #[test]
+    fn the_palette_offers_the_workers_in_finder_on_a_mac() {
+        let offered = app_palette_items().iter().any(|item| item.label == finder::TITLE);
+        assert_eq!(offered, finder::OFFERED);
+        let bindable = app_commands().iter().any(|c| c.name() == "show_workers_in_finder");
+        assert_eq!(bindable, finder::OFFERED);
     }
 
     /// A dial a worker answers from another build shows as its status, with both builds and the

@@ -23,6 +23,8 @@
 //! release to publish on their own. `cargo xtask symbolicate` finds them by a crash report's UUID
 //! (`docs/decisions/crashes.md`, "The dSYMs ship apart from the app").
 
+use std::fmt::Write as _;
+
 use anyhow::{Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Args;
@@ -51,6 +53,14 @@ const IDENTIFIERS: [(&str, &str); 4] = [
 /// Where the other platforms' workers go, under `Contents/Resources`
 /// (`slopty_deploy::BUNDLED_DIR`, which the app reads them from).
 const WORKERS_DIR: &str = "workers";
+/// The File Provider extension (`apps/slopty-files`): its bundle under `Contents/PlugIns`, its
+/// executable, and its identifier after `dev.aislopware.slopty.`.
+const FILES_APPEX: &str = "SloptyFiles.appex";
+const FILES_BIN: &str = "slopty-files";
+const FILES_ID: &str = "files";
+/// The app group the app and the extension share, prefixed with the signing team, which needs
+/// no provisioning profile under a Developer ID (`slopty_platform::files::GROUP`).
+const GROUP: &str = "AJ4R8GWM7A.dev.aislopware.slopty";
 
 /// `xtask bundle` options.
 #[derive(Args, Debug, Clone, Default)]
@@ -88,7 +98,20 @@ impl Signing {
     /// `codesign`'s arguments for `path` under `identifier` (`None`: the bundle's own). A real
     /// identity takes a secure timestamp, which notarisation requires; ad hoc takes none.
     fn codesign(&self, identifier: Option<&str>, path: &Utf8Path) -> Vec<String> {
+        self.codesign_with(identifier, None, path)
+    }
+
+    /// [`Self::codesign`], with the entitlements in the file `entitlements`.
+    fn codesign_with(
+        &self,
+        identifier: Option<&str>,
+        entitlements: Option<&Utf8Path>,
+        path: &Utf8Path,
+    ) -> Vec<String> {
         let mut args: Vec<String> = ["--force", "--options", "runtime"].map(str::to_owned).into();
+        if let Some(entitlements) = entitlements {
+            args.extend(["--entitlements".to_owned(), entitlements.to_string()]);
+        }
         let identity = match self {
             Self::Identity(identity) => {
                 args.push("--timestamp".to_owned());
@@ -147,7 +170,7 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
         &format!("cargo build ({profile})"),
         &cmd!(
             sh,
-            "cargo build {flags...} -p slopty -p slopty-workerd -p slopty-ptyd -p slopty-serverd -p slopty-cli"
+            "cargo build {flags...} -p slopty -p slopty-workerd -p slopty-ptyd -p slopty-serverd -p slopty-cli -p slopty-files"
         ),
     )?;
     let linux = if opts.no_linux {
@@ -173,6 +196,11 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
         }
         sh.copy_file(&from, macos.join(bin))?;
     }
+    let appex = Appex::under(&contents);
+    if let Some(dir) = appex.executable.parent() {
+        sh.create_dir(dir)?;
+    }
+    sh.copy_file(built.join(FILES_BIN), &appex.executable)?;
     for build in &linux {
         let dir = resources.join(WORKERS_DIR).join(build.shipped.name);
         sh.create_dir(&dir)?;
@@ -189,6 +217,7 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
             sh.remove_path(&dsyms)?;
         }
         crate::symbolicate::collect(sh, &built, &BINARIES, &dsyms)?;
+        crate::symbolicate::collect(sh, &built, &[FILES_BIN], &dsyms)?;
         println!("✔ {dsyms}");
         Some(dsyms)
     };
@@ -198,14 +227,24 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     let icon = crate::icon::Art::load(sh)?.write_document(sh, &out)?;
     crate::icon::compile_macos(sh, &icon, &resources)?;
     sh.write_file(contents.join("PkgInfo"), "APPL????")?;
-    // The helpers first, each under its identifier, then the bundle, which signs the app's own
-    // binary as it; `--deep` is deprecated for a reason.
+    sh.write_file(&appex.info_plist, files_info_plist(&version))?;
+    // Beside the app, as the icon's document is: only what codesign seals of them ships.
+    let entitlements = out.join("entitlements");
+    let (app_rights, files_rights) =
+        (entitlements.join("app.plist"), entitlements.join("files.plist"));
+    sh.write_file(&app_rights, app_entitlements())?;
+    sh.write_file(&files_rights, files_entitlements())?;
+    // The helpers first, each under its identifier, then the extension, then the bundle, which
+    // signs the app's own binary as it; `--deep` is deprecated for a reason.
     for (bin, suffix) in IDENTIFIERS {
         let id = crate::sign::identifier(suffix);
         let args = signing.codesign(Some(&id), &macos.join(bin));
         step(&format!("codesign {bin} as {id}"), &cmd!(sh, "codesign {args...}"))?;
     }
-    let args = signing.codesign(None, &app);
+    let id = crate::sign::identifier(FILES_ID);
+    let args = signing.codesign_with(Some(&id), Some(&files_rights), &appex.bundle);
+    step(&format!("codesign {FILES_APPEX} as {id}"), &cmd!(sh, "codesign {args...}"))?;
+    let args = signing.codesign_with(None, Some(&app_rights), &app);
     step("codesign bundle", &cmd!(sh, "codesign {args...}"))?;
     step("codesign verify", &cmd!(sh, "codesign --verify --strict --deep {app}"))?;
     if let Signing::Identity(identity) = &signing {
@@ -222,6 +261,28 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     }
     println!("✔ {app}");
     Ok(Bundle { app, signing, linux, dsyms })
+}
+
+/// Where the File Provider extension sits in the app's `Contents`.
+struct Appex {
+    /// `PlugIns/SloptyFiles.appex`, which the system finds the extension in.
+    bundle: Utf8PathBuf,
+    /// Its executable, the one its `Info.plist` names.
+    executable: Utf8PathBuf,
+    /// Its `Info.plist`.
+    info_plist: Utf8PathBuf,
+}
+
+impl Appex {
+    fn under(contents: &Utf8Path) -> Self {
+        let bundle = contents.join("PlugIns").join(FILES_APPEX);
+        let inner = bundle.join("Contents");
+        Self {
+            executable: inner.join("MacOS").join(FILES_BIN),
+            info_plist: inner.join("Info.plist"),
+            bundle,
+        }
+    }
 }
 
 /// Whether a designated requirement holds a binary to `identifier` and a certificate's team,
@@ -278,9 +339,129 @@ fn info_plist(version: &str) -> String {
     )
 }
 
+/// The File Provider extension's `Info.plist`: a replicated extension whose principal class
+/// the binary registers before it hands the process to the system.
+fn files_info_plist(version: &str) -> String {
+    let id = crate::sign::identifier(FILES_ID);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>{PRODUCT}</string>
+	<key>CFBundleExecutable</key>
+	<string>{FILES_BIN}</string>
+	<key>CFBundleIdentifier</key>
+	<string>{id}</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>{PRODUCT}</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>{version}</string>
+	<key>CFBundleVersion</key>
+	<string>{version}</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>{MACOS_VERSION}</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionFileProviderDocumentGroup</key>
+		<string>{GROUP}</string>
+		<key>NSExtensionFileProviderSupportsEnumeration</key>
+		<true/>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.fileprovider-nonui</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>SloptyFilesExtension</string>
+	</dict>
+</dict>
+</plist>
+"#
+    )
+}
+
+/// The app's entitlements: the group it shares with its extension.
+fn app_entitlements() -> String {
+    entitlements(&[])
+}
+
+/// The extension's: the sandbox every File Provider extension runs in, the shared group, and
+/// the network both ways, since QUIC over UDP binds a socket of its own.
+fn files_entitlements() -> String {
+    entitlements(&[
+        "com.apple.security.app-sandbox",
+        "com.apple.security.network.client",
+        "com.apple.security.network.server",
+    ])
+}
+
+/// An entitlements file with the shared group and each of `switches` on.
+fn entitlements(switches: &[&str]) -> String {
+    let on = switches.iter().fold(String::new(), |mut on, key| {
+        let _infallible = writeln!(on, "\t<key>{key}</key>\n\t<true/>");
+        on
+    });
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+{on}	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>{GROUP}</string>
+	</array>
+</dict>
+</plist>
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The extension's plist names the File Provider extension point, the class its binary
+    /// registers, and an identifier under the app's; the app and the extension share one group,
+    /// and only the extension is sandboxed.
+    #[test]
+    fn the_extension_is_a_file_provider_under_the_app() {
+        let plist = files_info_plist("0.3.1");
+        assert!(plist.contains("<string>com.apple.fileprovider-nonui</string>"));
+        assert!(plist.contains("<string>SloptyFilesExtension</string>"));
+        assert!(plist.contains(&format!("<string>{BUNDLE_ID}.files</string>")));
+        assert!(plist.contains("<string>XPC!</string>"));
+        let (app, files) = (app_entitlements(), files_entitlements());
+        for rights in [&app, &files] {
+            assert!(rights.contains(&format!("<string>{GROUP}</string>")));
+        }
+        assert!(files.contains("com.apple.security.app-sandbox</key>\n\t<true/>"));
+        assert!(files.contains("com.apple.security.network.client"));
+        assert!(!app.contains("app-sandbox"));
+    }
+
+    /// The extension sits where the system looks for an app's extensions, and its executable is
+    /// the one its `Info.plist` names, in the place a bundle keeps it.
+    #[test]
+    fn the_extension_sits_in_the_apps_plugins() {
+        let appex = Appex::under(Utf8Path::new("Slopty.app/Contents"));
+        assert_eq!(appex.bundle, "Slopty.app/Contents/PlugIns/SloptyFiles.appex");
+        assert_eq!(
+            appex.executable,
+            "Slopty.app/Contents/PlugIns/SloptyFiles.appex/Contents/MacOS/slopty-files"
+        );
+        assert_eq!(
+            appex.info_plist,
+            "Slopty.app/Contents/PlugIns/SloptyFiles.appex/Contents/Info.plist"
+        );
+        let named = format!("<key>CFBundleExecutable</key>\n\t<string>{FILES_BIN}</string>");
+        assert!(files_info_plist("0.3.1").contains(&named));
+        assert_eq!(appex.executable.file_name(), Some(FILES_BIN));
+    }
 
     /// A real identity signs under the identifier with a secure timestamp (notarisation wants
     /// one), ad hoc with none.

@@ -516,3 +516,84 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     runner's `--list --format terse`, so nextest runs it. `continued::mac::tests` covers a file
     already there.
 
+
+- ✅ **Each worker's home is a place in Finder, whose files come down as they are read**
+  (2026-10-02, readiness audit item 11; the paused ruling in `docs/decisions/audio.md`, "Worker
+  files paste into Finder through a File Provider domain", is built here).
+  - **The extension.** `Slopty.app/Contents/PlugIns/SloptyFiles.appex` is a replicated File
+    Provider extension (`com.apple.fileprovider-nonui`, principal class
+    `SloptyFilesExtension`), all Rust: `apps/slopty-files`, whose `main` registers its
+    `define_class!` classes and calls Foundation's `NSExtensionMain`. It is sandboxed with the
+    network both ways (QUIC binds a UDP socket of its own) and the app group
+    `AJ4R8GWM7A.dev.aislopware.slopty`, which a Developer ID signs without a provisioning
+    profile. No File Provider entitlement exists to ask for.
+  - **What Finder sees.** One domain per worker the server lists, named for the worker, under
+    Locations and at `~/Library/CloudStorage/Slopty-<worker>`. The app follows the directory it
+    caches (`slopty_app::finder::follow`): a domain is added as a worker comes, added again
+    under a new name as one is renamed, and removed, with the root the extension wrote for it,
+    once the server forgets the worker or the app lets the server go. A change of a worker's
+    load or liveness asks nothing of the system, and a domain that already matches is left
+    alone (`slopty_platform::files::plan`). Its root is the worker's home,
+    like a share's home folder, and every file and folder under it shows with its size, date,
+    kind and the worker's hidden flag. An item's identifier is its path under the home, so the
+    extension keeps no table between its launches.
+  - **Lazy.** A file is dataless until something reads it. The read faults into
+    `fetchContents`, which brings the bytes down with the same transfer a file tile uses into
+    the domain's temporary directory and hands the system the file; the reader waits in the
+    kernel meanwhile. The progress returned is cancellable, and a cancel stops the transfer.
+    A folder is listed when it is opened. Finder can remove a download to free space and
+    fetch it again on the next read.
+  - **The one-time switch-on.** A new domain comes up switched off until the person switches
+    Slopty on under System Settings ▸ General ▸ Login Items & Extensions ▸ File Providers
+    (checked on this Mac, 2026-09-25). The palette's "Show workers in Finder" opens that pane
+    (Finder Sync's `showExtensionManagementInterface`, the one documented way there) while any
+    domain is off, and the workspace says what to do there in a notice, "Turn on Slopty under
+    File Providers, then try again". Once they are on, it opens the first worker's home, by
+    name, in Finder, or `~/Library/CloudStorage` while the system has not yet said where it put
+    any. With no worker listed it says to connect to a server. The testing mode that skips the
+    switch needs a development provisioning profile, so no product build uses it.
+  - **Only a build the team signed touches the container.** The group is the team's, and
+    macOS asks the person before a process reads a group container it is not entitled to, so
+    `cargo run`, a test binary or an ad hoc bundle would raise that prompt. The container is
+    used only when the process's own signature (`SecCodeCopySigningInformation`) names the
+    team `AJ4R8GWM7A`; any other build follows no directory, adds no domain, and says, when
+    asked to show the workers, that it has no Finder extension. The self-test follows nothing
+    either.
+  - **Forks, each taken the way that feels most like a local disk.**
+    - *Its own link.* The extension dials the workers itself, at the addresses the app writes
+      to the shared container (`slopty_platform::files::Directory`), so Finder works with the
+      app closed, as a mounted disk does. It checks the worker that answers is the one the
+      domain is for.
+    - *The whole home, not what was offered.* A domain holds the worker's whole home, open to
+      browse at any time, rather than only the files of a copy, which is all the 2026-09-25
+      ruling asked for.
+    - *Live.* Every folder the system was given is watched on the worker (`WatchFolders`), and
+      a change comes to the system through the working set (`apps/slopty-files/src/changes.rs`),
+      so a file made on the worker shows in an open Finder window without a refresh. An anchor
+      from an earlier run of the extension, or older than the 10 000 changes kept, is expired,
+      and the system lists again.
+    - *Read-only for now.* Finder refuses a change in the domain. Writing back would need delete,
+      rename and make-folder on the wire, which the worker does not offer yet.
+  - **Where the root is.** The app needs the root's path to name worker files by, but a process
+    that asks the system for it (`getUserVisibleURLForItemIdentifier`) may never read the
+    domain's files after (`EDEADLK`). The extension never reads its own files, so it asks, and
+    writes the answer to the shared container (`slopty_platform::files::root`).
+  - **Signing.** `cargo xtask bundle` builds the extension, writes its `Info.plist`, and signs
+    it under `dev.aislopware.slopty.files` with its entitlements before the app, which takes
+    the group too.
+  - **Not yet.** A download cut by a relink starts again from its first byte. A folder of more
+    than 2000 entries shows its first 2000 (`FOLDER_ENTRIES`), until the listing pages. The
+    fetch's progress moves only at its end. Workers added by address, without a server, are not
+    shown. Pasting copied worker files into Finder, the reason for the 2026-09-25 ruling, needs
+    the roots above and follows.
+  - Tests: `files::tests` (slopty-platform: the directory, the roots, one domain per worker and
+    none for a forgotten one, and no container for a build the team did not sign),
+    `finder::tests` (slopty-app: the switch before a worker's home, and each notice),
+    `the_palette_offers_the_workers_in_finder_on_a_mac`, `bundle::tests` (xtask: the
+    extension's place in `PlugIns`, its plist and entitlements), `item::tests` and
+    `changes::tests` (slopty-files), and `tests/domain.rs` against a real worker daemon: the
+    home lists, a deeper item is found, a file's bytes come down with its version, a file made,
+    changed or removed on the worker reaches the working set, and a missing item, a file asked to
+    list, a forgotten worker, another worker at the address and an address nobody answers each
+    fail as the system is told. The switch-on and Finder's own reads are not proved yet: they
+    need a person or a provisioning profile, so they go to a macOS guest (`cargo xtask vm`).

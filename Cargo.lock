@@ -5117,6 +5117,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
 
 [[package]]
+name = "objc2-file-provider"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e75524f6dcc079d5722a85797b2d29079ebecb0b88352f0ecb18011f7d84655"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-uniform-type-identifiers",
+]
+
+[[package]]
+name = "objc2-finder-sync"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f807a27e4fbd1fe1fe31ebfab86f754e06da9f64af10d0dacc2f408afd244de2"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-foundation"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5261,6 +5284,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-security"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "709fe137109bd1e8b5a99390f77a7d8b2961dafc1a1c5db8f2e60329ad6d895a"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-ui-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5270,6 +5303,16 @@ dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-uniform-type-identifiers"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
+dependencies = [
+ "objc2 0.6.4",
  "objc2-foundation 0.3.2",
 ]
 
@@ -7518,6 +7561,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "slopty-files"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-file-provider",
+ "objc2-foundation 0.3.2",
+ "objc2-uniform-type-identifiers",
+ "parking_lot",
+ "slopty-client",
+ "slopty-core",
+ "slopty-net",
+ "slopty-platform",
+ "slopty-proto",
+ "slopty-testkit",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "slopty-grid"
 version = "0.1.0"
 dependencies = [
@@ -7626,16 +7693,23 @@ dependencies = [
  "objc2-avf-audio",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-file-provider",
+ "objc2-finder-sync",
  "objc2-foundation 0.3.2",
  "objc2-game-controller",
+ "objc2-security",
  "objc2-ui-kit",
  "objc2-user-notifications",
  "objc2-web-kit",
  "parking_lot",
  "plist",
  "rustix",
+ "serde",
+ "serde_json",
+ "slopty-core",
  "slopty-proto",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -10431,9 +10505,11 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-core-media",
  "objc2-core-video",
+ "objc2-file-provider",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
  "objc2-ui-kit",
+ "objc2-uniform-type-identifiers",
  "objc2-user-notifications",
  "objc2-video-toolbox",
  "once_cell",
