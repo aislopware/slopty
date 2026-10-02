@@ -752,7 +752,8 @@ mod frame_time {
     ///
     /// (h) the list following the tail while an answer grows by a piece every 16 ms, as Slopty's
     /// Claude Code mod reports it; (i) the same with the reader panning the history at 120
-    /// events per second.
+    /// events per second; (j) every step open and panned, nothing streaming; (k) how long a
+    /// streamed word takes from the mod's post to a frame that shows it.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn the_thread_draws_a_streaming_answer_within_a_frame() {
@@ -822,25 +823,84 @@ mod frame_time {
             .await
             .unwrap();
 
+        // (k) a streamed word to the frame that shows it: each word a token of its own, added to
+        // the answer while the list follows its tail, timed from its post to the first dump
+        // whose tree has it, so the dump's own round trip, timed alone, is in every sample.
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let mut stale = 0_usize;
+        let mut alone = Vec::new();
+        for _ in 0..40 {
+            let begin = tokio::time::Instant::now();
+            drop(moving_dump(&mut stack.driver, &mut stale).await);
+            alone.push(ms(begin.elapsed()));
+        }
+        let mut shown = Vec::new();
+        for n in 0..60 {
+            let token = format!("t{n:02}");
+            let word = json!({ "session": session, "events": [{
+                "kind": "text", "block": 0, "step": 0, "turnId": turn,
+                "model": "claude-haiku-4-5-20251001", "text": format!("{token} "),
+            }]});
+            let begin = tokio::time::Instant::now();
+            assert_eq!(stack.post_mod(&word).await.unwrap(), 204);
+            loop {
+                let dump = moving_dump(&mut stack.driver, &mut stale).await;
+                let answers = labels(&dump, "Article");
+                if answers.iter().any(|l| l.contains(&token)) {
+                    break;
+                }
+                assert!(begin.elapsed() < STEP, "{token} never showed: {answers:?}");
+            }
+            shown.push(ms(begin.elapsed()));
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+        }
+        let at = |v: &mut Vec<f64>, q: f64| {
+            v.sort_by(f64::total_cmp);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss,
+                reason = "a quantile's index in a few dozen samples"
+            )]
+            let i = ((v.len() as f64 - 1.0) * q).round() as usize;
+            v.get(i).copied().unwrap_or_default()
+        };
+        println!(
+            "MEASURE (k) a streamed word to its frame: {:.1} / {:.1} / {:.1} ms p50 / p95 / max \
+             ({} words) · a dump alone {:.1} / {:.1} ms p50 / p95 · {stale} dumps a step behind",
+            at(&mut shown, 0.5),
+            at(&mut shown, 0.95),
+            at(&mut shown, 1.0),
+            shown.len(),
+            at(&mut alone, 0.5),
+            at(&mut alone, 0.95),
+        );
+
         let region = stack
             .driver
-            .dump()
+            .dump_moving()
             .await
             .unwrap()
             .a11y_node("Group", Some("Thread"))
             .expect("the thread")
             .bounds;
         let (x, y) = (region[0] + region[2] / 2.0, region[1] + region[3] / 2.0);
-        for (scenario, pan) in [
-            ("(h) thread, following a streaming answer", false),
-            ("(i) thread, panning while it streams", true),
+        for (scenario, pan, streams) in [
+            ("(h) thread, following a streaming answer", false, true),
+            ("(i) thread, panning while it streams", true, true),
+            ("(j) thread, every step open, panning", true, false),
         ] {
+            if !streams {
+                stack.driver.keys("ctrl-o").await.unwrap();
+            }
             stack.driver.frames_reset().await.unwrap();
             let begin = tokio::time::Instant::now();
             let mut n = 0_usize;
             while begin.elapsed() < run {
                 let word = words[n % words.len()];
-                assert_eq!(stack.post_mod(&piece(word)).await.unwrap(), 204);
+                if streams {
+                    assert_eq!(stack.post_mod(&piece(word)).await.unwrap(), 204);
+                }
                 if pan {
                     let dy = if (n / 60).is_multiple_of(2) { 40.0 } else { -40.0 };
                     stack.driver.scroll(x, y, 0.0, dy).await.unwrap();
@@ -852,10 +912,21 @@ mod frame_time {
                 }
                 n = n.saturating_add(1);
             }
-            let frames = stack.driver.dump().await.unwrap().frames;
+            let frames = stack.driver.dump_moving().await.unwrap().frames;
             println!("MEASURE {scenario}: {}", frames.row());
             assert!(frames.frames >= 100, "too few frames to judge: {frames:?}");
         }
+
         stack.shutdown().await;
+    }
+
+    /// A dump while the motion runs, counting in `stale` one whose frame a stepped mark moved
+    /// on from between its draw and the one from scratch beside it.
+    async fn moving_dump(drv: &mut Driver, stale: &mut usize) -> Dump {
+        let dump = drv.dump_moving().await.unwrap();
+        if dump.stale.is_some() {
+            *stale = stale.saturating_add(1);
+        }
+        dump
     }
 }

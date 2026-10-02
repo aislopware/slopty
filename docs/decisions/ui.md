@@ -1009,7 +1009,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   and every word of chrome text in the app falls between those two. `--accept-all` is the blunt
   answer and was used here. The sharp one is an assertion over the bar's text through the app's
   own dump socket, at layer 3, where a word appearing or vanishing is a string comparison and not
-  a pixel count. Not written yet.
+  a pixel count. Written 2026-10-02 for every golden: its text beside its PNG
+  (`docs/decisions/testing.md`, "A golden is held in words too").
 
 - ✅ **The de-slop pass: every state is a golden, and the chrome says less** (2026-09-25). The
   user judged the app's UI and UX to be AI slop and asked for it to be minimal and genuinely
@@ -4643,3 +4644,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   rows come from the agent's thread table (`WorkspaceView::subagents`), under its root thread
   however deep.
   - Test: `workspace::tests::nav_rows::an_agents_subagents_at_work_fold_into_its_row_as_a_count`.
+
+- ✅ **The keyboard stays with a tile whose thread view comes or goes** (2026-10-02). A tile's
+  thread view goes when its thread moves to another terminal (the agent's session taken up
+  there) or ends, and it takes the place of the conversation face the tile showed until the
+  agent's thread was known. Whichever held the keyboard went out of the frame with it, and the
+  keyboard was left with nothing: the gallery's `agent-needs-you` golden lost the focused shell's
+  caret, and `thread-phone` lost its composer's in some runs and not others, by the frame the
+  thread arrived in. Now the tile asks for the keyboard again (`pending_focus`) and it lands in
+  whatever the tile shows next: the thread's view, or its TUI.
+  - Tests: `workspace::tests::thread_face::a_thread_that_moves_away_hands_the_keyboard_back_to_its_tile`,
+    `the_thread_view_takes_the_keyboard_from_the_face_it_replaces`.

@@ -650,6 +650,9 @@ fn an_agent_with_a_thread_opens_on_its_thread_view(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.thread_frame(key, thread, snapshot, cx));
     cx.run_until_parked();
     assert!(!face.read_with(cx, |f, _| f.rows().is_empty()), "the thread is in its rows");
+    let light = Theme::new(slopty_theme::Variant::Light);
+    view.update(cx, |v, cx| v.set_theme(light.clone(), cx));
+    assert_eq!(face.read_with(cx, |f, _| f.theme().clone()), light, "it follows the theme");
 
     view.update_in(cx, |v, _w, cx| v.threads_unlinked(key, cx));
     cx.run_until_parked();

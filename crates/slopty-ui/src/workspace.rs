@@ -1350,6 +1350,7 @@ impl WorkspaceView {
         for view in self.faces.views.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
+        self.set_threads_theme(&theme, cx);
         for view in self.projects.views.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }

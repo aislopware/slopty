@@ -322,6 +322,12 @@ impl ThreadView {
         }
     }
 
+    /// The theme it draws in.
+    #[must_use]
+    pub const fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
     /// Draw in `theme`.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.shared = Arc::new(theme.clone());

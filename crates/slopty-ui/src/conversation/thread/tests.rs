@@ -290,5 +290,77 @@ fn timing_of_the_thread_path() {
     println!("activity bar: {bar:?}");
 }
 
+/// What the thread view's frames cost in a headless window, for a snapshot's worth of a long
+/// thread (`SNAPSHOT_TURNS` turns of 40 calls): the first frame drawn from the cache, a send
+/// drawn as its bubble in the frame of its ↵, and every step opened by ⌃O. Layout and paint
+/// only: the headless window rasterizes nothing.
+#[gpui::test]
+#[ignore = "timing: cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_thread_s_frames --no-capture"]
+fn timing_of_the_thread_s_frames(cx: &mut TestAppContext) {
+    use std::time::{Duration, Instant};
+
+    use slopty_client::threads::SNAPSHOT_TURNS;
+
+    fn median(mut took: Vec<Duration>) -> Duration {
+        took.sort();
+        took.get(took.len() / 2).copied().unwrap_or_default()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let state = fixtures::long(SNAPSHOT_TURNS, 40);
+    let thread = state.meta.id;
+    let cursor = Cursor { epoch: 1, seq: 1 };
+    // Each view over a cache of its own, so every one reads it; made in a window already open.
+    let hubs: Vec<Entity<ThreadHub>> = (0..11)
+        .map(|n| {
+            let cache = Cache::new(dir.path().join(format!("studio-{n}")));
+            cache.keep_thread(thread, &Cached { cursor, state: state.clone() }).unwrap();
+            hub(cx, Some(cache)).0
+        })
+        .collect();
+    let (mut made, mut first) = (Vec::new(), Vec::new());
+    {
+        let window = cx.add_empty_window();
+        for hub in hubs {
+            let begin = Instant::now();
+            let view = window.update(|window, cx| {
+                cx.new(|cx| ThreadView::new(hub, thread, Theme::default(), window, cx))
+            });
+            made.push(begin.elapsed());
+            let space = size(px(800.0), px(600.0)).map(gpui::AvailableSpace::Definite);
+            window.draw(gpui::point(px(0.0), px(0.0)), space, |_, _| {
+                gpui::IntoElement::into_any_element(view.clone())
+            });
+            first.push(begin.elapsed());
+            assert!(view.read_with(window, |v, _| !v.rows().is_empty()), "drawn from the cache");
+        }
+    }
+
+    let cache = Cache::new(dir.path().join("studio"));
+    cache.keep_thread(thread, &Cached { cursor, state }).unwrap();
+    let (hub, _sent) = hub(cx, Some(cache));
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    let mut sends = Vec::new();
+    for n in 0..21 {
+        cx.simulate_input(&format!("Message {n}"));
+        let begin = Instant::now();
+        cx.simulate_keystrokes("enter");
+        sends.push(begin.elapsed());
+        let id = hub.read_with(cx, |h, _| h.threads().outbox().all().last().map(|s| s.id)).unwrap();
+        assert!(view.read_with(cx, |v, _| v.rows().contains(&Row::Sending { intent: id })));
+        assert!(cx.debug_bounds(format!("sending-{id}").leak()).is_some(), "in that frame");
+    }
+    let mut every = Vec::new();
+    for _ in 0..21 {
+        let begin = Instant::now();
+        cx.simulate_keystrokes("ctrl-o");
+        every.push(begin.elapsed());
+    }
+    println!("view made, its cache read: {:?}", median(made));
+    println!("first frame from the cache, view made and drawn: {:?}", median(first));
+    println!("a send drawn in the frame of its return: {:?}", median(sends));
+    println!("every step opened or folded by ctrl-o: {:?}", median(every));
+}
+
 mod composing;
 mod steps;

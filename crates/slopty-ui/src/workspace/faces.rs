@@ -139,6 +139,16 @@ impl WorkspaceView {
         self.faces.threads.reviews.remove(&thread);
     }
 
+    /// Draw every thread view and review tile in `theme`.
+    pub(super) fn set_threads_theme(&self, theme: &slopty_theme::Theme, cx: &mut Context<Self>) {
+        for view in self.faces.threads.views.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+        for view in self.faces.threads.reviews.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+    }
+
     /// Keep each worker's threads in `dir`, a directory per worker.
     pub fn set_thread_cache(&mut self, dir: PathBuf) {
         self.faces.threads.cache = Some(dir);
@@ -260,6 +270,15 @@ impl WorkspaceView {
             let theme = self.theme.clone();
             let view = cx.new(|cx| ThreadView::new(hub, thread, theme, window, cx));
             let session = *session;
+            // The keyboard follows the tile into the new view from what it replaces: the
+            // thread's last view, or the conversation face the tile showed until its thread
+            // was known.
+            let replaced =
+                self.faces.threads.views.get(&session).map(|v| v.read(cx).focus_handle(cx));
+            let face = self.faces.views.get(&session).map(|v| v.read(cx).focus_handle(cx));
+            if replaced.into_iter().chain(face).any(|h| h.contains_focused(window, cx)) {
+                self.pending_focus = Some(session);
+            }
             let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
                 this.thread_view_event(session, &view, event.clone(), cx);
             });
@@ -270,6 +289,17 @@ impl WorkspaceView {
             let _view = self.open_review(key, thread, window, cx);
             self.faces.threads.review_made = Some((key, thread));
             cx.notify();
+        }
+        // A view that goes while it holds the keyboard hands it back to its tile, which then
+        // shows its TUI or its thread's next view: a thread that moved to another terminal or
+        // ended must not leave the keyboard with nothing.
+        let threads = &self.faces.threads;
+        let held = threads.views.iter().find_map(|(s, view)| {
+            let gone = !wanted.contains(s) || !threads.of_session.contains_key(s);
+            (gone && view.read(cx).focus_handle(cx).contains_focused(window, cx)).then_some(*s)
+        });
+        if held.is_some() {
+            self.pending_focus = held;
         }
         let threads = &mut self.faces.threads;
         threads.views.retain(|s, _| wanted.contains(s) && threads.of_session.contains_key(s));
