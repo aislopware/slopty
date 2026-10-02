@@ -3494,6 +3494,8 @@ mod tests {
             first_visible_line: LineIndex(30),
             total_lines: 33,
             input_ack: 0,
+            above: None,
+            blocks: None,
             images: Vec::new(),
             updates: ["one", "two", "three"]
                 .iter()

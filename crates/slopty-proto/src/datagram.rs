@@ -255,6 +255,8 @@ mod tests {
             first_visible_line: LineIndex(0),
             total_lines: 1,
             input_ack: 2,
+            above: None,
+            blocks: None,
             updates: Vec::new(),
             images: Vec::new(),
         })

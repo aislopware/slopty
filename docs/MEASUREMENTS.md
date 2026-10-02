@@ -13514,6 +13514,22 @@ SLOPTY_BENCH_OUT=target/bench/laneT.jsonl \
   graphics storage changed (`graphics_changed`, one image sent again) lays out and lists all
   fifty above the screen, with no rows to diff. Both are new series, recorded as budgets in
   `xtask/budgets.toml` at these numbers.
+- **The lists ride on their frame.** As first landed, the two lists went out as events of their
+  own after the frame, and every whole frame carried a block list. CI (run 36998497615, a
+  hosted Mac) then found 4 events waiting in the throttled viewer's sink, over the bound of 3:
+  each resync the slow viewer was owed came as frame, marker and list. With the lists made
+  fields of `Frame` (two bytes when empty), the same test, run 30 times here under other
+  sessions' builds (`nice -n 19`, 4 jobs):
+
+  ```sh
+  for i in $(seq 1 30); do
+    cargo test -q -p slopty-worker --test session_actor a_throttled_viewer -- --nocapture
+  done
+  ```
+
+  | | runs | events queued at most | shown after the program ended |
+  | --- | --- | --- | --- |
+  | lists as fields of the frame | 30 / 30 pass | 1 (16 runs), 2 (14 runs) | 73–104 ms |
 
 ## 2026-10-02 — an encode that never returned
 

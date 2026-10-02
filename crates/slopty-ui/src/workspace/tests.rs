@@ -216,6 +216,8 @@ fn frame(rows: &[&str]) -> TermEvent {
         first_visible_line: LineIndex(0),
         total_lines: rows.len() as u64,
         input_ack: 0,
+        above: None,
+        blocks: None,
         images: Vec::new(),
         updates: rows
             .iter()
@@ -241,6 +243,8 @@ fn marked_frame(seq: u64, rows: &[(&str, SemanticMark)], cursor_row: u16) -> Ter
         first_visible_line: LineIndex(0),
         total_lines: rows.len() as u64,
         input_ack: 0,
+        above: None,
+        blocks: None,
         images: Vec::new(),
         updates: rows
             .iter()

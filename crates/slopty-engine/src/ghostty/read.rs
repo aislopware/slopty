@@ -371,8 +371,7 @@ impl GhosttyEngine {
     }
 
     /// Every command block the history holds (a prompt whose output started), the newest
-    /// [`MAX_BLOCKS`], oldest first: what
-    /// [`slopty_proto::terminal::TermEvent::Blocks`] lists whole.
+    /// [`MAX_BLOCKS`], oldest first: what [`slopty_proto::terminal::Blocks`] lists whole.
     pub(super) fn block_marks(&self) -> Vec<BlockMark> {
         let started = self.commands.iter().filter(|b| b.output.is_some() && b.prompt >= self.base);
         let skip = started.clone().count().saturating_sub(MAX_BLOCKS);
@@ -440,12 +439,12 @@ mod tests {
     fn blocks_go_out_as_news_and_whole() {
         let mark = |prompt, exit| BlockMark { prompt: LineIndex(prompt), exit };
         let mut e = engine(20, 5);
-        let _first = e.full_frame(0).unwrap();
-        assert_eq!(e.drain_blocks().map(|b| (b.whole, b.marks.len())), Some((true, 0)));
+        let first = e.full_frame(0).unwrap();
+        assert_eq!(first.blocks.map(|b| (b.whole, b.marks.len())), Some((true, 0)));
 
         run(&mut e, "false", "no\r\n", 1);
-        let _frame = e.take_frame(0).unwrap().expect("a frame");
-        let news = e.drain_blocks().expect("news");
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        let news = frame.blocks.expect("news");
         assert!(!news.whole);
         assert_eq!(news.marks, [mark(0, Some(1))], "started and ended: its end");
 
@@ -453,22 +452,22 @@ mod tests {
         e.write(PROMPT);
         e.write(b"\r\n");
         e.write(PROMPT);
-        let _frame = e.take_frame(0).unwrap().expect("a frame");
-        assert_eq!(e.drain_blocks(), None);
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.blocks, None);
 
         // One running.
         e.write(b"sleep 9\r\n\x1b]133;C\x07");
         let joined = e.join_frame(0).unwrap();
-        let whole = joined.blocks.expect("a joiner hears of every block");
+        let whole = joined.frame.blocks.expect("a joiner hears of every block");
         assert!(whole.whole);
         assert_eq!(whole.marks, [mark(0, Some(1)), mark(3, None)]);
-        let _frame = e.take_frame(0).unwrap().expect("a frame");
-        let news = e.drain_blocks().expect("the others' news is theirs still");
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        let news = frame.blocks.expect("the others' news is theirs still");
         assert_eq!((news.whole, news.marks), (false, vec![mark(3, None)]));
 
         // Every viewer takes a resize whole.
-        let _resized = e.full_frame(0).unwrap();
-        assert_eq!(e.drain_blocks().map(|b| b.whole), Some(true));
+        let resized = e.full_frame(0).unwrap();
+        assert_eq!(resized.blocks.map(|b| b.whole), Some(true));
     }
 
     /// A shell session as the integration scripts write it: prompt, typed command, `C`,

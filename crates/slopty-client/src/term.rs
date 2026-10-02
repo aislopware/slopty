@@ -8,7 +8,7 @@ use slopty_grid::{
     TermModes,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, DropOperation, Frame, IMAGE_CACHE_BYTES, MAX_ABOVE, MAX_BLOCKS,
+    Blocks, ColorOverrides, DropOperation, Frame, IMAGE_CACHE_BYTES, MAX_ABOVE, MAX_BLOCKS,
     MAX_FETCH_LINES, Placement, PointerShape, Progress, Restored, SearchMatch, TermEvent,
     TermRequest, TermSize,
 };
@@ -160,7 +160,7 @@ pub struct TermState {
     /// The placements of the latest frame, in paint order.
     placements: Vec<Placement>,
     /// The placements wholly above the latest frame's screen, in the history, oldest line
-    /// first: the worker's list (`TermEvent::ImagesAbove`), and what scrolled up since.
+    /// first: the worker's list (`Frame::above`), and what scrolled up since.
     above: Vec<Placement>,
     /// The command blocks the worker listed, by the line their prompt starts on, with the
     /// status each ended with: what the scrollbar marks.
@@ -183,9 +183,6 @@ pub struct TermState {
     /// Frames dropped as older than the last one applied: the tail of a stream a re-attach
     /// replaced.
     superseded: u64,
-    /// The last frame was dropped as older: the placements above its screen that follow it
-    /// are the old stream's too.
-    dropped_last: bool,
     /// The `FetchLines` asked and not answered yet, oldest first, each with the numbering it
     /// was asked in: a range in flight is not asked again, and an answer for a numbering that
     /// has gone is dropped.
@@ -295,7 +292,6 @@ impl TermState {
             restored: None,
             parked: None,
             superseded: 0,
-            dropped_last: false,
             in_flight: VecDeque::new(),
             relinked: false,
         }
@@ -607,33 +603,6 @@ impl TermState {
                 self.drag = Some(DragAnswer::Accepted { operation, mimes });
                 Vec::new()
             }
-            TermEvent::ImagesAbove(_) | TermEvent::Blocks { .. } if self.dropped_last => Vec::new(),
-            TermEvent::Blocks { whole, marks } => {
-                if whole {
-                    self.blocks.clear();
-                }
-                self.blocks.extend(marks.into_iter().map(|m| (m.prompt, m.exit)));
-                while self.blocks.len() > MAX_BLOCKS {
-                    self.blocks.pop_first();
-                }
-                Vec::new()
-            }
-            TermEvent::ImagesAbove(mut above) => {
-                // The nearest the screen are kept, as the worker keeps them.
-                above.sort_by_key(|p| p.line);
-                let excess = above.len().saturating_sub(MAX_ABOVE);
-                above.drain(..excess);
-                // Stamped a frame older than the screen's, as the worker's ledger stamps them,
-                // so both forget the same images over the budget.
-                let stamp = self.frames.saturating_sub(1);
-                for placement in &above {
-                    if let Some(image) = self.images.get_mut(&placement.image) {
-                        image.last = image.last.max(stamp);
-                    }
-                }
-                self.above = above;
-                Vec::new()
-            }
             TermEvent::DropConcluded { operation } => {
                 self.drag = Some(DragAnswer::Concluded { operation });
                 Vec::new()
@@ -652,10 +621,8 @@ impl TermState {
             // The rest of a stream an attach replaced, arriving after the new one's frames:
             // what it carries is older than what is shown.
             self.superseded = self.superseded.saturating_add(1);
-            self.dropped_last = true;
             return effects;
         }
-        self.dropped_last = false;
         self.frames = self.frames.saturating_add(1);
         let (epoch_before, top) =
             (self.epoch, (self.view_offset != 0).then(|| self.index_at_row(0)));
@@ -710,13 +677,19 @@ impl TermState {
         }
         let same_numbering = held && epoch_before == Some(frame.epoch);
         self.move_above(frame.first_visible_line, frame.oldest_line, same_numbering);
+        if let Some(above) = frame.above {
+            self.list_above(above);
+        }
         if same_numbering {
             while self.blocks.first_key_value().is_some_and(|(&p, _)| p < frame.oldest_line) {
                 self.blocks.pop_first();
             }
         } else {
-            // The worker lists them again after the frame.
+            // A frame in another numbering lists them again.
             self.blocks.clear();
+        }
+        if let Some(blocks) = frame.blocks {
+            self.list_blocks(blocks);
         }
         self.placements = frame.images;
         self.input_ack = frame.input_ack;
@@ -729,6 +702,34 @@ impl TermState {
             None => self.view_offset = self.view_offset.min(self.history_len()),
         }
         effects
+    }
+
+    /// The worker's list of the placements above the screen, replacing what is held.
+    fn list_above(&mut self, mut above: Vec<Placement>) {
+        // The nearest the screen are kept, as the worker keeps them.
+        above.sort_by_key(|p| p.line);
+        let excess = above.len().saturating_sub(MAX_ABOVE);
+        above.drain(..excess);
+        // Stamped a frame older than the screen's, as the worker's ledger stamps them, so both
+        // forget the same images over the budget.
+        let stamp = self.frames.saturating_sub(1);
+        for placement in &above {
+            if let Some(image) = self.images.get_mut(&placement.image) {
+                image.last = image.last.max(stamp);
+            }
+        }
+        self.above = above;
+    }
+
+    /// The worker's command blocks: every one, or the news of some.
+    fn list_blocks(&mut self, blocks: Blocks) {
+        if blocks.whole {
+            self.blocks.clear();
+        }
+        self.blocks.extend(blocks.marks.into_iter().map(|m| (m.prompt, m.exit)));
+        while self.blocks.len() > MAX_BLOCKS {
+            self.blocks.pop_first();
+        }
     }
 
     /// Keep the placements above a frame's screen, which starts at `first` with the history
@@ -1390,6 +1391,8 @@ mod tests {
             first_visible_line: LineIndex(first),
             total_lines: total,
             input_ack: seq,
+            above: None,
+            blocks: None,
             images: Vec::new(),
             updates: rows
                 .iter()
@@ -2108,8 +2111,9 @@ mod tests {
     }
 
     /// A placement that scrolls wholly above the screen is kept there, at its line, without a
-    /// word from the worker; the worker's list replaces what is kept; and one whose lines left
-    /// the history, or of another numbering, is forgotten.
+    /// word from the worker; the list a frame carries replaces what is kept; one whose lines
+    /// left the history, or of another numbering, is forgotten; and a frame dropped as older
+    /// changes nothing.
     #[test]
     fn placements_scrolled_above_the_screen_are_kept_by_line() {
         use slopty_proto::terminal::PixelRect;
@@ -2132,6 +2136,7 @@ mod tests {
             f.oldest_line = LineIndex(oldest);
             TermEvent::Frame(f)
         };
+        let listing = |f: Frame, above: Vec<Placement>| Frame { above: Some(above), ..f };
         let mut s = TermState::new(size());
         s.apply(with(frame(1, true, 0, 0, 3, &[]), vec![placement(0)], 0));
         assert!(s.placements_above().is_empty());
@@ -2142,28 +2147,28 @@ mod tests {
         s.apply(with(frame(3, false, 0, 3, 6, &[]), vec![], 0));
         assert_eq!(s.placements_above(), [placement(0)]);
         // The worker's list replaces it: deleted, then placed again further down.
-        s.apply(TermEvent::ImagesAbove(vec![]));
+        s.apply(with(listing(frame(4, false, 0, 3, 6, &[]), vec![]), vec![], 0));
         assert!(s.placements_above().is_empty());
-        s.apply(TermEvent::ImagesAbove(vec![placement(1)]));
+        s.apply(with(listing(frame(5, false, 0, 3, 6, &[]), vec![placement(1)]), vec![], 0));
         assert_eq!(s.placements_above(), [placement(1)]);
         // Its lines left the history.
-        s.apply(with(frame(4, false, 0, 4, 7, &[]), vec![], 3));
+        s.apply(with(frame(6, false, 0, 4, 7, &[]), vec![], 3));
         assert!(s.placements_above().is_empty());
         // Another numbering names nothing above until the worker lists it.
-        s.apply(TermEvent::ImagesAbove(vec![placement(3)]));
-        s.apply(with(frame(5, true, 1, 0, 3, &[]), vec![], 0));
+        s.apply(with(listing(frame(7, false, 0, 5, 8, &[]), vec![placement(3)]), vec![], 3));
+        assert_eq!(s.placements_above(), [placement(3)]);
+        s.apply(with(frame(8, true, 1, 0, 3, &[]), vec![], 0));
         assert!(s.placements_above().is_empty());
-        // A list after a frame dropped as older is the old stream's.
-        s.apply(TermEvent::ImagesAbove(vec![placement(1)]));
-        s.apply(with(frame(4, false, 1, 0, 3, &[]), vec![], 0));
-        s.apply(TermEvent::ImagesAbove(vec![]));
+        // A frame dropped as older is the old stream's, and so is its list.
+        s.apply(with(listing(frame(9, true, 1, 0, 3, &[]), vec![placement(1)]), vec![], 0));
+        s.apply(with(listing(frame(4, false, 1, 0, 3, &[]), vec![]), vec![], 0));
         assert_eq!(s.placements_above(), [placement(1)]);
     }
 
-    /// The worker's command blocks: a whole list replaces what is held, news replaces the
-    /// block at its prompt, a block whose prompt left the history goes, a frame in another
-    /// numbering forgets every one, and a list after a frame dropped as older is the old
-    /// stream's.
+    /// The command blocks the frames carry: a whole list replaces what is held, news replaces
+    /// the block at its prompt, a block whose prompt left the history goes, a frame in another
+    /// numbering forgets every one but those it lists, and a frame dropped as older changes
+    /// nothing.
     #[test]
     fn block_marks_follow_the_workers_list() {
         use slopty_proto::terminal::BlockMark;
@@ -2171,25 +2176,26 @@ mod tests {
         let held = |s: &TermState| -> Vec<(u64, Option<u8>)> {
             s.block_marks().iter().map(|(p, e)| (p.0, *e)).collect()
         };
+        let with = |f: Frame, whole: bool, marks: Vec<BlockMark>| {
+            TermEvent::Frame(Frame { blocks: Some(Blocks { whole, marks }), ..f })
+        };
         let mut s = TermState::new(size());
-        s.apply(TermEvent::Frame(frame(1, true, 0, 0, 3, &[])));
-        s.apply(TermEvent::Blocks { whole: true, marks: vec![mark(0, Some(0)), mark(2, None)] });
-        s.apply(TermEvent::Blocks { whole: false, marks: vec![mark(2, Some(1)), mark(5, None)] });
+        s.apply(with(frame(1, true, 0, 0, 3, &[]), true, vec![mark(0, Some(0)), mark(2, None)]));
+        s.apply(with(frame(2, false, 0, 0, 3, &[]), false, vec![mark(2, Some(1)), mark(5, None)]));
         assert_eq!(held(&s), [(0, Some(0)), (2, Some(1)), (5, None)]);
 
-        let mut on = frame(2, false, 0, 4, 7, &[]);
+        let mut on = frame(3, false, 0, 4, 7, &[]);
         on.oldest_line = LineIndex(1);
         s.apply(TermEvent::Frame(on));
         assert_eq!(held(&s), [(2, Some(1)), (5, None)], "line 0 left the history");
 
-        s.apply(TermEvent::Frame(frame(1, false, 0, 4, 7, &[])));
-        s.apply(TermEvent::Blocks { whole: true, marks: Vec::new() });
+        s.apply(with(frame(1, false, 0, 4, 7, &[]), true, Vec::new()));
         assert_eq!(held(&s), [(2, Some(1)), (5, None)], "the old stream's list is dropped");
 
-        s.apply(TermEvent::Frame(frame(3, true, 1, 0, 3, &[])));
+        s.apply(TermEvent::Frame(frame(4, true, 1, 0, 3, &[])));
         assert!(held(&s).is_empty(), "another numbering");
-        s.apply(TermEvent::Blocks { whole: true, marks: vec![mark(1, None)] });
-        assert_eq!(held(&s), [(1, None)]);
+        s.apply(with(frame(5, true, 2, 0, 3, &[]), true, vec![mark(1, None)]));
+        assert_eq!(held(&s), [(1, None)], "another numbering's own list");
     }
 
     #[test]

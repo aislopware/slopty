@@ -351,6 +351,8 @@ fn frame(seq: u64, first: u64, updates: Vec<(u16, Line)>, cursor: Cursor) -> Ter
         first_visible_line: LineIndex(first),
         total_lines: first.saturating_add(u64::from(ROWS)),
         input_ack: 0,
+        above: None,
+        blocks: None,
         images: Vec::new(),
         updates: updates
             .into_iter()

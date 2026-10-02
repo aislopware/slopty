@@ -1492,8 +1492,8 @@ impl TerminalView {
         }
     }
 
-    /// The palette's "Copy block output": the output of the block [`Self::target_block`]
-    /// picks to the clipboard; nothing for a block that printed nothing.
+    /// The palette's "Copy block output": the output of the block `target_block` picks to the
+    /// clipboard; nothing for a block that printed nothing.
     pub fn copy_block_output(
         &mut self,
         _: &CopyBlockOutput,
@@ -1505,10 +1505,10 @@ impl TerminalView {
         }
     }
 
-    /// The palette's "Attach block to agent": the block [`Self::target_block`] picks goes to
-    /// an agent's draft as context ([`TerminalViewEvent::AttachBlock`]). With no agent to take
-    /// it ([`Self::set_attach_probe`]) the palette lists no line for it, and a key bound to it
-    /// says so.
+    /// The palette's "Attach block to agent": the block `target_block` picks goes to an agent's
+    /// draft as context ([`TerminalViewEvent::AttachBlock`]). With no agent to take it
+    /// ([`Self::set_attach_probe`]) the palette lists no line for it, and a key bound to it says
+    /// so.
     pub fn attach_block(&mut self, _: &AttachBlock, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.can_attach(cx) {
             cx.emit(TerminalViewEvent::Notice("No agent to attach the block to".to_owned()));
@@ -4441,6 +4441,8 @@ mod tests {
                     first_visible_line: LineIndex(6),
                     total_lines: 9,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: screen
                         .iter()
@@ -4677,6 +4679,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 8,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: screen
                         .iter()
@@ -4811,6 +4815,8 @@ mod tests {
                         first_visible_line: LineIndex(0),
                         total_lines: 3,
                         input_ack: 0,
+                        above: None,
+                        blocks: None,
                         images: vec![placement],
                         updates: Vec::new(),
                     }),
@@ -4871,6 +4877,8 @@ mod tests {
                 first_visible_line: LineIndex(first),
                 total_lines: first.saturating_add(3),
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images,
                 updates: Vec::new(),
             })
@@ -4934,6 +4942,8 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images,
                 updates: Vec::new(),
             })
@@ -4997,6 +5007,8 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images: Vec::new(),
                 updates: rows
                     .iter()
@@ -5095,6 +5107,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![
                         row(0, "see http://a.b", Vec::new()),
@@ -5203,6 +5217,8 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images: Vec::new(),
                 updates: vec![RowUpdate { row: 0, line: Line::from_text("hi", 10, style).into() }],
             })
@@ -5434,6 +5450,8 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images: Vec::new(),
                 updates: rows
                     .iter()
@@ -5659,6 +5677,8 @@ mod tests {
                     first_visible_line: LineIndex(6),
                     total_lines: 9,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![RowUpdate { row: 2, line: marked("$ ", failed).into() }],
                 }),
@@ -5987,7 +6007,25 @@ mod tests {
             let mark =
                 |line, exit| slopty_proto::terminal::BlockMark { prompt: LineIndex(line), exit };
             let marks = vec![mark(0, Some(0)), mark(3, Some(1)), mark(4, Some(0))];
-            view.apply(TermEvent::Blocks { whole: true, marks }, cx);
+            let blocks = Some(slopty_proto::terminal::Blocks { whole: true, marks });
+            let frame = Frame {
+                seq: 2,
+                full: false,
+                epoch: 0,
+                cols: 10,
+                rows: 3,
+                cursor: Cursor::default(),
+                modes: TermModes::empty(),
+                oldest_line: LineIndex(0),
+                first_visible_line: LineIndex(6),
+                total_lines: 9,
+                input_ack: 0,
+                above: None,
+                blocks,
+                images: Vec::new(),
+                updates: Vec::new(),
+            };
+            view.apply(TermEvent::Frame(frame), cx);
             view.pointer_near_scrollbar(true, cx);
             window.refresh();
         });
@@ -6031,6 +6069,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: rows
                         .iter()
@@ -6175,6 +6215,8 @@ mod tests {
                 first_visible_line: LineIndex(0),
                 total_lines: 3,
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images: Vec::new(),
                 updates: vec![RowUpdate {
                     row: 0,
@@ -6285,6 +6327,8 @@ mod tests {
                     first_visible_line: LineIndex(100),
                     total_lines: 103,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: rows
                         .iter()
@@ -6416,6 +6460,8 @@ mod tests {
             first_visible_line: LineIndex(first),
             total_lines: first.saturating_add(u64::try_from(rows.len()).unwrap_or(3)),
             input_ack: 0,
+            above: None,
+            blocks: None,
             images: Vec::new(),
             updates: rows
                 .iter()
@@ -7425,6 +7471,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
@@ -7479,6 +7527,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
@@ -7538,6 +7588,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
@@ -7592,6 +7644,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![
                         RowUpdate {
@@ -7648,6 +7702,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![
                         RowUpdate {
@@ -7713,6 +7769,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
@@ -7776,6 +7834,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 3,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates: vec![RowUpdate {
                         row: 0,
@@ -8403,6 +8463,8 @@ mod tests {
             first_visible_line: LineIndex(0),
             total_lines: u64::from(rows),
             input_ack: 0,
+            above: None,
+            blocks: None,
             images: Vec::new(),
             updates: text
                 .iter()
@@ -8590,6 +8652,8 @@ mod tests {
                     first_visible_line: LineIndex(0),
                     total_lines: 40,
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     images: Vec::new(),
                     updates,
                 }),
@@ -8724,6 +8788,8 @@ mod tests {
                 first_visible_line: LineIndex(u64::try_from(first).unwrap()),
                 total_lines: u64::try_from(first.saturating_add(rows)).unwrap(),
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images: Vec::new(),
                 updates,
             })
@@ -8860,6 +8926,8 @@ mod tests {
                 first_visible_line: LineIndex(u64::try_from(first).unwrap()),
                 total_lines: u64::try_from(first.saturating_add(rows)).unwrap(),
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 images: Vec::new(),
                 updates,
             })

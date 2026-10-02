@@ -79,6 +79,8 @@ mod bounds {
             first_visible_line: LineIndex(0),
             total_lines: u64::from(rows),
             input_ack: 0,
+            above: None,
+            blocks: None,
             updates: Vec::new(),
             images: Vec::new(),
         })

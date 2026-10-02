@@ -917,6 +917,8 @@ mod tests {
             first_visible_line: LineIndex(0),
             total_lines: 24,
             input_ack: 0,
+            above: None,
+            blocks: None,
             updates: Vec::new(),
             images: Vec::new(),
         }

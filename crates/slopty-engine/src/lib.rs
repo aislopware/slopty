@@ -29,8 +29,8 @@ pub mod placeholder;
 pub mod search;
 
 pub use ghostty::{
-    Blocks, ClipboardSource, Compression, DropOperation, DropPoint, DropRep, GhosttyEngine, Joined,
-    Memory, PasteRep, TEXT_MIME,
+    ClipboardSource, Compression, DropOperation, DropPoint, DropRep, GhosttyEngine, Joined, Memory,
+    PasteRep, TEXT_MIME,
 };
 pub use graphics::ImageUpload;
 use slopty_proto::terminal::{ColorOverrides, PointerShape, Progress, TermSize};

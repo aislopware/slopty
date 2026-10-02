@@ -30,8 +30,8 @@ use slopty_proto::input::{
     KeyAction, KeyCode, KeyEvent, Mods, MouseAction, MouseButton, MouseEvent,
 };
 use slopty_proto::terminal::{
-    BlockMark, ColorOverrides, Frame, LineDiscipline, MAX_ABOVE, MAX_OSC52_BYTES, PixelRect,
-    Placement, PointerShape, Progress, ProgressState, TermColors, TermEvent, TermSize,
+    BlockMark, Blocks, ColorOverrides, Frame, LineDiscipline, MAX_ABOVE, MAX_OSC52_BYTES,
+    PixelRect, Placement, PointerShape, Progress, ProgressState, TermColors, TermSize,
 };
 
 use crate::graphics::{self, ImageUpload, Ledger, Shipped};
@@ -197,9 +197,6 @@ pub struct GhosttyEngine {
     uploads: Vec<ImageUpload>,
     /// The graphics storage's generation at the last frame: a change alone makes a frame.
     graphics_gen: u64,
-    /// The placements wholly above the screen, in the history, for the frame just taken when
-    /// they are due ([`Self::drain_above`]).
-    above: Option<Vec<Placement>>,
     /// The placements the last frame's placeholder runs made, as their line was then.
     screen_runs: Vec<Placement>,
     /// Placeholder runs that scrolled above the screen, oldest line first: their cells are in
@@ -208,8 +205,6 @@ pub struct GhosttyEngine {
     /// The command blocks that started (their output did) or ended since the last frame the
     /// viewers took.
     block_news: Vec<BlockMark>,
-    /// The command blocks for the frame just taken ([`Self::drain_blocks`]).
-    blocks: Option<Blocks>,
     /// The program's colour changes as last reported.
     overrides: ColorOverrides,
     /// The program's progress report as last reported, shared with libghostty's callback.
@@ -518,11 +513,9 @@ impl GhosttyEngine {
             ledger: Ledger::default(),
             uploads: Vec::new(),
             graphics_gen: 0,
-            above: None,
             screen_runs: Vec::new(),
             runs_above: Vec::new(),
             block_news: Vec::new(),
-            blocks: None,
             overrides: ColorOverrides::default(),
             progress,
             reported,
@@ -1489,7 +1482,7 @@ impl GhosttyEngine {
         // placeholder cells it had when the record last read it.
         let placeholders = !runs.runs.is_empty();
         let total = scrollback.saturating_add(u64::from(rows));
-        let images = match take {
+        let (blocks, (images, above)) = match take {
             Take::Joiner => {
                 if !known {
                     // The record is of another numbering or size, which the joiner never held
@@ -1504,8 +1497,8 @@ impl GhosttyEngine {
                 self.ledger.clear();
                 self.spare_rows = shown;
                 self.spare_prints = prints;
-                self.blocks = Some(Blocks { whole: true, marks: self.block_marks() });
-                self.placed_if(graphics_gen, runs, first, above_due)?
+                let blocks = Blocks { whole: true, marks: self.block_marks() };
+                (Some(blocks), self.placed_if(graphics_gen, runs, first, above_due)?)
             }
             Take::Everyone | Take::Diff => {
                 let record =
@@ -1540,7 +1533,7 @@ impl GhosttyEngine {
                     // Every viewer takes this frame as a resync, holding nothing yet.
                     self.ledger.clear();
                 }
-                self.blocks = if blocks_due {
+                let blocks = if blocks_due {
                     self.block_news.clear();
                     Some(Blocks { whole: true, marks: self.block_marks() })
                 } else if self.block_news.is_empty() || hold.is_some() {
@@ -1548,7 +1541,7 @@ impl GhosttyEngine {
                 } else {
                     Some(Blocks { whole: false, marks: std::mem::take(&mut self.block_news) })
                 };
-                self.placed_if(graphics_gen, runs, first, above_due)?
+                (blocks, self.placed_if(graphics_gen, runs, first, above_due)?)
             }
         };
         Ok(Some(Frame {
@@ -1565,6 +1558,8 @@ impl GhosttyEngine {
             input_ack,
             updates,
             images,
+            above,
+            blocks,
         }))
     }
 
@@ -1574,9 +1569,9 @@ impl GhosttyEngine {
         runs: Runs,
         first: u64,
         above_due: bool,
-    ) -> Result<Vec<Placement>, EngineError> {
+    ) -> Result<Placed, EngineError> {
         if graphics_gen == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
         self.placed(&runs.into_runs(), first, above_due)
     }
@@ -1585,8 +1580,8 @@ impl GhosttyEngine {
     /// then a placement per run of placeholder cells showing a virtual placement. `first` is the
     /// absolute line of the frame's top row, which the runs were read from.
     ///
-    /// With `above_due`, the placements wholly above the viewport, in the history, are kept for
-    /// [`Self::drain_above`] too, the [`MAX_ABOVE`] nearest the screen.
+    /// With `above_due`, the placements wholly above the viewport, in the history, are listed
+    /// too ([`Frame::above`]), the [`MAX_ABOVE`] nearest the screen.
     ///
     /// The pixels of any image the clients do not hold are queued for upload first.
     fn placed(
@@ -1594,7 +1589,7 @@ impl GhosttyEngine {
         runs: &[placeholder::Run],
         first: u64,
         above_due: bool,
-    ) -> Result<Vec<Placement>, EngineError> {
+    ) -> Result<Placed, EngineError> {
         let graphics = self.term.kitty_graphics()?;
         // A placement is pinned to the live grid, whose top may be past a held frame's.
         let live_first = self.base.saturating_add(self.term.scrollback_rows()? as u64);
@@ -1668,7 +1663,7 @@ impl GhosttyEngine {
         self.runs_above.retain(|p| p.line.0 >= base);
         let excess = self.runs_above.len().saturating_sub(MAX_ABOVE);
         self.runs_above.drain(..excess);
-        if above_due {
+        let above = if above_due {
             above.extend_from_slice(&self.runs_above);
             // The nearest the screen, which a scroll back reaches first. They are stamped a
             // frame older than the screen's, so over the cache budget they go before those.
@@ -1685,10 +1680,10 @@ impl GhosttyEngine {
                     kept.push(shipped);
                 }
             }
-            self.above = Some(kept);
+            Some(kept)
         } else {
-            self.above = None;
-        }
+            None
+        };
         let cell =
             (u32::from(self.size.metrics.cell_width), u32::from(self.size.metrics.cell_height));
         for run in runs {
@@ -1727,7 +1722,7 @@ impl GhosttyEngine {
         }
         self.screen_runs = screen_runs;
         self.ledger.prune();
-        Ok(out)
+        Ok((out, above))
     }
 
     /// Send the clean rows `rows` again with their wrap now (see `row_above_wraps`). Only the
@@ -2169,29 +2164,10 @@ pub struct Joined {
     pub frame: Frame,
     /// The images it places that the joiner needs, sent ahead of it.
     pub images: Vec<ImageUpload>,
-    /// The placements above the screen, sent after it ([`GhosttyEngine::drain_above`]).
-    pub above: Option<Vec<Placement>>,
-    /// Every command block, sent after it ([`GhosttyEngine::drain_blocks`]).
-    pub blocks: Option<Blocks>,
 }
 
-/// The command blocks a frame goes out with ([`TermEvent::Blocks`]).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Blocks {
-    /// Every block the history holds, replacing what a viewer holds; otherwise only those that
-    /// started or ended since the last frame.
-    pub whole: bool,
-    /// Oldest first.
-    pub marks: Vec<BlockMark>,
-}
-
-impl Blocks {
-    /// As it goes on the wire.
-    #[must_use]
-    pub fn event(self) -> TermEvent {
-        TermEvent::Blocks { whole: self.whole, marks: self.marks }
-    }
-}
+/// What a frame places: on its screen, and above it when that is due ([`Frame::above`]).
+type Placed = (Vec<Placement>, Option<Vec<Placement>>);
 
 struct Virtual {
     image: u32,
@@ -2647,14 +2623,10 @@ impl GhosttyEngine {
     /// libghostty-vt failing.
     pub fn join_frame(&mut self, input_ack: u64) -> Result<Joined, EngineError> {
         let others = std::mem::take(&mut self.uploads);
-        let others_above = self.above.take();
-        let others_blocks = self.blocks.take();
         let frame = self.build_frame(input_ack, Take::Joiner);
         let images = std::mem::replace(&mut self.uploads, others);
-        let above = std::mem::replace(&mut self.above, others_above);
-        let blocks = std::mem::replace(&mut self.blocks, others_blocks);
         let frame = frame?.ok_or(EngineError::InvalidSize("empty frame"))?;
-        Ok(Joined { frame, images, above, blocks })
+        Ok(Joined { frame, images })
     }
 
     /// Nobody is watching: drop what the next frame would have carried that the next joiner's
@@ -2663,8 +2635,6 @@ impl GhosttyEngine {
         self.forced_rows.clear();
         self.remarked_rows.clear();
         self.uploads.clear();
-        self.above = None;
-        self.blocks = None;
         self.block_news.clear();
     }
 
@@ -2966,21 +2936,6 @@ impl GhosttyEngine {
     /// sent ahead of those frames (see [`graphics::Ledger`]).
     pub fn drain_images(&mut self) -> Vec<ImageUpload> {
         std::mem::take(&mut self.uploads)
-    }
-
-    /// Every placement wholly above the screen, in the history, as of the frame just taken,
-    /// when that frame is one the clients must have them with: every viewer takes it whole, or
-    /// the graphics changed. Sent after the frame, it replaces what a client holds; otherwise a
-    /// client moves the placements that scroll off the screen up itself.
-    pub const fn drain_above(&mut self) -> Option<Vec<Placement>> {
-        self.above.take()
-    }
-
-    /// The command blocks to send after the frame just taken: all of them with a frame every
-    /// viewer takes whole, else those that started or ended since the last frame; `None` when
-    /// there is nothing to say.
-    pub const fn drain_blocks(&mut self) -> Option<Blocks> {
-        self.blocks.take()
     }
 
     /// The colours the driver paints with: what colour queries (OSC 10/11/12 `?`, OSC 4)
@@ -3423,7 +3378,7 @@ mod tests {
         let mut e = engine(10, 3);
         let first = e.full_frame(0).unwrap();
         e.write(b"one");
-        let Joined { frame: join, images: uploads, .. } = e.join_frame(0).unwrap();
+        let Joined { frame: join, images: uploads } = e.join_frame(0).unwrap();
         assert!(join.full && uploads.is_empty());
         assert_eq!(join.seq, first.seq, "no sequence number taken");
         assert!(join.updates.iter().any(|u| u.line.text() == "one"));
@@ -5975,7 +5930,6 @@ mod graphics_tests {
         let frame = e.take_frame(0).unwrap().expect("a frame");
         let lines: Vec<LineIndex> = frame.images.iter().map(|p| p.line).collect();
         assert!(lines.iter().all(|l| *l == LineIndex(0)), "{lines:?}");
-        let _first = e.drain_above();
         let _uploads = e.drain_images();
 
         // The placement left the cursor on its second row. Four lines down, the top one is
@@ -5984,28 +5938,28 @@ mod graphics_tests {
         let frame = e.take_frame(0).unwrap().expect("a frame");
         assert_eq!(frame.first_visible_line, LineIndex(1));
         assert!(frame.images.iter().any(|p| p.line == LineIndex(0)), "partly on screen");
-        assert_eq!(e.drain_above(), None, "a scroll alone lists nothing above");
+        assert_eq!(frame.above, None, "a scroll alone lists nothing above");
 
         // Further down: wholly above, in no frame's screen, and still no list.
         e.write(b"\r\n\r\n\r\n");
         let frame = e.take_frame(0).unwrap().expect("a frame");
         assert!(frame.images.is_empty(), "{:?}", frame.images);
-        assert_eq!(e.drain_above(), None);
+        assert_eq!(frame.above, None);
 
         // A joiner is told, and so is everyone with a frame they take whole.
         let joined = e.join_frame(0).unwrap();
-        let above = joined.above.expect("a joiner hears of them");
+        let above = joined.frame.above.expect("a joiner hears of them");
         assert_eq!(above.len(), 2, "the transmission's own placement and the one put");
         assert!(above.iter().all(|p| p.image == 1 && p.line == LineIndex(0)), "{above:?}");
         assert!(joined.images.iter().any(|u| u.id == 1), "with the pixels the joiner lacks");
-        let _whole = e.full_frame(0).unwrap();
-        assert!(e.drain_above().is_some_and(|a| a.len() == 2));
+        let whole = e.full_frame(0).unwrap();
+        assert!(whole.above.is_some_and(|a| a.len() == 2));
 
         // Deleted while above: the graphics changed, and the list says so.
         // `d=A` would spare it: it deletes only what is visible on screen.
         e.write(b"\x1b_Ga=d,d=I,i=1,q=2\x1b\\");
-        let _frame = e.take_frame(0).unwrap();
-        assert_eq!(e.drain_above(), Some(vec![]));
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert_eq!(frame.above, Some(vec![]));
     }
 
     #[test]
@@ -6065,9 +6019,9 @@ mod graphics_tests {
         let frame = e.take_frame(0).unwrap().expect("a frame");
         assert_eq!(frame.first_visible_line, LineIndex(1));
         assert!(frame.images.is_empty(), "{:?}", frame.images);
-        assert_eq!(e.drain_above(), None, "a scroll alone lists nothing");
+        assert_eq!(frame.above, None, "a scroll alone lists nothing");
         let joined = e.join_frame(0).unwrap();
-        let above = joined.above.expect("a joiner hears of it");
+        let above = joined.frame.above.expect("a joiner hears of it");
         assert_eq!(
             above.iter().map(|p| (p.image, p.line)).collect::<Vec<_>>(),
             [(7, LineIndex(0))]

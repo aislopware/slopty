@@ -499,6 +499,15 @@ pub struct Frame {
     pub updates: Vec<RowUpdate>,
     /// Every image placed on the visible screen (kitty graphics), in paint order.
     pub images: Vec<Placement>,
+    /// Every image placed wholly above the screen, in the history (at most [`MAX_ABOVE`] of
+    /// them, the nearest the screen), replacing what the client holds. A frame every viewer
+    /// takes whole carries it, and one after the images changed; otherwise it is `None`, and a
+    /// client moves a placement up itself once a frame's screen starts below it, and forgets
+    /// one whose lines left the history.
+    pub above: Option<Vec<Placement>>,
+    /// The command blocks, when there is news of them: on the frame they belong to, so a
+    /// viewer that is behind takes them in the same event as its rows.
+    pub blocks: Option<Blocks>,
 }
 
 /// A rectangle of an image, in its pixels.
@@ -514,7 +523,7 @@ pub struct PixelRect {
     pub height: u32,
 }
 
-/// The most command blocks [`TermEvent::Blocks`] lists whole, the newest: a scrollbar a few
+/// The most command blocks [`Blocks`] lists whole, the newest: a scrollbar a few
 /// hundred points tall shows no more distinct marks, and each is a few bytes on the wire.
 pub const MAX_BLOCKS: usize = 4096;
 
@@ -528,7 +537,19 @@ pub struct BlockMark {
     pub exit: Option<u8>,
 }
 
-/// The most placements [`TermEvent::ImagesAbove`] carries, the nearest the screen: each is a
+/// The command blocks a frame carries ([`Frame::blocks`]). A client forgets a block whose
+/// prompt left the history, and every block on a frame in another numbering.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Blocks {
+    /// Every block the history holds (at most [`MAX_BLOCKS`], the newest), replacing what the
+    /// client holds: on a frame every viewer takes whole. Otherwise only the blocks that
+    /// started or ended since the last frame, each replacing the one at its prompt.
+    pub whole: bool,
+    /// Oldest first.
+    pub marks: Vec<BlockMark>,
+}
+
+/// The most placements [`Frame::above`] carries, the nearest the screen: each is a
 /// few dozen bytes on the wire, and a program can place thousands of small images.
 pub const MAX_ABOVE: usize = 1024;
 
@@ -750,23 +771,6 @@ pub enum TermEvent {
     DropConcluded {
         /// What it did.
         operation: DropOperation,
-    },
-    /// Every image placed wholly above the screen, in the history, as of the frame just before
-    /// it (at most [`MAX_ABOVE`] of them, the nearest the screen). It replaces what the client
-    /// holds. It follows a frame every viewer takes whole and one after the images changed;
-    /// between them, a client moves a placement up itself once a frame's screen starts below
-    /// it, and forgets one whose lines left the history.
-    ImagesAbove(Vec<Placement>),
-    /// The command blocks, as of the frame just before it. `whole`: every block the history
-    /// holds (at most [`MAX_BLOCKS`], the newest), replacing what the client holds; it follows
-    /// a frame every viewer takes whole. Otherwise only the blocks that started or ended since
-    /// the last frame, each replacing the one at its prompt. A client forgets a block whose
-    /// prompt left the history, and every block on a frame in another numbering.
-    Blocks {
-        /// The list replaces what the client holds.
-        whole: bool,
-        /// Oldest first.
-        marks: Vec<BlockMark>,
     },
 }
 

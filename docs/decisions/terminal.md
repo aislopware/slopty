@@ -3394,9 +3394,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   nothing where a plot or a screenshot had been. Now a placement names the absolute line of
   its top row (`Placement::line`, a `LineIndex`), so it stays with the text it was placed
   among, on screen, scrolled back, and in the history.
-  - **Who holds what.** A frame still lists only what touches its screen. Placements wholly
-    above go out as `TermEvent::ImagesAbove`, right after a frame every viewer takes whole
-    (an attach, a resize, a change of numbering) and after a frame where the graphics
+  - **Who holds what.** A frame's `images` still lists only what touches its screen.
+    Placements wholly above go out in the frame's `above` list, on a frame every viewer takes
+    whole (an attach, a resize, a change of numbering) and on a frame where the graphics
     storage changed, with the pixels a viewer lacks queued ahead as for any placement.
     Between those, a client moves a placement up itself once a frame's screen starts below
     it, and forgets one whose lines left the history; a frame in another numbering, or over
@@ -3405,8 +3405,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Bounds.** At most `MAX_ABOVE` (1024) placements, the nearest the screen, which a scroll
     back reaches first. They are stamped a frame older than the screen's in both caches
     (worker ledger and client), so over `IMAGE_CACHE_BYTES` the history's pixels are dropped
-    before the screen's, on both sides alike. A list following a frame dropped as older (the
-    tail of a stream an attach replaced) is dropped with it.
+    before the screen's, on both sides alike. A frame dropped as older (the tail of a stream
+    an attach replaced) drops its list with it.
   - **Where libghostty says it is.** Off the viewport, `placement_render_info` still reports
     the pin's row relative to the viewport (`computeViewportPos` in
     `vendor/ghostty/src/terminal/c/kitty_graphics.zig`) unless the placement has no position
@@ -3423,14 +3423,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `an_image_in_the_history_reaches_every_viewer_above_the_screen` (a watcher and a late
     joiner, with pixels); view `an_image_in_the_history_shows_when_scrolled_back_to`; element
     `a_placement_is_painted_at_its_cell_in_the_workers_pixels`; goldens `worker_frame`,
-    `worker_term_images_above`. Cost: `history_image_frame_cost` (MEASUREMENTS).
+    `worker_frame_images_above`. Cost: `history_image_frame_cost` (MEASUREMENTS).
 
 - ✅ **Blocks marked on the scrollbar, selected from the gutter** (2026-10-02). Warp's block
   gestures, from the 2026-10-02 design plan's terminal row, in Slopty's calm.
   - **Marks come from the worker.** The client's cache holds the prompts it saw, but a late
     joiner (another device opening a running shell) holds none above its screen. So the engine's
     command blocks (a prompt whose output started, the same list the CLI and the agents read)
-    go out as `TermEvent::Blocks`: whole after a frame every viewer takes whole, at most
+    go out in the frame's `blocks` (`terminal::Blocks`): whole on a frame every viewer takes
+    whole, at most
     `MAX_BLOCKS` (4096), the newest; otherwise only the blocks that started or ended since the
     last frame, the last word for each. A client drops a block whose prompt left the history
     and every block on a frame in another numbering, until the next whole list. A width change
@@ -3465,4 +3466,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `block_marks_follow_the_workers_list`; worker `command_blocks_reach_every_viewer`; element
     `block_marks_sit_on_the_track_where_their_prompts_are`; view
     `a_gutter_click_selects_a_block_and_the_palette_acts_on_it`,
-    `a_block_as_context_says_what_ran_and_how_it_ended`; golden `worker_term_blocks`.
+    `a_block_as_context_says_what_ran_and_how_it_ended`; golden `worker_frame_blocks`.
+
+- ✅ **The lists above the screen and the block marks ride on their frame** (2026-10-02). They
+  first went out as two events of their own (`ImagesAbove`, `Blocks`) after the frame they
+  belonged to, and a whole frame always carried a block list, empty or not. CI's
+  `a_throttled_viewer_is_a_frame_or_two_behind_not_seconds` then found four events waiting in a
+  slow viewer's sink where three is the bound: every resync it was owed came as the frame, its
+  marker and the list behind them. Raising the bound would have let a slow link fall a list
+  further behind on every resync. Now both are fields of `Frame` (`above`, `blocks`, each `None`
+  when there is nothing to say, two bytes on the wire), so a frame and what it says of the
+  history take one place in the sink and one in the frames in flight, as before the lists
+  existed.
+  - **One fate.** A list can no longer outlive or miss its frame. The separate events had to
+    be dropped by hand after a frame dropped as older (`dropped_last`, now gone). An echo's
+    datagram copy carries the lists too, so the news shows with the rows it came with.
+  - Tests: worker `a_throttled_viewer_is_a_frame_or_two_behind_not_seconds` (still ≤ 3 queued,
+    run 30 times); engine `blocks_go_out_as_news_and_whole`; client
+    `placements_scrolled_above_the_screen_are_kept_by_line`, `block_marks_follow_the_workers_list`;
+    goldens `worker_frame`, `worker_frame_copy`, `worker_frame_images_above`,
+    `worker_frame_blocks`.

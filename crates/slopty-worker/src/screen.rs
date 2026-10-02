@@ -30,7 +30,7 @@
 //! `encoder` under their locks, lets both go, and only then calls into VideoToolbox: what it
 //! tells the session (bitrate, frame rate, layers) and the submits. No lock is held across a
 //! call into the encoder, so a call that never returns holds nothing anyone waits on but the
-//! turn, and the beat takes the turn from it ([`ENCODE_STUCK`], `Shared::unstick`). A session
+//! turn, and the beat takes the turn from it (`ENCODE_STUCK`, `Shared::unstick`). A session
 //! whose sides are multiples of 16 codes the frame inside the submit and runs its output
 //! callback there, on the encoding thread, before the submit returns. The callback path
 //! (`on_session_packet` → `on_packet`) takes `counters.in_flight`, `counters.encode`, `watch`,

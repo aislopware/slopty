@@ -2469,7 +2469,7 @@ exec sleep 60"#;
         let (tx, mut late) = viewer(256);
         session.attach(ClientId::new(), size(40, 6), tx).unwrap();
         let (seen, _) = wait_for(&mut late, |ev, _| {
-            ev.iter().any(|e| matches!(e, TermEvent::ImagesAbove(a) if !a.is_empty()))
+            ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.above.as_ref().is_some_and(|a| !a.is_empty())))
         })
         .await;
         assert!(seen.iter().any(|e| matches!(e, TermEvent::Image { id: 5, .. })), "{seen:?}");
@@ -2493,7 +2493,7 @@ exec sleep 60"#;
             |s: &TermState| s.block_marks().iter().map(|(p, e)| (*p, *e)).collect::<Vec<_>>();
         let ended = |ev: &[TermEvent]| {
             ev.iter().any(|e| {
-                matches!(e, TermEvent::Blocks { marks, .. } if marks.iter().any(|m| m.exit.is_some()))
+                matches!(e, TermEvent::Frame(f) if f.blocks.as_ref().is_some_and(|b| b.marks.iter().any(|m| m.exit.is_some())))
             })
         };
         let _seen = wait_for(&mut rx, |ev, _| ended(ev)).await;
@@ -2502,8 +2502,9 @@ exec sleep 60"#;
         let (tx, mut late) = viewer(256);
         session.attach(ClientId::new(), size(40, 6), tx).unwrap();
         let _seen = wait_for(&mut late, |ev, _| {
-            ev.iter()
-                .any(|e| matches!(e, TermEvent::Blocks { whole: true, marks } if !marks.is_empty()))
+            ev.iter().any(|e| {
+                matches!(e, TermEvent::Frame(f) if f.blocks.as_ref().is_some_and(|b| b.whole && !b.marks.is_empty()))
+            })
         })
         .await;
         assert_eq!(blocks(&late.state), [(LineIndex(0), Some(1))], "the late one gets it whole");

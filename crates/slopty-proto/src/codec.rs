@@ -301,6 +301,8 @@ mod tests {
             first_visible_line: slopty_grid::LineIndex(0),
             total_lines: 60,
             input_ack: 0,
+            above: None,
+            blocks: None,
             updates: (0..rows.saturating_add(blank))
                 .map(|row| RowUpdate {
                     row,
@@ -370,6 +372,8 @@ mod tests {
                 first_visible_line: slopty_grid::LineIndex(0),
                 total_lines: 60,
                 input_ack: 0,
+                above: None,
+                blocks: None,
                 updates: (0..rows)
                     .map(|row| RowUpdate {
                         row,

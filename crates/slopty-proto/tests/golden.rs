@@ -15,8 +15,8 @@ mod golden {
         Feedback, RateVerdict, ReceiverReport, ScreenEvent, ScreenInput, ScreenRequest,
     };
     use slopty_proto::terminal::{
-        BlockMark, ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors, TermEvent,
-        TermRequest,
+        BlockMark, Blocks, ColorOverrides, Frame, PixelRect, Placement, SearchMatch, TermColors,
+        TermEvent, TermRequest,
     };
     use slopty_proto::transfer::{
         BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Purpose, Rep,
@@ -236,6 +236,8 @@ mod golden {
             first_visible_line: slopty_grid::LineIndex(0),
             total_lines: 2,
             input_ack: 0,
+            above: None,
+            blocks: None,
             updates: vec![RowUpdate {
                 row: 0,
                 line: Line::from_text("$ x", 8, Style::DEFAULT).into(),
@@ -1552,6 +1554,8 @@ mod golden {
                 first_visible_line: slopty_grid::LineIndex(10),
                 total_lines: 12,
                 input_ack: 7,
+                above: None,
+                blocks: None,
                 updates: vec![RowUpdate { row: 0, line: line.into() }],
                 images: vec![Placement {
                     image: 9,
@@ -1571,9 +1575,36 @@ mod golden {
         );
     }
 
-    /// The images placed above the screen, in the history.
+    /// A frame of no rows carrying only `above` or `blocks`.
+    fn listing(above: Option<Vec<Placement>>, blocks: Option<Blocks>) -> TermEvent {
+        TermEvent::Frame(Frame {
+            seq: 3,
+            full: false,
+            epoch: 1,
+            cols: 8,
+            rows: 2,
+            cursor: Cursor {
+                row: 0,
+                col: 0,
+                shape: CursorShape::Block,
+                visible: true,
+                blink: false,
+            },
+            modes: TermModes::empty(),
+            oldest_line: slopty_grid::LineIndex(0),
+            first_visible_line: slopty_grid::LineIndex(10),
+            total_lines: 12,
+            input_ack: 0,
+            above,
+            blocks,
+            updates: Vec::new(),
+            images: Vec::new(),
+        })
+    }
+
+    /// A frame carrying the images placed above the screen, in the history.
     #[test]
-    fn images_above() {
+    fn frame_images_above() {
         let placement = Placement {
             image: 9,
             generation: 4,
@@ -1588,17 +1619,18 @@ mod golden {
             source: PixelRect { x: 0, y: 0, width: 6, height: 8 },
             z: 0,
         };
-        snap("worker_term_images_above", &TermEvent::ImagesAbove(vec![placement]));
+        snap("worker_frame_images_above", &listing(Some(vec![placement]), None));
     }
 
-    /// The command blocks the scrollbar marks: a failed one, then one still running.
+    /// A frame carrying the command blocks the scrollbar marks: a failed one, then one still
+    /// running.
     #[test]
-    fn blocks() {
+    fn frame_blocks() {
         let marks = vec![
             BlockMark { prompt: slopty_grid::LineIndex(12), exit: Some(1) },
             BlockMark { prompt: slopty_grid::LineIndex(300), exit: None },
         ];
-        snap("worker_term_blocks", &TermEvent::Blocks { whole: true, marks });
+        snap("worker_frame_blocks", &listing(None, Some(Blocks { whole: true, marks })));
     }
 
     #[test]
@@ -2263,6 +2295,8 @@ mod size_report {
                     first_visible_line: slopty_grid::LineIndex(0),
                     total_lines: u64::from(rows),
                     input_ack: 0,
+                    above: None,
+                    blocks: None,
                     updates,
                     images: Vec::new(),
                 };
