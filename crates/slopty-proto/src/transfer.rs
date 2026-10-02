@@ -551,16 +551,32 @@ pub enum XferMsg {
         xfer: XferId,
     },
     /// Client → worker: send this file or directory down as transfer `xfer`. A retried fetch
-    /// names what the client already holds, and each of those files resumes where it stopped.
+    /// names what the client already holds, and each of those files resumes where it stopped
+    /// while the worker's file is still the version held.
     Fetch {
         /// The transfer the client names.
         xfer: XferId,
         /// Absolute path, or `~/…`.
         path: String,
-        /// Files already partly here: name (as in its bulk header) and the bytes durable on
-        /// the client's disk.
-        held: Vec<(String, u64)>,
+        /// Files already partly or wholly here.
+        held: Vec<Held>,
     },
+}
+
+/// A file of a download the client holds part of, as a retried [`XferMsg::Fetch`] names it.
+///
+/// It carries the version its bytes are of, so the worker resumes it on any link and after a
+/// restart of its own, and never continues one version's bytes with another's.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Held {
+    /// Its name, as in its bulk header.
+    pub name: String,
+    /// The bytes durable on the client's disk.
+    pub bytes: u64,
+    /// The file's size when they were sent, as its bulk header said.
+    pub size: u64,
+    /// The file's modification time when they were sent, as its bulk header said.
+    pub mtime_ms: WallMs,
 }
 
 #[cfg(test)]

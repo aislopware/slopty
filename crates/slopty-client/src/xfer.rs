@@ -6,26 +6,28 @@
 //! how much of the file is durable ([`XferMsg::Resume`] → [`XferMsg::Offset`]) and sends the rest.
 //! A download is the worker's bulk streams landing in a directory as `name.partial`, synced as
 //! they go, checked against the digest in the worker's [`XferMsg::Done`] and renamed when whole.
-//! A cut download fetches again, naming what it holds of each file, and each file resumes from
-//! there ([`download`]).
+//! A cut download fetches again, naming what it holds of each file and the version it is of,
+//! and each file resumes from there ([`download`]). A download outlives its link: when the link
+//! goes, it waits on its worker's [`Line`] for the next one and goes on over it, from what it
+//! holds.
 //!
 //! Either keeps running while the app is off screen, with the system's progress UI
 //! (`offscreen`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use slopty_core::{WallMs, XferId, shell_quote};
+use slopty_core::{WallMs, WorkerId, XferId, shell_quote};
 use slopty_net::streams::RawRecv;
 use slopty_net::{ClientMsg, Connection, NetError};
 use slopty_proto::transfer::{
-    BulkHeader, Dest, Hash, MAX_FILES, MODE_BITS, Purpose, XferMsg, partial_of, relative_path,
+    BulkHeader, Dest, Hash, Held, MAX_FILES, MODE_BITS, Purpose, XferMsg, partial_of, relative_path,
 };
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 mod offscreen;
 
@@ -68,7 +70,8 @@ pub enum XferError {
     /// Somebody cancelled it.
     #[error("cancelled")]
     Cancelled,
-    /// The link to the worker is gone.
+    /// The link to the worker is gone, and for a download no other came within
+    /// [`RELINK_WAIT`].
     #[error("the worker went away")]
     LinkClosed,
 }
@@ -217,6 +220,8 @@ struct Fetch {
 struct FetchState {
     /// Every file a header named, and where it landed once whole and checked.
     files: HashMap<String, Option<PathBuf>>,
+    /// The version (size, modification time) each header named, which a retry claims.
+    versions: HashMap<String, (u64, WallMs)>,
     /// The landed files, in the order they landed.
     landed: Vec<PathBuf>,
     /// Streams being written now.
@@ -451,6 +456,107 @@ pub struct Uplink {
     pub table: Arc<Table>,
 }
 
+/// How long a download whose link went waits for the next link to its worker.
+///
+/// Long enough for a network change, a Mac waking or the worker restarting for an update.
+/// Finder's progress and its cancel stay up meanwhile.
+pub const RELINK_WAIT: Duration = Duration::from_mins(5);
+
+/// One worker's links in this process, one after another.
+///
+/// It holds the link up now, which a download cut by a relink goes on over, and the downloads on
+/// it, which a cancel reaches on whichever link they are, or while they wait for one.
+///
+/// Kept per worker for the process ([`Line::of`]), since whoever dials the next link (the app's
+/// redial, the File Provider's domain) knows nothing of the transfers the last one carried.
+#[derive(Debug)]
+pub struct Line {
+    now: watch::Sender<Option<Uplink>>,
+    /// The downloads following the line, by the transfer each began as, with its stop.
+    following: Mutex<HashMap<XferId, watch::Sender<bool>>>,
+}
+
+/// The lines of this process, by worker. Weak: a line lives while a link or a download holds it.
+static LINES: LazyLock<Mutex<HashMap<WorkerId, Weak<Line>>>> = LazyLock::new(Mutex::default);
+
+impl Line {
+    /// The line to `worker` in this process, made on first use.
+    #[must_use]
+    pub fn of(worker: WorkerId) -> Arc<Self> {
+        let mut lines = LINES.lock();
+        if let Some(line) = lines.get(&worker).and_then(Weak::upgrade) {
+            return line;
+        }
+        lines.retain(|_worker, line| line.strong_count() > 0);
+        let line = Arc::new(Self { now: watch::Sender::new(None), following: Mutex::default() });
+        lines.insert(worker, Arc::downgrade(&line));
+        line
+    }
+
+    /// `up` is the link to the worker now: a download waiting for one goes on over it.
+    pub fn linked(&self, up: Uplink) {
+        self.now.send_replace(Some(up));
+    }
+
+    /// Stop the download that began as `xfer`, on whichever link it is or while it waits for
+    /// one. `false` when none on this line did.
+    pub fn cancel(&self, xfer: XferId) -> bool {
+        self.following.lock().get(&xfer).map(|stop| stop.send_replace(true)).is_some()
+    }
+
+    /// Follow the download that begins as `xfer` until the guard drops.
+    fn follow(self: &Arc<Self>, xfer: XferId) -> Following {
+        let (tx, stop) = watch::channel(false);
+        self.following.lock().insert(xfer, tx);
+        Following { line: Arc::clone(self), xfer, stop }
+    }
+
+    /// The next link to the worker after `gone`, once it is up: within [`RELINK_WAIT`], else
+    /// [`XferError::LinkClosed`], and [`XferError::Cancelled`] once `stop` says so.
+    async fn next_after(
+        &self,
+        gone: &Connection,
+        stop: &mut watch::Receiver<bool>,
+    ) -> Result<Uplink, XferError> {
+        let mut now = self.now.subscribe();
+        let gone = gone.stable_id();
+        let next = async move {
+            let up = now
+                .wait_for(|up| {
+                    up.as_ref().is_some_and(|up| {
+                        up.conn.stable_id() != gone && up.conn.close_reason().is_none()
+                    })
+                })
+                .await;
+            up.ok().and_then(|up| up.clone())
+        };
+        tokio::select! {
+            next = tokio::time::timeout(RELINK_WAIT, next) => next.ok().flatten().ok_or(XferError::LinkClosed),
+            () = stopped(stop) => Err(XferError::Cancelled),
+        }
+    }
+}
+
+/// A download on a [`Line`]: its stop, and its place in the line's list until it drops.
+struct Following {
+    line: Arc<Line>,
+    xfer: XferId,
+    stop: watch::Receiver<bool>,
+}
+
+impl Drop for Following {
+    fn drop(&mut self) {
+        self.line.following.lock().remove(&self.xfer);
+    }
+}
+
+/// Resolves once `stop` says stop; never when nobody can say it any more.
+async fn stopped(stop: &mut watch::Receiver<bool>) {
+    if stop.wait_for(|stopped| *stopped).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Send `files` up as transfer `xfer`, to `dest`.
 ///
 /// Every file is sent before this returns; the worker's `Done`, `Progress` and `Finished` arrive
@@ -646,53 +752,101 @@ async fn send_file(
 /// An attempt cut short (a stream ended early, a digest that does not match, the worker's
 /// `Failed`) is given up and fetched again under a new transfer, naming what is held of each
 /// file, three attempts in all. One that failed on this side (a file here that cannot be
-/// written) is not.
+/// written) is not. A link that goes costs no attempt: the download waits on `line` for the
+/// next link to the worker, up to [`RELINK_WAIT`], and goes on over it from what it holds, its
+/// progress shown the whole time. [`Line::cancel`] with `xfer` stops it, waiting or not.
 pub async fn download(
     up: &Uplink,
+    line: &Arc<Line>,
     xfer: XferId,
     path: String,
     into: PathBuf,
     shown_at: Option<&Path>,
 ) -> Result<Vec<PathBuf>, XferError> {
-    let current = Arc::new(Mutex::new(xfer));
-    let shown =
-        offscreen::download(&up.table, &up.out, xfer, &path, shown_at, Arc::clone(&current));
+    let mut following = line.follow(xfer);
+    let cancel = {
+        let line = Arc::downgrade(line);
+        move || {
+            tracing::info!(%xfer, "download cancelled from the system's progress");
+            if let Some(line) = line.upgrade() {
+                line.cancel(xfer);
+            }
+        }
+    };
+    let shown = offscreen::download(&path, shown_at, cancel);
     let fetch = Arc::new(Fetch { work: Some(Arc::clone(shown.work())), ..Fetch::default() });
-    let landed = attempts(up, xfer, &path, &into, &fetch, &current).await;
+    let on = On { line, stop: &mut following.stop, xfer, path: &path, into: &into };
+    let landed = attempts(up.clone(), on, &fetch).await;
     shown.work().end(landed.is_ok());
     landed
 }
 
-/// The attempts of [`download`], each under the transfer `current` names.
-async fn attempts(
-    up: &Uplink,
+/// What every attempt of a download shares: its line and its stop, the transfer it began as,
+/// what it fetches and where to.
+struct On<'a> {
+    line: &'a Line,
+    stop: &'a mut watch::Receiver<bool>,
     xfer: XferId,
-    path: &str,
-    into: &Path,
+    path: &'a str,
+    into: &'a Path,
+}
+
+/// The attempts of [`download`], the first over `up`.
+async fn attempts(
+    mut up: Uplink,
+    mut on: On<'_>,
     fetch: &Arc<Fetch>,
-    shared: &Mutex<XferId>,
 ) -> Result<Vec<PathBuf>, XferError> {
-    let mut current = xfer;
-    let mut attempt = 0_u32;
+    let mut current = on.xfer;
+    let mut failed = 0_u32;
     loop {
-        attempt = attempt.saturating_add(1);
-        let held = held(fetch, into).await;
-        let done = up.table.expect_download(current, into.to_path_buf(), Arc::clone(fetch));
-        send(up, XferMsg::Fetch { xfer: current, path: path.to_owned(), held }).await?;
-        let error = match done.await.map_err(|_dropped| XferError::LinkClosed)? {
+        let error = match attempt(&up, &mut on, current, fetch).await {
             Ok(()) => return Ok(fetch.state.lock().landed.clone()),
             Err(error) => error,
         };
-        let cancelled = up.table.cancelled(xfer) || up.table.cancelled(current);
-        if cancelled || !error.worth_retrying() || attempt >= ATTEMPTS {
-            return Err(error);
+        let cancelled = *on.stop.borrow()
+            || matches!(error, XferError::Cancelled)
+            || up.table.cancelled(on.xfer)
+            || up.table.cancelled(current);
+        if cancelled {
+            // The attempt in flight stops here, and the worker hears it while the link is up.
+            up.table.cancel(current);
+            let _gone = up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer: current }));
+            return Err(XferError::Cancelled);
         }
-        tracing::info!(%current, %path, %error, "download cut; fetching the rest");
         up.table.abandon(current);
-        send(up, XferMsg::Cancel { xfer: current }).await?;
-        settle(fetch).await?;
+        if up.conn.close_reason().is_some() || matches!(error, XferError::LinkClosed) {
+            tracing::info!(%current, path = on.path, %error, "download's link went; waiting for the next");
+            settle(fetch).await?;
+            up = on.line.next_after(&up.conn, on.stop).await?;
+        } else {
+            failed = failed.saturating_add(1);
+            if !error.worth_retrying() || failed >= ATTEMPTS {
+                return Err(error);
+            }
+            tracing::info!(%current, path = on.path, %error, "download cut; fetching the rest");
+            let _gone = up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer: current }));
+            settle(fetch).await?;
+        }
         current = XferId::new();
-        *shared.lock() = current;
+    }
+}
+
+/// One fetch of a download as transfer `current` over `up`, until its files have landed, it
+/// fails, the link goes or the download is stopped.
+async fn attempt(
+    up: &Uplink,
+    on: &mut On<'_>,
+    current: XferId,
+    fetch: &Arc<Fetch>,
+) -> Result<(), XferError> {
+    let held = held(fetch, on.into).await;
+    let done = up.table.expect_download(current, on.into.to_path_buf(), Arc::clone(fetch));
+    send(up, XferMsg::Fetch { xfer: current, path: on.path.to_owned(), held }).await?;
+    tokio::select! {
+        landed = done => landed.map_err(|_dropped| XferError::LinkClosed)?,
+        _closed = up.conn.closed() => Err(XferError::LinkClosed),
+        () = stopped(on.stop) => Err(XferError::Cancelled),
     }
 }
 
@@ -717,12 +871,19 @@ async fn settle(fetch: &Fetch) -> Result<(), XferError> {
         .map_err(|_elapsed| XferError::Unanswered("an earlier stream did not stop"))
 }
 
-/// What a retry says it holds: every landed file whole, and the durable bytes of each partial.
-async fn held(fetch: &Fetch, into: &Path) -> Vec<(String, u64)> {
-    let files: Vec<(String, Option<PathBuf>)> =
-        fetch.state.lock().files.iter().map(|(n, l)| (n.clone(), l.clone())).collect();
+/// What a retry says it holds: every landed file whole, and the durable bytes of each partial,
+/// each with the version its header named.
+async fn held(fetch: &Fetch, into: &Path) -> Vec<Held> {
+    let files: Vec<(String, Option<PathBuf>, (u64, WallMs))> = {
+        let state = fetch.state.lock();
+        state
+            .files
+            .iter()
+            .filter_map(|(n, l)| Some((n.clone(), l.clone(), *state.versions.get(n)?)))
+            .collect()
+    };
     let mut held = Vec::with_capacity(files.len());
-    for (name, landed) in files {
+    for (name, landed, (size, mtime_ms)) in files {
         let bytes = match landed {
             Some(path) => tokio::fs::metadata(&path).await.map_or(0, |m| m.len()),
             None => match relative_path(&name) {
@@ -731,7 +892,7 @@ async fn held(fetch: &Fetch, into: &Path) -> Vec<(String, u64)> {
             },
         };
         if bytes > 0 {
-            held.push((name, bytes));
+            held.push(Held { name, bytes, size, mtime_ms });
         }
     }
     held
@@ -811,7 +972,11 @@ async fn write_file(
     }
     let partial = partial_of(&target);
     let (mut file, mut hasher) = open_partial(&partial, header.offset).await?;
-    fetch.state.lock().files.insert(header.name.clone(), None);
+    {
+        let mut state = fetch.state.lock();
+        state.files.insert(header.name.clone(), None);
+        state.versions.insert(header.name.clone(), (header.size, header.mtime_ms));
+    }
     let expected = header.size.saturating_sub(header.offset);
     let mut got = 0_u64;
     let cut_at =

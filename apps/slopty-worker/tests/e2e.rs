@@ -1353,13 +1353,16 @@ mod tests {
         })
         .await
         .expect("the agent is resumed");
-        let resumed: Vec<&str> = runs
-            .lines()
-            .nth(1)
-            .unwrap()
-            .split('|')
-            .filter(|w| !w.is_empty() && !w.starts_with("--plugin-dir="))
-            .collect();
+        // The shell's `claude` adds Slopty's mod and the relay's settings; the rest is the resume.
+        let mut words = runs.lines().nth(1).unwrap().split('|').filter(|w| !w.is_empty());
+        let mut resumed = Vec::new();
+        while let Some(word) = words.next() {
+            if word == "--settings" {
+                let _relay = words.next();
+            } else if !word.starts_with("--plugin-dir=") {
+                resumed.push(word);
+            }
+        }
         let (cwd, args) = resumed.split_first().unwrap();
         assert_eq!(
             std::path::Path::new(cwd).canonicalize().unwrap(),
@@ -4130,8 +4133,8 @@ mod tests {
     /// an empty stream; a file that changed since comes again from the start.
     #[tokio::test]
     async fn a_download_resumes_what_the_client_holds_unless_the_file_changed() {
-        use slopty_core::XferId;
-        use slopty_proto::transfer::{BulkHeader, Purpose, XferMsg};
+        use slopty_core::{WallMs, XferId};
+        use slopty_proto::transfer::{BulkHeader, Held, Purpose, XferMsg};
 
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut worker) = connect(dir.path()).await;
@@ -4176,12 +4179,22 @@ mod tests {
         }
         rx.stop();
         let held_len = held.len() as u64;
+        let big_held = Held {
+            name: "out/big.bin".to_owned(),
+            bytes: held_len,
+            size: header.size,
+            mtime_ms: header.mtime_ms,
+        };
+        let small_mtime = std::fs::metadata(out.join("small.txt")).unwrap().modified().unwrap();
+        let small_held = Held {
+            name: "out/small.txt".to_owned(),
+            bytes: small.len() as u64,
+            size: small.len() as u64,
+            mtime_ms: WallMs::of(small_mtime),
+        };
 
         let second = XferId::new();
-        let claims = vec![
-            ("out/big.bin".to_owned(), held_len),
-            ("out/small.txt".to_owned(), small.len() as u64),
-        ];
+        let claims = vec![big_held.clone(), small_held];
         let fetch = XferMsg::Fetch { xfer: second, path: path.clone(), held: claims };
         worker.tx.send(&ClientMsg::Xfer(fetch)).await.unwrap();
         let mut got = std::collections::HashMap::new();
@@ -4209,7 +4222,7 @@ mod tests {
         file.set_modified(later).unwrap();
         drop(file);
         let third = XferId::new();
-        let claims = vec![("out/big.bin".to_owned(), held_len)];
+        let claims = vec![big_held];
         worker
             .tx
             .send(&ClientMsg::Xfer(XferMsg::Fetch { xfer: third, path, held: claims }))

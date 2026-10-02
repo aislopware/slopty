@@ -3,7 +3,8 @@
 //!
 //! The domain's root is the worker's home, so a worker shows in Finder as a place of its own,
 //! as a synced folder does, and an item's identifier is its path under that home with `/`
-//! between names: `""` is the home, `"src/main.rs"` a file in it. A path is stable across
+//! between names ([`slopty_proto::folder::under_home`]): `""` is the home, `"src/main.rs"` a file
+//! in it. A path is stable across
 //! listings and needs no table, so the extension keeps nothing between its launches. A file
 //! outside the home has no identifier: it is not in the domain.
 
@@ -121,23 +122,6 @@ pub fn on_worker(home: &str, id: &str) -> String {
     if id.is_empty() { home.to_owned() } else { format!("{home}/{id}") }
 }
 
-/// The identifier of the worker's `path`, when it is in the home `home`; `None` for a path
-/// outside it, or one that climbs (`..`) or doubles its slashes.
-#[must_use]
-pub fn of_worker_path(home: &str, path: &str) -> Option<String> {
-    let home = home.trim_end_matches('/');
-    let rest = path.strip_prefix(home)?;
-    if rest.is_empty() {
-        return Some(ROOT.to_owned());
-    }
-    let rest = rest.strip_prefix('/')?.trim_end_matches('/');
-    if rest.is_empty() {
-        return Some(ROOT.to_owned());
-    }
-    let sound = rest.split('/').all(|part| !part.is_empty() && part != "." && part != "..");
-    sound.then(|| rest.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use slopty_core::WallMs;
@@ -169,21 +153,6 @@ mod tests {
         assert_eq!(on_worker("/home/dev", ROOT), "/home/dev");
         for bad in ["", ".", "..", "a/b", "nul\0"] {
             assert_eq!(child("src", bad), None, "{bad:?}");
-        }
-    }
-
-    /// A worker's path maps back into the domain only from inside the home, and never by a
-    /// path that climbs or has an empty part; a sibling whose name starts like the home is
-    /// outside it.
-    #[test]
-    fn only_a_path_in_the_home_is_in_the_domain() {
-        let home = "/Users/dev";
-        assert_eq!(of_worker_path(home, "/Users/dev/a/b.png").as_deref(), Some("a/b.png"));
-        assert_eq!(of_worker_path(home, "/Users/dev/a/").as_deref(), Some("a"));
-        assert_eq!(of_worker_path(home, "/Users/dev").as_deref(), Some(ROOT));
-        assert_eq!(of_worker_path(home, "/Users/dev/").as_deref(), Some(ROOT));
-        for outside in ["/Users/devops/x", "/tmp/x", "/Users/dev/../root", "/Users/dev//x"] {
-            assert_eq!(of_worker_path(home, outside), None, "{outside}");
         }
     }
 

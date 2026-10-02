@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use slopty_core::{WorkerId, XferId};
@@ -10,11 +11,18 @@ use slopty_platform::files::Directory;
 use tokio::sync::mpsc;
 
 use crate::changes::{Change, Changes, Expired};
-use crate::item::{self, Item};
+use crate::item::Item;
 use crate::worker::{FilesError, Pushed, Worker};
 
 /// How many unasked listings may wait for the domain to take them in.
 const PUSHES: usize = 64;
+
+/// The first wait before dialing a worker again that did not answer, doubled up to
+/// [`REDIAL_MOST`] while a fetch waits for it.
+const REDIAL_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest wait between two dials of a worker a fetch waits for.
+const REDIAL_MOST: Duration = Duration::from_secs(10);
 
 /// Called when there are changes for the system to ask for.
 pub type Signal = Arc<dyn Fn() + Send + Sync>;
@@ -90,6 +98,9 @@ impl Domain {
     /// Bring the file `id` down into `into` as transfer `xfer`; where it landed, and the item
     /// as its folder lists it now, its version with it.
     ///
+    /// A link that goes meanwhile is dialed again, and the transfer goes on over the new one
+    /// from what it holds (`slopty_client::xfer::Line`).
+    ///
     /// # Errors
     ///
     /// The worker is out of reach, the file is gone, or the transfer failed or was
@@ -101,14 +112,40 @@ impl Domain {
         xfer: XferId,
     ) -> Result<(PathBuf, Item), FilesError> {
         let worker = self.worker().await?;
-        let landed = worker.fetch(id, into, xfer).await?;
-        Ok((landed, worker.item(id).await?))
+        let landed = tokio::select! {
+            landed = worker.fetch(id, into, xfer) => landed?,
+            never = self.keep_linked() => match never {},
+        };
+        Ok((landed, self.worker().await?.item(id).await?))
     }
 
-    /// Stop transfer `xfer`, if a link is up to stop it on.
+    /// Stop transfer `xfer`, on whichever link it is, or while it waits for one.
     pub async fn cancel(&self, xfer: XferId) {
+        if slopty_client::xfer::Line::of(self.id).cancel(xfer) {
+            return;
+        }
         if let Some(worker) = self.link.lock().await.as_ref() {
             worker.cancel(xfer);
+        }
+    }
+
+    /// Dial the worker again each time its link goes, for as long as it is polled: a fetch
+    /// waiting for the next link gets one even when the system asks nothing else meanwhile.
+    #[expect(clippy::infinite_loop, reason = "polled only beside a fetch, which ends it")]
+    async fn keep_linked(&self) -> std::convert::Infallible {
+        let mut wait = REDIAL_FIRST;
+        loop {
+            match self.worker().await {
+                Ok(worker) => {
+                    worker.closed().await;
+                    wait = REDIAL_FIRST;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, ?wait, "the worker is out of reach; dialing again");
+                    tokio::time::sleep(wait).await;
+                    wait = wait.saturating_mul(2).min(REDIAL_MOST);
+                }
+            }
         }
     }
 
@@ -166,7 +203,7 @@ async fn take_in(
     signal: Signal,
 ) {
     while let Some(Pushed { path, listing }) = pushes.recv().await {
-        let Some(folder) = item::of_worker_path(&home, &path) else { continue };
+        let Some(folder) = slopty_proto::folder::under_home(&home, &path) else { continue };
         let changed = match crate::worker::items(&folder, &path, listing) {
             Ok(items) => changes.lock().listed(&folder, items),
             Err(_) => changes.lock().gone(&folder),

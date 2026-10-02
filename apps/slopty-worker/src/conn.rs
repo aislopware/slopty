@@ -1358,9 +1358,8 @@ impl Peer<'_> {
             }
             XferMsg::Fetch { xfer, path, held } => {
                 self.downloads.retain(|_xfer, task| !task.is_finished());
-                let transfers = Arc::clone(&self.daemon.transfers);
                 let (conn, out) = (self.conn.clone(), self.out.clone());
-                let task = crate::xfer::download(transfers, conn, out, xfer, path, held);
+                let task = crate::xfer::download(conn, out, xfer, path, held);
                 if let Some(earlier) = self.downloads.insert(xfer, tokio::spawn(task)) {
                     earlier.abort();
                 }

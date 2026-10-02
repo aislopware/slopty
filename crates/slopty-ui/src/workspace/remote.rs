@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{AppContext as _, Context, WeakEntity, Window};
-use slopty_client::clip::{Answer, Fetched, relay};
+use slopty_client::clip::{Answer, Fetched, Place, relay};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
@@ -298,6 +298,18 @@ impl WorkspaceView {
         }))
     }
 
+    /// Where `key`'s home shows in Finder: the root of its File Provider domain, once the
+    /// extension has said where the system put it and while it is there (switched on). A
+    /// worker's copied files paste into Finder from it. `None` for a worker the server does not
+    /// list (no domain), and in a build the team did not sign (no shared container).
+    #[cfg(target_os = "macos")]
+    fn finder_place(&self, key: WorkerKey) -> Option<Place> {
+        let home = self.workers.get(&key)?.home.clone()?;
+        let id: slopty_core::WorkerId = format!("{:032x}", key.value()).parse().ok()?;
+        let root = slopty_platform::files::root(&slopty_platform::files::container()?, id)?;
+        root.is_dir().then_some(Place { home, root })
+    }
+
     pub(super) fn remote(&self, key: WorkerKey) -> Option<Arc<dyn Remote>> {
         self.workers.get(&key).and_then(|w| w.link.as_ref()?.remote.clone())
     }
@@ -449,9 +461,14 @@ impl WorkspaceView {
         }
         match msg {
             ClipMsg::Offer(offer) => {
+                #[cfg(target_os = "macos")]
+                let place = self.finder_place(key);
+                // No other system shows a worker's home as a place of its own.
+                #[cfg(not(target_os = "macos"))]
+                let place: Option<Place> = None;
                 let mut clip = clip.borrow_mut();
                 let provide = provider(clip.link(key), &offer, CLIP_WAIT);
-                clip.receive(key, &offer, provide);
+                clip.receive(key, &offer, provide, place.as_ref());
             }
             ClipMsg::Fetch { rep, max, urgent } => {
                 let answer = clip.borrow().answer(&rep, max);

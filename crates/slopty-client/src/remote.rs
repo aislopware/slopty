@@ -18,7 +18,7 @@ use crate::clip::{ClipCache, Fetched, fits_inline};
 #[cfg(target_vendor = "apple")]
 use crate::dnd::out::{DragOuts, Shared};
 use crate::tunnel::Forwards;
-use crate::xfer::{self, Uplink, XferError};
+use crate::xfer::{self, Line, Uplink, XferError};
 
 /// Files and clipboard bytes to and from one worker.
 pub trait Remote: Send + Sync + std::fmt::Debug {
@@ -33,7 +33,9 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// Bring the worker's `path` (a file, or a directory as its files) into the directory
     /// `into`, blocking until every file has landed. Never call it on the main thread.
     /// `shown_at` is the file the person sees it become (a drop into Finder), where the system
-    /// shows its progress and a cancel; `None` for a download nobody watches land.
+    /// shows its progress and a cancel; `None` for a download nobody watches land. A link that
+    /// goes meanwhile does not end it: it goes on over the worker's next link from what it holds
+    /// ([`crate::xfer::Line`]).
     fn download(
         &self,
         path: String,
@@ -78,6 +80,8 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct LinkRemote {
     up: Uplink,
+    /// The worker's links in this process: a download follows them past this one.
+    line: Arc<Line>,
     clips: Arc<ClipCache>,
     events: mpsc::Sender<LinkEvent>,
     runtime: tokio::runtime::Handle,
@@ -89,12 +93,20 @@ pub struct LinkRemote {
 }
 
 impl LinkRemote {
-    /// The remote of a link: its uplink and clipboard cache, where its failures are reported,
-    /// the runtime its tasks run on, its port forwards if it has any, and the drags out its
-    /// control reader tells.
+    /// The remote of a link: its uplink, its worker's line and its clipboard cache, where its
+    /// failures are reported, the runtime its tasks run on, its port forwards if it has any,
+    /// and the drags out its control reader tells.
     #[must_use]
+    #[cfg_attr(
+        target_vendor = "apple",
+        expect(
+            clippy::too_many_arguments,
+            reason = "a link's parts, gathered once where it starts"
+        )
+    )]
     pub const fn new(
         up: Uplink,
+        line: Arc<Line>,
         clips: Arc<ClipCache>,
         events: mpsc::Sender<LinkEvent>,
         runtime: tokio::runtime::Handle,
@@ -103,6 +115,7 @@ impl LinkRemote {
     ) -> Self {
         Self {
             up,
+            line,
             clips,
             events,
             runtime,
@@ -129,6 +142,7 @@ impl Remote for LinkRemote {
     }
 
     fn cancel(&self, xfer: XferId) {
+        self.line.cancel(xfer);
         self.up.table.cancel(xfer);
         if let Err(e) = self.up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer })) {
             tracing::debug!(%xfer, error = %e, "cancel not sent");
@@ -141,15 +155,9 @@ impl Remote for LinkRemote {
         into: PathBuf,
         shown_at: Option<PathBuf>,
     ) -> Result<Vec<PathBuf>, XferError> {
-        let up = self.up.clone();
-        let conn = self.conn().clone();
         let xfer = XferId::new();
-        self.runtime.block_on(async move {
-            tokio::select! {
-                landed = xfer::download(&up, xfer, path, into, shown_at.as_deref()) => landed,
-                () = async { conn.closed().await; } => Err(XferError::LinkClosed),
-            }
-        })
+        let landed = xfer::download(&self.up, &self.line, xfer, path, into, shown_at.as_deref());
+        self.runtime.block_on(landed)
     }
 
     fn clip_fetch(&self, rep: &RepRef, max: Option<u64>, wait: Duration) -> Fetched {

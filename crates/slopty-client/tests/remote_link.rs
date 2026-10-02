@@ -21,8 +21,8 @@ mod tests {
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::orchestration::Port;
     use slopty_proto::transfer::{
-        BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Purpose, Rep,
-        TunnelHost, TunnelOpen, TunnelRefusal, XferMsg,
+        BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Held, Offer, Peer, Purpose,
+        Rep, TunnelHost, TunnelOpen, TunnelRefusal, XferMsg,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::sync::mpsc;
@@ -35,10 +35,15 @@ mod tests {
 
     /// A worker that greets one client and hands its end to the test, and the client's link.
     async fn pair() -> (AcceptedClient, WorkerLink, mpsc::Receiver<LinkEvent>) {
+        pair_as(WorkerId::new()).await
+    }
+
+    /// [`pair`], the worker going by `worker`: a second pair of the same id is the next link to
+    /// the same worker.
+    async fn pair_as(worker: WorkerId) -> (AcceptedClient, WorkerLink, mpsc::Receiver<LinkEvent>) {
         let listener =
             WorkerListener::bind(slopty_net::endpoint::any(0), Admission::default()).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let worker = WorkerId::new();
         let accepted = tokio::spawn(async move {
             let mut client = listener.accept().await.unwrap();
             let ack = HelloAck {
@@ -191,7 +196,7 @@ mod tests {
         }
     }
 
-    async fn fetched(client: &mut AcceptedClient) -> (XferId, Vec<(String, u64)>) {
+    async fn fetched(client: &mut AcceptedClient) -> (XferId, Vec<Held>) {
         expect(client, |m| match m {
             ClientMsg::Xfer(XferMsg::Fetch { xfer, held, .. }) => Some((xfer, held)),
             _ => None,
@@ -238,10 +243,16 @@ mod tests {
         assert_eq!(cancelled, first, "the cut attempt is called off");
         let (second, mut held) = fetched(&mut client).await;
         assert_ne!(second, first, "a retry is a transfer of its own");
-        held.sort();
-        assert_eq!(held[1], ("out/small.txt".to_owned(), small.len() as u64), "landed: whole");
-        let (name, durable) = held[0].clone();
+        held.sort_by(|a, b| a.name.cmp(&b.name));
+        let version = (WallMs::from_millis(1_700_000_000_000), small.len() as u64);
+        assert_eq!(
+            (held[1].name.as_str(), held[1].bytes, held[1].mtime_ms, held[1].size),
+            ("out/small.txt", small.len() as u64, version.0, version.1),
+            "landed: whole, of the version sent"
+        );
+        let (name, durable) = (held[0].name.clone(), held[0].bytes);
         assert_eq!(name, "out/big.bin");
+        assert_eq!(held[0].size, big.len() as u64, "of the version sent");
         assert!(durable > 0 && durable <= 1_000_000, "held {durable}");
         let partial = into.path().join("out/big.bin.partial");
         assert_eq!(std::fs::metadata(&partial).unwrap().len(), durable, "durable on disk");
@@ -268,6 +279,108 @@ mod tests {
         let mtime = std::fs::metadata(&big_at).unwrap().modified().unwrap();
         let ms = mtime.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
         assert_eq!(ms, 1_700_000_000_000, "the worker's modification time");
+    }
+
+    /// A download whose link goes part way waits for the next link to its worker and goes on
+    /// over it from what it holds, claiming the version it holds; the file lands byte for byte.
+    /// Its progress is the same download's throughout, and no attempt is spent on the relink.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_download_cut_by_a_lost_link_goes_on_over_the_next_link() {
+        let worker = WorkerId::new();
+        let (mut client, link, _events) = pair_as(worker).await;
+        let into = tempfile::tempdir().unwrap();
+        let remote = link.remote();
+        let target = into.path().to_owned();
+        let waiting =
+            std::thread::spawn(move || remote.download("~/big.bin".to_owned(), target, None));
+        let (first, held) = fetched(&mut client).await;
+        assert!(held.is_empty());
+        let big: Vec<u8> = (0..4_000_000_u32).map(|i| (i % 241) as u8).collect();
+        let begin = XferMsg::Begin { xfer: first, dest: None, files: 1, bytes: big.len() as u64 };
+        client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
+        let mut send =
+            streams::open_bulk(&client.conn, download_header(first, "big.bin", big.len(), 0))
+                .await
+                .unwrap();
+        send.write_all(&big[..1_500_000]).await.unwrap();
+        let partial = into.path().join("big.bin.partial");
+        tokio::time::timeout(WAIT, async {
+            while std::fs::metadata(&partial).map_or(0, |m| m.len()) < 1_500_000 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the first bytes land");
+        // The worker goes away mid-file, as one restarting for an update does.
+        client.conn.close(0_u32.into(), b"restarting");
+        drop(send);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!waiting.is_finished(), "the download waits for the worker");
+
+        let (mut client, _next, _events) = pair_as(worker).await;
+        let linked = std::time::Instant::now();
+        let (second, held) = fetched(&mut client).await;
+        println!("a download's fetch on the next link, from the link up: {:?}", linked.elapsed());
+        assert_ne!(second, first, "the next link's fetch is a transfer of its own");
+        let [claim] = held.as_slice() else { panic!("one file held: {held:?}") };
+        assert_eq!((claim.name.as_str(), claim.bytes), ("big.bin", 1_500_000), "durable");
+        assert_eq!(
+            (claim.size, claim.mtime_ms),
+            (big.len() as u64, WallMs::from_millis(1_700_000_000_000))
+        );
+        let begin = XferMsg::Begin { xfer: second, dest: None, files: 1, bytes: big.len() as u64 };
+        client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
+        let header = download_header(second, "big.bin", big.len(), claim.bytes);
+        let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
+        send.write_all(&big[1_500_000..]).await.unwrap();
+        send.finish().unwrap();
+        client.tx.send(&WorkerMsg::Xfer(done(second, "big.bin", &big))).await.unwrap();
+
+        let landed =
+            tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap().unwrap();
+        let at = into.path().join("big.bin");
+        assert_eq!(landed, std::slice::from_ref(&at));
+        assert_eq!(
+            blake3::hash(&std::fs::read(&at).unwrap()),
+            blake3::hash(&big),
+            "the same bytes across the relink"
+        );
+        assert!(!partial.exists());
+        drop(link);
+    }
+
+    /// A cancel while the download waits for its worker ends it at once, with what it held
+    /// kept off the file's name; a cancel for no download on the line reaches nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_download_waiting_for_its_worker_is_cancelled() {
+        let worker = WorkerId::new();
+        let (mut client, link, _events) = pair_as(worker).await;
+        let into = tempfile::tempdir().unwrap();
+        let remote = link.remote();
+        let target = into.path().to_owned();
+        let waiting =
+            std::thread::spawn(move || remote.download("~/a.bin".to_owned(), target, None));
+        let (xfer, _held) = fetched(&mut client).await;
+        let body = vec![7_u8; 500_000];
+        let mut send =
+            streams::open_bulk(&client.conn, download_header(xfer, "a.bin", 1_000_000, 0))
+                .await
+                .unwrap();
+        send.write_all(&body).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        client.conn.close(0_u32.into(), b"gone");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!waiting.is_finished(), "waiting for the worker");
+        assert!(!slopty_client::xfer::Line::of(worker).cancel(XferId::new()), "no such download");
+        let cancelled = std::time::Instant::now();
+        link.remote().cancel(xfer);
+        let ended = tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap();
+        assert!(
+            matches!(ended, Err(slopty_client::xfer::XferError::Cancelled)),
+            "cancelled: {ended:?}"
+        );
+        assert!(cancelled.elapsed() < Duration::from_secs(2), "at once: {:?}", cancelled.elapsed());
+        assert!(!into.path().join("a.bin").exists());
     }
 
     /// Bytes that do not match the worker's digest never land under the file's name.

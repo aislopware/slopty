@@ -178,10 +178,15 @@ impl Worker {
         &self.link.ack().home
     }
 
-    /// The link is still up.
+    /// The link is still up: its connection open, and its events still read.
     #[must_use]
     pub fn alive(&self) -> bool {
-        self.alive.load(Ordering::Acquire)
+        self.alive.load(Ordering::Acquire) && !self.link.is_closed()
+    }
+
+    /// Resolves once the link is gone.
+    pub async fn closed(&self) {
+        self.link.closed().await;
     }
 
     /// The folder `id`'s files and folders.
@@ -230,7 +235,8 @@ impl Worker {
     }
 
     /// Bring the file `id` down into the directory `into` as transfer `xfer`; the path it
-    /// landed at. [`Self::cancel`] with the same `xfer` stops it.
+    /// landed at. [`Self::cancel`] with the same `xfer` stops it. Should this link go, it goes
+    /// on over the next link to the worker, once something dials it.
     ///
     /// # Errors
     ///

@@ -19,8 +19,8 @@ mod golden {
         TermEvent, TermRequest,
     };
     use slopty_proto::transfer::{
-        BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Purpose, Rep,
-        RepRef, Source, TunnelHost, TunnelOpen, UniHead, XferMsg,
+        BulkHeader, ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Held, Offer, Peer, Purpose,
+        Rep, RepRef, Source, TunnelHost, TunnelOpen, UniHead, XferMsg,
     };
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
     use uuid::Uuid;
@@ -1464,7 +1464,12 @@ mod golden {
             &ClientMsg::Xfer(XferMsg::Fetch {
                 xfer,
                 path: "~/project/out".to_owned(),
-                held: vec![("out/big.bin".to_owned(), 1 << 20)],
+                held: vec![Held {
+                    name: "out/big.bin".to_owned(),
+                    bytes: 1 << 20,
+                    size: 3 << 20,
+                    mtime_ms: WallMs::from_millis(1_790_000_000_000),
+                }],
             }),
         );
         snap(

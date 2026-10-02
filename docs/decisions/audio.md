@@ -160,7 +160,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the pasteboard as file URLs, stamped with this worker as origin, so they are not
     announced back.
   - `Fetch` walks the path (symbolic links skipped, 10 000 files at most) and sends `Begin`
-    and then one bulk stream per file. A download does not resume yet.
+    and then one bulk stream per file. A download cut short resumes from what the client
+    holds, over the same link or the next (`docs/decisions/transport.md`, "A download outlives
+    its link").
 
 - ✅ **Ports are scanned on a hint or while the shell is busy, never when idle** (2026-09-25,
   protocol 52).
@@ -290,9 +292,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `keyframe_bursts_starve_the_ring_at_most_once_a_window`, `clock_drift_is_absorbed_by_slices`,
     `the_silence_gate_is_not_an_underrun`.
 
-- ⏸ **Worker files paste into Finder through a File Provider domain, not a pasteboard promise**
-  (2026-09-25, ruling only; the domain is built since 2026-10-02, `docs/decisions/platform.md`,
-  "Each worker's home is a place in Finder", and the paste follows it). Finder enables Paste
+- ✅ **Worker files paste into Finder through a File Provider domain, not a pasteboard promise**
+  (2026-09-25 ruling; the domain built 2026-10-02, `docs/decisions/platform.md`, "Each worker's
+  home is a place in Finder"; the paste built 2026-10-03, below). Finder enables Paste
   only for a file URL already on disk, so neither `NSFilePromiseProvider` nor the Carbon
   `promised-file-url` pair gets a Paste on the general pasteboard. No shipping client uses them:
   Microsoft's Windows App and Devolutions RDM hand out pre-made temporary files, RustDesk an
@@ -345,6 +347,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       identifier (`dev.aislopware.slopty.worker`). Whether `NSFileProviderManager` lets it add
       a domain for the bundle's extension is unknown. If not, the worker's side needs a small
       bundled agent that does it.
+  - **Built (2026-10-03, readiness audit A8 and C1).** A worker's copy of its own files comes
+    with their paths as file URLs on the worker. When this Mac has that worker's domain (a
+    signed build, the domain switched on, its root written by the extension), the client puts
+    each URL on the pasteboard as the same file's place in the domain instead
+    (`clip::local::Place`, `RemoteSurface::finder_place`): the root joined with the path under
+    the worker's home, which is the item's id, percent-encoded as a `public.file-url`. Finder
+    then sees files on disk and offers Paste, and its copy reads the dataless file, which the
+    kernel holds until the extension has brought the bytes down. A file outside the worker's
+    home, the domain does not hold, and every file on a Mac without the domain go on as before:
+    no file URL (a worker's path would name whatever sits at it here), their names as text,
+    and a paste into a worker still moving them. A folder keeps its trailing `/`, and Finder
+    copies it whole, listing it through the domain (its first 2000 entries,
+    `FOLDER_ENTRIES`).
+    - Tests: `a_workers_files_go_on_as_their_place_here` (slopty-client: the mapping, a folder,
+      a name that needs escaping, and a copy reaching outside the home left alone),
+      `only_a_path_in_the_home_is_under_it` (slopty-proto), and
+      `a_copied_files_url_in_the_place_is_the_domains_file` (slopty-files, against a real
+      worker daemon: the URL the clipboard writes names the domain item whose fetch yields
+      the file's bytes). Finder's own paste needs the domain switched on, so it goes to a
+      macOS guest (`cargo xtask vm`) with the domain's other system checks.
   - Withdrawn (2026-09-25): an attempt at the pasteboard route, file promises on the general
     pasteboard, sat uncommitted in the tree. Finder pastes only files that are already on disk,
     so it could not work, and it was taken out of the tree. Its diff is kept outside the

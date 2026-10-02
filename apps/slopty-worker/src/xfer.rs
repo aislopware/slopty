@@ -10,11 +10,11 @@ use slopty_net::streams::{self, RawRecv, Uni};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FILE_BYTES, WriteResult};
 use slopty_proto::transfer::{
-    BulkHeader, Hash, INLINE_CLIP_BYTES, Purpose, RepRef, Source, XferMsg,
+    BulkHeader, Hash, Held, INLINE_CLIP_BYTES, Purpose, RepRef, Source, XferMsg,
 };
 use slopty_worker::clip::MAX_REP_BYTES;
 use slopty_worker::screen::drag::Heard;
-use slopty_worker::xfer::{Landed, Receiving, Transfers, XferError, outgoing};
+use slopty_worker::xfer::{Landed, Receiving, XferError, outgoing, resume_points};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
 
@@ -292,20 +292,19 @@ async fn write(
 
 /// Send the file or directory at `path` down as transfer `xfer`: a `Begin`, then one bulk
 /// stream per file, each followed by its `Done` with the digest of the whole file. A file the
-/// client holds part of (`held`) resumes where [`Transfers::resume_points`] says. Failures are
+/// client holds part of (`held`) resumes where [`resume_points`] says. Failures are
 /// reported as `Failed`.
 pub async fn download(
-    transfers: Arc<Transfers>,
     conn: Connection,
     out: mpsc::Sender<WorkerMsg>,
     xfer: XferId,
     path: String,
-    held: Vec<(String, u64)>,
+    held: Vec<Held>,
 ) {
     let at = slopty_worker::file::expand_home(std::path::Path::new(&path));
     let listed = tokio::task::spawn_blocking(move || {
         let files = outgoing(&at)?;
-        let from = transfers.resume_points(&files, &held);
+        let from = resume_points(&files, &held);
         Ok::<_, std::io::Error>(files.into_iter().zip(from).collect::<Vec<_>>())
     })
     .await;

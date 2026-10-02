@@ -53,3 +53,47 @@ pub struct FolderEntry {
     /// Last modification.
     pub modified_ms: WallMs,
 }
+
+/// Where the worker's `path` is under its home `home`, as `/`-separated names.
+///
+/// `""` is the home itself. `None` for a path outside the home, or one that climbs (`..`),
+/// stays (`.`) or doubles a slash.
+///
+/// A worker's place in a client's file manager (its File Provider domain) is rooted at its home
+/// and names each item by this path, so a worker's file is found there by it.
+#[must_use]
+pub fn under_home(home: &str, path: &str) -> Option<String> {
+    let home = home.trim_end_matches('/');
+    let rest = path.strip_prefix(home)?;
+    if rest.is_empty() {
+        return Some(String::new());
+    }
+    let rest = rest.strip_prefix('/')?.trim_end_matches('/');
+    if rest.is_empty() {
+        return Some(String::new());
+    }
+    let sound = rest.split('/').all(|part| !part.is_empty() && part != "." && part != "..");
+    sound.then(|| rest.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a path in the home is under it, never by a path that climbs, stays or has an empty
+    /// part; a sibling whose name starts like the home is outside it.
+    #[test]
+    fn only_a_path_in_the_home_is_under_it() {
+        let home = "/Users/dev";
+        assert_eq!(under_home(home, "/Users/dev/a/b.png").as_deref(), Some("a/b.png"));
+        assert_eq!(under_home(home, "/Users/dev/a/").as_deref(), Some("a"));
+        assert_eq!(under_home("/Users/dev/", "/Users/dev/a").as_deref(), Some("a"));
+        assert_eq!(under_home(home, "/Users/dev").as_deref(), Some(""));
+        assert_eq!(under_home(home, "/Users/dev/").as_deref(), Some(""));
+        for outside in
+            ["/Users/devops/x", "/tmp/x", "/Users/dev/../root", "/Users/dev//x", "/Users/dev/./x"]
+        {
+            assert_eq!(under_home(home, outside), None, "{outside}");
+        }
+    }
+}

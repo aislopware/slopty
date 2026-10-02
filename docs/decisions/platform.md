@@ -581,11 +581,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Signing.** `cargo xtask bundle` builds the extension, writes its `Info.plist`, and signs
     it under `dev.aislopware.slopty.files` with its entitlements before the app, which takes
     the group too.
-  - **Not yet.** A download cut by a relink starts again from its first byte. A folder of more
-    than 2000 entries shows its first 2000 (`FOLDER_ENTRIES`), until the listing pages. The
-    fetch's progress moves only at its end. Workers added by address, without a server, are not
-    shown. Pasting copied worker files into Finder, the reason for the 2026-09-25 ruling, needs
-    the roots above and follows.
+  - **A fetch outlives its link.** While a fetch runs, the domain dials its worker again each
+    time the link goes, and the transfer goes on over the new link from what it holds
+    (`docs/decisions/transport.md`, "A download outlives its link"). Pasting copied worker
+    files into Finder, the reason for the 2026-09-25 ruling, uses the roots above
+    (`docs/decisions/audio.md`, "Worker files paste into Finder").
+  - **Not yet.** A folder of more than 2000 entries shows its first 2000 (`FOLDER_ENTRIES`),
+    until the listing pages. The fetch's progress moves only at its end. Workers added by
+    address, without a server, are not shown.
   - Tests: `files::tests` (slopty-platform: the directory, the roots, one domain per worker and
     none for a forgotten one, and no container for a build the team did not sign),
     `finder::tests` (slopty-app: the switch before a worker's home, and each notice),
@@ -595,5 +598,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     home lists, a deeper item is found, a file's bytes come down with its version, a file made,
     changed or removed on the worker reaches the working set, and a missing item, a file asked to
     list, a forgotten worker, another worker at the address and an address nobody answers each
-    fail as the system is told. The switch-on and Finder's own reads are not proved yet: they
-    need a person or a provisioning profile, so they go to a macOS guest (`cargo xtask vm`).
+    fail as the system is told, a fetch goes on once its worker restarts on its port
+    (`a_fetch_goes_on_once_the_worker_is_back`), and a copied file's URL names the domain's
+    file (`a_copied_files_url_in_the_place_is_the_domains_file`). The switch-on and Finder's
+    own reads are not proved yet: they need a person or a provisioning profile, so they go to a
+    macOS guest (`cargo xtask vm`).

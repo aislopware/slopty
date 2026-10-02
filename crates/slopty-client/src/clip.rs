@@ -26,8 +26,8 @@ use tokio::sync::mpsc;
 mod local;
 #[cfg(target_vendor = "apple")]
 pub use local::{
-    Answer, ClipFiles, ClipSync, LinkNow, ShellPaste, file_url_path, file_url_paths, provider,
-    relay,
+    Answer, ClipFiles, ClipSync, LinkNow, Place, ShellPaste, file_url, file_url_path,
+    file_url_paths, provider, relay,
 };
 
 /// Most a link fetches ahead of a paste for one offer.

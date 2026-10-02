@@ -15,8 +15,8 @@
 //! A drag's landing that nothing landed from goes at once ([`Transfers::discard_drag`]).
 //!
 //! A download goes the other way, and resumes the same way: a retried fetch names the bytes the
-//! client holds of each file, and [`Transfers::resume_points`] sends a file from there when
-//! this worker sent that very version of it before, from the start otherwise.
+//! client holds of each file and the version they are of, and [`resume_points`] sends a file from
+//! there while it is still that version, from the start otherwise.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
 use slopty_proto::drag::DragId;
-use slopty_proto::transfer::{Dest, Hash, MAX_FILES, MODE_BITS, partial_of, relative_path};
+use slopty_proto::transfer::{Dest, Hash, Held, MAX_FILES, MODE_BITS, partial_of, relative_path};
 use tokio::sync::{Notify, watch};
 
 /// Progress is reported at most this often per transfer.
@@ -156,35 +156,25 @@ impl Transfer {
     }
 }
 
-/// Most file versions remembered for resuming downloads; the oldest goes first.
-pub const REMEMBERED_SENDS: usize = 4096;
-
-/// Which version of each file downloads sent, so a resume only continues the bytes of the
-/// same version.
-#[derive(Debug, Default)]
-struct Sent {
-    /// By path on this worker: the size and modification time sent, and when (a sequence).
-    files: HashMap<PathBuf, ((u64, WallMs), u64)>,
-    next: u64,
-}
-
-impl Sent {
-    fn same(&self, file: &Outgoing) -> bool {
-        self.files
-            .get(&file.path)
-            .is_some_and(|(version, _at)| *version == (file.size, file.mtime_ms))
-    }
-
-    fn record(&mut self, file: &Outgoing) {
-        self.next = self.next.saturating_add(1);
-        self.files.insert(file.path.clone(), ((file.size, file.mtime_ms), self.next));
-        if self.files.len() > REMEMBERED_SENDS
-            && let Some(oldest) =
-                self.files.iter().min_by_key(|(_path, (_version, at))| *at).map(|(p, _)| p.clone())
-        {
-            self.files.remove(&oldest);
-        }
-    }
+/// Where each of `files` starts in a download: at the bytes the client holds of it (`held`).
+///
+/// A claim counts while it is of the version the file is now (its size and modification time),
+/// else the file starts at 0, so one that changed since starts over. The claim carries its
+/// version, so a resume holds on any link and across a restart of this worker; the client still
+/// checks the whole file against its digest.
+#[must_use]
+pub fn resume_points(files: &[Outgoing], held: &[Held]) -> Vec<u64> {
+    files
+        .iter()
+        .map(|file| {
+            held.iter()
+                .find(|h| h.name == file.name)
+                .filter(|h| {
+                    h.bytes <= file.size && (h.size, h.mtime_ms) == (file.size, file.mtime_ms)
+                })
+                .map_or(0, |h| h.bytes)
+        })
+        .collect()
 }
 
 /// The transfers in flight.
@@ -192,7 +182,6 @@ impl Sent {
 pub struct Transfers {
     drop_root: PathBuf,
     inner: Mutex<HashMap<XferId, Transfer>>,
-    sent: Mutex<Sent>,
     /// Woken on every [`Transfers::begin`]: a file's stream can overtake its transfer's
     /// `Begin`, which rides the control stream.
     begun: Notify,
@@ -267,7 +256,6 @@ impl Transfers {
         Self {
             drop_root,
             inner: Mutex::default(),
-            sent: Mutex::default(),
             begun: Notify::new(),
             ledger: Mutex::default(),
             discarded: Mutex::default(),
@@ -534,26 +522,6 @@ impl Transfers {
         if let Some(t) = self.inner.lock().get(&xfer) {
             t.cancel.send_replace(true);
         }
-    }
-
-    /// Where each of `files` starts in a download: at the bytes the client holds of it (`held`,
-    /// by name) when this worker sent the same version of it (size and modification time)
-    /// before, else at 0, so a file that changed since starts over. Remembers the versions
-    /// sent now for the next resume.
-    pub fn resume_points(&self, files: &[Outgoing], held: &[(String, u64)]) -> Vec<u64> {
-        let mut sent = self.sent.lock();
-        files
-            .iter()
-            .map(|file| {
-                let holds = held.iter().find(|(name, _)| *name == file.name).map(|(_, n)| *n);
-                let at = match holds {
-                    Some(n) if n <= file.size && sent.same(file) => n,
-                    _ => 0,
-                };
-                sent.record(file);
-                at
-            })
-            .collect()
     }
 
     /// Changes to `true` when `xfer` is cancelled.
@@ -972,12 +940,12 @@ mod tests {
         assert!(waiter.await.unwrap());
     }
 
-    /// A retried download continues a held file only when it is the version sent before; a
-    /// changed one, one past its size, or one this worker never sent starts over.
+    /// A retried download continues a held file only when the claim is of the version the file
+    /// is now; a changed one, a claim past its end and an unheld file start over. Nothing of
+    /// this worker's past is asked, so a claim holds after a restart.
     #[test]
-    fn a_download_resumes_only_the_version_it_sent() {
+    fn a_download_resumes_only_the_version_held() {
         let dir = tempfile::tempdir().unwrap();
-        let t = transfers(dir.path());
         let file = |name: &str, size: u64, mtime_ms: u64| Outgoing {
             name: name.to_owned(),
             path: dir.path().join(name),
@@ -985,17 +953,21 @@ mod tests {
             mtime_ms: WallMs::from_millis(mtime_ms),
             mode: 0o644,
         };
-        let first = [file("a", 100, 1), file("b", 50, 1), file("c", 10, 1)];
-        let held = [("a".to_owned(), 40), ("b".to_owned(), 50), ("c".to_owned(), 3)];
-        assert_eq!(t.resume_points(&first, &held), [0, 0, 0], "never sent: from the start");
-        let again = [file("a", 100, 1), file("b", 50, 2), file("c", 10, 1), file("d", 5, 1)];
-        let held = [("a".to_owned(), 40), ("b".to_owned(), 50), ("c".to_owned(), 11)];
+        let held = |name: &str, bytes: u64, size: u64, mtime_ms: u64| Held {
+            name: name.to_owned(),
+            bytes,
+            size,
+            mtime_ms: WallMs::from_millis(mtime_ms),
+        };
+        let now = [file("a", 100, 1), file("b", 50, 2), file("c", 10, 1), file("d", 5, 1)];
+        let claims = [held("a", 40, 100, 1), held("b", 50, 50, 1), held("c", 11, 10, 1)];
         assert_eq!(
-            t.resume_points(&again, &held),
+            resume_points(&now, &claims),
             [40, 0, 0, 0],
             "the same version resumes; a newer one, a claim past the end, an unheld one do not"
         );
-        assert_eq!(t.resume_points(&again, &[("b".to_owned(), 50)]), [0, 50, 0, 0]);
+        assert_eq!(resume_points(&now, &[held("b", 50, 50, 2)]), [0, 50, 0, 0], "held whole");
+        assert_eq!(resume_points(&now, &[held("a", 40, 99, 1)]), [0, 0, 0, 0], "another size");
     }
 
     #[test]

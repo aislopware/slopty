@@ -168,7 +168,7 @@ fn a_worker_offer_lands_as_text_and_promises_and_is_never_announced_back() {
             vec![lazy(ClipType::Apple("com.adobe.pdf".to_owned()))],
         ],
     );
-    sync.receive(studio, &offer, provide);
+    sync.receive(studio, &offer, provide, None);
     assert_eq!(board.data(TEXT_UTI).as_deref(), Some(&b"from the worker"[..]));
     assert_eq!(board.promised(), ["public.png"]);
     assert_eq!(board.items()[1], ["com.adobe.pdf"], "the second item");
@@ -184,7 +184,7 @@ fn a_worker_offer_lands_as_text_and_promises_and_is_never_announced_back() {
 #[test]
 fn the_same_contents_coming_back_unstamped_are_not_echoed() {
     let (board, mut sync, me, studio) = setup();
-    sync.receive(studio, &worker_offer(1, vec![vec![text_rep("ping")]]), noop());
+    sync.receive(studio, &worker_offer(1, vec![vec![text_rep("ping")]]), noop(), None);
     // Universal Clipboard delivers the worker's copy again, without Slopty's stamp.
     board.copy(&[(TEXT_UTI, b"ping")]);
     assert!(sync.offer_for(studio, me).is_none(), "same digest: an echo");
@@ -203,7 +203,7 @@ fn a_worker_offer_is_relayed_to_another_worker_and_fetched_through_the_first() {
         4,
         vec![vec![text_rep("copied on the studio"), lazy(ClipType::Format(ClipFormat::Png))]],
     );
-    sync.receive(studio, &offer, noop());
+    sync.receive(studio, &offer, noop(), None);
     let relayed = sync.offer_for(laptop, me).expect("offered to the other worker");
     assert_eq!((relayed.origin, relayed.generation), (offer.origin, 4), "origin kept");
     assert_eq!(relayed.items, offer.items);
@@ -223,7 +223,7 @@ fn a_worker_offer_is_relayed_to_another_worker_and_fetched_through_the_first() {
     // A picture relayed this way pastes into the laptop's shell ahead of the chord; into the
     // studio's own shell it is there already.
     let photo = worker_offer(5, vec![vec![lazy(ClipType::Format(ClipFormat::Png))]]);
-    sync.receive(studio, &photo, noop());
+    sync.receive(studio, &photo, noop(), None);
     let ShellPaste::Picture { offer: Some(ahead) } = sync.shell_paste(laptop, me) else {
         panic!("a picture from another worker goes ahead of the chord")
     };
@@ -281,7 +281,7 @@ fn a_concealed_copy_is_offered_without_bytes() {
         concealed: true,
         ..worker_offer(2, vec![vec![lazy(ClipType::Format(ClipFormat::Text))]])
     };
-    sync.receive(studio, &secret, noop());
+    sync.receive(studio, &secret, noop(), None);
     assert!(board.types().iter().any(|t| t == CONCEALED_UTI), "{:?}", board.types());
 }
 
@@ -308,7 +308,7 @@ fn copied_files_are_offered_as_urls_and_named_for_a_paste() {
         inline: None,
     };
     let theirs = worker_offer(4, vec![vec![url(1), text_rep("a.txt")], vec![url(2)]]);
-    sync.receive(studio, &theirs, noop());
+    sync.receive(studio, &theirs, noop(), None);
     let urls = vec![
         theirs.rep_ref(0, ClipType::Format(ClipFormat::FileUrls)),
         theirs.rep_ref(1, ClipType::Format(ClipFormat::FileUrls)),
@@ -355,7 +355,7 @@ fn a_workers_file_names_never_go_on_this_pasteboard() {
     link.bytes.lock().insert(promised, b"file:///etc/passwd".to_vec());
     let link: Arc<dyn Remote> = Arc::new(link);
     let (_tx, now) = watch::channel(Some(link));
-    sync.receive(studio, &theirs, provider(now, &theirs, Duration::from_secs(1)));
+    sync.receive(studio, &theirs, provider(now, &theirs, Duration::from_secs(1)), None);
     let types: Vec<String> = board.items().into_iter().flatten().collect();
     for bad in [FILE_URL_UTI, "com.apple.finder.node"] {
         assert!(types.iter().all(|t| t != bad), "{bad}: {types:?}");
@@ -364,7 +364,7 @@ fn a_workers_file_names_never_go_on_this_pasteboard() {
     assert_eq!(board.item_data(1, "public.url"), None, "nor one that a promise turns up");
 
     let only_files = worker_offer(7, vec![vec![lazy(ClipType::Format(ClipFormat::FileUrls))]]);
-    sync.receive(studio, &only_files, noop());
+    sync.receive(studio, &only_files, noop(), None);
     assert_eq!(board.items().len(), 1, "one item, for the origin");
     assert!(board.types().iter().any(|t| t == ORIGIN_TYPE));
     assert!(matches!(sync.files(), Some(ClipFiles::Worker { .. })), "named for a paste");
@@ -448,4 +448,49 @@ fn file_urls_become_paths() {
         file_url_paths(b"file:///a\nfile:///b%2Fc"),
         [PathBuf::from("/a"), PathBuf::from("/b/c")]
     );
+}
+
+/// A worker's copied files go on this pasteboard as their URLs in the worker's place here
+/// (its File Provider domain), escaped as Finder writes them, a folder still a folder: a paste
+/// in Finder takes them from there. One outside the worker's home, which the place does not
+/// hold, goes on as nothing, and a paste into a worker still moves them all.
+#[test]
+fn a_workers_files_go_on_as_their_place_here() {
+    let (board, mut sync, _me, studio) = setup();
+    let place = Place {
+        home: "/Users/dev".to_owned(),
+        root: PathBuf::from("/Users/me/Library/CloudStorage/Slopty-studio"),
+    };
+    let url = |text: &str| Rep {
+        kind: ClipType::Format(ClipFormat::FileUrls),
+        size: Some(text.len() as u64),
+        hash: Some(digest(text.as_bytes())),
+        inline: Some(text.as_bytes().to_vec()),
+    };
+    let theirs = worker_offer(
+        3,
+        vec![
+            vec![text_rep("a b.txt"), url("file:///Users/dev/src/a%20b.txt")],
+            vec![url("file:///Users/dev/proj/")],
+            vec![text_rep("hosts"), url("file:///etc/hosts")],
+        ],
+    );
+    sync.receive(studio, &theirs, noop(), Some(&place));
+    let at = |item: usize| board.item_data(item, FILE_URL_UTI).map(String::from_utf8);
+    assert_eq!(
+        at(0),
+        Some(Ok("file:///Users/me/Library/CloudStorage/Slopty-studio/src/a%20b.txt".to_owned()))
+    );
+    assert_eq!(
+        at(1),
+        Some(Ok("file:///Users/me/Library/CloudStorage/Slopty-studio/proj/".to_owned()))
+    );
+    assert_eq!(at(2), None, "outside the home: not in the place");
+    assert_eq!(board.item_data(2, TEXT_UTI), Some(b"hosts".to_vec()), "its name still goes on");
+    assert!(board.types().iter().any(|t| t == ORIGIN_TYPE), "never announced back");
+    let Some(ClipFiles::Worker { worker, urls }) = sync.files() else { panic!("worker files") };
+    assert_eq!((worker, urls.len()), (studio, 3), "a paste into a worker moves them all");
+    let back = file_url_paths(&place.urls_of(b"file:///Users/dev/%C3%BC/x%23y").unwrap());
+    assert_eq!(back, [place.root.join("ü/x#y")], "escaped and read back whole");
+    assert_eq!(place.urls_of(b"file:///Users/dev/../root/x"), None, "a path that climbs");
 }

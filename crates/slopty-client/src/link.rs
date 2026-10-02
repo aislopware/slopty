@@ -33,7 +33,7 @@ use crate::remote::{LinkRemote, Remote};
 #[cfg(target_vendor = "apple")]
 use crate::screen::{ScreenHandle, ScreenRouter, Uplink as ScreenUplink, spawn_screen};
 use crate::tunnel::{Forward, Forwards};
-use crate::xfer::{Table, Uplink, XferError};
+use crate::xfer::{Line, Table, Uplink, XferError};
 
 mod files;
 
@@ -120,6 +120,8 @@ pub struct WorkerLink {
     remote: Arc<dyn Remote>,
     /// What a transfer needs of the link, for [`Self::download`].
     up: Uplink,
+    /// The worker's links in this process, which a download follows past this one.
+    line: Arc<Line>,
     /// The link's transfers, for [`Self::hold_uploads`].
     xfers: Arc<Table>,
     /// Closed with the link, so a paste waiting on it stops at once.
@@ -339,8 +341,11 @@ impl WorkerLink {
 
         let xfers = Arc::clone(&table);
         let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table };
+        let line = Line::of(ack.worker);
+        line.linked(up.clone());
         let remote = Arc::new(LinkRemote::new(
             up.clone(),
+            Arc::clone(&line),
             Arc::clone(&clips),
             events_tx,
             tokio::runtime::Handle::current(),
@@ -359,6 +364,7 @@ impl WorkerLink {
             runtime: tokio::runtime::Handle::current(),
             remote,
             up,
+            line,
             xfers,
             clips,
             copies_taken,
@@ -367,24 +373,32 @@ impl WorkerLink {
     }
 
     /// Bring the worker's `path` (a file, or a directory as its files) into the directory
-    /// `into` as transfer `xfer`, for a caller that awaits it rather than blocking on it. It
-    /// stops with the link, or when `self.remote().cancel(xfer)` is called: a File Provider's
-    /// fetch, which Finder may cancel.
+    /// `into` as transfer `xfer`, for a caller that awaits it rather than blocking on it: a
+    /// File Provider's fetch, which Finder may cancel. Should this link go, it goes on over the
+    /// next link to the worker ([`Line`]), which the caller dials. It stops when
+    /// `self.remote().cancel(xfer)` or [`Line::cancel`] is called.
     ///
     /// # Errors
     ///
-    /// As [`crate::xfer::download`], and [`XferError::LinkClosed`] once the link is gone.
+    /// As [`crate::xfer::download`].
     pub async fn download(
         &self,
         xfer: XferId,
         path: String,
         into: std::path::PathBuf,
     ) -> Result<Vec<std::path::PathBuf>, XferError> {
-        let conn = self.conn.clone();
-        tokio::select! {
-            landed = crate::xfer::download(&self.up, xfer, path, into, None) => landed,
-            () = async { conn.closed().await; } => Err(XferError::LinkClosed),
-        }
+        crate::xfer::download(&self.up, &self.line, xfer, path, into, None).await
+    }
+
+    /// Resolves once the connection is closed, from either end.
+    pub async fn closed(&self) {
+        self.conn.closed().await;
+    }
+
+    /// Whether the connection is closed already.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.conn.close_reason().is_some()
     }
 
     /// Frames shown from their datagram copy because it came before the session stream's.

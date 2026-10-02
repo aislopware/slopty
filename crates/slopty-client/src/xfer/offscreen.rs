@@ -3,12 +3,12 @@
 //! the file it lands as, in Finder.
 //!
 //! The work begins where [`super::upload`] or [`super::download`] starts and ends where it
-//! returns. A person cancelling it from the Live Activity or Finder cancels the transfer as the
-//! UI's cancel does: its tasks stop at their next chunk and the worker is told.
+//! returns, across every relink in between. A person cancelling it from the Live Activity or
+//! Finder cancels the transfer as the UI's cancel does: its tasks stop at their next chunk and
+//! the worker is told.
 
 use std::sync::{Arc, Weak};
 
-use parking_lot::Mutex;
 use slopty_core::XferId;
 use slopty_net::ClientMsg;
 use slopty_platform::continued::Work;
@@ -42,43 +42,35 @@ pub(super) fn upload(
     list: &[Entry],
 ) -> Offscreen {
     let (title, subtitle) = upload_titles(list);
-    let current = Arc::new(Mutex::new(xfer));
-    Offscreen(Arc::new(Work::begin(&title, &subtitle, None, cancel(table, out, xfer, current))))
+    Offscreen(Arc::new(Work::begin(&title, &subtitle, None, cancel(table, out, xfer))))
 }
 
-/// Begin the work of a download of `path` as `xfer`, shown on the file `shown_at` when it
-/// lands as one; `current` is its attempt now, which a retry moves on.
+/// Begin the work of a download of `path`, shown on the file `shown_at` when it lands as one;
+/// `cancel` stops the download, on whichever link it is by then.
 pub(super) fn download(
-    table: &Arc<Table>,
-    out: &mpsc::Sender<ClientMsg>,
-    xfer: XferId,
     path: &str,
     shown_at: Option<&std::path::Path>,
-    current: Arc<Mutex<XferId>>,
+    cancel: impl Fn() + Send + Sync + 'static,
 ) -> Offscreen {
     let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
     let title = format!("Downloading {name}");
-    let cancel = cancel(table, out, xfer, current);
     Offscreen(Arc::new(Work::begin(&title, "From the worker", shown_at, cancel)))
 }
 
-/// Cancel transfer `xfer` and its attempt now, as the UI's cancel does.
+/// Cancel upload `xfer`, as the UI's cancel does.
 fn cancel(
     table: &Arc<Table>,
     out: &mpsc::Sender<ClientMsg>,
     xfer: XferId,
-    current: Arc<Mutex<XferId>>,
 ) -> impl Fn() + Send + Sync + 'static {
     let table: Weak<Table> = Arc::downgrade(table);
     let out = out.clone();
     move || {
         let Some(table) = table.upgrade() else { return };
-        let now = *current.lock();
-        tracing::info!(%xfer, %now, "transfer cancelled from the system's progress");
+        tracing::info!(%xfer, "transfer cancelled from the system's progress");
         table.cancel(xfer);
-        table.cancel(now);
-        if let Err(e) = out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer: now })) {
-            tracing::debug!(%now, error = %e, "cancel not sent");
+        if let Err(e) = out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer })) {
+            tracing::debug!(%xfer, error = %e, "cancel not sent");
         }
     }
 }
@@ -131,22 +123,18 @@ mod tests {
         assert_eq!(many, ("Uploading 4 files".to_owned(), "a, b and 2 more".to_owned()));
     }
 
-    /// Cancelling from the system's progress stops the attempt the download is on now and
-    /// tells the worker, as the UI's cancel does; once the link's table is gone it does nothing.
+    /// Cancelling an upload from the system's progress stops it and tells the worker, as the
+    /// UI's cancel does; once the link's table is gone it does nothing.
     #[test]
-    fn a_cancel_from_the_system_stops_the_current_attempt() {
+    fn a_cancel_from_the_system_stops_an_upload() {
         let table = Arc::new(Table::default());
         let (out, mut sent) = mpsc::channel(4);
-        let (first, retry) = (XferId::new(), XferId::new());
-        let current = Arc::new(Mutex::new(first));
-        let mut done = table.expect_download(retry, PathBuf::from("/tmp"), Arc::default());
-        let cancel = cancel(&table, &out, first, Arc::clone(&current));
-        *current.lock() = retry;
+        let xfer = XferId::new();
+        let cancel = cancel(&table, &out, xfer);
         cancel();
-        assert!(table.cancelled(first) && table.cancelled(retry));
-        assert!(matches!(done.try_recv(), Ok(Err(super::super::XferError::Cancelled))));
+        assert!(table.cancelled(xfer));
         assert!(
-            matches!(sent.try_recv(), Ok(ClientMsg::Xfer(XferMsg::Cancel { xfer })) if xfer == retry)
+            matches!(sent.try_recv(), Ok(ClientMsg::Xfer(XferMsg::Cancel { xfer: x })) if x == xfer)
         );
         drop(table);
         cancel();

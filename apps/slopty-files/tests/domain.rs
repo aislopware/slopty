@@ -33,10 +33,22 @@ mod tests {
 
     /// ptyd and a worker whose home is `dir/home`, killed with the test.
     struct Daemons {
-        _children: Vec<Child>,
+        _ptyd: Child,
+        worker: Child,
         addr: SocketAddr,
         id: WorkerId,
         home: PathBuf,
+    }
+
+    impl Daemons {
+        /// Stop the worker and start it again on the same port and data directory, as an
+        /// update restarts it: the same worker at the same address.
+        async fn restart_worker(&mut self, dir: &Path) {
+            self.worker.kill().await.unwrap();
+            let (worker, addr) = worker(dir, &self.home, self.addr.port()).await;
+            assert_eq!(addr, self.addr, "back at its address");
+            self.worker = worker;
+        }
     }
 
     fn scrubbed(program: PathBuf, home: &Path) -> Command {
@@ -66,16 +78,27 @@ mod tests {
             }
         });
         ready.await.expect("ptyd listens");
-        let mut worker = scrubbed(bin("slopty-worker"), &home)
+        let (worker, addr) = worker(dir, &home, 0).await;
+        let endpoint = bind_client().unwrap();
+        let hello = Hello { client: ClientId::new(), name: "test".to_owned() };
+        let conn = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello));
+        let id = conn.await.unwrap().unwrap().ack.worker;
+        Daemons { _ptyd: ptyd, worker, addr, id, home }
+    }
+
+    /// The worker on `dir`'s ptyd and data directory, listening on `port` (any when 0), and its
+    /// address on loopback.
+    async fn worker(dir: &Path, home: &Path, port: u16) -> (Child, SocketAddr) {
+        let mut worker = scrubbed(bin("slopty-worker"), home)
             .arg("--ptyd-socket")
-            .arg(&ptyd_sock)
+            .arg(dir.join("ptyd.sock"))
             .arg("--ctl-socket")
             .arg(dir.join("worker.sock"))
             .arg("--data-dir")
             .arg(dir.join("data"))
             .arg("--print-addr")
             .arg("--port")
-            .arg("0")
+            .arg(port.to_string())
             .env(
                 "SLOPTY_PASTEBOARD",
                 format!("dev.aislopware.slopty.files-test.{}", ClientId::new()),
@@ -91,12 +114,7 @@ mod tests {
         let read = tokio::time::timeout(STEP, stdout.read_line(&mut line));
         read.await.expect("the worker prints its address").unwrap();
         let bound: SocketAddr = line.trim().parse().unwrap();
-        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, bound.port()));
-        let endpoint = bind_client().unwrap();
-        let hello = Hello { client: ClientId::new(), name: "test".to_owned() };
-        let conn = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello));
-        let id = conn.await.unwrap().unwrap().ack.worker;
-        Daemons { _children: vec![ptyd, worker], addr, id, home }
+        (worker, SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, bound.port())))
     }
 
     /// A domain of the worker `id`, reached at `addr` by the directory written in `shared`,
@@ -141,6 +159,56 @@ mod tests {
         assert!(landed.starts_with(&into), "{landed:?}");
         let a = listed.iter().find(|i| i.id == "a.txt").unwrap();
         assert_eq!(item.content_version(), a.content_version());
+        drop(daemons);
+    }
+
+    /// A fetch made while the worker restarted (an update) goes on over the next link the
+    /// domain dials, and the file comes down whole: the link the domain held is found gone by
+    /// the fetch itself, which nothing else would dial again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_fetch_goes_on_once_the_worker_is_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemons = daemons(dir.path()).await;
+        let big: Vec<u8> = (0..6_000_000_u32).map(|i| (i % 239) as u8).collect();
+        std::fs::write(daemons.home.join("big.bin"), &big).unwrap();
+        let (domain, _heard) =
+            domain(&dir.path().join("shared"), daemons.id, &daemons.addr.to_string());
+        domain.list(ROOT).await.unwrap();
+        daemons.restart_worker(dir.path()).await;
+
+        let into = dir.path().join("fetched");
+        std::fs::create_dir_all(&into).unwrap();
+        let fetched = tokio::time::timeout(STEP, domain.fetch("big.bin", &into, XferId::new()));
+        let (landed, item) = fetched.await.expect("fetched within the step").unwrap();
+        assert!(std::fs::read(&landed).unwrap() == big, "whole, byte for byte");
+        assert_eq!(item.size, big.len() as u64);
+        drop(daemons);
+    }
+
+    /// A worker's file copied there and written to a client's pasteboard as its URL in the
+    /// worker's place (`slopty_client::clip::Place`) is the domain's item at that path: the
+    /// read a paste in Finder makes brings down its bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_copied_files_url_in_the_place_is_the_domains_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let (domain, _heard) =
+            domain(&dir.path().join("shared"), daemons.id, &daemons.addr.to_string());
+        let root = dir.path().join("CloudStorage/Slopty-studio");
+        let home = daemons.home.to_string_lossy().into_owned();
+        let place = slopty_client::clip::Place { home, root: root.clone() };
+        let copied = slopty_client::clip::file_url(&daemons.home.join("src/main.rs"));
+        let pasted = place.urls_of(copied.as_bytes()).expect("in the home");
+        let urls = slopty_client::clip::file_url_paths(&pasted);
+        let [at] = urls.as_slice() else { panic!("one URL: {urls:?}") };
+        let id = at.strip_prefix(&root).unwrap().to_str().unwrap().to_owned();
+        assert_eq!(id, "src/main.rs");
+
+        let into = dir.path().join("fetched");
+        std::fs::create_dir_all(&into).unwrap();
+        let (landed, item) = domain.fetch(&id, &into, XferId::new()).await.unwrap();
+        assert_eq!(std::fs::read(&landed).unwrap(), b"fn main() {}\n");
+        assert_eq!((item.id.as_str(), item.parent.as_str()), ("src/main.rs", "src"));
         drop(daemons);
     }
 

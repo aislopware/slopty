@@ -22,7 +22,10 @@
 //! digests match what a worker just announced are not announced to it again.
 //!
 //! Copied files are the exception to announcing: their URLs name files on one machine, so a
-//! paste of them moves the files by a transfer ([`ClipSync::files`]).
+//! paste of them into a worker moves the files by a transfer ([`ClipSync::files`]). Where this
+//! device shows a worker's home as a place of its own (a File Provider domain in Finder,
+//! [`Place`]), a worker's copied files go on this pasteboard as their URLs there, so a paste
+//! into Finder or any app here takes them, each fetched from the worker as it is read.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -32,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use slopty_core::ClientId;
 use slopty_platform::pasteboard::{
-    CONCEALED_UTI, Capped, ORIGIN_TYPE, Pasteboard, Provide, TRANSIENT_UTI, Write, WriteItem,
-    carried, clip_type, format_of, uti_of_type, writable,
+    CONCEALED_UTI, Capped, FILE_URL_UTI, ORIGIN_TYPE, Pasteboard, Provide, TRANSIENT_UTI, Write,
+    WriteItem, carried, clip_type, format_of, uti_of_type, writable,
 };
 use slopty_proto::transfer::{
     ClipEntry, ClipFormat, ClipType, Hash, INLINE_CLIP_BYTES, MAX_CLIP_ITEMS, Offer, Peer, Rep,
@@ -81,6 +84,37 @@ pub enum Answer {
     Here(Fetched),
     /// The worker whose offer this client relayed: fetch it from there.
     From(WorkerKey),
+}
+
+/// Where a worker's home shows on this device: the root of its place in the file manager (its
+/// File Provider domain in Finder), whose files are the worker's, fetched as they are read.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Place {
+    /// The worker's home, as its hello said.
+    pub home: String,
+    /// Where its place is rooted on this device.
+    pub root: PathBuf,
+}
+
+impl Place {
+    /// The URLs here of a worker's `public.file-url` representation (its own `file://` URLs,
+    /// one a line): each file's URL in this place. `None` when any of them is outside the
+    /// worker's home, which the place does not hold, or is no file URL at all.
+    #[must_use]
+    pub fn urls_of(&self, bytes: &[u8]) -> Option<Vec<u8>> {
+        let text = std::str::from_utf8(bytes).ok()?;
+        let mut urls = Vec::new();
+        for url in text.lines().filter(|line| !line.is_empty()) {
+            let path = file_url_path(url)?;
+            let under = slopty_proto::folder::under_home(&self.home, path.to_str()?)?;
+            let mut here = file_url(&self.root.join(under));
+            if url.ends_with('/') && !here.ends_with('/') {
+                here.push('/');
+            }
+            urls.push(here);
+        }
+        (!urls.is_empty()).then(|| urls.join("\n").into_bytes())
+    }
 }
 
 /// A worker's link as it is now: whichever connection is up, `None` while none is.
@@ -440,10 +474,18 @@ impl ClipSync {
     /// Worker `from`'s clipboard changed: put its offer here, every item, inline bytes now and
     /// the rest as promises that `provide` keeps. A secret goes on marked concealed and transient,
     /// so no clipboard manager here keeps it. Contents this clipboard already holds are left
-    /// alone. Nothing that names a file goes on ([`writable`]): a worker's path names whatever
-    /// sits there on this machine; its files come by a paste that moves them
-    /// ([`ClipSync::files`]).
-    pub fn receive(&mut self, from: WorkerKey, offer: &Offer, provide: Provide) {
+    /// alone. Nothing that names a file goes on as it is ([`writable`]): a worker's path names
+    /// whatever sits there on this machine. A worker's file in its home goes on as its URL in
+    /// the worker's `place` here, when this device shows one, which a paste in Finder takes as
+    /// a file fetched as it is read ([`Place::urls_of`]). Its files also come by a paste into a
+    /// worker, which moves them ([`ClipSync::files`]).
+    pub fn receive(
+        &mut self,
+        from: WorkerKey,
+        offer: &Offer,
+        provide: Provide,
+        place: Option<&Place>,
+    ) {
         let inline: HashSet<(u16, &ClipType, Hash)> = offer
             .reps()
             .filter_map(|(n, r)| r.inline.as_ref().map(|b| (n, &r.kind, digest(b))))
@@ -467,7 +509,14 @@ impl ClipSync {
             let mut item = WriteItem::default();
             for rep in &entry.reps {
                 let uti = uti_of_type(&rep.kind);
-                if rep.kind.is(ClipFormat::FileUrls) || !writable(uti, rep.inline.as_deref()) {
+                if uti == FILE_URL_UTI {
+                    let here = place.zip(rep.inline.as_deref()).and_then(|(p, b)| p.urls_of(b));
+                    if let Some(here) = here {
+                        item.data.push((FILE_URL_UTI.to_owned(), here));
+                    }
+                    continue;
+                }
+                if !writable(uti, rep.inline.as_deref()) {
                     continue;
                 }
                 match &rep.inline {
@@ -574,6 +623,22 @@ pub fn file_url_path(url: &str) -> Option<PathBuf> {
         }
     }
     Some(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+/// `path` as a `file://` URL: every byte but a letter, a digit and `/-._~` escaped.
+#[must_use]
+pub fn file_url(path: &std::path::Path) -> String {
+    use std::fmt::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut url = String::from("file://");
+    for &b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            url.push(char::from(b));
+        } else {
+            let _infallible = write!(url, "%{b:02X}");
+        }
+    }
+    url
 }
 
 /// The paths a `public.file-url` representation names: its URLs, one per line.

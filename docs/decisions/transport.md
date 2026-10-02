@@ -1460,6 +1460,51 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `Store(serde_json::Error)` is kept for a store that does not parse. A stream's write error
     goes through `NetError::stream`, which keeps its cause chain.
   - Test: `an_unreadable_file_fails_as_local_and_is_not_resumed` (`slopty-client`).
+- ✅ **A download outlives its link** (2026-10-03, readiness audit A9; wire change). A drag
+  into Finder, a saved copy or a File Provider read stopped with `LinkClosed` the moment the
+  link went, and a relink started it again from nothing, though the partial file was on disk.
+  - **A line per worker.** `slopty_client::xfer::Line` is one worker's links in this process,
+    one after another: every `WorkerLink` puts its uplink on its worker's line as it starts
+    (`Line::of(ack.worker)`). A download whose link goes (its connection closed, or its
+    control stream gone) abandons the attempt, waits for its streams to stop, and waits on the
+    line for a link that is up and is not the one it lost. Then it fetches again over that one,
+    naming what it holds. A relink costs no attempt; the three attempts are for cuts, digests
+    and the worker's failures.
+  - **Process-wide, not passed in.** The next link is dialed by whoever dials (the app's
+    redial loop, the File Provider domain), which knows nothing of the transfers the last one
+    carried, and a drag's promise holds the remote it was made with. So the line is found by
+    the worker's id, kept weakly: it lives while a link or a download holds it.
+  - **How long.** Up to `RELINK_WAIT`, five minutes: long enough for a network change, a Mac
+    waking or the worker restarting for an update, and Finder's progress and its cancel stay up
+    meanwhile. Past it the download ends `LinkClosed`.
+  - **Cancel.** A cancel reaches a download on whichever link it is, or while it waits: the
+    line keeps each download's stop by the transfer it began as, and `Remote::cancel`, Finder's
+    progress and the File Provider's cancel all go through `Line::cancel`. The download then
+    calls off the attempt in flight and tells the worker if the link is up.
+  - **The version travels with the claim.** A retried `XferMsg::Fetch` names each held file as
+    a `transfer::Held`: its bytes and the size and modification time its header said. The
+    worker resumes it while the file is still that version and sends it from 0 otherwise
+    (`slopty_worker::xfer::resume_points`). Before, the worker kept the versions it had sent in
+    memory, so a worker that restarted (the common way a worker comes back) knew none and sent
+    every file from its first byte. A client claiming bytes it does not hold only hurts itself:
+    the whole file is checked against the worker's digest.
+  - **The File Provider dials while it waits.** The extension opens its links only when the
+    system asks something, so a fetch waiting on the line would wait for nothing. While a
+    fetch runs, its domain dials the worker again each time the link goes, backing off from 1 s
+    to 10 s (`Domain::keep_linked`). A link the extension holds counts as gone once its
+    connection is closed, not only once its events say so.
+  - Number: the next link's fetch leaves 5 to 7 ms after the link is up, most of it the sync
+    of the partial it claims (`docs/MEASUREMENTS.md`, "a download across a relink").
+  - Uploads still end with their link: their tile and its typed paths live with the link's
+    events, which a relink starts over.
+  - Tests: `a_download_cut_by_a_lost_link_goes_on_over_the_next_link` (the scripted worker
+    closes the link 1.5 MB into 4 MB; the next link's fetch claims the durable bytes of that
+    version, and the file lands with the same BLAKE3 digest),
+    `a_download_waiting_for_its_worker_is_cancelled` (a cancel during the outage ends it at
+    once), `a_download_resumes_only_the_version_held` (slopty-worker),
+    `a_download_resumes_what_the_client_holds_unless_the_file_changed` (the worker daemon),
+    `a_fetch_goes_on_once_the_worker_is_back` (the File Provider domain against a real worker
+    restarted on its port). Golden: `client_xfer_fetch_resumed`.
 - ✅ **Wall-clock times are `WallMs`** (2026-09-28, audit finding 10). A newtype in
   `slopty-core` over milliseconds since the Unix epoch, serialized transparently so no golden
   moved. It covers every wall time on the wire: session starts, file modification times, agent
