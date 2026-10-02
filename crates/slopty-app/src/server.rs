@@ -26,9 +26,21 @@ use crate::{Workspace, net};
 
 /// The status bar's word while the server does not answer.
 pub(crate) const UNREACHABLE: &str = "Server unreachable";
-/// The titlebar's line while the server turns this app away: the tailnet policy grants this
+/// The status bar's line while the server turns this app away: the tailnet policy grants this
 /// device no client role there.
-pub(crate) const NOT_GRANTED: &str = "Server access not granted by the tailnet policy";
+pub(crate) const NOT_GRANTED: &str = "Server needs a tailnet grant for this device";
+/// Said once as the server starts turning this app away: where a grant is added. Headscale
+/// keeps the same grants in its policy file.
+pub(crate) const GRANT_WHERE: &str = "Add a grant for this device in Tailscale's Access controls";
+
+/// The grant that lets the tailnet's members in as clients of a server tagged as discovery
+/// prefers one (`docs/decisions/topology.md`), as the policy file's `grants` takes it.
+pub(crate) fn client_grant() -> String {
+    let (tag, cap) = (slopty_net::discover::SERVER_TAG, slopty_tailnet::policy::CAP);
+    format!(
+        r#"{{"src": ["autogroup:member"], "dst": ["{tag}"], "ip": ["*"], "app": {{"{cap}": [{{"roles": ["client"]}}]}}}}"#
+    )
+}
 
 /// A worker the server says is away is still dialled this often: the server's view of it can
 /// be wrong (its path to the worker broken while this client's works).
@@ -241,7 +253,17 @@ impl Workspace {
             }
             ServerEvent::Unlinked { why } => self.server_down(why, UNREACHABLE, cx),
             ServerEvent::Refused(why) => {
-                self.server_down(why.text().to_owned(), refused_status(why), cx);
+                let status = refused_status(why);
+                // A refused app redials, and each redial is refused again: say it once.
+                if why == Refusal::NotGranted && self.view.read(cx).server_status() != Some(status)
+                {
+                    tracing::warn!(
+                        grant = %client_grant(),
+                        "the server's tailnet policy grants this device no client role; add the grant"
+                    );
+                    self.show_notice(GRANT_WHERE.to_owned(), cx);
+                }
+                self.server_down(why.text().to_owned(), status, cx);
             }
             ServerEvent::Message(msg) => {
                 // The projects are the workspace's to mirror; the directory has no use for them.
@@ -513,6 +535,36 @@ mod tests {
         );
         assert_eq!(failure_status(&at, other()), WorkerStatus::Reconnecting("no answer".into()));
         assert_eq!(refused_status(Refusal::NotGranted), NOT_GRANTED);
+    }
+
+    /// A server that turns this device away says, once and not on every redial, that the
+    /// tailnet policy needs a grant for it and where that is added; the grant names the
+    /// capability the server reads.
+    #[gpui::test]
+    fn a_refused_device_is_told_where_to_grant_it_once(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = crate::tests::shell(cx, &runtime, &dir, true);
+        let said = |cx: &mut gpui::VisualTestContext| {
+            ws.read_with(cx, |ws, cx| {
+                let view = ws.view.read(cx);
+                (view.server_status().map(str::to_owned), view.toast_text())
+            })
+        };
+        ws.update(cx, |ws, cx| ws.server_event(ServerEvent::Refused(Refusal::NotGranted), cx));
+        cx.run_until_parked();
+        assert_eq!(said(cx), (Some(NOT_GRANTED.to_owned()), Some(GRANT_WHERE.to_owned())));
+
+        cx.executor().advance_clock(Duration::from_secs(20));
+        cx.run_until_parked();
+        assert_eq!(said(cx).1, None, "the notice went");
+        ws.update(cx, |ws, cx| ws.server_event(ServerEvent::Refused(Refusal::NotGranted), cx));
+        cx.run_until_parked();
+        assert_eq!(said(cx), (Some(NOT_GRANTED.to_owned()), None), "said once, not per redial");
+
+        let grant: serde_json::Value = serde_json::from_str(&client_grant()).unwrap();
+        assert_eq!(grant["dst"][0], slopty_net::discover::SERVER_TAG);
+        assert_eq!(grant["app"][slopty_tailnet::policy::CAP][0]["roles"][0], "client");
     }
 
     /// A wake names the machine that sent it, and a refusal says why.

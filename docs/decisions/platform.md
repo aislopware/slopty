@@ -211,7 +211,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Not covered.** systemd: the container has no init system, so `slopty worker install`,
     lingering and the logind sleep lock (`no systemd-inhibit; sleep not held`, as designed)
     are still proven only by their Mac-side tests. A real network path, x86_64, and the tests
-    `LINUX_UNTESTED` keeps off the lane are not covered either.
+    `LINUX_UNTESTED` keeps off the lane are not covered either. (Since then: systemd and
+    lingering by `cargo xtask linux deploy`, `workers.md`; inotify, search, uploads, tunnels and
+    x86_64 below, "A Linux worker's files, search, uploads and tunnels".)
 
 - ✅ **This Mac as a worker** (2026-09-28). The app turns the Mac it runs on into a worker, as
   `slopty worker install` does from a shell: "Use this Mac as a worker" is a quiet link under the
@@ -603,3 +605,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     file (`a_copied_files_url_in_the_place_is_the_domains_file`). The switch-on and Finder's
     own reads are not proved yet: they need a person or a provisioning profile, so they go to a
     macOS guest (`cargo xtask vm`).
+
+- ✅ **A Linux worker's files, search, uploads and tunnels are proven in the container, and its
+  crates are tested on a Linux runner** (2026-10-03, readiness audit C5). The Linux worker had
+  run only in the local Docker e2e (a shell, folders, reads, an agent's status, the clipboard),
+  and no gate lane ran on Linux but the tools'.
+  - **Two more live cases** (`crates/slopty-e2e/tests/linux.rs`, `cargo xtask linux e2e`).
+    Files change through `docker exec` as the worker's account, so inotify hears another
+    process write them, as it would an editor.
+    - `a_linux_worker_follows_files_on_inotify_and_searches_them`: a file tile's file, written
+      there, is read again unasked; a folder tile's folder is listed again with a new entry; the
+      file's removal says it is missing; a text search over a tree streams its one match, with
+      the build `.gitignore` names left out.
+    - `an_upload_lands_in_a_linux_shell_and_its_server_is_tunnelled_here`: the app's own link
+      (`WorkerLink::start_forwarding`) uploads 2.5 MB into the shell's directory, read from
+      `/proc/<pid>/cwd`, whole by its digest there; a server the shell starts (perl, which Debian
+      always has) is found by the Linux port scan, forwarded to this Mac's loopback, and echoes
+      through the tunnel.
+    - Numbers: `docs/MEASUREMENTS.md`, 2026-10-03.
+  - **`linux e2e` no longer builds the workspace here first.** Its tests spawn nothing on this
+    Mac, so it sets `SLOPTY_BINS_FRESH` and nextest's setup script returns at once, where it
+    used to build every binary of the workspace with its tests (and fail on any crate another
+    session had half-edited).
+  - **CI's Linux lane** is `docs/decisions/tooling.md`, "The Linux worker is built and tested on
+    a Linux runner".
+
+- ✅ **A server that turns the app away says where the grant goes** (2026-10-03, readiness audit
+  D5). A server on a tagged node, or on another user's, admits a device only with a tailnet grant
+  carrying the client role (`docs/decisions/topology.md`, "Admission asks whois; roles come from
+  grants"). The status bar said only that the policy did not grant it.
+  - The status bar now reads "Server needs a tailnet grant for this device", and the first
+    refusal, not each redial's, shows the notice "Add a grant for this device in Tailscale's
+    Access controls": the admin console's policy file, or Headscale's. Both fit a notice's single
+    line.
+  - The log carries the grant to paste (`slopty_app::server::client_grant`):
+    `{"src": ["autogroup:member"], "dst": ["tag:slopty-server"], "ip": ["*"], "app":
+    {"github.com/aislopware/slopty": [{"roles": ["client"]}]}}`, the tag discovery prefers.
+  - Not yet: a way to copy that grant from the app (a palette command in `slopty-app/src/lib.rs`),
+    and the same words where the server panel's Connect is refused (`net.rs`).
+  - Test: `server::tests::a_refused_device_is_told_where_to_grant_it_once`.
