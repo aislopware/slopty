@@ -248,19 +248,26 @@ fn a_thread_the_server_ranks_counts_once_however_its_worker_is_reached(cx: &mut 
     table(&view, cx, key, vec![own.clone()]);
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 1, "the link's own word");
 
-    let (alone, on_terminal, terminal) = (
+    let (alone, on_terminal, also_on_terminal, terminal) = (
+        slopty_proto::thread::ThreadId::new(),
         slopty_proto::thread::ThreadId::new(),
         slopty_proto::thread::ThreadId::new(),
         SessionId::new(),
     );
-    let ranked = |worker: WorkerId, thread| Ranked {
+    let ranked = |worker: WorkerId, thread, terminal| Ranked {
         at: ThreadAt { worker, thread },
         rung: Rung::NeedsYou,
         since_ms: WallMs::from_millis(1),
+        terminal,
     };
-    let threads =
-        vec![ranked(studio_id, own.id), ranked(laptop_id, alone), ranked(laptop_id, on_terminal)];
-    let tile = Standing::of(threads.iter().filter(|r| r.at.thread == on_terminal));
+    // Two threads in one Claude Code terminal both wait: its agent speaks for both, once.
+    let threads = vec![
+        ranked(studio_id, own.id, None),
+        ranked(laptop_id, alone, None),
+        ranked(laptop_id, on_terminal, Some(terminal)),
+        ranked(laptop_id, also_on_terminal, Some(terminal)),
+    ];
+    let tile = Standing::of(threads.iter().filter(|r| r.terminal == Some(terminal)));
     let ladder = Ladder {
         threads,
         tiles: vec![(TermRef { worker: laptop_id, session: terminal }, tile)],
@@ -282,10 +289,9 @@ fn a_thread_the_server_ranks_counts_once_however_its_worker_is_reached(cx: &mut 
     cx.simulate_click(bell.center(), Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds(leak(format!("inbox-thread-{alone}"))).is_some(), "an inbox row");
-    assert!(
-        cx.debug_bounds(leak(format!("inbox-thread-{on_terminal}"))).is_none(),
-        "its terminal's"
-    );
+    for on_it in [on_terminal, also_on_terminal] {
+        assert!(cx.debug_bounds(leak(format!("inbox-thread-{on_it}"))).is_none(), "its terminal's");
+    }
 
     view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::Connecting, cx));
     cx.run_until_parked();

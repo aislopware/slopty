@@ -750,7 +750,8 @@ mod golden_thread {
         let session = SessionId::from_uuid(Uuid::from_u128(0x5e55));
         let tile = TermRef { worker, session };
         let at = ThreadAt { worker, thread: thread() };
-        let ranked = Ranked { at, rung: Rung::NeedsYou, since_ms: ms(1_500) };
+        let ranked =
+            Ranked { at, rung: Rung::NeedsYou, since_ms: ms(1_500), terminal: Some(session) };
         let standing = Standing {
             rung: Rung::NeedsYou,
             counts: Counts {

@@ -990,14 +990,9 @@ impl WorkspaceView {
 
     /// The server's ladder: where the threads of every worker stand, for those whose own link
     /// is down or was never up, as [`Self::server_agents_replace`] is for their terminals. A
-    /// thread stands on its tile's terminal when it leads that tile, so one whose terminal's
-    /// agent already speaks for it is counted once, by the terminal.
+    /// thread names the terminal its TUI runs in, so one whose terminal's agent already speaks
+    /// for it is counted once, by the terminal.
     pub fn server_ladder(&mut self, ladder: &Ladder, cx: &mut Context<Self>) {
-        let terminals: HashMap<ThreadId, SessionId> = ladder
-            .tiles
-            .iter()
-            .filter_map(|(tile, standing)| Some((standing.top?.thread, tile.session)))
-            .collect();
         let stands: HashMap<ThreadId, ThreadStand> = ladder
             .threads
             .iter()
@@ -1006,7 +1001,7 @@ impl WorkspaceView {
                     worker: super::projects::worker_key(r.at.worker),
                     rung: r.rung,
                     asks: None,
-                    terminal: terminals.get(&r.at.thread).copied(),
+                    terminal: r.terminal,
                     since: r.since_ms,
                 };
                 (r.at.thread, stand)

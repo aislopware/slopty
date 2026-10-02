@@ -280,7 +280,8 @@ fn roots(tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>) -> Vec<Root<
                 let row = table.get(&root)?;
                 let (rung, from) = source(row, &family);
                 let at = ThreadAt { worker: *worker, thread: root };
-                let ranked = Ranked { at, rung, since_ms: from.status.since_ms };
+                let ranked =
+                    Ranked { at, rung, since_ms: from.status.since_ms, terminal: row.terminal };
                 Some(Root { ranked, row })
             })
         })

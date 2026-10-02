@@ -163,6 +163,8 @@ pub struct Ranked {
     pub rung: Rung,
     /// Since when it stands there, by its worker's clock: the longest waiting goes first.
     pub since_ms: WallMs,
+    /// The terminal its TUI runs in, when it has one: whose agent already speaks for it.
+    pub terminal: Option<SessionId>,
 }
 
 /// Where a group of threads stands: a tile's, a worker's, a node's, the fleet's.
