@@ -3119,8 +3119,13 @@ impl ScreenView {
             div().text_color(hsla(s.text_muted)).child("\u{2026}").into_any_element()
         } else {
             let line = SharedString::from(line);
+            // The figures are said as they are drawn, so a screen reader hears them and a
+            // golden can find them to hold out of its comparison.
             div()
+                .id("stream-stats-line")
                 .debug_selector(|| "stream-stats-line".to_owned())
+                .role(gpui::accesskit::Role::Label)
+                .aria_label(line.clone())
                 .whitespace_nowrap()
                 .child(gpui::StyledText::new(line).with_runs(runs))
                 .into_any_element()

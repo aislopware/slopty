@@ -13660,3 +13660,66 @@ comparison on this Mac is made A/B in alternation, as here, never against an old
 # A: git show 08cbf9a4:Cargo.lock > Cargo.lock; B: the lock file at 767e0502
 cargo xtask e2e smooth --filter 'test(/frame_time::the_thread/)'
 ```
+
+## 2026-10-03 — the stream goldens and the late beats
+
+`stream::a_drawn_window_streams_into_its_tile` failed in full `cargo xtask e2e app` runs and
+passed alone. Mac Studio M1 Max, macOS 27.0, other lanes building beside it (load average 7–43).
+Two separate things were behind it.
+
+**The stats golden compared live figures.** The overlay's line ("60 fps · – to glass · 0.5
+Mb/s · RTT 1.0 ms") had no accessibility node, so no mask found it, and one changed digit is
+about 0.15 % of the frame. Every stream golden also still had the icons from before the
+Hugeicons change, 1 698 px (0.338 %) that the 0.4 % tolerance let through. "59 fps" against the
+golden's "60 fps" made 0.485 % and 0.589 %, alone or in the suite. The line is now a `Label`
+node that the golden masks, the four stream goldens were retaken, and their tolerance is the
+chrome's 0.2 %:
+
+| golden | before | after (12 runs: 2 full suites, 10 of the stream tests) |
+| --- | --- | --- |
+| `stream-window` | 0.338 % | 0.000 % |
+| `stream-window-stats` | 0.343–0.589 % | 0.000–0.033 % |
+| `stream-window-popped` | 0.021 % | 0.000 % |
+| `stream-display` | — | 0.000 % |
+
+A run whose overlay said "59 fps" matched the "60 fps" golden at 0.000 %.
+
+**The late heartbeat was measured wrong.** `beat_loop` logged a beat as late when the time
+since the previous *beat* passed four promises (100 ms). On a moving picture no beat goes out
+while video flows, so the time between two beats spans the video between them. The same runs
+logged "late heartbeats" of 116 ms, 268 ms, 857 ms, 2.2 s and 4.0 s with 0 stalls on the client.
+The beat (log, `ScreenStats::beat_gap`, `beat_gap_worst_us`) is now held to the silence it ends,
+from the last datagram of any kind. Measured the same way, the longest silence any beat ended
+was 26.9–35.1 ms in every run (the 25 ms promise plus the loop's tick), at load averages of
+10–23, and no beat was late. On a quiet stream the two measures are the same.
+`video_between_two_beats_is_not_a_late_beat` fails on the old measure.
+
+**The one real stall did not come back.** One full run (before these changes) had a 66 ms
+stall that the client charged to the link ("the link held datagrams the worker had already
+sent"), 2 NACKs, ~450 ms into the stream, as the stripe timer's sessions at 2560 × 1600 finished
+beside the first keyframe. The app suite runs its tests one at a time (`--no-capture`), so no
+other test was beside it. A temporary probe polled the worker's datagram queue every 0.5 ms for
+the first 3 s of each stream. Over 8 runs of the test (5 at load averages of 10–23) and a full
+suite, the queue never held bytes for more than 11 ms (cwnd 19 712 B, the 16-packet floor), and
+those runs and 2 more full suites had 0 stalls. This matches the 2026-09-29 note above (a 136 kB keyframe held 133 ms in QUIC on
+a starved Mac), so it stays the transport's open question, not the screen path's. The test now
+prints the worker's line before its verdict, so a stall's next appearance shows whether the
+worker's own silence covers it.
+
+**A synthetic 4:4:4 test waited on the clock alone.** CI run 37049458626 (a hosted virtual
+Mac) failed `a_full_chroma_stream_arrives_as_444_and_follows_the_rate` with no 4:4:4 picture in
+30 s after the switch back. Its waits (`next_picture`) never ran the geometry tick. When
+VideoToolbox keeps an encode past `ENCODE_STUCK` ("an encode that never returned", above), the
+beat gives the sessions up and only that tick builds new ones. The other synthetic tests already
+waited through `next_or_stopped`, and the three that used `next_picture` now do too. With the
+binaries run from `deps/` (no runner, so every VideoToolbox call was slow) and the screen tests
+10 at a time, all three had failed with `None`. After the change they passed. The 4:4:4 test had
+1 encode given up on, its replacement built at 4:4:4, and the switches took 196 and 166 ms. A
+replacement is built at the chroma in force (`Pipeline::follow_lost`). Through the runner the
+113 screen tests pass in 5.2 s.
+
+```sh
+cargo xtask e2e app                                   # twice; 55 passed each
+cargo xtask e2e app --filter 'test(/^stream::/)'
+cargo nextest run -p slopty-worker --lib -E 'test(/^screen::/)'
+```

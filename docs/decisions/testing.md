@@ -549,6 +549,14 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     the luma range: 0.006–0.015 between runs, a black or misplaced picture is near 1). The
     tile header's health word follows the last second's pacing, which the machine's load
     moves, so it is masked too and asserted through the accessibility tree.
+  - Every live readout is masked by its accessibility node, in pixels and in words: the status
+    bar's rate and frame time, and the stats overlay's figures (2026-10-03). The overlay's line
+    was a run of text with no node, so it was compared pixel for pixel, and "59 fps" against a
+    golden's "60 fps" failed `stream-window-stats` (0.485 % and 0.589 % against 0.4 %). It is
+    a `Label` now, which a screen reader also reads. The 0.4 % had also hidden goldens a day
+    behind the chrome's icons (0.34 % of every stream golden); they were retaken, and the
+    stream goldens hold to the chrome's 0.2 %, since the still desktop's codec rendering moves
+    them by 0 to 0.033 % (`docs/MEASUREMENTS.md`, "the stream goldens and the late beats").
   - The harness runs the binaries from a copy in the temporary directory (`harness::bin_dir`).
     A process whose executable sits in a directory of ~100k entries (`target/…/deps`) pays for
     it in every VideoToolbox session it opens (`tooling.md`, "A test binary's directory, not the

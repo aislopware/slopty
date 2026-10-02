@@ -39,10 +39,11 @@ const FIRST_FRAMES: Duration = Duration::from_secs(90);
 /// Arrival → present on the app's surface, 95th percentile, past which a loopback stream is
 /// broken rather than slow: three periods of a 60 Hz display.
 const PRESENT_P95: Duration = Duration::from_millis(50);
-/// Pixels of a golden outside the moving page allowed to differ. The chrome alone holds to
-/// `MAC_TOLERANCE`; the rest is the codec's rendering of the still desktop and strip, and the
-/// overlay's figures.
-const TOLERANCE: f64 = 0.004;
+/// Pixels of a golden outside the moving page and the live readouts allowed to differ: the
+/// chrome's own `MAC_TOLERANCE`. The codec's rendering of the still desktop and strip differs
+/// by 0 to 0.033 % between runs; at 0.4 %, the old bound, a golden a day behind the chrome's
+/// icons (0.34 %) passed until one live figure tipped it over.
+const TOLERANCE: f64 = slopty_e2e::snapshot::MAC_TOLERANCE;
 /// How far the page's mix of luma may move from the golden's: a scroll changes which lines are
 /// on it by a few percent.
 const PAGE_DISTANCE: f64 = 0.08;
@@ -188,21 +189,37 @@ fn header_status(dump: &Dump, heading: &str) -> PixelRect {
     [px(left), px(hy - 6.0), px((right - left).max(0.0)), px(hh + 12.0)]
 }
 
-/// The readouts a stream keeps live, its rate in the status bar and a stats line's time: what
-/// they say follows the load on this Mac, so a golden masks them, in pixels and in words.
+/// The readouts a stream keeps live, its rate in the status bar and the stats overlay's
+/// figures: what they say follows the load on this Mac (59 fps one run, 60 the next), so a
+/// golden masks them, in pixels and in words.
 fn live_readouts(dump: &Dump) -> Vec<PixelRect> {
     let scale = dump.window.scale;
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window pixels")]
     let px = |points: f32| (points * scale).round().max(0.0) as u32;
     dump.a11y
         .iter()
-        .filter(|n| n.role == "Status")
-        .filter(|n| n.label.as_deref().is_some_and(|l| l.ends_with(" fps") || l.ends_with(" ms")))
+        .filter(|n| n.role == "Status" || n.role == "Label")
+        .filter(|n| n.label.as_deref().is_some_and(is_live))
         .map(|n| {
             let [x, y, w, h] = n.bounds;
             [px(x), px(y), px(w), px(h)]
         })
         .collect()
+}
+
+/// A label made of figures that move: one of its parts, as the readouts join them with " · ",
+/// is a rate or a time.
+fn is_live(label: &str) -> bool {
+    label.split(" \u{b7} ").any(|part| part.ends_with(" fps") || part.ends_with(" ms"))
+}
+
+/// The stats overlay's figures, as it says them: the rate first.
+fn overlay_figures(dump: &Dump) -> Option<String> {
+    dump.a11y
+        .iter()
+        .filter(|n| n.role == "Label")
+        .filter_map(|n| n.label.clone())
+        .find(|l| l.split(" \u{b7} ").next().is_some_and(|rate| rate.ends_with(" fps")))
 }
 
 /// Points the header's own buttons take at its right end, which the status mask leaves out.
@@ -284,6 +301,9 @@ struct WorkerSide {
     encode_p95: u64,
     /// Capture → packetized, the mean.
     packetized: u64,
+    /// Heartbeats sent, and the longest silence one of them ended.
+    beats: u64,
+    beat_worst: u64,
 }
 
 impl WorkerSide {
@@ -291,7 +311,7 @@ impl WorkerSide {
     fn row(&self) -> String {
         format!(
             "captured {} encoded {} refined {} superseded {} dropped {}, encode p50 {} / p95 {} \
-             µs, capture → packetized mean {} µs",
+             µs, capture → packetized mean {} µs, {} beats, the longest silence one ended {} µs",
             self.captured,
             self.encoded,
             self.refined,
@@ -299,7 +319,9 @@ impl WorkerSide {
             self.dropped,
             self.encode_p50,
             self.encode_p95,
-            self.packetized
+            self.packetized,
+            self.beats,
+            self.beat_worst
         )
     }
 }
@@ -321,6 +343,8 @@ async fn worker_side(stack: &Stack, client: &str) -> WorkerSide {
         encode_p50: q("encode", "p50_us"),
         encode_p95: q("encode", "p95_us"),
         packetized: n("latency_sum_us").checked_div(n("encoded")).unwrap_or_default(),
+        beats: n("heartbeats"),
+        beat_worst: n("beat_gap_worst_us"),
     }
 }
 
@@ -348,6 +372,10 @@ async fn a_drawn_window_streams_into_its_tile() {
     let screen = dump.screens[0].clone();
     println!("MEASURE drawn window: {}", row(&screen));
     println!("MEASURE drawn window, UI frames: {}", dump.frames.row());
+    // Before the verdict: a stall's cause is in the worker's line (its longest silence is its
+    // own; the rest of what the client waited through, the link's).
+    let worker = worker_side(&stack, &dump.client).await;
+    println!("MEASURE drawn window, worker: {}", worker.row());
     assert_clean(&screen);
     assert!(
         dump.a11y_node("Heading", Some(&format!("window {}", EDITOR.1))).is_some(),
@@ -357,8 +385,6 @@ async fn a_drawn_window_streams_into_its_tile() {
     // 1280 × 800 points: whatever scale the tile asked for, the stream keeps the window's shape.
     let [w, h] = screen.size;
     assert!((f64::from(w) / f64::from(h) - 1.6).abs() < 0.01, "{w}×{h}");
-    let worker = worker_side(&stack, &dump.client).await;
-    println!("MEASURE drawn window, worker: {}", worker.row());
     // A still picture's refinements are painted as frames and counted apart from the source's.
     let sent = worker.encoded.saturating_add(worker.refined);
     assert!(sent >= screen.frames, "the app painted more than the worker sent: {}", worker.row());
@@ -375,7 +401,13 @@ async fn a_drawn_window_streams_into_its_tile() {
         .await
         .unwrap();
     // The overlay samples once a second: two periods, and its figures are the stream's own.
+    // A screen reader hears them, and that is how the golden finds them to mask.
     tokio::time::sleep(Duration::from_millis(2_200)).await;
+    let dump = drv.dump().await.unwrap();
+    assert!(dump.a11y_node("Status", Some("Stream stats")).is_some(), "{:#?}", dump.a11y);
+    let figures = overlay_figures(&dump);
+    println!("MEASURE stream-window-stats: the overlay says {figures:?}");
+    assert!(figures.as_deref().is_some_and(|f| f.contains(" to glass")), "{figures:?}");
     let distance = golden_stream(drv, &dir, "stream-window-stats", &label, &heading).await;
     assert!(distance <= PAGE_DISTANCE);
     open_command(drv, "Stream stats").await;
@@ -432,7 +464,10 @@ async fn the_drawn_display_streams_into_its_tile() {
     let dump = drv.wait_for("the drawn display's frames", FIRST_FRAMES, shown).await.unwrap();
     let screen = dump.screens[0].clone();
     println!("MEASURE drawn display: {}", row(&screen));
+    let worker = worker_side(&stack, &dump.client).await;
+    println!("MEASURE drawn display, worker: {}", worker.row());
     assert_clean(&screen);
+    let drv = &mut stack.driver;
     assert!(
         dump.a11y_node("Heading", Some(&format!("display Display {DISPLAY}"))).is_some(),
         "{:#?}",

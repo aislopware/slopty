@@ -16,7 +16,6 @@ Terminal │ shell │ ~ %
 Heading │ window Synthetic editor
 Button │ Fullscreen tile
 Button │ Close tile
-Status │ Stream stats
 Button │ Details
 Group │ Status
 Status │ e2e-worker
