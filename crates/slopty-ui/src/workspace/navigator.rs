@@ -3,7 +3,8 @@
 //! It runs from the window's top edge to its bottom, and its top row is the title bar's
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
 //! On a phone, where the title bar has no tabs, *Workspaces* heads the list: a row per
-//! workspace with its tile count, the active one on a plate of its own, then "New workspace".
+//! workspace with its tile count, the active one in the text's tone at the medium weight (the
+//! focused tile's row below is the one selection), then "New workspace".
 //! *Needs you* appears only while an agent waits on the human, *To review* only while one's turn
 //! ended unseen (its row says what it did, else how long it ran), and *Working* only while one
 //! is at its turn (its heading turns the working mark and counts them, its rows tick their
@@ -201,9 +202,6 @@ pub(super) struct NavList {
     autoscroll: Cell<Option<TileRef>>,
     /// The fill under the selected row.
     plate: Plate,
-    /// The fill under the active workspace's row, on a phone: a plate of its own, since the
-    /// focused tile's row below keeps the list's.
-    space_plate: Plate,
 }
 
 impl Default for NavList {
@@ -215,7 +213,6 @@ impl Default for NavList {
             revealed: Cell::default(),
             autoscroll: Cell::default(),
             plate: Plate::default(),
-            space_plate: Plate::default(),
         }
     }
 }
@@ -1772,7 +1769,6 @@ impl WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
-            .child(self.nav.list.space_plate.under_on(theme, moves, Some(self.clock_instant())))
             .child(self.nav.list.plate.under_on(theme, moves, Some(self.clock_instant())))
             .child(rows)
             .into_any_element()
@@ -2024,7 +2020,8 @@ impl WorkspaceView {
     }
 
     /// A workspace in the phone's drawer: its glyph, its name and how many tiles it holds. The
-    /// active one sits on its plate; a press goes there and closes the drawer.
+    /// active one is said by its name's tone and weight, not a fill: the focused tile's row is
+    /// the list's one selection. A press goes there and closes the drawer.
     fn space_row(&self, space: &NavSpace, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -2035,26 +2032,24 @@ impl WorkspaceView {
         };
         let label = SharedString::from(format!("{}, {count}", space.name));
         let ink = if space.active { s.text } else { s.text_secondary };
-        let row = row(
-            theme,
-            kit::Row::One,
-            ElementId::Name(format!("nav-space-{ix}").into()),
-            format!("nav-space-{ix}"),
-            label,
-            space.active,
-        )
-        .map(|row| if space.active { self.nav.list.space_plate.seat(row, ix, theme) } else { row })
-        .child(lead_slot(
-            theme,
-            icon(theme, IconName::PanelsTopLeft, IconSize::Inline, hsla(s.text_muted)),
-        ))
-        .child(
-            title(space.name.clone(), hsla(ink)).when(space.active, |el| {
+        let row =
+            row(
+                theme,
+                kit::Row::One,
+                ElementId::Name(format!("nav-space-{ix}").into()),
+                format!("nav-space-{ix}"),
+                label,
+                false,
+            )
+            .child(lead_slot(
+                theme,
+                icon(theme, IconName::PanelsTopLeft, IconSize::Inline, hsla(s.text_muted)),
+            ))
+            .child(title(space.name.clone(), hsla(ink)).when(space.active, |el| {
                 el.font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
-            }),
-        )
-        .child(readout(theme, space.tiles.to_string()))
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
+            }))
+            .child(readout(theme, space.tiles.to_string()))
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_workspace(ix, cx)));
         row.into_any_element()
     }
 
@@ -2705,11 +2700,6 @@ impl WorkspaceView {
             _ => None,
         };
         self.nav.list.rows.borrow().iter().filter_map(working).collect()
-    }
-
-    /// Where the plate under the phone's active workspace row was drawn in the last frame.
-    pub(super) fn navigator_space_plate(&self) -> Option<gpui::Bounds<gpui::Pixels>> {
-        self.nav.list.space_plate.drawn()
     }
 
     /// Where the navigator's selection plate was drawn in the last frame.

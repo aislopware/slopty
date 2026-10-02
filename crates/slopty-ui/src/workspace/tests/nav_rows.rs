@@ -585,13 +585,15 @@ fn a_resting_agent_reads_its_last_word_and_its_age(cx: &mut TestAppContext) {
 }
 
 /// A phone's title bar has no tabs, so its drawer heads the list with *Workspaces*: a row per
-/// workspace, the active one on a plate of its own, and "New workspace", which goes to the empty
-/// one the layout keeps last. A desktop's navigator has no such section.
+/// workspace, and "New workspace", which goes to the empty one the layout keeps last. A
+/// desktop's navigator has no such section. The active workspace is said by its name's tone,
+/// not a fill: the focused tile's row is the list's one selection, so two rows never both read
+/// as selected.
 #[gpui::test]
 fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let _tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let tile = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     assert!(!shown(cx, "nav-workspaces"), "the title bar's tabs say it on a desktop");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
@@ -603,8 +605,21 @@ fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
     let worker = cx.debug_bounds(leak(format!("nav-worker-{}", studio.key))).expect("the worker");
     assert!(heading.bottom() <= space.top() && space.bottom() <= new.top(), "in that order");
     assert!(new.bottom() <= worker.top(), "above the workers");
-    let plate = view.read_with(cx, |v, _| v.navigator_space_plate()).expect("a plate");
-    assert!((plate.top() - space.top()).abs() < px(0.5), "the active one on it: {plate:?}");
+    let plate = view.read_with(cx, |v, _| v.navigator_plate()).expect("the selection's plate");
+    let focused = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the focused row");
+    assert!((plate.top() - focused.top()).abs() < px(0.5), "under the focused tile: {plate:?}");
+    let fills = [Theme::default().surfaces.overlay, Theme::default().surfaces.raised]
+        .map(|fill| gpui::Background::from(crate::colors::hsla(fill)));
+    let filled = cx.update(|window, _| {
+        let scale = window.scale_factor();
+        let near = |a: f32, b: Pixels| f32::from(b).mul_add(-scale, a).abs() < 1.0;
+        window.painted_quads().into_iter().any(|q| {
+            fills.contains(&q.background)
+                && near(q.bounds.origin.y.0, space.origin.y)
+                && near(q.bounds.size.height.0, space.size.height)
+        })
+    });
+    assert!(!filled, "the active workspace's row has no fill of its own");
     click(cx, "nav-new-space");
     let (active, last) = view.read_with(cx, |v, _| {
         (v.layout().active_workspace(), v.layout().workspaces().len().saturating_sub(1))

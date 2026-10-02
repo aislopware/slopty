@@ -150,6 +150,7 @@ impl WorkspaceView {
             self.crumb(MenuKind::Workspaces, "crumb-workspace", label.into(), cx)
                 .child(
                     div()
+                        .debug_selector(|| "crumb-workspace-name".to_owned())
                         .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
                         .text_color(hsla(s.text))
                         .child(name.clone()),

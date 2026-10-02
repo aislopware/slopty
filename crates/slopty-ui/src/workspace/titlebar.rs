@@ -11,8 +11,9 @@
 //! content, as `MonoCode`'s and Zed's do. A menu fades in as it drops 4 pt from its button, at
 //! once under Reduce Motion.
 //!
-//! On a phone the bar is a navigation bar: the workspace's name alone at the navigation title's
-//! size, what "+" opens folded into "…", and the column marks after the name.
+//! On a phone the bar is a navigation bar: the workspace's name alone, as the breadcrumb's
+//! first segment says it (the body's size, the medium weight), and what "+" opens folded into
+//! "…".
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again.
 
@@ -68,10 +69,6 @@ pub(super) const NEW: &str = "New";
 
 /// Keyboard hints where there is a keyboard with a ⌘ key.
 const SHORTCUT_HINTS: bool = cfg!(target_os = "macos");
-
-/// How much bigger than the body the phone's workspace name is: the iOS navigation title's
-/// 17 over the body's 15.
-const PHONE_TITLE_STEP: f32 = 2.0;
 
 /// What a menu row runs, on the workspace itself.
 type MenuAction = fn(&mut WorkspaceView, &mut Window, &mut Context<WorkspaceView>);
@@ -362,9 +359,10 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// A phone's title: the active workspace's name at the navigation title's size and the
-    /// strong weight, as an iOS navigation bar names its screen. The navigator and a swipe go
-    /// between workspaces; a row of tabs has no room at this width.
+    /// A phone's title: the active workspace's name, as an iOS navigation bar names its screen,
+    /// at the size and weight the breadcrumb names it in on a wider window: the chrome has no
+    /// display type. The navigator and a swipe go between workspaces; a breadcrumb has no room
+    /// at this width.
     fn render_phone_title(&self) -> gpui::AnyElement {
         let ix = self.layout.active_workspace();
         let theme = &self.theme;
@@ -379,8 +377,8 @@ impl WorkspaceView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_size(px(theme.typography.title() + PHONE_TITLE_STEP))
-            .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
+            .text_size(px(theme.typography.ui_size))
+            .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(theme.surfaces.text))
             .child(SharedString::from(self.workspace_name_at(ix)))
             .into_any_element()

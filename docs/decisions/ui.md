@@ -4870,9 +4870,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     means something else, its nearer drawing is taken: the arrows are its `-02` shafts (its
     `-01` are chevrons), the plain file `file-empty-02`, the terminal `command-line` (its
     `square-terminal` is a squircle with a dot of a prompt), activity `pulse-01`, maximize
-    `arrow-expand-01` (its `maximize` are hands). A lint-as-test fails on any `IconName` the
-    chrome names that Hugeicons does not draw, which is how case-sensitive, eye, git-merge,
-    layout-dashboard and minus were found falling back.
+    `arrow-expand-01` (its `maximize` are hands), pencil `pencil-edit-01` (its `pencil` is a
+    crayon tip up, which read as a vector pen tool where a tile is named; amended 2026-10-03).
+    A lint-as-test fails on any `IconName` the chrome names that Hugeicons does not draw, which
+    is how case-sensitive, eye, git-merge, layout-dashboard and minus were found falling back.
   - **A file shows its type.** Material Icon Theme's drawings (MIT, `assets/file-types/
     LICENSE`), 55 of them, in their own colours: by the whole name first (Dockerfile,
     README, Cargo.lock, .gitignore), then the extension. A type the set does not draw keeps

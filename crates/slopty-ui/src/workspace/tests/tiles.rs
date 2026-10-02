@@ -937,20 +937,21 @@ fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
     assert!(quads.iter().any(|q| q.border_color == accent), "the ring in the full accent");
 }
 
-/// On a phone the bar names the workspace as a navigation bar does, at 17 pt in the strong
-/// weight, with no "+": what it opened leads the "…" menu.
+/// On a phone the bar names the workspace as a navigation bar does, at the size the breadcrumb
+/// names it in on a wider window (no display type in the chrome), with no "+": what it opened
+/// leads the "…" menu.
 #[gpui::test]
 fn a_phone_bar_is_a_navigation_bar(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let _shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    let crumb = cx.debug_bounds("crumb-workspace-name").expect("the breadcrumb's name");
     cx.simulate_resize(size(px(390.0), px(844.0)));
     cx.run_until_parked();
     assert!(cx.debug_bounds("new-menu").is_none(), "no +");
     let name = cx.debug_bounds("ws-tab-0").expect("the name");
     assert!(cx.debug_bounds("breadcrumb").is_none(), "the name alone, no breadcrumb");
-    let theme = Theme::default();
-    assert!(f32::from(name.size.height) >= theme.typography.title() + 2.0, "{name:?}");
+    assert!((name.size.height - crumb.size.height).abs() < px(0.5), "{name:?} {crumb:?}");
     click(cx, "more");
     cx.update(|window, _cx| window.set_a11y_active(true));
     view.update(cx, |_, cx| cx.notify());
