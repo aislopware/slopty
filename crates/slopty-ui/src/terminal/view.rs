@@ -1573,8 +1573,9 @@ impl TerminalView {
     /// One row over the grid's top naming the command whose output the viewport is inside,
     /// so a long output is never anonymous; a click scrolls its prompt back to the top. It sits
     /// on the head surface the prompt rows had in the grid. Its
-    /// text starts at the grid's first column, and a failed block carries its bar and wash on
-    /// up into it. Under the pointer it shows the block's facts in place of the duration.
+    /// text starts at the grid's first column, and a failed block carries its bar and its
+    /// head's wash on up into it: the header stands for the head scrolled away. Under the pointer
+    /// it shows the block's facts in place of the duration.
     fn render_block_header(
         &self,
         block: &BlockHead,
@@ -1651,8 +1652,9 @@ impl TerminalView {
         )
     }
 
-    /// Whether the newest finished command failed and its block shows in the grid, washed and
-    /// barred: the tile's header then leaves the failure to the grid rather than mark it twice.
+    /// Whether the newest finished command failed and its block shows in the grid, barred and
+    /// its head washed: the tile's header then leaves the failure to the grid rather than mark
+    /// it twice.
     /// Two prompt lookups, so a frame can ask it of every tile.
     #[must_use]
     pub fn failure_in_view(&self) -> bool {
@@ -1756,7 +1758,7 @@ impl TerminalView {
         let rows = prompt.0.saturating_sub(self.state.index_at_row(0).0);
         let row = u16::try_from(rows).unwrap_or(u16::MAX).min(m.rows.saturating_sub(1));
         let inset = px(theme.spacing.inset() * self.zoom);
-        // Over a failed block's wash the facts sit on the band itself: a chip of its own there
+        // Over a failed block's head the facts sit on its wash itself: a chip of its own there
         // would be a lighter patch cut out of the one mark that says the command failed.
         let on_band = self.state.block_exit(prompt).is_some_and(|code| code != 0);
         Some(
@@ -4524,10 +4526,13 @@ mod tests {
         out
     }
 
-    /// The view rows a failed block covers, as `(first row, rows)`: the error bar down the
-    /// element's left edge and the wash edge to edge, as the block separators run, read from
-    /// the scene. Each bar must have its wash.
-    fn failed_bands(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> Vec<(u16, u16)> {
+    /// View rows as `(first row, rows)` bands.
+    type Bands = Vec<(u16, u16)>;
+
+    /// The view rows a failed block covers: the error bar down the element's left edge, and
+    /// the wash edge to edge over its head, as the block separators run, read from the scene.
+    /// The bars, then the washes.
+    fn failed_marks(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> (Bands, Bands) {
         let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
         let (metrics, zoom) =
             view.read_with(cx, |view, _| (view.metrics.expect("laid out"), view.zoom));
@@ -4558,8 +4563,59 @@ mod tests {
             let band = (first, rows);
             if bar { bars.push(band) } else { washes.push(band) }
         }
-        assert_eq!(bars, washes, "every bar has its wash");
+        (bars, washes)
+    }
+
+    /// The view rows the failed blocks' bars cover; a block with only its head in view is
+    /// washed where it is barred.
+    fn failed_bands(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> Vec<(u16, u16)> {
+        let (bars, washes) = failed_marks(view, cx);
+        assert_eq!(bars, washes, "a head alone is washed where it is barred");
         bars
+    }
+
+    /// A failed block is marked quietly: the error bar runs down its left edge over every row
+    /// of it, and only its head (the prompt and the command) is washed; its output keeps the
+    /// program's own background, so a long failure never fills the tile with the error tone.
+    #[gpui::test]
+    fn a_failed_blocks_output_keeps_its_background(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let prompt = |exit| SemanticMark::Prompt { exit, input: Some(2) };
+        let screen =
+            [("$ make", prompt(None)), ("error: x", SemanticMark::Output), ("$ ", prompt(Some(2)))];
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 10,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    above: None,
+                    blocks: None,
+                    images: Vec::new(),
+                    updates: screen
+                        .iter()
+                        .enumerate()
+                        .map(|(row, (text, mark))| RowUpdate {
+                            row: u16::try_from(row).unwrap(),
+                            line: marked(text, *mark).into(),
+                        })
+                        .collect(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let (bars, washes) = failed_marks(&view, cx);
+        assert_eq!(bars, vec![(0, 2)], "the bar down the whole block");
+        assert_eq!(washes, vec![(0, 1)], "the wash over its head only");
     }
 
     /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport. A hairline is drawn

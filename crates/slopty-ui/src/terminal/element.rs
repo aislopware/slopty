@@ -134,9 +134,11 @@ pub struct Prepared {
     /// The tops of the hairlines over the prompts that follow a row, and their colour.
     rules: Vec<Pixels>,
     rule: Hsla,
-    /// The failed blocks' rows as `(top, height)` bands: washed edge to edge, a bar at the
-    /// left edge.
+    /// The failed blocks' rows as `(top, height)` bands: a bar at the left edge.
     failed: Vec<(Pixels, Pixels)>,
+    /// The failed blocks' heads (their prompt and command rows) as `(top, height)` bands,
+    /// washed edge to edge.
+    failed_heads: Vec<(Pixels, Pixels)>,
     /// The failed blocks' wash and bar colours, and the bar's width.
     failed_look: FailedLook,
     /// Text drawn over the grid: the input method's composition and the "took" captions.
@@ -594,10 +596,34 @@ fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
     if wide { 2 } else { 1 }
 }
 
+/// The rows of `runs` (the failed blocks' rows in view) that are a block's head: a prompt's
+/// rows and the command typed at it, as `marks` (each view row's) say, in runs.
+fn head_runs(
+    runs: &[std::ops::Range<u16>],
+    marks: &[Option<slopty_grid::SemanticMark>],
+) -> Vec<std::ops::Range<u16>> {
+    use slopty_grid::SemanticMark;
+    let head = |row: u16| {
+        marks
+            .get(usize::from(row))
+            .copied()
+            .flatten()
+            .is_some_and(|mark| mark.is_prompt() || matches!(mark, SemanticMark::Input))
+    };
+    let mut out: Vec<std::ops::Range<u16>> = Vec::new();
+    for row in runs.iter().flat_map(Clone::clone).filter(|row| head(*row)) {
+        match out.last_mut() {
+            Some(last) if last.end == row => last.end = row.saturating_add(1),
+            _ => out.push(row..row.saturating_add(1)),
+        }
+    }
+    out
+}
+
 /// The hairline over a prompt that follows a row: the quieter hairline inside one region, as a
 /// list parts its rows. A block's rows otherwise keep the program's own background: a band
 /// under the prompt painted over what the program drew. A failed block says so with its own
-/// bar and wash ([`FailedLook`]).
+/// bar, and a wash over its head ([`FailedLook`]).
 #[must_use]
 pub(super) fn separator_color(theme: &Theme) -> Hsla {
     hsla(theme.surfaces.border_subtle)
@@ -617,12 +643,14 @@ fn rule_rows(marks: impl Iterator<Item = Option<slopty_grid::SemanticMark>>) -> 
     rows
 }
 
-/// How a block whose command failed is drawn, as Warp does it: a bar of the error fill down
-/// the block's left edge and a faint wash of it over the block, edge to edge as its rules
-/// run, so the band never runs past them.
+/// How a block whose command failed is drawn: a thin bar of the error fill down the block's
+/// left edge, and a faint wash of it over the block's head only (its prompt and command rows),
+/// edge to edge as its rules run. The output keeps the program's own background: washed whole,
+/// a long failure turned the tile into one pink slab, louder than anything that needs the
+/// person, and its red text sat on red.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct FailedLook {
-    /// Over the block's rows, edge to edge.
+    /// Over the block's head rows, edge to edge.
     pub wash: Hsla,
     /// Down the element's left edge, in the inset beside the text.
     pub bar: Hsla,
@@ -1660,14 +1688,15 @@ impl Element for TerminalElement {
             // "took 3.2 s" at the right end of a prompt row whose command took a while.
             let mut captions: Vec<(Point<Pixels>, ShapedLine)> = Vec::new();
             let hovered = view.hovered_block();
-            let failed = state
-                .failed_runs(&rows_view)
-                .into_iter()
-                .map(|run| {
-                    let top = origin.y + line_height * f32::from(run.start);
-                    (top, line_height * f32::from(run.end.saturating_sub(run.start)))
-                })
-                .collect();
+            let runs = state.failed_runs(&rows_view);
+            let band = |run: &std::ops::Range<u16>| {
+                let top = origin.y + line_height * f32::from(run.start);
+                (top, line_height * f32::from(run.end.saturating_sub(run.start)))
+            };
+            let failed = runs.iter().map(band).collect();
+            let marks: Vec<Option<slopty_grid::SemanticMark>> =
+                rows_view.iter().map(|row| row.line.map(|line| line.mark)).collect();
+            let failed_heads = head_runs(&runs, &marks).iter().map(band).collect();
             let failed_look = FailedLook::new(theme, zoom);
             // The alternate screen has no blocks, whatever marks a program leaves on it. From
             // their own pass, not the row loop: deciding them there cost the dense screen's
@@ -2037,6 +2066,7 @@ impl Element for TerminalElement {
                 rules,
                 rule: separator_color(theme),
                 failed,
+                failed_heads,
                 failed_look,
                 overlay,
                 shown: predicted
@@ -2182,13 +2212,15 @@ impl Element for TerminalElement {
         });
         window.paint_quad(fill(bounds, prepared.background));
         let look = prepared.failed_look;
-        // A block spans the tile, as Warp's do: its wash and its hairline run edge to edge, so
-        // they end together whatever width the grid's last column leaves.
-        for &(top, height) in &prepared.failed {
+        // A block spans the tile, as Warp's do: its head's wash and its hairline run edge to
+        // edge, so they end together whatever width the grid's last column leaves.
+        for &(top, height) in &prepared.failed_heads {
             let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
             window.paint_quad(fill(band, look.wash));
-            window
-                .paint_quad(fill(Bounds::new(band.origin, size(look.bar_width, height)), look.bar));
+        }
+        for &(top, height) in &prepared.failed {
+            let bar = Bounds::new(point(bounds.origin.x, top), size(look.bar_width, height));
+            window.paint_quad(fill(bar, look.bar));
         }
         for &top in &prepared.rules {
             let rule = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, px(1.0)));
