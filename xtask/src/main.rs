@@ -27,11 +27,13 @@ mod ios;
 mod land;
 mod linux;
 mod nightly;
+mod pi;
 mod prune;
 mod ptys;
 mod release;
 mod run;
 mod runner;
+mod scrub;
 mod setup;
 mod sign;
 mod soak;
@@ -180,6 +182,11 @@ enum Cmd {
     Codex {
         #[command(subcommand)]
         cmd: codex::CodexCmd,
+    },
+    /// The pinned pi build, and the RPC fixtures recorded from it.
+    Pi {
+        #[command(subcommand)]
+        cmd: pi::PiCmd,
     },
     /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
     E2e(e2e::E2eOpts),
@@ -359,6 +366,7 @@ fn main() -> Result<()> {
         Cmd::E2e(opts) => e2e::run(&sh, &opts),
         Cmd::Fixtures { cmd } => fixtures::run(&cmd),
         Cmd::Codex { cmd } => codex::run(&cmd),
+        Cmd::Pi { cmd } => pi::run(&cmd),
         Cmd::Fmt => gate::fmt(&sh, true),
         Cmd::Lint => gate::lint(&sh),
         Cmd::Test { args } => gate::test(&sh, &args),

@@ -52,6 +52,7 @@ pub mod live;
 pub mod loosening;
 pub mod observed;
 pub mod permission;
+pub mod pi;
 pub mod reports;
 pub mod resume;
 pub mod roster;

@@ -55,6 +55,12 @@ zed itself so it is never behind zed while longbridge lags.
   `target/codex/<version>/`, checked against the registry's sha512; `SLOPTY_CODEX` points at
   another binary of the same pinned version. A Codex bump is the version in `xtask/src/codex.rs`,
   then both commands, and the diff is the wire change.
+- `cargo xtask pi fixtures` records `crates/slopty-agent/tests/fixtures/pi/` from the pinned pi
+  driven over RPC with Slopty's gate, against a canned Messages API, with nothing signed in and
+  nothing fetched by pi. The package comes from npm into `target/pi/<version>/` by `bun
+  install`, checked against the registry's sha512, and runs under `node`; `SLOPTY_PI` points at
+  another `pi` of the same pinned version. A pi bump is the version in `xtask/src/pi.rs` and
+  `slopty_agent::pi::VERSION`, then the command.
 - `cargo xtask linux` cross-builds the terminal-only Linux worker (`slopty-ptyd`,
   `slopty-worker`, `slopty`) for `aarch64-unknown-linux-gnu` under `target/linux`, with
   `cargo zigbuild` (`cargo binstall cargo-zigbuild`; zig is the one libghostty-vt takes).

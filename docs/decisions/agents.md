@@ -521,6 +521,43 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - Not carried yet: starting a Codex thread or its TUI from Slopty (`codex --remote`), the
       models list, images in a user message, and expanding a clipped output.
 
+- ✅ **pi is driven over its RPC mode, with a gate that fails closed by pi's own rule**
+  (2026-10-02, verified against pi 1.0.0, the latest on npm; `crates/slopty-agent/src/pi.rs`,
+  `pi/rpc.rs`, `assets/pi-gate/gate.ts`, `xtask/src/pi/`; `crates/slopty-agent/tests/pi.rs`
+  over `tests/fixtures/pi/gate.jsonl`).
+  - **The gate.** pi has no permission system, so every pi Slopty drives loads one extension,
+    embedded and written under the data directory by its digest as the Claude mod is. Its
+    `tool_call` handler asks about each call through the RPC extension UI: a `select` whose
+    title is the call as JSON (`slopty-gate/1`, the call's id, its tool, its arguments and the
+    tool's own hints), with `allow` and `deny` as the options. Only `allow` lets the call run.
+    A deny may carry the person's reason on the lines after it, and pi gives that reason to
+    the model as the call's result. Anything else blocks the call: a dismissal, an abort, a pi
+    run outside RPC mode. pi itself blocks a call whose `tool_call` handler throws, so a
+    failure of the gate fails closed too. The extension only asks. What to ask the person and
+    what to let through is the worker's to decide.
+  - **As recorded.** pi says a call began (`tool_execution_start`) before the gate asks about
+    it, so a call shows as running, then as waiting on the person. A steer sent while the gate
+    waits is queued (`queue_update`) and goes after the call, as the next user message of the
+    same run. An abort while the gate waits ends the call as "Operation aborted" and settles
+    the run (`agent_settled`) before the abort's own response. pi writes `message_start` from
+    the message it goes on filling, and each `message_update`'s usage from the usage it goes on
+    adding to, so those hold some of what came after them, by timing. A message is built from
+    its deltas and its `message_end`, its usage from the end alone.
+  - **The recording.** `cargo xtask pi fixtures` installs `@earendil-works/pi-coding-agent` at
+    the pinned version with bun under `target/pi/<version>`, its tarball checked against the
+    registry's SHA-512, and runs it under node as its `bin` does. It runs with an environment
+    of nothing but a scratch home, a scratch `PI_CODING_AGENT_DIR`, `PI_OFFLINE`,
+    `PI_SKIP_VERSION_CHECK` and `PI_TELEMETRY=0`. Nothing is signed in, and no credential of
+    this machine is in reach. The model is a canned Messages API on loopback, a provider of its
+    own in the scratch `models.json`. The script is a first prompt with thinking, an allowed
+    command with a steer queued at its gate, a denied one with a reason, and one interrupted at
+    its gate, then the session's entries and stats. The paths, the canned model's address, the
+    host name, every UUID, the session's entry ids and every time are scrubbed, and pi's
+    system prompt is not kept. The starts and updates written by the race above are kept as
+    pi begins them. Three recordings in a row are byte-identical. The tests read every record
+    into the typed records, with none of an unknown kind. What went to pi reads back to the
+    same JSON, and the gate's asks and answers are asserted as recorded.
+
 - ✅ **The thread view carries what the conversation face showed, and its e2e moved with it**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/`;
   `crates/slopty-e2e/tests/app/conversation.rs`, `thread/tests/steps.rs`). A subagent's call

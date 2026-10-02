@@ -1134,7 +1134,10 @@ under `$CODEX_HOME` (else `~/.codex`), follows every thread the daemon holds or 
 `thread/resume`, and sends an approval's answer, a turn, a steer or an interrupt as the Codex
 TUI would. `cargo xtask codex fixtures` records the pinned build speaking to two clients
 against a canned model; the codec's tests map that recording, and the daemon's e2e replays it
-from a stand-in app-server. On the link, `ClientMsg::Thread`
+from a stand-in app-server. pi is driven over its RPC mode: `slopty_agent::pi` embeds the permission
+gate every driven pi loads (`assets/pi-gate/gate.ts`, which asks about each tool call through
+the RPC extension UI and fails closed), and `pi::rpc` reads and writes its LF-framed JSON
+records. `cargo xtask pi fixtures` records the pinned pi against a canned model. On the link, `ClientMsg::Thread`
 carries the requests and the control stream carries the table (`WorkerMsg::Threads`) and each
 intent's outcome (`WorkerMsg::IntentDone`). A followed thread streams on a unidirectional
 stream of its own (`UniHead::Thread`), one task per thread on the worker

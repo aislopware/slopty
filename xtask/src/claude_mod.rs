@@ -368,7 +368,7 @@ fn serve_api(stream: TcpStream) -> Result<()> {
 }
 
 /// A content block the fake model writes, in pieces.
-enum Block {
+pub enum Block {
     Text(&'static [&'static str]),
     Thinking(&'static [&'static str]),
     Tool { id: &'static str, name: &'static str, input: &'static [&'static str] },
@@ -434,7 +434,7 @@ fn usage() -> Value {
 }
 
 /// The answer as a stream of server-sent events.
-fn sse(blocks: &[Block], stop: &str) -> String {
+pub fn sse(blocks: &[Block], stop: &str) -> String {
     let mut events = vec![json!({ "type": "message_start", "message": {
         "id": "msg_fake", "type": "message", "role": "assistant", "model": MODEL,
         "content": [], "stop_reason": null, "stop_sequence": null,
