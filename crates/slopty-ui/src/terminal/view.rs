@@ -29,13 +29,13 @@ use slopty_proto::terminal::{
     PasteChord, Placement, PointerShape, ProgressState, SearchMatch, TermEvent, TermRequest,
     TermSize,
 };
-use slopty_theme::{Theme, alpha};
+use slopty_theme::{Colors, Theme, alpha};
 use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
 use crate::kit::FIND_PLACEHOLDER;
-use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement, head_color};
+use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
 use crate::terminal::scrollbar::Visibility;
 use crate::terminal::{latency, url};
 
@@ -1622,7 +1622,11 @@ impl TerminalView {
                 .items_center()
                 .justify_between()
                 .px(inset)
-                .bg(head_color(theme))
+                // The grid's own background, the program's when it set one: the header stands
+                // where the top row was, parted from the output under it by the block hairline.
+                .bg(hsla(Colors::new(&theme.terminal, self.state.colors()).theme.bg))
+                .border_b_1()
+                .border_color(super::element::separator_color(theme))
                 .font_family(family)
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
@@ -4509,59 +4513,6 @@ mod tests {
         out
     }
 
-    /// The view rows on the head surface, as `(first row, rows)`, each with its index in the
-    /// scene: the bands of [`head_color`] spanning the element edge to edge, on row edges.
-    fn head_bands(
-        view: &Entity<TerminalView>,
-        cx: &mut VisualTestContext,
-    ) -> Vec<((u16, u16), usize)> {
-        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
-        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
-        let head = head_color(&Theme::default());
-        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
-            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
-        };
-        let row_at = |y: gpui::ScaledPixels| {
-            (0..=metrics.rows)
-                .find(|&row| near(y, metrics.origin.y + metrics.line_height * f32::from(row)))
-                .expect("a head band sits on row edges")
-        };
-        quads
-            .iter()
-            .enumerate()
-            .filter(|(_, q)| {
-                near(q.bounds.origin.x, bounds.origin.x)
-                    && near(q.bounds.size.width, bounds.size.width)
-                    && q.background.as_solid() == Some(head)
-            })
-            .map(|(i, q)| {
-                let first = row_at(q.bounds.origin.y);
-                let bottom = gpui::ScaledPixels(q.bounds.origin.y.0 + q.bounds.size.height.0);
-                ((first, row_at(bottom).saturating_sub(first)), i)
-            })
-            .collect()
-    }
-
-    /// The scene index of the first 1 px rule spanning the element on `row`'s top edge.
-    fn rule_index(view: &Entity<TerminalView>, cx: &mut VisualTestContext, row: u16) -> usize {
-        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
-        let metrics = view.read_with(cx, |view, _| view.metrics.expect("laid out"));
-        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let near = |scaled: gpui::ScaledPixels, logical: Pixels| {
-            f32::from(logical).mul_add(-scale, scaled.0).abs() < 0.5
-        };
-        let top = metrics.origin.y + metrics.line_height * f32::from(row);
-        quads
-            .iter()
-            .position(|q| {
-                near(q.bounds.size.height, px(1.0))
-                    && near(q.bounds.size.width, bounds.size.width)
-                    && near(q.bounds.origin.y, top)
-            })
-            .expect("a rule on the row's top edge")
-    }
-
     /// The view rows a failed block covers, as `(first row, rows)`: the error bar down the
     /// element's left edge and the wash edge to edge, as the block separators run, read from
     /// the scene. Each bar must have its wash.
@@ -4600,24 +4551,24 @@ mod tests {
         bars
     }
 
-    /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport. A neutral rule is
-    /// drawn only where a prompt follows a head that printed nothing; a block
-    /// whose command failed wears the error bar and wash over its rows, with the status from
-    /// the prompt below it even when that prompt is out of view.
+    /// ⌘↑ / ⌘↓ put the previous / next prompt at the top of the viewport. A hairline is drawn
+    /// over each prompt below another row, never on the top edge; a block whose command failed
+    /// wears the error bar and wash over its rows, with the status from the prompt below it
+    /// even when that prompt is out of view.
     #[gpui::test]
     fn cmd_up_and_down_walk_the_prompts_and_separators_follow(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
         let theme = Theme::default();
         let rule = separator_color(&theme);
-        assert_eq!(rule, hsla_alpha(theme.terminal.fg, alpha::FAINT));
+        assert_eq!(rule, hsla(theme.surfaces.border_subtle), "the list's quiet hairline");
         let look = FailedLook::new(&theme, 1.0);
         assert_eq!(look.bar, hsla(theme.surfaces.error_fill));
         assert_eq!(look.wash, hsla_alpha(theme.surfaces.error_fill, alpha::FAINT));
         assert_eq!(look.bar_width, px(theme.spacing.xxs), "a 2 pt bar");
 
         assert_eq!(top_line(&view, cx), LineIndex(6), "following output");
-        assert_eq!(separators(&view, cx), vec![], "the newest prompt follows output: its band");
+        assert_eq!(separators(&view, cx), vec![(2, rule)], "over the newest prompt");
         assert_eq!(failed_bands(&view, cx), vec![], "`seq 2` succeeded");
 
         cx.simulate_keystrokes("cmd-up");
@@ -4627,7 +4578,7 @@ mod tests {
 
         cx.simulate_keystrokes("cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(3));
-        assert_eq!(separators(&view, cx), vec![(1, rule)], "`false` printed nothing: two heads");
+        assert_eq!(separators(&view, cx), vec![(1, rule)], "over `seq 2`'s prompt");
         assert_eq!(failed_bands(&view, cx), vec![(0, 1)], "`false` failed: its one row");
 
         cx.simulate_keystrokes("cmd-up");
@@ -4646,13 +4597,11 @@ mod tests {
         assert!(view.read_with(cx, |view, _| view.state.view_offset() == 0), "following again");
     }
 
-    /// A block's head, the rows its command was typed on, sits on the band edge to edge, and
-    /// after output the band's top edge is the only boundary: no rule underlines the output.
-    /// A wrapped command and a two-row prompt are one head; two heads with nothing between
-    /// share a band and a rule parts them, drawn over it; an `Input` row under output is not
-    /// a head.
+    /// A block's rows keep the program's background: no band under its prompt, in any shade.
+    /// A hairline lies over each prompt that follows a row, output or another prompt, and over
+    /// none on the grid's top row; a continued prompt row and an `Input` row get none.
     #[gpui::test]
-    fn a_heads_band_is_its_own_edge_and_a_rule_parts_heads_that_touch(cx: &mut TestAppContext) {
+    fn a_block_paints_no_band_and_a_hairline_parts_it(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         let prompt = |exit, input| SemanticMark::Prompt { exit, input };
         let screen = [
@@ -4696,14 +4645,21 @@ mod tests {
         });
         cx.run_until_parked();
         let theme = Theme::default();
-        assert_eq!(head_color(&theme), hsla(theme.surfaces.band), "the band, not the header's");
-        let heads = head_bands(&view, cx);
-        let bands: Vec<(u16, u16)> = heads.iter().map(|(band, _)| *band).collect();
-        assert_eq!(bands, vec![(0, 2), (3, 3)], "`echo` wrapped; `cd` and the next prompt");
         let rule = separator_color(&theme);
-        assert_eq!(separators(&view, cx), vec![(5, rule)], "only between heads that touch");
-        let (_, band) = heads[1];
-        assert!(rule_index(&view, cx, 5) > band, "the rule lies on the band, not under it");
+        assert_eq!(separators(&view, cx), vec![(3, rule), (5, rule)]);
+        // Nothing edge to edge but the hairlines: the rows are the grid's background.
+        let bounds = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let spanning = quads
+            .iter()
+            .filter(|q| {
+                f32::from(bounds.size.width).mul_add(-scale, q.bounds.size.width.0).abs() < 0.5
+            })
+            .filter(|q| q.bounds.size.height.0 > scale * 1.5)
+            .filter_map(|q| q.background.as_solid())
+            .filter(|c| *c != hsla(theme.terminal.bg))
+            .collect::<Vec<_>>();
+        assert_eq!(spanning, vec![], "no band under a prompt");
     }
 
     /// A block whose prompt rows have scrolled above the viewport keeps its command in a

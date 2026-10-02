@@ -131,12 +131,7 @@ pub struct Prepared {
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
     /// The command blocks' marks on the scrollbar's track, under the thumb, while it shows.
     block_ticks: Vec<(Bounds<Pixels>, Hsla)>,
-    /// The rows each command was typed on, as `(top, height)` bands on the head surface, edge
-    /// to edge ([`head_color`]).
-    heads: Vec<(Pixels, Pixels)>,
-    /// The head surface's colour.
-    head: Hsla,
-    /// The tops of the rules that part two heads with nothing between them, and their colour.
+    /// The tops of the hairlines over the prompts that follow a row, and their colour.
     rules: Vec<Pixels>,
     rule: Hsla,
     /// The failed blocks' rows as `(top, height)` bands: washed edge to edge, a bar at the
@@ -599,41 +594,27 @@ fn cursor_span(line: Option<&slopty_grid::Line>, col: u16) -> u16 {
     if wide { 2 } else { 1 }
 }
 
-/// The rule that parts two heads with nothing between them (a command that printed nothing):
-/// the terminal foreground, faint. A head after output needs none, as the band's own top edge
-/// is the boundary. A failed block says so with its own bar and wash ([`FailedLook`]).
+/// The hairline over a prompt that follows a row: the quieter hairline inside one region, as a
+/// list parts its rows. A block's rows otherwise keep the program's own background: a band
+/// under the prompt painted over what the program drew. A failed block says so with its own
+/// bar and wash ([`FailedLook`]).
 #[must_use]
 pub(super) fn separator_color(theme: &Theme) -> Hsla {
-    hsla_alpha(theme.terminal.fg, alpha::FAINT)
+    hsla(theme.surfaces.border_subtle)
 }
 
-/// The surface under a block's head, the rows its command was typed on: the theme's band, a
-/// step off the content that is not the header's `panel`, so an unfocused tile's header and
-/// its first head do not read as two headers.
-#[must_use]
-pub(super) fn head_color(theme: &Theme) -> Hsla {
-    hsla(theme.surfaces.band)
-}
-
-/// The view rows of the blocks' heads, as runs: prompt rows, and `Input` rows continuing a
-/// command on the head row above them. Heads with nothing between them (a command that
-/// printed nothing) make one run, which their rules part. A row without a line is no head.
-fn head_runs(
-    marks: impl Iterator<Item = Option<slopty_grid::SemanticMark>>,
-) -> Vec<std::ops::Range<u16>> {
-    let mut runs: Vec<std::ops::Range<u16>> = Vec::new();
+/// The view rows a block's hairline goes over: each row a prompt starts on, below a row with a
+/// line. Not on the grid's top row, and not on the first line there is, with nothing above it.
+fn rule_rows(marks: impl Iterator<Item = Option<slopty_grid::SemanticMark>>) -> Vec<u16> {
+    let mut above = false;
+    let mut rows = Vec::new();
     for (row, mark) in (0..u16::MAX).zip(marks) {
-        let Some(mark) = mark else { continue };
-        let continues = runs.last().is_some_and(|run| run.end == row);
-        if !(mark.is_prompt() || (continues && mark == slopty_grid::SemanticMark::Input)) {
-            continue;
+        if above && mark.is_some_and(slopty_grid::SemanticMark::starts_prompt) {
+            rows.push(row);
         }
-        match runs.last_mut() {
-            Some(run) if continues => run.end = row.saturating_add(1),
-            _ => runs.push(row..row.saturating_add(1)),
-        }
+        above = mark.is_some();
     }
-    runs
+    rows
 }
 
 /// How a block whose command failed is drawn, as Warp does it: a bar of the error fill down
@@ -1688,32 +1669,17 @@ impl Element for TerminalElement {
                 })
                 .collect();
             let failed_look = FailedLook::new(theme, zoom);
-            // The alternate screen has no blocks, whatever marks a program leaves on it.
-            let head_rows = if modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
+            // The alternate screen has no blocks, whatever marks a program leaves on it. From
+            // their own pass, not the row loop: deciding them there cost the dense screen's
+            // frame about 100 µs (MEASUREMENTS, "the head band on its own step").
+            let rules = if modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
                 Vec::new()
             } else {
-                head_runs(rows_view.iter().map(|row| row.line.map(|line| line.mark)))
+                rule_rows(rows_view.iter().map(|row| row.line.map(|line| line.mark)))
+                    .into_iter()
+                    .map(|row| origin.y + line_height * f32::from(row))
+                    .collect()
             };
-            // A prompt starts inside a head run only where the head above printed nothing: the
-            // one boundary no band edge draws. From the runs, not the row loop, as the heads are.
-            let rules = head_rows
-                .iter()
-                .flat_map(|run| run.start.saturating_add(1)..run.end)
-                .filter(|&row| {
-                    rows_view
-                        .get(usize::from(row))
-                        .and_then(|r| r.line)
-                        .is_some_and(|line| line.mark.starts_prompt())
-                })
-                .map(|row| origin.y + line_height * f32::from(row))
-                .collect();
-            let heads = head_rows
-                .iter()
-                .map(|run| {
-                    let top = origin.y + line_height * f32::from(run.start);
-                    (top, line_height * f32::from(run.end.saturating_sub(run.start)))
-                })
-                .collect();
             for (i, row) in rows_view.iter().enumerate() {
                 let screen_row = u16::try_from(i).unwrap_or(u16::MAX);
                 let y = origin.y + line_height * f32::from(screen_row);
@@ -2068,8 +2034,6 @@ impl Element for TerminalElement {
                     scrollbar_thumb(&metrics, history, offset).map(|thumb| (thumb, color))
                 }),
                 block_ticks,
-                heads,
-                head: head_color(theme),
                 rules,
                 rule: separator_color(theme),
                 failed,
@@ -2218,13 +2182,8 @@ impl Element for TerminalElement {
         });
         window.paint_quad(fill(bounds, prepared.background));
         let look = prepared.failed_look;
-        // A block spans the tile, as Warp's do: its head, its wash and its rule run edge to
-        // edge, so the bands and the rules end together whatever width the grid's last column
-        // leaves. A failed block's wash lies over its head.
-        for &(top, height) in &prepared.heads {
-            let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
-            window.paint_quad(fill(band, prepared.head));
-        }
+        // A block spans the tile, as Warp's do: its wash and its hairline run edge to edge, so
+        // they end together whatever width the grid's last column leaves.
         for &(top, height) in &prepared.failed {
             let band = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, height));
             window.paint_quad(fill(band, look.wash));

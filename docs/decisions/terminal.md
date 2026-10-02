@@ -3486,3 +3486,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `placements_scrolled_above_the_screen_are_kept_by_line`, `block_marks_follow_the_workers_list`;
     goldens `worker_frame`, `worker_frame_copy`, `worker_frame_images_above`,
     `worker_frame_blocks`.
+
+- ✅ **No band under a block's prompt; a hairline parts the blocks** (2026-10-02, the design
+  review under the "MonoCode leads" ruling of `.research/design-2026-10-02/plan.md`).
+  Supersedes the head band of the two 2026-09-28 entries above. The rows a command was typed
+  on sat on `surfaces.band`, so the shell's prompt row (`~ %`) showed a tint the program never
+  drew. MonoCode keeps colour for meaning and parts regions with hairlines, and a terminal
+  is the program's surface: what Slopty adds should not repaint under its text.
+  - **The rows keep the program's background.** Nothing is painted under a prompt. A failed
+    block keeps its bar and wash, which carry a meaning.
+  - **A hairline over each prompt that follows a row**, output or another prompt, in
+    `surfaces.border_subtle`, the quiet hairline that parts a list's rows (it was the terminal
+    ink at `alpha::FAINT`). None on the grid's top row and none over the first line there is.
+    Where the band's edge was the boundary after output, the hairline is now.
+  - **The sticky header** stands on the grid's own background (the program's, when it set
+    one) with the same hairline under it, so it reads as the top row with a boundary below.
+  - The hairlines come from their own pass over the rows' marks, as the rules did, so the
+    row loop does not pay for them. The frame paints one quad fewer per head on screen.
+  - Tests: view `a_block_paints_no_band_and_a_hairline_parts_it` (no edge-to-edge fill but
+    the grid's background, hairlines at the prompts),
+    `cmd_up_and_down_walk_the_prompts_and_separators_follow`.
