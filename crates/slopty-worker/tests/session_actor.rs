@@ -2452,6 +2452,27 @@ exec sleep 60"#;
         let _killed = child.kill().await;
     }
 
+    /// A drop that reaches the worker after the program stopped asking for drops is told back
+    /// to its viewer, whose drop then goes the way it goes without the protocol.
+    #[tokio::test]
+    async fn a_drop_on_a_program_not_asking_is_told_back() {
+        use slopty_proto::terminal::{DropPoint, DropRep};
+
+        let (session, mut child) = start(&["/bin/sh", "-c", "echo ready; exec sleep 60"]);
+        let (tx, mut rx) = viewer(256);
+        let client = ClientId::new();
+        session.attach(client, size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        let reps = vec![DropRep { mime: "text/uri-list".to_owned(), data: None }];
+        session.request(client, TermRequest::Drop { at: DropPoint::default(), reps }).unwrap();
+        let (seen, _) =
+            wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::DropTarget { .. })))
+                .await;
+        assert!(seen.contains(&TermEvent::DropTarget { accepts: false }), "{seen:?}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// A file dropped on a program that asks for drops (Kitty drag and drop, OSC 72) reaches it
     /// as the worker's copy: the program accepts the drag, asks for the file list on the drop,
     /// waits while the upload finishes, gets the worker path, opens it itself and concludes.
@@ -2459,8 +2480,8 @@ exec sleep 60"#;
     async fn a_dropped_file_reaches_a_program_asking_for_drops_as_the_workers_copy() {
         use std::time::Instant;
 
-        use slopty_engine::{DropOperation, DropPoint, DropRep};
-        use slopty_worker::session::Dropped;
+        use slopty_client::term::DragAnswer;
+        use slopty_proto::terminal::{DropOperation, DropPoint, DropRep};
 
         // Ask for file lists; accept the drag; on the drop ask for the list, open the file it
         // names and keep its bytes; then say the copy is done.
@@ -2481,11 +2502,11 @@ printf '\033]72;t=r:o=1\033\\'
 : > "$0/done"
 exec sleep 60"#;
         let dir = tempfile::tempdir().unwrap();
-        let at = |name: &str| dir.path().join(name);
+        let at_file = |name: &str| dir.path().join(name);
         let (session, mut child) =
             start(&["/bin/bash", "-c", script, dir.path().to_str().unwrap()]);
         let until = |name: &str| {
-            let path = at(name);
+            let path = at_file(name);
             async move {
                 let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
                 while !path.exists() {
@@ -2498,45 +2519,54 @@ exec sleep 60"#;
         let client = ClientId::new();
         session.attach(client, size(40, 6), tx).unwrap();
         let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
-        assert!(session.snapshot().await.unwrap().drop_target, "the program asks for drops");
+        assert!(rx.state.drop_target(), "the program asks for drops");
+        assert!(session.snapshot().await.unwrap().drop_target);
+        // A viewer joining hears it too.
+        let (tx, mut late) = viewer(256);
+        session.attach(ClientId::new(), size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut late, |_, s| text(s).contains("ready")).await;
+        assert!(late.state.drop_target(), "told on attach");
 
-        let point = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
         let uris = "text/uri-list".to_owned();
-        session.drag_over(client, point, vec![uris.clone()]).unwrap();
-        until("moved").await;
-        let deadline = Instant::now().checked_add(Duration::from_secs(10)).unwrap();
-        while session.drop_heard(client).await.unwrap().is_empty() {
-            assert!(Instant::now() < deadline, "the program never answered the drag");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        session.request(client, TermRequest::DragOver { at, mimes: vec![uris.clone()] }).unwrap();
+        let _seen = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropAccepted { .. }))
+        })
+        .await;
         assert_eq!(
-            session.drop_heard(client).await.unwrap(),
-            [Dropped::Accepted { operation: DropOperation::Copy, mimes: vec![uris.clone()] }]
+            rx.state.drag_answer(),
+            Some(&DragAnswer::Accepted {
+                operation: DropOperation::Copy,
+                mimes: vec![uris.clone()]
+            })
         );
+        until("moved").await;
 
         // The drop goes at once; its list comes when the upload has landed on the worker.
-        session.drop_on(client, point, vec![DropRep { mime: uris.clone(), data: None }]).unwrap();
+        let reps = vec![DropRep { mime: uris.clone(), data: None }];
+        session.request(client, TermRequest::Drop { at, reps }).unwrap();
         until("dropped").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!at("got").exists(), "the program waits for the upload");
+        assert!(!at_file("got").exists(), "the program waits for the upload");
         let landed = dir.path().join("landed.txt");
         std::fs::write(&landed, b"uploaded bytes").unwrap();
-        let list = format!("file://{}\r\n", landed.display());
-        session.drop_data(client, uris, Some(list.into_bytes())).unwrap();
+        let list = format!("file://{}\r\n", landed.display()).into_bytes();
+        session.request(client, TermRequest::DropData { mime: uris, data: Some(list) }).unwrap();
+        let _seen = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropConcluded { .. }))
+        })
+        .await;
+        assert_eq!(
+            rx.state.drag_answer(),
+            Some(&DragAnswer::Concluded { operation: DropOperation::Copy })
+        );
         until("done").await;
 
-        assert!(std::fs::read_to_string(at("moved")).unwrap().contains("t=m:x=2:y=1"));
-        assert!(std::fs::read_to_string(at("dropped")).unwrap().contains("t=M:x=2:y=1"));
-        assert_eq!(std::fs::read(at("got")).unwrap(), b"uploaded bytes");
-        let deadline = Instant::now().checked_add(Duration::from_secs(10)).unwrap();
-        loop {
-            let heard = session.drop_heard(client).await.unwrap();
-            if heard.last() == Some(&Dropped::Concluded { operation: DropOperation::Copy }) {
-                break;
-            }
-            assert!(Instant::now() < deadline, "never concluded: {heard:?}");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        assert!(std::fs::read_to_string(at_file("moved")).unwrap().contains("t=m:x=2:y=1"));
+        assert!(std::fs::read_to_string(at_file("dropped")).unwrap().contains("t=M:x=2:y=1"));
+        assert_eq!(std::fs::read(at_file("got")).unwrap(), b"uploaded bytes");
+        assert_eq!(late.state.drag_answer(), None, "the answers are the dragging viewer's");
         session.close();
         let _killed = child.kill().await;
     }

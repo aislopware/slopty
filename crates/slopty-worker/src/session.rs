@@ -164,7 +164,6 @@ enum Cmd {
     Probe { reply: oneshot::Sender<Probe> },
     Memory { reply: oneshot::Sender<Result<Memory, WorkerError>> },
     ShareClipboard { clip: Arc<dyn ForSessions> },
-    Dnd { client: ClientId, act: dnd::Act },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { status: i32 },
     Launch { line: String },
@@ -327,6 +326,20 @@ fn drafts(req: &TermRequest) -> Option<bool> {
     }
 }
 
+/// What the program's clipboard reads are answered from: the worker's clipboard, as far as a
+/// client shares it.
+struct Reads(Arc<dyn ForSessions>);
+
+impl slopty_engine::ClipboardSource for Reads {
+    fn text(&self) -> Option<String> {
+        self.0.shared_text()
+    }
+
+    fn shared(&self) -> bool {
+        self.0.shares()
+    }
+}
+
 /// `at` is past `mark`, or in another line numbering (which replaces it).
 fn ahead(mark: Option<Position>, at: Position) -> bool {
     let place = |p: Position| (p.line, p.col);
@@ -345,7 +358,6 @@ impl std::fmt::Debug for Cmd {
             Self::Probe { .. } => "Probe",
             Self::Memory { .. } => "Memory",
             Self::ShareClipboard { .. } => "ShareClipboard",
-            Self::Dnd { .. } => "Dnd",
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
             Self::Launch { .. } => "Launch",
@@ -1572,11 +1584,11 @@ impl Actor {
                     self.place_due = true;
                     self.prompted = true;
                 }
-                EngineEvent::DropTarget { accepts } => self.drops.target(accepts),
+                EngineEvent::DropTarget { accepts } => self.drop_target(accepts),
                 EngineEvent::DropAccepted { operation, mimes } => {
-                    self.drops.accepted(operation, mimes);
+                    self.drop_accepted(operation, mimes);
                 }
-                EngineEvent::DropConcluded { operation } => self.drops.concluded(operation),
+                EngineEvent::DropConcluded { operation } => self.drop_concluded(operation),
                 EngineEvent::ClipboardWrite { text } => {
                     // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
                     // that would sit ahead of every frame on the session stream.
@@ -1971,6 +1983,9 @@ impl Actor {
         if let Some(restored) = self.restored.clone() {
             self.send_to(client, &TermEvent::Restored(restored));
         }
+        if self.drops.accepts() {
+            self.send_to(client, &TermEvent::DropTarget { accepts: true });
+        }
         if let Some(i) = self.viewers.iter().position(|v| v.client == client) {
             if let Some(v) = self.viewers.get_mut(i) {
                 v.stale = true;
@@ -2118,10 +2133,8 @@ impl Actor {
             Cmd::Memory { reply } => {
                 let _ignored = reply.send(self.engine.memory().map_err(WorkerError::from));
             }
-            Cmd::Dnd { client, act } => self.dnd(client, act),
             Cmd::ShareClipboard { clip } => {
-                let reads = Arc::clone(&clip);
-                self.engine.share_clipboard(Some(Box::new(move || reads.shared_text())));
+                self.engine.share_clipboard(Some(Box::new(Reads(Arc::clone(&clip)))));
                 self.arrivals = Some(clip.arrivals());
                 self.clip = Some(clip);
             }
@@ -2288,6 +2301,14 @@ impl Actor {
             TermRequest::Focus { focused } => {
                 return self.focus(client, focused);
             }
+            TermRequest::DragOver { at, mimes } => {
+                return self.dnd(client, dnd::Act::Over { at, mimes });
+            }
+            TermRequest::DragLeave => return self.dnd(client, dnd::Act::Left),
+            TermRequest::Drop { at, reps } => return self.dnd(client, dnd::Act::Drop { at, reps }),
+            TermRequest::DropData { mime, data } => {
+                return self.dnd(client, dnd::Act::Data { mime, data });
+            }
             TermRequest::FetchLines { start, count } => {
                 match self.engine.lines(start, count.min(MAX_FETCH_LINES)) {
                     Ok((start, lines)) => {
@@ -2387,8 +2408,6 @@ fn premultiplied_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
 
 mod dnd;
 mod paste;
-
-pub use dnd::Dropped;
 
 #[cfg(test)]
 mod tests {

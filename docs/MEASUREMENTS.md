@@ -13075,6 +13075,60 @@ moves both builds' counts (unwired 123 290 to 123 360) and makes the high level 
 12 wired), so `take_frame` at 80×24 has a cost that depends on where its buffers fall. That is
 `take_frame`'s own, and finding it is a follow-up.
 
+## 2026-10-02 — grapheme clustering on by default
+
+Release, mac-studio, other sessions building beside it; each pass ran with the 1-minute load
+under 20 (18.7), before and after back to back. The engine with mode 2027 on from the start
+(`set_default_mode(Mode::GRAPHEME_CLUSTER, true)`) against the same tree without that line.
+`unicode_write_cost` writes a 76-column line and its line break into an 80×24 screen, 500
+times: plain ASCII; CJK (wide); and emoji sequences (a ZWJ family, a flag, a skin tone, a
+combining mark, a variation selector, five times over).
+
+```sh
+cargo nextest run --release -p slopty-engine --run-ignored only -E 'test(unicode_write_cost)' --no-capture
+```
+
+| line | instructions, off | on | wall p50, off | on |
+| --- | --- | --- | --- | --- |
+| ascii | 3 143 | 3 147 to 3 172 | 208 ns | 208 ns |
+| cjk | 4 450 | 4 990 (+12 %) | 292 ns | 292 ns |
+| emoji | 15 715 | 32 981 to 32 995 (×2.1) | 1.0 µs | 2.3 to 2.5 µs |
+
+The whole `_cost` suite, interleaved twice at a load of 17 to 19, moved nothing else:
+`frame_cost.write` 842 off and 821 on, `fill_engine` 31.14 M and 31.11 M, `encode_cost.echo`
+4 149 both. `search_after_output_cost` (only the search is timed) read 1.17 M to 1.21 M off
+and 1.20 M to 1.22 M on over five runs each, overlapping.
+
+## 2026-10-02 — search over soft wraps, and Kitty notifications in the ghostty fork
+
+Release, mac-studio, other sessions building beside it; every pass ran with the 1-minute load
+under 20 (17.7 to 19.9), before and after interleaved. Before is the engine with
+row-by-row search against ghostty `497a316`. After is the engine searching soft-wrapped lines
+as one against ghostty `9cb1c04`, which adds Kitty notifications (OSC 99).
+
+```sh
+cargo nextest run --release -p slopty-engine --run-ignored only -E 'test(search_cost) | test(search_after_output_cost) | test(osc_write_cost) | test(frame_cost)' --no-capture
+```
+
+| series | before | after |
+| --- | --- | --- |
+| `search_cost.50000_lines.plain` (every row hits) | 103.8 M, 6.3 ms | 108.9 M (+4.8 %), 6.7 ms |
+| `search_cost.50000_lines.regex` | 84.0 M | 86.5 M (+2.9 %), 6.1 ms |
+| `search_cost.10000_lines.plain` | 21.6 M | 22.7 M (+4.8 %) |
+| `search_after_output_cost.plain` | 1.21 M | 1.24 M to 1.27 M (+2 to 5 %) |
+
+The rescans above reuse the history's text. A first search also reads each history row's
+soft-wrap flag, once: at a load of 13.5, `search_cost.50000_lines.wraps` is 21.5 M
+instructions and 2.4 ms, against 139 M and 9.9 ms for the format of the same rows (1 000 rows:
+0.19 M; 10 000: 2.3 M). Three changes took the rescan from +40 % to this: no allocation for a
+line of one row, no reference count per hit, and no second pass over the text to find where a
+wrapped tail starts.
+
+Nothing on the write or frame path moved with ghostty `9cb1c04`, over three passes each:
+`osc_write_cost.per_osc` 7 086 to 7 089 before and 7 091 to 7 096 after,
+`scroll_frame_cost.80x24` 123 476 to 123 519 and 123 457 to 123 513. `frame_cost.write` read
+771 to 796 and 823 to 848, inside the 690 to 920 spread it shows run to run.
+
 ## 2026-10-02 — a turn snapshot of this repository
 
 What a turn's snapshot costs the worker (`repo::snapshot::Repo::take`: `git add -A` and

@@ -147,6 +147,17 @@ impl GhosttyEngine {
         }
     }
 
+    /// Whether each of screen rows `first_y..=last_y` soft-wraps into the next, for search to
+    /// read a wrapped line as one.
+    pub(super) fn row_wraps(&self, first_y: u32, last_y: u32) -> Result<Vec<bool>, EngineError> {
+        (first_y..=last_y)
+            .map(|y| {
+                let at = self.term.grid_ref(Point::Screen(PointCoordinate { x: 0, y }))?;
+                Ok(at.row()?.is_wrapped()?)
+            })
+            .collect()
+    }
+
     /// Screen rows `first_y..=last_y` (screen space: history then screen) as plain text, one
     /// line per row with trailing blanks trimmed; blank rows at the end are omitted.
     pub(super) fn plain_rows(&self, first_y: u32, last_y: u32) -> Result<String, EngineError> {

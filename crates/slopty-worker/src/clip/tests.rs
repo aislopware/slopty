@@ -934,7 +934,9 @@ fn a_program_reads_the_shared_text_only_while_it_is_shared() {
     assert!(c.offered(a, copy, Instant::now()));
     assert!(c.mirror(a));
     assert_eq!(c.shared_text_within(1024), None, "nobody shares");
+    assert!(!ForSessions::shares(&c), "so the attributes list no clipboard");
     c.watch(b, true);
+    assert!(ForSessions::shares(&c), "b shares");
     assert_eq!(c.shared_text_within(1024), None, "the copy is a's, and a does not share");
     c.watch(a, true);
     assert_eq!(c.shared_text_within(1024).as_deref(), Some("client copy"));

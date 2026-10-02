@@ -191,8 +191,8 @@ each chunk the engine reads the current fg/bg/cursor/palette against the default
 difference is `TermEvent::Colors(ColorOverrides)` with the whole set (an OSC 104/110/111/112
 reset sends it again without the entry; RIS keeps them, as xterm does). A late attach gets the set ahead of its first
 frame; `slopty_theme::Colors` paints it over the client's theme, ANSI 0–15 and the cube
-alike, and the shaped-word cache keys on it. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty parses
-all three) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
+alike, and the shaped-word cache keys on it. OSC 9, OSC 777 `notify` and OSC 99 desktop notifications (libghostty delivers
+all three through one callback; OSC 99's chunks are put together in the ghostty fork) become `TermEvent::Notification { title, body }`, each field capped at 512 chars;
 the workspace posts them as a notification-centre banner when no window is active, tagged by the
 session so a click reveals the tile, and bounces the Dock like an agent's attention. BEL tints
 the tile's grid for a flash (`TerminalView::bell_flashing`, `alpha::FAINT`) and, when no window
@@ -201,7 +201,8 @@ the Dock.
 
 **Kitty graphics.** libghostty keeps the images (`KITTY_STORAGE_BYTES` per screen; PNG
 decoded through the `png` crate by `slopty_engine::graphics::PngDecoder`) and lays the
-placements out at the client's cell pixels. Every `Frame` lists the placements on the
+placements out at the client's cell pixels. An image comes in the program's output, or as a
+file, a temporary file or shared memory on the worker (`graphics::allow_media`). Every `Frame` lists the placements on the
 viewport (`Frame.images: Vec<Placement>` — cell, offsets, painted size, source rectangle,
 z), and a placement's pixels travel once as `TermEvent::Image` (premultiplied BGRA,
 the texture's format, made on the session actor; sampled down by a whole factor when over

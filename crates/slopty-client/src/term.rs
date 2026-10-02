@@ -8,13 +8,50 @@ use slopty_grid::{
     TermModes,
 };
 use slopty_proto::terminal::{
-    ColorOverrides, Frame, IMAGE_CACHE_BYTES, MAX_FETCH_LINES, Placement, PointerShape, Progress,
-    Restored, SearchMatch, TermEvent, TermRequest, TermSize,
+    ColorOverrides, DropOperation, Frame, IMAGE_CACHE_BYTES, MAX_FETCH_LINES, Placement,
+    PointerShape, Progress, Restored, SearchMatch, TermEvent, TermRequest, TermSize,
 };
 
 /// Lines kept client-side; the worker retains 50k. Past it the lines farthest from the view
 /// go first (see [`Scrollback`]), so what was fetched to be looked at stays.
 pub const CACHE_LINES: usize = 20_000;
+
+/// The MIME type a drop of files is offered to a program as (Kitty drag and drop).
+pub const URI_LIST: &str = "text/uri-list";
+
+/// The `text/uri-list` a program asking for drops is given for `paths`.
+///
+/// `paths` are the worker's copies of the dropped files: one `file://` URL a line, each line
+/// ended by CRLF (RFC 2483). A path that is not absolute is left out. Drops come from the Apple
+/// clients only.
+#[cfg(target_vendor = "apple")]
+#[must_use]
+pub fn uri_list(paths: &[String]) -> Vec<u8> {
+    let mut list = String::new();
+    for url in paths.iter().filter_map(|p| crate::dnd::file_url(std::path::Path::new(p))) {
+        list.push_str(&url);
+        list.push_str("\r\n");
+    }
+    list.into_bytes()
+}
+
+/// What the program said of a client's drag over its terminal (Kitty drag and drop).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DragAnswer {
+    /// The program answered the drag: what a drop would do, and the MIME types it wants,
+    /// most wanted first. [`DropOperation::None`] refuses it.
+    Accepted {
+        /// What a drop would do.
+        operation: DropOperation,
+        /// The types it wants; empty when it did not say.
+        mimes: Vec<String>,
+    },
+    /// The program is done with the drop, having done `operation`.
+    Concluded {
+        /// What it did.
+        operation: DropOperation,
+    },
+}
 
 /// What the UI or connection should do after an event was applied.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -127,6 +164,10 @@ pub struct TermState {
     progress: Progress,
     /// The pointer shape the program asked for (`OSC 22`).
     pointer: PointerShape,
+    /// The program asks for drops (Kitty drag and drop, OSC 72).
+    drop_target: bool,
+    /// What the program last said of this client's drag.
+    drag: Option<DragAnswer>,
     /// The session was reopened after its shell was lost.
     restored: Option<Restored>,
     /// The primary screen's lines while the alternate screen is up, to take back if the
@@ -237,6 +278,8 @@ impl TermState {
             colors: ColorOverrides::default(),
             progress: Progress::default(),
             pointer: PointerShape::Text,
+            drop_target: false,
+            drag: None,
             restored: None,
             parked: None,
             superseded: 0,
@@ -338,6 +381,21 @@ impl TermState {
         self.pointer
     }
 
+    /// Whether the program asks for drops (Kitty drag and drop, OSC 72): a drag over the tile
+    /// then goes to it ([`TermRequest::DragOver`], [`TermRequest::Drop`]) instead of typing
+    /// paths. Changes arrive with no [`Effect`] of their own: read it after [`Self::apply`].
+    #[must_use]
+    pub const fn drop_target(&self) -> bool {
+        self.drop_target
+    }
+
+    /// What the program last said of this client's drag: whether it would take a drop, and
+    /// once dropped, that it is done. Changes arrive with no [`Effect`] of their own.
+    #[must_use]
+    pub const fn drag_answer(&self) -> Option<&DragAnswer> {
+        self.drag.as_ref()
+    }
+
     /// Whether the session was reopened after its shell was lost (a reboot, ptyd ending),
     /// and what it ran before. The divider in the scrollback says so too; this is for chrome
     /// that offers the old command again.
@@ -434,6 +492,10 @@ impl TermState {
         self.in_flight.clear();
         self.parked = None;
         self.relinked = true;
+        // The new stream says so again while the program asks; a restarted worker's program
+        // may not.
+        self.drop_target = false;
+        self.drag = None;
     }
 
     /// Apply one event.
@@ -502,6 +564,18 @@ impl TermState {
             }
             TermEvent::Restored(restored) => {
                 self.restored = Some(restored);
+                Vec::new()
+            }
+            TermEvent::DropTarget { accepts } => {
+                self.drop_target = accepts;
+                Vec::new()
+            }
+            TermEvent::DropAccepted { operation, mimes } => {
+                self.drag = Some(DragAnswer::Accepted { operation, mimes });
+                Vec::new()
+            }
+            TermEvent::DropConcluded { operation } => {
+                self.drag = Some(DragAnswer::Concluded { operation });
                 Vec::new()
             }
             TermEvent::Pointer(pointer) => {
@@ -1271,6 +1345,37 @@ mod tests {
         state.apply(TermEvent::Exited { status: 0 });
         assert_eq!(state.progress(), Progress::default(), "the exit ends the report");
         assert_eq!(state.restored(), Some(&restored));
+    }
+
+    /// Whether the program asks for drops, and its answers to this client's drag, are kept
+    /// until a new stream says them again.
+    #[test]
+    fn the_programs_drop_answers_are_kept_until_a_relink() {
+        let mut state = TermState::new(size());
+        assert!(!state.drop_target());
+        assert_eq!(state.apply(TermEvent::DropTarget { accepts: true }), vec![]);
+        assert!(state.drop_target());
+        let mimes = vec!["text/uri-list".to_owned()];
+        let operation = DropOperation::Copy;
+        assert_eq!(
+            state.apply(TermEvent::DropAccepted { operation, mimes: mimes.clone() }),
+            vec![]
+        );
+        assert_eq!(state.drag_answer(), Some(&DragAnswer::Accepted { operation, mimes }));
+        state.apply(TermEvent::DropConcluded { operation });
+        assert_eq!(state.drag_answer(), Some(&DragAnswer::Concluded { operation }));
+        state.relinked();
+        assert!(!state.drop_target(), "the new stream says it again");
+        assert_eq!(state.drag_answer(), None);
+    }
+
+    /// A drop's files go to the program as `file://` URLs, escaped, one a CRLF-ended line.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_uri_list_names_each_absolute_path_as_a_file_url() {
+        let paths = ["/w/a b.txt".to_owned(), "rel".to_owned(), "/w/ü".to_owned()];
+        assert_eq!(uri_list(&paths), b"file:///w/a%20b.txt\r\nfile:///w/%C3%BC\r\n");
+        assert_eq!(uri_list(&[]), b"");
     }
 
     /// The program's pointer shape is kept from its report, the I-beam until one comes.

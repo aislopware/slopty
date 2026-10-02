@@ -1780,6 +1780,50 @@ mod golden {
         );
     }
 
+    /// Kitty drag and drop (OSC 72): a drag over a program that asks for drops, and its answers.
+    #[test]
+    fn drag_and_drop() {
+        use slopty_proto::terminal::{DropOperation, DropPoint, DropRep};
+        let at = DropPoint { col: 3, row: 2, x: 28, y: 40, copy: true, moves: false };
+        let uris = "text/uri-list".to_owned();
+        let term = |req| ClientMsg::Term { session: session(), req };
+        snap(
+            "client_term_drag_over",
+            &term(TermRequest::DragOver { at, mimes: vec![uris.clone()] }),
+        );
+        snap("client_term_drag_leave", &term(TermRequest::DragLeave));
+        snap(
+            "client_term_drop",
+            &term(TermRequest::Drop {
+                at,
+                reps: vec![
+                    DropRep { mime: uris.clone(), data: None },
+                    DropRep { mime: "text/plain".to_owned(), data: Some(b"a.txt".to_vec()) },
+                ],
+            }),
+        );
+        snap(
+            "client_term_drop_data",
+            &term(TermRequest::DropData {
+                mime: uris.clone(),
+                data: Some(b"file:///w/a.txt\r\n".to_vec()),
+            }),
+        );
+        snap(
+            "client_term_drop_data_gone",
+            &term(TermRequest::DropData { mime: uris.clone(), data: None }),
+        );
+        snap("worker_term_drop_target", &TermEvent::DropTarget { accepts: true });
+        snap(
+            "worker_term_drop_accepted",
+            &TermEvent::DropAccepted { operation: DropOperation::Copy, mimes: vec![uris] },
+        );
+        snap(
+            "worker_term_drop_concluded",
+            &TermEvent::DropConcluded { operation: DropOperation::Move },
+        );
+    }
+
     /// `OSC 22`: the pointer a program asks for over the grid.
     #[test]
     fn pointer_shape() {

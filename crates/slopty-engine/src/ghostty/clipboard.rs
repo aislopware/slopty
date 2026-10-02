@@ -21,11 +21,28 @@ use slopty_proto::terminal::MAX_OSC52_BYTES;
 use super::GhosttyEngine;
 use crate::EngineError;
 
-/// What a program's clipboard read is answered with: the shared text now, or `None` to deny it.
-///
-/// A denied OSC 52 read gets an empty answer. It is called on the engine's thread inside
-/// [`GhosttyEngine::write`], so it must return at once.
-pub type ClipboardSource = Box<dyn Fn() -> Option<String>>;
+/// What a program's clipboard reads are answered from. Both are asked on the engine's thread
+/// inside [`GhosttyEngine::write`], so they must return at once.
+pub trait ClipboardSource {
+    /// The shared text now, or `None` to deny the read. A denied OSC 52 read gets an empty
+    /// answer.
+    fn text(&self) -> Option<String>;
+
+    /// Whether a viewer shares its clipboard now: the primary device attributes then list
+    /// clipboard access (52), so a program knows its OSC 52 reads are answered.
+    fn shared(&self) -> bool;
+}
+
+/// A closure is a source that is always shared.
+impl<F: Fn() -> Option<String>> ClipboardSource for F {
+    fn text(&self) -> Option<String> {
+        self()
+    }
+
+    fn shared(&self) -> bool {
+        true
+    }
+}
 
 /// One representation of a paste: its MIME type and its bytes.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -39,12 +56,19 @@ pub struct PasteRep {
 /// What the read callback answers from, shared with it.
 #[derive(Default)]
 pub(super) struct Reads {
-    source: Option<ClipboardSource>,
+    source: Option<Box<dyn ClipboardSource>>,
     /// The last paste event's representations, until the program reads them with its password.
     pasted: Vec<PasteRep>,
 }
 
 pub(super) type Shared = Rc<RefCell<Reads>>;
+
+impl Reads {
+    /// A viewer shares its clipboard with the program now.
+    pub(super) fn shared(&self) -> bool {
+        self.source.as_ref().is_some_and(|s| s.shared())
+    }
+}
 
 /// The MIME type of text, as Kitty names it.
 pub const TEXT_MIME: &str = "text/plain";
@@ -52,7 +76,7 @@ pub const TEXT_MIME: &str = "text/plain";
 impl GhosttyEngine {
     /// Answer the program's clipboard reads from `source`; `None` denies them all, as a new
     /// engine does.
-    pub fn share_clipboard(&self, source: Option<ClipboardSource>) {
+    pub fn share_clipboard(&self, source: Option<Box<dyn ClipboardSource>>) {
         self.clipboard.borrow_mut().source = source;
     }
 
@@ -110,7 +134,7 @@ pub(super) fn install(
             return reply_paste(read, &pasted);
         }
         let text = answerable(&read)
-            .then(|| reads.borrow().source.as_ref().and_then(|f| f()))
+            .then(|| reads.borrow().source.as_ref().and_then(|s| s.text()))
             .flatten()
             .filter(|text| text.len() <= MAX_OSC52_BYTES);
         // The reply writes to the pty through the pty-write callback: no borrow is held over it.

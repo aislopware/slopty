@@ -288,6 +288,72 @@ pub enum TermRequest {
     /// offer, as a window's input waits behind its ⌘V. It has no datagram copy, which could
     /// overtake the offer.
     PastePicture(PasteChord),
+    /// This client's drag of `mimes` is over the tile at `at`, while the program asks for drops
+    /// ([`TermEvent::DropTarget`]). Answered with [`TermEvent::DropAccepted`].
+    DragOver {
+        /// Where.
+        at: DropPoint,
+        /// The MIME types the drag carries.
+        mimes: Vec<String>,
+    },
+    /// This client's drag left the tile without dropping.
+    DragLeave,
+    /// This client dropped `reps` on the tile at `at`. The program reads what it wants of them,
+    /// then concludes ([`TermEvent::DropConcluded`]).
+    Drop {
+        /// Where.
+        at: DropPoint,
+        /// What the drop carries.
+        reps: Vec<DropRep>,
+    },
+    /// The bytes of a representation of this client's drop that [`TermRequest::Drop`] said
+    /// were still coming, such as the `file://` URLs of its files once they are uploaded to
+    /// the worker. `None` when they will not come.
+    DropData {
+        /// The representation's MIME type.
+        mime: String,
+        /// Its bytes.
+        #[serde(with = "serde_bytes")]
+        data: Option<Vec<u8>>,
+    },
+}
+
+/// Where a drag is over a terminal, and what it allows (Kitty drag and drop, OSC 72).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct DropPoint {
+    /// Cell column, from 0 at the left.
+    pub col: u16,
+    /// Cell row, from 0 at the top of the screen.
+    pub row: u16,
+    /// Pixels from the left of the grid.
+    pub x: i32,
+    /// Pixels from the top of the grid.
+    pub y: i32,
+    /// The drag may copy.
+    pub copy: bool,
+    /// The drag may move.
+    pub moves: bool,
+}
+
+/// What a drop does with its data, as the program says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum DropOperation {
+    /// Nothing: not accepted, or canceled.
+    None,
+    /// The data is copied.
+    Copy,
+    /// The data is moved.
+    Move,
+}
+
+/// One representation of a drop: its MIME type, and its bytes once they are here.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct DropRep {
+    /// The MIME type, such as `text/uri-list`.
+    pub mime: String,
+    /// Its bytes; `None` while they are still coming ([`TermRequest::DropData`]).
+    #[serde(with = "serde_bytes")]
+    pub data: Option<Vec<u8>>,
 }
 
 /// What a [`TermRequest::PastePicture`] applies once the worker's pasteboard holds the
@@ -334,7 +400,11 @@ impl TermRequest {
             | Self::FetchLines { .. }
             | Self::Search { .. }
             | Self::Colors(_)
-            | Self::Reached { .. } => false,
+            | Self::Reached { .. }
+            | Self::DragOver { .. }
+            | Self::DragLeave
+            | Self::Drop { .. }
+            | Self::DropData { .. } => false,
         }
     }
 }
@@ -384,7 +454,9 @@ pub struct SearchMatch {
     pub line: LineIndex,
     /// First cell.
     pub col: u16,
-    /// Cells covered.
+    /// Cells covered, in reading order. A hit over a soft wrap runs past the end of its row
+    /// onto the rows its line wraps into: on a grid `cols` wide it covers cells `col..col + len`
+    /// of row `line` counted on, row after row, at `cols` cells each.
     pub len: u16,
 }
 
@@ -638,6 +710,26 @@ pub enum TermEvent {
     PasteHeld {
         /// The text, as it was pasted.
         text: String,
+    },
+    /// Whether the program asks for drops (Kitty drag and drop, OSC 72): while it does, a
+    /// drag over the tile goes to it as [`TermRequest::DragOver`] and [`TermRequest::Drop`]
+    /// instead of typing paths. Sent on attach while it does.
+    DropTarget {
+        /// It asks.
+        accepts: bool,
+    },
+    /// The program answered the drag of the client it goes to: what a drop would do, and the
+    /// MIME types it wants, most wanted first.
+    DropAccepted {
+        /// What a drop would do.
+        operation: DropOperation,
+        /// The types it wants; empty when it did not say.
+        mimes: Vec<String>,
+    },
+    /// The program is done with the drop of the client it goes to, having done `operation`.
+    DropConcluded {
+        /// What it did.
+        operation: DropOperation,
     },
 }
 

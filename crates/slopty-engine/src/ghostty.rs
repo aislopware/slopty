@@ -44,6 +44,7 @@ mod dnd;
 mod memory;
 mod read;
 mod redraw;
+mod reports;
 mod restored;
 #[cfg(test)]
 mod session_state;
@@ -425,9 +426,14 @@ impl GhosttyEngine {
         // Kitty graphics: a storage limit turns the protocol on; the decoder is per thread,
         // and the engine lives on its session's thread.
         term.set_kitty_image_storage_limit(graphics::KITTY_STORAGE_BYTES)?;
+        graphics::allow_media(&mut term)?;
         // A kitty clipboard write (OSC 5522) is buffered whole before the callback sees it, up
         // to 64 MiB by default; nothing past the session's ceiling would be passed on anyway.
         term.set_clipboard_write_max_bytes(Some(MAX_OSC52_BYTES))?;
+        // Grapheme clustering (mode 2027) on from the start and after a reset, as Ghostty,
+        // Kitty and WezTerm have it: an emoji sequence or a flag is one wide cell, not a cell
+        // per code point. A program can still turn it off.
+        term.set_default_mode(Mode::GRAPHEME_CLUSTER, true)?;
         kitty_graphics::set_png_decoder(Some(Box::new(graphics::PngDecoder)))?;
         let dark = slopty_theme::TerminalPalette::DARK.wire();
         set_colors(&mut term, &dark)?;
@@ -446,6 +452,7 @@ impl GhosttyEngine {
         let clipboard = Rc::new(RefCell::new(clipboard::Reads::default()));
         clipboard::install(&mut term, &clipboard)?;
         let drops = dnd::install(&mut term)?;
+        reports::install(&mut term, &clipboard)?;
 
         let mut engine = Self {
             anchor: None,
@@ -2549,18 +2556,27 @@ impl GhosttyEngine {
         let scrollback = self.term.scrollback_rows()? as u64;
         let y = |rows: u64| u32::try_from(rows).unwrap_or(u32::MAX);
         let history_end = self.base.saturating_add(scrollback);
-        if let Some((from, to)) = self.history.missing(self.epoch, self.base, history_end) {
+        if let Some((from, to)) =
+            self.history.missing(self.epoch, self.size.cols, self.base, history_end)
+        {
             let (first, last) = (from.saturating_sub(self.base), to.saturating_sub(self.base));
-            let text = self.plain_rows(y(first), y(last.saturating_sub(1)))?;
-            self.history.append(&text, to.saturating_sub(from));
+            let (top, bottom) = (y(first), y(last.saturating_sub(1)));
+            let text = self.plain_rows(top, bottom)?;
+            let wraps = self.row_wraps(top, bottom)?;
+            self.history.append(&text, to.saturating_sub(from), &wraps);
         }
         let rows = self.total_rows()?;
-        let screen = if rows > scrollback {
-            self.plain_rows(y(scrollback), y(rows.saturating_sub(1)))?
+        let (screen, wraps) = if rows > scrollback {
+            let (top, bottom) = (y(scrollback), y(rows.saturating_sub(1)));
+            (self.plain_rows(top, bottom)?, self.row_wraps(top, bottom)?)
         } else {
-            String::new()
+            (String::new(), Vec::new())
         };
-        Ok(self.history.find(&pattern, needle, regex, max, &screen))
+        let screen = screen
+            .split('\n')
+            .enumerate()
+            .map(|(i, t)| (t, wraps.get(i).copied().unwrap_or(false)));
+        Ok(self.history.find(&pattern, needle, regex, max, screen))
     }
 
     /// Encode a key event into `out`. Appends nothing for keys the terminal does not encode.
@@ -3237,6 +3253,43 @@ mod tests {
         assert!(diff.updates.iter().any(|u| u.line.text() == "one"), "{diff:?}");
     }
 
+    /// A search of the whole terminal formatted afresh, to hold an incremental one against.
+    fn whole_search(e: &GhosttyEngine, pattern: &search::Pattern, max: u32) -> search::Found {
+        let rows = u32::try_from(e.total_rows().unwrap()).unwrap();
+        let wraps = e.row_wraps(0, rows.saturating_sub(1)).unwrap();
+        search::find(&e.plain_text().unwrap(), &wraps, pattern, LineIndex(e.base), max, e.size.cols)
+    }
+
+    /// A line the program wrote past the edge is searched as one: a hit over the wrap is found,
+    /// its `len` running from its start over the end of the row onto the next. A line wrapped
+    /// from the history onto the screen is found too, and found again as the screen moves on.
+    #[test]
+    fn a_hit_over_a_soft_wrap_is_found_with_its_cells_in_reading_order() {
+        use slopty_proto::terminal::SearchMatch;
+        let mut e = engine(10, 3);
+        // "hello world" over a 10-column grid wraps after its tenth column, inside "world".
+        e.write(b"hello world\r\n");
+        let found = e.search("world", false, 10).unwrap();
+        assert_eq!(found.total, 1);
+        assert_eq!(found.matches, [SearchMatch { line: LineIndex(0), col: 6, len: 5 }]);
+        // A blank at the wrap is kept: "abcdefghi " then "jkl" holds "i j".
+        e.write(b"abcdefghi jkl\r\n");
+        let found = e.search("i j", false, 10).unwrap();
+        assert_eq!(found.matches, [SearchMatch { line: LineIndex(2), col: 8, len: 3 }]);
+        // Scrolled up past the screen and searched incrementally, the same answers as a fresh
+        // search of the whole text.
+        for i in 0..20 {
+            e.write(format!("row {i} over the edge\r\n").as_bytes());
+        }
+        let pattern = search::Pattern::new("over the edge", false).unwrap();
+        let found = e.search("over the edge", false, 100).unwrap();
+        assert_eq!(found.total, 20);
+        assert_eq!(found, whole_search(&e, &pattern, 100));
+        assert!(found.matches.iter().all(|m| m.len == 13), "{:?}", found.matches);
+        e.write(b"one more over the edge\r\n");
+        assert_eq!(e.search("over the edge", false, 100).unwrap(), whole_search(&e, &pattern, 100));
+    }
+
     /// Search formats a history row once, when it first finds it scrolled up, and scans it
     /// once per needle: a find bar refreshed while a program writes costs the rows written
     /// since and the screen, not the whole history again.
@@ -3254,12 +3307,7 @@ mod tests {
         let found = e.search("beta", false, 10).unwrap();
         assert_eq!(found.total, 52, "a write is seen");
         assert_eq!(e.history.hits_scanned() - hits, 2, "only the rows that scrolled up since");
-        let fresh = search::find(
-            &e.plain_text().unwrap(),
-            &search::Pattern::new("beta", false).unwrap(),
-            LineIndex(e.base),
-            10,
-        );
+        let fresh = whole_search(&e, &search::Pattern::new("beta", false).unwrap(), 10);
         assert_eq!(found, fresh, "the same answer as a search of the whole text");
         // Another needle scans the rows held again, without formatting them.
         assert_eq!(e.search("row 4", false, 100).unwrap().total, 11);
@@ -3270,9 +3318,7 @@ mod tests {
     fn evicted_rows_and_a_reflow_leave_the_search() {
         let mut e = engine(20, 3);
         let needle = search::Pattern::new("x", false).unwrap();
-        let fresh = |e: &GhosttyEngine| {
-            search::find(&e.plain_text().unwrap(), &needle, LineIndex(e.base), 5)
-        };
+        let fresh = |e: &GhosttyEngine| whole_search(e, &needle, 5);
         for i in 0..300 {
             e.write(format!("x {i}\r\n").as_bytes());
         }
@@ -3655,6 +3701,42 @@ mod tests {
         out.clear();
         e.encode_key(&key(KeyCode::C, Some("c"), Mods::CTRL), &mut out).unwrap();
         assert_eq!(out, b"\x03");
+    }
+
+    /// A key's repeat and release reach a program only once it asks for event types (Kitty
+    /// keyboard flag 2): before that a release types nothing, and a repeat types the key again.
+    #[test]
+    fn key_releases_reach_a_program_that_asks_for_event_types() {
+        let mut e = engine(10, 3);
+        let key = |action| KeyEvent {
+            seq: 1,
+            action,
+            code: KeyCode::A,
+            mods: Mods::empty(),
+            consumed_mods: Mods::empty(),
+            text: (action != KeyAction::Release).then(|| "a".to_owned()),
+            unshifted: Some('a'),
+            composing: false,
+            option_as_alt: false,
+        };
+        let typed = |e: &mut GhosttyEngine, action| {
+            let mut out = Vec::new();
+            e.encode_key(&key(action), &mut out).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(typed(&mut e, KeyAction::Release), "", "nobody asked");
+        assert_eq!(typed(&mut e, KeyAction::Repeat), "a");
+        // Disambiguate alone still reports no release.
+        e.write(b"\x1b[>1u");
+        assert_eq!(typed(&mut e, KeyAction::Release), "");
+        // Disambiguate and event types: the press and repeat of a key that types text are
+        // still its text; the release is reported.
+        e.write(b"\x1b[=3u");
+        assert_eq!(typed(&mut e, KeyAction::Press), "a");
+        assert_eq!(typed(&mut e, KeyAction::Repeat), "a");
+        assert_eq!(typed(&mut e, KeyAction::Release), "\x1b[97;1:3u");
+        e.write(b"\x1b[<u");
+        assert_eq!(typed(&mut e, KeyAction::Release), "", "popped");
     }
 
     /// ⌥b on a Mac client arrives as the layout's `∫` and is typed as such; when the client
@@ -4216,6 +4298,23 @@ mod tests {
                 body: "\u{fffd}ok".to_owned()
             }]
         );
+        // Kitty's: a title in chunks, one of them base64, then the body that finishes it.
+        e.write(b"\x1b]99;i=1:d=0;Build\x1b\\\x1b]99;i=1:d=0:e=1;IGRvbmU=\x1b\\");
+        assert_eq!(e.drain_events(), [], "not done yet");
+        e.write(b"\x1b]99;i=1:p=body;All green\x1b\\");
+        assert_eq!(
+            e.drain_events(),
+            [EngineEvent::Notification {
+                title: "Build done".to_owned(),
+                body: "All green".to_owned()
+            }]
+        );
+        // Its query is answered with what is shown: a title and a body.
+        e.write(b"\x1b]99;i=q:p=?;\x1b\\");
+        assert_eq!(
+            e.drain_events(),
+            [EngineEvent::PtyWrite(b"\x1b]99;i=q:p=?;o=always:p=title,body,?\x1b\\".to_vec())]
+        );
     }
 
     fn progress_events(e: &GhosttyEngine) -> Vec<Progress> {
@@ -4739,17 +4838,22 @@ mod scrollback_tests {
             let mut e = engine(lines);
             write_lines(&mut e, lines);
             let mut format = bench.series(&format!("{lines}_lines.format"));
+            // What the first search adds to the format: each row's soft-wrap flag.
+            let mut wraps = bench.series(&format!("{lines}_lines.wraps"));
             let mut plain = bench.series(&format!("{lines}_lines.plain"));
             let mut regex = bench.series(&format!("{lines}_lines.regex"));
+            let rows = u32::try_from(e.total_rows().unwrap()).unwrap();
             for _ in 0..10 {
                 let text = format.time(|| e.plain_text().unwrap());
                 assert!(!text.is_empty());
+                let flags = wraps.time(|| e.row_wraps(0, rows - 1).unwrap());
+                assert_eq!(flags.len(), rows as usize);
                 let found = plain.time(|| e.search("lazy dog", false, 100).unwrap());
                 assert!(found.total > 0);
                 let found = regex.time(|| e.search("line [0-9]+7 ", true, 100).unwrap());
                 assert!(found.total > 0);
             }
-            for series in [format, plain, regex] {
+            for series in [format, wraps, plain, regex] {
                 series.report().unwrap();
             }
         }
@@ -5018,6 +5122,31 @@ mod checkpoint_tests {
             e.write(b"\x1b[3;1H\nx");
         }
         assert_eq!(all_text(&b), all_text(&a), "the region still scrolls rows 2 and 3");
+    }
+
+    /// Grapheme clustering (mode 2027) is on from the start and after a full reset, so an
+    /// emoji sequence is one wide cell. A program that turns it off gets a cell per code point,
+    /// and a checkpoint keeps it off.
+    #[test]
+    fn a_grapheme_cluster_is_one_wide_cell_unless_the_program_turns_it_off() {
+        const FAMILY: &[u8] = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".as_bytes();
+        let col = |e: &mut GhosttyEngine| e.full_frame(0).unwrap().cursor.col;
+        let mut a = engine(20, 3, 100);
+        a.write(FAMILY);
+        assert_eq!(col(&mut a), 2, "one wide cell");
+        a.write(b"\x1bc");
+        a.write(FAMILY);
+        assert_eq!(col(&mut a), 2, "still, after a full reset");
+        a.write(b"\x1b[?2027l\r\x1b[K");
+        a.write(FAMILY);
+        let off = col(&mut a);
+        assert!(off > 2, "a cell per code point once off: {off}");
+        let mut b = replayed(&mut a);
+        for e in [&mut a, &mut b] {
+            e.write(b"\r\x1b[K");
+            e.write(FAMILY);
+        }
+        assert_eq!(col(&mut b), off, "the checkpoint keeps it off");
     }
 
     /// The tab stops a program set come back with a checkpoint.
@@ -5299,6 +5428,37 @@ mod checkpoint_tests {
             unchanged.report().unwrap();
         }
         write.report().unwrap();
+    }
+
+    /// What a line of output costs to write by script, where grapheme clustering (mode 2027)
+    /// has work to do: plain ASCII, CJK (wide), and emoji sequences (ZWJ families, flags,
+    /// skin tones, a combining mark). Each sample is a 76-column line and its line break into
+    /// an 80×24 screen. `cargo xtask bench --filter unicode_write_cost` runs it.
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn unicode_write_cost() {
+        let bench = Bench::new("engine.unicode_write_cost");
+        let ascii = "the quick brown fox jumps over the lazy dog, again and again and again ok\r\n";
+        let cjk = format!(
+            "{}\r\n",
+            "\u{6f22}\u{5b57}\u{304b}\u{306a}\u{30ab}\u{30ca}\u{d55c}\u{ae00}".repeat(4)
+        );
+        let sequences = [
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{1F1F3}\u{1F1F1}",
+            "\u{1F44D}\u{1F3FD}",
+            "e\u{301}",
+            "\u{2764}\u{FE0F}",
+        ];
+        let emoji = format!("{}\r\n", sequences.concat().repeat(5));
+        for (name, line) in [("ascii", ascii.to_owned()), ("cjk", cjk), ("emoji", emoji)] {
+            let mut e = engine(80, 24, 1_000);
+            let mut write = bench.series(name);
+            for _ in 0..500 {
+                write.time(|| e.write(line.as_bytes()));
+            }
+            write.report().unwrap();
+        }
     }
 
     /// What an Enter at a bottom prompt costs inside the engine: three lines of output and the
@@ -5715,6 +5875,75 @@ mod graphics_tests {
         out.extend(bytes);
         out.extend((b.wrapping_shl(16) | a).to_be_bytes());
         out
+    }
+
+    /// Where a program on this machine left an image: a file (`t=f`) is read and left where
+    /// it is; a temporary file (`t=t`) is read from the temporary directory and deleted. One
+    /// that only claims to be temporary, outside it, is refused and kept, and so is a device.
+    #[test]
+    fn an_image_may_come_as_a_file_or_a_temporary_file() {
+        let pixels: Vec<u8> = (0..16).collect();
+        let at = |dir: &std::path::Path| {
+            std::fs::create_dir_all(dir).unwrap();
+            let (file, temporary) =
+                (dir.join("image.rgba"), dir.join("tty-graphics-protocol.rgba"));
+            std::fs::write(&file, &pixels).unwrap();
+            std::fs::write(&temporary, &pixels).unwrap();
+            (file, temporary)
+        };
+        let pid = std::process::id();
+        let inside = std::env::temp_dir().join(format!("slopty-kitty-media-{pid}"));
+        let outside = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("../../target/kitty-media-{pid}"));
+        let (file, temporary) = at(&inside);
+        let (_, misplaced) = at(&outside);
+        let from = |medium: char, id: u32, path: &std::path::Path| {
+            let path = base64(path.to_str().unwrap().as_bytes());
+            format!("\x1b_Ga=T,t={medium},f=32,s=2,v=2,i={id},q=2;{path}\x1b\\")
+        };
+        let mut e = engine();
+        e.write(from('f', 1, &file).as_bytes());
+        e.write(from('t', 2, &temporary).as_bytes());
+        e.write(from('t', 3, &misplaced).as_bytes());
+        e.write(from('f', 4, std::path::Path::new("/dev/zero")).as_bytes());
+        let _frame = e.take_frame(0).unwrap();
+        let mut got: Vec<(u32, Vec<u8>)> =
+            e.drain_images().into_iter().map(|u| (u.id, u.rgba)).collect();
+        got.sort();
+        assert_eq!(got, vec![(1, pixels.clone()), (2, pixels)]);
+        assert!(file.exists(), "a file is the program's own");
+        assert!(!temporary.exists(), "a temporary file is gone once read");
+        assert!(misplaced.exists(), "a file outside the temporary directory is not touched");
+        std::fs::remove_dir_all(&inside).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
+
+    /// Output that names a FIFO as an image file is refused at once. Opened blocking, it would
+    /// wait for a writer that never comes and stall the session for good (ghostty fork #12).
+    #[test]
+    fn an_image_named_as_a_fifo_never_blocks_the_engine() {
+        let dir = std::env::temp_dir().join(format!("slopty-kitty-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("tty-graphics-protocol.fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(made.success());
+        let name = base64(fifo.to_str().unwrap().as_bytes());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _writer = std::thread::spawn(move || {
+            let mut e = engine();
+            for medium in ['f', 't'] {
+                e.write(format!("\x1b_Ga=T,t={medium},f=24,s=1,v=1,i=1;{name}\x1b\\").as_bytes());
+            }
+            let _frame = e.take_frame(0).unwrap();
+            tx.send(e.drain_images().len()).unwrap();
+        });
+        let shown = rx.recv_timeout(std::time::Duration::from_secs(10));
+        if shown.is_err() {
+            // Free the stuck open before failing, so the thread ends with the test.
+            let _unblocked = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(shown, Ok(0), "refused at once, never shown");
     }
 
     /// `o=z`: libghostty inflates the payload (wuffs since ghostty `d48c0372f`) before the

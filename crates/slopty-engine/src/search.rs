@@ -1,15 +1,17 @@
 //! Text search over the plain-text rendering of the grid.
 //!
 //! The engine formats the retained history plus the screen as plain text (one line per row,
-//! trailing blanks trimmed) and this module finds the needle in it. Columns are cells, so a
-//! hit can be painted straight onto the grid: cluster widths come from libghostty's own
-//! tables, the same ones that laid the cells out.
+//! trailing blanks trimmed), with each row's soft-wrap flag, and this module finds the needle
+//! in it. Rows a line soft-wraps over are searched as the one line the program wrote, so a hit
+//! can run over the wrap. Columns are cells, so a hit can be painted straight onto the grid:
+//! cluster widths come from libghostty's own tables, the same ones that laid the cells out.
 //!
 //! A row that scrolled into history never changes again within its numbering, so [`History`]
 //! keeps each one's text from the search that first formatted it, and the hits of the last
 //! needle in them: a find bar refreshed while a program writes formats and scans only the rows
 //! written since, and the screen.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use libghostty_vt::unicode::grapheme_width;
@@ -75,6 +77,9 @@ fn char_index(s: &str, byte: usize) -> usize {
 pub struct History {
     /// The numbering the rows are of; `None` before the first search.
     epoch: Option<u32>,
+    /// The width of the grid the rows were written on, the same for a whole numbering: a line
+    /// that soft-wraps fills each row but its last to it.
+    cols: u16,
     /// Absolute line of the row that starts at `text[start..]`.
     first: u64,
     /// One past the last row held.
@@ -82,6 +87,8 @@ pub struct History {
     /// Each row's text and a newline; the bytes before `start` are rows evicted since.
     text: String,
     start: usize,
+    /// Whether each row held soft-wraps into the next, from row `first`.
+    wraps: VecDeque<bool>,
     /// The last needle's hits in the rows held.
     hits: Option<Hits>,
 }
@@ -103,12 +110,12 @@ struct Hits {
 }
 
 impl History {
-    /// Bring the record to a history that is now rows `[base, end)` of numbering `epoch`:
-    /// forget what another numbering or an eviction made wrong, and return the rows it lacks,
-    /// for [`Self::append`].
-    pub fn missing(&mut self, epoch: u32, base: u64, end: u64) -> Option<(u64, u64)> {
-        if self.epoch != Some(epoch) || end < self.end || base >= self.end {
-            self.reset(epoch, base.min(end));
+    /// Bring the record to a history that is now rows `[base, end)` of numbering `epoch`, on a
+    /// grid `cols` wide: forget what another numbering or an eviction made wrong, and return
+    /// the rows it lacks, for [`Self::append`].
+    pub fn missing(&mut self, epoch: u32, cols: u16, base: u64, end: u64) -> Option<(u64, u64)> {
+        if self.epoch != Some(epoch) || self.cols != cols || end < self.end || base >= self.end {
+            self.reset(epoch, cols, base.min(end));
         } else if base > self.first {
             self.evict(base);
         }
@@ -116,8 +123,10 @@ impl History {
     }
 
     /// The next `rows` rows below the ones held, as the formatter wrote them: one line each,
-    /// blank rows at the end left out.
-    pub fn append(&mut self, formatted: &str, rows: u64) {
+    /// blank rows at the end left out. `wraps` says which soft-wrap into the next.
+    pub fn append(&mut self, formatted: &str, rows: u64, wraps: &[bool]) {
+        let count = usize::try_from(rows).unwrap_or(usize::MAX);
+        self.wraps.extend((0..count).map(|i| wraps.get(i).copied().unwrap_or(false)));
         let mut added = 0_u64;
         for line in formatted.split('\n').take(usize::try_from(rows).unwrap_or(usize::MAX)) {
             self.text.push_str(line);
@@ -143,15 +152,15 @@ impl History {
     }
 
     /// Find `pattern` (from `needle` and `regex`) in the rows held, then in `screen`, the
-    /// plain text of the rows below them. Only the rows held that the same needle has not
-    /// scanned yet are scanned.
-    pub fn find(
+    /// rows below them with their soft-wrap flags, on the same grid. Only the rows held that
+    /// the same needle has not scanned yet are scanned.
+    pub fn find<'s>(
         &mut self,
         pattern: &Pattern,
         needle: &str,
         regex: bool,
         max: u32,
-        screen: &str,
+        screen: impl Iterator<Item = (&'s str, bool)>,
     ) -> Found {
         if pattern.is_empty() {
             return Found::default();
@@ -172,11 +181,27 @@ impl History {
                 newest: VecDeque::new(),
             });
         }
-        let (text, end) = (&self.text, self.end);
+        let (text, end, first, cols) = (&self.text, self.end, self.first, self.cols);
         let Some(hits) = &mut self.hits else { return Found::default() };
-        if hits.scanned < end {
-            let unscanned = text.get(hits.scanned_at..).unwrap_or_default();
-            let found = scan(unscanned.split_terminator('\n'), pattern, hits.scanned, max);
+        let wrap_of = |row: u64| {
+            usize::try_from(row.saturating_sub(first))
+                .ok()
+                .and_then(|i| self.wraps.get(i))
+                .copied()
+                .unwrap_or(false)
+        };
+        // A line that soft-wraps past the last row held goes on into the screen: the rows of
+        // it held are searched with the screen, and scanned for good once it ends.
+        let mut complete = end;
+        while complete > hits.scanned && wrap_of(complete.saturating_sub(1)) {
+            complete = complete.saturating_sub(1);
+        }
+        let unscanned = text.get(hits.scanned_at..).unwrap_or_default();
+        let from = usize::try_from(hits.scanned.saturating_sub(first)).unwrap_or(usize::MAX);
+        let mut rows = unscanned.split_terminator('\n').zip(self.wraps.iter().skip(from).copied());
+        let complete_rows = usize::try_from(complete.saturating_sub(hits.scanned)).unwrap_or(0);
+        if complete_rows > 0 {
+            let found = scan(rows.by_ref().take(complete_rows), pattern, hits.scanned, max, cols);
             hits.total =
                 hits.total.saturating_add(found.rows.iter().map(|&(_, n)| u64::from(n)).sum());
             hits.rows.extend(found.rows);
@@ -184,10 +209,12 @@ impl History {
             let keep = usize::try_from(max).unwrap_or(usize::MAX);
             let excess = hits.newest.len().saturating_sub(keep);
             hits.newest.drain(..excess);
-            hits.scanned = end;
-            hits.scanned_at = text.len();
+            hits.scanned = complete;
+            hits.scanned_at = tail_start(text, end.saturating_sub(complete), hits.scanned_at);
         }
-        let below = scan(screen.split('\n'), pattern, end, max);
+        // The screen's rows are the caller's, the held ones this record's: one lifetime for both.
+        let screen = screen.map(|(t, wraps)| -> (&str, bool) { (t, wraps) });
+        let below = scan(rows.chain(screen), pattern, complete, max, cols);
         let total = hits.total.saturating_add(below.rows.iter().map(|&(_, n)| u64::from(n)).sum());
         let keep = usize::try_from(max).unwrap_or(usize::MAX);
         let older = keep.saturating_sub(below.matches.len());
@@ -202,8 +229,8 @@ impl History {
         self.hits.as_ref().map_or(0, |h| h.scanned)
     }
 
-    fn reset(&mut self, epoch: u32, at: u64) {
-        *self = Self { epoch: Some(epoch), first: at, end: at, ..Self::default() };
+    fn reset(&mut self, epoch: u32, cols: u16, at: u64) {
+        *self = Self { epoch: Some(epoch), cols, first: at, end: at, ..Self::default() };
     }
 
     /// Forget the rows above `base`, which the terminal no longer keeps.
@@ -216,6 +243,8 @@ impl History {
         }
         self.start = at;
         self.first = self.first.saturating_add(gone);
+        let gone = usize::try_from(gone).unwrap_or(usize::MAX).min(self.wraps.len());
+        self.wraps.drain(..gone);
         if let Some(hits) = &mut self.hits {
             while hits.rows.front().is_some_and(|&(line, _)| line < self.first) {
                 if let Some((_, n)) = hits.rows.pop_front() {
@@ -240,75 +269,194 @@ impl History {
     }
 }
 
+/// Where the last `rows` rows of `text` (each ended by a newline) start, found from the end:
+/// nearly always none, a line wrapped past the last row held, so no pass over the whole text.
+/// Never before `floor`.
+fn tail_start(text: &str, rows: u64, floor: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut at = text.len();
+    for _ in 0..rows {
+        let before = bytes.get(..at.saturating_sub(1)).unwrap_or_default();
+        at = memchr::memrchr(b'\n', before).map_or(floor, |n| n.saturating_add(1));
+    }
+    at.max(floor)
+}
+
+/// Find `pattern` in `text`, whose first line is absolute line `base`, on a grid `cols` wide.
+/// `wraps` says which rows soft-wrap into the next; rows past its end do not.
+///
+/// Smart case: a needle without an upper-case letter matches case-insensitively. Rows a line
+/// soft-wraps over are one line, so a hit can run over the wrap: its `len` then counts the
+/// cells in reading order from its start, over the end of its row onto the next. Every hit is
+/// counted, but columns are laid out only for the `max` newest ones that are reported: the
+/// column of a hit needs the cell width of every cluster before it on its row, which is a call
+/// into libghostty per character, and a needle that hits every row of a long history would pay
+/// it fifty thousand times for a hundred answers.
+#[must_use]
+pub fn find(
+    text: &str,
+    wraps: &[bool],
+    pattern: &Pattern,
+    base: LineIndex,
+    max: u32,
+    cols: u16,
+) -> Found {
+    if pattern.is_empty() {
+        return Found::default();
+    }
+    let rows =
+        text.split('\n').enumerate().map(|(i, t)| (t, wraps.get(i).copied().unwrap_or(false)));
+    let found = scan(rows, pattern, base.0, max, cols);
+    let total = found.rows.iter().fold(0_u32, |sum, &(_, n)| sum.saturating_add(n));
+    Found { total, matches: found.matches }
+}
+
 /// What [`scan`] found: every row with hits and how many, and the newest `max` hits laid out.
 struct Scanned {
     rows: Vec<(u64, u32)>,
     matches: Vec<SearchMatch>,
 }
 
-/// Find `pattern` in `text`, whose first line is absolute line `base`.
-///
-/// Smart case: a needle without an upper-case letter matches case-insensitively. Hits never
-/// span rows (soft-wrapped lines are searched row by row). Every hit is counted, but columns
-/// are laid out only for the `max` newest ones that are reported: the column of a hit needs
-/// the cell width of every cluster before it on its row, which is a call into libghostty per
-/// character, and a needle that hits every row of a long history would pay it fifty thousand
-/// times for a hundred answers.
-#[must_use]
-pub fn find(text: &str, pattern: &Pattern, base: LineIndex, max: u32) -> Found {
-    if pattern.is_empty() {
-        return Found::default();
-    }
-    let found = scan(text.split('\n'), pattern, base.0, max);
-    let total = found.rows.iter().fold(0_u32, |sum, &(_, n)| sum.saturating_add(n));
-    Found { total, matches: found.matches }
+/// A line as the program wrote it: the rows it soft-wraps over, joined.
+#[derive(Clone)]
+struct Logical<'a> {
+    /// The absolute line of its first row.
+    row: u64,
+    /// The rows' text, each but the last filled out with blanks to the grid's width.
+    text: Cow<'a, str>,
+    /// Where each row starts in `text`: its char index and its byte offset. A line of one row,
+    /// nearly every line, allocates nothing.
+    starts: Cow<'static, [(usize, usize)]>,
 }
 
-/// Find `pattern` in `lines`, the first of which is absolute line `base`: every row that
-/// hits, and the newest `max` hits with their columns.
+impl Logical<'_> {
+    /// The row char `at` is on, as an index into the rows, and its char index within it.
+    fn place(&self, at: usize) -> (usize, usize) {
+        let part = self.starts.partition_point(|&(c, _)| c <= at).saturating_sub(1);
+        let from = self.starts.get(part).map_or(0, |&(c, _)| c);
+        (part, at.saturating_sub(from))
+    }
+
+    /// The text of row `part`, its fill included.
+    fn part(&self, part: usize) -> &str {
+        let from = self.starts.get(part).map_or(0, |&(_, b)| b);
+        let to = self.starts.get(part.saturating_add(1)).map_or(self.text.len(), |&(_, b)| b);
+        self.text.get(from..to).unwrap_or_default()
+    }
+}
+
+/// Join the rows of one line: each row but the last is filled out to `cols` cells, as the
+/// trimmed blanks at its end were, unless the next row starts with a wide cluster that did
+/// not fit in the one cell left (a spacer, not a blank).
+fn join<'a>(row: u64, parts: &[&'a str], cols: u16) -> Logical<'a> {
+    if let [only] = parts {
+        return Logical { row, text: Cow::Borrowed(only), starts: Cow::Borrowed(&[(0, 0)]) };
+    }
+    let mut text = String::new();
+    let mut starts = Vec::with_capacity(parts.len());
+    let mut chars = 0_usize;
+    for (i, part) in parts.iter().enumerate() {
+        starts.push((chars, text.len()));
+        text.push_str(part);
+        chars = chars.saturating_add(part.chars().count());
+        let Some(next) = parts.get(i.saturating_add(1)) else { break };
+        let mut pad = cols.saturating_sub(width_of(part));
+        let lead: Vec<char> = next.chars().take(8).collect();
+        if pad == 1 && !lead.is_empty() && grapheme_width(&lead).1 == 2 {
+            pad = 0;
+        }
+        text.extend(std::iter::repeat_n(' ', usize::from(pad)));
+        chars = chars.saturating_add(usize::from(pad));
+    }
+    Logical { row, text: Cow::Owned(text), starts: Cow::Owned(starts) }
+}
+
+/// Cells a row's text covers.
+fn width_of(text: &str) -> u16 {
+    if text.is_ascii() {
+        u16::try_from(text.len()).unwrap_or(u16::MAX)
+    } else {
+        Widths::new(text).end()
+    }
+}
+
+/// Find `pattern` in `rows`, each a row's text and whether it soft-wraps into the next, the
+/// first of which is absolute line `base`: every line that hits (by its first row), and the
+/// newest `max` hits with their columns.
 fn scan<'a>(
-    lines: impl Iterator<Item = &'a str>,
+    rows: impl Iterator<Item = (&'a str, bool)>,
     pattern: &Pattern,
     base: u64,
     max: u32,
+    cols: u16,
 ) -> Scanned {
     let keep = usize::try_from(max).unwrap_or(usize::MAX);
-    // `(row, line, first char, char count)` of the hits still in the running.
-    let mut pending: Vec<(u64, &str, usize, usize)> = Vec::new();
-    let mut rows = Vec::new();
-    for (row, line) in (base..).zip(lines) {
-        let found = pattern.hits(line);
+    // `(line, first char, char count)` of the hits still in the running. A line of one row is
+    // borrowed and copies for free; only a wrapped line with hits owns its text.
+    let mut pending: Vec<(Logical<'a>, usize, usize)> = Vec::new();
+    let mut hit_rows = Vec::new();
+    let mut hit = |line: Logical<'a>| {
+        let found = pattern.hits(&line.text);
         if found.is_empty() {
-            continue;
+            return;
         }
-        rows.push((row, u32::try_from(found.len()).unwrap_or(u32::MAX)));
-        pending.extend(found.into_iter().map(|(first, count)| (row, line, first, count)));
+        hit_rows.push((line.row, u32::try_from(found.len()).unwrap_or(u32::MAX)));
+        pending.extend(found.into_iter().map(|(at, count)| (line.clone(), at, count)));
         // Older hits than the newest `keep` are never reported: forget them in batches.
         if pending.len() > keep.saturating_mul(2) {
             let excess = pending.len().saturating_sub(keep);
             pending.drain(..excess);
         }
+    };
+    let mut parts: Vec<&'a str> = Vec::new();
+    let mut first = base;
+    for (row, (text, wraps)) in (base..).zip(rows) {
+        // Nearly every row is a line of its own, searched as it is.
+        if parts.is_empty() && !wraps {
+            hit(join(row, &[text], cols));
+            continue;
+        }
+        if parts.is_empty() {
+            first = row;
+        }
+        parts.push(text);
+        if !wraps {
+            hit(join(first, &parts, cols));
+            parts.clear();
+        }
+    }
+    if !parts.is_empty() {
+        hit(join(first, &parts, cols));
     }
     let excess = pending.len().saturating_sub(keep);
-    let mut widths: Option<(u64, Widths)> = None;
+    let mut widths: Option<(u64, usize, Widths)> = None;
+    let mut column = |line: &Logical<'_>, part: usize, at: usize| -> u16 {
+        let text = line.part(part);
+        if text.is_ascii() {
+            return u16::try_from(at).unwrap_or(u16::MAX);
+        }
+        let w = match &widths {
+            Some((row, p, w)) if *row == line.row && *p == part => w,
+            _ => &widths.insert((line.row, part, Widths::new(text))).2,
+        };
+        w.at(at)
+    };
     let matches = pending
         .iter()
         .skip(excess)
-        .map(|&(row, line, first, count)| {
-            let (col, len) = if line.is_ascii() {
-                // One byte, one char, one cell.
-                (u16::try_from(first).unwrap_or(u16::MAX), u16::try_from(count).unwrap_or(1).max(1))
-            } else {
-                let w = match &widths {
-                    Some((at, w)) if *at == row => w,
-                    _ => &widths.insert((row, Widths::new(line))).1,
-                };
-                w.span(first, count)
-            };
+        .map(|(line, at, count)| {
+            let (first_part, first_at) = line.place(*at);
+            let last = at.saturating_add(count.saturating_sub(1));
+            let (last_part, last_at) = line.place(last);
+            let col = column(line, first_part, first_at);
+            let end = column(line, last_part, last_at.saturating_add(1));
+            let rows_over = u16::try_from(last_part.saturating_sub(first_part)).unwrap_or(u16::MAX);
+            let len = rows_over.saturating_mul(cols).saturating_add(end).saturating_sub(col).max(1);
+            let row = line.row.saturating_add(u64::try_from(first_part).unwrap_or(u64::MAX));
             SearchMatch { line: LineIndex(row), col, len }
         })
         .collect();
-    Scanned { rows, matches }
+    Scanned { rows: hit_rows, matches }
 }
 
 /// Cell column at each char boundary of a line.
@@ -337,12 +485,15 @@ impl Widths {
         Self { starts }
     }
 
-    /// Column and cell length of `count` chars starting at char `first`.
-    fn span(&self, first: usize, count: usize) -> (u16, u16) {
+    /// The column char `at` starts at; the end of the line for one past it.
+    fn at(&self, at: usize) -> u16 {
         let last = self.starts.len().saturating_sub(1);
-        let start = self.starts.get(first.min(last)).copied().unwrap_or(0);
-        let end = self.starts.get(first.saturating_add(count).min(last)).copied().unwrap_or(start);
-        (start, end.saturating_sub(start).max(1))
+        self.starts.get(at.min(last)).copied().unwrap_or(0)
+    }
+
+    /// The column after the last cluster.
+    fn end(&self) -> u16 {
+        self.starts.last().copied().unwrap_or(0)
     }
 }
 
@@ -355,11 +506,41 @@ mod tests {
     }
 
     fn find(text: &str, needle: &str, base: LineIndex, max: u32) -> Found {
-        super::find(text, &Pattern::new(needle, false).expect("plain"), base, max)
+        super::find(text, &[], &Pattern::new(needle, false).expect("plain"), base, max, 80)
     }
 
     fn find_re(text: &str, needle: &str, base: LineIndex, max: u32) -> Found {
-        super::find(text, &Pattern::new(needle, true).expect("regex"), base, max)
+        super::find(text, &[], &Pattern::new(needle, true).expect("regex"), base, max, 80)
+    }
+
+    fn find_wrapped(text: &str, wraps: &[bool], needle: &str, cols: u16) -> Found {
+        let pattern = Pattern::new(needle, false).expect("plain");
+        super::find(text, wraps, &pattern, LineIndex(0), 100, cols)
+    }
+
+    /// A wrapped line is one: a hit over a wrap counts its cells in reading order, the blanks
+    /// trimmed at the wrap are put back, and a wide cluster pushed onto the next row leaves no
+    /// blank behind.
+    #[test]
+    fn a_hit_runs_over_a_soft_wrap() {
+        // "abcde" wraps into "fgh" on a 5-column grid.
+        let found = find_wrapped("abcde\nfgh", &[true], "def", 5);
+        assert_eq!(found.matches, vec![m(0, 3, 3)]);
+        // Three rows of one line, the hit from the first row's last cell to the third's first.
+        let found = find_wrapped("abcde\nfghij\nk", &[true, true], "efghijk", 5);
+        assert_eq!(found.matches, vec![m(0, 4, 7)]);
+        // "ab" and three trimmed blanks, then "cd": the blanks are put back.
+        let found = find_wrapped("ab\ncd", &[true], "b   c", 5);
+        assert_eq!(found.matches, vec![m(0, 1, 5)]);
+        assert_eq!(find_wrapped("ab\ncd", &[true], "bc", 5).total, 0);
+        // "abcd" and a spacer, then "日": the wide char did not fit in the last cell.
+        let found = find_wrapped("abcd\n日x", &[true], "d日", 5);
+        assert_eq!(found.matches, vec![m(0, 3, 4)]);
+        // Rows that end a line stay apart.
+        assert_eq!(find_wrapped("abcde\nfgh", &[false], "def", 5).total, 0);
+        // A hit wholly on the second row is placed on it.
+        let found = find_wrapped("abcde\nfgh", &[true], "gh", 5);
+        assert_eq!(found.matches, vec![m(1, 1, 2)]);
     }
 
     #[test]

@@ -631,8 +631,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `printf '\e]9;done\a'` or a kitty `notify` used to end at `EngineEvent::Bell`'s neighbour
   and vanish; ghostty, kitty, WezTerm and iTerm2 all post a banner. libghostty's
   `desktop_notification` callback (registered in `install_callbacks` next to the bell) hands
-  over the parsed title and body for every dialect, so the engine needs no OSC parsing of
-  its own: it emits `EngineEvent::Notification { title, body }` with each field cut to
+  over the parsed title and body for every dialect (OSC 99 only from 2026-10-02: libghostty
+  parsed it and dropped it until the fork delivered it, see that day's entry), so the engine
+  needs no OSC parsing of its own: it emits `EngineEvent::Notification { title, body }` with each field cut to
   `NOTIFICATION_CHARS` (512; a banner shows a line or two and a program can write anything
   into an OSC), the session broadcasts `TermEvent::Notification` (appended last, protocol 42)
   to every attached client, and the canvas treats it as an agent's attention: a
@@ -3201,10 +3202,150 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     as nothing.
   - **Not yet.** A drag the program starts (dragging out of yazi) is not carried to the
     clients. The registration is the program's state in the engine, so a worker restart loses
-    it until the program registers again. The wire messages and the tile's side
-    (`slopty-proto`, the worker's connection, `drop_in.rs`) come next.
+    it until the program registers again.
+  - **On the wire.** The client sends `TermRequest::DragOver`, `DragLeave`, `Drop` and
+    `DropData`, which the connection hands to the session like any request that types
+    nothing. The session tells every viewer `TermEvent::DropTarget` when the program starts or
+    stops asking, and a viewer attaching while it asks. `DropAccepted` and `DropConcluded` go
+    to the dragging viewer only. A drop that reaches a program that has stopped asking is told
+    back as `DropTarget { accepts: false }`, so the client can fall back to typing the paths.
+    The client keeps both in its terminal state (`TermState::drop_target`,
+    `TermState::drag_answer`) and forgets them on a relink, since the new stream says them
+    again. A representation over 8 MiB is listed to the program and answered as not coming,
+    the bound a paste's copy has.
   - Tests: engine `a_drag_over_a_program_that_did_not_ask_tells_nothing`,
     `a_drop_waits_for_its_files_and_answers_the_program`, `a_failed_upload_fails_the_request`;
-    worker `a_dropped_file_reaches_a_program_asking_for_drops_as_the_workers_copy`. That last one
-    runs a bash stand-in that registers, accepts the drag, asks for the list on the drop, and
-    is shown to wait for the upload before it opens the worker's copy and concludes.
+    client `the_programs_drop_answers_are_kept_until_a_relink`; worker
+    `a_drop_on_a_program_not_asking_is_told_back` and
+    `a_dropped_file_reaches_a_program_asking_for_drops_as_the_workers_copy`. That last one
+    runs a bash stand-in that registers, accepts the drag over the wire's requests, asks for
+    the list on the drop, and is shown to wait for the upload before it opens the worker's copy
+    and concludes. It checks a second viewer is told the program asks and hears none of the
+    first viewer's answers.
+
+- ✅ **Grapheme clustering is on by default** (2026-10-02). Mode 2027 starts on and comes
+  back on after a full reset, as in Ghostty, Kitty and WezTerm. An emoji sequence (a ZWJ
+  family, a flag, a skin tone) is one wide cell instead of a cell per code point, so what a
+  program counts as one character takes one place. A program can still turn it off, and a
+  checkpoint keeps it off. It costs nothing on ASCII output. A line of CJK costs 12 % more
+  instructions to write and a line dense with emoji sequences about twice as much
+  (`unicode_write_cost`, MEASUREMENTS.md). That is libghostty finding the cluster breaks,
+  and it is the price of the right width.
+  - Test: engine `a_grapheme_cluster_is_one_wide_cell_unless_the_program_turns_it_off`.
+
+- ✅ **The terminal answers what it is, how big it is and what it supports** (2026-10-02).
+  libghostty leaves three answers to its embedder, and the engine gave none of them:
+  XTVERSION (`CSI > q`) named libghostty, the size queries (XTWINOPS `CSI 14 t`, `16 t`,
+  `18 t`) and the in-band size reports of mode 2048 went unanswered, and the primary device
+  attributes never listed the clipboard.
+  - **XTVERSION** answers `Slopty <version>`, which programs that tune themselves per terminal
+    (neovim, tmux) read.
+  - **The size** is the terminal's own: the driver's cells and its cell pixels, so a program
+    that sizes images by pixels (yazi, chafa) gets the size it is drawn at, and it stays right
+    through every resize. A program on mode 2048 is told at once and on each resize. A
+    checkpoint replay that turns 2048 back on tells the program nothing, since replies during
+    the replay are dropped.
+  - **The primary device attributes** answer `CSI ? 62 ; 22 c`, a VT220 with ANSI colour, and
+    add clipboard access (52) while a client shares its clipboard with the worker, which is
+    when a program's OSC 52 read is answered. A program asks again when it starts, so it
+    learns of a share by its next start. The secondary and tertiary attributes keep
+    libghostty's answers, which vim reads.
+  - The clipboard source the session gives the engine is now a trait (`ClipboardSource`):
+    the text, and whether a client shares (`ForSessions::shares`).
+  - Tests: engine `xtversion_names_slopty_and_its_version`,
+    `the_size_queries_are_answered_from_the_drivers_size`,
+    `in_band_size_reports_come_on_asking_and_on_each_resize`,
+    `the_primary_attributes_list_the_clipboard_while_it_is_shared`.
+
+- ✅ **Kitty notifications (OSC 99) are shown** (2026-10-02). libghostty parsed OSC 99 and then
+  dropped it as unimplemented, so the 2026-09-15 entry's claim held for OSC 9 and 777 only.
+  No upstream pull request takes it on. The ghostty fork now puts a notification together
+  from its chunks (aislopware/ghostty #11, `src/terminal/kitty/notification.zig`) and hands it
+  to the same desktop notification callback OSC 9 and 777 use, so no binding or engine
+  change was needed and it takes the same way to the person: `TermEvent::Notification`, the
+  banner while the app is away under the tile's name, which the system's Focus and Do Not
+  Disturb govern, and the server's routing of the session.
+  - **What is implemented.** A title and a body, sent whole or in chunks under one id, each
+    chunk plain or base64. Base64 is decoded four characters at a time across chunks, so a
+    payload chunked before encoding (each chunk padded) and one chunked after decode alike.
+    A chunk of another notification drops the one in progress. Each field is kept to 16 KiB,
+    cut on a character.
+  - **The query says so.** `p=?` is answered `o=always:p=title,body,?`: the payload types
+    implemented, and `o=always`, which the protocol asks of a terminal that honours no
+    occasion. Actions, close events, icons, buttons, sounds and urgency are neither
+    implemented nor claimed, and `p=close` and `p=alive` are ignored. Without the callback,
+    libghostty ignores OSC 99 altogether, the query included, so a program falls back.
+  - Tests: ghostty `kitty/notification.zig` (seven) and `kitty desktop notification through the
+    desktop_notification effect`; engine `desktop_notifications_are_events`.
+
+- ✅ **Search finds a hit over a soft wrap** (2026-10-02). Search read the history and the
+  screen one row at a time, so a word the program wrote across the edge of the grid was never
+  found, though the reader sees one line. Each row's soft-wrap flag now comes with its text,
+  and the rows a line wraps over are searched as one line.
+  - **Put back what the formatter trimmed.** A wrapped row's trailing blanks are trimmed in
+    the plain text. Joined, each row but the last is filled out to the grid's width again, so
+    a blank at the wrap still separates two words. The exception is a wide cluster that did
+    not fit in the last cell and went onto the next row, which leaves a spacer, not a blank.
+  - **On the wire nothing new.** A hit is still one `SearchMatch` per hit, so the count and
+    the stepping through hits are unchanged. Its `len` now counts cells in reading order
+    from its start, over the end of the row onto the next. A client paints a hit's cells on
+    each row it runs into, and one that does not yet paints only the first row.
+  - **Incremental as before.** A line that wraps past the last history row held is searched
+    with the screen, and its rows are scanned for good once it ends, so a find bar refreshed
+    under output still scans only the new rows. The flags are read once per history row,
+    with its text.
+  - **What it costs.** Reading the flags adds 15 % to a first search's format of the history
+    (2.4 ms on top of 9.9 ms for 50 000 rows). A rescan of the history costs 3 to 5 % more
+    (`search_cost`, MEASUREMENTS.md).
+  - Tests: engine `a_hit_runs_over_a_soft_wrap` (search) and
+    `a_hit_over_a_soft_wrap_is_found_with_its_cells_in_reading_order`, which holds the
+    incremental search against a fresh one as lines wrap from the history onto the screen.
+
+- ✅ **A Kitty image may come as a file, a temporary file or shared memory** (2026-10-02).
+  libghostty took an image only in the program's output (`t=d`), so a program that saves the
+  bytes by writing a file and naming it (`t=f`, `t=t`, `t=s`, which `kitty +kitten icat` and
+  several image viewers use on a local terminal) showed nothing. The engine now turns the
+  three on, as Ghostty does.
+  - **Whose files.** The program runs beside the engine, so the files are the worker's own,
+    read with the worker's own rights, and a client's files never take part. Output that a
+    program only passes on (a file shown with `cat`, a remote host over `ssh`) can name a
+    worker file as well. Nothing in the protocol reads pixels back, so such output learns only
+    from the reply whether a file exists and loads as an image. Kitty and Ghostty accept the
+    same exposure, and turning the media off would leave the local programs that use them
+    blank.
+  - **What libghostty refuses.** It refuses a path under `/proc`, `/sys` or `/dev` (but
+    `/dev/shm`) and anything that is not a regular file. It takes a temporary file only from
+    the temporary directory, `/tmp` or `/dev/shm`, with `tty-graphics-protocol` in its name,
+    and deletes it once opened. It unlinks a shared memory object once opened. The temporary
+    directory is the worker's (`TMPDIR`); one that is not UTF-8 leaves the temporary file
+    medium off.
+  - **Reviewed for safety, three holes closed in the ghostty fork** (aislopware/ghostty #12 and
+    #13, not yet upstream; no open pull request there covers it):
+    - *A FIFO stalled the session for good.* libghostty opened the path blocking, before any
+      check, so output naming a FIFO (or a serial device waiting for carrier) blocked the
+      session's thread until something wrote to it. Kitty opens with `O_NONBLOCK` for exactly
+      this. The fork checks the resolved path against the blocklist before the open, as
+      Kitty does, and opens it `O_NONBLOCK | O_NOCTTY`, so a FIFO opens at once and is
+      refused as not a regular file. The opened file is checked again, so an entry swapped
+      in between gains nothing. The check needs no stat of the path, which the C API's
+      `TinyIo` lacks; the fork's file tests load through it as well as the test runner's Io.
+    - *A large file was read before it was refused.* Without `S`, libghostty read the whole
+      file up to its 400 MB limit, then failed. The fork reads what the image takes, as Kitty
+      does: `S` bytes, an uncompressed image's own size, else the rest. It checks that range
+      against the file's size first, so a file over the limit costs one `fstat`. Several raw
+      images can also share one file by offset now, as in Kitty.
+    - *A shared memory object could crash the worker on Linux.* libghostty copied from a
+      mapping of the object, and a program that shrinks the object during the copy raises
+      SIGBUS, which ends the worker and every session in it. Off macOS the fork reads the
+      object with `pread`, where a shrink only reads short. macOS takes no read of a shared
+      memory object but never resizes one once sized, so it keeps the mapping, as Kitty does.
+    - What stays: an image is capped at 400 MB loaded and 10 000 pixels a side, the PNG
+      decoder allocates through libghostty's capped allocator, and the screen's images at
+      `KITTY_STORAGE_BYTES`.
+  - Tests: engine `an_image_may_come_as_a_file_or_a_temporary_file` (a file is read and kept,
+    a temporary one read and deleted, a temporary one outside the directory and a device
+    refused), `an_image_named_as_a_fifo_never_blocks_the_engine`, and `kitty_shm` (an object
+    read and unlinked). ghostty `graphics_image.zig`: `a FIFO is refused without blocking`
+    (shown to hang without the fix), `an uncompressed image reads only its own size from a
+    file`, `a file larger than the limit is refused before it is read` (a sparse file), and
+    `shared memory is read and unlinked`, run on macOS and in an aarch64 Linux container.

@@ -43,6 +43,10 @@ pub trait ForSessions: Send + Sync {
     /// copy.
     fn shared_text(&self) -> Option<String>;
 
+    /// Whether a client shares its clipboard with the worker now, so a program's reads may be
+    /// answered.
+    fn shares(&self) -> bool;
+
     /// What a paste of `text` by `client` carries beside the text, at most `budget` bytes of
     /// it: `None` when it carries nothing.
     fn paste_plan(&self, client: ClientId, text: &str, budget: usize) -> Option<PastePlan>;
@@ -63,6 +67,10 @@ pub trait ForSessions: Send + Sync {
 impl<B: Board + Access + Send + Sync> ForSessions for Clipboard<B> {
     fn shared_text(&self) -> Option<String> {
         self.shared_text_within(MAX_OSC52_BYTES)
+    }
+
+    fn shares(&self) -> bool {
+        !self.shared.state.lock().watchers.is_empty()
     }
 
     fn paste_plan(&self, client: ClientId, text: &str, budget: usize) -> Option<PastePlan> {

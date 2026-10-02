@@ -5,10 +5,14 @@
 //! client already holds, mirrored by `slopty_client` with the same budget.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
+use libghostty_vt::Terminal;
 use libghostty_vt::alloc::{Allocator, Bytes};
 use libghostty_vt::kitty::graphics::{DecodePng, DecodedImage, ImageFormat};
 use slopty_proto::terminal::IMAGE_CACHE_BYTES;
+
+use crate::EngineError;
 
 /// Largest RGBA payload shipped in one `TermEvent::Image`.
 ///
@@ -19,6 +23,27 @@ pub const IMAGE_WIRE_BYTES: usize = 12 * 1024 * 1024;
 /// Bytes of decoded pixels libghostty keeps per screen before it refuses a transmission
 /// (its own default is 320 MB; a coding session shows previews, not a film).
 pub const KITTY_STORAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Let a program hand an image over as a file, a temporary file or shared memory, as well as
+/// in its output, as Ghostty and Kitty let it.
+///
+/// The program runs beside the engine, so these are this machine's own files, read with the
+/// worker's own rights, never a client's. libghostty opens a file before it checks it, refuses
+/// one under `/proc`, `/sys` or `/dev` and anything not a regular file, takes a temporary file
+/// only from the temporary directory (or `/tmp`, `/dev/shm`) with `tty-graphics-protocol` in
+/// its name and deletes it once read, and unlinks a shared memory object once read. A
+/// temporary directory that is not UTF-8 leaves that one medium off.
+///
+/// # Errors
+///
+/// libghostty refused an option.
+pub fn allow_media(term: &mut Terminal<'_, '_>) -> Result<(), EngineError> {
+    let temp = std::env::temp_dir();
+    term.set_kitty_image_from_file_allowed(true)?
+        .set_kitty_image_temp_file_dir(temp.to_str().map(Path::new))?
+        .set_kitty_image_from_shared_mem_allowed(true)?;
+    Ok(())
+}
 
 /// An image's pixels for the wire.
 #[derive(Clone, PartialEq, Eq, Debug)]

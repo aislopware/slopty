@@ -14,73 +14,33 @@ use std::rc::Rc;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::kitty::dnd::{Errno, Event, Operation, Operations, Position};
+pub use slopty_proto::terminal::{DropOperation, DropPoint, DropRep};
 
 use super::GhosttyEngine;
 use crate::{EngineError, EngineEvent};
 
-/// What a drop does with its data, as the program says.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DropOperation {
-    /// Nothing: not accepted, or canceled.
-    None,
-    /// The data is copied.
-    Copy,
-    /// The data is moved.
-    Move,
-}
-
-impl DropOperation {
-    const fn of(operation: Operation) -> Self {
-        match operation {
-            Operation::None => Self::None,
-            Operation::Copy => Self::Copy,
-            Operation::Move => Self::Move,
-        }
+const fn operation(operation: Operation) -> DropOperation {
+    match operation {
+        Operation::None => DropOperation::None,
+        Operation::Copy => DropOperation::Copy,
+        Operation::Move => DropOperation::Move,
     }
 }
 
-/// Where a drag is over the terminal, and what it allows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct DropPoint {
-    /// Cell column, from 0 at the left.
-    pub col: u16,
-    /// Cell row, from 0 at the top of the screen.
-    pub row: u16,
-    /// Pixels from the left of the grid.
-    pub x: i32,
-    /// Pixels from the top of the grid.
-    pub y: i32,
-    /// The drag may copy.
-    pub copy: bool,
-    /// The drag may move.
-    pub moves: bool,
-}
-
-impl DropPoint {
-    fn position(self) -> Position {
-        let operations = match (self.copy, self.moves) {
-            (true, true) => Operations::ANY,
-            (true, false) => Operations::COPY,
-            (false, true) => Operations::MOVE,
-            (false, false) => Operations::NONE,
-        };
-        Position {
-            cell_x: u32::from(self.col),
-            cell_y: u32::from(self.row),
-            pixel_x: self.x,
-            pixel_y: self.y,
-            operations,
-        }
+const fn position(at: DropPoint) -> Position {
+    let operations = match (at.copy, at.moves) {
+        (true, true) => Operations::ANY,
+        (true, false) => Operations::COPY,
+        (false, true) => Operations::MOVE,
+        (false, false) => Operations::NONE,
+    };
+    Position {
+        cell_x: at.col as u32,
+        cell_y: at.row as u32,
+        pixel_x: at.x,
+        pixel_y: at.y,
+        operations,
     }
-}
-
-/// One representation of a drop: its MIME type, and its bytes once they are here.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct DropRep {
-    /// The MIME type, such as `text/uri-list`.
-    pub mime: String,
-    /// Its bytes; `None` while they are still coming ([`GhosttyEngine::drop_data`]).
-    pub data: Option<Vec<u8>>,
 }
 
 /// The protocol's state the engine keeps, shared with the callback.
@@ -141,7 +101,7 @@ impl GhosttyEngine {
     /// libghostty-vt failing.
     pub fn drag_over(&mut self, at: DropPoint, mimes: &[String]) -> Result<bool, EngineError> {
         let mimes: Vec<&str> = mimes.iter().map(String::as_str).collect();
-        let told = self.term.dnd_drop_move(at.position(), &mimes)?;
+        let told = self.term.dnd_drop_move(position(at), &mimes)?;
         if told == Some(true) {
             self.drop_ended(DropOperation::None);
         }
@@ -169,7 +129,7 @@ impl GhosttyEngine {
     pub fn dropped(&mut self, at: DropPoint, reps: Vec<DropRep>) -> Result<bool, EngineError> {
         let mimes: Vec<String> = reps.iter().map(|r| r.mime.clone()).collect();
         let mime_refs: Vec<&str> = mimes.iter().map(String::as_str).collect();
-        let told = self.term.dnd_drop(at.position(), &mime_refs)?;
+        let told = self.term.dnd_drop(position(at), &mime_refs)?;
         if told == Some(true) {
             self.drop_ended(DropOperation::None);
         }
@@ -232,7 +192,7 @@ impl GhosttyEngine {
                         .dnd_drop_accepted()
                         .ok()
                         .flatten()
-                        .map_or(DropOperation::None, DropOperation::of);
+                        .map_or(DropOperation::None, operation);
                     let mimes = self
                         .term
                         .dnd_drop_accepted_mimes()
@@ -247,7 +207,7 @@ impl GhosttyEngine {
                         .unwrap_or_default();
                     self.events.borrow_mut().push(EngineEvent::DropAccepted { operation, mimes });
                 }
-                Event::Concluded(operation) => self.drop_ended(DropOperation::of(operation)),
+                Event::Concluded(op) => self.drop_ended(operation(op)),
                 // Requests are served below, in order; a drag the program offers is not
                 // carried to the clients yet.
                 _ => {}
