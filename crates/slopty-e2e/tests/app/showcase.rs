@@ -43,16 +43,15 @@ fn render_path(name: &str) -> PathBuf {
 static STALE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The app's state, also when its frame differs from the same state drawn from scratch: the
-/// showcase reports a stale frame (the first few) and goes on, since it is looked at, not
-/// judged.
+/// showcase counts every stale frame, says all the first few differ in and how the rest
+/// begin, and goes on, since it is looked at, not judged.
 async fn look(drv: &mut Driver) -> Dump {
     let dump = drv.dump_moving().await.unwrap();
     if let Some(stale) = &dump.stale {
-        let seen = STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if seen < 3 {
-            let first = stale.lines().take(2).collect::<Vec<_>>().join(" / ");
-            println!("showcase: a stale frame: {first}");
-        }
+        let seen = STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed).saturating_add(1);
+        let lines = if seen <= 3 { usize::MAX } else { 2 };
+        let first = stale.lines().take(lines).collect::<Vec<_>>().join("\n    ");
+        println!("showcase: stale frame {seen}: {first}");
     }
     dump
 }
