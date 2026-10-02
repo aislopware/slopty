@@ -3405,14 +3405,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     OK, Esc Cancel. A
     `Dialog` answers WebKit's handler exactly once, and dropping one (the tile closed) cancels
     it, since WebKit raises on a handler never called.
-  - **Web Inspector** is on in debug builds, off in release; a setting can come when someone
-    needs it in a release build. `isInspectable` opens a page to Safari's Develop menu only, so
-    a debug build on the Mac also turns on WebKit's developer extras, and "Inspect page" in the
-    palette opens the inspector's own window. Both are WebKit's private headers
-    (`_setDeveloperExtrasEnabled:`, `_inspector` and its `show`), asked `respondsToSelector:`
-    first, so a WebKit without them loses the command and nothing else, and neither reaches a
-    release build. The palette lists the line only in a Mac debug build; on iOS Safari's Develop
-    menu on a Mac is the way in.
+  - **Web Inspector** follows `[web] inspector` (on by default, debug and release alike;
+    `docs/decisions/settings.md`, 2026-10-02). `isInspectable` opens a page to Safari's
+    Develop menu only, so a page opened with the setting on also has WebKit's developer extras,
+    and "Inspect page" in the palette opens the inspector's own window. Both are WebKit's
+    private headers (`_setDeveloperExtrasEnabled:`, `_inspector` and its `show`), asked
+    `respondsToSelector:` first, so a WebKit without them loses the command and nothing else.
+    The palette lists the line on the Mac; on iOS Safari's Develop menu on a Mac is the way in.
   - **Find** is a bar above the page, like a file tile's, on WebKit's `findString:`: ↩ and ⇧↩
     (⌘G and ⇧⌘G) step, Esc closes. WebKit answers found or not, never a count, so the page
     counts: a script run with `callAsyncJavaScript:` in WebKit's client content world, which the

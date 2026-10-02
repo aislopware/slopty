@@ -83,7 +83,7 @@ mod tests {
     use super::super::Work;
 
     /// Something already at the destination is shown on and left alone. Finder's view of a
-    /// published progress is `tests/file_progress.rs`, which runs on the main thread, where
+    /// published progress is `tests/main_thread.rs`, which runs on the main thread, where
     /// Foundation hands a publish to a subscriber.
     #[test]
     fn a_file_already_there_is_left_where_it_was() {

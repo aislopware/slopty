@@ -124,6 +124,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
     };
     theme.behaviour.paste_protection = settings.terminal.paste_protection;
     theme.behaviour.confirm_close = settings.terminal.confirm_close;
+    theme.behaviour.web_inspector = settings.web.inspector;
     theme.behaviour.natural_editing = settings.terminal.natural_editing;
     theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;

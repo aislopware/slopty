@@ -113,6 +113,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Remote windows and desktops",
         &["remote.fps", "remote.max_bitrate_mbps", "remote.muted"],
     ),
+    (Section::Streams, "Web pages", &["web.inspector"]),
     (Section::Network, "This app", &["client.server"]),
     (Section::Network, "This Mac as a worker", &["worker.server", "worker.allow"]),
     (Section::Network, "This Mac as a server", &["server.allow"]),
@@ -124,7 +125,7 @@ fn home(table: &str) -> Section {
     let root = table.split_once('.').map_or(table, |(root, _)| root);
     match root {
         "theme" | "colors" => Section::Appearance,
-        "remote" => Section::Streams,
+        "remote" | "web" => Section::Streams,
         "clipboard" => Section::Input,
         "client" | "worker" | "server" => Section::Network,
         _ => Section::Terminal,

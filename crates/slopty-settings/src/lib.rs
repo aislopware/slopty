@@ -492,6 +492,26 @@ impl ClipboardSettings {
     }
 }
 
+/// `[web]`: the browser tiles, which show a worker's pages.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(title = "Web pages")]
+pub struct WebSettings {
+    /// Web Inspector opens on a page, as a developer's browser does.
+    ///
+    /// "Inspect page" in the palette and "Inspect Element" in a page's menu open the inspector
+    /// on it, and Safari's Develop menu lists the page. Off, neither does; a page open already
+    /// keeps its menu item until it is opened again.
+    #[schemars(title = "Web Inspector")]
+    pub inspector: bool,
+}
+
+impl Default for WebSettings {
+    fn default() -> Self {
+        Self { inspector: true }
+    }
+}
+
 /// `[keys]`: the app's key bindings the file changes.
 ///
 /// A table per context (`[keys.workspace]`, `[keys.terminal]`) of action names and their
@@ -799,6 +819,8 @@ pub struct Settings {
     pub remote: RemoteSettings,
     /// The clipboard shared with the workers.
     pub clipboard: ClipboardSettings,
+    /// The browser tiles.
+    pub web: WebSettings,
     /// Terminal colours.
     pub colors: ColorSettings,
     /// The app's key bindings the file changes.
@@ -1328,6 +1350,17 @@ mod tests {
 
         let back = toml::to_string(&loaded.settings).unwrap_or_default();
         assert_eq!(Settings::parse(&back).settings.keys, *keys, "written back as read:\n{back}");
+    }
+
+    /// Web Inspector opens on a page unless `[web] inspector` says not, and a value that is no
+    /// switch is the file's error.
+    #[test]
+    fn web_inspector_is_on_unless_the_file_says_not() {
+        assert!(Settings::default().web.inspector);
+        let off = Settings::parse("[web]\ninspector = false\n");
+        assert!(off.error.is_none() && off.warnings.is_empty(), "{off:?}");
+        assert!(!off.settings.web.inspector);
+        assert!(Settings::parse("[web]\ninspector = \"yes\"\n").error.is_some(), "a switch");
     }
 
     /// The clipboard is shared with every worker unless `sync` says not; a worker named under

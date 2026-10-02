@@ -1,10 +1,11 @@
-//! A download's progress as Finder sees it (`slopty_platform::continued`, macOS).
+//! What only the main thread can see (macOS): a download's progress as Finder sees it
+//! (`slopty_platform::continued`), and a browser page's Web Inspector (`slopty_platform::web`).
 //!
-//! Finder subscribes to the progress published for a file URL; Foundation hands the publish to
-//! a subscriber on its main thread, which libtest never gives a test. So this binary is its own
-//! harness (`harness = false`): `main` runs the test on the main thread, pumping its run loop
-//! while it waits. It answers a runner's `--list --format terse` with its one test, and none for
-//! `--ignored`, as nextest asks of a harness of its own.
+//! Finder subscribes to the progress published for a file URL, and Foundation hands the publish
+//! to a subscriber on its main thread; a `WKWebView` is made only there. libtest never gives a
+//! test the main thread, so this binary is its own harness (`harness = false`): `main` runs each
+//! test there, pumping its run loop while one waits. It answers a runner's `--list --format
+//! terse` with its tests, and none for `--ignored`, as nextest asks of a harness of its own.
 
 #[cfg(target_os = "macos")]
 #[expect(clippy::unwrap_used, reason = "a test, which fails by panicking")]
@@ -15,13 +16,26 @@ mod mac {
     use std::time::{Duration, Instant};
 
     use block2::RcBlock;
+    use objc2::MainThreadMarker;
     use objc2::rc::Retained;
+    use objc2_app_kit::NSView;
     use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
     use objc2_foundation::{NSProgress, NSProgressUnpublishingHandler, NSString, NSURL};
     use parking_lot::Mutex;
     use slopty_platform::continued::Work;
+    use slopty_platform::web::WebView;
 
-    pub const NAME: &str = "a_download_shows_on_its_file_and_finders_cancel_ends_it";
+    /// Every test, by name.
+    pub const TESTS: [(&str, fn()); 2] = [
+        (
+            "a_download_shows_on_its_file_and_finders_cancel_ends_it",
+            a_download_shows_on_its_file_and_finders_cancel_ends_it,
+        ),
+        (
+            "web_inspector_opens_on_a_page_only_while_the_setting_is_on",
+            web_inspector_opens_on_a_page_only_while_the_setting_is_on,
+        ),
+    ];
 
     /// Run the main run loop until `done`, five seconds at most.
     fn until(what: &str, done: impl Fn() -> bool) {
@@ -38,7 +52,7 @@ mod mac {
     /// A download shows on the file it lands as, as Finder subscribes to it: a progress
     /// published for that file and counting its bytes, on a placeholder holding its name.
     /// Finder's cancel on it ends the transfer, and the placeholder goes with the work.
-    pub fn a_download_shows_on_its_file_and_finders_cancel_ends_it() {
+    fn a_download_shows_on_its_file_and_finders_cancel_ends_it() {
         let dir = tempfile::tempdir().unwrap();
         let at = dir.path().join("report.pdf");
         let seen: Arc<Mutex<Option<Retained<NSProgress>>>> = Arc::default();
@@ -81,6 +95,29 @@ mod mac {
             NSProgress::removeSubscriber(&subscriber);
         }
     }
+
+    /// A page opened with `[web] inspector` on is open to Web Inspector, one opened with it off
+    /// is not and opens none, and the setting turned either way follows on a page already
+    /// open. Nothing is shown: the page is in no window, and no inspector is opened.
+    fn web_inspector_opens_on_a_page_only_while_the_setting_is_on() {
+        let mtm = MainThreadMarker::new().unwrap();
+        let gpui = NSView::new(mtm);
+        let host = NonNull::from(&*gpui).cast();
+        // Worker 0: a store that keeps nothing on disk.
+        let page = |inspectable| {
+            WebView::new(host, 0, "about:blank", inspectable, std::rc::Rc::new(|_event| {}))
+                .unwrap()
+        };
+        let on = page(true);
+        assert!(on.inspectable(), "open to the inspector");
+        on.set_inspectable(false);
+        assert!(!on.inspectable(), "closed when the setting goes off");
+        let off = page(false);
+        assert!(!off.inspectable(), "not open to it");
+        assert!(!off.inspect(), "and none opens");
+        off.set_inspectable(true);
+        assert!(off.inspectable(), "open once the setting comes on");
+    }
 }
 
 #[cfg_attr(
@@ -93,14 +130,22 @@ fn main() {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.iter().any(|a| a == "--list") {
             if !args.iter().any(|a| a == "--ignored") {
-                println!("{}: test", mac::NAME);
+                for (name, _test) in mac::TESTS {
+                    println!("{name}: test");
+                }
             }
             return;
         }
+        let exact = args.iter().any(|a| a == "--exact");
         let named: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-        if named.iter().all(|filter| mac::NAME.contains(filter.as_str())) {
-            mac::a_download_shows_on_its_file_and_finders_cancel_ends_it();
-            println!("test {} ... ok", mac::NAME);
+        for (name, test) in mac::TESTS {
+            let wanted = named.iter().all(|filter| {
+                if exact { name == filter.as_str() } else { name.contains(filter.as_str()) }
+            });
+            if wanted {
+                test();
+                println!("test {name} ... ok");
+            }
         }
     }
 }

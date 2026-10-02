@@ -177,8 +177,9 @@ tempfile.workspace = true
 # The Linux service tests stand in for `loginctl` behind a lock.
 parking_lot.workspace = true
 
-# Finder's view of a download's progress, which Foundation hands to a subscriber on the main
-# thread: its own harness, so the test runs there (`tests/file_progress.rs`).
+# What only the main thread sees: Finder's view of a download's progress, which Foundation hands
+# to a subscriber there, and a browser page's Web Inspector. Its own harness, so its tests run
+# there (`tests/main_thread.rs`).
 [[test]]
-name = "file_progress"
+name = "main_thread"
 harness = false

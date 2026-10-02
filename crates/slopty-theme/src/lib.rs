@@ -1110,6 +1110,8 @@ pub struct Behaviour {
     pub natural_editing: bool,
     /// What a remote window or display stream asks the worker for.
     pub stream: StreamPrefs,
+    /// Web Inspector opens on a browser tile's page (`[web] inspector`).
+    pub web_inspector: bool,
 }
 
 impl Default for Behaviour {
@@ -1125,6 +1127,7 @@ impl Default for Behaviour {
             confirm_close: true,
             natural_editing: true,
             stream: StreamPrefs::default(),
+            web_inspector: true,
         }
     }
 }

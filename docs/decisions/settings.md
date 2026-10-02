@@ -184,3 +184,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   The paste hooks read the set as they run, so a change holds for tiles opened before it.
   Tests: `the_clipboard_is_shared_by_default_and_per_worker_by_name` (slopty-settings) and
   `workspace::tests::remote::a_worker_the_clipboard_is_not_shared_with_neither_hears_nor_gives_it`.
+
+- ✅ **`[web] inspector`: Web Inspector on a browser tile's page, on by default** (2026-10-02,
+  readiness audit item 21). The inspector was on only in debug builds, so a shipped app could
+  not debug a worker's dev pages, which is a browser tile's main use. An inspector one can open
+  is what a developer expects of a page, so the key defaults to on, and a debug and a release
+  build behave the same: no `cfg!(debug_assertions)` decides it anywhere.
+  - **What it governs.** On, a page is open to Safari's Develop menu (`isInspectable`), its
+    menu has "Inspect Element" (WebKit's developer extras), and "Inspect page" opens WebKit's
+    own inspector window. Off, none of them.
+  - **A change follows on open pages**, through the theme's behaviour the app derives from the
+    file: `isInspectable` and the palette's command change at once. The developer extras are the
+    page's configuration, copied when the web view is made, so "Inspect Element" in an open
+    page's menu follows when the page opens again.
+  - **In the form**: Streams ▸ Web pages, beside remote windows and desktops, since both show
+    what runs on a worker.
+  - Tests: `web_inspector_is_on_unless_the_file_says_not` (slopty-settings), and on the main
+    thread, where a `WKWebView` is made,
+    `main_thread::web_inspector_opens_on_a_page_only_while_the_setting_is_on`
+    (slopty-platform): a page made with it on or off, then turned either way. It opens no
+    window and no inspector.
+

@@ -510,7 +510,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     iOS Files picker, which nobody watches land.
   - **Tested on the main thread.** Foundation hands a publish to a subscriber on the main
     thread's run loop (checked with a scratch program: never seen without it), which libtest
-    never gives a test, so `crates/slopty-platform/tests/file_progress.rs` is its own harness:
+    never gives a test, so `crates/slopty-platform/tests/main_thread.rs` is its own harness:
     it subscribes to the destination as Finder does, sees the progress and its bytes, cancels
     through it and sees the transfer's cancel, and finds the placeholder gone. It answers a
     runner's `--list --format terse`, so nextest runs it. `continued::mac::tests` covers a file
