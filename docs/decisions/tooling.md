@@ -885,3 +885,11 @@ more full-window layer.
     dev's opt-level 1, so frame times and the e2e suites measure what they did.
   - **Accept** on the next land against run 36963072630: the tests lane's `nextest build` (1 613.7
     s) drops by at least 35 % and nextest's run (435.9 s) grows by less than 15 %.
+
+- ✅ **A newer push to `gate` waits behind the run in progress** (2026-10-02). It used to cancel
+  it, on the grounds that the newer commit's green covers both. But 10 of the last 41 gate runs
+  were cancelled, two of them at 47.6 and 48.3 minutes, a few minutes from promoting main, and
+  their minutes bought nothing. Now `cancel-in-progress` holds only for pull requests. GitHub
+  keeps one run in progress and one pending per group, and a newer push replaces the pending
+  one, so the queue never holds more than the newest commit. A pending run replaced that way
+  ends as cancelled, which `land --wait` reports as such.

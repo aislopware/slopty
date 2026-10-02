@@ -9,11 +9,15 @@ on:
     tags: [ "v*" ]
   pull_request:
 
-# One run per ref: a newer push to `gate` cancels the run in progress, since the commit it
-# carries sits on top of the older one and its green covers both. A tag's run is never cancelled.
+# One run at a time per ref. A newer push to `gate` waits behind the run in progress instead of
+# cancelling it: that run is often most of the way to promoting main, and cancelled runs threw
+# away up to 48 minutes each (10 of 41 runs; MEASUREMENTS 2026-10-02, "the tests lane's build").
+# GitHub keeps one run pending per group and replaces it with each newer push, so the queue never
+# grows past the newest commit, whose green covers every commit under it. A pull request's run is
+# still cancelled by its next push; a tag's never is.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

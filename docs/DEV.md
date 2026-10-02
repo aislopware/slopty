@@ -28,8 +28,8 @@ zed itself so it is never behind zed while longbridge lags.
   gate takes about a minute with a warm build; it prints the next step when it passes. `land`
   pushes the commit to the `gate` branch, where CI runs every lane, and main moves to that commit
   only once all of them pass (below, "Gate"). A red run names the failed lane and tests in its
-  summary: fix it in a new commit and land again, since a newer push supersedes the run in
-  progress. `land --wait` blocks until main moved or the run failed, and says which.
+  summary: fix it in a new commit and land again; that push's run, which waits for any run in
+  progress, decides. `land --wait` blocks until main moved or the run failed, and says which.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask e2e <case>` runs the live tests (`docs/TESTING.md`); `cargo xtask e2e server`
   is the one for the server, its worker link, the CLI and MCP, and takes seconds.
@@ -192,12 +192,13 @@ doctests, rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is spli
   by printing the next step.
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
   makes: the commits on main not yet on `origin/main`, pushed with a lease. Runs on that branch
-  form one concurrency group, and a newer push cancels the run in progress, because its commit
-  sits on top of the older one and its green covers both. When every lane passed, the `promote`
-  job fast-forwards main to that exact commit (`git push origin <sha>:main`); it refuses one
-  that is not on top of main, and main is never gated a second time. A failed lane writes the
-  run's summary: the lane, the step that failed and, for the tests, each failed test from the
-  JUnit report.
+  form one concurrency group. A newer push waits behind the run in progress rather than
+  cancelling it, and GitHub keeps only the newest push pending, whose green covers every commit
+  under it; a pull request's run is still cancelled by its next push. When every lane passed,
+  the `promote` job fast-forwards main to that exact commit (`git push origin <sha>:main`); it
+  refuses one that is not on top of main, and main is never gated a second time. A failed lane
+  writes the run's summary: the lane, the step that failed and, for the tests, each failed test
+  from the JUnit report.
 
 `cargo gate --full` runs every lane here, as `cargo xtask release` once did; the release now runs
 the quick gate and CI gates its tag in full before it builds anything. The gate checks the
