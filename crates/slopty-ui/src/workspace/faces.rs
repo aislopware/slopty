@@ -30,7 +30,7 @@ use slopty_proto::agent::{AgentKind, AgentStatus};
 use slopty_proto::conversation::{ConversationEvent, ConversationRequest, PermissionEvent};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::TermRequest;
-use slopty_proto::thread::attention::Rung;
+use slopty_proto::thread::attention::{Ladder, Rung};
 use slopty_proto::thread::wire::{
     IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
 };
@@ -99,6 +99,9 @@ pub(super) struct ThreadFaces {
     /// Where each thread stands as its worker's table last said, its subagents folded in, for
     /// the chrome outside its tile.
     stands: HashMap<ThreadId, ThreadStand>,
+    /// Where each thread stands as the server's ladder last said: what speaks for the threads
+    /// of a worker this client has no link to.
+    server: HashMap<ThreadId, ThreadStand>,
     /// Starts sent and not yet answered, and the worker each went to.
     starts: HashMap<IntentId, WorkerKey>,
     /// The thread tile whose view takes the keyboard once it is made.
@@ -214,9 +217,8 @@ impl WorkspaceView {
     /// The agent `item` shows, by its [`AgentId`] name: a thread's, or the one at work in a
     /// terminal, as its thread's row names it or else by the kind the terminal reports.
     pub(super) fn item_agent(&self, item: &Item) -> Option<&str> {
-        let threads = &self.faces.threads;
         match item.kind {
-            ItemKind::Thread { thread } => threads.agents.get(&thread).map(|a| a.0.as_str()),
+            ItemKind::Thread { thread } => self.thread_agent(thread),
             ItemKind::Terminal { session } => self.session_agent(session),
             _ => None,
         }
@@ -234,6 +236,11 @@ impl WorkspaceView {
             },
             |a| a.0.as_str(),
         ))
+    }
+
+    /// The agent that runs `thread`, by its [`AgentId`] name, as its worker's table last said.
+    pub(super) fn thread_agent(&self, thread: ThreadId) -> Option<&str> {
+        self.faces.threads.agents.get(&thread).map(|a| a.0.as_str())
     }
 
     /// What `item`'s tile leads with ([`super::tile::kind_icon`]), its agent looked up.
@@ -981,10 +988,59 @@ impl WorkspaceView {
         }
     }
 
-    /// Where `thread` stands, when its row speaks for it: not while its terminal's agent
-    /// status already does (Claude Code observed in its TUI), which would count it twice.
+    /// The server's ladder: where the threads of every worker stand, for those whose own link
+    /// is down or was never up, as [`Self::server_agents_replace`] is for their terminals. A
+    /// thread stands on its tile's terminal when it leads that tile, so one whose terminal's
+    /// agent already speaks for it is counted once, by the terminal.
+    pub fn server_ladder(&mut self, ladder: &Ladder, cx: &mut Context<Self>) {
+        let terminals: HashMap<ThreadId, SessionId> = ladder
+            .tiles
+            .iter()
+            .filter_map(|(tile, standing)| Some((standing.top?.thread, tile.session)))
+            .collect();
+        let stands: HashMap<ThreadId, ThreadStand> = ladder
+            .threads
+            .iter()
+            .map(|r| {
+                let stand = ThreadStand {
+                    worker: super::projects::worker_key(r.at.worker),
+                    rung: r.rung,
+                    asks: None,
+                    terminal: terminals.get(&r.at.thread).copied(),
+                    since: r.since_ms,
+                };
+                (r.at.thread, stand)
+            })
+            .collect();
+        if stands != self.faces.threads.server {
+            self.faces.threads.server = stands;
+            self.agents_moved(cx);
+            cx.notify();
+        }
+    }
+
+    /// Drop what the server's ladder said: on `worker` (gone), or everywhere (`None`, the
+    /// server was disconnected). Whether anything went.
+    pub(super) fn forget_server_threads(&mut self, worker: Option<WorkerKey>) -> bool {
+        let before = self.faces.threads.server.len();
+        self.faces
+            .threads
+            .server
+            .retain(|_, stand| worker.is_some_and(|gone| stand.worker != gone));
+        self.faces.threads.server.len() != before
+    }
+
+    /// Where `thread` stands, when its row speaks for it: its worker's own table while that
+    /// worker's link is up, else the server's ladder; and not while its terminal's agent
+    /// status already speaks for it (Claude Code observed in its TUI), which would count it
+    /// twice.
     pub(super) fn thread_stand(&self, thread: ThreadId) -> Option<&ThreadStand> {
-        let stand = self.faces.threads.stands.get(&thread)?;
+        let linked = |key: WorkerKey| self.workers.get(&key).is_some_and(|w| w.link.is_some());
+        let threads = &self.faces.threads;
+        let stand = match threads.stands.get(&thread) {
+            Some(own) if linked(own.worker) => own,
+            _ => threads.server.get(&thread).filter(|s| !linked(s.worker))?,
+        };
         let spoken = stand
             .terminal
             .and_then(|s| self.agent_state(s))
@@ -992,14 +1048,23 @@ impl WorkspaceView {
         (!spoken).then_some(stand)
     }
 
-    /// Every thread whose row speaks for it ([`Self::thread_stand`]), on every worker.
+    /// Every thread whose row speaks for it ([`Self::thread_stand`]), on every worker, each
+    /// once however many ways its worker is reached.
     pub(super) fn thread_stands(&self) -> impl Iterator<Item = (ThreadId, &ThreadStand)> {
-        self.faces.threads.stands.keys().filter_map(|t| Some((*t, self.thread_stand(*t)?)))
+        let threads = &self.faces.threads;
+        let only_server = threads.server.keys().filter(|t| !threads.stands.contains_key(t));
+        threads.stands.keys().chain(only_server).filter_map(|t| Some((*t, self.thread_stand(*t)?)))
     }
 
     /// The threads waiting on the person whose rows speak for them, after the sessions of
     /// [`Self::needs_you`]: those with a tile in reading order, then the rest by worker.
     pub(super) fn threads_waiting(&self) -> Vec<ThreadWait> {
+        self.threads_on(Rung::NeedsYou)
+    }
+
+    /// The threads on `rung` whose rows speak for them: those with a tile in reading order,
+    /// then the rest by worker.
+    pub(super) fn threads_on(&self, rung: Rung) -> Vec<ThreadWait> {
         let tiles: HashMap<ThreadId, TileRef> = self
             .items()
             .filter_map(|(worker, i)| match i.kind {
@@ -1009,7 +1074,7 @@ impl WorkspaceView {
             .collect();
         let mut out: Vec<(Option<slopty_client::layout::Pos>, ThreadWait)> = self
             .thread_stands()
-            .filter(|(_, stand)| stand.rung == Rung::NeedsYou)
+            .filter(|(_, stand)| stand.rung == rung)
             .map(|(thread, stand)| {
                 let tile = tiles.get(&thread).copied();
                 let pos = tile.and_then(|t| self.layout.position(t));

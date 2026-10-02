@@ -338,8 +338,9 @@ impl Workspace {
             },
             Change::Present(present) => self.heard_present(&present),
             Change::Notice(notice) => self.heard_notice(&notice, cx),
-            // The workspace's to show; until it does, nothing here takes it.
-            Change::Ladder(_) => {}
+            // What speaks for the threads of the workers this client reaches only through the
+            // server, as `Terminals` does for their agents.
+            Change::Ladder(ladder) => self.view.update(cx, |v, cx| v.server_ladder(&ladder, cx)),
             Change::Terminals(terminals) => {
                 let agents = terminals
                     .into_iter()

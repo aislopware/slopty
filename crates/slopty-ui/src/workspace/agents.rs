@@ -13,9 +13,11 @@ use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::SessionSummary;
+use slopty_proto::thread::attention::Rung;
 use slopty_theme::alpha;
 
 use super::actions::NextAttention;
+use super::faces::ThreadWait;
 use super::tile::Chrome;
 use super::{Finished, WorkspaceEvent, WorkspaceView};
 use crate::a11y::tab_stop;
@@ -33,6 +35,26 @@ pub(super) struct Waiting {
     pub tile: Option<TileRef>,
     /// Its session.
     pub session: SessionId,
+}
+
+/// Something on the attention ladder: an agent in a terminal, or a thread whose row speaks
+/// for it, having no terminal whose agent could (Codex, pi, an ACP agent).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Step {
+    /// A terminal's agent, or a command that ended in it.
+    Session(Waiting),
+    /// A thread.
+    Thread(ThreadWait),
+}
+
+impl Step {
+    /// Its tile here, if one shows it.
+    pub(super) const fn tile(self) -> Option<TileRef> {
+        match self {
+            Self::Session(w) => w.tile,
+            Self::Thread(w) => w.tile,
+        }
+    }
 }
 
 /// A banner's title: what the agent is doing, led by the tile's name when the human gave it
@@ -463,12 +485,13 @@ impl WorkspaceView {
         }
     }
 
-    /// Drop what the server said about agents: on `worker` (gone), or everywhere (`None`,
-    /// the server was disconnected).
+    /// Drop what the server said about agents and their threads: on `worker` (gone), or
+    /// everywhere (`None`, the server was disconnected).
     pub fn forget_server_agents(&mut self, worker: Option<WorkerKey>, cx: &mut Context<Self>) {
         let before = self.server_agents.len();
         self.server_agents.retain(|_, (w, _)| worker.is_some_and(|gone| *w != gone));
-        if self.server_agents.len() != before {
+        let threads = self.forget_server_threads(worker);
+        if self.server_agents.len() != before || threads {
             self.agents_moved(cx);
             cx.notify();
         }
@@ -495,32 +518,47 @@ impl WorkspaceView {
         cx.emit(WorkspaceEvent::NeedsYou(self.needs_you_count()));
     }
 
-    /// What wants the person, on every worker, in the ladder's order: the agents that need
-    /// them, then the finishes not yet looked at that failed, then the rest of those.
-    pub(super) fn attention_ladder(&self) -> Vec<Waiting> {
+    /// What wants the person, on every worker, in the ladder's order: the agents and threads
+    /// that need them, then what failed (the finishes not yet looked at and the threads that
+    /// stopped on an error), then the rest of those finishes. Each rung in reading order, what
+    /// has no tile here after it.
+    pub(super) fn attention_ladder(&self) -> Vec<Step> {
         let finished = |failed: bool| {
-            let mut out: Vec<Waiting> = self
-                .finished
+            self.finished
                 .iter()
                 .filter(|(session, done)| {
                     !self.snoozed(**session) && done.exit.is_some_and(|e| e != 0) == failed
                 })
                 .filter_map(|(session, _)| {
                     let tile = self.tile_of_session(*session)?;
-                    Some(Waiting { worker: tile.worker, tile: Some(tile), session: *session })
+                    let at = Waiting { worker: tile.worker, tile: Some(tile), session: *session };
+                    Some(Step::Session(at))
                 })
-                .collect();
-            out.sort_by_key(|w| {
-                w.tile
-                    .and_then(|t| self.layout.position(t))
-                    .map(|p| (p.workspace, p.column, p.tile))
-            });
-            out
+                .collect::<Vec<_>>()
         };
-        let mut ladder = self.needs_you();
-        ladder.extend(finished(true));
-        ladder.extend(finished(false));
+        let threads = |rung: Rung| self.threads_on(rung).into_iter().map(Step::Thread);
+        let mut ladder = self.steps_in_reading_order(
+            self.needs_you().into_iter().map(Step::Session).chain(threads(Rung::NeedsYou)),
+        );
+        ladder.extend(
+            self.steps_in_reading_order(finished(true).into_iter().chain(threads(Rung::Failed))),
+        );
+        ladder.extend(self.steps_in_reading_order(finished(false)));
         ladder
+    }
+
+    /// `steps` in reading order (workspace, column, tile), those with no tile here after them
+    /// in the order they came.
+    pub(super) fn steps_in_reading_order(
+        &self,
+        steps: impl IntoIterator<Item = Step>,
+    ) -> Vec<Step> {
+        let mut steps: Vec<(Option<slopty_client::layout::Pos>, Step)> = steps
+            .into_iter()
+            .map(|step| (step.tile().and_then(|t| self.layout.position(t)), step))
+            .collect();
+        steps.sort_by_key(|(pos, _)| (pos.is_none(), pos.map(|p| (p.workspace, p.column, p.tile))));
+        steps.into_iter().map(|(_, step)| step).collect()
     }
 
     /// ⌘⇧A: reveal and focus the next thing on the attention ladder, on whichever worker:
@@ -538,16 +576,33 @@ impl WorkspaceView {
         }
         // From the focused rung, the next; from a finish the last step looked at (and so took
         // off the ladder), the one that took its place.
-        let at = match self.focused().and_then(|f| ladder.iter().position(|w| w.tile == Some(f))) {
+        let at = match self.focused().and_then(|f| ladder.iter().position(|w| w.tile() == Some(f)))
+        {
             Some(i) => i.saturating_add(1),
             None => self.attention_at.unwrap_or(0),
         };
         let at = if at < ladder.len() { at } else { 0 };
         self.attention_at = Some(at);
         let Some(next) = ladder.get(at).copied() else { return };
-        match next.tile {
-            Some(_) => self.reveal_session(next.session, cx),
-            None => self.show_untiled(next.worker, next.session, cx),
+        self.reveal_step(next, cx);
+    }
+
+    /// Bring up what `step` is about: a terminal's tile, a thread's, or, with none here, a
+    /// new one on its worker. A worker this client cannot reach says so instead.
+    pub(super) fn reveal_step(&mut self, step: Step, cx: &mut Context<Self>) {
+        match step {
+            Step::Session(w) if w.tile.is_some() => self.reveal_session(w.session, cx),
+            Step::Session(w) => self.show_untiled(w.worker, w.session, cx),
+            Step::Thread(ThreadWait { tile: Some(tile), .. }) => self.go_to(tile.item, cx),
+            Step::Thread(w) => {
+                let Some(worker) = self.workers.get(&w.worker) else { return };
+                if worker.link.is_none() {
+                    let text = format!("{} is not reachable from here", worker.name);
+                    self.show_notice(text, cx);
+                    return;
+                }
+                self.open_thread(w.worker, w.thread, cx);
+            }
         }
     }
 

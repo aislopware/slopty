@@ -2206,7 +2206,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `working_lists_the_agents_at_their_turn_and_ticks_their_time`,
   `the_rail_keeps_the_workers_in_view_when_the_navigator_hides`,
   `the_handle_straddles_the_edge_and_a_double_click_resets_it`; navigator
-  `an_age_shows_past_a_minute_and_ticks_at_its_next_unit`, `a_turn_ticks_in_whole_seconds`.
+  `an_age_shows_past_a_minute_and_ticks_at_its_next_unit`; kit `a_clock_ticks_in_whole_seconds`.
 
 - ✅ **Workspace tabs are sized to their names and the active one joins the content**
   (2026-09-27, UI wave 2 frame chrome). Tabs were fixed 148 pt `overlay` pills beside a second
@@ -3309,7 +3309,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_resting_agent_reads_its_last_word_and_its_age`, `a_phone_drawer_lists_the_workspaces`
     (`workspace/tests/nav_rows.rs`), `without_a_keyboard_the_palette_prints_no_chords`
     (Cancel and the scrim), `an_inbox_row_says_its_age_first_and_no_word_its_heading_does` (a
-    bare tool, flush under the bar), navigator `a_turn_ticks_in_whole_seconds`,
+    bare tool, flush under the bar), kit `a_clock_ticks_in_whole_seconds`,
     `a_resting_agent_is_quoted_not_stated`; app
     `the_panel_names_its_host_and_the_server_the_tailnet_found` (the mark, the field's label).
 
@@ -4951,3 +4951,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `layout::tests::the_overview_fills_the_window_with_a_strip_wider_than_it`,
     `workspace::tests::thread_waits::*`,
     `workspace::attention::tests::a_server_notice_leads_to_its_tile_and_names_the_subagent`.
+
+- ✅ **A waiting thread is on every list a waiting terminal is on, and counts once** (2026-10-02,
+  `crates/slopty-ui/src/workspace`, `crates/slopty-app/src/server.rs`).
+  - **⌘⇧A and *Needs you* take threads by their rung.** A thread whose row speaks for it
+    (Codex, pi, ACP) steps onto ⌘⇧A's ladder on the rung `Rung::of` gives it: one that waits
+    on the person beside the waiting terminals, one that stopped on an error beside the failed
+    commands, each rung in reading order with what has no tile here after it. A thread left to
+    review is not a step: its rung lasts until its changes are kept, while the ladder's
+    finishes leave once looked at, so it would never let ⌘⇧A move on. *Needs you* lists a
+    waiting thread out of sight with what it asks; a step or a row opens the thread's tile, or
+    a new one on its worker, and a worker this client cannot reach says so.
+  - **One word per worker.** The server's ladder is to threads what its terminal list is to
+    agents: it speaks for a worker this client has no link to. While a worker's own link is up
+    its table is the word and the server's is ignored; once the link drops, the table goes
+    stale and the server's stands in, so a worker reached both ways never counts a thread
+    twice and never counts a stale one. The ladder carries no thread's terminal, so a thread
+    takes the terminal of the tile it leads; one its terminal's agent speaks for is counted by
+    the terminal. Forgetting the server forgets its threads with its agents.
+  - **A clock says only what its tick can keep.** A live turn's time (the conversation face's
+    working row, its running subagent and task, the thread face's working row) is whole
+    seconds from "1 s" (`kit::clock`, the navigator's former `turn_label`), and the
+    conversation face's clock ticks on the turn's own second, as the thread face's does. Its
+    tenths would have gone stale between two ticks a second apart.
+  - Tests: `workspace::tests::thread_waits::`
+    (`the_ladder_and_needs_you_list_a_waiting_thread_by_its_rung`,
+    `a_thread_the_server_ranks_counts_once_however_its_worker_is_reached`),
+    `conversation::view::tests::the_working_clock_says_what_it_ticks`,
+    `kit::tests::a_clock_ticks_in_whole_seconds`; e2e gallery `agent-needs-you` and `inbox` wait
+    for the thread's request to arrive before their goldens.

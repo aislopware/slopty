@@ -15,6 +15,8 @@ use gpui::{Context, Window, actions};
 use slopty_core::SessionId;
 use slopty_proto::conversation::Verdict;
 
+use super::super::agents::Step;
+use super::super::faces::ThreadWait;
 use super::super::toast::ToastKind;
 use super::super::{Finished, WorkspaceView};
 use super::{Go, Row};
@@ -154,9 +156,12 @@ impl WorkspaceView {
     /// Go where a row leads.
     pub(in crate::workspace) fn go_row(&mut self, go: Go, cx: &mut Context<Self>) {
         match go {
-            Go::Waiting(waiting) => self.go_to_waiting(waiting, cx),
+            Go::Waiting(waiting) => self.go_to_step(Step::Session(waiting), cx),
             Go::Session(session) => self.reveal_session(session, cx),
-            Go::Thread(worker, thread) => self.open_thread(worker, thread, cx),
+            Go::Thread(worker, thread) => {
+                let tile = self.tile_of_thread(thread);
+                self.go_to_step(Step::Thread(ThreadWait { worker, thread, tile }), cx);
+            }
         }
     }
 

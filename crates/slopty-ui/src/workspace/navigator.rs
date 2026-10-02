@@ -74,7 +74,9 @@ use slopty_proto::thread::attention::Rung;
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::actions::{ToggleNavigator, ToggleNavigatorLens};
-use super::agents::{Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human};
+use super::agents::{
+    Step, Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human,
+};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
@@ -430,12 +432,6 @@ pub(super) fn age_shown(age: Duration) -> Option<String> {
     (age >= Duration::from_secs(60)).then(|| crate::palette::age_label(age))
 }
 
-/// A clock that ticks once a second, as *Working* and a long command's row print it: whole
-/// seconds in [`kit::duration`]'s one form, from "1 s" (never a fraction the next tick undoes).
-pub(super) fn turn_label(elapsed: Duration) -> String {
-    kit::duration(Duration::from_secs(elapsed.as_secs().max(1)))
-}
-
 /// What an agent at rest last said, as its row's second line gives it: a single word quoted
 /// (`“done”`), so the agent's own last word does not read as a second state beside the row's.
 pub(super) fn rest_words(said: &str) -> Option<String> {
@@ -736,10 +732,11 @@ struct NavBlock {
     tiles: Vec<NavTile>,
 }
 
-/// An agent in *Needs you* or *Working*: what it is, what it says, where, and since when.
+/// An agent in *Needs you* or *Working*, or a thread in *Needs you*: what it is, what it
+/// says, where, and since when.
 #[derive(Clone)]
 struct NavAgent {
-    at: Waiting,
+    at: Step,
     status: Status,
     title: String,
     words: String,
@@ -953,16 +950,12 @@ impl WorkspaceView {
         self.focus_tile(tile, cx);
     }
 
-    /// Go to an agent waiting on the human or at work: its tile, or, with none here, a new one
-    /// on its worker (the same as ⌘⇧A does for one waiting).
-    pub(super) fn go_to_waiting(&mut self, waiting: Waiting, cx: &mut Context<Self>) {
+    /// Go to an agent or a thread waiting on the human, or an agent at work: its tile, or,
+    /// with none here, a new one on its worker (the same as ⌘⇧A does for one waiting).
+    pub(super) fn go_to_step(&mut self, step: Step, cx: &mut Context<Self>) {
         self.tick();
         self.navigated();
-        if waiting.tile.is_some() {
-            self.reveal_session(waiting.session, cx);
-            return;
-        }
-        self.show_untiled(waiting.worker, waiting.session, cx);
+        self.reveal_step(step, cx);
     }
 
     /// Switch to workspace `ix`.
@@ -1191,7 +1184,7 @@ impl WorkspaceView {
                 let restored = summary.is_some_and(|s| s.restored.is_some());
                 let running = match (mark, &item.kind) {
                     (Some(Status::Running), ItemKind::Terminal { session }) => {
-                        self.running_for(*session).map(turn_label)
+                        self.running_for(*session).map(kit::clock)
                     }
                     _ => None,
                 };
@@ -1256,10 +1249,44 @@ impl WorkspaceView {
         out
     }
 
+    /// A row's data: an agent's ([`Self::session_nav_agent`]) or a waiting thread's
+    /// ([`Self::thread_nav_agent`]).
+    fn nav_agent(&self, at: Step, status: Status) -> NavAgent {
+        match at {
+            Step::Session(at) => self.session_nav_agent(at, status),
+            Step::Thread(wait) => self.thread_nav_agent(wait, status),
+        }
+    }
+
+    /// A thread's row data, for one waiting on the person whose row speaks for it: what its
+    /// tile is called (else its title), what it asks under the section that already says it
+    /// waits, its worker, and since when it has waited.
+    fn thread_nav_agent(&self, wait: super::faces::ThreadWait, status: Status) -> NavAgent {
+        let stand = self.thread_stand(wait.thread);
+        let asks = stand.and_then(|st| st.asks.as_ref());
+        let words = asks
+            .map(|a| crate::markdown::plain_line(&a.title))
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_default();
+        let title = match wait.tile.and_then(|t| self.item(t)) {
+            Some(item) => self.tile_title(item),
+            None => self.thread_title(wait.thread),
+        };
+        let since = asks.map(|a| a.opened_ms).or_else(|| stand.map(|st| st.since));
+        NavAgent {
+            at: Step::Thread(wait),
+            status,
+            title,
+            words,
+            place: self.worker_name(wait.worker),
+            since_ms: since.map_or(0, WallMs::as_millis),
+        }
+    }
+
     /// An agent's row data: what its tile is called (else what the agent says), its words,
     /// and its worker and directory. A waiting agent's words are what it asks, under the
     /// section that already says it waits.
-    fn nav_agent(&self, at: Waiting, status: Status) -> NavAgent {
+    fn session_nav_agent(&self, at: Waiting, status: Status) -> NavAgent {
         let agent = self.agent_state(at.session);
         let calm = |a: &AgentEvent| matches!(a.status, AgentStatus::Idle | AgentStatus::Done);
         let words = agent
@@ -1291,7 +1318,7 @@ impl WorkspaceView {
         let worker = self.worker_name(at.worker);
         let place = meta_line([Some(worker.as_str()), cwd.as_deref()]);
         NavAgent {
-            at,
+            at: Step::Session(at),
             status,
             title,
             words,
@@ -1312,7 +1339,7 @@ impl WorkspaceView {
     /// The words an agent's row under *Working* says.
     #[cfg(test)]
     pub(super) fn working_words(&self, at: Waiting) -> String {
-        self.nav_agent(at, Status::Working).words
+        self.session_nav_agent(at, Status::Working).words
     }
 
     /// The filter's field, made once there is a window to make it in. ↩ in it goes to the
@@ -1477,27 +1504,35 @@ impl WorkspaceView {
             .filter(|b| !b.folded)
             .flat_map(|b| b.tiles.iter().map(|t| t.tile))
             .collect();
-        let seen = |at: &Waiting| {
-            at.tile.is_some_and(|tile| listed.contains(&tile) && self.nav.list.in_view(tile))
+        let seen = |at: &Step| {
+            at.tile().is_some_and(|tile| listed.contains(&tile) && self.nav.list.in_view(tile))
         };
         let mut rows = Vec::new();
         if query.is_empty() && self.nav.drawn == Some(Mode::Drawer) {
             rows.extend(self.space_rows());
         }
-        let agents = |list: &[Waiting], status: Status| -> Vec<NavAgent> {
-            list.iter()
+        let agents = |list: Vec<Step>, status: Status| -> Vec<NavAgent> {
+            list.into_iter()
                 .filter(|at| !seen(at))
                 .map(|at| {
-                    let mut agent = self.nav_agent(*at, status);
-                    let words = (!agent.words.is_empty()).then(|| std::mem::take(&mut agent.words));
-                    let subagents = self.live_subagents(at.session, cx);
-                    agent.words = with_subagents(words, subagents).unwrap_or_default();
+                    let mut agent = self.nav_agent(at, status);
+                    if let Step::Session(at) = at {
+                        let words =
+                            (!agent.words.is_empty()).then(|| std::mem::take(&mut agent.words));
+                        let subagents = self.live_subagents(at.session, cx);
+                        agent.words = with_subagents(words, subagents).unwrap_or_default();
+                    }
                     agent
                 })
                 .filter(|a| matches(&query, &[&a.title, &a.words, &a.place]))
                 .collect()
         };
-        let waiting = agents(&self.drawn_waiting, Status::NeedsYou);
+        let sessions = |list: Vec<Waiting>| list.into_iter().map(Step::Session).collect();
+        let threads = self.drawn_thread_waits.iter().copied().map(Step::Thread);
+        let waiting = self.steps_in_reading_order(
+            self.drawn_waiting.iter().copied().map(Step::Session).chain(threads),
+        );
+        let waiting = agents(waiting, Status::NeedsYou);
         if !waiting.is_empty() {
             rows.push(NavRow::Heading {
                 selector: "nav-needs-you",
@@ -1506,7 +1541,7 @@ impl WorkspaceView {
             });
             rows.extend(waiting.into_iter().map(NavRow::Agent));
         }
-        let review = agents(&self.to_review(), Status::Done);
+        let review = agents(sessions(self.to_review()), Status::Done);
         if !review.is_empty() {
             rows.push(NavRow::Heading {
                 selector: "nav-to-review",
@@ -1515,7 +1550,7 @@ impl WorkspaceView {
             });
             rows.extend(review.into_iter().map(NavRow::Agent));
         }
-        let working = agents(&self.working(), Status::Working);
+        let working = agents(sessions(self.working()), Status::Working);
         if !working.is_empty() {
             let count = working.len();
             rows.push(NavRow::Heading {
@@ -1884,7 +1919,12 @@ impl WorkspaceView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (first, second) = line_heights(theme);
-        let session = agent.at.session;
+        // A terminal's agent by its session, a thread by its own id.
+        let key: SharedString = match agent.at {
+            Step::Session(at) => at.session.to_string(),
+            Step::Thread(at) => at.thread.to_string(),
+        }
+        .into();
         let prefix = match agent.status {
             Status::NeedsYou => "nav-waiting",
             Status::Done => "nav-review",
@@ -1903,10 +1943,11 @@ impl WorkspaceView {
             .filter(|_| agent.since_ms > 0)
             .map(|now| Duration::from_millis(now.saturating_sub(agent.since_ms)))
             .and_then(
-                |elapsed| if working { Some(turn_label(elapsed)) } else { age_shown(elapsed) },
+                |elapsed| if working { Some(kit::clock(elapsed)) } else { age_shown(elapsed) },
             )
             .map(|text| {
-                readout(theme, text).debug_selector(move || format!("{prefix}-time-{session}"))
+                let key = key.clone();
+                readout(theme, text).debug_selector(move || format!("{prefix}-time-{key}"))
             });
         let line1 = div()
             .h(px(first))
@@ -1922,15 +1963,17 @@ impl WorkspaceView {
         // heading that says it waits.
         let tone = (agent.status == Status::Working).then(|| hsla(agent.status.tone(theme)));
         let words = (!agent.words.is_empty()).then(|| {
+            let key = key.clone();
             div()
-                .debug_selector(move || format!("{prefix}-words-{session}"))
+                .debug_selector(move || format!("{prefix}-words-{key}"))
                 .flex_none()
                 .when_some(tone, gpui::Styled::text_color)
                 .child(agent.words.clone())
         });
         let separator = (!agent.words.is_empty() && !agent.place.is_empty()).then(|| {
+            let key = key.clone();
             div()
-                .debug_selector(move || format!("{prefix}-separator-{session}"))
+                .debug_selector(move || format!("{prefix}-separator-{key}"))
                 .flex_none()
                 .text_color(crate::palette::separator_ink(theme))
                 .child(META_SEPARATOR)
@@ -1946,31 +1989,37 @@ impl WorkspaceView {
             .children(separator)
             .child(
                 div()
-                    .debug_selector(move || format!("{prefix}-place-{session}"))
+                    .debug_selector({
+                        let key = key.clone();
+                        move || format!("{prefix}-place-{key}")
+                    })
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
                     .child(crate::palette::dotted(theme, agent.place.clone())),
             );
-        let waiting = agent.at;
+        let step = agent.at;
+        let agent_name = match step {
+            Step::Session(at) => self.session_agent(at.session),
+            Step::Thread(at) => self.thread_agent(at.thread),
+        };
         row(
             theme,
             kit::Row::Two,
-            ElementId::Name(format!("{prefix}-{session}").into()),
-            format!("{prefix}-{session}"),
+            ElementId::Name(format!("{prefix}-{key}").into()),
+            format!("{prefix}-{key}"),
             label.into(),
             false,
         )
         .items_start()
         .pt(px(theme.spacing.xs))
         .child(lead_slot(theme, {
-            let mark =
-                self.session_agent(session).map_or(Glyph::Agent(AgentMark::Other), Glyph::agent);
+            let mark = agent_name.map_or(Glyph::Agent(AgentMark::Other), Glyph::agent);
             crate::icons::glyph(theme, mark, px(theme.typography.icon()), hsla(s.text_muted))
         }))
         .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))
-        .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_waiting(waiting, cx)))
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.go_to_step(step, cx)))
         .into_any_element()
     }
 
@@ -2650,7 +2699,9 @@ impl WorkspaceView {
     /// The sessions *Working* lists, in its order.
     pub(super) fn navigator_working(&self) -> Vec<slopty_core::SessionId> {
         let working = |r: &NavRow| match r {
-            NavRow::Agent(a) if a.status == Status::Working => Some(a.at.session),
+            NavRow::Agent(NavAgent { at: Step::Session(at), status: Status::Working, .. }) => {
+                Some(at.session)
+            }
             _ => None,
         };
         self.nav.list.rows.borrow().iter().filter_map(working).collect()
@@ -2684,15 +2735,6 @@ mod tests {
         assert_eq!(until_age_changes(Duration::from_secs(59)), Duration::from_secs(1));
         assert_eq!(until_age_changes(Duration::from_secs(61)), Duration::from_secs(59));
         assert_eq!(until_age_changes(Duration::from_secs(3_700)), Duration::from_secs(3_500));
-    }
-
-    /// A ticking clock reads in whole seconds in the one duration form, from its first second.
-    #[test]
-    fn a_turn_ticks_in_whole_seconds() {
-        assert_eq!(turn_label(Duration::from_millis(300)), "1 s");
-        assert_eq!(turn_label(Duration::from_millis(9_999)), "9 s");
-        assert_eq!(turn_label(Duration::from_secs(64)), "1m 4s");
-        assert_eq!(turn_label(Duration::from_mins(62)), "1h 2m");
     }
 
     /// An agent at rest says what it last said, a lone word quoted so it is not read as a
