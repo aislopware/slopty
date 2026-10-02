@@ -179,7 +179,13 @@ mod tests {
         assert_eq!(by("steer").disposition(), Some(Disposition::Queued));
         let state: State = serde_json::from_value(by("state").data.clone().unwrap()).unwrap();
         assert!(!state.is_streaming);
-        assert_eq!(state.session_file.as_deref(), Some("/scratch/sessions/session.jsonl"));
+        assert_eq!(
+            state.session_file.as_deref(),
+            Some(
+                "/pi-agent/sessions/--work--/0000-00-00T00-00-00-000Z_00000000-0000-7000-8000-000000000001.jsonl"
+            ),
+            "pi keeps the session it was given the id of with its others"
+        );
         assert_eq!(
             state.model.map(|m| (m.provider, m.id)),
             Some(("canned".into(), "canned-1".into()))
@@ -203,5 +209,437 @@ mod tests {
         assert_eq!(prompts, want, "the session holds every message, the steer in its place");
         let stats: Stats = serde_json::from_value(by("stats").data.clone().unwrap()).unwrap();
         assert_eq!(stats.context_usage.map(|c| c.context_window), Some(200_000));
+    }
+
+    mod driven {
+        use slopty_agent::pi::driven::{self, Driven};
+        use slopty_agent::pi::rpc::{self, Command, Entries, Incoming, Request};
+        use slopty_core::WallMs;
+        use slopty_proto::thread::{
+            Action, Answerer, AskId, IntentId, ItemBody, Liveness, Phase, RequestState,
+            ThreadState, ToolState, TurnState,
+        };
+
+        use super::gate;
+
+        const SESSION: &str = "00000000-0000-7000-8000-000000000001";
+
+        fn slopty() -> Answerer {
+            Answerer { client: None, name: "Slopty".to_owned() }
+        }
+
+        /// The recording replayed through the codec, as the worker drives it: what went to pi
+        /// is asked of the codec, what came back is heard by it, and the thread is what the
+        /// reducer makes of every action. Also the thread's state at each gate ask.
+        fn replayed() -> (ThreadState, Vec<ThreadState>, Vec<Command>) {
+            let (mut driven, begun) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let mut state = ThreadState::new(driven.meta().clone());
+            let apply = |state: &mut ThreadState, actions: Vec<Action>| {
+                for action in &actions {
+                    state.apply(action);
+                }
+            };
+            apply(&mut state, begun);
+            let mut at_asks = Vec::new();
+            let mut asked = Vec::new();
+            let mut sends = 0_u128;
+            for line in gate() {
+                if line.sent {
+                    let request: Request = serde_json::from_value(line.msg.clone()).unwrap();
+                    match &request.command {
+                        Command::Prompt { message, .. } | Command::Steer { message, .. } => {
+                            sends = sends.saturating_add(1);
+                            let intent = IntentId::from_uuid(uuid::Uuid::from_u128(sends));
+                            asked.push(driven.send(message, intent));
+                        }
+                        Command::ExtensionUiResponse { value: Some(value), .. } => {
+                            let ask = AskId(request.id.clone().unwrap());
+                            let (choice, reason) = value.split_once('\n').unwrap_or((value, ""));
+                            let reason = Some(reason).filter(|r| !r.is_empty());
+                            let answered = driven
+                                .answer(&ask, choice, reason, slopty(), WallMs::ZERO)
+                                .unwrap();
+                            assert_eq!(
+                                answered.requests,
+                                std::slice::from_ref(&request),
+                                "the answer that went"
+                            );
+                            apply(&mut state, answered.actions);
+                        }
+                        Command::Abort => asked.extend(driven.interrupt()),
+                        _ => {}
+                    }
+                    continue;
+                }
+                let record = rpc::record(line.msg.to_string().as_bytes()).unwrap();
+                let actions = driven.incoming(&record, WallMs::ZERO);
+                apply(&mut state, actions);
+                if matches!(record, Incoming::ExtensionUiRequest(_)) {
+                    at_asks.push(state.clone());
+                }
+            }
+            (state, at_asks, asked)
+        }
+
+        fn user_texts(state: &ThreadState) -> Vec<(u32, String)> {
+            state
+                .items
+                .iter()
+                .filter_map(|i| match &i.body {
+                    ItemBody::User(m) => Some((i.turn.0, m.text.text.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn tool_states(state: &ThreadState) -> Vec<(String, ToolState)> {
+            state
+                .items
+                .iter()
+                .filter_map(|i| match &i.body {
+                    ItemBody::Tool(call) => Some((i.id.0.clone(), call.state.clone())),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Four messages are four turns, the steer joining the turn it was sent into; each
+        /// message carries the intent that sent it; the turns end as pi ended them.
+        #[test]
+        fn each_message_is_a_turn_and_a_steer_joins_its_own() {
+            let (state, _, asked) = replayed();
+            let want = [
+                (1, "Say hello.".to_owned()),
+                (2, "Make a file called made-by-pi.".to_owned()),
+                (2, "Also say done.".to_owned()),
+                (3, "Remove it.".to_owned()),
+                (4, "Remove it again.".to_owned()),
+            ];
+            assert_eq!(user_texts(&state), want);
+            let intents: Vec<Option<IntentId>> = state
+                .items
+                .iter()
+                .filter_map(|i| match &i.body {
+                    ItemBody::User(m) => Some(m.intent),
+                    _ => None,
+                })
+                .collect();
+            assert!(intents.iter().all(Option::is_some), "every message is its intent's");
+            let ends: Vec<TurnState> = state.turns.iter().map(|t| t.state.clone()).collect();
+            let want = [
+                TurnState::Complete,
+                TurnState::Complete,
+                TurnState::Complete,
+                TurnState::Interrupted,
+            ];
+            assert_eq!(ends, want);
+            assert!(state.turns.iter().all(|t| t.input.is_some()), "each turn names its message");
+            assert_eq!(state.status.phase, Phase::Stopped, "the last turn was interrupted");
+            assert!(asked.contains(&Command::Abort), "the interrupt is an abort");
+            let prompt = Command::Prompt {
+                message: "Say hello.".to_owned(),
+                images: Vec::new(),
+                streaming_behavior: Some(rpc::StreamingBehavior::Steer),
+            };
+            assert_eq!(asked.first(), Some(&prompt), "a message steers, or starts a run");
+        }
+
+        /// What the model wrote streams into items and ends as the whole of it.
+        #[test]
+        fn the_model_writes_its_thinking_and_text() {
+            let (state, ..) = replayed();
+            let first: Vec<(String, String)> = state
+                .items
+                .iter()
+                .filter(|i| i.turn.0 == 1)
+                .filter_map(|i| match &i.body {
+                    ItemBody::Reasoning(t) => Some(("thinking".to_owned(), t.text.clone())),
+                    ItemBody::Text(t) => Some(("text".to_owned(), t.text.clone())),
+                    _ => None,
+                })
+                .collect();
+            let want = [
+                ("thinking".to_owned(), "The person wants a greeting.".to_owned()),
+                ("text".to_owned(), "Hello there.".to_owned()),
+            ];
+            assert_eq!(first, want);
+        }
+
+        /// Each call waits on the person while the gate asks; allowed, it runs and completes;
+        /// denied, it is rejected with the reason the model was given; interrupted at its gate,
+        /// it is cancelled and its ask withdrawn.
+        #[test]
+        fn a_call_waits_on_the_gate_and_ends_as_answered() {
+            let (state, at_asks, _) = replayed();
+            assert_eq!(at_asks.len(), 3);
+            for (n, asking) in at_asks.iter().enumerate() {
+                assert_eq!(asking.status.phase, Phase::NeedsYou, "ask {n}");
+                let open: Vec<_> = asking.open_requests().collect();
+                assert_eq!(open.len(), 1, "ask {n}");
+                let call = open[0].item.clone().unwrap();
+                let pending = tool_states(asking).into_iter().find(|(id, _)| *id == call.0);
+                assert!(matches!(pending, Some((_, ToolState::Pending { .. }))), "{pending:?}");
+                let ids: Vec<&str> = open[0].options.iter().map(|c| c.id.as_str()).collect();
+                assert_eq!(ids, [driven::ALLOW, driven::DENY, driven::DENY_STOP]);
+            }
+            let wait = at_asks[0].status.wait.clone().unwrap();
+            assert_eq!(wait.text, "Run touch made-by-pi?");
+            let want = [
+                ("toolu_pi1".to_owned(), ToolState::Completed),
+                ("toolu_pi2".to_owned(), ToolState::Rejected),
+                ("toolu_pi3".to_owned(), ToolState::Cancelled),
+            ];
+            assert_eq!(tool_states(&state), want);
+            let output = |id: &str| {
+                state.items.iter().find(|i| i.id.0 == id).and_then(|i| match &i.body {
+                    ItemBody::Tool(call) => call.output.as_ref().map(|o| o.text.clone()),
+                    _ => None,
+                })
+            };
+            assert_eq!(output("toolu_pi2").as_deref(), Some("Keep the file."));
+            let settled: Vec<RequestState> =
+                state.requests.iter().map(|r| r.state.clone()).collect();
+            let want = [
+                RequestState::Answered { by: slopty(), choice: driven::ALLOW.to_owned() },
+                RequestState::Answered { by: slopty(), choice: driven::DENY.to_owned() },
+                RequestState::Withdrawn,
+            ];
+            assert_eq!(settled, want);
+        }
+
+        /// The session's own entries rebuild the thread that was streamed: the same turns, the
+        /// same items under the same ids, the same words.
+        #[test]
+        fn the_session_rebuilds_the_thread_it_streamed() {
+            let (live, ..) = replayed();
+            let data = gate()
+                .into_iter()
+                .find(|l| !l.sent && l.msg["command"] == "get_entries")
+                .map(|l| l.msg["data"].clone())
+                .unwrap();
+            let entries: Entries = serde_json::from_value(data).unwrap();
+            let (mut driven, begun) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let mut read = ThreadState::new(driven.meta().clone());
+            for action in begun.iter().chain(&driven.entries(&entries, WallMs::ZERO)) {
+                read.apply(action);
+            }
+            let shape = |state: &ThreadState| -> Vec<(String, u32, String)> {
+                state
+                    .items
+                    .iter()
+                    .filter(|i| !matches!(i.body, ItemBody::Notice(_)))
+                    .map(|i| {
+                        let words = match &i.body {
+                            ItemBody::User(m) => m.text.text.clone(),
+                            ItemBody::Text(t) | ItemBody::Reasoning(t) => t.text.clone(),
+                            ItemBody::Tool(call) => call.title.clone(),
+                            _ => String::new(),
+                        };
+                        (i.id.0.clone(), i.turn.0, words)
+                    })
+                    .collect()
+            };
+            assert_eq!(shape(&read), shape(&live));
+            assert_eq!(read.turns.len(), live.turns.len());
+            let ends: Vec<TurnState> = read.turns.iter().map(|t| t.state.clone()).collect();
+            assert_eq!(ends.last(), Some(&TurnState::Interrupted), "{ends:?}");
+            assert!(read.open_requests().next().is_none(), "nothing asks of a session read again");
+            let states = tool_states(&read);
+            assert_eq!(states[0].1, ToolState::Completed);
+            assert!(states.iter().all(|(_, s)| s.is_final()), "{states:?}");
+            assert_eq!(read.meta.title, "Say hello.", "named by its first message");
+        }
+
+        /// An answer is had once and only with the gate's choices; deny and stop also aborts.
+        #[test]
+        fn an_answer_is_one_of_the_gates_and_is_had_once() {
+            let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let ask = r#"{"type":"extension_ui_request","id":"g1","method":"select","title":"{\"gate\":\"slopty-gate/1\",\"call\":\"c1\",\"tool\":\"bash\",\"input\":{\"command\":\"ls\"}}","options":["allow","deny"]}"#;
+            driven.incoming(&rpc::record(ask.as_bytes()).unwrap(), WallMs::ZERO);
+            let id = AskId("g1".to_owned());
+            assert!(driven.answer(&id, "maybe", None, slopty(), WallMs::ZERO).is_none());
+            let answered =
+                driven.answer(&id, driven::DENY_STOP, Some("No."), slopty(), WallMs::ZERO).unwrap();
+            let want =
+                [rpc::deny("g1", Some("No.")), Request { id: None, command: Command::Abort }];
+            assert_eq!(answered.requests, want);
+            assert!(
+                driven.answer(&id, driven::ALLOW, None, slopty(), WallMs::ZERO).is_none(),
+                "once"
+            );
+            assert_eq!(
+                Driven::set_model("canned/canned-1"),
+                Some(Command::SetModel {
+                    provider: "canned".to_owned(),
+                    model_id: "canned-1".to_owned(),
+                })
+            );
+            assert_eq!(Driven::set_model("no-provider"), None);
+        }
+
+        fn heard(driven: &mut Driven, line: &str, now: u64) -> Vec<Action> {
+            driven.incoming(&rpc::record(line.as_bytes()).unwrap(), WallMs::from_millis(now))
+        }
+
+        fn opened(actions: &[Action]) -> Vec<slopty_proto::thread::Request> {
+            actions
+                .iter()
+                .filter_map(|a| match a {
+                    Action::RequestOpened(r) => Some((**r).clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Another extension's dialogs are questions with the answers they offer, answered in
+        /// the shape each takes; one pi gives up on at its timeout is withdrawn then; the end of
+        /// a turn leaves them open, since pi still waits on them; a notice is a notice.
+        #[test]
+        fn another_extensions_dialogs_are_questions() {
+            let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let pick = r#"{"type":"extension_ui_request","id":"p","method":"select","title":"Which branch?","options":["main","dev"],"timeout":5000}"#;
+            let sure = r#"{"type":"extension_ui_request","id":"c","method":"confirm","title":"Clear it?","message":"All of it."}"#;
+            let say = r#"{"type":"extension_ui_request","id":"t","method":"input","title":"Your name?","placeholder":"name"}"#;
+            let note = r#"{"type":"extension_ui_request","id":"n","method":"notify","message":"Saved.","notifyType":"info"}"#;
+
+            let asked = opened(&heard(&mut driven, pick, 1_000));
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0].kind, slopty_proto::thread::Request::QUESTION);
+            let ids: Vec<&str> = asked[0].options.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(ids, ["main", "dev"]);
+            assert_eq!(asked[0].until_ms, Some(WallMs::from_millis(6_000)));
+            assert_eq!(driven.deadline(), Some(WallMs::from_millis(6_000)));
+            let asked = opened(&heard(&mut driven, sure, 1_000));
+            let ids: Vec<&str> = asked[0].options.iter().map(|c| c.id.as_str()).collect();
+            assert_eq!(ids, [driven::YES, driven::NO]);
+            assert_eq!(asked[0].text.as_ref().map(|t| t.text.as_str()), Some("All of it."));
+            let asked = opened(&heard(&mut driven, say, 1_000));
+            assert!(asked[0].options.is_empty(), "nothing offered: written");
+            assert_eq!(asked[0].questions[0].text, "Your name?");
+
+            let notice = heard(&mut driven, note, 1_000);
+            assert!(
+                notice.iter().any(|a| matches!(a, Action::ItemCompleted(i)
+                    if matches!(&i.body, ItemBody::Notice(n) if n.text.text == "Saved."))),
+                "{notice:?}"
+            );
+
+            let ended = heard(&mut driven, r#"{"type":"agent_settled"}"#, 1_500);
+            assert!(
+                !ended.iter().any(|a| matches!(a, Action::RequestResolved { .. })),
+                "pi still waits on them"
+            );
+
+            let (p, c, t) = (AskId("p".to_owned()), AskId("c".to_owned()), AskId("t".to_owned()));
+            assert!(!driven.takes(&p, "nope"), "only what it offers");
+            assert!(!driven.takes(&c, "maybe"));
+            let at = WallMs::from_millis(2_000);
+            let yes = driven.answer(&c, driven::YES, None, slopty(), at).unwrap();
+            assert_eq!(yes.requests, [rpc::confirm("c", true)]);
+            let named = driven.answer(&t, "Ada", None, slopty(), at).unwrap();
+            assert_eq!(named.requests, [rpc::answer("t", "Ada".to_owned())]);
+
+            assert!(driven.expire(WallMs::from_millis(5_999)).is_empty(), "not yet");
+            let gone = driven.expire(WallMs::from_millis(6_000));
+            assert!(gone.contains(&Action::RequestResolved {
+                id: p.clone(),
+                state: RequestState::Withdrawn
+            }));
+            assert_eq!(driven.deadline(), None);
+            assert!(driven.answer(&p, "main", None, slopty(), at).is_none(), "pi gave up on it");
+        }
+
+        /// The recording heard up to the first gate ask, as the worker hears it: the codec and
+        /// the thread.
+        fn at_first_ask() -> (Driven, ThreadState) {
+            let (mut driven, begun) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let mut state = ThreadState::new(driven.meta().clone());
+            for action in &begun {
+                state.apply(action);
+            }
+            for line in gate() {
+                if line.sent {
+                    if let Ok(Request { command: Command::Prompt { message, .. }, .. }) =
+                        serde_json::from_value::<Request>(line.msg.clone())
+                    {
+                        drop(driven.send(&message, IntentId::new()));
+                    }
+                    continue;
+                }
+                let record = rpc::record(line.msg.to_string().as_bytes()).unwrap();
+                for action in driven.incoming(&record, WallMs::ZERO) {
+                    state.apply(&action);
+                }
+                if matches!(record, Incoming::ExtensionUiRequest(_)) {
+                    return (driven, state);
+                }
+            }
+            panic!("the recording asks");
+        }
+
+        /// pi gone while its gate asks: the ask is withdrawn, the call cancelled, and the turn
+        /// ends failed with why when pi failed, stopped when it was ended; either way the thread
+        /// can be taken up again.
+        #[test]
+        fn a_pi_that_ends_cuts_its_work_short() {
+            for (why, turn, phase) in [
+                (
+                    Some("pi ended: boom"),
+                    TurnState::Failed { error: "pi ended: boom".into() },
+                    Phase::Failed,
+                ),
+                (None, TurnState::Interrupted, Phase::Stopped),
+            ] {
+                let (mut driven, mut state) = at_first_ask();
+                assert_eq!(state.status.phase, Phase::NeedsYou);
+                for action in driven.exited(why, WallMs::ZERO) {
+                    state.apply(&action);
+                }
+                assert!(state.open_requests().next().is_none(), "nothing asks");
+                assert_eq!(state.requests[0].state, RequestState::Withdrawn);
+                assert_eq!(tool_states(&state), [("toolu_pi1".to_owned(), ToolState::Cancelled)]);
+                assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(turn));
+                assert_eq!(state.status.phase, phase);
+                assert_eq!(state.status.liveness, Liveness::Exited { resumable: true });
+            }
+        }
+
+        /// A pi that ended unheard, as with the worker that ran it, is cut short from what the
+        /// thread holds: the same as a pi heard to end.
+        #[test]
+        fn a_pi_gone_with_its_worker_is_cut_short_from_the_thread() {
+            let (_, mut state) = at_first_ask();
+            for action in driven::gone(&state, WallMs::ZERO) {
+                state.apply(&action);
+            }
+            assert!(state.open_requests().next().is_none());
+            assert_eq!(tool_states(&state), [("toolu_pi1".to_owned(), ToolState::Cancelled)]);
+            assert_eq!(state.turns.last().map(|t| t.state.clone()), Some(TurnState::Interrupted));
+            assert_eq!(state.status.phase, Phase::Stopped);
+            assert_eq!(state.status.liveness, Liveness::Exited { resumable: true });
+        }
+
+        /// A message pi refused is not waited on: the next one in the same words is its own.
+        #[test]
+        fn a_refused_message_is_not_waited_on() {
+            let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
+            let first = IntentId::from_uuid(uuid::Uuid::from_u128(1));
+            let second = IntentId::from_uuid(uuid::Uuid::from_u128(2));
+            drop(driven.send("Say hello.", first));
+            driven.unsent(first);
+            drop(driven.send("Say hello.", second));
+            let start = r#"{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Say hello."}],"timestamp":0}}"#;
+            let end = start.replace("message_start", "message_end");
+            heard(&mut driven, start, 1);
+            let actions = heard(&mut driven, &end, 1);
+            let intent = actions.iter().find_map(|a| match a {
+                Action::ItemCompleted(i) => match &i.body {
+                    ItemBody::User(m) => m.intent,
+                    _ => None,
+                },
+                _ => None,
+            });
+            assert_eq!(intent, Some(second));
+        }
     }
 }

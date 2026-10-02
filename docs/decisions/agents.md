@@ -558,6 +558,56 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     into the typed records, with none of an unknown kind. What went to pi reads back to the
     same JSON, and the gate's asks and answers are asserted as recorded.
 
+- ✅ **pi on the worker: a thread started here runs the person's own pi, one writer per
+  session, and nothing passes the gate but an answer it offers** (2026-10-02, verified against
+  pi 1.0.0; `crates/slopty-agent/src/pi/driven.rs`, `crates/slopty-worker/src/thread/pi.rs`,
+  `crates/slopty-testkit/src/bin/slopty-stub-pi.rs`; `crates/slopty-agent/tests/pi.rs` maps the
+  recording, `crates/slopty-worker/tests/pi.rs` drives the stand-in end to end).
+  - **The thread.** A pi session is one thread, its id derived from the session's id, with
+    drive `driven`. A message from the person opens the next turn unless a run still works,
+    when it steers that run and joins its turn. Each message streams from its deltas and is
+    replaced whole at its end. The person's message `n` is item `msg-n` and the model's blocks
+    `msg-n.i`; a tool call keeps pi's id. The same rule rebuilds the thread from the session's
+    entries, so a thread read again is the one that was streamed, item for item.
+  - **The session is named by the start.** `--session-id` with the start's intent id opens that
+    session in pi's own directory or makes it, so starting a thread and taking it up again are
+    the same words, and the person's own `pi --session <id>` finds it with their others. The
+    plan had `--session <path>`, which puts the file outside pi's directory.
+  - **Starting.** `ThreadRequest::Start` for agent `pi` starts it; every other agent is still
+    refused there. pi is found on the daemon's `PATH`, else on the login shell's, and runs with
+    that `PATH`, since pi is a Node program and its `node` is the person's too. Its version is
+    what `pi --version` says. A start's own flags pass only from a list that loads no code,
+    names no session and reaches no key (`slopty_agent::pi::SAFE_FLAGS`), and a value that
+    reads as a flag is refused, since pi's parser may take it as one. A refused start is refused
+    once per intent, as a started one is started once. The worker's facts list pi's version
+    beside the other agents', which is what offers it.
+  - **One writer.** The worker runs at most one pi per thread, and a thread's next pi starts only
+    once the last is reaped. What was sent to a pi that was ending is handed back and goes to
+    the next. A thread whose pi is gone is exited and resumable. The next message starts pi again
+    on the same session, reads the thread again from `get_entries` before the message goes, and
+    keeps each message's intent by its item. A session pi does not give back ends that pi with
+    a notice, rather than numbering new items over old ones.
+  - **Fail closed.** Only an answer the dialog offers reaches pi: the gate's allow, deny (with
+    the person's reason) and deny and stop, which also aborts. When the worker goes, pi's stdin
+    closes and pi ends with no answer sent, so a call at the gate never runs, and the thread
+    shows the ask withdrawn, the call cancelled and the turn stopped. A worker that starts
+    again cuts short from the thread whatever a pi of the last one was doing.
+  - **Other dialogs.** An extension the person's pi loads may ask too. A choice or a yes or no is
+    a question with the answers it offers; a text is a question answered in the person's own
+    words. They stay open past the turn, since pi waits on them, until answered or until pi gives
+    up at the dialog's timeout. A notice is a notice. Release is refused: while Slopty drives
+    pi, there is no prompt of pi's own to hand a request to.
+  - **The stand-in.** `slopty-stub-pi` replays a recording against what it is sent: a command
+    that is the next step's gets that step's records under its own id, a query gets the
+    recorded answer, and anything else is noted as unexpected and failed. It reads its fixture
+    from a file beside the path it was started as, because the worker that starts it may be the
+    test itself, whose environment is shared. The worker tests run the gate's recording through
+    it: allow, deny with a reason, an interrupt at the gate, a resume from the session, and the
+    worker going while the gate asks, each asserting what reached pi.
+  - **Not carried yet:** queueing a message (pi's follow-up queue has no way to take one message
+    back), the handoff to pi's TUI at idle, the start's flags on a resume (the session keeps its
+    model, not its tool list), and a picture in a message.
+
 - ✅ **The thread view carries what the conversation face showed, and its e2e moved with it**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/`;
   `crates/slopty-e2e/tests/app/conversation.rs`, `thread/tests/steps.rs`). A subagent's call

@@ -1,11 +1,12 @@
 //! The thread host on the daemon (`slopty_worker::thread`).
 //!
 //! Every Claude Code session the daemon sees is observed into the agent-neutral thread model,
-//! beside today's conversation path, and served to clients: the table on the control stream, a
-//! stream per followed thread, and intents answered once each.
+//! beside today's conversation path, every Codex thread is followed, and a pi thread is started
+//! and driven here. They are served to clients: the table on the control stream, a stream per
+//! followed thread, and intents answered once each.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use slopty_core::{ClientId, SessionId};
@@ -23,6 +24,7 @@ use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
+use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::{Composer, Follower, Host};
 use tokio::sync::{mpsc, watch};
@@ -79,6 +81,7 @@ pub struct Threads {
     host: Host,
     claude: Driver,
     codex: Codex,
+    pi: Pi,
     composer: Composer,
     snapshots: Snapshots,
 }
@@ -98,12 +101,15 @@ pub fn open(
         Ok(host) => {
             let (claude, asks) = Driver::channel();
             let (codex, codex_asks) = Codex::channel();
+            let (pi, pi_asks) = Pi::channel();
             let typing = Typing { worker, agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
-            let observing = Observing { claude: asks, codex: codex_asks };
-            Some((Threads { host, claude, codex, composer, snapshots }, observing))
+            // The threads live under the data directory, where pi's gate is written too.
+            let data = dir.parent().unwrap_or(dir).to_path_buf();
+            let observing = Observing { claude: asks, codex: codex_asks, pi: pi_asks, data };
+            Some((Threads { host, claude, codex, pi, composer, snapshots }, observing))
         }
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "the thread host did not open: {e}");
@@ -117,10 +123,13 @@ pub fn open(
 pub struct Observing {
     claude: claude::Asks,
     codex: codex::Asks,
+    pi: pi::Asks,
+    /// The daemon's data directory.
+    data: PathBuf,
 }
 
 /// Observe every Claude Code session and follow every Codex thread into the daemon's
-/// threads, and snapshot each turn.
+/// threads, serve the pi threads it starts, and snapshot each turn.
 pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
@@ -130,6 +139,7 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     if let Some(home) = codex::codex_home() {
         drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), asks.codex));
     }
+    drop(pi::spawn(threads.host.clone(), asks.data, None, asks.pi));
 }
 
 /// What a request needs of the connection it came on.
@@ -276,9 +286,18 @@ impl Following {
                 let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
+            // pi looks for its program and starts: on a task of its own.
+            ThreadRequest::Start { id, start } if start.agent.is(AgentId::PI) => {
+                tracing::info!(client = %at.client, %id, cwd = start.cwd, "start pi");
+                let (pi, out) = (threads.pi, at.out.clone());
+                at.tasks.spawn(async move {
+                    let outcome = pi.start(id, start).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             ThreadRequest::Start { id, start } => {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, "start refused");
-                let reason = "starting an agent from here is not built yet".to_owned();
+                let reason = format!("starting {} from here is not built yet", start.agent.0);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome: refused(reason) }));
             }
             ThreadRequest::Approvals { on } => {
@@ -331,6 +350,10 @@ fn decide(
     }
     if codex::is_shared(state) {
         return (shared(at, &threads.codex, state, id, intent), Vec::new());
+    }
+    if pi::is_driven(state) {
+        let by = slopty_proto::thread::Answerer { client: Some(at.client), name: "Slopty".into() };
+        return (threads.pi.decide(state, id, intent, by), Vec::new());
     }
     let Some(session) = state.meta.terminal else {
         let reason = "the thread's agent runs in no terminal here".to_owned();

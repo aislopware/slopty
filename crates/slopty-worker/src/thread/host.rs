@@ -151,7 +151,8 @@ impl Own {
                 | Action::ItemUpdated(item)
                 | Action::ItemCompleted(item) => {
                     let ItemBody::User(message) = &mut item.body else { continue };
-                    if message.intent.is_some() {
+                    if let Some(intent) = message.intent {
+                        self.sent.insert(item.id.clone(), intent);
                         continue;
                     }
                     message.intent = self.sent.get(&item.id).copied().or_else(|| {
@@ -404,6 +405,12 @@ impl Host {
             tracing::warn!(%thread, "an intent could not be recorded: {e}");
         }
         Some(outcome)
+    }
+
+    /// The outcome intent `id` had as a start, if it was acted on.
+    #[must_use]
+    pub fn started(&self, id: IntentId) -> Option<Outcome> {
+        self.inner.lock().starts.outcome(&id).cloned()
     }
 
     /// Start a thread for intent `id` once: `start` makes its metadata, or says why not. A

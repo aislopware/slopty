@@ -111,6 +111,7 @@ fn is_time(key: &str) -> bool {
         || key.ends_with("_at")
         || key.ends_with("Ms")
         || key.ends_with("_ms")
+        || key.ends_with("_seconds")
         || key == "timestamp"
 }
 

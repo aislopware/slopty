@@ -72,9 +72,10 @@ impl Tool {
 }
 
 /// The coding agents' command lines, under `agents`.
-const AGENTS: [Tool; 7] = [
+const AGENTS: [Tool; 8] = [
     Tool::version("claude", "claude"),
     Tool::version("codex", "codex"),
+    Tool::version("pi", "pi"),
     Tool::version("gemini", "gemini"),
     Tool::version("amp", "amp"),
     Tool::version("opencode", "opencode"),
@@ -377,6 +378,33 @@ fn low_priority(search: &SearchPath, program: &Path) -> tokio::process::Command 
     let mut command = tokio::process::Command::new(nice);
     command.args(["-n", "10"]).arg(program);
     command
+}
+
+/// A program the person installed, as their terminal finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Installed {
+    /// The program.
+    pub program: PathBuf,
+    /// The `PATH` it runs with, which finds what it runs in turn (a Node program's `node`).
+    pub path: OsString,
+    /// What it says its version is, when it says.
+    pub version: Option<String>,
+}
+
+/// `program` as the person's terminal finds it, with the version it says.
+///
+/// It is looked for on the daemon's own `PATH`, then on the person's login shell's, which is
+/// where a daemon launchd started finds what they installed; only on `path` when it is given.
+/// `None` when it is not found. Its version is asked as [`gather`] asks it.
+pub async fn installed(program: &str, path: Option<OsString>) -> Option<Installed> {
+    let search = match path {
+        Some(path) => SearchPath::of([path]),
+        None => SearchPath::of(std::env::var_os("PATH").into_iter().chain(login_path().await)),
+    };
+    let found = search.resolve(program)?;
+    let ran = run(search.command(&found, &["--version"]), VERSION_WAIT, VERSION_OUTPUT_MAX).await;
+    let version = ran.filter(|ran| ran.ok).and_then(|ran| version_in(&ran.out, None));
+    Some(Installed { program: found, path: search.joined, version })
 }
 
 /// The person's login shell's `PATH`, as it stands once their profile and rc files ran.

@@ -9,6 +9,7 @@
 //! nothing. Every intent is acted on once per id ([`intents`], [`Host::intent`]); what an
 //! observed agent is sent is typed into its terminal by the [`Composer`]. A Codex thread is
 //! followed over the person's Codex daemon instead ([`codex`]), and what it is sent goes there.
+//! A pi thread is started here and driven over pi's RPC mode ([`pi`]).
 
 pub mod claude;
 pub mod codex;
@@ -17,6 +18,7 @@ pub mod follow;
 pub mod host;
 pub mod intents;
 pub mod log;
+pub mod pi;
 pub mod review;
 pub mod table;
 

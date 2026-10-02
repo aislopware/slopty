@@ -50,6 +50,8 @@ const REMOVE: &str = "Remove it.";
 const AGAIN: &str = "Remove it again.";
 /// Why the person denies the removal.
 const REASON: &str = "Keep the file.";
+/// The session's id, as the worker gives pi the id of the intent that started the thread.
+const SESSION: &str = "5e55105e-0000-4000-8000-000000000001";
 /// How long the recorder waits on any one step before it gives up.
 const PATIENCE: Duration = Duration::from_secs(60);
 
@@ -70,7 +72,7 @@ impl Scratch {
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
         }
-        let dirs = ["home", "agent", "work", "tmp", "sessions"];
+        let dirs = ["home", "agent", "work", "tmp"];
         for dir in dirs {
             std::fs::create_dir_all(root.join(dir))?;
         }
@@ -93,8 +95,7 @@ pub fn record() -> Result<()> {
     write_models(&scratch.agent, api.port)?;
     let gate = scratch.root.join("gate.ts");
     std::fs::copy(repo_root()?.join(GATE), &gate).context("copy the gate")?;
-    let session = scratch.root.join("sessions/session.jsonl");
-    let mut rpc = Rpc::start(&pi, &scratch, &gate, &session)?;
+    let mut rpc = Rpc::start(&pi, &scratch, &gate, SESSION)?;
     let scripted = script(&mut rpc);
     let (lines, finished) = rpc.finish();
     let mut raw = String::new();
@@ -111,6 +112,8 @@ pub fn record() -> Result<()> {
         (host()?, "host"),
         (format!("http://127.0.0.1:{}", api.port), "http://canned"),
         (scratch.work.display().to_string(), "/work"),
+        // pi names a project's session directory by its path, its separators dashes.
+        (dashed(&scratch.work), "work"),
         (scratch.agent.display().to_string(), "/pi-agent"),
         (scratch.home.display().to_string(), "/home/user"),
         (scratch.tmp.display().to_string(), "/tmp"),
@@ -163,6 +166,13 @@ fn script(rpc: &mut Rpc) -> Result<()> {
     Ok(())
 }
 
+/// `path` as pi names a project's session directory after it: without its leading separator,
+/// every other one a dash.
+fn dashed(path: &Path) -> String {
+    let text = path.display().to_string();
+    text.trim_start_matches('/').replace(['/', '\\', ':'], "-")
+}
+
 /// One record of the fixture: which way it went, and what it was.
 fn line(dir: &str, msg: Value) -> Value {
     let mut line = serde_json::Map::new();
@@ -207,7 +217,7 @@ struct Rpc {
 }
 
 impl Rpc {
-    fn start(pi: &super::Pi, scratch: &Scratch, gate: &Path, session: &Path) -> Result<Self> {
+    fn start(pi: &super::Pi, scratch: &Scratch, gate: &Path, session: &str) -> Result<Self> {
         let node_dir = pi.program.parent().map(Path::to_path_buf).unwrap_or_default();
         let path = format!("{}:/usr/bin:/bin", node_dir.display());
         let stderr = std::fs::File::create(scratch.root.join("pi.stderr"))?;
@@ -215,8 +225,7 @@ impl Rpc {
             .command()
             .args(["--mode", "rpc", "--extension"])
             .arg(gate)
-            .arg("--session")
-            .arg(session)
+            .args(["--session-id", session])
             .args(["--provider", PROVIDER, "--model", MODEL])
             .current_dir(&scratch.work)
             .env("PATH", path)
@@ -519,6 +528,6 @@ fn unraced(mut line: Value) -> Value {
     line
 }
 
-/// The dates pi writes: entry timestamps (`2026-10-02T06:29:36.123Z`), `9` standing for a
-/// digit.
-const DATED: [&str; 1] = ["9999-99-99T99:99:99.999Z"];
+/// The dates pi writes, `9` standing for a digit: entry timestamps
+/// (`2026-10-02T06:29:36.123Z`) and session file names (`2026-10-02T04-13-49-083Z_<id>.jsonl`).
+const DATED: [&str; 2] = ["9999-99-99T99:99:99.999Z", "9999-99-99T99-99-99-999Z_"];

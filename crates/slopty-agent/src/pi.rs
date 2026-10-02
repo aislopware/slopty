@@ -11,6 +11,7 @@
 //! directory named by its digest ([`install`]), so a running pi keeps the file it loaded while a
 //! newer worker writes its own beside it.
 
+pub mod driven;
 pub mod rpc;
 
 use std::io;
@@ -62,17 +63,89 @@ pub fn install(data_dir: &Path) -> io::Result<PathBuf> {
     Ok(file)
 }
 
-/// The arguments of a pi driven over RPC with the gate at `gate`, on session file `session`,
-/// before `args`, the thread's own.
+/// pi's flags that change neither what the gate asks nor which session is driven, nor reach a
+/// credential: each with whether a value follows it.
+///
+/// From `pi --help` of the pinned [`VERSION`]. Every other flag is refused: one that loads code
+/// (`--extension`, `--approve`), names a session (`--session`, `--continue`, `--fork`), changes
+/// the mode (`--print`, `--mode`), or carries a key (`--api-key`). A new flag is judged before it
+/// is let through, never after.
+pub const SAFE_FLAGS: [(&str, bool); 30] = [
+    ("--provider", true),
+    ("--model", true),
+    ("--models", true),
+    ("--thinking", true),
+    ("--tools", true),
+    ("-t", true),
+    ("--exclude-tools", true),
+    ("-xt", true),
+    ("--no-builtin-tools", false),
+    ("-nbt", false),
+    ("--no-tools", false),
+    ("-nt", false),
+    ("--name", true),
+    ("-n", true),
+    ("--no-extensions", false),
+    ("-ne", false),
+    ("--skill", true),
+    ("--no-skills", false),
+    ("-ns", false),
+    ("--prompt-template", true),
+    ("--no-prompt-templates", false),
+    ("-np", false),
+    ("--no-context-files", false),
+    ("-nc", false),
+    ("--system-prompt", true),
+    ("--append-system-prompt", true),
+    ("--no-approve", false),
+    ("-na", false),
+    ("--offline", false),
+    ("--verbose", false),
+];
+
+/// `args` for a driven pi, when each is one of [`SAFE_FLAGS`] or the value after one; else the
+/// first that is not, and why.
+///
+/// # Errors
+///
+/// When an argument is no safe flag: a flag outside the list, a message (the first prompt goes
+/// over RPC), a flag's value written into it (`--model=x`), or a value missing or reading as a
+/// flag.
+pub fn checked(args: &[String]) -> Result<&[String], String> {
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match SAFE_FLAGS.iter().find(|(flag, _)| flag == arg) {
+            // A value that reads as a flag may be taken as one by pi's parser.
+            Some((_, true)) => {
+                if rest.next().is_none_or(|value| value.starts_with('-')) {
+                    return Err(format!("{arg} needs a value after it"));
+                }
+            }
+            Some((_, false)) => {}
+            None if arg.starts_with('-') => {
+                return Err(format!("{arg} is not a flag Slopty passes to pi"));
+            }
+            None => return Err(format!("{arg} is not a flag: the first prompt goes on its own")),
+        }
+    }
+    Ok(args)
+}
+
+/// The arguments of a pi driven over RPC with the gate at `gate`, on session `session`, before
+/// `args`, the thread's own.
+///
+/// `--session-id` opens the session of that id in pi's own session directory, or makes it, so
+/// starting a thread and taking it up again are the same words, and the person's own pi finds
+/// the session where it keeps its others.
 #[must_use]
-pub fn args(gate: &Path, session: &Path, args: &[String]) -> Vec<String> {
+pub fn args(gate: &Path, session: &str, args: &[String]) -> Vec<String> {
     let fixed = [
         "--mode".to_owned(),
         "rpc".to_owned(),
         EXTENSION_FLAG.to_owned(),
         gate.display().to_string(),
-        "--session".to_owned(),
-        session.display().to_string(),
+        "--session-id".to_owned(),
+        session.to_owned(),
     ];
     fixed.into_iter().chain(args.iter().cloned()).collect()
 }
@@ -108,12 +181,42 @@ mod tests {
         assert!(GATE.1.contains("block: true"));
     }
 
+    /// The thread's own flags pass when each is a safe one with its value; a flag that loads
+    /// code, names a session, carries a key or is unknown is refused, and so is a message.
+    #[test]
+    fn only_safe_flags_reach_pi() {
+        let owned = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        let fine = owned(&["--model", "anthropic/x", "-t", "read,bash", "-ne", "--offline"]);
+        assert_eq!(checked(&fine), Ok(fine.as_slice()));
+        assert_eq!(checked(&[]), Ok(&[][..]));
+        for bad in [
+            &["--extension", "/tmp/x.ts"][..],
+            &["-e", "/tmp/x.ts"],
+            &["--approve"],
+            &["--api-key", "k"],
+            &["--session", "s"],
+            &["--session-id", "s"],
+            &["--continue"],
+            &["--fork", "s"],
+            &["--mode", "json"],
+            &["--print"],
+            &["--model=x"],
+            &["hello"],
+            &["@file.md"],
+        ] {
+            assert!(checked(&owned(bad)).is_err(), "{bad:?}");
+        }
+        assert!(checked(&owned(&["--model"])).is_err(), "a flag without its value");
+        let hidden = owned(&["--model", "--extension", "/tmp/x.ts"]);
+        assert!(checked(&hidden).is_err(), "a flag where a value goes");
+    }
+
     /// RPC mode, the gate and the session come first; the thread's own arguments after.
     #[test]
     fn a_driven_pi_runs_rpc_with_the_gate_on_its_session() {
         let got = args(
             Path::new("/data/pi-gate/0123/gate.ts"),
-            Path::new("/s/1.jsonl"),
+            "0190-ab",
             &["--model".to_owned(), "m".to_owned()],
         );
         let want = [
@@ -121,8 +224,8 @@ mod tests {
             "rpc",
             "--extension",
             "/data/pi-gate/0123/gate.ts",
-            "--session",
-            "/s/1.jsonl",
+            "--session-id",
+            "0190-ab",
             "--model",
             "m",
         ];

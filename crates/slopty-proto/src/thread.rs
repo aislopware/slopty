@@ -242,7 +242,7 @@ pub struct ThreadMeta {
     /// The agent's version, as it says it.
     pub agent_version: String,
     /// The agent's own id for the session, the record this thread mirrors: Claude Code's
-    /// session id, a Codex thread id, a pi session file.
+    /// session id, a Codex thread id, a pi session id.
     pub native: String,
     /// Where it works.
     pub cwd: String,

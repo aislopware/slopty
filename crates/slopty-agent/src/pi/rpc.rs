@@ -377,11 +377,20 @@ pub enum UiMethod {
         /// More of it.
         #[serde(default)]
         message: Option<String>,
+        /// When pi gives up waiting, in milliseconds.
+        #[serde(default)]
+        timeout: Option<u64>,
     },
     /// A line of text.
     Input {
         /// What is asked.
         title: String,
+        /// What the empty field shows.
+        #[serde(default)]
+        placeholder: Option<String>,
+        /// When pi gives up waiting, in milliseconds.
+        #[serde(default)]
+        timeout: Option<u64>,
     },
     /// Lines of text.
     Editor {
@@ -390,11 +399,17 @@ pub enum UiMethod {
         /// The text to start from.
         #[serde(default)]
         prefill: Option<String>,
+        /// When pi gives up waiting, in milliseconds.
+        #[serde(default)]
+        timeout: Option<u64>,
     },
     /// A notice; nothing answers it.
     Notify {
         /// What it says.
         message: String,
+        /// `info`, `warning` or `error`; `info` when it is not given.
+        #[serde(default, rename = "notifyType")]
+        notify_type: Option<String>,
     },
     /// Something not asked of the person (a status, a widget, a title), or a method this does
     /// not know.
@@ -447,12 +462,27 @@ pub fn deny(ask: &str, reason: Option<&str>) -> Request {
     answer(ask, value)
 }
 
-fn answer(ask: &str, value: String) -> Request {
+/// The answer `value` to dialog `ask`: the option chosen, or the text written.
+#[must_use]
+pub fn answer(ask: &str, value: String) -> Request {
     Request {
         id: Some(ask.to_owned()),
         command: Command::ExtensionUiResponse {
             value: Some(value),
             confirmed: None,
+            cancelled: None,
+        },
+    }
+}
+
+/// The answer to confirmation `ask`.
+#[must_use]
+pub fn confirm(ask: &str, confirmed: bool) -> Request {
+    Request {
+        id: Some(ask.to_owned()),
+        command: Command::ExtensionUiResponse {
+            value: None,
+            confirmed: Some(confirmed),
             cancelled: None,
         },
     }
