@@ -503,4 +503,110 @@ mod threads {
 
         a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
+
+    /// The first `PermissionRequest` of the `permission` capture, as Claude Code session
+    /// `native` would send it with its transcript at `transcript`.
+    fn first_ask(native: &str, transcript: &Path) -> serde_json::Value {
+        let hooks = std::fs::read_to_string(fixture("permission").join("hooks.jsonl")).unwrap();
+        let mut ask: serde_json::Value = hooks
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .map(|l| l["input"].clone())
+            .find(|input| input["hook_event_name"] == "PermissionRequest")
+            .unwrap();
+        ask["transcript_path"] = transcript.to_string_lossy().into_owned().into();
+        ask["session_id"] = native.into();
+        ask
+    }
+
+    /// The row of the thread observed in terminal `terminal`, when there is one.
+    fn row_in(
+        client: &Client,
+        terminal: SessionId,
+    ) -> Option<&slopty_proto::thread::wire::ThreadRow> {
+        client.table.rows.values().find(|r| r.terminal == Some(terminal))
+    }
+
+    /// A Claude Code whose first word is a permission prompt, with no session start before it
+    /// and its transcript still empty, has a thread from that hook: the prompt is a request on
+    /// it, in the table and in the thread. The thread fills from the transcript once it is
+    /// written, and the request is answered by an intent.
+    #[tokio::test]
+    async fn a_first_hook_that_asks_opens_a_thread_with_its_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        a.send(ThreadRequest::Approvals { on: true }).await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let main = dir.path().join("p1.jsonl");
+        std::fs::write(&main, "").unwrap();
+
+        let held = relay(dir.path(), session, &first_ask("p1", &main));
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| row_in(c, session).is_some_and(|r| r.requests.len() == 1)).await;
+        let row = row_in(&a, session).unwrap();
+        let thread = row.id;
+        assert_eq!(thread, slopty_agent::observed::thread_of("p1"), "the session's own thread");
+        assert_eq!(row.requests[0].kind, slopty_proto::thread::Request::APPROVAL);
+
+        a.follow(thread).await;
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)).await;
+        let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
+        std::fs::write(&main, captured).unwrap();
+        let whole = entries(&main);
+        assert!(!whole.is_empty());
+        a.until(|c| c.thread.as_ref().is_some_and(|s| ids(s) == whole)).await;
+        assert_eq!(a.state().open_requests().count(), 1, "the request outlives the read");
+
+        let request = a.state().open_requests().next().unwrap().id.clone();
+        let answer = Intent::Answer { ask: request, choice: "allow".to_owned(), message: None };
+        assert_eq!(a.intent(IntentId::new(), thread, answer).await, Outcome::Done);
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
+    /// Two terminals whose Claude Codes name one session id at once keep a thread each: the
+    /// first the session's own, the second one of its own. A prompt in the second is a request
+    /// on the second's thread alone, and neither thread moves to the other terminal.
+    #[tokio::test]
+    async fn two_terminals_on_one_session_id_keep_a_thread_each() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        a.send(ThreadRequest::Approvals { on: true }).await;
+        let first = open_shell(&mut a, dir.path()).await;
+        let second = open_shell(&mut a, dir.path()).await;
+        let main = dir.path().join("e2e.jsonl");
+        let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
+        std::fs::write(&main, captured).unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "e2e",
+            "transcript_path": main, "cwd": dir.path(),
+        });
+        a.send(ThreadRequest::Table { have: None }).await;
+        assert_eq!(printed(relay(dir.path(), first, &start)).await, "");
+        a.until(|c| row_in(c, first).is_some()).await;
+        assert_eq!(printed(relay(dir.path(), second, &start)).await, "");
+        a.until(|c| row_in(c, first).is_some() && row_in(c, second).is_some()).await;
+        let mine = row_in(&a, first).unwrap().id;
+        let beside = row_in(&a, second).unwrap().id;
+        assert_eq!(mine, slopty_agent::observed::thread_of("e2e"));
+        assert_eq!(beside, slopty_agent::observed::thread_in("e2e", second));
+
+        let held = relay(dir.path(), second, &first_ask("e2e", &main));
+        a.until(|c| c.table.rows.get(&beside).is_some_and(|r| r.requests.len() == 1)).await;
+        let rows = &a.table.rows;
+        assert!(rows[&mine].requests.is_empty(), "the first terminal's thread asks nothing");
+        assert_eq!(rows[&mine].terminal, Some(first), "it stays with its terminal");
+        assert_eq!(rows[&beside].terminal, Some(second));
+        let ask = rows[&beside].requests[0].id.clone();
+        let deny = Intent::Answer { ask, choice: "deny".to_owned(), message: None };
+        assert_eq!(a.intent(IntentId::new(), beside, deny).await, Outcome::Done);
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        for session in [first, second] {
+            a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+        }
+    }
 }

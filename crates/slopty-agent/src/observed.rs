@@ -27,6 +27,9 @@
 //!   id yet (no hook, no transcript). Its terminal names a provisional thread
 //!   ([`Observed::provisional`], [`terminal_thread`]), which gives way to the session's own once
 //!   the id is known.
+//! - **One session in two terminals.** Two live Claude Codes on one session id (a `--resume` of a
+//!   session still running elsewhere) are told apart by their terminals: the first keeps the
+//!   session's thread, the second gets one of its own ([`Observed::beside`], [`thread_in`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Instant;
@@ -77,6 +80,13 @@ pub const MODELS: [(&str, &str); 4] =
 #[must_use]
 pub fn thread_of(native: &str) -> ThreadId {
     derived(&["claude-code session", native])
+}
+
+/// The thread of Claude Code session `native` as terminal `terminal` runs it while another
+/// terminal's Claude Code runs the same session: each terminal keeps a thread of its own.
+#[must_use]
+pub fn thread_in(native: &str, terminal: SessionId) -> ThreadId {
+    derived(&["claude-code session", native, "in terminal", &terminal.to_string()])
 }
 
 /// The thread of subagent `agent` in the session whose thread is `main`.
@@ -225,6 +235,19 @@ impl Observed {
         now: WallMs,
     ) -> Self {
         Self::begun(thread_of(native), native, version, terminal, cwd, now)
+    }
+
+    /// Session `native` as terminal `terminal` runs it while another terminal's Claude Code
+    /// runs it too ([`thread_in`]): a thread of this terminal's own, so neither moves the other's.
+    #[must_use]
+    pub fn beside(
+        native: &str,
+        version: &str,
+        terminal: SessionId,
+        cwd: &str,
+        now: WallMs,
+    ) -> Self {
+        Self::begun(thread_in(native, terminal), native, version, Some(terminal), cwd, now)
     }
 
     /// The Claude Code in terminal `terminal` whose session id is not known yet: a thread

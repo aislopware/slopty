@@ -16,6 +16,16 @@
 //! again from the transcript, under a new epoch. When the terminal moves to another Claude Code
 //! session (`/clear`, `/resume`), the old thread is left exited and resumable, and the new one
 //! begins. A thread declares `approvals` once a hook has been heard in its terminal.
+//!
+//! A permission prompt held for a terminal opens a thread there when none is observed yet (the
+//! session's own when its id is known, else the terminal's provisional one), so the prompt is a
+//! request on a thread from the first hook. The prompts held and not yet settled are told again
+//! to whichever thread begins after them, provisional or the session's own.
+//!
+//! Two terminals whose Claude Codes run on one session id at once (a `--resume` of a session
+//! still running elsewhere, or a stand-in that names every session alike) are told apart: the
+//! first to claim the id keeps the session's thread until its agent goes, and the other observes
+//! a thread of its own ([`observed::thread_in`]), so no thread moves between terminals.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,7 +37,7 @@ use slopty_agent::observed::{self, Observed, Out};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentStatus};
-use slopty_proto::conversation::PermissionEvent;
+use slopty_proto::conversation::{PermissionEvent, PermissionPrompt};
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
 use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadState};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -47,6 +57,10 @@ pub trait Sources: Send + Sync {
     /// What the hooks and the mod said of the session, as it changes.
     fn seen(&self, session: SessionId) -> watch::Receiver<Seen>;
 }
+
+/// Which terminal holds each Claude Code session id it observes, so a second terminal on the
+/// same id is told apart from it.
+type Claims = Arc<parking_lot::Mutex<HashMap<String, SessionId>>>;
 
 /// What a session's task hears.
 #[derive(Debug)]
@@ -101,6 +115,7 @@ pub fn spawn(
         let mut sessions: HashMap<SessionId, mpsc::UnboundedSender<Input>> = HashMap::new();
         let mut cwds: HashMap<SessionId, String> = HashMap::new();
         let mut titles: HashMap<SessionId, String> = HashMap::new();
+        let claims = Claims::default();
         loop {
             let heard = tokio::select! {
                 heard = events.recv() => heard,
@@ -156,7 +171,8 @@ pub fn spawn(
                 if let Some(title) = titles.get(&session) {
                     let _queued = tx.send(Input::Title(title.clone()));
                 }
-                tokio::spawn(observe(host.clone(), session, Arc::clone(&sources), rx));
+                let claims = Arc::clone(&claims);
+                tokio::spawn(observe(host.clone(), session, Arc::clone(&sources), claims, rx));
                 tx
             });
             if tx.send(input).is_err() {
@@ -171,6 +187,7 @@ async fn observe(
     host: Host,
     session: SessionId,
     sources: Arc<dyn Sources>,
+    claims: Claims,
     mut inputs: mpsc::UnboundedReceiver<Input>,
 ) {
     let mut seen = sources.seen(session);
@@ -179,6 +196,8 @@ async fn observe(
         host,
         terminal: session,
         sources,
+        claims,
+        held: Vec::new(),
         observed: None,
         transcripts: Some(Transcripts::default()),
         status: None,
@@ -193,6 +212,7 @@ async fn observe(
             input = inputs.recv() => match input {
                 None => {
                     on.forget_provisional();
+                    on.unclaim();
                     return;
                 }
                 Some(Input::Status(event)) => on.status(*event).await,
@@ -208,12 +228,7 @@ async fn observe(
                     }
                     on.title = title;
                 }
-                Some(Input::Permission(event)) => {
-                    if let Some(observed) = on.observed.as_mut() {
-                        let outs = observed.permission(&event);
-                        take(&on.host, outs);
-                    }
-                }
+                Some(Input::Permission(event)) => on.permission(&event).await,
                 Some(Input::Expand(content, reply)) => {
                     let _gone = reply.send(on.expand(&content).await);
                 }
@@ -240,6 +255,9 @@ struct Session {
     host: Host,
     terminal: SessionId,
     sources: Arc<dyn Sources>,
+    claims: Claims,
+    /// The prompts held for the terminal and not yet settled.
+    held: Vec<PermissionPrompt>,
     observed: Option<Observed>,
     /// `None` while a read has them on the blocking pool.
     transcripts: Option<Transcripts>,
@@ -256,7 +274,13 @@ impl Session {
     async fn status(&mut self, event: AgentEvent) {
         let native = event.agent_session.clone().or_else(|| self.native_from_file());
         match native {
-            Some(native) => self.begin(&native),
+            Some(native) => {
+                self.begin(&native);
+                // The agent went: its session's id is free for another terminal to take up.
+                if event.status == AgentStatus::None {
+                    self.unclaim();
+                }
+            }
             None if event.status == AgentStatus::None => self.forget_provisional(),
             None if self.observed.is_none() => {
                 let observed = Observed::provisional("", self.terminal, &self.cwd, WallMs::now());
@@ -287,6 +311,31 @@ impl Session {
         }
     }
 
+    /// A prompt held for the terminal, or settled. One held while no thread is observed here
+    /// opens one: the session's own when its id is known, else the terminal's provisional one.
+    async fn permission(&mut self, event: &PermissionEvent) {
+        match event {
+            PermissionEvent::Asked(prompt) => self.held.push((**prompt).clone()),
+            PermissionEvent::Settled { ask, .. } => self.held.retain(|p| p.ask != *ask),
+        }
+        if let Some(observed) = self.observed.as_mut() {
+            take(&self.host, observed.permission(event));
+            return;
+        }
+        if matches!(event, PermissionEvent::Settled { .. }) {
+            return;
+        }
+        let known = self.status.as_ref().and_then(|s| s.agent_session.clone());
+        // Begun now, the thread is told the prompts held, this one with them.
+        if let Some(native) = known.or_else(|| self.native_from_file()) {
+            self.begin(&native);
+        } else {
+            let observed = Observed::provisional("", self.terminal, &self.cwd, WallMs::now());
+            self.start(observed);
+        }
+        self.read().await;
+    }
+
     /// The session id the transcript's file name says, for a session no hook spoke for.
     fn native_from_file(&self) -> Option<String> {
         let main = self.sources.sources(self.terminal).main?;
@@ -296,9 +345,12 @@ impl Session {
     /// Observe Claude Code session `native` from now on, unless it already is.
     fn begin(&mut self, native: &str) {
         if self.observed.as_ref().is_some_and(|o| o.meta().native == native) {
+            // Its agent back on the same session holds the id again, unless another took it.
+            let _held = self.claim(native);
             return;
         }
         self.forget_provisional();
+        self.unclaim();
         if let Some(old) = self.observed.take() {
             let exited = Status {
                 phase: Phase::Idle,
@@ -308,7 +360,13 @@ impl Session {
             };
             self.host.apply(old.main(), vec![Action::Status(exited)]);
         }
-        let observed = Observed::new(native, "", Some(self.terminal), &self.cwd, WallMs::now());
+        let now = WallMs::now();
+        let observed = if self.claim(native) {
+            Observed::new(native, "", Some(self.terminal), &self.cwd, now)
+        } else {
+            tracing::info!(terminal = %self.terminal, native, "a session id another terminal runs");
+            Observed::beside(native, "", self.terminal, &self.cwd, now)
+        };
         self.start(observed);
         self.transcripts = Some(Transcripts::default());
     }
@@ -323,7 +381,34 @@ impl Session {
         if let Some(status) = &self.status {
             take(&self.host, observed.status(status));
         }
+        for prompt in &self.held {
+            let asked = PermissionEvent::Asked(Box::new(prompt.clone()));
+            take(&self.host, observed.permission(&asked));
+        }
         self.observed = Some(observed);
+    }
+
+    /// Claim session id `native` for this terminal: whether no other terminal holds it.
+    fn claim(&self, native: &str) -> bool {
+        let mut claims = self.claims.lock();
+        match claims.get(native) {
+            Some(holder) if *holder != self.terminal => false,
+            _ => {
+                claims.insert(native.to_owned(), self.terminal);
+                true
+            }
+        }
+    }
+
+    /// Let go of the session id this terminal holds, if it holds one.
+    fn unclaim(&self) {
+        let Some(native) = self.observed.as_ref().map(|o| o.meta().native.clone()) else {
+            return;
+        };
+        let mut claims = self.claims.lock();
+        if claims.get(&native) == Some(&self.terminal) {
+            claims.remove(&native);
+        }
     }
 
     /// Remove the provisional thread, if that is what is observed: it never was a session.
