@@ -4125,6 +4125,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Left for the fork.** A focus given while the window draws could ask for its own frame
     (`Window::draw` compares the focus only across its focus listeners); then the strip's
     notify goes too.
+  - **No frame of motion draws the chrome** (2026-10-03). A frame that changed which tiles
+    were on screen still told the status bar to draw in the next, for a count of agents at
+    work off screen the bar stopped showing long ago (`7ecf8ad7`). The layout's springs run
+    on the wall clock, so a slower machine drew more frames of the overview opening, crossed
+    more of those changes and drew the bar more: CI failed the bound of two that a fast Mac
+    met. The notify went, and with it `chrome_next_frame`, its only use. The chrome now draws
+    for the change alone, whatever the frames' pace:
+    `a_frame_of_motion_is_no_news_for_the_chrome` opens the overview on a held clock at 60 Hz
+    and at 240 Hz (21 and 79 frames, four changes of what is on screen each) and finds the
+    chrome drawn for the change and in no frame of motion, the same at both paces.
   - Tests: `workspace::tests::retained`'s
     `the_keyboard_moving_on_its_own_builds_neither_the_workspace_nor_the_strip` (the two shells
     built again, a third not, workspace and strip not, each frame the one drawn from scratch)

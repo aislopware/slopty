@@ -659,9 +659,6 @@ pub struct WorkspaceView {
     chrome: Chrome,
     /// The strip, a view of its own so its motion is not news.
     strip_host: Entity<StripHost>,
-    /// The workspace changed since the strip last built, so the chrome draws in the frame the
-    /// strip builds in anyway. The strip, which a change always builds, takes it.
-    chrome_due: std::cell::Cell<bool>,
     /// How many changes the workspace took and how many times the titles were worked out: the
     /// proof that a frame of motion is neither.
     #[cfg(test)]
@@ -912,7 +909,6 @@ impl WorkspaceView {
                     builds: 0,
                 })
             },
-            chrome_due: std::cell::Cell::new(true),
             #[cfg(test)]
             counts: (0, 0),
             #[cfg(test)]
@@ -1432,23 +1428,6 @@ impl WorkspaceView {
         self.sync_approvals(cx);
         self.light_marks(cx);
         self.chrome.notify(cx);
-        self.chrome_due.set(true);
-    }
-
-    /// Draw `region` again in the next frame: what it shows moved with the strip. Not in this
-    /// one: a notify while drawing reaches a cached view only in the frame after. Nothing when
-    /// the chrome draws in this frame anyway.
-    fn chrome_next_frame(&self, region: Region, window: &Window) {
-        if self.chrome_due.get() {
-            return;
-        }
-        let view = match region {
-            Region::Navigator => self.chrome.navigator.entity_id(),
-            Region::NavigatorRows => self.chrome.nav_rows.entity_id(),
-            Region::Titlebar => self.chrome.titlebar.entity_id(),
-            Region::Statusbar => self.chrome.statusbar.entity_id(),
-        };
-        window.on_next_frame(move |_window, cx| cx.notify(view));
     }
 
     /// How many times each region of the chrome has drawn: the navigator (its panel and its

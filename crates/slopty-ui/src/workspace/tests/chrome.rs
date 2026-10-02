@@ -178,44 +178,95 @@ fn an_echo_leaves_the_chrome_as_it_was_drawn(cx: &mut TestAppContext) {
     assert!(after.iter().zip(before).all(|(a, b)| *a > b), "{before:?} → {after:?}");
 }
 
+/// What one move of the overview, opening or closing, cost the chrome when its frames came
+/// `period` apart on the workspace's held clock.
+#[derive(Debug)]
+struct Move {
+    /// The frames of motion drawn after the change's own.
+    frames: u32,
+    /// How many of them changed which tiles are on screen.
+    screens: u32,
+    /// How many times the navigator, the title bar and the status bar drew for the change.
+    change: [usize; 3],
+    /// How many times they drew in the frames of motion after it.
+    motion: [usize; 3],
+    /// How many changes the workspace took and how many times it worked out the titles.
+    counts: (usize, usize),
+}
+
+/// Open the overview, or close it, with the held clock at `clock`, and draw its motion a frame
+/// every `period` until it rests.
+fn overview_move(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    clock: &mut Duration,
+    period: Duration,
+) -> Move {
+    let screen = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| {
+            let mut items: Vec<ItemId> = v.drawn.on_screen.borrow().iter().copied().collect();
+            items.sort_unstable();
+            items
+        })
+    };
+    let (chrome, counts) = view.read_with(cx, |v, cx| (v.chrome_renders(cx), v.counts));
+    view.update(cx, |v, cx| {
+        v.hold_clock(Some(*clock));
+        v.tick();
+        let open = v.layout.overview_open();
+        v.layout.set_overview(!open);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let changed = renders(view, cx);
+    let (mut frames, mut screens, mut shown) = (0_u32, 0_u32, screen(cx));
+    while view.read_with(cx, |v, _| v.layout.frame().animating) {
+        assert!(frames < 10_000, "the move rests");
+        *clock = clock.saturating_add(period);
+        view.update(cx, |v, _| v.hold_clock(Some(*clock)));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        frames = frames.saturating_add(1);
+        let now = screen(cx);
+        if now != shown {
+            screens = screens.saturating_add(1);
+            shown = now;
+        }
+    }
+    let (after, took) = view.read_with(cx, |v, cx| (v.chrome_renders(cx), v.counts));
+    Move {
+        frames,
+        screens,
+        change: [0, 1, 2].map(|i| changed[i].saturating_sub(chrome[i])),
+        motion: [0, 1, 2].map(|i| after[i].saturating_sub(changed[i])),
+        counts: (took.0.saturating_sub(counts.0), took.1.saturating_sub(counts.1)),
+    }
+}
+
 /// The overview opening is one change and many frames of motion: the strip draws each frame,
-/// and the chrome, the titles and who needs the human are worked out for the change alone. A
-/// frame that moves which tiles are on screen tells the status bar in the next.
+/// and the chrome, the titles and who needs the human are worked out for the change alone. No
+/// frame of the motion draws the chrome, even one that changes which tiles are on screen, so
+/// what the chrome costs does not depend on how many frames the motion took: opened at 60 Hz
+/// and again at 240 Hz, it draws the same.
 #[gpui::test]
 fn a_frame_of_motion_is_no_news_for_the_chrome(cx: &mut TestAppContext) {
-    const FRAMES: u64 = 20;
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let _sessions = crowd(&view, cx, &studio, 8, 4);
     view.update(cx, |v, _| v.set_animation(true));
-    let (drawn, chrome, counts) =
-        view.read_with(cx, |v, cx| (v.drawn.builds.get(), v.chrome_renders(cx), v.counts));
-    view.update(cx, |v, cx| {
-        v.tick();
-        v.layout.set_overview(true);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    // The layout's springs run on the wall clock: these frames all fall inside the move.
-    for _ in 0..FRAMES {
-        assert!(view.read_with(cx, |v, _| v.layout.frame().animating), "still moving");
-        cx.update(Window::simulate_next_frame);
-        cx.run_until_parked();
+    let mut clock = Duration::ZERO;
+    let slow = overview_move(&view, cx, &mut clock, Duration::from_micros(16_667));
+    let _closed = overview_move(&view, cx, &mut clock, Duration::from_micros(16_667));
+    let fast = overview_move(&view, cx, &mut clock, Duration::from_micros(4_167));
+    for opening in [&slow, &fast] {
+        assert!(opening.frames > 1 && opening.screens > 0, "it moved the tiles: {opening:?}");
+        assert_eq!(opening.counts, (1, 1), "one change, one working out of the titles");
+        assert!(opening.change.iter().all(|n| *n > 0), "the change drew it: {opening:?}");
+        assert_eq!(opening.motion, [0; 3], "no frame of motion drew it: {opening:?}");
     }
-    let drew = view.read_with(cx, |v, _| v.drawn.builds.get().wrapping_sub(drawn));
-    let (after, took) = view.read_with(cx, |v, cx| (v.chrome_renders(cx), v.counts));
-    assert!(drew > FRAMES, "the change and every frame of motion drawn: {drew}");
-    let once = (counts.0.saturating_add(1), counts.1.saturating_add(1));
-    assert_eq!(took, once, "one change, one working out of the titles");
-    let regions = ["navigator", "title bar", "status bar"];
-    for (region, (now, was)) in regions.iter().zip(after.iter().zip(chrome)) {
-        let redrawn = now.saturating_sub(was);
-        assert!(redrawn <= 2, "the {region} drew {redrawn} times in {drew} frames");
-    }
-    println!(
-        "MEASURE overview opening: {drew} frames drawn, chrome renders {chrome:?} -> {after:?}, \
-         changes and titles worked out {counts:?} -> {took:?}"
-    );
+    assert!(fast.frames > slow.frames, "{slow:?} {fast:?}");
+    assert_eq!(fast.change, slow.change, "the frames' pace is no news: {slow:?} {fast:?}");
+    println!("MEASURE overview opening: at 60 Hz {slow:?}, at 240 Hz {fast:?}");
 }
 
 /// What a frame of motion costs beside the chrome: the overview opening and closing over 60

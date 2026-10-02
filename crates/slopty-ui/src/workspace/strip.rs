@@ -498,7 +498,7 @@ impl WorkspaceView {
     /// workspace's, so it is done once the frame is over, and only when there is something to
     /// do: a timer comes back for the streams once the grace is up, since an idle strip draws
     /// no frames.
-    fn track_visibility(&self, frame: &Frame, window: &Window, cx: &Draw<'_, Self>) {
+    fn track_visibility(&self, frame: &Frame, cx: &Draw<'_, Self>) {
         let (w, h) = self.layout.viewport();
         let screen = Rect { x: 0.0, y: 0.0, w, h };
         let visible: Vec<ItemId> = frame
@@ -510,8 +510,6 @@ impl WorkspaceView {
         let on_screen: HashSet<ItemId> = visible.iter().copied().collect();
         let moved = on_screen != *self.drawn.on_screen.borrow();
         if moved {
-            // The status bar counts the agents at work off screen.
-            self.chrome_next_frame(super::Region::Statusbar, window);
             *self.drawn.on_screen.borrow_mut() = on_screen;
         }
         if !moved && !self.visibility_due(&visible) {
@@ -771,7 +769,7 @@ impl WorkspaceView {
                 .is_some();
         let chrome = Chrome { k: frame.zoom, zooming, focus_line };
         drawn.zoom.set(frame.zoom);
-        self.track_visibility(&frame, window, cx);
+        self.track_visibility(&frame, cx);
         let origin = drawn.viewport.get().origin;
         let dragged = match &self.drag {
             Some(Drag::Move { tile, moving: true, .. }) => Some(*tile),
@@ -848,7 +846,6 @@ impl WorkspaceView {
             .children(hint)
             .children(empty)
             .children(self.render_marks());
-        self.chrome_due.set(false);
         strip.into_any_element()
     }
 
