@@ -8,6 +8,8 @@
 //! published on this Mac's loopback; `SLOPTY_LINUX_CONTAINER`; `SLOPTY_LINUX_USER`;
 //! `SLOPTY_LINUX_BIN_DIR`, where the binaries are inside it). Nothing is typed into a shell the
 //! test did not open, and the agent status comes from a hook played through `slopty hook`.
+//! Files the worker is to notice change through `docker exec` as its account, so inotify hears
+//! another process write them, as it would an editor.
 
 #[cfg(test)]
 mod tests {
@@ -16,19 +18,23 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use anyhow::{Context as _, Result, bail};
+    use slopty_client::tunnel::Forward;
     use slopty_client::{Effect, LinkEvent, TermState, WorkerLink};
-    use slopty_core::{ClientId, SessionId};
+    use slopty_core::{ClientId, SessionId, XferId};
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_proto::agent::AgentStatus;
     use slopty_proto::file::FileRead;
     use slopty_proto::folder::Listing;
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
+    use slopty_proto::search::{SearchEvent, SearchQuery, SearchRequest};
     use slopty_proto::server::Os;
     use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
-    use slopty_proto::transfer::{ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Rep};
+    use slopty_proto::transfer::{
+        ClipEntry, ClipFormat, ClipMsg, ClipType, Dest, Offer, Peer, Rep, XferMsg,
+    };
     use slopty_proto::{ClientMsg, WorkerMsg};
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
     use tokio::sync::mpsc;
 
     /// How long a shell start, a command or a reply may take.
@@ -66,18 +72,31 @@ mod tests {
         events: mpsc::Receiver<LinkEvent>,
         session: SessionId,
         state: TermState,
+        /// The session's listening ports as the link last forwarded them here.
+        forwards: Vec<Forward>,
     }
 
     impl Client {
         /// Connect, then open `command` (the account's login shell when empty) in `~`.
         async fn open(linux: &Linux, command: &[&str], size: TermSize) -> Result<(Self, HelloAck)> {
+            Self::open_on(linux, command, size, WorkerLink::start).await
+        }
+
+        /// [`Self::open`] on a link `start` makes of the connection: the app's own forwards
+        /// every port the worker's shells listen on.
+        async fn open_on(
+            linux: &Linux,
+            command: &[&str],
+            size: TermSize,
+            start: fn(slopty_net::client::WorkerConn) -> WorkerLink,
+        ) -> Result<(Self, HelloAck)> {
             let endpoint = bind_client()?;
             let hello = Hello { client: ClientId::new(), name: "linux e2e".to_owned() };
             let conn = tokio::time::timeout(STEP, connect_addr(&endpoint, linux.addr, hello))
                 .await
                 .context("connect")??;
             let ack = conn.ack.clone();
-            let mut link = WorkerLink::start(conn);
+            let mut link = start(conn);
             let mut events = link.events().context("the link's events")?;
             link.send(ClientMsg::OpenSession {
                 request: 1,
@@ -110,7 +129,8 @@ mod tests {
             .await
             .context("SessionOpened")??;
             let state = TermState::new(size);
-            let client = Self { _endpoint: endpoint, link, events, session, state };
+            let client =
+                Self { _endpoint: endpoint, link, events, session, state, forwards: Vec::new() };
             Ok((client, ack))
         }
 
@@ -141,6 +161,10 @@ mod tests {
                     Ok(None)
                 }
                 LinkEvent::Control(msg) => Ok(Some(msg)),
+                LinkEvent::Ports { session, forwards } if session == self.session => {
+                    self.forwards = forwards;
+                    Ok(None)
+                }
                 LinkEvent::Disconnected(why) => bail!("disconnected: {why}"),
                 _other => Ok(None),
             }
@@ -217,6 +241,200 @@ mod tests {
         }
         exec.arg(&linux.container).args(args).kill_on_drop(true);
         exec
+    }
+
+    /// `script` run by `sh` in the worker's container as its account, to its end.
+    async fn sh(linux: &Linux, script: &str) {
+        let status = exec(linux, &[], &["sh", "-c", script]).stdin(Stdio::null()).status().await;
+        let status = status.unwrap();
+        assert!(status.success(), "`{script}`: {status}");
+    }
+
+    /// What `script` printed, run as [`sh`] runs it.
+    async fn sh_out(linux: &Linux, script: &str) -> String {
+        let out = exec(linux, &[], &["sh", "-c", script]).stdin(Stdio::null()).output().await;
+        let out = out.unwrap();
+        assert!(out.status.success(), "`{script}`: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// The next `WorkerMsg::File` for `path`.
+    async fn file(client: &mut Client, path: &str) -> FileRead {
+        client
+            .until_control("the file", |msg| match msg {
+                WorkerMsg::File { path: at, read } if at == path => Some(read),
+                _other => None,
+            })
+            .await
+            .unwrap()
+    }
+
+    /// The Linux worker follows a file tile's file and a folder tile's folder on inotify: a
+    /// write by another process there, a new entry and a removal each reach the client unasked.
+    /// A text search over a tree streams its matches, with what `.gitignore` leaves out left
+    /// out.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask linux e2e"]
+    async fn a_linux_worker_follows_files_on_inotify_and_searches_them() {
+        let linux = linux();
+        let size = TermSize { cols: 80, rows: 24, ..TermSize::default() };
+        let (mut client, ack) = Client::open(&linux, &[], size).await.unwrap();
+        let dir = format!("{}/watched", ack.home);
+        let note = format!("{dir}/note.txt");
+        sh(&linux, &format!("mkdir -p {dir} && printf one > {note}")).await;
+
+        // 1. The file, read, then followed; the folder followed beside it.
+        client.link.send(ClientMsg::ReadFile { path: note.clone() }).await.unwrap();
+        let read = file(&mut client, &note).await;
+        assert!(matches!(&read, FileRead::Text { text, .. } if text == "one"), "{read:?}");
+        client.link.send(ClientMsg::WatchFiles { paths: vec![note.clone()] }).await.unwrap();
+        client.link.send(ClientMsg::WatchFolders { paths: vec![dir.clone()] }).await.unwrap();
+        // The watch stamps the file as it is; the write must come after that.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // 2. Another process writes it: read again, unasked.
+        let wrote = Instant::now();
+        sh(&linux, &format!("printf two > {note}")).await;
+        let read = file(&mut client, &note).await;
+        let heard = wrote.elapsed();
+        assert!(matches!(&read, FileRead::Text { text, .. } if text == "two"), "{read:?}");
+        eprintln!("linux inotify: a write reached the client {heard:?} after docker exec began");
+
+        // 3. A new entry in the folder: listed again with it.
+        sh(&linux, &format!("touch {dir}/added.txt")).await;
+        let listing = client
+            .until_control("the folder listed again", |msg| match msg {
+                WorkerMsg::Folder { listing: Listing::Listed { entries, .. }, .. }
+                    if entries.iter().any(|e| e.name == "added.txt") =>
+                {
+                    Some(entries.len())
+                }
+                _other => None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(listing, 2, "note.txt and added.txt");
+
+        // 4. Removed: said to be missing.
+        sh(&linux, &format!("rm {note}")).await;
+        let read = file(&mut client, &note).await;
+        assert!(matches!(read, FileRead::Missing { .. }), "{read:?}");
+
+        // 5. A text search over a tree, its ignored build left out.
+        let tree = format!("{}/tree", ack.home);
+        sh(
+            &linux,
+            &format!(
+                "mkdir -p {tree}/src {tree}/build && printf 'build\\n' > {tree}/.gitignore \
+                 && printf '//! Docs.\\npub fn needle() {{}}\\n' > {tree}/src/lib.rs \
+                 && printf 'needle\\n' > {tree}/build/out.rs"
+            ),
+        )
+        .await;
+        let query = SearchQuery { pattern: "needle".to_owned(), ..SearchQuery::default() };
+        let start = SearchRequest::Start { id: 1, root: "~/tree".to_owned(), query };
+        client.link.send(ClientMsg::Search(start)).await.unwrap();
+        let mut found = Vec::new();
+        let summary = loop {
+            let event = client
+                .until_control("the search", |msg| match msg {
+                    WorkerMsg::Search(event) => Some(event),
+                    _other => None,
+                })
+                .await
+                .unwrap();
+            match event {
+                SearchEvent::Hits { id: 1, files } => found.extend(files),
+                SearchEvent::Done { id: 1, summary } => break summary,
+                other => panic!("{other:?}"),
+            }
+        };
+        let paths: Vec<&str> = found.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["src/lib.rs"], "the ignored build is not searched");
+        let line = found.first().and_then(|f| f.lines.first()).unwrap();
+        assert_eq!((line.line, line.text.as_str()), (2, "pub fn needle() {}"));
+        assert_eq!((summary.files, summary.lines, summary.capped), (1, 1, false));
+
+        client.close().await;
+    }
+
+    /// A file dropped on a Linux terminal goes up whole into its shell's directory, and a
+    /// server the shell starts is forwarded to this Mac's loopback by the app's own link and
+    /// answers through it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live: cargo xtask linux e2e"]
+    async fn an_upload_lands_in_a_linux_shell_and_its_server_is_tunnelled_here() {
+        let linux = linux();
+        let size = TermSize { cols: 120, rows: 24, ..TermSize::default() };
+        let (mut shell, ack) =
+            Client::open_on(&linux, &[], size, WorkerLink::start_forwarding).await.unwrap();
+
+        // 1. An upload into the shell's directory, checked by its digest there and its size.
+        let here = tempfile::tempdir().unwrap();
+        let bytes: Vec<u8> = (0..2_500_000_u32).map(|i| (i % 251) as u8).collect();
+        let sent = here.path().join("upload.bin");
+        std::fs::write(&sent, &bytes).unwrap();
+        let xfer = XferId::new();
+        let started = Instant::now();
+        shell.link.remote().upload(xfer, vec![sent], Dest::SessionCwd(shell.session));
+        let (path, hash) = shell
+            .until_control("the upload", |msg| match msg {
+                WorkerMsg::Xfer(XferMsg::Done { xfer: x, path, hash, .. }) if x == xfer => {
+                    Some((path, hash))
+                }
+                WorkerMsg::Xfer(XferMsg::Failed { xfer: x, error, .. }) if x == xfer => {
+                    panic!("the upload failed: {error}")
+                }
+                _other => None,
+            })
+            .await
+            .unwrap();
+        let took = started.elapsed();
+        assert_eq!(path, format!("{}/upload.bin", ack.home), "in the shell's directory");
+        assert!(hash == <[u8; 32]>::from(blake3::hash(&bytes)), "whole");
+        let paths = shell
+            .until_control("the upload's end", |msg| match msg {
+                WorkerMsg::Xfer(XferMsg::Finished { xfer: x, paths }) if x == xfer => Some(paths),
+                _other => None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(paths, std::slice::from_ref(&path));
+        assert_eq!(sh_out(&linux, &format!("stat -c %s {path}")).await, bytes.len().to_string());
+        eprintln!("linux upload: {} bytes in {took:?}", bytes.len());
+
+        // 2. A server started in the shell, forwarded here, echoing through the tunnel.
+        let port = 47_123_u16;
+        shell
+            .type_line(&format!(
+                "perl -MIO::Socket::INET -e '$s=IO::Socket::INET->new(LocalAddr=>\"127.0.0.1\",\
+                 LocalPort=>{port},Listen=>5,ReuseAddr=>1) or die $!; $|=1; \
+                 print \"serving on http://127.0.0.1:{port}\\n\"; \
+                 while($c=$s->accept){{while(<$c>){{print $c \"echo:$_\"}} close $c}}'"
+            ))
+            .await
+            .unwrap();
+        shell.until_row(&format!("serving on http://127.0.0.1:{port}")).await.unwrap();
+        let deadline = after(STEP);
+        let local = loop {
+            let forwarded = shell.forwards.iter().find(|f| f.port.number == port);
+            if let Some(local) = forwarded.and_then(|f| f.local) {
+                break local;
+            }
+            shell.step(deadline).await.context("the port forwarded here").unwrap();
+        };
+        let socket = tokio::net::TcpStream::connect(("127.0.0.1", local)).await.unwrap();
+        let (read, mut write) = socket.into_split();
+        write.write_all(b"through-linux\n").await.unwrap();
+        let mut line = String::new();
+        let mut read = tokio::io::BufReader::new(read);
+        tokio::time::timeout(STEP, read.read_line(&mut line)).await.unwrap().unwrap();
+        assert_eq!(line, "echo:through-linux\n");
+        drop(write);
+
+        // Ctrl-C ends the server.
+        shell.send(TermRequest::Raw(vec![3])).await.unwrap();
+        shell.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

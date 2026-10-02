@@ -953,3 +953,28 @@ more full-window layer.
     same commits again runs nothing. `--no-tests` pushes without it.
   - Track the red-run rate (16 of 41 before), the cancelled-run rate (10 of 41) and the median
     time from push to promote.
+
+- ✅ **The Linux worker is built and tested on a Linux runner** (2026-10-03, readiness audit C5).
+  Every gate lane but the tools' ran on a Mac: the Linux crates were linted for Linux (the
+  clippy-ios lane's `lint_linux`) and cross-built, but no test of theirs ever ran on Linux.
+  - **The lane.** `cargo xtask gate --lane linux`, on a Linux host only (a full gate on a Mac
+    leaves it out, and naming it there says to use `cargo xtask linux e2e`): the tests of every
+    `LINUX_CRATES` crate but `LINUX_UNTESTED`'s built, then the worker, its ptyd, the CLI, the
+    server and the stand-ins the tests spawn, built natively in the tests' profile, then nextest
+    and the doctests. No workspace hack, whose features pull in GPUI.
+  - **The job.** `linux` in `.github/workflows/ci.yml`, on `ubuntu-24.04` (x86_64), beside the
+    gate's matrix, so the run takes no longer. zig comes from `mlugg/setup-zig` at 0.16.0, the
+    minimum the vendored ghostty names. The image's unused SDKs are deleted first, since it keeps
+    about 14 GB free.
+  - **Not required yet.** `promote` needs only the gate's matrix. Once the job has passed
+    steadily, adding it there (`needs: [gate, linux]`) makes it decide what lands.
+  - **No Actions compile cache.** The repository's Actions cache held 10.78 GB in 8 309 entries
+    on 2026-10-03, over its 10 GB quota, and GitHub evicts the least recently used: Linux units
+    there would push out the Mac lanes' and lengthen the critical path. The job's sccache keeps
+    its cache on the runner, so it compiles cold each run. Before it is required, measure its
+    wall time against the run's (21.5 min warm, `docs/MEASUREMENTS.md` 2026-10-02).
+  - **Next.** arm64 on `ubuntu-24.04-arm` once the cache question is settled (aarch64 runs here
+    in the Docker e2e meanwhile). Once required, the Linux clippy could move here from the
+    clippy-ios lane, the longest on the critical path.
+  - Test: `gate::tests::ci_runs_the_linux_lane_on_linux`.
+

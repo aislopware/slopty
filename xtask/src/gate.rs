@@ -4,7 +4,8 @@
 //! tools and host clippy) and prints the next step. The rest (tests, clippy for iOS and Linux,
 //! rustdoc) runs on GitHub Actions when `cargo xtask land` pushes the commit to the `gate`
 //! branch, and `main` moves to it only once every lane there passed (`.github/workflows/ci.yml`).
-//! `--full` runs every lane here, as `cargo xtask release` and CI do.
+//! `--full` runs every lane here, as `cargo xtask release` and CI do. The `linux` lane, the
+//! Linux worker's build and tests, runs only on a Linux host: CI's Linux runner.
 //!
 //! The gate checks a **snapshot of the index** (`target/gate/tree`, synced from the staged
 //! blobs before every run), not the working tree: several agents edit this one checkout at
@@ -34,8 +35,8 @@ use pass::{Inputs, Plan, Scope};
 use xshell::{Shell, cmd};
 
 use crate::tools::{
-    LINUX_CRATES, TRIPLES, WORKSPACE_HACK, has, host_only_present, quiet_step, repo_root,
-    workspace_packages,
+    LINUX_CRATES, LINUX_UNTESTED, TRIPLES, WORKSPACE_HACK, has, host_only_present, quiet_step,
+    repo_root, workspace_packages,
 };
 
 /// Gate options.
@@ -60,8 +61,14 @@ const MESSAGE_FILE: &str = "target/gate/COMMIT_MSG";
 
 /// The build lanes, each with its own target dir and a share of the cores. The host clippy
 /// pass and the tests are the long ones; the rest fill the gaps.
-const LANES: [(&str, u8); 5] =
-    [("tools", 1), ("clippy host", 4), ("clippy ios", 4), ("tests", 6), ("rustdoc", 3)];
+const LANES: [(&str, u8); 6] = [
+    ("tools", 1),
+    ("clippy host", 4),
+    ("clippy ios", 4),
+    ("tests", 6),
+    ("rustdoc", 3),
+    ("linux", 6),
+];
 
 /// The nextest profile of the gate's tests lane (`.config/nextest.toml`).
 const NEXTEST_PROFILE: &str = "gate";
@@ -78,6 +85,8 @@ pub enum LaneId {
     ClippyIos,
     Tests,
     Rustdoc,
+    /// The Linux worker built natively and its crates' tests run, on a Linux host only.
+    Linux,
 }
 
 impl LaneId {
@@ -89,6 +98,7 @@ impl LaneId {
             Self::ClippyIos => "clippy ios",
             Self::Tests => "tests",
             Self::Rustdoc => "rustdoc",
+            Self::Linux => "linux",
         }
     }
 
@@ -104,7 +114,7 @@ impl LaneId {
                 "taplo-cli",
                 "committed",
             ],
-            Self::Tests => &["cargo-nextest"],
+            Self::Tests | Self::Linux => &["cargo-nextest"],
             Self::ClippyHost | Self::ClippyIos | Self::Rustdoc => &[],
         }
     }
@@ -205,7 +215,9 @@ impl Only {
     }
 
     fn wants(&self, lane: LaneId) -> bool {
-        self.lanes.is_empty() || self.lanes.contains(&lane)
+        // Every lane, when none is named, is every lane this host can run.
+        let here = lane != LaneId::Linux || cfg!(target_os = "linux");
+        (self.lanes.is_empty() && here) || self.lanes.contains(&lane)
     }
 }
 
@@ -232,6 +244,12 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
     crate::prune::ensure_room(&root.join("target"))?;
     if opts.in_place && opts.since_pass {
         bail!("--since-pass compares snapshots of the index; it cannot check the tree in place");
+    }
+    if only.lanes.contains(&LaneId::Linux) && !cfg!(target_os = "linux") {
+        bail!(
+            "the linux lane runs on a Linux host (CI's); here `cargo xtask linux e2e` runs the \
+             Linux worker in Docker"
+        );
     }
     if only.shard.is_some() {
         ensure!(
@@ -358,6 +376,23 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
                 "rustdoc",
                 scope.spawn(|| {
                     cached(inputs, &tree, &build("rustdoc"), |_| doc(&lane("rustdoc")?, false))
+                }),
+            ));
+        }
+        if only.wants(LaneId::Linux) {
+            handles.push((
+                "linux",
+                scope.spawn(|| {
+                    let linux = Lane {
+                        name: "linux",
+                        scope: Scope::Build,
+                        extra: pass::tool_id("cargo-nextest"),
+                        since_pass: false,
+                    };
+                    cached(inputs, &tree, &linux, |_| {
+                        let (sh, doc_sh) = (lane("linux")?, lane("linux")?);
+                        linux_lane(&sh, doc_sh, profile)
+                    })
                 }),
             ));
         }
@@ -744,6 +779,49 @@ fn test_lane(
     let ptys = ptys.finish();
     print!("{}", ptys.report());
     both(both(tests, doctests), ptys.verdict())
+}
+
+/// The [`LINUX_CRATES`] whose tests build and run on Linux: all but [`LINUX_UNTESTED`].
+fn linux_tested() -> Vec<&'static str> {
+    LINUX_CRATES.iter().copied().filter(|c| !LINUX_UNTESTED.contains(c)).collect()
+}
+
+/// The Linux lane, on a Linux host: the worker, its ptyd, the CLI and the server built as a
+/// Linux box runs them (with the binaries the tests spawn), then the tests of every crate of
+/// theirs whose tests build there, and their doctests. Without the workspace hack, whose
+/// features pull in the client's GPUI, which no Linux build takes.
+fn linux_lane(sh: &Shell, doc_sh: Shell, profile: &str) -> Result<()> {
+    let tested = linux_tested();
+    let p = &selected(tested.iter().copied());
+    let timings: &[&str] = if profile == NEXTEST_CI_PROFILE { &["--timings"] } else { &[] };
+    quiet_step("nextest build", cmd!(sh, "cargo nextest run {p...} --no-run {timings...}"))?;
+    let mut spawned = tested.clone();
+    for (_, package) in SPAWNED_BINS {
+        if !spawned.contains(&package) {
+            spawned.push(package);
+        }
+    }
+    let spawned = selected(spawned);
+    let bins = spawned_bin_args();
+    // The binaries a Linux worker and server install, which the tests also spawn.
+    quiet_step(
+        "the Linux worker, server and spawned binaries",
+        cmd!(sh, "cargo build --profile test {spawned...} --examples {bins...}"),
+    )?;
+    let _fresh = sh.push_env(BINS_FRESH, "1");
+    let libs: Vec<String> = workspace_packages()?
+        .into_iter()
+        .filter(|package| package.lib && tested.contains(&package.name.as_str()))
+        .map(|package| package.name)
+        .collect();
+    let libs = selected(libs.iter().map(String::as_str));
+    let (tests, doctests) = std::thread::scope(|scope| {
+        let doctests =
+            scope.spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test {libs...} --doc")));
+        let tests = quiet_step("nextest", cmd!(sh, "cargo nextest run {p...} --profile {profile}"));
+        (tests, join(doctests))
+    });
+    both(tests, doctests)
 }
 
 /// The packages whose tests spawn [`SPAWNED_BINS`] (`slopty_testkit::bins::bin`), as
@@ -1259,6 +1337,19 @@ mod tests {
             let entry = format!("lane: tests, shard: {}, ", shard.name());
             assert!(workflow.contains(&entry), "ci.yml's matrix has no `{entry}`");
         }
+    }
+
+    /// CI runs the Linux lane on a Linux runner, apart from the gate's matrix until it is
+    /// required; its tested crates all build for Linux and none is one the lane leaves untested.
+    #[test]
+    fn ci_runs_the_linux_lane_on_linux() {
+        let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
+        let workflow = std::fs::read_to_string(&path).expect("ci.yml");
+        assert!(workflow.contains("cargo xtask gate --ci --lane linux"), "ci.yml runs it");
+        assert!(workflow.contains("cargo xtask setup --lane linux"), "with its tools");
+        let tested = super::linux_tested();
+        assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
+        assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));
     }
 
     /// A shard builds the spawned binaries beside its own packages without the others' tests,

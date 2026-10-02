@@ -117,6 +117,51 @@ jobs:
       - if: always() && matrix.lane != 'tools'
         run: $SCCACHE_PATH --show-stats
 
+  # The Linux worker on Linux: its ptyd, the CLI and the server built natively, and the tests of
+  # every crate of theirs that builds there (`cargo xtask gate --lane linux`), beside the gate on
+  # a free Linux runner, so the run takes no longer. Not yet among what `promote` needs: it joins
+  # them once it has passed steadily. Its compile cache stays on the runner: the Actions cache is
+  # at its 10 GB quota, and Linux units there would evict the Mac lanes' (MEASUREMENTS
+  # 2026-10-03, "a Linux lane in CI").
+  linux:
+    name: gate (linux)
+    runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "false"
+      SLOPTY_DISK_FLOOR_GB: 5
+    steps:
+      # A hosted Ubuntu image leaves about 14 GB free, which a test build can outgrow.
+      # These SDKs are what the image holds that no step here uses.
+      - run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+          add-rust-environment-hash-key: false
+          cache-targets: false
+          save-if: false
+      - uses: cargo-bins/cargo-binstall@main
+      # libghostty-vt-sys builds its library with zig, the version it pins.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: cargo xtask setup --lane linux
+      - run: cargo xtask gate --ci --lane linux
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timings-linux
+          path: |
+            target/**/nextest/ci/junit.xml
+            target/**/cargo-timings/cargo-timing.html
+          if-no-files-found: ignore
+
   # main moves to the commit every lane passed on, only forward: a push without force is
   # refused unless main is an ancestor of it, and the check before says why in the summary.
   promote:
