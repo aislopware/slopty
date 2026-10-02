@@ -37,9 +37,9 @@ mod crash {
                 && install.line.is_some(),
             "the call site resolved to its source line: {install:?}"
         );
-        let main = frame("slopty::main");
+        let main = frame("slopty_cli::main");
         assert!(
-            main.file.as_deref().is_none_or(|file| file.ends_with("apps/slopty-cli/src/main.rs")),
+            main.file.as_deref().is_none_or(|file| file.ends_with("apps/slopty-cli/src/lib.rs")),
             "main, by its whole path, in this binary's source: {main:?}"
         );
     }

@@ -10,12 +10,16 @@ description = "Slopty worker daemon: serves terminal sessions and remote windows
 [lints]
 workspace = true
 
+# The daemon is a library with a binary of one call over it: sccache caches a library but never a
+# binary, so a build that leaves this package unchanged links it instead of compiling it again
+# (MEASUREMENTS 2026-10-02, "the tests lane's build"). The unit tests are the library's.
 # The package takes another name than the library's; the binary keeps the one people type.
-# `doc = false`: its docs would land where the library's do.
+# `doc = false`: its docs would land where `slopty-worker`'s library's do.
 [[bin]]
 name = "slopty-worker"
 path = "src/main.rs"
 doc = false
+test = false
 
 [dependencies]
 anyhow.workspace = true

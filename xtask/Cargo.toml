@@ -10,6 +10,16 @@ description = "Slopty automation: gates, builds, bundles, measurements"
 [lints]
 workspace = true
 
+# A library with a binary of one call over it: sccache caches a library but never a binary, and
+# every CI job compiles xtask before anything else (`cargo xtask setup`), so an unchanged xtask is
+# linked from the cache instead of compiled (MEASUREMENTS 2026-10-02, "the tests lane's build").
+# The unit tests and the docs are the library's.
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+doc = false
+test = false
+
 [dependencies]
 anyhow.workspace = true
 camino.workspace = true

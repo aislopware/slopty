@@ -76,7 +76,7 @@ pub async fn send_file(
 }
 
 /// Save a file tile and answer how it went. Every watcher of the file, the writer's own
-/// included, then hears the new contents from the save's own events ([`watch`]). A file a waiting
+/// included, then hears the new contents from the save's own events ([`watch()`]). A file a waiting
 /// edit shows is written in place, since the program waiting on it may hold it open.
 pub async fn write(
     handoffs: &Handoffs,
@@ -106,7 +106,7 @@ pub async fn write(
 /// A save, or the end of a waiting edit, in the order its client sent them.
 #[derive(Debug)]
 pub enum Save {
-    /// A file tile's save ([`write`]).
+    /// A file tile's save ([`write()`]).
     File {
         /// Absolute path on the worker.
         path: String,

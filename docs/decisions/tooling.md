@@ -921,3 +921,19 @@ more full-window layer.
     JUnit report, its `cargo-timing.html` and its pseudo-terminal samples.
   - Rejected: nextest's `--partition`, which splits only the run (7 of the lane's 33 minutes)
     and leaves every shard the whole build.
+
+- ✅ **The daemon, the command line and xtask are libraries under a one-call binary**
+  (2026-10-02). sccache caches a library but never a binary, so these three compiled in full on
+  every CI run: `slopty-workerd`'s binary took 332 CPU-seconds and its test harness 219,
+  `slopty-cli`'s 86 and 84, and every job's `cargo xtask setup` spent about two minutes on
+  xtask. Each is now `src/lib.rs` with a `pub fn main`, and `src/main.rs` calls it. When the
+  package is unchanged the library comes from the cache and the binary is a link. Binary names,
+  `CARGO_BIN_EXE_*` and the command lines are unchanged; the unit tests and the docs are the
+  library's, so each binary has `test = false` and `doc = false`.
+  - The daemon's binary had `doc = false`, so its docs had never been built. As a library,
+    rustdoc failed on seven links: four into private items, which went once its modules became
+    private and its `Daemon` `pub(crate)` (a library's `pub` is API, and the binary had none),
+    and three it could not resolve, now fixed. A constant only a Mac reads is marked so for
+    Linux, which the `pub mod` around it used to hide from the dead-code lint.
+  - The crash tests find `main` as `slopty_workerd::main` and `slopty_cli::main`, in each
+    `lib.rs`.

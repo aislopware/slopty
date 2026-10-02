@@ -10,9 +10,15 @@ description = "slopty: command-line client and worker control for Slopty"
 [lints]
 workspace = true
 
+# The command line is a library with a binary of one call over it: sccache caches a library but
+# never a binary, so a build that leaves this package unchanged links it instead of compiling it
+# again (MEASUREMENTS 2026-10-02, "the tests lane's build"). The unit tests are the library's,
+# and so are the docs.
 [[bin]]
 name = "slopty"
 path = "src/main.rs"
+doc = false
+test = false
 
 [dependencies]
 anyhow.workspace = true

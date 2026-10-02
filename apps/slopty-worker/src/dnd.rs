@@ -387,6 +387,10 @@ impl Carrying {
 
 /// How often the drag pasteboard's count is read while the client's left button is held and
 /// moved: an app's drag reaches the client within this of beginning.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only a Mac has a drag pasteboard to watch")
+)]
 pub const WATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// The drag pasteboard's watch for one stream, on a thread of its own from its first press.
@@ -400,7 +404,8 @@ pub const WATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(8)
     expect(dead_code, reason = "only a Mac has a drag pasteboard to watch")
 )]
 pub struct PressWatch {
-    /// The pasteboard watched, when not the system's drag pasteboard ([`Dnd::watching`]).
+    /// The pasteboard watched, when not the system's drag pasteboard (a test's, given to
+    /// [`Dnd`]'s `watching`).
     board: Option<String>,
     /// What the thread is asked, with the count a press saw.
     to: Option<std::sync::mpsc::Sender<(Watching, isize)>>,
