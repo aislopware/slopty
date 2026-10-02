@@ -700,6 +700,61 @@ fn the_repository_lens_groups_across_workers(cx: &mut TestAppContext) {
     assert_eq!(saved, NavLens::Repositories, "kept with the layout");
 }
 
+/// The repository lens groups by what a repository is, not where it is cloned: two clones at
+/// different paths on two workers are one block once their workers say they share an origin,
+/// a third at one of those paths joins before its own identity comes, and a clone of another
+/// repository of the same name says where it is. A fold is kept by the repository's key.
+#[gpui::test]
+fn the_repository_lens_groups_clones_by_their_identity(cx: &mut TestAppContext) {
+    use slopty_proto::terminal::RepoId;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let identified = |fake: &Fake, version, (repo, origin): (&str, Option<&str>), cx: &mut _| {
+        let tile = in_repo(&view, cx, fake, version, (repo, repo, "main"));
+        let session = view.read_with(cx, |v, _| session_of(v, tile));
+        let key = fake.key;
+        view.update_in(cx, |v, _w, cx| {
+            let id = origin.map(|o| RepoId { origin: Some(o.to_owned()), ..RepoId::default() });
+            let reported = SessionSummary {
+                repo: Some(repo.to_owned()),
+                repo_id: id,
+                branch: Some("main".to_owned()),
+                ..summary(session, Some(repo))
+            };
+            v.session_opened(key, reported, cx);
+        });
+        cx.run_until_parked();
+        tile
+    };
+    let origin = "github.com/aislopware/slopty";
+    let here = identified(&studio, 1, ("/w/oss/slopty", Some(origin)), cx);
+    let there = identified(&laptop, 1, ("/Users/c/code/slopty", Some(origin)), cx);
+    let unknown = identified(&studio, 2, ("/w/oss/slopty", None), cx);
+    let fork = identified(&laptop, 2, ("/w/forks/slopty", Some("github.com/someone/slopty")), cx);
+    view.update_in(cx, |v, w, cx| v.toggle_navigator_lens(&ToggleNavigatorLens, w, cx));
+    cx.run_until_parked();
+
+    let order = view.read_with(cx, |v, _| v.navigator_tiles());
+    let at = |t: TileRef| order.iter().position(|o| *o == t).expect("listed");
+    let mut one = [at(here), at(there), at(unknown)];
+    one.sort_unstable();
+    assert_eq!(one[0].abs_diff(one[2]), 2, "one repository, one block of three: {order:?}");
+    assert!(at(fork) < one[0] || at(fork) > one[2], "the fork is a block of its own");
+    assert!(shown(cx, leak(format!("nav-repo-{origin}"))), "kept by its origin");
+    let labels = view.read_with(cx, |v, _| v.navigator_repo_labels());
+    assert!(labels.contains(&"slopty, in github.com/aislopware".to_owned()), "{labels:?}");
+    assert!(labels.contains(&"slopty, in github.com/someone".to_owned()), "{labels:?}");
+
+    click(cx, leak(format!("nav-repo-{origin}")));
+    let order = view.read_with(cx, |v, _| v.navigator_tiles());
+    for tile in [here, there, unknown] {
+        assert!(!order.contains(&tile), "folded with its repository");
+    }
+    assert!(order.contains(&fork));
+}
+
 /// An agent's subagents at work fold into its row as a count, and one that finished is not
 /// counted: the rail lists the agent once, saying how many it has out.
 #[gpui::test]

@@ -51,7 +51,7 @@
 //! tile whose row is out of view scrolls into it.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::mem::{Discriminant, discriminant};
 use std::time::{Duration, SystemTime};
 
@@ -70,7 +70,7 @@ use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
-use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
+use slopty_proto::terminal::{Progress, ProgressState, RepoChanges, RepoId};
 use slopty_proto::thread::attention::Rung;
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
@@ -621,6 +621,9 @@ struct NavTile {
     /// The repository it is in: its shell's, or for a file or a folder the deepest of its
     /// worker's shells' repositories that holds it.
     repo: Option<String>,
+    /// Which repository that is, once its worker knows: what the repository lens groups
+    /// clones on several workers by ([`crate::repo_groups`]).
+    repo_id: Option<RepoId>,
 }
 
 impl NavTile {
@@ -708,9 +711,9 @@ struct NavHeader {
 /// A repository's header, under the repository lens.
 #[derive(Clone)]
 struct NavRepo {
-    /// Its path, the same on every worker that has a checkout there; empty for the tiles in
-    /// no repository.
-    path: String,
+    /// What it is kept by ([`crate::repo_groups::RepoGroup::key`]): its origin, else its first
+    /// commit, else its path; empty for the tiles in no repository. Its fold is kept under it.
+    key: String,
     name: String,
     /// Where it is, when another repository listed has the same name.
     parent: Option<String>,
@@ -1146,6 +1149,12 @@ impl WorkspaceView {
             let key = *key;
             let named = matches(&query, &[&w.name]);
             let roots: Vec<&str> = w.sessions.values().filter_map(|s| s.repo.as_deref()).collect();
+            // Each root's identity, from a shell there whose worker has read it.
+            let identity = |root: &str| {
+                w.sessions.values().find_map(|s| {
+                    s.repo_id.as_ref().filter(|_| s.repo.as_deref() == Some(root)).cloned()
+                })
+            };
             let mut rollup = Rollup::default();
             let mut tiles: Vec<(u8, NavTile)> = Vec::new();
             for &tile in order.iter().filter(|t| t.worker == key) {
@@ -1167,6 +1176,7 @@ impl WorkspaceView {
                     }
                     _ => None,
                 };
+                let repo_id = repo.as_deref().and_then(identity);
                 let repo_named = repo.as_deref().map_or("", repo_name);
                 if !named && !matches(&query, &[&title, &meta, repo_named]) {
                     continue;
@@ -1209,6 +1219,7 @@ impl WorkspaceView {
                     progress,
                     restored,
                     repo,
+                    repo_id,
                 };
                 tiles.push((attention(mark, unseen), row));
             }
@@ -2248,7 +2259,7 @@ impl WorkspaceView {
     fn repo_header(&self, repo: &NavRepo, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let path = repo.path.clone();
+        let path = repo.key.clone();
         let key = if path.is_empty() { "none".to_owned() } else { path.clone() };
         let folded = repo.folded;
         let label = SharedString::from(format!(
@@ -2533,45 +2544,69 @@ impl WorkspaceView {
 
 /// The repository lens's blocks: a repository's tiles from every worker under one header, in
 /// order of attention (each worker's own order kept within a class), the repositories by name
-/// and the tiles in none last. Two repositories of one name say where each is.
+/// and the tiles in none last. Clones are one repository when their identities match or they
+/// share a path ([`crate::repo_groups::group`]), so one cloned at two paths on two workers is
+/// one block. Two repositories of one name say where each is.
 fn repo_blocks(
     tiles: impl Iterator<Item = NavTile>,
     folded: impl Fn(&str) -> bool,
 ) -> Vec<NavBlock> {
-    let mut groups: BTreeMap<(bool, String, String), Vec<NavTile>> = BTreeMap::new();
+    let tiles: Vec<NavTile> = tiles.collect();
+    let grouped = {
+        let clones: Vec<crate::repo_groups::Clone<'_>> = tiles
+            .iter()
+            .filter_map(|t| {
+                Some(crate::repo_groups::Clone { path: t.repo.as_deref()?, id: t.repo_id.as_ref() })
+            })
+            .collect();
+        crate::repo_groups::group(&clones)
+    };
+    let mut members: Vec<Vec<NavTile>> = grouped.groups.iter().map(|_| Vec::new()).collect();
+    let mut loose = Vec::new();
+    let mut of = grouped.of.iter();
     for tile in tiles {
-        let path = tile.repo.clone().unwrap_or_default();
-        let name =
-            if path.is_empty() { NO_REPOSITORY.to_owned() } else { repo_name(&path).to_owned() };
-        groups.entry((path.is_empty(), name.to_lowercase(), path)).or_default().push(tile);
+        let group = tile.repo.as_ref().and_then(|_| of.next()).and_then(|&g| members.get_mut(g));
+        match group {
+            Some(group) => group.push(tile),
+            None => loose.push(tile),
+        }
     }
     let mut seen = HashSet::new();
     let mut shared = HashSet::new();
-    for (_, name, _) in groups.keys() {
+    for group in &grouped.groups {
+        let name = group.name.to_lowercase();
         if !seen.insert(name.clone()) {
-            shared.insert(name.clone());
+            shared.insert(name);
         }
     }
-    groups
+    let block = |key: String, name: String, parent: Option<String>, mut tiles: Vec<NavTile>| {
+        tiles.sort_by_key(|t| attention(t.mark, t.unseen));
+        let mut rollup = Rollup::default();
+        for t in &tiles {
+            rollup.add(t.mark, t.unseen);
+        }
+        let folded = folded(&key);
+        let head = NavRow::Repo(NavRepo { key, name, parent, rollup, folded, gap: false });
+        NavBlock { head, folded, vacant: None, tiles }
+    };
+    let mut blocks: Vec<NavBlock> = grouped
+        .groups
         .into_iter()
-        .map(|((_, key, path), mut tiles)| {
-            tiles.sort_by_key(|t| attention(t.mark, t.unseen));
-            let mut rollup = Rollup::default();
-            for t in &tiles {
-                rollup.add(t.mark, t.unseen);
-            }
-            let name = if path.is_empty() {
-                NO_REPOSITORY.to_owned()
-            } else {
-                repo_name(&path).to_owned()
-            };
-            let parent =
-                (shared.contains(&key) && !path.is_empty()).then(|| repo_parent(&path)).flatten();
-            let folded = folded(&path);
-            let head = NavRow::Repo(NavRepo { path, name, parent, rollup, folded, gap: false });
-            NavBlock { head, folded, vacant: None, tiles }
+        .zip(members)
+        .map(|(group, tiles)| {
+            // Where it is: the origin's owner when it has one, else its least path's parent.
+            let parent = shared.contains(&group.name.to_lowercase()).then(|| {
+                let origin =
+                    tiles.iter().filter_map(|t| t.repo_id.as_ref()?.origin.as_deref()).min();
+                origin.or_else(|| group.paths.first().map(String::as_str)).and_then(repo_parent)
+            });
+            block(group.key, group.name, parent.flatten(), tiles)
         })
-        .collect()
+        .collect();
+    if !loose.is_empty() {
+        blocks.push(block(String::new(), NO_REPOSITORY.to_owned(), None, loose));
+    }
+    blocks
 }
 
 /// The deepest of `roots` that holds `path`, on a directory boundary.
