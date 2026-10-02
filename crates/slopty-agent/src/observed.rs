@@ -77,6 +77,20 @@ pub const CAPS: [&str; 7] = [
 pub const MODELS: [(&str, &str); 4] =
     [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("default", "Default")];
 
+/// Who answered a request the agent asked in its own terminal ([`Answerer::name`]).
+pub const IN_TERMINAL: &str = "terminal";
+
+/// How long a block waits for a prompt held here before it is asked in the terminal.
+///
+/// The held prompt follows its block's status at once, and the worker looks again on each of
+/// its ticks ([`Observed::waited`]).
+pub const ASK_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// The request a block that began at `since` asks in the agent's own terminal.
+fn terminal_ask(since: WallMs) -> AskId {
+    AskId(format!("terminal-{}", since.as_millis()))
+}
+
 /// The thread of Claude Code session `native`.
 #[must_use]
 pub fn thread_of(native: &str) -> ThreadId {
@@ -245,6 +259,14 @@ pub struct Observed {
     /// gets them again, since the transcript has neither.
     status: Option<Status>,
     open: Vec<Request>,
+    /// What the agent asks in its own terminal with no prompt held here (nobody followed it,
+    /// or no relay held it): a request answered only there, so the thread still shows it.
+    in_terminal: Option<Request>,
+    /// When the block a held prompt stood for began: that block is the prompt's, and asks
+    /// nothing more in the terminal once the prompt is settled.
+    held_block: Option<WallMs>,
+    /// The kind of request the agent's block asks for, while it is blocked on the person.
+    blocked_kind: Option<&'static str>,
     out: Vec<Out>,
     /// The title is the session's own name, which its first prompt replaces.
     named: bool,
@@ -330,6 +352,9 @@ impl Observed {
             meters: Meters::default(),
             status: None,
             open: Vec::new(),
+            in_terminal: None,
+            held_block: None,
+            blocked_kind: None,
             named: false,
             hooked: false,
             commands: Vec::new(),
@@ -460,7 +485,8 @@ impl Observed {
         };
         let status = Status { phase, wait, liveness, since_ms: event.since_ms };
         self.status = Some(status.clone());
-        self.push(self.meta.id, Action::Status(status));
+        self.push(self.meta.id, Action::Status(status.clone()));
+        self.ask_in_terminal(event, &status);
         let mode = event.mode.as_ref().map(|m| m.name.clone());
         if mode.is_some() && mode != self.meters.mode {
             self.meters.mode = mode;
@@ -558,11 +584,21 @@ impl Observed {
         let action = match event {
             PermissionEvent::Asked(prompt) => {
                 self.hear_hook();
+                self.held_block = self.blocked_since();
+                // The prompt is held here after all: it is answered on its own card.
+                if let Some(asked) = self.in_terminal.take() {
+                    let id = asked.id;
+                    self.push(
+                        self.meta.id,
+                        Action::RequestResolved { id, state: RequestState::Withdrawn },
+                    );
+                }
                 let request = request(prompt);
                 self.open.push(request.clone());
                 Action::RequestOpened(Box::new(request))
             }
             PermissionEvent::Settled { ask, outcome, .. } => {
+                self.held_block = self.held_block.or_else(|| self.blocked_since());
                 let id = ask.to_string();
                 self.open.retain(|r| r.id.0 != id);
                 let state = match outcome {
@@ -576,6 +612,83 @@ impl Observed {
             }
         };
         self.push(self.meta.id, action);
+        self.drain()
+    }
+
+    /// When the block the thread is in began, while it is blocked on the person.
+    fn blocked_since(&self) -> Option<WallMs> {
+        self.status.as_ref().filter(|s| s.phase == Phase::NeedsYou).map(|s| s.since_ms)
+    }
+
+    /// Note what the agent's status `event` (mapped to `status`) asks in its own terminal, and
+    /// settle the request made for an earlier block once this status ends it: answered there
+    /// when the agent goes back to work, else withdrawn. The request itself opens only after
+    /// [`ASK_GRACE`], from [`Observed::waited`].
+    fn ask_in_terminal(&mut self, event: &AgentEvent, status: &Status) {
+        self.blocked_kind = match &event.status {
+            AgentStatus::Blocked(BlockReason::Permission { .. }) => Some(Request::APPROVAL),
+            AgentStatus::Blocked(BlockReason::Question) => Some(Request::QUESTION),
+            AgentStatus::Blocked(BlockReason::Elicitation) => Some(Request::ELICITATION),
+            _ => None,
+        };
+        let Some(mut asked) = self.in_terminal.take() else { return };
+        if let (Some(kind), Some(wait)) = (self.blocked_kind, status.wait.as_ref())
+            && asked.id == terminal_ask(status.since_ms)
+        {
+            // The same block: told again only if what it asks moved.
+            if asked.kind != kind || asked.title != wait.text {
+                kind.clone_into(&mut asked.kind);
+                asked.title.clone_from(&wait.text);
+                self.push(self.meta.id, Action::RequestOpened(Box::new(asked.clone())));
+            }
+            self.in_terminal = Some(asked);
+            return;
+        }
+        let state = if status.phase == Phase::Working {
+            RequestState::Answered {
+                by: Answerer { client: None, name: IN_TERMINAL.to_owned() },
+                choice: String::new(),
+            }
+        } else {
+            RequestState::Withdrawn
+        };
+        self.push(self.meta.id, Action::RequestResolved { id: asked.id, state });
+    }
+
+    /// Time has come to `now`: a block that still asks with no prompt held here, for
+    /// [`ASK_GRACE`] since it began, opens its request, answered only in the agent's own
+    /// terminal. The grace lets a prompt held for the block come first, so a held one never
+    /// flashes a card it then replaces.
+    pub fn waited(&mut self, now: WallMs) -> Vec<Out> {
+        let Some(kind) = self.blocked_kind else { return self.drain() };
+        let Some(status) = self.status.as_ref() else { return self.drain() };
+        let since = status.since_ms;
+        let grace = u64::try_from(ASK_GRACE.as_millis()).unwrap_or(u64::MAX);
+        let due = now.as_millis() >= since.as_millis().saturating_add(grace);
+        let asks = self.in_terminal.is_none()
+            && self.open.is_empty()
+            && self.meta.terminal.is_some()
+            && self.held_block != Some(since)
+            && due;
+        if let (true, Some(wait)) = (asks, status.wait.as_ref()) {
+            let request = Request {
+                id: terminal_ask(since),
+                item: None,
+                kind: kind.to_owned(),
+                title: wait.text.clone(),
+                text: None,
+                options: Vec::new(),
+                questions: Vec::new(),
+                proposed: None,
+                schema_json: None,
+                url: None,
+                state: RequestState::Open,
+                opened_ms: since,
+                until_ms: None,
+            };
+            self.in_terminal = Some(request.clone());
+            self.push(self.meta.id, Action::RequestOpened(Box::new(request)));
+        }
         self.drain()
     }
 
@@ -650,7 +763,13 @@ impl Observed {
         if self.meters != Meters::default() {
             actions.push(Action::MetersSet(self.meters.clone()));
         }
-        actions.extend(self.open.iter().cloned().map(|r| Action::RequestOpened(Box::new(r))));
+        actions.extend(
+            self.open
+                .iter()
+                .chain(&self.in_terminal)
+                .cloned()
+                .map(|r| Action::RequestOpened(Box::new(r))),
+        );
         if !self.commands.is_empty() {
             actions.push(Action::CommandsSet(self.commands.clone()));
         }
@@ -1342,20 +1461,65 @@ fn answerer(by: ClientId) -> Answerer {
     Answerer { client: Some(by), name: String::new() }
 }
 
-/// What "allow always" grants, in Claude Code's words.
+/// What "allow always" grants: rules and paths as Claude Code writes them, a mode or an
+/// update of an unknown kind in words. The line is in sentence case, so it reads
+/// "/work; accept edits mode", or "Accept edits mode" when the mode comes first.
 fn grants(prompt: &PermissionPrompt) -> Option<String> {
-    let words: Vec<String> = prompt
-        .suggestions
-        .iter()
-        .map(|s| match &s.grant {
-            Grant::Rules { rules, .. } => rules.join(", "),
-            Grant::Mode { mode } => format!("mode {mode}"),
-            Grant::Directories { directories } => directories.join(", "),
-            Grant::Other { kind } => kind.clone(),
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
-    (!words.is_empty()).then(|| words.join("; "))
+    let mut line = String::new();
+    for suggestion in &prompt.suggestions {
+        let (part, prose) = match &suggestion.grant {
+            Grant::Rules { rules, .. } => (rules.join(", "), false),
+            Grant::Mode { mode } => {
+                let mode = words(mode);
+                (if mode.is_empty() { mode } else { format!("{mode} mode") }, true)
+            }
+            Grant::Directories { directories } => (directories.join(", "), false),
+            Grant::Other { kind } => (words(kind), true),
+        };
+        if part.is_empty() {
+            continue;
+        }
+        if line.is_empty() && prose {
+            let mut chars = part.chars();
+            line.extend(chars.next().into_iter().flat_map(char::to_uppercase));
+            line.push_str(chars.as_str());
+        } else {
+            if !line.is_empty() {
+                line.push_str("; ");
+            }
+            line.push_str(&part);
+        }
+    }
+    (!line.is_empty()).then_some(line)
+}
+
+/// An open name (a mode, an update's kind) in lower-case words: `acceptEdits` and
+/// `AcceptEdits` read "accept edits", `dont-ask` "dont ask". The same split as the client's
+/// sentence case, so a name the worker does not know still reads as words.
+fn words(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().saturating_add(4));
+    let mut prev: Option<char> = None;
+    for c in name.trim().chars() {
+        match c {
+            '-' | '_' | ' ' => {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            c if c.is_uppercase() => {
+                if prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit())
+                    && !out.ends_with(' ')
+                {
+                    out.push(' ');
+                }
+                out.extend(c.to_lowercase());
+            }
+            c => out.push(c),
+        }
+        prev = Some(c);
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 /// A held permission prompt as a request, with the answers Claude Code takes.

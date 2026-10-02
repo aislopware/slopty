@@ -262,6 +262,8 @@ fn a_permission_prompt_is_a_request_with_claudes_answers() {
     assert_eq!(ids.first(), Some(&"allow"));
     assert!(ids.contains(&"deny") && ids.contains(&"deny-stop"), "{ids:?}");
     assert_eq!(ids.contains(&"always"), !prompt.suggestions.is_empty());
+    let always = request.options.iter().find(|c| c.id == "always").expect("always");
+    assert_eq!(always.scope.as_deref(), Some("/work; accept edits mode"));
     for choice in &request.options {
         let verdict = verdict(&choice.id, Some("no")).expect("a verdict");
         assert_eq!(choice_of(&verdict), choice.id);
@@ -273,6 +275,51 @@ fn a_permission_prompt_is_a_request_with_claudes_answers() {
     assert_eq!(main.open_requests().count(), 0);
     let RequestState::Answered { by: answered, choice } = &main.requests[0].state else { panic!() };
     assert_eq!((answered.client, choice.as_str()), (Some(by), "allow"));
+}
+
+/// "Always allow" names a mode in words, sentence case over the line, and an unknown mode or
+/// update kind still reads as words.
+#[test]
+fn always_allow_says_a_mode_in_words() {
+    let said = |granted: Vec<Grant>| {
+        let suggestions = granted
+            .into_iter()
+            .map(|grant| conv::Suggestion { grant, destination: None })
+            .collect();
+        let prompt = PermissionPrompt {
+            session: SessionId::nil(),
+            ask: 1,
+            tool: "Bash".to_owned(),
+            detail: conv::ToolDetail::Other {
+                input: conv::Clipped { text: "{}".to_owned(), lines: 1, chars: 2, full: None },
+            },
+            suggestions,
+            mode: None,
+            asked_ms: WallMs::from_millis(1),
+            until_ms: WallMs::from_millis(2),
+        };
+        grants(&prompt)
+    };
+    let mode = |mode: &str| Grant::Mode { mode: mode.to_owned() };
+    let dirs = Grant::Directories { directories: vec!["/work".to_owned()] };
+    let rules = Grant::Rules { behavior: "allow".to_owned(), rules: vec!["Bash(ls:*)".to_owned()] };
+    assert_eq!(said(vec![mode("acceptEdits")]).as_deref(), Some("Accept edits mode"));
+    assert_eq!(
+        said(vec![dirs.clone(), mode("acceptEdits")]).as_deref(),
+        Some("/work; accept edits mode")
+    );
+    assert_eq!(said(vec![rules, mode("plan")]).as_deref(), Some("Bash(ls:*); plan mode"));
+    assert_eq!(
+        said(vec![mode("someFutureMode2X"), dirs]).as_deref(),
+        Some("Some future mode2 x mode; /work")
+    );
+    assert_eq!(said(vec![mode("auto_review")]).as_deref(), Some("Auto review mode"));
+    assert_eq!(
+        said(vec![Grant::Other { kind: "removeRules".to_owned() }]).as_deref(),
+        Some("Remove rules")
+    );
+    assert_eq!(said(vec![mode(""), mode("  ")]), None);
+    assert_eq!(said(Vec::new()), None);
 }
 
 /// The tracker's status maps to the phase the ladder ranks, with what it waits on.
@@ -311,6 +358,104 @@ fn the_status_maps_to_a_phase() {
     host.take(observed.cwd("/work/next"));
     assert_eq!(host.thread(observed.main()).meta.cwd, "/work/next", "the directory moved");
     assert!(observed.cwd("/work/next").is_empty(), "and only once");
+}
+
+/// What the agent asks in its own terminal with no prompt held here is still a request on
+/// the thread, answered only there, opened once the block has waited [`ASK_GRACE`] for a held
+/// prompt, and settled when the block ends. A block a held prompt stands for asks nothing
+/// there, before the prompt comes, while it is open, or after it is settled.
+#[test]
+fn a_block_with_no_prompt_held_asks_in_the_terminal() {
+    let event = |status, detail: Option<&str>, since| AgentEvent {
+        session: SessionId::nil(),
+        kind: AgentKind::ClaudeCode,
+        status,
+        agent_session: None,
+        detail: detail.map(str::to_owned),
+        attention: false,
+        source: AgentSource::Hook,
+        since_ms: WallMs::from_millis(since),
+        mode: None,
+    };
+    let after = |since: u64| WallMs::from_millis(since + 400);
+    let question = || AgentStatus::Blocked(BlockReason::Question);
+    let bash = || AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
+    let native = "00000000-0000-4000-8000-000000000001";
+    let mut observed = Observed::new(native, "", Some(SessionId::new()), "/work", WallMs::ZERO);
+    let mut host = Host::default();
+    host.take(observed.drain());
+    let open = |host: &Host, observed: &Observed| -> Vec<Request> {
+        host.thread(observed.main()).open_requests().cloned().collect()
+    };
+
+    let asked = "How should the test wait?";
+    host.take(observed.status(&event(question(), Some(asked), 5)));
+    host.take(observed.waited(WallMs::from_millis(404)));
+    assert!(open(&host, &observed).is_empty(), "a held prompt may still come");
+    host.take(observed.waited(after(5)));
+    let [request] = open(&host, &observed).try_into().expect("one request");
+    assert_eq!((request.kind.as_str(), request.title.as_str()), (Request::QUESTION, asked));
+    assert!(request.options.is_empty() && request.questions.is_empty(), "answered only there");
+    host.take(observed.status(&event(question(), Some(asked), 5)));
+    host.take(observed.waited(after(9)));
+    assert_eq!(host.thread(observed.main()).requests.len(), 1, "told once");
+    host.take(observed.status(&event(AgentStatus::Working, None, 9)));
+    assert!(open(&host, &observed).is_empty());
+    let by = Answerer { client: None, name: IN_TERMINAL.to_owned() };
+    let answered = RequestState::Answered { by, choice: String::new() };
+    assert_eq!(host.thread(observed.main()).requests[0].state, answered);
+
+    // A prompt held for the block comes before the grace is out: no card but its own.
+    let text = std::fs::read_to_string(dir("conversation", "permission").join("hooks.jsonl"))
+        .expect("hooks");
+    let hook: Hook = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|r| serde_json::from_value::<Hook>(r["input"].clone()).ok())
+        .find(|h| h.event == crate::HookEvent::PermissionRequest)
+        .expect("a permission request");
+    let session = SessionId::nil();
+    let prompt = |ask| {
+        crate::permission::prompt(
+            session,
+            ask,
+            &hook,
+            WallMs::from_millis(1),
+            WallMs::from_millis(99),
+        )
+    };
+    host.take(observed.status(&event(bash(), None, 20)));
+    host.take(observed.permission(&PermissionEvent::Asked(Box::new(prompt(7)))));
+    host.take(observed.waited(after(20)));
+    let ids: Vec<String> = open(&host, &observed).into_iter().map(|r| r.id.0).collect();
+    assert_eq!(ids, ["7"], "the held prompt alone");
+    let by = ClientId::from_uuid(uuid::Uuid::from_u128(5));
+    let outcome = Settled::Answered { verdict: Verdict::Allow, by };
+    host.take(observed.permission(&PermissionEvent::Settled { session, ask: 7, outcome }));
+    host.take(observed.status(&event(bash(), None, 20)));
+    host.take(observed.waited(after(20)));
+    assert!(open(&host, &observed).is_empty(), "the block was the prompt's");
+    assert_eq!(host.thread(observed.main()).requests.len(), 2, "and no card was made for it");
+
+    // A held prompt that comes late takes the terminal's card's place.
+    host.take(observed.status(&event(AgentStatus::Working, None, 30)));
+    host.take(observed.status(&event(bash(), None, 40)));
+    host.take(observed.waited(after(40)));
+    assert_eq!(open(&host, &observed)[0].kind, Request::APPROVAL);
+    host.take(observed.permission(&PermissionEvent::Asked(Box::new(prompt(8)))));
+    let ids: Vec<String> = open(&host, &observed).into_iter().map(|r| r.id.0).collect();
+    assert_eq!(ids, ["8"]);
+    let outcome = Settled::Withdrawn;
+    host.take(observed.permission(&PermissionEvent::Settled { session, ask: 8, outcome }));
+
+    // A block nobody answers ends withdrawn.
+    host.take(observed.status(&event(AgentStatus::Working, None, 50)));
+    host.take(observed.status(&event(question(), Some(asked), 60)));
+    host.take(observed.waited(after(60)));
+    assert_eq!(open(&host, &observed).len(), 1, "a new block asks again");
+    host.take(observed.status(&event(AgentStatus::Idle, None, 70)));
+    let last = host.thread(observed.main()).requests.last().cloned().expect("a request");
+    assert_eq!(last.state, RequestState::Withdrawn, "the agent stopped asking");
 }
 
 /// A thread's id is the session's own, so a restart finds the same thread, and a clipped

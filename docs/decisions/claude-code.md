@@ -1947,3 +1947,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `a_mode_change_alone_is_an_event_that_carries_it`,
     `a_transcripts_mode_moves_only_an_unhooked_agent`, `the_newest_prompt_names_the_mode` and
     `the_mode_chip_follows_the_live_mode`.
+
+- ✅ **A block with no prompt held here is still a request on the thread** (2026-10-02). A
+  `PermissionRequest` reaches a held prompt only while someone follows the thread, and an
+  `AskUserQuestion` only then too, so a question asked while nobody watched set the tile's
+  "Has a question" and filled the inbox, yet the thread showed no card.
+  - The codec opens a request for any blocked status (a permission, a question, an
+    elicitation) that no prompt is held for. Its title is the wait's words, it has no answers
+    and no questions, and its id starts with `terminal-`. The UI then shows "Answer in the
+    terminal" as its one button, and the worker takes that release as done, since the TUI
+    holds the question already.
+  - The worker's daemon sends a block's status just before the prompt it holds for it, so the
+    request opens only once the block has gone 400 ms with no prompt (`ASK_GRACE`, looked at
+    on the worker's 250 ms tick, `Observed::waited`). A held prompt never flashes a card it
+    then replaces, and never leaves a withdrawn one in the thread.
+  - A held prompt that comes later still withdraws the card and takes its place. A block a
+    held prompt stood for asks nothing more once the prompt is settled: the block's start
+    time marks it, so a status sent again after the answer opens no card.
+  - The block's end settles it: answered in the terminal when the agent goes back to work,
+    else withdrawn.
+  - The "Always allow" button names a mode in words ("/work; accept edits mode"), split the
+    way the client's sentence case splits it, so a mode Claude Code adds later still reads.
+  - Tests: `a_block_with_no_prompt_held_asks_in_the_terminal`,
+    `always_allow_says_a_mode_in_words`, `a_question_asked_in_the_terminal_is_shown_on_the_thread`
+    and `a_hooks_folder_outranks_the_terminals_from_the_first_hook`.

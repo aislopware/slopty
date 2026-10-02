@@ -502,10 +502,12 @@ fn decide(
             }
         }
         Intent::Release { ask } => match held(ask) {
-            None => refused(format!("no request {}", ask.0)),
             Some(held) => {
                 answered(crate::follow::hand_back(at.daemon, at.link, at.client, session, held))
             }
+            // Asked in the agent's own terminal with nothing held here: it is there already.
+            None if asked_in_terminal(state, ask) => Outcome::Done,
+            None => refused(format!("no request {}", ask.0)),
         },
         _ => Outcome::Unsupported { cap: Cap::named(needs) },
     };
@@ -570,6 +572,15 @@ fn answered(taken: bool) -> Outcome {
 /// The held prompt a request made from it names.
 fn held(ask: &AskId) -> Option<u64> {
     ask.0.parse().ok()
+}
+
+/// Whether `ask` is open on the thread and answered only in the agent's own terminal: it
+/// offers nothing here.
+fn asked_in_terminal(state: &ThreadState, ask: &AskId) -> bool {
+    state
+        .requests
+        .iter()
+        .any(|r| r.id == *ask && r.is_open() && r.options.is_empty() && r.questions.is_empty())
 }
 
 /// The thread table as the server is told of it: every row first, then what changed. The

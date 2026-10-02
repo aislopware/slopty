@@ -26,7 +26,7 @@ mod threads {
         Expanded, Intent, IntentDone, Outcome, Start, TableFrame, ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
-        AgentId, Cap, Cursor, IntentId, RequestState, TableState, ThreadId, ThreadState,
+        AgentId, Cap, Cursor, IntentId, Request, RequestState, TableState, ThreadId, ThreadState,
     };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -556,7 +556,7 @@ mod threads {
         let row = row_in(&a, session).unwrap();
         let thread = row.id;
         assert_eq!(thread, slopty_agent::observed::thread_of("p1"), "the session's own thread");
-        assert_eq!(row.requests[0].kind, slopty_proto::thread::Request::APPROVAL);
+        assert_eq!(row.requests[0].kind, Request::APPROVAL);
 
         a.follow(thread).await;
         a.until(|c| c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)).await;
@@ -764,5 +764,55 @@ mod threads {
             c.thread.as_ref().is_some_and(|s| s.commands.iter().any(|c| c.name == "compact"))
         })
         .await;
+    }
+
+    /// A question Claude Code asks while nobody follows its thread is not held, so it is asked
+    /// in its own terminal; the thread still shows it as a request answered only there, and
+    /// taking it to the terminal is no error.
+    #[tokio::test]
+    async fn a_question_asked_in_the_terminal_is_shown_on_the_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let transcript = daemons.dir.join("projects").join("q1.jsonl");
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "").unwrap();
+        let hook = |event: &str, more: serde_json::Value| {
+            let mut payload = serde_json::json!({
+                "hook_event_name": event, "session_id": "q1",
+                "transcript_path": transcript, "cwd": dir.path(),
+            });
+            payload.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+            payload
+        };
+        let start = hook("SessionStart", serde_json::json!({ "source": "startup" }));
+        assert_eq!(printed(relay(dir.path(), session, &start)).await, "");
+        let asked = "Where should the key live?";
+        let question = hook(
+            "PermissionRequest",
+            serde_json::json!({
+                "permission_mode": "default", "tool_name": "AskUserQuestion",
+                "tool_input": { "questions": [{
+                    "question": asked, "header": "Key", "multiSelect": false,
+                    "options": [
+                        { "label": "Memory", "description": "In the request" },
+                        { "label": "Store", "description": "In the session store" }
+                    ]
+                }] },
+            }),
+        );
+        let _passed = printed(relay(dir.path(), session, &question)).await;
+
+        let thread = slopty_agent::observed::thread_of("q1");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.contains_key(&thread)).await;
+        a.follow(thread).await;
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)).await;
+        let request = a.state().open_requests().next().unwrap().clone();
+        assert_eq!((request.kind.as_str(), request.title.as_str()), (Request::QUESTION, asked));
+        assert!(request.options.is_empty() && request.questions.is_empty(), "answered there");
+        let release = Intent::Release { ask: request.id };
+        assert_eq!(a.intent(IntentId::new(), thread, release).await, Outcome::Done);
     }
 }

@@ -22,7 +22,9 @@
 //! A permission prompt held for a terminal opens a thread there when none is observed yet (the
 //! session's own when its id is known, else the terminal's provisional one), so the prompt is a
 //! request on a thread from the first hook. The prompts held and not yet settled are told again
-//! to whichever thread begins after them, provisional or the session's own.
+//! to whichever thread begins after them, provisional or the session's own. A block with no
+//! prompt held for it (nobody followed the thread when the agent asked) is asked in the agent's
+//! own terminal, looked at on each tick ([`Observed::waited`]).
 //!
 //! Two terminals whose Claude Codes run on one session id at once (a `--resume` of a session
 //! still running elsewhere, or a stand-in that names every session alike) are told apart: the
@@ -287,6 +289,7 @@ async fn observe(
                 let board = seen.borrow().live.clone();
                 if let Some(observed) = on.observed.as_mut() {
                     take(&on.host, observed.live(&board, Instant::now(), WallMs::now()));
+                    take(&on.host, observed.waited(WallMs::now()));
                 }
             }
         }
@@ -342,11 +345,15 @@ impl Session {
     }
 
     async fn seen(&mut self, seen: &Seen) {
-        if let Some(cwd) = seen.cwd.as_ref().filter(|c| **c != self.cwd) {
-            cwd.clone_into(&mut self.cwd);
+        // A hook that names the folder the terminal already reported still outranks the
+        // terminal from now on.
+        if let Some(cwd) = &seen.cwd {
             self.hooked_cwd = true;
-            if let Some(observed) = self.observed.as_mut() {
-                take(&self.host, observed.cwd(cwd));
+            if *cwd != self.cwd {
+                cwd.clone_into(&mut self.cwd);
+                if let Some(observed) = self.observed.as_mut() {
+                    take(&self.host, observed.cwd(cwd));
+                }
             }
         }
         if let Some(observed) = self.observed.as_mut() {

@@ -18,6 +18,7 @@ mod claude_threads {
     use slopty_proto::WorkerMsg;
     use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
     use slopty_proto::conversation::{PermissionEvent, PermissionPrompt, ToolDetail};
+    use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_proto::thread::{Cap, Phase, ThreadId, ThreadState};
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
@@ -130,6 +131,29 @@ mod claude_threads {
 
         fn heard(&self) {
             self.seen.seen.send_modify(|seen| seen.hooks = seen.hooks.wrapping_add(1));
+        }
+
+        /// The terminal reports its title and folder, as the daemon lists it.
+        fn terminal_says(&self, title: &str, cwd: &str) {
+            let summary = SessionSummary {
+                id: self.terminal,
+                title: title.to_owned(),
+                cwd: Some(cwd.to_owned()),
+                repo: None,
+                branch: None,
+                repo_id: None,
+                changes: None,
+                started_ms: WallMs::ZERO,
+                cols: 80,
+                rows: 24,
+                state: SessionState::Running,
+                viewers: 0,
+                command: Vec::new(),
+                agent: None,
+                progress: None,
+                restored: None,
+            };
+            self.events.send(WorkerMsg::SessionChanged(summary)).unwrap();
         }
     }
 
@@ -397,5 +421,35 @@ mod claude_threads {
         until(&host, provisional, |_| true).await;
         other.tracked(AgentStatus::None, None, AgentSource::Process);
         gone(&host, provisional).await;
+    }
+
+    /// A thread works where the agent's hooks say: a hook's folder outranks the terminal's
+    /// from the first hook that names it, even one naming the folder the terminal already
+    /// reported, so a later word from the terminal moves nothing.
+    #[tokio::test]
+    async fn a_hooks_folder_outranks_the_terminals_from_the_first_hook() {
+        let rig = Rig::new();
+        rig.seen.main.send_replace(None);
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let provisional = terminal_thread(rig.terminal);
+        rig.terminal_says("\u{2733} One", "/work");
+        rig.tracked(AgentStatus::Idle, None, AgentSource::Process);
+        let state = until(&host, provisional, |s| s.meta.title == "One").await;
+        assert_eq!(state.meta.cwd, "/work", "the terminal's folder, while no hook said one");
+
+        rig.seen.seen.send_modify(|seen| {
+            seen.cwd = Some("/work".to_owned());
+            seen.hooks = seen.hooks.wrapping_add(1);
+        });
+        let approvals = Cap::named(Cap::APPROVALS);
+        until(&host, provisional, |s| s.meta.caps.contains(&approvals)).await;
+        rig.terminal_says("\u{2733} Two", "/elsewhere");
+        rig.terminal_says("\u{2733} Three", "/elsewhere");
+        let state = until(&host, provisional, |s| s.meta.title == "Three").await;
+        assert_eq!(state.meta.cwd, "/work", "the hook's folder stands");
+
+        rig.seen.seen.send_modify(|seen| seen.cwd = Some("/work/sub".to_owned()));
+        until(&host, provisional, |s| s.meta.cwd == "/work/sub").await;
     }
 }
