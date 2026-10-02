@@ -893,3 +893,20 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Left:** Codex background terminals, hooks, MCP startup and rewind (not in the generated
     protocol yet), Claude Code `StopFailure` as failed and its per-turn cost, MCP servers as
     model state, pi commands and edit diffs, and ACP subagents and compaction.
+
+- ✅ **A Codex thread reads like every other agent's** (2026-10-02, from the showcase).
+  - A thread Codex has not named takes its first prompt as its title, as pi and ACP threads do,
+    until `thread/name/updated` names it.
+  - Codex runs every command through the person's shell (`/bin/zsh -lc '…'`). The call's title,
+    its command row and the request's title show the command the shell runs, its quoting undone
+    as a POSIX shell reads one word. A command that is not exactly one shell word after `-c` is
+    shown as Codex sent it.
+  - Codex begins a call before it asks about it, so the call is told again as waiting on the
+    person while a request is open about it, and as running once the request is settled.
+  - A request open here puts the thread in "needs you" whatever flags Codex sent with its
+    status, and whether or not it said yet that the thread is active.
+  - An ACP write of a new file is numbered from line 1, as git numbers a new file. The same
+    holds for Claude Code's proposed `Write`.
+  - Tests: `the_starter_sees_the_thread_and_the_approval_settled_elsewhere`,
+    `an_open_request_waits_on_the_person_whatever_the_flags`,
+    `a_commands_shell_wrapper_is_taken_off` and `the_session_maps_onto_the_thread`.

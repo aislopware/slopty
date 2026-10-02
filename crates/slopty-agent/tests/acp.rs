@@ -296,6 +296,13 @@ mod tests {
         });
         let written = written.unwrap();
         assert_eq!((written.path.as_str(), written.lines), ("/work/made-by-acp", 1));
+        let hunks: Vec<(u32, u32, u32, u32)> = written
+            .patch
+            .hunks
+            .iter()
+            .map(|h| (h.old_start, h.old_lines, h.new_start, h.new_lines))
+            .collect();
+        assert_eq!(hunks, [(0, 0, 1, 1)], "a new file is numbered from its first line");
         let requests: Vec<&RequestState> = state.requests.iter().map(|r| &r.state).collect();
         let answered =
             |choice: &str| RequestState::Answered { by: slopty(), choice: choice.into() };

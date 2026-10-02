@@ -92,6 +92,8 @@ struct Open {
     item: Option<ItemId>,
     /// What it asks, in a line.
     title: String,
+    /// Its [`Request`] kind.
+    kind: &'static str,
     /// What each choice answers, by its id: the decision as Codex takes it.
     answers: BTreeMap<String, Value>,
     /// The questions it asks, each with Codex's id for it, which its answer is keyed by.
@@ -132,6 +134,9 @@ pub struct Shared {
     said: Option<(ThreadStatus, WallMs)>,
     /// Each turn as it began, told again once its input is known.
     begun: HashMap<TurnId, Turn>,
+    /// The calls begun and not yet whole, as last told, so a request about one marks it
+    /// waiting on the person: Codex begins a call before it asks about it.
+    calls: HashMap<ItemId, Item>,
 }
 
 impl Shared {
@@ -195,6 +200,7 @@ impl Shared {
             retries: 0,
             said: None,
             begun: HashMap::new(),
+            calls: HashMap::new(),
         };
         let mut actions = vec![Action::Meta(Box::new(shared.meta.clone()))];
         for turn in &thread.turns {
@@ -437,11 +443,11 @@ impl Shared {
         let ask = ask_of(id);
         let (item, kind, title, text, options, answers) = match request {
             ServerRequest::ItemCommandExecutionRequestApproval(asked) => {
-                let command = asked.command.clone().unwrap_or_default();
+                let command = unwrapped(asked.command.as_deref().unwrap_or_default());
                 let title = if command.is_empty() {
                     "Run a command?".to_owned()
                 } else {
-                    format!("Run {command}?")
+                    format!("{}?", run_title(&command))
                 };
                 let decisions = asked.available_decisions.clone().unwrap_or_else(|| {
                     vec![
@@ -513,6 +519,7 @@ impl Shared {
             }
         };
         let item = item.map(ItemId);
+        let open_item = item.clone();
         // A secret is never asked here: an answer is kept in the thread's log, so the person
         // gives it in Codex's own terminal, which keeps it out of sight.
         let questions = match request {
@@ -527,15 +534,21 @@ impl Shared {
             id: id.clone(),
             item: item.clone(),
             title: title.clone(),
+            kind,
             answers,
             questions: questions.clone(),
             answered: None,
         };
         self.open.insert(ask.clone(), open);
-        // Codex says the thread waits before it says on what: the wait is worded again now.
-        let waiting = self.said.clone().filter(|(status, _)| {
-            matches!(status, ThreadStatus::Active { active_flags } if !active_flags.is_empty())
-        });
+        // Codex may say the thread waits before it says on what, or not say it waits at all,
+        // or not yet say it is active: the wait is worded again now, from what it asks.
+        let waiting = match self.said.clone() {
+            Some((status @ ThreadStatus::Active { .. }, since)) => Some((status, since)),
+            None | Some((ThreadStatus::Idle, _)) => {
+                Some((ThreadStatus::Active { active_flags: Vec::new() }, now))
+            }
+            Some((ThreadStatus::NotLoaded | ThreadStatus::SystemError, _)) => None,
+        };
         let request = Request {
             id: ask,
             item,
@@ -552,6 +565,9 @@ impl Shared {
             until_ms: None,
         };
         let mut actions = vec![Action::RequestOpened(Box::new(request))];
+        if let Some(item) = &open_item {
+            actions.extend(self.restate(item));
+        }
         if let Some((status, since)) = waiting {
             actions.push(self.status(status, since));
         }
@@ -670,8 +686,9 @@ impl Shared {
         // Whatever the turn still asked is no longer asked.
         let gone: Vec<AskId> = self.open.keys().cloned().collect();
         for ask in gone {
-            self.open.remove(&ask);
+            let item = self.open.remove(&ask).and_then(|open| open.item);
             actions.push(Action::RequestResolved { id: ask, state: RequestState::Withdrawn });
+            actions.extend(item.and_then(|item| self.restate(&item)));
         }
         actions.push(Action::TurnEnded {
             turn: id,
@@ -688,7 +705,24 @@ impl Shared {
         let (by, choice) = open.answered.unwrap_or_else(|| {
             (Answerer { client: None, name: ELSEWHERE.to_owned() }, String::new())
         });
-        vec![Action::RequestResolved { id: ask, state: RequestState::Answered { by, choice } }]
+        let mut actions =
+            vec![Action::RequestResolved { id: ask, state: RequestState::Answered { by, choice } }];
+        actions.extend(open.item.and_then(|item| self.restate(&item)));
+        actions
+    }
+
+    /// Call `item` told again with the state the requests open now give it: waiting on the
+    /// person while one is about it, else running. Nothing for a call that is whole, or not
+    /// begun.
+    fn restate(&mut self, item: &ItemId) -> Option<Action> {
+        let state = self.pending(&item.0).unwrap_or(ToolState::Running);
+        let shown = self.calls.get_mut(item)?;
+        let ItemBody::Tool(call) = &mut shown.body else { return None };
+        if call.state == state {
+            return None;
+        }
+        call.state = state;
+        Some(Action::ItemUpdated(shown.clone()))
     }
 
     /// The thread's status as Codex says it, from `since`.
@@ -711,16 +745,24 @@ impl Shared {
                 };
                 (phase, None, Liveness::Live)
             }
+            // A request open here waits on the person whatever flags Codex sent with it.
             ThreadStatus::Active { active_flags } => {
-                let what = self.open.values().next().map(|open| open.title.clone());
-                if active_flags.contains(&ThreadActiveFlag::WaitingOnApproval) {
+                let open = self.open.values().next();
+                let approval = open.map_or_else(
+                    || active_flags.contains(&ThreadActiveFlag::WaitingOnApproval),
+                    |open| open.kind == Request::APPROVAL,
+                );
+                let asks =
+                    open.is_some() || active_flags.contains(&ThreadActiveFlag::WaitingOnUserInput);
+                let what = open.map(|open| open.title.clone());
+                if approval {
                     let text = what.unwrap_or_else(|| "Waits for approval".to_owned());
                     (
                         Phase::NeedsYou,
                         Some(Wait { kind: "permission".to_owned(), text }),
                         Liveness::Live,
                     )
-                } else if active_flags.contains(&ThreadActiveFlag::WaitingOnUserInput) {
+                } else if asks {
                     let text = what.unwrap_or_else(|| "Has a question".to_owned());
                     (
                         Phase::NeedsYou,
@@ -748,7 +790,20 @@ impl Shared {
             begun.input = Some(id.clone());
             actions.push(Action::TurnStarted(begun.clone()));
         }
+        // A thread Codex has not named is named by what the person first said in it.
+        if let ItemBody::User(message) = &body
+            && self.meta.title.is_empty()
+            && !message.text.text.trim().is_empty()
+        {
+            self.meta.title = crate::driven::title_of(&message.text.text);
+            actions.push(Action::Meta(Box::new(self.meta.clone())));
+        }
         let item = Item { id, turn, at_ms: at, body };
+        if whole {
+            self.calls.remove(&item.id);
+        } else if matches!(item.body, ItemBody::Tool(_)) {
+            self.calls.insert(item.id.clone(), item.clone());
+        }
         actions.push(if whole { Action::ItemCompleted(item) } else { Action::ItemStarted(item) });
         actions
     }
@@ -800,8 +855,9 @@ impl Shared {
                     CommandExecutionStatus::Failed => ToolState::Failed,
                     CommandExecutionStatus::Declined => ToolState::Rejected,
                 });
+                let run = unwrapped(command);
                 let exec = ExecDetail {
-                    command: Clipped::whole(command),
+                    command: Clipped::whole(&run),
                     description: None,
                     cwd: Some(cwd.clone()),
                     background: false,
@@ -819,7 +875,7 @@ impl Shared {
                 let call = ToolCall {
                     name: "commandExecution".to_owned(),
                     kind: kind::EXEC.to_owned(),
-                    title: command.clone(),
+                    title: run_title(&run),
                     input: Clipped::whole(&serde_json::json!({ "command": command }).to_string()),
                     state,
                     output: aggregated_output.as_deref().map(|o| Clipped::tail(o, OUTPUT, None)),
@@ -1042,6 +1098,66 @@ fn title_of(thread: &p::Thread) -> String {
         .unwrap_or_else(|| thread.preview.lines().next().unwrap_or_default().to_owned())
 }
 
+/// A call's title for command `run`: "Run" and its first line, as every agent's command reads.
+fn run_title(run: &str) -> String {
+    format!("Run {}", run.lines().next().unwrap_or_default().trim())
+}
+
+/// The command a shell runs for Codex: `/bin/zsh -lc 'cargo test'` is `cargo test`. Codex runs
+/// each command through the person's shell, and the wrapper says nothing to them. Any other
+/// command is as it was.
+fn unwrapped(command: &str) -> String {
+    let inner = command.trim().split_once(char::is_whitespace).and_then(|(shell, rest)| {
+        let shell = shell.rsplit('/').next().unwrap_or_default();
+        let (flag, script) = rest.trim_start().split_once(char::is_whitespace)?;
+        let runs = flag.len() > 1
+            && flag.starts_with('-')
+            && flag.ends_with('c')
+            && flag.chars().skip(1).all(|c| c.is_ascii_lowercase());
+        (SHELLS.contains(&shell) && runs).then(|| one_word(script.trim())).flatten()
+    });
+    inner.unwrap_or_else(|| command.to_owned())
+}
+
+/// The shells Codex wraps a command in.
+const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+/// `text` as the one word a POSIX shell reads it as, its quotes taken off; `None` when it is
+/// more than one word, or a quote is left open.
+fn one_word(text: &str) -> Option<String> {
+    let mut word = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    c => word.push(c),
+                }
+            },
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    '\\' => {
+                        let next = chars.next()?;
+                        if !matches!(next, '"' | '\\' | '$' | '`' | '\n') {
+                            word.push('\\');
+                        }
+                        if next != '\n' {
+                            word.push(next);
+                        }
+                    }
+                    c => word.push(c),
+                }
+            },
+            '\\' => word.push(chars.next()?),
+            c if c.is_whitespace() => return None,
+            c => word.push(c),
+        }
+    }
+    Some(word)
+}
+
 /// A Unix time in seconds, as Codex writes a thread's and a turn's times.
 fn seconds(at: i64) -> WallMs {
     WallMs::from_millis(u64::try_from(at).unwrap_or_default().saturating_mul(1_000))
@@ -1208,5 +1324,32 @@ fn question(asked: &p::ToolRequestUserInputQuestion) -> Question {
         header: Some(asked.header.clone()).filter(|h| !h.is_empty()),
         options: options.collect(),
         multi_select: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shell Codex wraps a command in is taken off, its quoting undone; a command it did
+    /// not wrap, or one that is not one word to the shell, is as it was.
+    #[test]
+    fn a_commands_shell_wrapper_is_taken_off() {
+        let cases = [
+            ("/bin/zsh -lc 'cargo test -p atlas-api refresh'", "cargo test -p atlas-api refresh"),
+            ("bash -c \"echo \\\"hi\\\" && ls\"", "echo \"hi\" && ls"),
+            ("/bin/sh -c 'it'\\''s here'", "it's here"),
+            ("/usr/bin/bash -lc rg", "rg"),
+            ("zsh -lc 'line one\nline two'", "line one\nline two"),
+            ("cargo test", "cargo test"),
+            ("/bin/zsh -lc 'unclosed", "/bin/zsh -lc 'unclosed"),
+            ("/bin/zsh -lc 'two' words", "/bin/zsh -lc 'two' words"),
+            ("python -c 'print(1)'", "python -c 'print(1)'"),
+            ("/bin/zsh -x 'ls'", "/bin/zsh -x 'ls'"),
+        ];
+        for (command, run) in cases {
+            assert_eq!(unwrapped(command), run, "{command}");
+        }
+        assert_eq!(run_title("cargo test\n--nocapture"), "Run cargo test");
     }
 }

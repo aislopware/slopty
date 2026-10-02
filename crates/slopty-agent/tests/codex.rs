@@ -15,7 +15,7 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::thread::{
         Action, AgentId, Answerer, Drive, Effect, ItemBody, Phase, Request, RequestState, Status,
-        ThreadState, TurnId, TurnState,
+        ThreadState, ToolDetail, ToolState, TurnId, TurnState,
     };
 
     /// The notifications Slopty passes over: the app-server's remote-control state, its
@@ -214,12 +214,14 @@ mod tests {
     /// One client's view of the recorded thread, mapped: the thread its `thread/start` or
     /// `thread/resume` brought back, then every request and notification it heard about it.
     /// `answer` is how the client answers the approval, when it does: through the mapper, as
-    /// the face would, which must send what the recording sent.
-    fn mapped(client: &str, answer: Option<&str>) -> (ThreadState, Vec<Status>) {
+    /// the face would, which must send what the recording sent. With the statuses and every
+    /// action applied, in order.
+    fn mapped(client: &str, answer: Option<&str>) -> (ThreadState, Vec<Status>, Vec<Action>) {
         let lines = approval();
         let mut shared: Option<Shared> = None;
         let mut state: Option<ThreadState> = None;
         let mut statuses = Vec::new();
+        let mut applied = Vec::new();
         let now = WallMs::from_millis(1);
         for line in lines.iter().filter(|line| line.client == client) {
             if line.sent {
@@ -262,8 +264,9 @@ mod tests {
                     statuses.push(status.clone());
                 }
             }
+            applied.extend(actions);
         }
-        (state.unwrap(), statuses)
+        (state.unwrap(), statuses, applied)
     }
 
     fn texts(state: &ThreadState) -> Vec<String> {
@@ -284,7 +287,7 @@ mod tests {
     /// elsewhere in its place, and the request answered by the TUI.
     #[test]
     fn the_starter_sees_the_thread_and_the_approval_settled_elsewhere() {
-        let (state, statuses) = mapped("a", None);
+        let (state, statuses, applied) = mapped("a", None);
         assert_eq!(state.meta.drive, Drive::named(Drive::SHARED));
         assert_eq!(state.meta.agent, AgentId::named(AgentId::CODEX));
         assert_eq!(state.meta.agent_version, "0.160.0");
@@ -298,7 +301,7 @@ mod tests {
                 "text: Hello.",
                 warned,
                 "user: Make a file called made-by-codex.",
-                "exec Completed: /bin/zsh -lc 'touch made-by-codex'",
+                "exec Completed: Run touch made-by-codex",
                 "text: Made it.",
             ]
         );
@@ -316,7 +319,31 @@ mod tests {
         assert_eq!(inputs, users, "each turn names the message that started it");
         let [request] = &*state.requests else { panic!("one request: {:?}", state.requests) };
         assert_eq!(request.kind, Request::APPROVAL);
-        assert_eq!(request.title, "Run /bin/zsh -lc 'touch made-by-codex'?");
+        assert_eq!(request.title, "Run touch made-by-codex?");
+        assert_eq!(state.meta.title, "Say hello.", "named by its first prompt, as Codex did not");
+        // The call begun before Codex asked about it waits on the person while it asks.
+        let call_states: Vec<String> = applied
+            .iter()
+            .filter_map(|action| match action {
+                Action::ItemStarted(item)
+                | Action::ItemUpdated(item)
+                | Action::ItemCompleted(item) => match &item.body {
+                    ItemBody::Tool(call) => Some(format!("{:?}", call.state)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let pending = format!("{:?}", ToolState::Pending { ask: request.id.clone() });
+        assert_eq!(call_states, ["Running", pending.as_str(), "Running", "Completed"]);
+        let exec = state.items.iter().find_map(|item| match &item.body {
+            ItemBody::Tool(call) => match &call.detail {
+                Some(ToolDetail::Exec(exec)) => Some(exec.command.text.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(exec.as_deref(), Some("touch made-by-codex"), "the shell's wrapper taken off");
         let offered: Vec<(&str, Effect, bool)> =
             request.options.iter().map(|c| (c.id.as_str(), c.effect, c.stops)).collect();
         assert_eq!(
@@ -340,11 +367,11 @@ mod tests {
     /// first turn, which its `thread/resume` brought back.
     #[test]
     fn the_first_answer_from_here_is_named_as_ours() {
-        let (state, _) = mapped("b", Some("accept"));
+        let (state, ..) = mapped("b", Some("accept"));
         let [request] = &*state.requests else { panic!("one request: {:?}", state.requests) };
         let by = Answerer { client: None, name: "Slopty".to_owned() };
         assert_eq!(request.state, RequestState::Answered { by, choice: "accept".to_owned() });
-        let (started, _) = mapped("a", None);
+        let (started, ..) = mapped("a", None);
         // Codex's warnings are said once, to whoever is there: a resume does not bring them back.
         let kept = |state: &ThreadState| -> Vec<String> {
             texts(state).into_iter().filter(|t| !t.starts_with("info: ")).collect()
@@ -542,6 +569,31 @@ mod tests {
         assert_eq!((retry.max, retry.in_ms), (None, None), "Codex says neither");
     }
 
+    /// A request open on an active thread waits on the person, though Codex flagged no wait
+    /// (a build that says it late, or not at all); it is worded by what it asks.
+    #[test]
+    fn an_open_request_waits_on_the_person_whatever_the_flags() {
+        let (mut shared, mut state) = begun();
+        let thread = shared.meta().native.clone();
+        let active = json!({"threadId": thread, "status": {"type": "active", "activeFlags": []}});
+        hear(&mut shared, &mut state, "thread/status/changed", &active);
+        assert_eq!(state.status.phase, Phase::Working);
+        let asked = approval()
+            .into_iter()
+            .find(|l| !l.sent && l.msg["method"] == "item/commandExecution/requestApproval")
+            .expect("the recorded approval");
+        let Incoming::Request { id, request, .. } = rpc::read(&asked.msg.to_string()).unwrap()
+        else {
+            panic!("a request: {}", asked.msg)
+        };
+        for action in &shared.request(&id, &request, WallMs::from_millis(2)) {
+            state.apply(action);
+        }
+        assert_eq!(state.status.phase, Phase::NeedsYou);
+        let wait = state.status.wait.as_ref().map(|w| (w.kind.as_str(), w.text.as_str()));
+        assert_eq!(wait, Some(("permission", "Run touch made-by-codex?")));
+    }
+
     /// A turn begun on the recorded thread, as Codex says it.
     fn turn_begun(shared: &mut Shared, state: &mut ThreadState) -> String {
         let thread = shared.meta().native.clone();
@@ -592,7 +644,7 @@ mod tests {
             .iter()
             .find_map(|i| match &i.body {
                 ItemBody::Tool(call) => match &call.detail {
-                    Some(slopty_proto::thread::ToolDetail::Edit(edit)) => Some(edit.clone()),
+                    Some(ToolDetail::Edit(edit)) => Some(edit.clone()),
                     _ => None,
                 },
                 _ => None,
@@ -672,9 +724,7 @@ mod tests {
             .expect("the call");
         assert_eq!(call.kind, slopty_proto::thread::kind::AGENT);
         assert_eq!(call.child, Some(shared::thread_of(child)));
-        let Some(slopty_proto::thread::ToolDetail::Agent(agent)) = &call.detail else {
-            panic!("{call:?}")
-        };
+        let Some(ToolDetail::Agent(agent)) = &call.detail else { panic!("{call:?}") };
         assert_eq!(agent.prompt.text, "Read the tests");
 
         let link = slopty_proto::thread::Link {

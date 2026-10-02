@@ -981,7 +981,8 @@ pub fn proposed(name: &str, input: &Value) -> ToolDetail {
 }
 
 /// A patch of replacements without line numbers (the file is not read): each is one hunk, the
-/// lines it keeps at either end as context around the lines it removes and adds.
+/// lines it keeps at either end as context around the lines it removes and adds. Text that
+/// replaces nothing is a whole file, numbered from its first line, as git numbers a new one.
 pub(crate) fn proposed_patch(replacements: &[(String, String)]) -> Patch {
     let mut patch = Patch::default();
     let mut room = PATCH_LINES;
@@ -1016,10 +1017,11 @@ pub(crate) fn proposed_patch(replacements: &[(String, String)]) -> Patch {
         patch.clipped_lines =
             patch.clipped_lines.saturating_add(to_u32(lines.len().saturating_sub(kept)));
         if kept > 0 {
+            let whole = old.is_empty() && !new.is_empty();
             patch.hunks.push(Hunk {
                 old_start: 0,
                 old_lines: to_u32(old.len()),
-                new_start: 0,
+                new_start: u32::from(whole),
                 new_lines: to_u32(new.len()),
                 // Only the text replaced is known, not where in the file it is.
                 heading: None,
