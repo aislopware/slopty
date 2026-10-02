@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
 
+use crate::snapshot::Frame;
 use crate::{
     Button, Command, Dump, Reply, UiGesturePhase, UiPressPhase, UiTouchPhase, UiTouchPoint, hid,
 };
@@ -323,6 +324,22 @@ impl Driver {
         }
     }
 
+    /// The app's state while something on screen moves on its own (a working mark's steps,
+    /// with `SLOPTY_E2E_MOTION`): the frame the dump drew may be a step behind the same state
+    /// drawn from scratch a moment later, which [`Dump::stale`] then says, and the tree is still
+    /// the state's.
+    ///
+    /// # Errors
+    ///
+    /// When the socket breaks.
+    pub async fn dump_moving(&mut self) -> Result<Dump> {
+        match self.call(&Command::Dump).await? {
+            Reply::Dump(dump) => Ok(*dump),
+            Reply::Error { message } => bail!("dump: {message}"),
+            other => bail!("dump: unexpected {other:?}"),
+        }
+    }
+
     /// Poll [`Driver::dump`] until `pred` holds or `timeout` passes; the last dump is in the
     /// error so a failure says what the app was showing.
     ///
@@ -353,15 +370,15 @@ impl Driver {
         }
     }
 
-    /// Render the current frame to `path` and load it back.
+    /// Render the current frame to `path` and load it back, with what the frame says in words.
     ///
     /// # Errors
     ///
     /// When the app was built without the `e2e` feature, or the file cannot be read.
-    pub async fn render(&mut self, path: &Path) -> Result<image::RgbaImage> {
+    pub async fn render(&mut self, path: &Path) -> Result<Frame> {
         let path_str = path.to_str().context("render path is not UTF-8")?.to_owned();
         match self.call(&Command::Render { path: path_str }).await? {
-            Reply::Rendered { width, height } => {
+            Reply::Rendered { width, height, a11y, scale } => {
                 let img = image::open(path)
                     .with_context(|| format!("read {}", path.display()))?
                     .into_rgba8();
@@ -370,7 +387,7 @@ impl Driver {
                     "rendered {width}×{height}, file is {:?}",
                     img.dimensions()
                 );
-                Ok(img)
+                Ok(Frame { image: img, a11y, scale })
             }
             Reply::Error { message } => bail!("render: {message}"),
             other => bail!("render: unexpected {other:?}"),

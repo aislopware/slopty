@@ -1,0 +1,21 @@
+Window │ Slopty
+Group │ Workspace (focused)
+Button │ Navigator
+Heading │ e2e-worker, 2 tiles, working
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Safari
+Heading │ window Safari
+Button │ Fullscreen tile
+Button │ Close tile
+Status │ Opening Safari on e2e-worker…
+Group │ Status
+Status │ e2e-worker

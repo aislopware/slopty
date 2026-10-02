@@ -1,0 +1,17 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 1 tile
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group (focused)
+Terminal │ shell │ ~ %
+Group │ Status
+Status │ e2e-worker
+Status │ ~

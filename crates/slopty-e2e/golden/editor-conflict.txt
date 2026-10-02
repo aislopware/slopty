@@ -1,0 +1,30 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 2 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ main.rs
+Heading │ file main.rs
+Button │ Drag the file out
+Image │ Unsaved changes
+Label │ project
+Button │ Fullscreen tile
+Button │ Close tile
+Document │ File $SCRATCH/project/main.rs │ 4 lines, Rust, edited, changed on disk
+Status │ Changed on disk
+Button │ Reload
+Button │ Overwrite
+MultilineTextInput │ Text of $SCRATCH/project/main.rs │ // edited⏎xfn main() {⏎    println!("hello");⏎} (focused)
+Group │ Status
+Status │ e2e-worker
+Status │ slopty-e2e-47c78742/project
+Status │ Rust · Spaces: 4 · Ln 2, Col 2

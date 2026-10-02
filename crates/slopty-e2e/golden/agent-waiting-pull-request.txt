@@ -1,0 +1,25 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 1 tile, running
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Claude Code
+Heading │ terminal Claude Code
+Image │ Waiting
+Label │ ~
+Link │ Pull request 1234, approved
+Label │ Worktree fix-build on worktree-fix-build
+Status │ Waiting on cargo test
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status │ Nothing here yet
+MultilineTextInput │ Message (focused)
+Button │ Attach files
+Group │ Status
+Status │ e2e-worker
+Status │ ~
+Status │ 1 waiting

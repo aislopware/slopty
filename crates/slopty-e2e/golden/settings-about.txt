@@ -1,0 +1,36 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 1 tile
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Status
+Status │ e2e-worker
+Status │ ~
+Dialog │ Settings
+TextInput │ Search settings (focused)
+TabList │ Sections
+Tab │ Appearance
+Tab │ Terminal
+Tab │ Input
+Tab │ Streams
+Tab │ Network
+Tab │ Keyboard
+Tab │ About
+TabPanel │ About
+Group │ About
+Label │ Slopty
+Heading │ Links
+Link │ Source code
+Link │ Changes in each release
+Link │ Report a problem
+Button │ Edit as TOML
+Button │ Done

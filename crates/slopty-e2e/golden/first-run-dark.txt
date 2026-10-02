@@ -1,0 +1,8 @@
+Window │ Slopty
+Label │ Slopty
+Heading │ Connect to a server
+Status │ Nothing answered on your tailnet
+Button │ Use this Mac as a worker
+TextInput │ Server address (focused)
+Button │ Connect
+Button │ Add a worker by address instead

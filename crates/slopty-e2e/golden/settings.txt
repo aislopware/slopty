@@ -1,0 +1,60 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 3 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Release
+Heading │ note Release
+Status │ 1 of 3 done
+Button │ Fullscreen tile
+Button │ Close tile
+Document │ Note │ Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
+CheckBox │ Done: build the bundle
+CheckBox │ To do: notarise
+CheckBox │ To do: tag
+Group │ Terminal 2
+Heading │ terminal Terminal 2
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell
+Group │ Status
+Status │ e2e-worker
+Status │ ~
+Dialog │ Settings
+TextInput │ Search settings (focused)
+TabList │ Sections
+Tab │ Appearance
+Tab │ Terminal
+Tab │ Input
+Tab │ Streams
+Tab │ Network
+Tab │ Keyboard
+Tab │ About
+TabPanel │ Appearance
+Heading │ Interface
+RadioGroup │ Theme │ Light
+RadioButton │ System
+RadioButton │ Light
+RadioButton │ Dark
+SpinButton │ Text size │ 13 pt
+Button │ Decrease
+Button │ Increase
+Heading │ Terminal colours
+TextInput │ Text
+TextInput │ Background
+TextInput │ Cursor
+TextInput │ Text under the cursor
+TextInput │ Selection
+TextInput │ ANSI colours
+Button │ Edit as TOML
+Button │ Done

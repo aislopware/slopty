@@ -1,0 +1,31 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ project, 2 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ project
+Heading │ terminal project
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ty-e2e-5b39ae00/project %
+Group │ project
+Heading │ folder project
+Button │ Enclosing folder
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Folder $SCRATCH/project │ 3 items (focused)
+Navigation │ $SCRATCH/project
+Link │ /
+Link │ …
+Link │ T
+Link │ slopty-e2e-5b39ae00
+Label │ project
+ListBox │ Entries
+ListBoxOption │ src
+ListBoxOption │ .env
+ListBoxOption │ README.md
+Group │ Status
+Status │ e2e-folder

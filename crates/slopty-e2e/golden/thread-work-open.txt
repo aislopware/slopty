@@ -1,0 +1,36 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Button │ e2e-worker
+Button │ New shell on e2e-worker
+Button │ The header clips its chips on a narrow window,…
+Button │ Navigator
+Heading │ e2e-worker, 1 tile
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ The header clips its chips on a narrow window,…
+Heading │ terminal The header clips its chips on a narrow window,…
+Label │ ~
+Button │ Context 34% used
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Button │ Thought
+Button │ Propose a plan
+Button │ Update the task list
+Button │ Read /work/shots/header.png
+Image │ Picture, 640 × 400
+Button │ Build the release binary
+Article │ The chips now give way from the right, the model first. The release build runs in the background; I will check a phone-width window once it is done.
+Group │ Activity
+Button │ Plan, 1 of 3 done
+List │ In the background
+Status │ Build the release binary: Done
+MultilineTextInput │ Message (focused)
+Button │ Attach files
+Group │ Status
+Status │ e2e-worker
+Status │ ~

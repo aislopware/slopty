@@ -1,0 +1,27 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 2 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ capture.log
+Heading │ file capture.log
+Button │ Drag the file out
+Label │ project
+Button │ Fullscreen tile
+Button │ Close tile
+Document │ File $SCRATCH/project/capture.log │ too large, 40.0 MB (focused)
+Status │ Too large to open here: 40.0 MB, over the 16.0 MB a tile opens
+Button │ Open in editor
+Button │ Open in pager
+Group │ Status
+Status │ e2e-worker
+Status │ slopty-e2e-34ee9f0b/project

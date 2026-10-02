@@ -1,0 +1,35 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Button │ e2e-worker
+Button │ New shell on e2e-worker
+Button │ Do these steps in order, using the named tools,…
+Button │ Navigator
+Heading │ e2e-worker, 1 tile
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Do these steps in order, using the named tools,…
+Heading │ terminal Do these steps in order, using the named tools,…
+Label │ ~
+Button │ Changes: 2 lines added, 0 removed
+Button │ Context 34% used
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Article │ You: Do these steps in order, using the named tools, then reply "done". 1) TaskCreate a task "Survey files" and a task "Write notes". 2) TaskUpdate "Survey files" to in_progress. 3) Glob "*.rs". 4) Grep for "println" with output mode content. 5) Bash: `printf 'one\ntwo\n'` with a description. 6) Bash: `ls missing-file` (it fails; that is expected). 7) Bash with run_in_background true: `sleep 1; echo bg-finished`. 8) Write notes.md containing two lines: "# Notes" and "main.rs…
+Button │ Show more
+Button │ Worked 35 s: edited notes.md, ran 3 commands, 9 more
+Article │ done
+Group │ Activity
+Group │ Edited notes.md
+Button │ Review
+List │ In the background
+Status │ Background sleep and echo: Done
+MultilineTextInput │ Message (focused)
+Button │ Attach files
+Group │ Status
+Status │ e2e-worker
+Status │ ~

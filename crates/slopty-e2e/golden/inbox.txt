@@ -1,0 +1,43 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 2 tiles, 1 needs you
+Button │ New
+Button │ Inbox
+Status │ 2 new
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Image │ Done
+Label │ ~
+Button │ Done · 6 s
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Claude Code
+Heading │ terminal Claude Code
+Label │ ~
+Button │ Needs approval: Bash
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status │ Nothing here yet
+MultilineTextInput │ Message
+Button │ Attach files
+Group │ Status
+Status │ e2e-worker
+Status │ ~
+Status │ 1 blocked
+Dialog │ Inbox (focused)
+Tab │ Unread
+Tab │ All
+Button │ Mark all read
+Heading │ Needs you
+Button │ Wants to run a command · Needs you · Claude Code
+Image │ Needs you
+Heading │ Finished
+Button │ sleep 6 · Done · 6 s
+Image │ Done
+Button │ Mark read

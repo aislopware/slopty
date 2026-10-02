@@ -842,7 +842,18 @@ fn render(window: &mut Window, cx: &mut App, path: &str) -> Reply {
         return Reply::Error { message: format!("write {path}: {e}") };
     }
     match stale {
-        None => Reply::Rendered { width, height },
+        None => {
+            // What the frame says, from the same state drawn once more with the tree asked for:
+            // the tree is built only while it is, and the frame drawn for the picture is a
+            // person's.
+            let started = std::time::Instant::now();
+            window.set_a11y_active(true);
+            window.draw(cx).clear(cx);
+            let a11y = a11y_nodes(window);
+            window.set_a11y_active(false);
+            tracing::info!(us = started.elapsed().as_micros(), nodes = a11y.len(), "frame text");
+            Reply::Rendered { width, height, a11y, scale: window.scale_factor() }
+        }
         Some(stale) => {
             let scratch = format!("{path}.scratch.png");
             if let Ok(image) = window.render_to_image() {

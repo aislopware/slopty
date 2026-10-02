@@ -182,8 +182,8 @@ pub struct Simulator {
     pub bundle_id: String,
 }
 
-/// Where the binaries are: a copy of the build's in the temporary directory, or
-/// the build's own when the copy cannot be made.
+/// Where the binaries are: under nextest, the run's own set ([`pinned`]); else a copy of the
+/// build's in the temporary directory, or the build's own when the copy cannot be made.
 ///
 /// # Errors
 ///
@@ -191,7 +191,68 @@ pub struct Simulator {
 pub fn bin_dir() -> Result<PathBuf> {
     static STAGED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     let built = built_dir()?;
-    Ok(STAGED.get_or_init(|| staged(&built)).clone().unwrap_or(built))
+    let run = std::env::var("NEXTEST_RUN_ID").ok().filter(|run| !run.is_empty());
+    Ok(STAGED
+        .get_or_init(|| {
+            let runs = runs_dir(&built);
+            if let Some(pin) = run.as_deref().map(|run| runs.join(run)).filter(|pin| pin.is_dir()) {
+                return Some(pin);
+            }
+            let cache = staged(&built)?;
+            Some(run.and_then(|run| pinned(&cache, &runs, &run)).unwrap_or(cache))
+        })
+        .clone()
+        .unwrap_or(built))
+}
+
+/// Where each run's set of binaries is pinned, beside the copies [`staged`] keeps.
+fn runs_dir(built: &Path) -> PathBuf {
+    std::env::temp_dir()
+        .join(format!("slopty-e2e-bin-{:08x}.runs", fnv1a(&built.to_string_lossy())))
+}
+
+/// How long a run's pinned set is kept: longer than any run takes.
+const PIN_KEPT: Duration = Duration::from_hours(2);
+
+/// The binaries of nextest run `run`, as the run's first test found them: hard links to the
+/// copies in `cache`, in `runs/<run>`, made once and read by every later test of the run.
+///
+/// Every test is a process of its own, and `target/debug` is shared with every other build on
+/// the machine. A build of the workspace's tests rebuilds `slopty-app` there without the `e2e`
+/// feature (`apps/slopty/tests/crash.rs` runs the binary), and that app never opens the test
+/// socket: each test that copied it after that waited 30 s and failed. With the set pinned, a
+/// build elsewhere can no longer change the binaries under a run that has started. A link
+/// keeps the file the run started with when [`staged`] replaces a copy, since it renames a new
+/// file over the old name. Pins older than [`PIN_KEPT`] are removed as a new one is made.
+fn pinned(cache: &Path, runs: &Path, run: &str) -> Option<PathBuf> {
+    std::fs::create_dir_all(runs).ok()?;
+    let pin = runs.join(run);
+    let part = runs.join(format!(".{run}.{}", std::process::id()));
+    let linked = std::fs::create_dir_all(&part).is_ok()
+        && std::fs::read_dir(cache).ok()?.all(|entry| {
+            entry.is_ok_and(|entry| {
+                let name = entry.file_name();
+                name.to_string_lossy().starts_with('.')
+                    || std::fs::hard_link(entry.path(), part.join(&name)).is_ok()
+            })
+        });
+    // Another test of the run may have pinned it first: its set is the run's.
+    let placed = linked && std::fs::rename(&part, &pin).is_ok();
+    if !placed {
+        let _gone = std::fs::remove_dir_all(&part);
+    }
+    if let Ok(entries) = std::fs::read_dir(runs) {
+        for entry in entries.flatten() {
+            let old = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|at| at.elapsed().is_ok_and(|age| age > PIN_KEPT));
+            if old && entry.path() != pin {
+                let _gone = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    pin.is_dir().then_some(pin)
 }
 
 /// Where the build put the binaries.
@@ -1273,13 +1334,35 @@ pub fn check_jetbrains_mono_face(face: Option<&crate::FaceInfo>) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::loopback_address;
+    use super::{loopback_address, pinned};
 
     #[test]
     fn the_app_dials_loopback_on_the_port_the_worker_printed() {
         assert_eq!(loopback_address("[::]:53211\n").unwrap(), "127.0.0.1:53211");
         assert_eq!(loopback_address("0.0.0.0:7").unwrap(), "127.0.0.1:7");
         loopback_address("not an address").unwrap_err();
+    }
+
+    /// A run's binaries are the ones its first test pinned: a copy staged over them later, as
+    /// another build's would be, reaches the next run and not this one, and the run's later
+    /// tests find the same pin.
+    #[test]
+    fn a_run_keeps_the_binaries_its_first_test_pinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cache, runs) = (tmp.path().join("cache"), tmp.path().join("runs"));
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("slopty-app"), "e2e").unwrap();
+        std::fs::write(cache.join(".slopty-app.42"), "half copied").unwrap();
+        let pin = pinned(&cache, &runs, "run-1").unwrap();
+        std::fs::write(cache.join(".next"), "plain").unwrap();
+        std::fs::rename(cache.join(".next"), cache.join("slopty-app")).unwrap();
+
+        assert_eq!(std::fs::read_to_string(pin.join("slopty-app")).unwrap(), "e2e");
+        assert!(!pin.join(".slopty-app.42").exists(), "a copy being made is not pinned");
+        assert_eq!(pinned(&cache, &runs, "run-1").unwrap(), pin, "the run's later tests");
+        let next = pinned(&cache, &runs, "run-2").unwrap();
+        assert_eq!(std::fs::read_to_string(next.join("slopty-app")).unwrap(), "plain");
+        assert_eq!(std::fs::read_dir(&runs).unwrap().count(), 2, "no half-made pin is left");
     }
 }
 

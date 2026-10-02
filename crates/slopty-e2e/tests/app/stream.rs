@@ -158,8 +158,9 @@ async fn golden_stream(
     }
     let existing = golden_dir().join(format!("{name}.png"));
     let before = image::open(&existing).ok().map(image::DynamicImage::into_rgba8);
-    assert_matches_masked(name, &frame, TOLERANCE, &artifacts_dir(), &[page, status]).unwrap();
-    let golden = before.unwrap_or_else(|| frame.clone());
+    let masks: Vec<PixelRect> = [page, status].into_iter().chain(live_readouts(&dump)).collect();
+    assert_matches_masked(name, &frame, TOLERANCE, &artifacts_dir(), &masks).unwrap();
+    let golden = before.unwrap_or_else(|| frame.image.clone());
     let distance = luma_distance(&luma_histogram(&frame, page), &luma_histogram(&golden, page));
     println!("MEASURE {name}: page luma distance {distance:.4}");
     distance
@@ -185,6 +186,23 @@ fn header_status(dump: &Dump, heading: &str) -> PixelRect {
     let px = |points: f32| (points * scale).round().max(0.0) as u32;
     let left = hx + hw + 4.0;
     [px(left), px(hy - 6.0), px((right - left).max(0.0)), px(hh + 12.0)]
+}
+
+/// The readouts a stream keeps live, its rate in the status bar and a stats line's time: what
+/// they say follows the load on this Mac, so a golden masks them, in pixels and in words.
+fn live_readouts(dump: &Dump) -> Vec<PixelRect> {
+    let scale = dump.window.scale;
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window pixels")]
+    let px = |points: f32| (points * scale).round().max(0.0) as u32;
+    dump.a11y
+        .iter()
+        .filter(|n| n.role == "Status")
+        .filter(|n| n.label.as_deref().is_some_and(|l| l.ends_with(" fps") || l.ends_with(" ms")))
+        .map(|n| {
+            let [x, y, w, h] = n.bounds;
+            [px(x), px(y), px(w), px(h)]
+        })
+        .collect()
 }
 
 /// Points the header's own buttons take at its right end, which the status mask leaves out.
@@ -381,12 +399,13 @@ async fn a_drawn_window_streams_into_its_tile() {
     let dump = settled(drv).await;
     let status = header_status(&dump, &heading);
     let frame = drv.render(&dir.join("stream-window-popped.png")).await.unwrap();
+    let masks: Vec<PixelRect> = std::iter::once(status).chain(live_readouts(&dump)).collect();
     assert_matches_masked(
         "stream-window-popped",
         &frame,
         slopty_e2e::snapshot::MAC_TOLERANCE,
         &artifacts_dir(),
-        &[status],
+        &masks,
     )
     .unwrap();
     open_command(drv, "Back to the workspace").await;

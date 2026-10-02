@@ -89,7 +89,7 @@ mod tests {
             let scale = drv.dump().await.unwrap().window.scale;
             #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
             let (w, h) = ((w * scale).round() as u32, (h * scale).round() as u32);
-            frame = image::imageops::crop_imm(&frame, 0, 0, w, h).to_image();
+            frame.image = image::imageops::crop_imm(&frame.image, 0, 0, w, h).to_image();
         }
         assert_matches(&name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
     }

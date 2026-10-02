@@ -1,0 +1,466 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 1 tile
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Status
+Status │ e2e-worker
+Status │ ~
+Dialog │ Settings
+TextInput │ Search settings (focused)
+TabList │ Sections
+Tab │ Appearance
+Tab │ Terminal
+Tab │ Input
+Tab │ Streams
+Tab │ Network
+Tab │ Keyboard
+Tab │ About
+TabPanel │ Keyboard
+Heading │ General
+ListItem │ New terminal │ ⌘T, ⌘N
+Button │ Keys for New terminal │ ⌘T, ⌘N
+ListItem │ New agent │ ⇧⌘T
+Button │ Keys for New agent │ ⇧⌘T
+ListItem │ New note │ ⇧⌘N
+Button │ Keys for New note │ ⇧⌘N
+ListItem │ Add a window or display │ ⌘O
+Button │ Keys for Add a window or display │ ⌘O
+ListItem │ Open file…
+Button │ Keys for Open file…
+ListItem │ Open folder…
+Button │ Keys for Open folder…
+ListItem │ Open URL…
+Button │ Keys for Open URL…
+ListItem │ Open last offered page
+Button │ Keys for Open last offered page
+ListItem │ Discard unsaved edits over a week old
+Button │ Keys for Discard unsaved edits over a week old
+ListItem │ About Slopty
+Button │ Keys for About Slopty
+ListItem │ Save a copy…
+Button │ Keys for Save a copy…
+ListItem │ Close tile │ ⌘W
+Button │ Keys for Close tile │ ⌘W
+ListItem │ Undo close │ ⌘Z
+Button │ Keys for Undo close │ ⌘Z
+ListItem │ Next thing that needs you │ ⇧⌘A
+Button │ Keys for Next thing that needs you │ ⇧⌘A
+ListItem │ Inbox │ ⇧⌘U
+Button │ Keys for Inbox │ ⇧⌘U
+ListItem │ Filter the navigator │ ⇧⌘E
+Button │ Keys for Filter the navigator │ ⇧⌘E
+ListItem │ Mute sound │ ⇧⌘M
+Button │ Keys for Mute sound │ ⇧⌘M
+ListItem │ Stream stats │ ⇧⌘I
+Button │ Keys for Stream stats │ ⇧⌘I
+ListItem │ Type clipboard
+Button │ Keys for Type clipboard
+ListItem │ Toggle sized display
+Button │ Keys for Toggle sized display
+ListItem │ Toggle own window │ ⌃⌘N
+Button │ Keys for Toggle own window │ ⌃⌘N
+ListItem │ Toggle system keys
+Button │ Keys for Toggle system keys
+ListItem │ Show or hide the navigator │ ⌘B
+Button │ Keys for Show or hide the navigator │ ⌘B
+ListItem │ Toggle navigator lens
+Button │ Keys for Toggle navigator lens
+ListItem │ Find │ ⌘F
+Button │ Keys for Find │ ⌘F
+ListItem │ Focus next │ ⌃⇥
+Button │ Keys for Focus next │ ⌃⇥
+ListItem │ Focus previous │ ⌃⇧⇥
+Button │ Keys for Focus previous │ ⌃⇧⇥
+ListItem │ Open palette │ ⇧⌘P
+Button │ Keys for Open palette │ ⇧⌘P
+ListItem │ List workers
+Button │ Keys for List workers
+ListItem │ Forwarded ports
+Button │ Keys for Forwarded ports
+ListItem │ Name this tile │ ⌘E
+Button │ Keys for Name this tile │ ⌘E
+ListItem │ Point other devices at this tile │ ⇧⌘O
+Button │ Keys for Point other devices at this tile │ ⇧⌘O
+ListItem │ Find in every tile │ ⇧⌘F
+Button │ Keys for Find in every tile │ ⇧⌘F
+ListItem │ Search in files │ ⌥⌘F
+Button │ Keys for Search in files │ ⌥⌘F
+ListItem │ Into the column on the left │ ⌘[
+Button │ Keys for Into the column on the left │ ⌘[
+ListItem │ Into the column on the right │ ⌘]
+Button │ Keys for Into the column on the right │ ⌘]
+ListItem │ Larger text │ ⌘=, ⇧⌘=
+Button │ Keys for Larger text │ ⌘=, ⇧⌘=
+ListItem │ Smaller text │ ⌘-
+Button │ Keys for Smaller text │ ⌘-
+ListItem │ Default text size │ ⌘0
+Button │ Keys for Default text size │ ⌘0
+ListItem │ Show conversation or terminal │ ⌘J
+Button │ Keys for Show conversation or terminal │ ⌘J
+ListItem │ Show project board or terminal │ ⇧⌘J
+Button │ Keys for Show project board or terminal │ ⇧⌘J
+ListItem │ Edit page address │ ⌘L
+Button │ Keys for Edit page address │ ⌘L
+ListItem │ Trackpad mode
+Button │ Keys for Trackpad mode
+ListItem │ Gestures to the remote app
+Button │ Keys for Gestures to the remote app
+ListItem │ Start a project here
+Button │ Keys for Start a project here
+ListItem │ Open settings │ ⌘,
+Button │ Keys for Open settings │ ⌘,
+ListItem │ Add worker │ ⇧⌘H
+Button │ Keys for Add worker │ ⇧⌘H
+ListItem │ Connect server
+Button │ Keys for Connect server
+ListItem │ Disconnect server
+Button │ Keys for Disconnect server
+ListItem │ Use this mac
+Button │ Keys for Use this mac
+ListItem │ Install over ssh
+Button │ Keys for Install over ssh
+ListItem │ Show workers in finder
+Button │ Keys for Show workers in finder
+Heading │ Layout
+ListItem │ Column to the left │ ⌥⌘←
+Button │ Keys for Column to the left │ ⌥⌘←
+ListItem │ Column to the right │ ⌥⌘→
+Button │ Keys for Column to the right │ ⌥⌘→
+ListItem │ Tile or workspace above │ ⌥⌘↑
+Button │ Keys for Tile or workspace above │ ⌥⌘↑
+ListItem │ Tile or workspace below │ ⌥⌘↓
+Button │ Keys for Tile or workspace below │ ⌥⌘↓
+ListItem │ Move column left │ ⌥⇧⌘←
+Button │ Keys for Move column left │ ⌥⇧⌘←
+ListItem │ Move column right │ ⌥⇧⌘→
+Button │ Keys for Move column right │ ⌥⇧⌘→
+ListItem │ Move tile up │ ⌥⇧⌘↑
+Button │ Keys for Move tile up │ ⌥⇧⌘↑
+ListItem │ Move tile down │ ⌥⇧⌘↓
+Button │ Keys for Move tile down │ ⌥⇧⌘↓
+ListItem │ Focus column first │ ⌥⌘↖
+Button │ Keys for Focus column first │ ⌥⌘↖
+ListItem │ Last column │ ⌥⌘↘
+Button │ Keys for Last column │ ⌥⌘↘
+ListItem │ Move column to the start │ ⌥⇧⌘↖
+Button │ Keys for Move column to the start │ ⌥⇧⌘↖
+ListItem │ Move column to the end │ ⌥⇧⌘↘
+Button │ Keys for Move column to the end │ ⌥⇧⌘↘
+ListItem │ Workspace above │ ⌥⌘⇞
+Button │ Keys for Workspace above │ ⌥⌘⇞
+ListItem │ Workspace below │ ⌥⌘⇟
+Button │ Keys for Workspace below │ ⌥⌘⇟
+ListItem │ Move workspace up │ ⌥⇧⌘⇞
+Button │ Keys for Move workspace up │ ⌥⇧⌘⇞
+ListItem │ Move workspace down │ ⌥⇧⌘⇟
+Button │ Keys for Move workspace down │ ⌥⇧⌘⇟
+ListItem │ Move column to the workspace above │ ⌃⌥⌘⇞
+Button │ Keys for Move column to the workspace above │ ⌃⌥⌘⇞
+ListItem │ Move column to the workspace below │ ⌃⌥⌘⇟
+Button │ Keys for Move column to the workspace below │ ⌃⌥⌘⇟
+ListItem │ Previous workspace │ ⌥⌘`
+Button │ Keys for Previous workspace │ ⌥⌘`
+ListItem │ Next column width │ ⌘R
+Button │ Keys for Next column width │ ⌘R
+ListItem │ Previous column width │ ⇧⌘R
+Button │ Keys for Previous column width │ ⇧⌘R
+ListItem │ Narrower column │ ⌥⌘-
+Button │ Keys for Narrower column │ ⌥⌘-
+ListItem │ Wider column │ ⌥⌘=
+Button │ Keys for Wider column │ ⌥⌘=
+ListItem │ Maximize column │ ⇧⌘↩
+Button │ Keys for Maximize column │ ⇧⌘↩
+ListItem │ Fullscreen tile │ ⌃⌘F
+Button │ Keys for Fullscreen tile │ ⌃⌘F
+ListItem │ Center column │ ⌥⌘C
+Button │ Keys for Center column │ ⌥⌘C
+ListItem │ Center the visible columns │ ⌥⇧⌘C
+Button │ Keys for Center the visible columns │ ⌥⇧⌘C
+ListItem │ Fill the free width │ ⌥⇧⌘F
+Button │ Keys for Fill the free width │ ⌥⇧⌘F
+ListItem │ Tabbed column │ ⌥⌘T
+Button │ Keys for Tabbed column │ ⌥⌘T
+ListItem │ Overview │ ⌥⌘O
+Button │ Keys for Overview │ ⌥⌘O
+ListItem │ First column │ ⌘1
+Button │ Keys for First column │ ⌘1
+ListItem │ Focus column 2 │ ⌘2
+Button │ Keys for Focus column 2 │ ⌘2
+ListItem │ Focus column 3 │ ⌘3
+Button │ Keys for Focus column 3 │ ⌘3
+ListItem │ Focus column 4 │ ⌘4
+Button │ Keys for Focus column 4 │ ⌘4
+ListItem │ Focus column 5 │ ⌘5
+Button │ Keys for Focus column 5 │ ⌘5
+ListItem │ Focus column 6 │ ⌘6
+Button │ Keys for Focus column 6 │ ⌘6
+ListItem │ Focus column 7 │ ⌘7
+Button │ Keys for Focus column 7 │ ⌘7
+ListItem │ Focus column 8 │ ⌘8
+Button │ Keys for Focus column 8 │ ⌘8
+ListItem │ Focus column 9 │ ⌘9
+Button │ Keys for Focus column 9 │ ⌘9
+ListItem │ First workspace │ ⌥⌘1
+Button │ Keys for First workspace │ ⌥⌘1
+ListItem │ Focus workspace 2 │ ⌥⌘2
+Button │ Keys for Focus workspace 2 │ ⌥⌘2
+ListItem │ Focus workspace 3 │ ⌥⌘3
+Button │ Keys for Focus workspace 3 │ ⌥⌘3
+ListItem │ Focus workspace 4 │ ⌥⌘4
+Button │ Keys for Focus workspace 4 │ ⌥⌘4
+ListItem │ Focus workspace 5 │ ⌥⌘5
+Button │ Keys for Focus workspace 5 │ ⌥⌘5
+ListItem │ Focus workspace 6 │ ⌥⌘6
+Button │ Keys for Focus workspace 6 │ ⌥⌘6
+ListItem │ Focus workspace 7 │ ⌥⌘7
+Button │ Keys for Focus workspace 7 │ ⌥⌘7
+ListItem │ Focus workspace 8 │ ⌥⌘8
+Button │ Keys for Focus workspace 8 │ ⌥⌘8
+ListItem │ Focus workspace 9 │ ⌥⌘9
+Button │ Keys for Focus workspace 9 │ ⌥⌘9
+ListItem │ Move column to the first workspace │ ⌃⌥⌘1
+Button │ Keys for Move column to the first workspace │ ⌃⌥⌘1
+ListItem │ Move column to workspace 2 │ ⌃⌥⌘2
+Button │ Keys for Move column to workspace 2 │ ⌃⌥⌘2
+ListItem │ Move column to workspace 3 │ ⌃⌥⌘3
+Button │ Keys for Move column to workspace 3 │ ⌃⌥⌘3
+ListItem │ Move column to workspace 4 │ ⌃⌥⌘4
+Button │ Keys for Move column to workspace 4 │ ⌃⌥⌘4
+ListItem │ Move column to workspace 5 │ ⌃⌥⌘5
+Button │ Keys for Move column to workspace 5 │ ⌃⌥⌘5
+ListItem │ Move column to workspace 6 │ ⌃⌥⌘6
+Button │ Keys for Move column to workspace 6 │ ⌃⌥⌘6
+ListItem │ Move column to workspace 7 │ ⌃⌥⌘7
+Button │ Keys for Move column to workspace 7 │ ⌃⌥⌘7
+ListItem │ Move column to workspace 8 │ ⌃⌥⌘8
+Button │ Keys for Move column to workspace 8 │ ⌃⌥⌘8
+ListItem │ Move column to workspace 9 │ ⌃⌥⌘9
+Button │ Keys for Move column to workspace 9 │ ⌃⌥⌘9
+Heading │ Terminal
+ListItem │ Copy │ ⌘C
+Button │ Keys for Copy │ ⌘C
+ListItem │ Paste │ ⌘V
+Button │ Keys for Paste │ ⌘V
+ListItem │ Find │ ⌘F
+Button │ Keys for Find │ ⌘F
+ListItem │ Find next │ ⌘G
+Button │ Keys for Find next │ ⌘G
+ListItem │ Find previous │ ⇧⌘G
+Button │ Keys for Find previous │ ⇧⌘G
+ListItem │ Close find │ ⎋
+Button │ Keys for Close find │ ⎋
+ListItem │ Previous prompt │ ⌘↑
+Button │ Keys for Previous prompt │ ⌘↑
+ListItem │ Next prompt │ ⌘↓
+Button │ Keys for Next prompt │ ⌘↓
+ListItem │ Scroll page up │ ⇧⇞
+Button │ Keys for Scroll page up │ ⇧⇞
+ListItem │ Scroll page down │ ⇧⇟
+Button │ Keys for Scroll page down │ ⇧⇟
+ListItem │ Scroll to top │ ⇧↖, ⌘↖
+Button │ Keys for Scroll to top │ ⇧↖, ⌘↖
+ListItem │ Scroll to bottom │ ⇧↘, ⌘↘
+Button │ Keys for Scroll to bottom │ ⇧↘, ⌘↘
+ListItem │ Select all │ ⌘A
+Button │ Keys for Select all │ ⌘A
+ListItem │ Copy last output │ ⇧⌘C
+Button │ Keys for Copy last output │ ⇧⌘C
+ListItem │ Rerun last command
+Button │ Keys for Rerun last command
+ListItem │ Keep last block as a note
+Button │ Keys for Keep last block as a note
+ListItem │ Clear the screen and history │ ⌘K
+Button │ Keys for Clear the screen and history │ ⌘K
+Heading │ Conversation
+ListItem │ Conversation density │ ⌃O
+Button │ Keys for Conversation density │ ⌃O
+ListItem │ Stop the agent │ ⎋
+Button │ Keys for Stop the agent │ ⎋
+ListItem │ Previous prompt │ ⌘↑
+Button │ Keys for Previous prompt │ ⌘↑
+ListItem │ Next prompt │ ⌘↓
+Button │ Keys for Next prompt │ ⌘↓
+ListItem │ Find │ ⌘F
+Button │ Keys for Find │ ⌘F
+Heading │ Inbox
+ListItem │ Select next │ ↓, J
+Button │ Keys for Select next │ ↓, J
+ListItem │ Select previous │ ↑, K
+Button │ Keys for Select previous │ ↑, K
+ListItem │ Open │ ↩
+Button │ Keys for Open │ ↩
+ListItem │ Mark done │ E
+Button │ Keys for Mark done │ E
+ListItem │ Snooze │ H
+Button │ Keys for Snooze │ H
+ListItem │ Mark unread │ U
+Button │ Keys for Mark unread │ U
+ListItem │ Allow │ ⌘↩
+Button │ Keys for Allow │ ⌘↩
+ListItem │ Deny │ ⌘⌫
+Button │ Keys for Deny │ ⌘⌫
+ListItem │ Close │ ⎋
+Button │ Keys for Close │ ⎋
+Heading │ Files
+ListItem │ Save file │ ⌘S
+Button │ Keys for Save file │ ⌘S
+ListItem │ Done with this file │ ⌘↩
+Button │ Keys for Done with this file │ ⌘↩
+ListItem │ Find │ ⌘F
+Button │ Keys for Find │ ⌘F
+ListItem │ Close find │ ⎋
+Button │ Keys for Close find │ ⎋
+ListItem │ Find next │ ⌘G
+Button │ Keys for Find next │ ⌘G
+ListItem │ Find previous │ ⇧⌘G
+Button │ Keys for Find previous │ ⇧⌘G
+ListItem │ Toggle comment │ ⌘/
+Button │ Keys for Toggle comment │ ⌘/
+ListItem │ Jump to line │ ⌃G
+Button │ Keys for Jump to line │ ⌃G
+ListItem │ Close go to line │ ⎋
+Button │ Keys for Close go to line │ ⎋
+ListItem │ Move line up │ ⌥↑
+Button │ Keys for Move line up │ ⌥↑
+ListItem │ Move line down │ ⌥↓
+Button │ Keys for Move line down │ ⌥↓
+ListItem │ Duplicate line │ ⌥⇧↓
+Button │ Keys for Duplicate line │ ⌥⇧↓
+ListItem │ Jump to matching bracket │ ⇧⌘\
+Button │ Keys for Jump to matching bracket │ ⇧⌘\
+ListItem │ Wrap long lines
+Button │ Keys for Wrap long lines
+ListItem │ Find and replace │ ⇧⌘H
+Button │ Keys for Find and replace │ ⇧⌘H
+ListItem │ Toggle match case │ ⌥⌘C
+Button │ Keys for Toggle match case │ ⌥⌘C
+ListItem │ Toggle whole word │ ⌥⌘W
+Button │ Keys for Toggle whole word │ ⌥⌘W
+ListItem │ Toggle regex │ ⌥⌘R
+Button │ Keys for Toggle regex │ ⌥⌘R
+ListItem │ Jump to symbol │ ⇧⌘O
+Button │ Keys for Jump to symbol │ ⇧⌘O
+ListItem │ Add the next match to the selection │ ⌘D
+Button │ Keys for Add the next match to the selection │ ⌘D
+ListItem │ Select every match │ ⇧⌘L
+Button │ Keys for Select every match │ ⇧⌘L
+ListItem │ Close symbols │ ⎋
+Button │ Keys for Close symbols │ ⎋
+ListItem │ Next symbol │ ↓
+Button │ Keys for Next symbol │ ↓
+ListItem │ Previous symbol │ ↑
+Button │ Keys for Previous symbol │ ↑
+ListItem │ Scroll down │ ↓
+Button │ Keys for Scroll down │ ↓
+ListItem │ Scroll up │ ↑
+Button │ Keys for Scroll up │ ↑
+ListItem │ Next screen │ ⇟, ␣
+Button │ Keys for Next screen │ ⇟, ␣
+ListItem │ Previous screen │ ⇞, ⇧␣
+Button │ Keys for Previous screen │ ⇞, ⇧␣
+ListItem │ Next page │ →
+Button │ Keys for Next page │ →
+ListItem │ Previous page │ ←
+Button │ Keys for Previous page │ ←
+ListItem │ First page │ ↖
+Button │ Keys for First page │ ↖
+ListItem │ Last page │ ↘
+Button │ Keys for Last page │ ↘
+ListItem │ Copy selected text │ ⌘C
+Button │ Keys for Copy selected text │ ⌘C
+ListItem │ Select all text │ ⌘A
+Button │ Keys for Select all text │ ⌘A
+Heading │ Folders
+ListItem │ Select previous │ ↑
+Button │ Keys for Select previous │ ↑
+ListItem │ Select next │ ↓
+Button │ Keys for Select next │ ↓
+ListItem │ Select first │ ↖
+Button │ Keys for Select first │ ↖
+ListItem │ Select last │ ↘
+Button │ Keys for Select last │ ↘
+ListItem │ Open │ ↩
+Button │ Keys for Open │ ↩
+ListItem │ Enclosing folder │ ⌫, ⌘↑
+Button │ Keys for Enclosing folder │ ⌫, ⌘↑
+Heading │ Project boards
+ListItem │ Select previous │ ↑, K
+Button │ Keys for Select previous │ ↑, K
+ListItem │ Select next │ ↓, J
+Button │ Keys for Select next │ ↓, J
+ListItem │ Open │ ↩
+Button │ Keys for Open │ ↩
+ListItem │ Project tree │ 1
+Button │ Keys for Project tree │ 1
+ListItem │ Project board │ 2
+Button │ Keys for Project board │ 2
+ListItem │ Project timeline │ 3
+Button │ Keys for Project timeline │ 3
+ListItem │ Merge the task │ M
+Button │ Keys for Merge the task │ M
+ListItem │ Retry the task │ R
+Button │ Keys for Retry the task │ R
+ListItem │ Approve the task's work │ A
+Button │ Keys for Approve the task's work │ A
+ListItem │ Tell the task's agent to fix CI
+Button │ Keys for Tell the task's agent to fix CI
+ListItem │ Tell the task's agent to address the comments
+Button │ Keys for Tell the task's agent to address the comments
+ListItem │ Tell the task's agent to resolve the conflicts
+Button │ Keys for Tell the task's agent to resolve the conflicts
+ListItem │ Show the orchestrator's terminal │ T
+Button │ Keys for Show the orchestrator's terminal │ T
+ListItem │ Tell the orchestrator… │ C
+Button │ Keys for Tell the orchestrator… │ C
+ListItem │ Show the machines │ 4
+Button │ Keys for Show the machines │ 4
+ListItem │ Run the task on… │ O
+Button │ Keys for Run the task on… │ O
+ListItem │ Start the task │ S
+Button │ Keys for Start the task │ S
+ListItem │ Start every proposed task
+Button │ Keys for Start every proposed task
+ListItem │ Ask before each task starts
+Button │ Keys for Ask before each task starts
+ListItem │ Push after each merge
+Button │ Keys for Push after each merge
+ListItem │ Delete the project
+Button │ Keys for Delete the project
+Heading │ Search in files
+ListItem │ Toggle match case │ ⌥⌘C
+Button │ Keys for Toggle match case │ ⌥⌘C
+ListItem │ Toggle whole word │ ⌥⌘W
+Button │ Keys for Toggle whole word │ ⌥⌘W
+ListItem │ Toggle regex │ ⌥⌘R
+Button │ Keys for Toggle regex │ ⌥⌘R
+Heading │ Pages
+ListItem │ Page back │ ⌘←
+Button │ Keys for Page back │ ⌘←
+ListItem │ Page forward │ ⌘→
+Button │ Keys for Page forward │ ⌘→
+ListItem │ Reload page
+Button │ Keys for Reload page
+ListItem │ Undo │ ⌘Z
+Button │ Keys for Undo │ ⌘Z
+ListItem │ Redo │ ⇧⌘Z
+Button │ Keys for Redo │ ⇧⌘Z
+ListItem │ Cut │ ⌘X
+Button │ Keys for Cut │ ⌘X
+ListItem │ Select all │ ⌘A
+Button │ Keys for Select all │ ⌘A
+ListItem │ Find next │ ⌘G
+Button │ Keys for Find next │ ⌘G
+ListItem │ Find previous │ ⇧⌘G
+Button │ Keys for Find previous │ ⇧⌘G
+Button │ Edit as TOML
+Button │ Done

@@ -17,6 +17,7 @@ harness = [
     "dep:tokio",
     "dep:image",
     "dep:anyhow",
+    "dep:similar",
     "dep:tempfile",
     "dep:slopty-pty",
     "dep:slopty-shape",
@@ -77,6 +78,8 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
+# A golden's text against the frame's, as the lines that changed (`snapshot::text_matches`).
+similar = { workspace = true, optional = true }
 slopty-pty = { workspace = true, optional = true }
 # The link the second worker is reached over (`harness::SecondWorker`).
 slopty-shape = { workspace = true, optional = true }

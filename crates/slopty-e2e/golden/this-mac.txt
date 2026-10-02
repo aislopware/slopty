@@ -1,0 +1,14 @@
+Window │ Slopty (focused)
+Label │ Slopty
+Heading │ Use this Mac as a worker
+List │ Use this Mac as a worker
+ListItem │ Worker running
+Image │ Done
+ListItem │ Screen Recording
+Image │ Needs you
+Button │ Open settings
+ListItem │ Accessibility
+Image │ Done
+ListItem │ Reachable on your tailnet
+Image │ Done
+Button │ Connect to a server instead

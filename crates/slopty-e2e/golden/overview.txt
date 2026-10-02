@@ -1,0 +1,25 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 3 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Button │ New workspace
+Group │ Terminal
+Heading │ terminal Terminal
+Group (focused)
+Terminal │ shell │ ~ %
+Group │ Release
+Heading │ note Release
+Document │ Note │ Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
+CheckBox │ Done: build the bundle
+CheckBox │ To do: notarise
+CheckBox │ To do: tag
+Group │ Terminal 2
+Heading │ terminal Terminal 2
+Group
+Terminal │ shell
+Group │ Status
+Status │ e2e-worker
+Status │ ~

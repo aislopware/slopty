@@ -508,12 +508,18 @@ pub enum Reply {
     Ok,
     /// A [`Command::Dump`].
     Dump(Box<Dump>),
-    /// A [`Command::Render`]: the image written, in device pixels.
+    /// A [`Command::Render`]: the image written, in device pixels, and what the same frame
+    /// says in words: its accessibility tree, read from a frame of the same state drawn right
+    /// after it.
     Rendered {
         /// Width.
         width: u32,
         /// Height.
         height: u32,
+        /// The frame's accessibility tree, in reading order.
+        a11y: Vec<A11yNode>,
+        /// Device pixels per point.
+        scale: f32,
     },
     /// A [`Command::DragOver`]: what the drag is over.
     Over {
@@ -661,6 +667,28 @@ pub struct A11yNode {
     pub focused: bool,
     /// Window rect in points: x, y, w, h.
     pub bounds: [f32; 4],
+}
+
+/// What a frame says in words: a line per node of its accessibility tree, in reading order.
+///
+/// Each line is the role, the label and the value, and a mark on the node with the keyboard.
+/// Where a node sits is the picture's business, so no bounds: a golden's text changes only
+/// when a word does.
+#[must_use]
+pub fn frame_text(a11y: &[A11yNode]) -> String {
+    let mut text = String::new();
+    for node in a11y {
+        text.push_str(&node.role);
+        for part in [&node.label, &node.value].into_iter().flatten().filter(|p| !p.is_empty()) {
+            text.push_str(" \u{2502} ");
+            text.push_str(&part.replace('\n', "\u{23ce}"));
+        }
+        if node.focused {
+            text.push_str(" (focused)");
+        }
+        text.push('\n');
+    }
+    text
 }
 
 /// The window.

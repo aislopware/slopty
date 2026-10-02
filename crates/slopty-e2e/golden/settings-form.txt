@@ -1,0 +1,61 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ e2e-worker, 1 tile
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Status
+Status │ e2e-worker
+Status │ ~
+Dialog │ Settings
+TextInput │ Search settings (focused)
+TabList │ Sections
+Tab │ Appearance
+Tab │ Terminal
+Tab │ Input
+Tab │ Streams
+Tab │ Network
+Tab │ Keyboard
+Tab │ About
+TabPanel │ Terminal
+Heading │ Font
+ComboBox │ Family │ JetBrains Mono
+SpinButton │ Size │ 13 pt
+Button │ Decrease
+Button │ Increase
+SpinButton │ Line height │ 1.0×
+Button │ Decrease
+Button │ Increase
+Switch │ Ligatures
+Heading │ Cursor
+RadioGroup │ Shape │ Auto
+RadioButton │ Auto
+RadioButton │ Block
+RadioButton │ Bar
+RadioButton │ Underline
+RadioGroup │ Blink │ Never
+RadioButton │ Auto
+RadioButton │ Always
+RadioButton │ Never
+Heading │ Text
+SpinButton │ Minimum contrast │ 3.0:1
+Button │ Decrease
+Button │ Increase
+Switch │ Bold is bright
+Heading │ Behaviour
+Switch │ Confirm close
+Switch │ Bell in the background
+RadioGroup │ Agent alert │ When hidden
+RadioButton │ Never
+RadioButton │ When hidden
+RadioButton │ Always
+Button │ Edit as TOML
+Button │ Done

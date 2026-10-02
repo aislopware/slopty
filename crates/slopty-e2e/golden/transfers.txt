@@ -1,0 +1,28 @@
+Window │ Slopty
+Group │ Workspace
+Button │ Navigator
+Heading │ drop-here, 2 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ drop-here
+Heading │ terminal drop-here
+Button │ Cancel upload
+Button │ Fullscreen tile
+Button │ Close tile
+Group (focused)
+Terminal │ shell │ ~/drop-here %
+Group │ nc -l 47310
+Heading │ terminal nc -l 47310
+Label │ ~/drop-here
+Link │ Open port 47310 in a tile
+Link │ Open port 47310 in the browser
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell
+Group │ Status
+Status │ e2e-worker
+Status │ ~/drop-here
+Button │ 1 port
+Status │ Port 47310 is taken here; forwarded on 47311

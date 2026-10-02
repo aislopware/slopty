@@ -1,0 +1,15 @@
+Window │ Slopty
+Group │ Workspace (focused)
+Button │ Navigator
+Heading │ New workspace, 0 tiles
+Button │ New
+Button │ Inbox
+Button │ More
+TextInput │ What should an agent do?
+Button │ On e2e-worker
+Button │ In ~
+Button │ New terminal
+Button │ Add a window or display
+Button │ New terminal on e2e-worker
+Group │ Status
+Status │ e2e-worker

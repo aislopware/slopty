@@ -1,0 +1,28 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Button │ e2e-worker
+Button │ New shell on e2e-worker
+Button │ Claude Code, Working
+Button │ Navigator
+Heading │ e2e-worker, 1 tile, working
+Button │ New
+Button │ Inbox
+Button │ More
+Group │ Claude Code
+Heading │ terminal Claude Code
+Image │ Working
+Label │ ~
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Article │ Let me run it.
+Button │ Preparing Bash
+MultilineTextInput │ Message (focused)
+Button │ Attach files
+Group │ Status
+Status │ e2e-worker
+Status │ ~
+Status │ 1 working

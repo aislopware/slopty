@@ -1008,3 +1008,56 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     row. The samples go beside the `JUnit` report, which CI keeps, in place of the `lsof` step.
   - The pairs are counted, never timed. No nextest test group bounds the PTY tests: none holds
     more than 16, and a group would only stretch the run.
+
+- ✅ **A golden is held in words too** (2026-10-02). The pixel tolerance (0.2 %) cannot see a
+  changed word: `workspace-navigator.png` kept "Workspace 1" in its title bar a day after the
+  app said "e2e-worker" there, and passed. Every app golden now has a `.txt` beside its PNG:
+  what the same frame says, a line per node of its accessibility tree in reading order (role,
+  label, value, and the node with the keyboard), with no bounds, compared exactly. A changed
+  word fails with the lines that changed, the golden's and the frame's (`similar`'s unified
+  diff), under the same `--accept`, `--accept-all` and `--review` as the picture. A masked
+  region's nodes are left out, since what a moving picture's header says moves with it.
+  - **Cost.** The app reads the tree from one more frame of the same state, drawn with the tree
+    asked for, right after the frame it renders: 0.7 to 1.7 ms a golden (25 to 60 nodes) over
+    the ten goldens of `a_workspace_of_columns_in_both_themes`, against a render and PNG write
+    of tens of milliseconds.
+  - **What it cannot see.** Text that is in no node, for a screen reader or for this check:
+    a plain run of text with no role. That is an accessibility gap to close where it is found,
+    not a reason to read glyphs back.
+  - **No machine in a golden.** A path in the run's scratch directory (the system temporary
+    root, raw or resolved, and the directory the run made in it, whose name is random) is
+    spelled `$SCRATCH` as the text is made (`snapshot::scrub_scratch`), so a file tile's
+    `File $SCRATCH/project/main.rs` reads the same on every machine and in every run, and no
+    user name or temporary path lands in a golden. A port after a loopback host is `$PORT`
+    (`snapshot::scrub_ports`), since the tests' servers bind what the system gives them. Both
+    are scrubbed in code, never by hand.
+  - Tests: `snapshot::tests::a_changed_word_is_a_changed_line`, `a_masked_node_says_nothing`,
+    `a_scratch_path_reads_the_same_everywhere`, `a_loopback_port_reads_the_same_in_every_run`.
+
+- ✅ **A run of app tests keeps the binaries it started with** (2026-10-02). Tests in the app
+  suite failed at random with "slopty-app did not create app.sock within 30s"
+  (`a_folder_tile_browses_the_worker_and_opens_a_file_beside_it`,
+  `a_page_on_a_host_only_the_worker_names_loads_through_its_proxy`,
+  `a_multi_item_copy_arrives_as_its_items`, the thread's frame-time run), always in a row and
+  while other builds ran on the machine. Not a slow machine: each of those apps logged
+  "notifications off: not an app bundle", which only `notify::System::new` says, and only an app
+  built without the `e2e` feature makes that one, since the self-test makes `notify::Memory`.
+  Such an app never opens the test socket. `apps/slopty/tests/crash.rs` runs the app binary, so
+  any build of the workspace's tests (a gate's, another session's `cargo nextest run`) builds
+  `target/debug/slopty-app` again without the feature, and every test process staged
+  whatever was there when it started. `target/debug/deps` held the evidence: a plain build of
+  the app finished at 11:04:45, the thread's frame-time run failed at 11:07, and the e2e build
+  that replaced it came at 11:17:48.
+  - Under nextest each test is a process, so the run's first test pins the binaries it staged
+    (`harness::pinned`): hard links to the staged copies in a directory named by
+    `NEXTEST_RUN_ID`, which every later test of the run reads. Staging replaces a copy by
+    renaming a new file over it, so a link keeps the file the run began with. A pin older than
+    two hours is removed as a new one is made.
+  - The pin does not cover the gap between `cargo xtask e2e`'s app build and the run's first
+    test, which holds the suites' own test builds: minutes on a busy machine. A rerun of the
+    thread's frame-time test lost its app there at 13:06. Closing it takes a binary a plain
+    build never makes: an `e2e`-only bin target of `apps/slopty`
+    (`required-features = ["e2e"]`) that the harness starts. *Not done yet:* it touches the
+    app's manifest.
+  - Timeouts were not raised: 30 s already covers a cold start on a loaded machine many times.
+  - Test: `harness::tests::a_run_keeps_the_binaries_its_first_test_pinned`.
