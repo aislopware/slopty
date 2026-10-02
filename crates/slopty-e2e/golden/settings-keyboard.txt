@@ -440,6 +440,8 @@ ListItem │ Push after each merge
 Button │ Keys for Push after each merge
 ListItem │ Delete the project
 Button │ Keys for Delete the project
+ListItem │ Verifier and review…
+Button │ Keys for Verifier and review…
 Heading │ Search in files
 ListItem │ Toggle match case │ ⌥⌘C
 Button │ Keys for Toggle match case │ ⌥⌘C

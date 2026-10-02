@@ -35,7 +35,7 @@ use super::model::{
 use super::recap::{Recap, RecapKind};
 use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
 use super::{
-    AddressComments, ApproveTask, DeleteProject, FixCi, Lens, MergeTask, OpenNode,
+    AddressComments, ApproveTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask, OpenNode,
     ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard, ShowMachines,
     ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask, TellOrchestrator,
     ToggleAskToStart, TogglePush,
@@ -107,6 +107,16 @@ const MACHINES_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 pub enum ProjectEvent {
     /// Open this node's agent in its tile.
     Open(Node),
+    /// Open the thread of one of Claude Code's own subagents in this node's session, by its
+    /// agent id, under its type (`Explore`).
+    OpenSubagent {
+        /// The node whose session runs it.
+        node: Node,
+        /// Claude Code's id for it, which names its thread.
+        agent: String,
+        /// Its type, which the thread's bar names it by until it has a title.
+        kind: String,
+    },
     /// Show a terminal the server runs for a task, its verifier's, in its tile.
     Output(TermRef),
     /// Open the Claude Code session a task's reviewer reads its work in.
@@ -115,6 +125,14 @@ pub enum ProjectEvent {
     Act(TaskId, TaskAction),
     /// Push the target after each merge, or stop.
     SetPush(bool),
+    /// Check each task's work by this command, and have a reviewer read it with this brief;
+    /// an empty one is none.
+    SetChecks {
+        /// The verifier command.
+        verifier: String,
+        /// The reviewer's brief.
+        review: String,
+    },
     /// Let the project go; the person pressed for it twice.
     Delete,
     /// Say this: what was asked of the board cannot be done now.
@@ -239,6 +257,16 @@ enum Pick {
     Entry(u64),
 }
 
+/// How a project's work is checked, as the person sets it on the board: the verifier command,
+/// and whether a reviewer with fresh eyes reads each task's work before it merges, by what
+/// brief.
+struct Checks {
+    verifier: Entity<InputState>,
+    brief: Entity<InputState>,
+    review: bool,
+    _enter: [Subscription; 2],
+}
+
 /// One project's board.
 pub struct ProjectView {
     id: ProjectId,
@@ -263,6 +291,10 @@ pub struct ProjectView {
     composer: Option<(Entity<InputState>, [Subscription; 2])>,
     /// Words the server refused, to put back on the line once it is empty.
     refused: Option<String>,
+    /// The project's checks being set, while that panel is open.
+    checks: Option<Checks>,
+    /// The checks panel opens with the next frame, which has the window its fields need.
+    checks_wanted: bool,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -305,6 +337,8 @@ impl ProjectView {
             delete_asked: None,
             composer: None,
             refused: None,
+            checks: None,
+            checks_wanted: false,
             #[cfg(test)]
             renders: 0,
         }
@@ -438,7 +472,13 @@ impl ProjectView {
 
     /// Give the board the keyboard.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus, cx);
+        // The checks panel keeps the keyboard it has: a click that opened it focused its tile.
+        let typing = self.checks.as_ref().is_some_and(|c| {
+            [&c.verifier, &c.brief].iter().any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        });
+        if !typing {
+            window.focus(&self.focus, cx);
+        }
     }
 
     /// Move the keyboard's row by `delta`, stopping at the ends; the first press lands on the
@@ -811,6 +851,19 @@ pub(crate) const MOVE_HINT: &str = "Click to choose where it runs";
 pub(crate) const MACHINES_HINT: &str = "Click to see the machines";
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
+/// The header's toggle for the panel that sets how the work is checked, and the panel's name.
+pub(crate) const CHECKS: &str = "Verifier and review";
+/// The verifier field's label.
+pub(crate) const VERIFIER: &str = "Verifier";
+/// What the verifier field says while empty.
+pub(crate) const VERIFIER_HINT: &str = "A command that passes when a task's work is right";
+/// The review switch's words.
+pub(crate) const REVIEW: &str = "A reviewer reads each task's work before it merges";
+/// What the brief field says while empty.
+pub(crate) const BRIEF_HINT: &str = "What the reviewer looks for";
+/// The brief a reviewer turned on with none written is given.
+pub(crate) const BRIEF: &str =
+    "Bugs, missed cases, and anything the task asked for that the work leaves out";
 
 /// Where a project's work lands and how it is checked, as one sentence: "slopty → main,
 /// verified by cargo gate and reviewed".
@@ -873,9 +926,9 @@ impl ProjectView {
     }
 
     /// The name, where the work lands and how it is checked, how far along it is and how
-    /// many of its agents run, and its two controls: pushing, and the way back to the
-    /// orchestrator's terminal. The readouts are columns, so the line under the title is a
-    /// sentence and not a string of facts.
+    /// many of its agents run, and its controls: how the work is checked, asking before each
+    /// start, pushing, and the way back to the orchestrator's terminal. The readouts are columns,
+    /// so the line under the title is a sentence and not a string of facts.
     fn header(&self, board: &Board, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -920,6 +973,22 @@ impl ProjectView {
         .on_click(cx.listener(move |_this, _ev, _w, cx| {
             cx.emit(ProjectEvent::SetAsk(!ask));
         }));
+        let checks_open = self.checks.is_some();
+        let checks_toggle = crate::kit::icon_toggle(
+            theme,
+            "project-checks",
+            IconName::ListChecks,
+            CHECKS,
+            checks_open,
+            self.zoom,
+        )
+        .on_click(cx.listener(|this, _ev, window, cx| {
+            if this.checks.is_some() {
+                this.close_checks(window, cx);
+            } else {
+                this.open_checks(window, cx);
+            }
+        }));
         let title = div()
             .flex()
             .items_center()
@@ -951,6 +1020,7 @@ impl ProjectView {
                         .chain(self.spent_readouts(board)),
                 ),
             )
+            .child(checks_toggle)
             .child(ask_toggle)
             .child(push_toggle)
             .child(terminal);
@@ -2034,12 +2104,14 @@ impl ProjectView {
         )
     }
 
-    /// Claude Code's own subagents running under `node`, as leaves of the tree.
-    fn native_rows(&self, board: &Board, row: TreeRow) -> Vec<AnyElement> {
+    /// Claude Code's own subagents running under `node`, as leaves of the tree; one opens its
+    /// thread.
+    fn native_rows(&self, board: &Board, row: TreeRow, cx: &Context<Self>) -> Vec<AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let Some(natives) = board.natives.get(&row.task) else { return Vec::new() };
+        let raised = hsla(s.raised);
         natives
             .agents
             .iter()
@@ -2048,7 +2120,12 @@ impl ProjectView {
                 let id = format!("{}-native-{}", node_key(row.task), agent.id);
                 let selector = id.clone();
                 let depth = row.depth.saturating_add(1);
-                div()
+                let open = ProjectEvent::OpenSubagent {
+                    node: row.task,
+                    agent: agent.id.clone(),
+                    kind: agent.kind.clone(),
+                };
+                let row = div()
                     .id(SharedString::from(id))
                     .debug_selector(move || selector)
                     .role(Role::TreeItem)
@@ -2060,6 +2137,9 @@ impl ProjectView {
                     .mx(self.z(sp.xs))
                     .pl(self.z(INDENT.mul_add(depth_f(depth), sp.inset() - sp.xs)))
                     .h(self.z(theme.density.row))
+                    .rounded(self.z(theme.radii.sm))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(raised))
                     .text_size(self.z(theme.typography.meta()))
                     .text_color(hsla(s.text_secondary))
                     .child(self.guides(depth))
@@ -2071,7 +2151,10 @@ impl ProjectView {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .child(SharedString::from(agent.kind.clone())),
-                    )
+                    );
+                // Its thread, in the face of the session it runs in, as a row opens its agent.
+                tab_stop(row, s.accent)
+                    .on_click(cx.listener(move |_this, _ev, _w, cx| cx.emit(open.clone())))
                     .into_any_element()
             })
             .collect()
@@ -2082,7 +2165,7 @@ impl ProjectView {
         for row in board.tree() {
             let line = Line { asking: None, said: None, depth: row.depth, prefix: "project-row" };
             out.push(self.node_row(board, row.task, line, cx));
-            out.extend(self.native_rows(board, row));
+            out.extend(self.native_rows(board, row, cx));
         }
         if board.tasks.is_empty() {
             out.push(self.empty(NO_TASKS, NO_TASKS_HINT));
@@ -2336,6 +2419,203 @@ impl ProjectView {
     #[must_use]
     pub fn composing(&self, cx: &gpui::App) -> Option<String> {
         self.composer.as_ref().map(|(input, _)| input.read(cx).value().to_string())
+    }
+
+    /// Open the panel that sets how the project's work is checked, its fields holding what
+    /// the project has now, the keyboard in the verifier's. Without a window yet (the board
+    /// is about to show), it opens with the next frame.
+    pub fn ask_checks(&mut self, cx: &mut Context<Self>) {
+        self.checks_wanted = true;
+        cx.notify();
+    }
+
+    fn open_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.checks_wanted = false;
+        let project = self.seen.board.as_ref().map(|b| &b.project);
+        let verifier = project.and_then(|p| p.verifier.clone()).unwrap_or_default();
+        let brief = project.and_then(|p| p.review.clone());
+        let review = brief.is_some();
+        let field =
+            |text: String, hint: &'static str, window: &mut Window, cx: &mut Context<Self>| {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
+                input.update(cx, |input, cx| input.set_value(text, window, cx));
+                input
+            };
+        let verifier = field(verifier, VERIFIER_HINT, window, cx);
+        let brief = field(brief.unwrap_or_default(), BRIEF_HINT, window, cx);
+        let enter = |input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>| {
+            cx.subscribe_in(input, window, |this, _input, event, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_checks(window, cx);
+                }
+            })
+        };
+        let enters = [enter(&verifier, window, cx), enter(&brief, window, cx)];
+        verifier.update(cx, |input, cx| input.focus(window, cx));
+        self.checks = Some(Checks { verifier, brief, review, _enter: enters });
+        cx.notify();
+    }
+
+    /// What the open checks panel holds: the verifier, and the brief while a reviewer is on.
+    #[cfg(test)]
+    pub(crate) fn checks_typed(&self, cx: &gpui::App) -> Option<(String, Option<String>)> {
+        let checks = self.checks.as_ref()?;
+        let verifier = checks.verifier.read(cx).value().to_string();
+        Some((verifier, checks.review.then(|| checks.brief.read(cx).value().to_string())))
+    }
+
+    /// Close the checks panel unsaved; the keyboard goes back to the board.
+    fn close_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.checks.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    /// Turn the reviewer on or off in the open panel; on, the keyboard goes to its brief.
+    fn flip_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(checks) = self.checks.as_mut() else { return };
+        checks.review = !checks.review;
+        if checks.review {
+            checks.brief.update(cx, |input, cx| input.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Say the panel's checks to the server and close it. A reviewer turned on with no brief
+    /// gets [`BRIEF`].
+    fn save_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(checks) = self.checks.as_ref() else { return };
+        let verifier = checks.verifier.read(cx).value().trim().to_owned();
+        let review = if checks.review {
+            let brief = checks.brief.read(cx).value().trim().to_owned();
+            if brief.is_empty() { BRIEF.to_owned() } else { brief }
+        } else {
+            String::new()
+        };
+        cx.emit(ProjectEvent::SetChecks { verifier, review });
+        self.close_checks(window, cx);
+    }
+
+    /// The panel under the header that sets how the work is checked, while it is open: the
+    /// verifier command, the reviewer's switch and its brief, and Save beside Cancel.
+    fn checks_panel(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        let checks = self.checks.as_ref()?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let label = |text: &'static str| {
+            div()
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_muted))
+                .child(text)
+        };
+        // A command and a brief: what is typed is code or close to it.
+        let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
+        let field = |input: &Entity<InputState>, name: &'static str| {
+            div().font_family(mono.clone()).child(Input::new(input).aria_label(name))
+        };
+        let on = checks.review;
+        let switch = self.review_switch(on).on_click(cx.listener(|this, _ev, window, cx| {
+            this.flip_review(window, cx);
+        }));
+        let review = div()
+            .flex()
+            .items_center()
+            .gap(self.z(sp.sm))
+            .child(switch)
+            .child(div().min_w_0().text_color(hsla(s.text_secondary)).child(REVIEW));
+        let button = |id: &'static str, text: &'static str| {
+            div()
+                .id(id)
+                .debug_selector(move || id.to_owned())
+                .role(Role::Button)
+                .aria_label(text)
+                .flex_none()
+                .flex()
+                .items_center()
+                .h(self.z(theme.density.control))
+                .px(self.z(sp.md))
+                .rounded(self.z(theme.radii.sm))
+                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                .cursor_pointer()
+                .child(text)
+        };
+        let cancel = button("project-checks-cancel", "Cancel")
+            .text_color(hsla(s.text_secondary))
+            .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+        let cancel = tab_stop(cancel, s.accent)
+            .on_click(cx.listener(|this, _ev, window, cx| this.close_checks(window, cx)));
+        let save = crate::kit::solid_pressable(button("project-checks-save", "Save"), theme);
+        let save = tab_stop(save, s.accent)
+            .on_click(cx.listener(|this, _ev, window, cx| this.save_checks(window, cx)));
+        let panel = div()
+            .id("project-checks-panel")
+            .debug_selector(|| "project-checks-panel".to_owned())
+            .role(Role::Group)
+            .aria_label(CHECKS)
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(self.z(sp.xs))
+            .mx(self.z(sp.inset()))
+            .mb(self.z(sp.sm))
+            .p(self.z(sp.md))
+            .rounded(self.z(theme.radii.md))
+            .bg(hsla(s.panel))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_checks(window, cx)))
+            .child(label(VERIFIER))
+            .child(field(&checks.verifier, VERIFIER))
+            .child(div().pt(self.z(sp.xs)).child(review))
+            .when(on, |el| el.child(field(&checks.brief, BRIEF_HINT)))
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(self.z(sp.xs))
+                    .pt(self.z(sp.xs))
+                    .child(cancel)
+                    .child(save),
+            );
+        Some(panel)
+    }
+
+    /// The reviewer's switch: a track the solid fills while on, its knob at the far end.
+    fn review_switch(&self, on: bool) -> Stateful<Div> {
+        let theme = &self.theme;
+        let (s, sp) = (theme.surfaces, theme.spacing);
+        let knob = 2.0_f32.mul_add(-sp.xxs, sp.lg);
+        let width = sp.xl + sp.xs;
+        let travel = 2.0_f32.mul_add(-sp.xxs, width - knob);
+        let (track, ink) = if on { (s.solid, s.solid_ink) } else { (s.overlay, s.text_secondary) };
+        let el = div()
+            .id("project-review-switch")
+            .debug_selector(|| "project-review-switch".to_owned())
+            .role(Role::Switch)
+            .aria_label(REVIEW)
+            .aria_toggled(if on {
+                gpui::accesskit::Toggled::True
+            } else {
+                gpui::accesskit::Toggled::False
+            })
+            .flex_none()
+            .w(self.z(width))
+            .h(self.z(sp.lg))
+            .flex()
+            .items_center()
+            .px(self.z(sp.xxs))
+            .rounded_full()
+            .bg(hsla(track))
+            .cursor_pointer()
+            .child(
+                div()
+                    .flex_none()
+                    .size(self.z(knob))
+                    .ml(self.z(if on { travel } else { 0.0 }))
+                    .rounded_full()
+                    .bg(hsla(ink)),
+            );
+        tab_stop(el, s.accent)
     }
 
     /// The line at the board's foot that talks to the orchestrator, while it has one.
@@ -2980,6 +3260,9 @@ impl Render for ProjectView {
         }
         self.keep_time(cx);
         self.composer_in(window, cx);
+        if self.checks_wanted {
+            self.open_checks(window, cx);
+        }
         let theme = &self.theme;
         // The board's bare keys hold only while the board has the keyboard: the line to the
         // orchestrator is beside them, so a letter typed there is a letter.
@@ -3028,6 +3311,9 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &TellOrchestrator, window, cx| {
                 this.compose(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &EditChecks, window, cx| {
+                this.open_checks(window, cx);
+            }))
             .flex_1()
             .min_h_0()
             .flex()
@@ -3059,7 +3345,6 @@ impl Render for ProjectView {
         };
         let composer = self.composer_row(&board, cx);
         let keys = keys
-            .child(self.header(&board, cx))
             .children(self.recap(&board, cx))
             .children(self.needs_you(&board, cx))
             .children(self.plan(&board, cx))
@@ -3085,7 +3370,12 @@ impl Render for ProjectView {
                         ),
                 ),
             );
-        root.child(keys).children(composer)
+        // The header and the checks panel sit over the board's keys, as the line to the
+        // orchestrator sits under them: a letter typed into a field there is a letter.
+        root.child(self.header(&board, cx))
+            .children(self.checks_panel(cx))
+            .child(keys)
+            .children(composer)
     }
 }
 

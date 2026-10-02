@@ -66,6 +66,9 @@ pub(super) struct ProjectsState {
     pub caller: Option<ServerCaller>,
     /// A project just started here, whose board shows once the mirror hears of it.
     pub opening: Option<ProjectId>,
+    /// Boards that open their checks panel once they are made: a project just started here
+    /// has its verifier and review set where it was started.
+    pub checks: HashSet<ProjectId>,
     /// The workers as the server last said they are doing, for the machines lens.
     pub machines: Vec<Machine>,
     /// A question about the workers is out: another waits for its answer.
@@ -138,6 +141,21 @@ fn set_project(project: &ProjectId, push: Option<bool>, ask_to_start: Option<boo
         review: None,
         push,
         ask_to_start,
+        limits: LimitsChange::default(),
+        metadata: None,
+    }
+}
+
+/// The person's change to how `project`'s work is checked: its verifier command and the
+/// reviewer's brief, each empty for none.
+fn set_checks(project: &ProjectId, verifier: String, review: String) -> Verb {
+    Verb::ProjectSet {
+        project: project.clone(),
+        orchestrator: None,
+        verifier: Some(verifier),
+        review: Some(review),
+        push: None,
+        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
     }
@@ -327,6 +345,26 @@ impl WorkspaceView {
         self.reveal_session(session, cx);
     }
 
+    /// Open one of Claude Code's own subagents running in `node`'s session: that agent's tile,
+    /// as its row opens it, showing its face on the subagent's thread.
+    fn open_subagent(
+        &mut self,
+        project: &ProjectId,
+        node: Node,
+        agent: String,
+        kind: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_node(project, node, cx);
+        let session = self.projects.mirror.get(project).and_then(|b| b.terminal(node));
+        if let Some((_, session)) = session
+            && self.tile_of_session(session).is_some()
+            && !self.board_shown(session)
+        {
+            self.show_subagent(session, agent, kind, cx);
+        }
+    }
+
     /// `to` is about to be focused from `from` and should show beside it: when `from`'s column
     /// fills the view, it gives up its full width first, as a column does for a tile opened
     /// beside it. Following the focus would otherwise leave the board cut off at the window's
@@ -482,6 +520,13 @@ impl WorkspaceView {
                 view.update(cx, |v, cx| v.focus(window, cx));
             }
         }
+        let views = &self.projects.views;
+        let ready: Vec<Entity<ProjectView>> =
+            self.projects.checks.iter().filter_map(|p| views.get(p).cloned()).collect();
+        self.projects.checks.retain(|p| !views.contains_key(p));
+        for view in ready {
+            view.update(cx, ProjectView::ask_checks);
+        }
     }
 
     /// The boards on show now against those at the last hand-over: a board that hid read its
@@ -613,6 +658,9 @@ impl WorkspaceView {
         let subscription =
             cx.subscribe(&view, move |this, _view, event: &ProjectEvent, cx| match event {
                 ProjectEvent::Open(node) => this.open_node(&asked, *node, cx),
+                ProjectEvent::OpenSubagent { node, agent, kind } => {
+                    this.open_subagent(&asked, *node, agent.clone(), kind.clone(), cx);
+                }
                 ProjectEvent::Output(term) => {
                     this.open_output(term.session, "The verifier's terminal has closed", cx);
                 }
@@ -620,6 +668,10 @@ impl WorkspaceView {
                     this.open_output(term.session, "The reviewer's session has closed", cx);
                 }
                 ProjectEvent::Act(task, action) => this.act_on_task(&asked, *task, *action, cx),
+                ProjectEvent::SetChecks { verifier, review } => {
+                    let verb = set_checks(&asked, verifier.clone(), review.clone());
+                    this.send_to_server(verb, |_, _| (), cx);
+                }
                 ProjectEvent::SetPush(push) => {
                     this.send_to_server(set_project(&asked, Some(*push), None), |_, _| (), cx);
                 }
@@ -935,6 +987,8 @@ impl WorkspaceView {
         self.send_to_server(
             verb,
             move |this, cx| {
+                // Its board opens on how its work is checked, which only the person sets.
+                this.projects.checks.insert(project.clone());
                 // The server's word of the new project may come before or after its answer.
                 if this.projects.mirror.get(&project).is_some() {
                     this.open_project(&project, cx);

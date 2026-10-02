@@ -18,6 +18,8 @@ pub mod recap;
 pub mod spend;
 mod view;
 
+#[cfg(test)]
+pub(crate) use view::BRIEF;
 pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
 
 use crate::icons::IconName;
@@ -67,6 +69,8 @@ gpui::actions!(
         DeleteProject,
         /// Put the keyboard on the line to the orchestrator.
         TellOrchestrator,
+        /// Set the project's verifier command and whether a reviewer reads each task's work.
+        EditChecks,
         /// Make a project of the focused terminal's directory, with that terminal as its
         /// orchestrator.
         StartProject,
@@ -100,6 +104,7 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "toggle_ask_to_start", ToggleAskToStart, &[], BOARD),
         Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
         Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
+        Command::new(Scope::Project, "edit_checks", EditChecks, &[], BOARD),
         Command::new(Scope::Workspace, "start_project", StartProject, &[], WORKSPACE),
     ]
 }
@@ -134,6 +139,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Push after each merge", IconName::Upload, Box::new(TogglePush)),
         line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
         line("Tell the orchestrator\u{2026}", IconName::MessageSquare, Box::new(TellOrchestrator)),
+        line("Verifier and review\u{2026}", IconName::ListChecks, Box::new(EditChecks)),
         line("Delete the project", IconName::X, Box::new(DeleteProject)),
     ]
 }

@@ -49,7 +49,7 @@ impl ThreadView {
 
     /// Open subagent thread `child` in the view, the one on show kept as the reader left it
     /// to go back to. The view itself takes the keyboard: a subagent has no composer.
-    pub(super) fn open_subagent(
+    pub(crate) fn open_subagent(
         &mut self,
         child: ThreadId,
         called: String,

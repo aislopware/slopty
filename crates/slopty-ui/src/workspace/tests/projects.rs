@@ -858,6 +858,7 @@ fn a_project_starts_in_the_focused_terminal(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(shown(&view, cx, here), "its board shows once the server has it");
     assert_eq!(focused(&view, cx), Some(tile));
+    assert!(cx.debug_bounds("project-checks-panel").is_some(), "open on how it is checked");
 
     view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
     cx.run_until_parked();
@@ -1469,4 +1470,146 @@ fn every_node_says_where_it_runs_and_a_waiting_one_moves_from_there(cx: &mut Tes
     let said = labels(&view, cx);
     let need = r#"Apple work, apps/slopty, Requires os == "macos""#;
     assert!(said.iter().any(|l| l == need), "{said:?}");
+}
+
+/// Claude Code's subagent `id` of type Explore, running under task 1.
+fn native(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, seq: u64, id: &str) {
+    use slopty_proto::project::{Native, NativeAgent, NativeChange};
+    let agent = Native::Agent(NativeAgent {
+        id: id.to_owned(),
+        kind: "Explore".to_owned(),
+        started_ms: WallMs::ZERO,
+        stopped_ms: None,
+        transcript: None,
+        last: None,
+    });
+    let update = ProjectUpdate {
+        project: fixtures::id("board"),
+        record: None,
+        task: None,
+        native: Some(NativeChange { task: Some(TaskId(1)), native: agent }),
+        entry: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.project_update(seq, update, cx));
+    cx.run_until_parked();
+}
+
+/// The client names a subagent's thread as the worker's Claude Code adapter does, so the
+/// board's subagent opens the thread the worker keeps for it.
+#[test]
+fn a_subagents_thread_is_named_as_the_worker_names_it() {
+    let main = slopty_proto::thread::ThreadId::new();
+    assert_eq!(
+        crate::workspace::faces::subagent_thread(main, "a1b2"),
+        slopty_agent::observed::subagent_of(main, "a1b2")
+    );
+}
+
+/// A click on one of Claude Code's own subagents in the tree opens it as its task's row opens
+/// the task: the agent's tile, showing its face, on the subagent's thread. Where the tile shows
+/// the thread view that is its way into a subagent (the bar that leads back); before the
+/// session's thread is known, the conversation face's.
+#[gpui::test]
+fn a_click_on_a_subagent_opens_its_thread(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::TableFrame;
+    use slopty_proto::thread::{Cursor, Link};
+
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (agent_tile, agent) = setup.agent;
+    native(&view, cx, 11, "a1");
+    view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, true, cx));
+    cx.run_until_parked();
+
+    let row = cx.debug_bounds("project-node-1-native-a1").expect("the subagent's row").center();
+    cx.simulate_click(row, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(agent_tile), "its agent's tile");
+    let face = view.read_with(cx, |v, _| v.face_shown(agent));
+    assert!(face, "showing its face");
+    let thread =
+        view.read_with(cx, |v, cx| v.conversation(agent).map(|f| f.read(cx).thread().clone()));
+    assert_eq!(
+        thread,
+        Some(slopty_proto::conversation::ThreadId::Agent("a1".to_owned())),
+        "on the subagent's thread"
+    );
+
+    // The worker's table names the session's thread and the subagent's under it.
+    let key = setup.fake.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(agent);
+    let root = state.row(WallMs::ZERO);
+    let mut sub = root.clone();
+    sub.id = crate::workspace::faces::subagent_thread(root.id, "a1");
+    sub.terminal = None;
+    sub.parent = Some(Link { thread: root.id, item: slopty_proto::thread::ItemId("call".into()) });
+    let table =
+        TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![root, sub.clone()] };
+    view.update_in(cx, |v, _w, cx| {
+        v.thread_table(key, &table, cx);
+        v.focus_tile(setup.orchestrator.0, cx);
+    });
+    cx.run_until_parked();
+    let row = cx.debug_bounds("project-node-1-native-a1").expect("the subagent's row").center();
+    cx.simulate_click(row, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(agent_tile));
+    let shown = view.read_with(cx, |v, cx| v.thread_face(agent).map(|t| t.read(cx).shown()));
+    assert_eq!(shown, Some(sub.id), "the thread view on the subagent's thread");
+}
+
+/// The board sets how its project's work is checked: the header's toggle opens a panel holding
+/// the verifier and the reviewer as the project has them, the keyboard in the verifier; ↩
+/// sends both as the person's word and closes it, a reviewer switched on with no brief getting
+/// the default one. Esc closes it with nothing sent, and a reviewer switched off is sent as
+/// none.
+#[gpui::test]
+fn a_board_sets_its_verifier_and_review(cx: &mut TestAppContext) {
+    use slopty_proto::project::LimitsChange;
+
+    use crate::project::BRIEF;
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let project = fixtures::id("board");
+    let set = |verifier: &str, review: &str| Verb::ProjectSet {
+        project: project.clone(),
+        orchestrator: None,
+        verifier: Some(verifier.to_owned()),
+        review: Some(review.to_owned()),
+        push: None,
+        ask_to_start: None,
+        limits: LimitsChange::default(),
+        metadata: None,
+    };
+    assert!(cx.debug_bounds("project-checks-panel").is_none(), "closed until asked");
+
+    click(cx, "project-checks");
+    assert!(cx.debug_bounds("project-checks-panel").is_some(), "the panel opens");
+    let verifier = board(&view, cx, orchestrator).read_with(cx, ProjectView::checks_typed);
+    assert_eq!(verifier, Some(("cargo gate".to_owned(), None)), "as the project has it");
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("cargo test --workspace");
+    click(cx, "project-review-switch");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(sent(&mut queue, cx, done), [set("cargo test --workspace", BRIEF)]);
+    assert!(cx.debug_bounds("project-checks-panel").is_none(), "saved, it closes");
+
+    click(cx, "project-checks");
+    cx.simulate_keystrokes("escape");
+    assert!(cx.debug_bounds("project-checks-panel").is_none(), "Esc closes it");
+    assert_eq!(sent(&mut queue, cx, done), [], "with nothing sent");
+
+    click(cx, "project-checks");
+    click(cx, "project-checks-save");
+    assert_eq!(sent(&mut queue, cx, done), [set("cargo gate", "")], "no reviewer is none");
 }

@@ -60,6 +60,10 @@ regex.workspace = true
 raw-window-handle.workspace = true
 # Which lines an agent's edit changed, when a file tile reads its file again (`file`).
 similar.workspace = true
+# A Claude Code subagent's thread id, derived as the worker derives it
+# (`workspace::faces::subagent_thread`).
+blake3.workspace = true
+uuid.workspace = true
 slopty-client.workspace = true
 slopty-platform.workspace = true
 slopty-core.workspace = true

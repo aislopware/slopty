@@ -30,6 +30,7 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group │ Project board │ Needs you 2, Up next 3, Ready to merge 1, Merged 1 (focused)
 Heading
+Button │ Verifier and review
 Button │ Ask before each task starts
 Button │ Push after each merge
 Button │ Show the orchestrator's terminal

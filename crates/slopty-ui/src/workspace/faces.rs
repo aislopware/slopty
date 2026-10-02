@@ -65,6 +65,36 @@ pub(super) struct Faces {
     pub held: HashSet<SessionId>,
     /// The thread views and the hubs they read.
     pub threads: ThreadFaces,
+    /// A subagent's thread the board asked to open in its session's face, once that face is
+    /// made and has the keyboard.
+    pub subagent: Option<SubagentAsked>,
+}
+
+/// A subagent's thread to open in the face of the session it runs in.
+#[derive(Clone, Debug)]
+pub(super) struct SubagentAsked {
+    /// The session.
+    pub session: SessionId,
+    /// Claude Code's id for the subagent.
+    pub agent: String,
+    /// Its type, which the thread's bar names it by until it has a title.
+    pub kind: String,
+    /// Frames it may still wait for the face to be made.
+    pub waits: u8,
+}
+
+/// The thread Claude Code's adapter on the worker gives subagent `agent` of the session whose
+/// thread is `main`. The worker derives it (`slopty_agent::observed::subagent_of`, which the
+/// client does not link) and a test holds the two together.
+pub(super) fn subagent_thread(main: ThreadId, agent: &str) -> ThreadId {
+    let mut hasher = blake3::Hasher::new();
+    for part in ["claude-code subagent", main.to_string().as_str(), agent] {
+        hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(hasher.finalize().as_bytes().get(..16).unwrap_or(&[0; 16]));
+    ThreadId::from_uuid(uuid::Builder::from_custom_bytes(bytes).into_uuid())
 }
 
 /// Each worker's threads, and the thread view of each agent tile that shows one.
@@ -665,6 +695,49 @@ impl WorkspaceView {
     #[must_use]
     pub fn conversation(&self, session: SessionId) -> Option<&Entity<ConversationView>> {
         self.faces.views.get(&session)
+    }
+
+    /// Show subagent `agent` (of type `kind`) of the agent in `session`: its tile shows its
+    /// face, and the face opens the subagent's thread once it is made.
+    pub(super) fn show_subagent(
+        &mut self,
+        session: SessionId,
+        agent: String,
+        kind: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_face(session, true, cx);
+        self.faces.subagent = Some(SubagentAsked { session, agent, kind, waits: 2 });
+        self.faces_dirty = true;
+        cx.notify();
+    }
+
+    /// Open the subagent the board asked for in its session's face: the thread view's own way
+    /// in (its bar leads back), else the conversation face's. A face not made yet is waited
+    /// for a frame or two; a thread the worker has not begun is said.
+    pub(super) fn open_asked_subagent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut asked) = self.faces.subagent.take() else { return };
+        let session = asked.session;
+        if let Some(view) = self.thread_face(session).cloned() {
+            let child = subagent_thread(view.read(cx).thread(), &asked.agent);
+            let known =
+                self.worker_of_session(session).and_then(|k| self.faces.threads.hubs.get(&k));
+            if known.is_some_and(|hub| hub.read(cx).threads().rows().rows.contains_key(&child)) {
+                view.update(cx, |v, cx| v.open_subagent(child, asked.kind, window, cx));
+            } else {
+                self.show_notice(format!("The {} subagent has no thread here yet", asked.kind), cx);
+            }
+        } else if let Some(face) =
+            self.faces.views.get(&session).filter(|_| self.face_shown(session)).cloned()
+        {
+            let thread = slopty_proto::conversation::ThreadId::Agent(asked.agent);
+            face.update(cx, |f, cx| f.open_thread(thread, cx));
+        } else if asked.waits > 0 && self.tile_of_session(session).is_some() {
+            asked.waits = asked.waits.saturating_sub(1);
+            self.faces.subagent = Some(asked);
+            self.faces_dirty = true;
+            cx.notify();
+        }
     }
 
     /// Show `session`'s face or its TUI.
