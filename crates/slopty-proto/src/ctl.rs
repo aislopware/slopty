@@ -496,15 +496,17 @@ pub struct ScreenStats {
     pub capture: Quantiles,
     /// Encode latency: `VTCompressionSessionEncodeFrame` → the output callback.
     pub encode: Quantiles,
-    /// Time between two heartbeats, over the last `LATENCY_WINDOW` of them. The beat is what
-    /// tells the receiver the worker is alive while nothing is being drawn, and the receiver calls
-    /// a silence of `STALL_GAP` a stall, so this is the number that says whether the worker is
-    /// keeping its own promise.
+    /// The silence each heartbeat ended (from the last datagram of any kind to the beat), over
+    /// the last `LATENCY_WINDOW` of them. The beat is what tells the receiver the worker is alive
+    /// while nothing is being drawn, and the receiver calls a silence of `STALL_GAP` a stall, so
+    /// this is the number that says whether the worker is keeping its own promise. On a quiet
+    /// stream it is the time between two beats; on a moving one the video between them is not in
+    /// it.
     pub beat_gap: Quantiles,
     /// How long the geometry probe took (its window-server reads, off the runtime), over the
     /// last `LATENCY_WINDOW` of them: the work the beat used to wait behind.
     pub bounds: Quantiles,
-    /// The longest gap between two beats since the stream opened, microseconds. The quantiles
+    /// The longest silence a beat ended since the stream opened, microseconds. The quantiles
     /// above are over a sliding window of `LATENCY_WINDOW` beats — about twenty seconds — so
     /// a single late beat early in a long stream would be gone from them by the end. This is
     /// the one that cannot forget, and it is what a rule about the beat has to be written on.

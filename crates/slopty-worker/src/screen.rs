@@ -4990,8 +4990,8 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
     let mut beats: u32 = 0;
     let mut last_beat_us: Option<u64> = None;
     let heartbeat_after_us = u64::try_from(HEARTBEAT_AFTER.as_micros()).unwrap_or(u64::MAX);
-    // Four times the promise, which is twice the gap the receiver already calls a stall: past
-    // this the beat has not merely slipped, it has failed at the one thing it is for.
+    // A silence of four times the promise, twice what the receiver already calls a stall: a
+    // beat that ends one has not merely slipped, it has failed at the one thing it is for.
     let late_beat_us = heartbeat_after_us.saturating_mul(4);
     while !shared.sink.is_closed() {
         let now = now::<P>();
@@ -5006,12 +5006,16 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
         beats = beats.wrapping_add(1);
         tracing::trace!(stream = %shared.id, beats, "heartbeat");
         shared.counters.heartbeats.fetch_add(1, Ordering::Relaxed);
-        if let Some(previous) = last_beat_us {
-            let gap = now.saturating_sub(previous);
-            shared.counters.beat_gap.lock().push(gap);
-            shared.counters.beat_gap_worst_us.fetch_max(gap, Ordering::Relaxed);
-            if gap >= late_beat_us {
-                tracing::info!(stream = %shared.id, gap_us = gap, beats, "late heartbeat");
+        // The silence this beat ends, from whatever left last. The time since the previous beat
+        // would count the video that flowed between them and, on a moving picture, read as a
+        // late beat when none was due. The first beat's is the stream's opening, which no
+        // receiver waits through.
+        if last_beat_us.is_some() {
+            let silence = now.saturating_sub(last_out);
+            shared.counters.beat_gap.lock().push(silence);
+            shared.counters.beat_gap_worst_us.fetch_max(silence, Ordering::Relaxed);
+            if silence >= late_beat_us {
+                tracing::info!(stream = %shared.id, silence_us = silence, beats, "late heartbeat");
             }
         }
         last_beat_us = Some(now);
@@ -5634,6 +5638,32 @@ mod tests {
         // The beats really went out, rather than only being counted.
         let sent = wire.drain().len();
         assert!(sent >= 8, "only {sent} datagrams for {} beats", seen.heartbeats);
+    }
+
+    /// A beat is held to the silence it ends, not to the time since the beat before: a third of
+    /// a second of video between two beats is no late beat.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn video_between_two_beats_is_not_a_late_beat() {
+        let (shared, wire) = shared_for_frames();
+        let beat = tokio::spawn(beat_loop(Arc::clone(&shared)));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let video = Bytes::from_static(&[0; 64]);
+        for _ in 0..30 {
+            shared.send(std::slice::from_ref(&video));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        beat.abort();
+
+        let seen = shared.stats();
+        let beats =
+            wire.drain().iter().filter(|d| d.len() == slopty_proto::media::HEADER_BYTES).count();
+        assert!(beats >= 3, "beats before and after the video: {beats}");
+        assert!(
+            seen.beat_gap_worst_us < 100_000,
+            "the video was counted as silence: {} µs",
+            seen.beat_gap_worst_us
+        );
     }
 
     /// The beat waits exactly as long as the silence has left to run, and never polls.
