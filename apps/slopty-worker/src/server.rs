@@ -60,7 +60,7 @@ pub fn own_facts(settings: &slopty_settings::WorkerSettings) -> slopty_worker::f
         .iter()
         .filter_map(|(name, label)| Some((name.clone(), label_fact(label)?)))
         .collect();
-    slopty_worker::facts::Own { labels, probes: settings.probes.clone() }
+    slopty_worker::facts::Own { labels, probes: settings.probes.clone(), acp: settings.acp.clone() }
 }
 
 /// A label as a fact. A float that is not a number, or is infinite, is none: no rule can

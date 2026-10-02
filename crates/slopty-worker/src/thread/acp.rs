@@ -246,7 +246,9 @@ struct Served {
 impl Served {
     /// How to run the agent named `name`, or why it cannot be.
     async fn launcher(&self, name: &str) -> Result<Launcher, String> {
-        let own = (self.own)();
+        // The settings are a file: read off the runtime.
+        let own = Arc::clone(&self.own);
+        let own = tokio::task::spawn_blocking(move || own()).await.unwrap_or_default();
         let agent = registry::find(name, &own)
             .ok_or_else(|| format!("No ACP agent {name} is known here"))?;
         let found = crate::facts::installed(&agent.program, self.path.clone())

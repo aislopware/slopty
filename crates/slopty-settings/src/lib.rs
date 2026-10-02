@@ -640,6 +640,17 @@ pub struct WorkerSettings {
     /// at 1 KiB, or `true` when it printed nothing; `false` when it fails or runs past 5 s.
     #[schemars(title = "Probes", example = serde_json::json!({ "cuda": "nvidia-smi -L" }))]
     pub probes: BTreeMap<String, String>,
+    /// Agents that speak ACP, beside the ones Slopty knows; an empty command line hides one.
+    ///
+    /// A name and the command line that serves the Agent Client Protocol on stdio
+    /// (`mine = ["/opt/mine/bin/agent", "--acp"]`). A name Slopty already knows (`gemini`,
+    /// `opencode`, the ACP registry's) is started this way instead, and an empty list takes it
+    /// away. Its threads' agent is `acp:<name>`. Read at each start.
+    #[schemars(
+        title = "ACP agents",
+        example = serde_json::json!({ "mine": ["/opt/mine/bin/agent", "--acp"], "goose": [] })
+    )]
+    pub acp: BTreeMap<String, Vec<String>>,
 }
 
 /// One of `[worker.labels]`: a flag, a number, a word or a list of them.
@@ -1041,6 +1052,12 @@ server = \"\"
 #
 # [worker.probes]
 # cuda = \"nvidia-smi -L\"
+#
+# Agents that speak ACP on stdio, by name and command line, beside the ones
+# Slopty knows; a known name is started this way instead, and [] hides it.
+#
+# [worker.acp]
+# mine = [\"/opt/mine/bin/agent\", \"--acp\"]
 
 [client]
 # The server whose directory lists the workers this app and the slopty CLI
@@ -1185,8 +1202,10 @@ impl Loaded {
 }
 
 /// Tables whose keys the person names. `[keys]` names actions the keymap knows, not this
-/// crate, and the keymap says which it does not; a worker's labels and probes are anything.
-const OPEN_TABLES: [&str; 4] = ["keys", "clipboard.workers", "worker.labels", "worker.probes"];
+/// crate, and the keymap says which it does not; a worker's labels, probes and ACP agents are
+/// anything.
+const OPEN_TABLES: [&str; 5] =
+    ["keys", "clipboard.workers", "worker.labels", "worker.probes", "worker.acp"];
 
 /// Keys in `given` with no counterpart in `known`, recursively through tables, except the
 /// [`OPEN_TABLES`].
@@ -1659,6 +1678,22 @@ mod tests {
         assert!(Settings::parse("[worker.probes]\ncuda = 1\n").error.is_some(), "a command");
         let back = toml::to_string(&loaded.settings).unwrap_or_default();
         assert_eq!(Settings::parse(&back).settings.worker, *worker, "written back:\n{back}");
+    }
+
+    /// A worker's own ACP agents are any name and a command line, and an empty one hides it.
+    #[test]
+    fn worker_acp_agents() {
+        let read = Settings::parse(
+            "[worker.acp]\nmine = [\"/opt/mine/bin/agent\", \"--acp\"]\ngoose = []\n",
+        );
+        assert!(read.error.is_none() && read.warnings.is_empty(), "{read:?}");
+        let acp = &read.settings.worker.acp;
+        assert_eq!(acp["mine"], ["/opt/mine/bin/agent", "--acp"]);
+        assert!(acp["goose"].is_empty());
+        assert!(Settings::default().worker.acp.is_empty());
+        assert!(Settings::parse("[worker.acp]\nmine = \"agent\"\n").error.is_some(), "a list");
+        let back = toml::to_string(&read.settings).unwrap_or_default();
+        assert_eq!(Settings::parse(&back).settings.worker.acp, *acp, "written back:\n{back}");
     }
 
     /// The fleet's bounds on projects, each key with its default when the file leaves it out.

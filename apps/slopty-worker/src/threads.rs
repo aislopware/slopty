@@ -199,9 +199,11 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     if let Some(home) = codex::codex_home() {
         drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), asks.codex));
     }
+    // The registry's agents and the person's own, `[worker.acp]`, read at each start.
+    let settings = slopty_settings::path_in(&asks.data);
+    let own: acp::Own =
+        Arc::new(move || slopty_settings::Settings::load(&settings).settings.worker.acp);
     drop(pi::spawn(threads.host.clone(), asks.data, None, asks.terminals, asks.pi));
-    // The registry's agents; the person's own come with `[worker.acp]` in the settings.
-    let own: acp::Own = Arc::new(std::collections::BTreeMap::new);
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
 }
 
@@ -481,8 +483,14 @@ fn shared(
             if !request.is_open() {
                 return Outcome::Done;
             }
-            if !request.options.iter().any(|o| o.id == *choice) {
+            let questions = &request.questions;
+            if questions.is_empty() && !request.options.iter().any(|o| o.id == *choice) {
                 return refused(format!("no choice {choice}"));
+            }
+            if !questions.is_empty()
+                && slopty_proto::thread::detail::Answer::read(questions, choice).is_none()
+            {
+                return refused("the answer does not answer each question".to_owned());
             }
             let by = slopty_proto::thread::Answerer {
                 client: Some(at.client),

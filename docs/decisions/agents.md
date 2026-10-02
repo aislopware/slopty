@@ -709,9 +709,40 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     turns after them are written from the protocol's schema, since recording them needs a model
     behind the agent; `tests/acp.rs` holds every line to the schema's types and every message
     Slopty sends to the very JSON in the fixture.
-  - **Not carried yet:** the person's own agents from the settings (`[worker.acp]`, which the
-    settings crate does not read yet), offering the installed ACP agents in the client, pictures
-    and files in a prompt, and the unstable methods (forking, subagents, session notices).
+  - **The person's own agents.** `[worker.acp]` in the settings names an agent and its command
+    line, or replaces a known one by name, and an empty list hides one. The worker reads it at
+    each start, off the runtime, so an edit needs no restart.
+  - **What a client can offer.** The worker's facts list the ACP agents installed under `acp`,
+    by the registry's names (`acp.cursor`, `acp.amp-acp`, the person's own), each with the
+    version its program says or `true` when it says none. Those names are the ones a thread's
+    agent carries (`acp:<name>`), so what a client offers to start is what the worker will run.
+    The `agents` fact had listed some of these by their program (`cursor-agent`, `amp`), which
+    named neither the agent nor, for Amp, the program that speaks ACP; it now holds only the
+    agents with adapters of their own (and `aider`).
+  - **Not carried yet:** the client's offer itself (queued for the UI), pictures and files in a
+    prompt, and the unstable methods (forking, subagents, session notices).
+
+- ✅ **One answer answers all of a request's questions, and each adapter reads it as its agent
+  takes it** (2026-10-02, `detail::Answer::{choice, read, parts}` and the doc of
+  `Intent::Answer` in `slopty-proto`; tests `one_answer_answers_every_question`,
+  `a_questionnaires_answer_is_the_answers_claude_code_takes` and
+  `codex_questions_are_carried_and_answered_by_their_ids`).
+  - **The encoding.** The questionnaire card sends one `Intent::Answer` for the whole form. For
+    a lone question that offers nothing it is the words typed. Otherwise it is a JSON list of
+    `detail::Answer`, one per question keyed by its text, with several picks of one question
+    joined by `", "` and one's own words last, which is how Claude Code's own dialog joins them.
+  - **Claude Code** takes the list as `AskUserQuestion`'s answers as they are.
+  - **Codex** asks with `item/tool/requestUserInput`. Its request now carries the questions,
+    each with the answers Codex offers and their descriptions, and the answer goes back under
+    each question's id, the picks and one's own words split again by the labels offered
+    (`Answer::parts`). An answer that leaves a question out, or names one not asked, is refused
+    by the worker before it reaches Codex.
+  - **A secret stays in the terminal.** A Codex question for a secret (`isSecret`) is not
+    carried: an answer given in the GUI is kept in the thread's log. The card says to answer
+    it in Codex's own terminal, which runs beside the face.
+  - **The fixture** (`tests/fixtures/codex/question.jsonl`) is written from the pinned
+    app-server schema, since the recorder (`cargo xtask codex fixtures`) does not yet drive a
+    question. Its frames are held to the generated types.
 
 - ✅ **The thread view carries what the conversation face showed, and its e2e moved with it**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/`;
