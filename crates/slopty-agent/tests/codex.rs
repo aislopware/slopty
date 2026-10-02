@@ -19,9 +19,14 @@ mod tests {
     };
 
     /// The notifications Slopty passes over: the app-server's remote-control state, its
-    /// deprecation notices and thread goals.
-    const PASSED_OVER: [&str; 3] =
-        ["remoteControl/status/changed", "deprecationNotice", "thread/goal/cleared"];
+    /// deprecation notices, thread goals, and a thread's settings (its collaboration mode, which
+    /// the thread does not show yet).
+    const PASSED_OVER: [&str; 4] = [
+        "remoteControl/status/changed",
+        "deprecationNotice",
+        "thread/goal/cleared",
+        "thread/settings/updated",
+    ];
 
     struct Line {
         client: String,
@@ -30,7 +35,11 @@ mod tests {
     }
 
     fn approval() -> Vec<Line> {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex/approval.jsonl");
+        fixture("approval.jsonl")
+    }
+
+    fn fixture(name: &str) -> Vec<Line> {
+        let path = format!("{}/tests/fixtures/codex/{name}", env!("CARGO_MANIFEST_DIR"));
         std::fs::read_to_string(path)
             .unwrap()
             .lines()
@@ -83,6 +92,7 @@ mod tests {
             "item/commandExecution/requestApproval" => {
                 call!(p::CommandExecutionRequestApprovalParams);
             }
+            "item/tool/requestUserInput" => call!(p::ToolRequestUserInputParams),
             other => panic!("no types named for {other}"),
         }
     }
@@ -93,7 +103,9 @@ mod tests {
     fn every_frame_the_app_server_sent_reads() {
         let mut unnamed = BTreeSet::new();
         let mut read = 0;
-        for line in approval().iter().filter(|line| !line.sent) {
+        let lines: Vec<Line> =
+            [approval(), fixture("question.jsonl")].into_iter().flatten().collect();
+        for line in lines.iter().filter(|line| !line.sent) {
             match rpc::read(&line.msg.to_string()).unwrap() {
                 Incoming::UnknownNotification { method } => {
                     unnamed.insert(method);
@@ -113,13 +125,15 @@ mod tests {
     /// them, and the approval and the answer to it.
     #[test]
     fn what_both_sides_sent_reads_back() {
-        let lines = approval();
+        let lines: Vec<Line> =
+            [approval(), fixture("question.jsonl")].into_iter().flatten().collect();
         let mut asked: HashMap<(String, String), (String, Value)> = HashMap::new();
         let mut checked = BTreeSet::new();
         for line in &lines {
             let id = line.msg.get("id").map(Value::to_string);
             let method = line.msg.get("method").and_then(Value::as_str);
             match (id, method) {
+                // Each fixture numbers from 1 again: a request replaces the one before it.
                 (Some(id), Some(method)) => {
                     let params = line.msg.get("params").cloned().unwrap_or(Value::Null);
                     asked.insert((line.client.clone(), id), (method.to_owned(), params));
@@ -136,7 +150,8 @@ mod tests {
             }
         }
         let want = ["initialize", "thread/start", "thread/resume", "turn/start"];
-        let want = want.into_iter().chain(["item/commandExecution/requestApproval"]);
+        let asks = ["item/commandExecution/requestApproval", "item/tool/requestUserInput"];
+        let want = want.into_iter().chain(asks);
         assert_eq!(checked, want.map(str::to_owned).collect());
     }
 
@@ -328,47 +343,77 @@ mod tests {
         assert_eq!(texts(&state), texts(&started), "the first turn came back with the resume");
     }
 
-    /// Codex's questions (`tests/fixtures/codex/question.jsonl`, written from the pinned
-    /// schema): a request carrying them, each with the answers Codex offers, answered by the one
-    /// choice the questionnaire makes for them all, which goes back under each question's id;
-    /// an answer that leaves one out goes nowhere, and a question for a secret is left to
-    /// Codex's own terminal.
+    /// Codex's questions, as the pinned build asked them in Plan mode
+    /// (`tests/fixtures/codex/question.jsonl`): a request carrying them, each with the answers
+    /// Codex offers, answered by the one choice the questionnaire makes for them all, which goes
+    /// back under each question's id exactly as the recording sent it and Codex took it; an
+    /// answer that leaves one out goes nowhere.
     #[test]
     fn codex_questions_are_carried_and_answered_by_their_ids() {
         use slopty_proto::thread::detail::Answer;
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex/question.jsonl");
-        let lines: Vec<Value> = std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap()["msg"].clone())
-            .collect();
-        let started = approval()
-            .into_iter()
-            .find(|l| l.client == "a" && l.msg["result"].get("thread").is_some())
-            .unwrap();
-        let thread: p::Thread =
-            serde_json::from_value(started.msg["result"]["thread"].clone()).unwrap();
-        let (mut shared, begun) = Shared::new(&thread, None);
-        let mut state = ThreadState::new(shared.meta().clone());
-        for action in &begun {
-            state.apply(action);
-        }
+        let lines = fixture("question.jsonl");
+        assert!(lines.iter().all(|l| l.client == "a"), "one client asks and answers");
+        let by = Answerer { client: None, name: "Slopty".to_owned() };
         let now = WallMs::from_millis(1);
-        let heard = |shared: &mut Shared, state: &mut ThreadState, msg: &Value| {
-            let Incoming::Request { id, request, .. } = rpc::read(&msg.to_string()).unwrap() else {
-                panic!("a request: {msg}")
-            };
-            for action in &shared.request(&id, &request, now) {
-                state.apply(action);
+        let mut shared: Option<Shared> = None;
+        let mut state: Option<ThreadState> = None;
+        let mut answered = 0;
+        for line in &lines {
+            if line.sent {
+                if line.msg.get("result").is_none() {
+                    continue;
+                }
+                reads_back::<p::ToolRequestUserInputResponse>("the answers", &line.msg["result"]);
+                let (shared, state) = (shared.as_mut().unwrap(), state.as_ref().unwrap());
+                let id = serde_json::from_value(line.msg["id"].clone()).unwrap();
+                let ask = shared::ask_of(&id);
+                let request = state.requests.iter().find(|r| r.id == ask).unwrap();
+                assert_eq!(request.kind, Request::QUESTION);
+                let asked = &request.questions;
+                let answer = |q: usize, a: &str| Answer {
+                    question: asked[q].text.clone(),
+                    answer: a.into(),
+                };
+                let partial = Answer::choice(asked, &[answer(0, &asked[0].options[0].label)]);
+                assert_eq!(shared.answer(&ask, &partial, by.clone()), None, "each is answered");
+                let given = [answer(0, &asked[0].options[0].label), answer(1, "plans.md")];
+                let choice = Answer::choice(asked, &given);
+                let sent = shared.answer(&ask, &choice, by.clone()).unwrap();
+                assert_eq!(sent, (id, line.msg["result"].clone()), "as the recording sent it");
+                answered += 1;
+                continue;
             }
-            id
-        };
-        reads_back::<p::ToolRequestUserInputParams>("the questions", &lines[0]["params"]);
-        reads_back::<p::ToolRequestUserInputResponse>("the answers", &lines[1]["result"]);
-
-        let id = heard(&mut shared, &mut state, &lines[0]);
-        let request = state.requests.last().unwrap().clone();
-        assert_eq!(request.kind, Request::QUESTION);
+            let actions = match rpc::read(&line.msg.to_string()).unwrap() {
+                Incoming::Answer { outcome: Ok(result), .. } if result.get("thread").is_some() => {
+                    let thread: p::Thread =
+                        serde_json::from_value(result["thread"].clone()).unwrap();
+                    let (begun, actions) = Shared::new(&thread, None);
+                    state = Some(ThreadState::new(begun.meta().clone()));
+                    shared = Some(begun);
+                    actions
+                }
+                Incoming::Request { id, request, .. } => {
+                    reads_back::<p::ToolRequestUserInputParams>(
+                        "the questions",
+                        &line.msg["params"],
+                    );
+                    shared.as_mut().unwrap().request(&id, &request, now)
+                }
+                Incoming::Notification { note, .. } => match shared.as_mut() {
+                    Some(shared) => shared.notification(&note, now),
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            if let Some(state) = state.as_mut() {
+                for action in &actions {
+                    state.apply(action);
+                }
+            }
+        }
+        assert_eq!(answered, 1);
+        let state = state.unwrap();
+        let [request] = &*state.requests else { panic!("one request: {:?}", state.requests) };
         assert_eq!(request.title, "2 questions");
         let asked: Vec<(&str, Option<&str>, Vec<&str>)> = request
             .questions
@@ -379,30 +424,45 @@ mod tests {
             })
             .collect();
         let want = [
-            ("Which layout?", Some("Layout"), vec!["Split", "Tabs"]),
-            ("What should the file be called?", Some("Name"), vec!["notes.md"]),
+            ("Which layout?", Some("Layout"), vec!["Split (Recommended)", "Tabs"]),
+            ("What should the file be called?", Some("Name"), vec!["notes.md", "plan.md"]),
         ];
         assert_eq!(asked, want);
         assert_eq!(
             request.questions[0].options[0].description.as_deref(),
             Some("Two panes side by side.")
         );
-        assert_eq!(request.questions[1].options[0].description, None, "an empty one is none");
+        let RequestState::Answered { by: who, .. } = &request.state else {
+            panic!("settled: {:?}", request.state)
+        };
+        assert_eq!(*who, by, "answered from here");
+        assert!(texts(&state).iter().any(|t| t == "text: Split it is."), "{:?}", texts(&state));
+        assert_eq!(state.turns.last().map(|t| &t.state), Some(&TurnState::Complete));
+    }
 
-        let by = Answerer { client: None, name: "Slopty".to_owned() };
-        let ask = shared::ask_of(&id);
-        let answer = |q: &str, a: &str| Answer { question: q.to_owned(), answer: a.to_owned() };
-        let partial = Answer::choice(&request.questions, &[answer("Which layout?", "Split")]);
-        assert_eq!(shared.answer(&ask, &partial, by.clone()), None, "every question is answered");
-        let given = [
-            answer("Which layout?", "Split"),
-            answer("What should the file be called?", "plans.md"),
-        ];
-        let choice = Answer::choice(&request.questions, &given);
-        let (to, result) = shared.answer(&ask, &choice, by).unwrap();
-        assert_eq!((to, result), (id, lines[1]["result"].clone()), "as Codex takes it");
-
-        heard(&mut shared, &mut state, &lines[2]);
+    /// A Codex question for a secret is not carried: its answer would be kept in the thread's
+    /// log, so the card says to answer it in Codex's own terminal. The model cannot mark one
+    /// secret, so the recorded request is the base and only `isSecret` is set.
+    #[test]
+    fn a_codex_question_for_a_secret_is_left_to_its_terminal() {
+        let lines = fixture("question.jsonl");
+        let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
+        let thread: p::Thread =
+            serde_json::from_value(started.msg["result"]["thread"].clone()).unwrap();
+        let (mut shared, _) = Shared::new(&thread, None);
+        let asked = lines
+            .iter()
+            .find(|l| l.msg.get("method").is_some_and(|m| m == "item/tool/requestUserInput"))
+            .unwrap();
+        let mut msg = asked.msg.clone();
+        msg["params"]["questions"][1]["isSecret"] = json!(true);
+        let Incoming::Request { id, request, .. } = rpc::read(&msg.to_string()).unwrap() else {
+            panic!("a request")
+        };
+        let mut state = ThreadState::new(shared.meta().clone());
+        for action in &shared.request(&id, &request, WallMs::from_millis(1)) {
+            state.apply(action);
+        }
         let secret = state.requests.last().unwrap();
         assert!(secret.questions.is_empty() && secret.options.is_empty(), "nothing to answer here");
         assert!(secret.text.as_ref().is_some_and(|t| t.text.contains("Codex's own terminal")));

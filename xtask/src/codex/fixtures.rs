@@ -10,6 +10,11 @@
 //! live. The approval the command needs then shows who is asked, what a second answer to one
 //! request gets, and how each client hears that it was settled.
 //!
+//! A second scenario (`question.jsonl`) has one client start a turn in Plan mode, where Codex
+//! offers the model its `request_user_input` tool: the canned model asks two questions, the client
+//! answers them as Slopty's Codex adapter does, and the canned model answers once the answers come
+//! back as the tool's output.
+//!
 //! Every frame either client sent or heard is kept in the order the recorder saw it, one JSON
 //! line each (`{"client", "dir", "msg"}`), scrubbed: the scratch paths become `/work`,
 //! `/codex-home` and `/home/user`, every UUID a stable placeholder numbered in order of
@@ -49,6 +54,12 @@ const HELLO: &str = "Say hello.";
 const GREETING: &str = "Hello.";
 /// What the canned model answers once the command ran.
 const ANSWER: &str = "Made it.";
+/// What the person asks for in Plan mode, which the canned model meets with questions.
+const PLAN: &str = "Plan a notes file.";
+/// The canned model's call that asks them.
+const ASK_CALL: &str = "call-q";
+/// What the canned model answers once the answers came back.
+const PLANNED: &str = "Split it is.";
 /// How long the recorder waits on any one step before it gives up.
 const PATIENCE: Duration = Duration::from_secs(60);
 /// How long the recorder listens for what a client is not sent, before saying it was not.
@@ -100,28 +111,35 @@ pub fn record() -> Result<()> {
     write_config(&scratch.codex_home, api.port)?;
     let mut server = AppServer::start(&codex, &scratch)?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let recorded = runtime.block_on(approval(&scratch));
+    let recorded = runtime.block_on(async {
+        let approval = approval(&scratch).await?;
+        let question = question(&scratch).await?;
+        anyhow::Ok([("approval.jsonl", approval), ("question.jsonl", question)])
+    });
     server.stop();
-    let lines = recorded?;
+    let recorded = recorded?;
     let dir = repo_root()?.join(FIXTURES).into_std_path_buf();
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join("approval.jsonl");
     println!("the run's API requests and app-server log are in {}", scratch.root.display());
-    let paths = vec![
-        (host()?, "host"),
-        (scratch.work.display().to_string(), "/work"),
-        (scratch.codex_home.display().to_string(), "/codex-home"),
-        (scratch.home.display().to_string(), "/home/user"),
-        (scratch.root.display().to_string(), "/scratch"),
-    ];
-    let mut scrub = Scrub::new(paths, &DATED);
-    let mut out = String::new();
-    for line in lines {
-        out.push_str(&serde_json::to_string(&scrub.value(line))?);
-        out.push('\n');
+    for (name, lines) in recorded {
+        let paths = vec![
+            (host()?, "host"),
+            (scratch.work.display().to_string(), "/work"),
+            (scratch.codex_home.display().to_string(), "/codex-home"),
+            (scratch.home.display().to_string(), "/home/user"),
+            (scratch.root.display().to_string(), "/scratch"),
+        ];
+        // Each file numbers its own UUIDs from the first.
+        let mut scrub = Scrub::new(paths, &DATED);
+        let mut out = String::new();
+        for line in lines {
+            out.push_str(&serde_json::to_string(&scrub.value(line))?);
+            out.push('\n');
+        }
+        let path = dir.join(name);
+        std::fs::write(&path, out).with_context(|| path.display().to_string())?;
+        println!("wrote {} from Codex {}", path.display(), super::VERSION);
     }
-    std::fs::write(&path, out).with_context(|| path.display().to_string())?;
-    println!("wrote {} from Codex {}", path.display(), super::VERSION);
     Ok(())
 }
 
@@ -243,7 +261,9 @@ fn answer(body: &Value, work: &Path) -> Result<Vec<Value>> {
     let input = body.get("input").and_then(Value::as_array).cloned().unwrap_or_default();
     let last = input.last();
     let ran = last.and_then(|item| item.get("type")) == Some(&json!("function_call_output"));
+    let answered = ran && last.and_then(|item| item.get("call_id")) == Some(&json!(ASK_CALL));
     let asked = last.is_some_and(|item| item.to_string().contains(PROMPT));
+    let planning = last.is_some_and(|item| item.to_string().contains(PLAN));
     let created = json!({ "type": "response.created", "response": { "id": "resp-1" } });
     let completed = json!({
         "type": "response.completed",
@@ -267,8 +287,17 @@ fn answer(body: &Value, work: &Path) -> Result<Vec<Value>> {
             "content": [{ "type": "output_text", "text": text }],
         })
     };
-    let item = if ran {
+    let item = if answered {
+        say("msg-3", PLANNED)
+    } else if ran {
         say("msg-2", ANSWER)
+    } else if planning {
+        json!({
+            "type": "function_call",
+            "call_id": ASK_CALL,
+            "name": "request_user_input",
+            "arguments": questions().to_string(),
+        })
     } else if !asked {
         say("msg-1", GREETING)
     } else {
@@ -301,6 +330,75 @@ fn answer(body: &Value, work: &Path) -> Result<Vec<Value>> {
     };
     let done = json!({ "type": "response.output_item.done", "item": item });
     Ok(vec![created, done, completed])
+}
+
+/// The canned model's questions in Plan mode, as `request_user_input` takes them.
+fn questions() -> Value {
+    json!({ "questions": [
+        {
+            "id": "layout",
+            "header": "Layout",
+            "question": "Which layout?",
+            "options": [
+                { "label": "Split (Recommended)", "description": "Two panes side by side." },
+                { "label": "Tabs", "description": "One pane at a time." },
+            ],
+        },
+        {
+            "id": "name",
+            "header": "Name",
+            "question": "What should the file be called?",
+            "options": [
+                { "label": "notes.md", "description": "Beside the others." },
+                { "label": "plan.md", "description": "Named for what it holds." },
+            ],
+        },
+    ] })
+}
+
+/// The answers the client gives, as Slopty's Codex adapter sends them: a pick for the first
+/// question, the person's own words for the second.
+const ANSWERS: [(&str, &str); 2] = [("layout", "Split (Recommended)"), ("name", "plans.md")];
+
+/// One client's turn in Plan mode: the canned model's questions, the client's answers, and
+/// the turn's end once they reach the model.
+async fn question(scratch: &Scratch) -> Result<Vec<Value>> {
+    let socket = scratch.socket();
+    listening(&socket).await?;
+    let mut pair = Pair::connect(&socket).await?;
+    let params = json!({
+        "clientInfo": { "name": "slopty", "version": "1.0.0" },
+        "capabilities": { "experimentalApi": true },
+    });
+    let id = pair.request(Who::A, "initialize", params).await?;
+    pair.answer(Who::A, id).await?;
+    pair.send(Who::A, json!({ "method": "initialized" })).await?;
+    let start =
+        json!({ "cwd": scratch.work, "approvalPolicy": "on-request", "sandbox": "read-only" });
+    let id = pair.request(Who::A, "thread/start", start).await?;
+    let started = pair.answer(Who::A, id).await?;
+    let thread = started.pointer("/result/thread/id").and_then(Value::as_str);
+    let thread = thread.context("thread/start named no thread")?.to_owned();
+    let input = json!([{ "type": "text", "text": PLAN, "text_elements": [] }]);
+    let plan = json!({ "mode": "plan", "settings": { "model": "mock-model" } });
+    let turn = json!({ "threadId": thread, "input": input, "collaborationMode": plan });
+    let id = pair.request(Who::A, "turn/start", turn).await?;
+    pair.answer(Who::A, id).await?;
+    let is_question = |msg: &Value| msg.get("method") == Some(&json!("item/tool/requestUserInput"));
+    let (_, asked) =
+        pair.until("the questions", |who, msg| who == Who::A && is_question(msg)).await?;
+    let id = asked.get("id").cloned().context("questions with no id")?;
+    let answers: serde_json::Map<String, Value> =
+        ANSWERS.iter().map(|(q, a)| ((*q).to_owned(), json!({ "answers": [a] }))).collect();
+    pair.send(Who::A, json!({ "id": id, "result": { "answers": answers } })).await?;
+    let done = |msg: &Value| msg.get("method") == Some(&json!("turn/completed"));
+    pair.until("the planned turn's end", |_, msg| done(msg)).await?;
+    pair.settle(QUIET).await?;
+    pair.a.close(None).await?;
+    pair.b.close(None).await?;
+    // Only the client that asked is kept: the second one only listened.
+    pair.lines.retain(|line| line.get("client") == Some(&json!("a")));
+    Ok(pair.lines)
 }
 
 /// `events` as a server-sent event stream.
