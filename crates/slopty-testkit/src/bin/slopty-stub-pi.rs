@@ -15,6 +15,17 @@
 //!   empty success when the recording has none, and the steps stay where they were.
 //! - Anything else is unexpected: it is noted and answered with a failure.
 //!
+//! - With `session_file`, the session's file is said to be that one wherever pi names it.
+//! - With `writer_lock`, it holds that file while it runs, in either mode, made only if it is not
+//!   there; finding it there already means two wrote the session at once, which its record says
+//!   (`clash`).
+//!
+//! Started without `--mode rpc` it is pi's TUI on the session: it appends the session the
+//! recording ends with (its `get_entries`) to `session_file` as pi's TUI writes it, a header
+//! first when the file is new, in two writes a moment apart. Then it waits for its stdin to
+//! close, as a TUI waits on its terminal, or with `tui_exits` it exits, as when the person ends
+//! it. What it was started with goes to `tui_record`.
+//!
 //! It reads what to replay from `stub-pi.json` beside the path it was started as (a test puts it
 //! on the worker's `PATH` as `pi`, with the file beside it): `{"fixture": …, "record": …}`. No
 //! environment variable carries it, since the worker that starts it may be the test itself.
@@ -29,6 +40,7 @@ use std::error::Error;
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -69,6 +81,32 @@ fn run(at: &Path, args: &[String]) -> Fallible<()> {
     let path = |key: &str| config.get(key).and_then(Value::as_str).map(PathBuf::from);
     let fixture = path("fixture").ok_or("stub-pi.json names no fixture")?;
     let (before, steps) = steps(&std::fs::read_to_string(fixture)?)?;
+    let session_file = path("session_file");
+    let lock = path("writer_lock");
+    let clash = lock.as_deref().is_some_and(|lock| {
+        std::fs::OpenOptions::new().write(true).create_new(true).open(lock).is_err()
+    });
+    let ran = if args.windows(2).any(|pair| pair == ["--mode", "rpc"]) {
+        rpc(&config, args, &before, &steps, session_file.as_deref(), clash)
+    } else {
+        tui(&config, args, &steps, session_file.as_deref(), clash)
+    };
+    if let Some(lock) = lock.filter(|_| !clash) {
+        std::fs::remove_file(lock)?;
+    }
+    ran
+}
+
+/// pi in RPC mode: the recording replayed against what it is sent.
+fn rpc(
+    config: &Value,
+    args: &[String],
+    before: &[Value],
+    steps: &[Step],
+    session_file: Option<&Path>,
+    clash: bool,
+) -> Fallible<()> {
+    let path = |key: &str| config.get(key).and_then(Value::as_str).map(PathBuf::from);
     let gate = args
         .iter()
         .position(|a| a == "--extension")
@@ -81,12 +119,13 @@ fn run(at: &Path, args: &[String]) -> Fallible<()> {
         "gate": gate,
         "heard": [],
         "unexpected": [],
+        "clash": clash,
     });
     let record_at = path("record");
     save(record_at.as_deref(), &record)?;
 
     let mut out = std::io::stdout().lock();
-    for line in &before {
+    for line in before {
         writeln!(out, "{line}")?;
     }
     out.flush()?;
@@ -101,7 +140,7 @@ fn run(at: &Path, args: &[String]) -> Fallible<()> {
             next = next.saturating_add(1);
             for wrote in &step.wrote {
                 let wrote = answering(wrote, &step.sent, id.as_ref(), &kind);
-                writeln!(out, "{wrote}")?;
+                writeln!(out, "{}", filed(wrote, session_file))?;
             }
         } else if kind.starts_with("get_") {
             let recorded = steps.iter().find(|s| text(&s.sent, "type") == kind).and_then(|s| {
@@ -115,7 +154,7 @@ fn run(at: &Path, args: &[String]) -> Fallible<()> {
                 },
                 |wrote| answering(wrote, wrote, id.as_ref(), &kind),
             );
-            writeln!(out, "{answer}")?;
+            writeln!(out, "{}", filed(answer, session_file))?;
         } else if kind != "extension_ui_response" {
             push(&mut record, "unexpected", sent.clone());
             let error = "the stand-in pi has no record of this";
@@ -129,6 +168,73 @@ fn run(at: &Path, args: &[String]) -> Fallible<()> {
         save(record_at.as_deref(), &record)?;
     }
     Ok(())
+}
+
+/// pi's TUI on the session: the recorded session appended to `file`, then a wait on stdin.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test program with no runtime, pausing between two writes as a TUI's turns do"
+)]
+fn tui(
+    config: &Value,
+    args: &[String],
+    steps: &[Step],
+    file: Option<&Path>,
+    clash: bool,
+) -> Fallible<()> {
+    let cwd = std::env::current_dir()?;
+    let record = json!({ "argv": args, "cwd": cwd.to_string_lossy(), "clash": clash });
+    let at = config.get("tui_record").and_then(Value::as_str).map(PathBuf::from);
+    save(at.as_deref(), &record)?;
+    let file = file.ok_or("stub-pi.json names no session_file")?;
+    let entries: Vec<Value> = steps
+        .iter()
+        .filter(|s| text(&s.sent, "type") == "get_entries")
+        .flat_map(|s| s.wrote.iter())
+        .find(|w| is_response(w))
+        .and_then(|w| w.get("data")?.get("entries")?.as_array().cloned())
+        .ok_or("the recording has no session to write")?;
+    let mut lines = Vec::new();
+    if !file.exists() {
+        let id = args
+            .iter()
+            .position(|a| a == "--session-id")
+            .and_then(|at| args.get(at.saturating_add(1)))
+            .cloned()
+            .unwrap_or_default();
+        let header =
+            json!({ "type": "session", "version": 3, "id": id, "cwd": cwd.to_string_lossy() });
+        lines.push(header);
+    }
+    lines.extend(entries);
+    let half = lines.len() / 2;
+    let mut session = std::fs::OpenOptions::new().create(true).append(true).open(file)?;
+    for (n, line) in lines.iter().enumerate() {
+        if n == half {
+            session.flush()?;
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        writeln!(session, "{line}")?;
+    }
+    session.flush()?;
+    if config.get("tui_exits").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    for line in std::io::stdin().lock().lines() {
+        drop(line?);
+    }
+    Ok(())
+}
+
+/// `record` with the session's file said to be `file`, when it names one.
+fn filed(mut record: Value, file: Option<&Path>) -> Value {
+    let Some(file) = file else { return record };
+    if let Some(data) = record.get_mut("data").and_then(Value::as_object_mut)
+        && data.contains_key("sessionFile")
+    {
+        data.insert("sessionFile".to_owned(), json!(file.to_string_lossy()));
+    }
+    record
 }
 
 /// The recording cut into what pi wrote before any command, and the steps.

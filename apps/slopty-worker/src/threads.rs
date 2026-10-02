@@ -102,19 +102,67 @@ pub fn open(
             let (claude, asks) = Driver::channel();
             let (codex, codex_asks) = Codex::channel();
             let (pi, pi_asks) = Pi::channel();
+            let terminals = Arc::new(PiTerminals(worker.clone()));
             let typing = Typing { worker, agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
             // The threads live under the data directory, where pi's gate is written too.
             let data = dir.parent().unwrap_or(dir).to_path_buf();
-            let observing = Observing { claude: asks, codex: codex_asks, pi: pi_asks, data };
+            let observing =
+                Observing { claude: asks, codex: codex_asks, pi: pi_asks, data, terminals };
             Some((Threads { host, claude, codex, pi, composer, snapshots }, observing))
         }
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "the thread host did not open: {e}");
             None
         }
+    }
+}
+
+/// The daemon's terminals, as pi's own TUI runs in them when the session is handed to it.
+#[derive(Debug)]
+struct PiTerminals(Worker);
+
+impl pi::tui::Terminals for PiTerminals {
+    fn open(
+        &self,
+        command: Vec<String>,
+        cwd: String,
+        env: Vec<(String, String)>,
+    ) -> pi::tui::Pending<'_, Result<SessionId, String>> {
+        Box::pin(async move {
+            let open = slopty_proto::terminal::OpenSession {
+                size: slopty_proto::terminal::TermSize::default(),
+                cwd: Some(cwd),
+                command,
+                env,
+                title: Some("pi".to_owned()),
+                attach: false,
+            };
+            self.0.open(&open).await.map(|session| session.id()).map_err(|e| e.to_string())
+        })
+    }
+
+    fn exited(&self, session: SessionId) -> pi::tui::Pending<'static, ()> {
+        let handle = self.0.get(session).ok();
+        Box::pin(async move {
+            let Some(handle) = handle else { return };
+            let mut activity = handle.activity();
+            while !activity.borrow_and_update().exited {
+                if activity.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
+    }
+
+    fn close(&self, session: SessionId) -> pi::tui::Pending<'_, ()> {
+        Box::pin(async move {
+            if let Err(e) = self.0.close(session).await {
+                tracing::debug!(%session, "pi's terminal did not close: {e}");
+            }
+        })
     }
 }
 
@@ -126,6 +174,8 @@ pub struct Observing {
     pi: pi::Asks,
     /// The daemon's data directory.
     data: PathBuf,
+    /// The terminals pi's TUI runs in.
+    terminals: Arc<PiTerminals>,
 }
 
 /// Observe every Claude Code session and follow every Codex thread into the daemon's
@@ -139,7 +189,7 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     if let Some(home) = codex::codex_home() {
         drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), asks.codex));
     }
-    drop(pi::spawn(threads.host.clone(), asks.data, None, asks.pi));
+    drop(pi::spawn(threads.host.clone(), asks.data, None, asks.terminals, asks.pi));
 }
 
 /// What a request needs of the connection it came on.
@@ -351,7 +401,7 @@ fn decide(
     if codex::is_shared(state) {
         return (shared(at, &threads.codex, state, id, intent), Vec::new());
     }
-    if pi::is_driven(state) {
+    if pi::is_pi(state) {
         let by = slopty_proto::thread::Answerer { client: Some(at.client), name: "Slopty".into() };
         return (threads.pi.decide(state, id, intent, by), Vec::new());
     }

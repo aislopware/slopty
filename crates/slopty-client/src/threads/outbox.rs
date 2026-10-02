@@ -73,6 +73,8 @@ impl Sent {
             | Intent::SetModel { .. }
             | Intent::SetMode { .. }
             | Intent::Compact
+            | Intent::Handoff
+            | Intent::TakeBack
             | Intent::StopTask { .. }
             | Intent::Keep(_)
             | Intent::Revert(_) => self.outcome.is_some(),

@@ -172,6 +172,11 @@ pub enum Intent {
     /// Put a change back in the working tree as it was: the whole file, or the hunks named.
     /// Refused when the file no longer is what the review showed.
     Revert(Pick),
+    /// Give the session to the agent's own TUI, in a terminal of the worker's, once the agent
+    /// rests ([`Cap::HANDOFF`]).
+    Handoff,
+    /// Take the session back from the agent's own TUI once it rests, and drive it again.
+    TakeBack,
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -202,6 +207,7 @@ impl Intent {
             Self::SetModel { .. } => Cap::SET_MODEL,
             Self::SetMode { .. } => Cap::SET_MODE,
             Self::Compact => Cap::COMPACT,
+            Self::Handoff | Self::TakeBack => Cap::HANDOFF,
             Self::StopTask { .. } => Cap::STOP_TASK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
         }

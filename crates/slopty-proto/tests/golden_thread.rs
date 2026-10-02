@@ -333,6 +333,8 @@ mod golden_thread {
         snap("intent_set_model", &send(Intent::SetModel { model: "claude-opus-5-5".to_owned() }));
         snap("intent_set_mode", &send(Intent::SetMode { mode: "plan".to_owned() }));
         snap("intent_compact", &send(Intent::Compact));
+        snap("intent_handoff", &send(Intent::Handoff));
+        snap("intent_take_back", &send(Intent::TakeBack));
         snap("intent_stop_task", &send(Intent::StopTask { task: "b1".to_owned() }));
     }
 

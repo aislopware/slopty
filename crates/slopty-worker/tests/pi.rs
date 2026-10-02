@@ -2,14 +2,19 @@
 //! stand-in `pi` (`slopty-stub-pi`) on the `PATH` it is found on, replaying the recording of
 //! the pinned pi with Slopty's gate (`crates/slopty-agent/tests/fixtures/pi/gate.jsonl`). The
 //! stand-in fails a command it has no record of, so what the worker sent is what pi was sent.
+//! Handed to pi's TUI, the stand-in runs as the TUI in a terminal the test keeps, appending the
+//! recorded session to its file; it notes any time two of it wrote the session at once.
 
 #[cfg(test)]
 mod pi {
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::Value;
-    use slopty_core::ClientId;
+    use slopty_core::{ClientId, SessionId};
     use slopty_proto::thread::wire::{Intent, Outcome, Start};
     use slopty_proto::thread::{
         AgentId, Answerer, Cap, Delivery, Drive, IntentId, ItemBody, Liveness, Phase, RequestState,
@@ -17,7 +22,10 @@ mod pi {
     };
     use slopty_worker::thread::Host;
     use slopty_worker::thread::log::Limits;
+    use slopty_worker::thread::pi::tui::{Pending, Terminals};
     use slopty_worker::thread::pi::{self, Pi};
+    use tokio::process::ChildStdin;
+    use tokio::sync::watch;
 
     const WAIT: Duration = Duration::from_secs(30);
 
@@ -30,6 +38,64 @@ mod pi {
         slopty_testkit::bins::bin(&profile.join("slopty-worker-tests").to_string_lossy(), name)
     }
 
+    /// A kept terminal: its program's stdin until it is closed, and whether the program ended.
+    type Running = (Option<ChildStdin>, watch::Receiver<bool>);
+
+    /// The worker's terminals as the test keeps them: each runs its program on pipes, and is
+    /// closed by closing its stdin, as a terminal's program ends when its terminal goes.
+    #[derive(Default)]
+    struct Kept {
+        running: parking_lot::Mutex<HashMap<SessionId, Running>>,
+        opened: parking_lot::Mutex<Vec<(Vec<String>, String)>>,
+    }
+
+    impl Terminals for Kept {
+        fn open(
+            &self,
+            command: Vec<String>,
+            cwd: String,
+            env: Vec<(String, String)>,
+        ) -> Pending<'_, Result<SessionId, String>> {
+            Box::pin(async move {
+                self.opened.lock().push((command.clone(), cwd.clone()));
+                let mut child = tokio::process::Command::new(&command[0])
+                    .args(&command[1..])
+                    .current_dir(cwd)
+                    .envs(env)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                let stdin = child.stdin.take();
+                let (done, ended) = watch::channel(false);
+                tokio::spawn(async move {
+                    let _status = child.wait().await;
+                    let _gone = done.send(true);
+                });
+                let session = SessionId::new();
+                self.running.lock().insert(session, (stdin, ended));
+                Ok(session)
+            })
+        }
+
+        fn exited(&self, session: SessionId) -> Pending<'static, ()> {
+            let ended = self.running.lock().get(&session).map(|(_, ended)| ended.clone());
+            Box::pin(async move {
+                let Some(mut ended) = ended else { return };
+                let _ended = ended.wait_for(|done| *done).await;
+            })
+        }
+
+        fn close(&self, session: SessionId) -> Pending<'_, ()> {
+            Box::pin(async move {
+                let stdin =
+                    self.running.lock().get_mut(&session).and_then(|(stdin, _)| stdin.take());
+                drop(stdin);
+                self.exited(session).await;
+            })
+        }
+    }
+
     /// A worker's threads and data, a project to work in, and the stand-in as `pi` alone on a
     /// `PATH` of its own.
     struct Rig {
@@ -39,11 +105,19 @@ mod pi {
         work: PathBuf,
         programs: PathBuf,
         record: PathBuf,
+        tui_record: PathBuf,
+        session_file: PathBuf,
+        terminals: Arc<Kept>,
         me: ClientId,
     }
 
     impl Rig {
         fn new() -> Self {
+            Self::with_tui(false)
+        }
+
+        /// A rig whose stand-in TUI exits once it has written, when `exits`.
+        fn with_tui(exits: bool) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().canonicalize().unwrap();
             let (data, work, programs) = (root.join("data"), root.join("work"), root.join("bin"));
@@ -56,17 +130,38 @@ mod pi {
                 .canonicalize()
                 .unwrap();
             let record = root.join("record.json");
-            let config = serde_json::json!({ "fixture": fixture, "record": record });
+            let tui_record = root.join("tui-record.json");
+            let session_file = root.join("session.jsonl");
+            let config = serde_json::json!({
+                "fixture": fixture,
+                "record": record,
+                "tui_record": tui_record,
+                "session_file": session_file,
+                "writer_lock": root.join("writer.lock"),
+                "tui_exits": exits,
+            });
             std::fs::write(programs.join("stub-pi.json"), config.to_string()).unwrap();
             let host = Host::open(&data.join("threads"), Limits::default()).unwrap();
-            Self { _dir: dir, host, data, work, programs, record, me: ClientId::new() }
+            Self {
+                _dir: dir,
+                host,
+                data,
+                work,
+                programs,
+                record,
+                tui_record,
+                session_file,
+                terminals: Arc::default(),
+                me: ClientId::new(),
+            }
         }
 
         /// The pi threads served, and what is asked of them.
         fn serve(&self) -> (Pi, tokio::task::JoinHandle<()>) {
             let (pi, asks) = Pi::channel();
             let path = Some(self.programs.clone().into_os_string());
-            (pi, pi::spawn(self.host.clone(), self.data.clone(), path, asks))
+            let terminals: Arc<dyn Terminals> = Arc::<Kept>::clone(&self.terminals);
+            (pi, pi::spawn(self.host.clone(), self.data.clone(), path, terminals, asks))
         }
 
         fn start(&self, prompt: &str) -> Box<Start> {
@@ -132,6 +227,29 @@ mod pi {
         /// What the stand-in that ran last was given and heard.
         fn record(&self) -> Value {
             serde_json::from_slice(&std::fs::read(&self.record).unwrap()).unwrap()
+        }
+
+        /// The driven stand-in's record once `done` holds of it: a new one is written as it
+        /// starts.
+        async fn record_once(&self, done: impl Fn(&Value) -> bool) -> Value {
+            let waited = tokio::time::timeout(WAIT, async {
+                loop {
+                    let read = std::fs::read(&self.record).ok();
+                    if let Some(record) = read.and_then(|r| serde_json::from_slice(&r).ok())
+                        && done(&record)
+                    {
+                        return record;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            waited.unwrap_or_else(|_| panic!("the record: {:#}", self.record()))
+        }
+
+        /// What the stand-in that ran last as the TUI was given.
+        fn tui_record(&self) -> Value {
+            serde_json::from_slice(&std::fs::read(&self.tui_record).unwrap()).unwrap()
         }
     }
 
@@ -331,6 +449,106 @@ mod pi {
         assert!(!answered, "nothing answered the gate");
     }
 
+    fn held_by_tui(s: &ThreadState) -> bool {
+        s.meta.terminal.is_some() && s.meta.drive.is(Drive::OBSERVED)
+    }
+
+    fn held_by_slopty(s: &ThreadState) -> bool {
+        s.meta.terminal.is_none() && s.meta.drive.is(Drive::DRIVEN)
+    }
+
+    /// On the person's word the session goes to pi's own TUI once pi rests, in a terminal on
+    /// the same session with the thread's flags, and the thread follows what the TUI writes; it
+    /// takes nothing else while the TUI holds it. A worker that starts again follows the TUI
+    /// again. Taken back once the TUI rests, the terminal closes and pi is driven again on the
+    /// same session with the same flags, read again from the session. At no time do two write
+    /// the session.
+    #[tokio::test]
+    async fn a_session_goes_to_pis_tui_and_comes_back() {
+        let rig = Rig::new();
+        let (pi, served) = rig.serve();
+        let id = IntentId::new();
+        let Outcome::Started { thread } = pi.start(id, rig.start("Say hello.")).await else {
+            panic!("not started");
+        };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert_eq!(
+            state.meta.facts.get("session-file").map(String::as_str),
+            Some(rig.session_file.to_string_lossy().as_ref()),
+            "where pi said it keeps the session"
+        );
+        assert!(state.meta.can(Cap::HANDOFF));
+        let (_, back) = rig.intent(&pi, thread, &Intent::TakeBack);
+        assert!(matches!(back, Outcome::Refused { .. }), "Slopty holds it: {back:?}");
+
+        assert_eq!(rig.intent(&pi, thread, &Intent::Handoff).1, Outcome::Accepted);
+        let state = rig
+            .until(thread, "the TUI's four turns", |s| {
+                held_by_tui(s) && turn_ended(4, TurnState::Interrupted)(s)
+            })
+            .await;
+        assert_eq!(state.status.liveness, Liveness::Live);
+        assert_eq!(state.meta.caps, [Cap::named(Cap::HANDOFF)], "it can only be taken back");
+        let opened = rig.terminals.opened.lock().clone();
+        let program = rig.programs.join("pi").to_string_lossy().into_owned();
+        let session = id.to_string();
+        let want =
+            vec![program, "--session-id".to_owned(), session.clone(), "--offline".to_owned()];
+        assert_eq!(opened, [(want.clone(), rig.work.to_string_lossy().into_owned())]);
+        assert_eq!(rig.tui_record()["argv"], serde_json::json!(&want[1..]));
+        let send = Intent::Send { text: "Hello?".to_owned(), delivery: Delivery::Steer };
+        assert!(!matches!(rig.intent(&pi, thread, &send).1, Outcome::Done), "the TUI's now");
+        let (_, again) = rig.intent(&pi, thread, &Intent::Handoff);
+        assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");
+
+        served.abort();
+        let (pi, _served) = rig.serve();
+        rig.until(thread, "followed again", held_by_tui).await;
+        assert_eq!(rig.terminals.opened.lock().len(), 1, "the same TUI");
+
+        assert_eq!(rig.intent(&pi, thread, &Intent::TakeBack).1, Outcome::Accepted);
+        let live = |s: &ThreadState| held_by_slopty(s) && s.status.liveness == Liveness::Live;
+        let state = rig.until(thread, "driven again", live).await;
+        assert!(state.meta.can(Cap::STEER));
+        let record = rig.record_once(|r| r["heard"][0]["type"] == "get_entries").await;
+        let argv = record["argv"].as_array().unwrap();
+        assert_eq!(argv[5], session.as_str(), "the same session");
+        assert_eq!(argv.last().unwrap(), "--offline", "with the flags it was started with");
+
+        let again = rig.send(&pi, thread, "Say hello.");
+        let state =
+            rig.until(thread, "a turn driven again", turn_ended(5, TurnState::Complete)).await;
+        assert_eq!(users(&state).last(), Some(&("Say hello.".to_owned(), Some(again))));
+        assert_eq!(rig.record()["clash"], false, "one writer");
+        assert_eq!(rig.tui_record()["clash"], false, "one writer");
+        assert_eq!(rig.record()["unexpected"], serde_json::json!([]));
+    }
+
+    /// A TUI the person ends gives the session back: Slopty holds it, pi exited, and the next
+    /// message drives pi again from the session.
+    #[tokio::test]
+    async fn a_tui_the_person_ends_gives_the_session_back() {
+        let rig = Rig::with_tui(true);
+        let (pi, _served) = rig.serve();
+        let Outcome::Started { thread } = pi.start(IntentId::new(), rig.start("Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert_eq!(rig.intent(&pi, thread, &Intent::Handoff).1, Outcome::Accepted);
+        let given_back = |s: &ThreadState| {
+            held_by_slopty(s)
+                && s.status.liveness == (Liveness::Exited { resumable: true })
+                && s.turns.len() == 4
+        };
+        let state = rig.until(thread, "given back with what the TUI wrote", given_back).await;
+        assert_eq!(state.turns[3].state, TurnState::Interrupted);
+        let again = rig.send(&pi, thread, "Say hello.");
+        let state = rig.until(thread, "driven again", turn_ended(5, TurnState::Complete)).await;
+        assert_eq!(users(&state).last(), Some(&("Say hello.".to_owned(), Some(again))));
+        assert_eq!(rig.record()["clash"], false, "one writer");
+    }
+
     /// A start pi cannot take is refused once, with why: a flag that would loosen the gate, a
     /// folder that is not there, pi not installed.
     #[tokio::test]
@@ -352,8 +570,9 @@ mod pi {
         let (bare, asks) = Pi::channel();
         let empty = rig.data.join("empty");
         std::fs::create_dir_all(&empty).unwrap();
-        let _bare =
-            pi::spawn(rig.host.clone(), rig.data.clone(), Some(empty.into_os_string()), asks);
+        let terminals: Arc<dyn Terminals> = Arc::<Kept>::clone(&rig.terminals);
+        let path = Some(empty.into_os_string());
+        let _bare = pi::spawn(rig.host.clone(), rig.data.clone(), path, terminals, asks);
         let missing = bare.start(IntentId::new(), rig.start("Say hello.")).await;
         assert_eq!(missing, Outcome::Refused { reason: "pi is not installed".to_owned() });
         assert!(!rig.record.exists(), "no pi ran");

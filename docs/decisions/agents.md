@@ -604,9 +604,38 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     test itself, whose environment is shared. The worker tests run the gate's recording through
     it: allow, deny with a reason, an interrupt at the gate, a resume from the session, and the
     worker going while the gate asks, each asserting what reached pi.
+  - **Kept flags.** The start's safe flags, without the model ones, are kept as the thread's
+    `pi-args` fact and re-checked against the safe list each time pi starts again on the session,
+    so a resumed or taken-back pi keeps its tool list. The model is left to the session, which
+    keeps its own.
   - **Not carried yet:** queueing a message (pi's follow-up queue has no way to take one message
-    back), the handoff to pi's TUI at idle, the start's flags on a resume (the session keeps its
-    model, not its tool list), and a picture in a message.
+    back), and a picture in a message.
+
+- ✅ **pi's TUI takes a resting session on the person's word, and gives it back the same way;
+  one writer holds it throughout** (2026-10-02; `Intent::Handoff`, `Intent::TakeBack`,
+  `crates/slopty-worker/src/thread/pi/tui.rs`; `a_session_goes_to_pis_tui_and_comes_back` and
+  `a_tui_the_person_ends_gives_the_session_back` in `crates/slopty-worker/tests/pi.rs`).
+  - **Who holds it is in the meta.** Slopty holding the session is drive `driven` with no
+    terminal; the TUI holding it is drive `observed` with the terminal it runs in and only
+    `handoff` among the caps, so a client offers nothing else while the TUI holds it, and the
+    worker refuses anything else with a reason.
+  - **Handoff waits for rest.** The driven pi is told to end once no run works and no turn is
+    open (`agent_settled` seen), never mid-turn. Only once it is reaped does the worker open a
+    terminal running `pi --session-id <id>` plus the kept flags. The next task starts from the
+    last one's end message, so the two never overlap. The stand-in takes a writer lock on the
+    session file and the tests assert it never clashed.
+  - **Following the TUI.** The TUI has no protocol, so the worker follows the session file pi
+    writes: a stat every 250 ms and a read of only what it grew by, each new entry mapped by the
+    same rule as `get_entries`. A file that shrank, or an entry off the last one (the person
+    moved to another branch), reads the thread again whole. A worker that starts again with a
+    thread held by a TUI follows it again, since the terminal outlives the worker's restart.
+  - **Taking it back.** Take back waits until the TUI's session rests, then closes its terminal,
+    waits for it to exit, and drives pi again, which reads the session from `get_entries` first.
+    A TUI the person ends on their own leaves the session with Slopty, its pi exited and
+    resumable, and the next message starts the driven pi on it.
+  - **Rejected:** reading the TUI's screen to know when it rests (the session file says so, and
+    Slopty never reads a screen to steer an agent), and sending `/quit` into it (keys go into an
+    agent's TUI only on the person's word).
 
 - ✅ **The thread view carries what the conversation face showed, and its e2e moved with it**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/`;

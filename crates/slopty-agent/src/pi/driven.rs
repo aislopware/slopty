@@ -24,6 +24,10 @@
 //!   no, or a text. Each is a question with the answers the extension offers, and stays open until
 //!   it is answered or pi gives up on it at its timeout, since pi waits on it whatever the turn
 //!   does. A notice an extension shows is a notice in the thread.
+//! - **Who holds it.** Slopty drives the session (drive `driven`, no terminal), or pi's own TUI
+//!   holds it in a terminal (drive `observed`, the terminal named), when the thread follows the
+//!   entries the TUI appends to the session's file ([`Driven::appended`]) and can only be taken
+//!   back ([`Driven::held_by_tui`], [`Driven::held_by_slopty`]).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -45,8 +49,31 @@ use super::rpc::{
 };
 
 /// What a driven pi can do through Slopty.
-pub const CAPS: [&str; 6] =
-    [Cap::APPROVALS, Cap::COMPACT, Cap::INTERRUPT, Cap::LIVE_TEXT, Cap::SET_MODEL, Cap::STEER];
+pub const CAPS: [&str; 7] = [
+    Cap::APPROVALS,
+    Cap::COMPACT,
+    Cap::HANDOFF,
+    Cap::INTERRUPT,
+    Cap::LIVE_TEXT,
+    Cap::SET_MODEL,
+    Cap::STEER,
+];
+
+/// What a pi whose own TUI holds the session can do through Slopty: be taken back.
+pub const TUI_CAPS: [&str; 1] = [Cap::HANDOFF];
+
+/// The fact that keeps the flags a thread's pi was started with, as a JSON list: a pi started
+/// again for it, driven or in its TUI, gets them too.
+pub const ARGS_FACT: &str = "pi-args";
+
+/// The fact that names the session's file, as pi said it.
+pub const SESSION_FILE_FACT: &str = "session-file";
+
+/// The flags a thread's pi was started with ([`ARGS_FACT`]).
+#[must_use]
+pub fn args_of(meta: &ThreadMeta) -> Vec<String> {
+    meta.facts.get(ARGS_FACT).and_then(|args| serde_json::from_str(args).ok()).unwrap_or_default()
+}
 
 /// The gate's answers, by their choice ids.
 pub const ALLOW: &str = "allow";
@@ -208,8 +235,6 @@ impl Driven {
     /// pi session `session` of pi `version` in `cwd`, with the actions that begin its thread.
     #[must_use]
     pub fn new(session: &str, version: &str, cwd: &str, now: WallMs) -> (Self, Vec<Action>) {
-        let mut caps: Vec<Cap> = CAPS.iter().map(|c| Cap::named(c)).collect();
-        caps.sort();
         let meta = ThreadMeta {
             id: thread_of(session),
             agent: AgentId::named(AgentId::PI),
@@ -222,11 +247,24 @@ impl Driven {
             origin: ThreadMeta::PERSON.to_owned(),
             forked_from: None,
             drive: Drive::named(Drive::DRIVEN),
-            caps,
+            caps: caps(&CAPS),
             models: Vec::new(),
             facts: BTreeMap::new(),
             created_ms: now,
         };
+        Self::with(meta, now)
+    }
+
+    /// The thread `meta` as it stands, read again from nothing: what it is and who holds it are
+    /// kept, what it holds is told again by [`Driven::entries`] or [`Driven::observed`].
+    #[must_use]
+    pub fn of(meta: &ThreadMeta, now: WallMs) -> (Self, Vec<Action>) {
+        let mut meta = meta.clone();
+        meta.models.clear();
+        Self::with(meta, now)
+    }
+
+    fn with(meta: ThreadMeta, now: WallMs) -> (Self, Vec<Action>) {
         let driven = Self {
             meta,
             turns: 0,
@@ -254,6 +292,50 @@ impl Driven {
     #[must_use]
     pub const fn meta(&self) -> &ThreadMeta {
         &self.meta
+    }
+
+    /// The flags pi was started with, kept for every pi started again for the thread.
+    pub fn started_with(&mut self, args: &[String]) -> Vec<Action> {
+        if args.is_empty() {
+            return Vec::new();
+        }
+        let json = serde_json::to_string(args).unwrap_or_default();
+        self.meta.facts.insert(ARGS_FACT.to_owned(), json);
+        vec![Action::Meta(Box::new(self.meta.clone()))]
+    }
+
+    /// The terminal whose TUI holds the session, when one does.
+    #[must_use]
+    pub const fn held(&self) -> Option<slopty_core::SessionId> {
+        self.meta.terminal
+    }
+
+    /// pi's own TUI in `terminal` holds the session from `now`: the thread follows what it
+    /// writes, and can only be taken back.
+    pub fn held_by_tui(&mut self, terminal: slopty_core::SessionId, now: WallMs) -> Vec<Action> {
+        self.meta.terminal = Some(terminal);
+        self.meta.drive = Drive::named(Drive::OBSERVED);
+        self.meta.caps = caps(&TUI_CAPS);
+        let mut actions = self.withdraw(|_| true);
+        actions.push(Action::Meta(Box::new(self.meta.clone())));
+        self.phase = (self.phase_now(), now);
+        actions.push(self.status_now());
+        actions
+    }
+
+    /// Slopty holds the session again, its TUI gone; the next pi is driven.
+    pub fn held_by_slopty(&mut self) -> Vec<Action> {
+        self.meta.terminal = None;
+        self.meta.drive = Drive::named(Drive::DRIVEN);
+        self.meta.caps = caps(&CAPS);
+        vec![Action::Meta(Box::new(self.meta.clone()))]
+    }
+
+    /// Whether the session rests: no run works and, as its TUI writes it, no turn is open. A
+    /// handoff waits for it.
+    #[must_use]
+    pub const fn rests(&self) -> bool {
+        !self.running && !self.turn_open
     }
 
     /// Whether a run works now.
@@ -323,21 +405,8 @@ impl Driven {
     /// thread read again from pi's own record holds. Only for a [`Driven`] that has heard
     /// nothing yet.
     pub fn entries(&mut self, entries: &Entries, now: WallMs) -> Vec<Action> {
-        let by_id: HashMap<&str, &rpc::Entry> =
-            entries.entries.iter().map(|e| (e.id.as_str(), e)).collect();
-        let mut branch = Vec::new();
-        let mut at =
-            entries.leaf_id.as_deref().or_else(|| entries.entries.last().map(|e| e.id.as_str()));
-        while let Some(entry) = at.and_then(|id| by_id.get(id)) {
-            branch.push(*entry);
-            at = entry.parent_id.as_deref();
-            if branch.len() > entries.entries.len() {
-                break;
-            }
-        }
-        branch.reverse();
         let mut actions = Vec::new();
-        for entry in branch {
+        for entry in branch(entries) {
             let Some(message) = &entry.message else { continue };
             actions.extend(self.message_start(message, now));
             actions.extend(self.message_end(message, now));
@@ -363,6 +432,41 @@ impl Driven {
         actions
     }
 
+    /// The thread rebuilt from the session's entries as pi's own TUI goes on writing them: as
+    /// [`Driven::entries`], but a turn the TUI is still in stays open and working. Only for a
+    /// [`Driven`] that has heard nothing yet.
+    pub fn observed(&mut self, entries: &Entries, now: WallMs) -> Vec<Action> {
+        let mut actions = Vec::new();
+        for entry in branch(entries) {
+            actions.extend(self.appended_quietly(entry, now));
+        }
+        actions.push(self.status(now));
+        actions
+    }
+
+    /// Entry `entry`, which pi's own TUI appended to the session after the last one heard.
+    pub fn appended(&mut self, entry: &rpc::Entry, now: WallMs) -> Vec<Action> {
+        let mut actions = self.appended_quietly(entry, now);
+        actions.push(self.status(now));
+        actions
+    }
+
+    fn appended_quietly(&mut self, entry: &rpc::Entry, now: WallMs) -> Vec<Action> {
+        let Some(message) = &entry.message else { return Vec::new() };
+        let mut actions = self.message_start(message, now);
+        actions.extend(self.message_end(message, now));
+        // The TUI's run works from the person's message until the model's that ends it.
+        match message {
+            Message::User { .. } => self.running = true,
+            Message::Assistant { .. } if self.last_message_ended_run() => {
+                self.running = false;
+                actions.extend(self.end_turn(now));
+            }
+            _ => {}
+        }
+        actions
+    }
+
     /// The session's state, from `get_state`.
     pub fn state(&mut self, state: &State) -> Vec<Action> {
         let mut actions = Vec::new();
@@ -374,7 +478,7 @@ impl Driven {
         }
         let mut meta = self.meta.clone();
         if let Some(file) = &state.session_file {
-            meta.facts.insert("session-file".to_owned(), file.clone());
+            meta.facts.insert(SESSION_FILE_FACT.to_owned(), file.clone());
         }
         if let Some(name) = state.session_name.clone().filter(|n| !n.is_empty()) {
             meta.title = name;
@@ -1014,6 +1118,31 @@ impl Driven {
 /// A question answered in the person's own words.
 fn written(title: &str) -> Question {
     Question { text: title.to_owned(), header: None, options: Vec::new(), multi_select: false }
+}
+
+/// The entries on the branch the session is at, oldest first.
+fn branch(entries: &Entries) -> Vec<&rpc::Entry> {
+    let by_id: HashMap<&str, &rpc::Entry> =
+        entries.entries.iter().map(|e| (e.id.as_str(), e)).collect();
+    let mut branch = Vec::new();
+    let mut at =
+        entries.leaf_id.as_deref().or_else(|| entries.entries.last().map(|e| e.id.as_str()));
+    while let Some(entry) = at.and_then(|id| by_id.get(id)) {
+        branch.push(*entry);
+        at = entry.parent_id.as_deref();
+        if branch.len() > entries.entries.len() {
+            break;
+        }
+    }
+    branch.reverse();
+    branch
+}
+
+/// `names` as a thread's capabilities, sorted.
+fn caps(names: &[&str]) -> Vec<Cap> {
+    let mut caps: Vec<Cap> = names.iter().map(|c| Cap::named(c)).collect();
+    caps.sort();
+    caps
 }
 
 /// The item of block `index` of message `message`.
